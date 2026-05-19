@@ -8,6 +8,32 @@ function stringOutput(value) {
   return value === undefined || value === null ? '' : String(value);
 }
 
+// Only treat lines that are actually issued as commands. Markdown quote
+// lines (`> ...`) and fenced code blocks are context a maintainer is
+// quoting, not a live `@qwen /...` instruction — matching the raw body
+// would let a reply that quotes an earlier `--override-design-gate`
+// command re-trigger the override.
+function commandLines(body) {
+  const lines = String(body ?? '').split(/\r?\n/);
+  const kept = [];
+  let inFence = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^(```|~~~)/.test(trimmed)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) {
+      continue;
+    }
+    if (/^>/.test(trimmed)) {
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join('\n');
+}
+
 function prNumberFor(eventName, event, inputs) {
   if (eventName === 'workflow_dispatch') {
     return inputs.pr_number;
@@ -33,7 +59,7 @@ function commentBodyFor(eventName, event) {
 
 function sanitizeReviewerFocus(text) {
   return text
-    .replace(/(?<!\S)--comment(?!\S)/g, '`--comment`')
+    .replace(/(?<![-\w])--comment(?![-\w])/g, '`--comment`')
     .replace(/^\s+/, '')
     .slice(0, 2048);
 }
@@ -81,11 +107,14 @@ function pullRequestTargetMode(event) {
     case 'ready_for_review':
     case 'synchronize':
       return { shouldRun: true, gateOnly: false };
-    case 'edited':
-      return {
-        shouldRun: Boolean(event.changes?.body),
-        gateOnly: Boolean(event.changes?.body),
-      };
+    case 'edited': {
+      // Design Gate classifies on the live PR title and body (feature
+      // vs process detection, history keywords). A title edit can flip
+      // an innocuous PR into a workflow/security-relevant one, so it
+      // must also trigger a gate-only rerun.
+      const edited = Boolean(event.changes?.body || event.changes?.title);
+      return { shouldRun: edited, gateOnly: edited };
+    }
     default:
       return { shouldRun: false, gateOnly: false };
   }
@@ -124,7 +153,7 @@ export function resolveReviewContext({
     eventName === 'pull_request_review_comment' ||
     eventName === 'pull_request_review'
   ) {
-    body = commentBodyFor(eventName, event);
+    body = commandLines(commentBodyFor(eventName, event));
     if (eventName === 'issue_comment' && !event.issue?.pull_request) {
       shouldRun = false;
     } else if (DESIGN_GATE_COMMAND.test(body)) {

@@ -33,7 +33,7 @@ jobs:
     if: |-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_target' &&
-       (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'ready_for_review' || github.event.action == 'synchronize' || (github.event.action == 'edited' && github.event.changes.body)) &&
+       (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'ready_for_review' || github.event.action == 'synchronize' || (github.event.action == 'edited' && (github.event.changes.body || github.event.changes.title))) &&
        (github.event.pull_request.author_association == 'OWNER' ||
         github.event.pull_request.author_association == 'MEMBER' ||
         github.event.pull_request.author_association == 'COLLABORATOR')) ||
@@ -49,7 +49,7 @@ jobs:
          github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request_review' &&
-        contains(github.event.review.body, '@qwen /review') &&
+        (contains(github.event.review.body, '@qwen /review') || contains(github.event.review.body, '@qwen /design-gate')) &&
         (github.event.review.author_association == 'OWNER' ||
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR'))
@@ -222,7 +222,7 @@ jobs:
             if [ "$SHOULD_COMMENT" = "true" ] && [ "${ACT:-}" != "true" ]; then
               gh pr comment "$PR_NUMBER" \
                 --repo "$GITHUB_REPOSITORY" \
-                --body-file qwen-pr-review-fork-comment.md
+                --body-file qwen-pr-review-fork-comment.md || true
             else
               {
                 printf '### Qwen PR review dry run\n\n'
@@ -245,7 +245,7 @@ jobs:
             if [ "$SHOULD_COMMENT" = "true" ] && [ "${ACT:-}" != "true" ]; then
               gh pr comment "$PR_NUMBER" \
                 --repo "$GITHUB_REPOSITORY" \
-                --body-file qwen-pr-review-size-comment.md
+                --body-file qwen-pr-review-size-comment.md || true
             else
               {
                 printf '### Qwen PR review dry run\n\n'
@@ -315,6 +315,16 @@ jobs:
             --prompt-append-out "$prompt_append"
 
           status="$(jq -r '.status' "$gate_out")"
+          # Guard against a malformed gate output (missing/renamed field
+          # makes jq emit "null"). Fail loudly instead of silently
+          # treating an unknown status as "not BLOCK" and proceeding.
+          case "$status" in
+            PASS | ADVISORY_ONLY | BLOCK) ;;
+            *)
+              echo "::error::Design Gate returned an invalid status: '$status'. Expected PASS, ADVISORY_ONLY, or BLOCK."
+              exit 1
+              ;;
+          esac
           if [ "$status" = "BLOCK" ]; then
             should_review="false"
           else
@@ -345,9 +355,11 @@ jobs:
           PROCESS_COMMENT: '${{ steps.design-gate.outputs.process_comment }}'
         run: |-
           set -euo pipefail
+          # Informational gate comment: a transient GitHub API failure
+          # here must not fail the job and suppress the deep review.
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
-            --body-file "$PROCESS_COMMENT"
+            --body-file "$PROCESS_COMMENT" || true
 
       - name: 'Post Design Gate override audit'
         if: |-
@@ -374,7 +386,7 @@ jobs:
           if [ "$SHOULD_COMMENT" = "true" ] && [ "${ACT:-}" != "true" ]; then
             gh pr comment "$PR_NUMBER" \
               --repo "$GITHUB_REPOSITORY" \
-              --body-file qwen-design-gate-override-comment.md
+              --body-file qwen-design-gate-override-comment.md || true
           fi
 
       - name: 'Prepare final review prompt'
@@ -514,6 +526,12 @@ jobs:
       # comment delivery, not just model success. The lookup step above skips
       # duplicate exact-key saves on reruns.
       - name: 'Save review cache'
+        # continue-on-error: the review summary is already published by
+        # this point. A concurrent run can save the same key between the
+        # lookup step and here, making actions/cache/save throw "Cache
+        # already exists". That must not fail an otherwise successful
+        # review (and must not trip the review-failure fallback).
+        continue-on-error: true
         if: |-
           steps.review.outcome == 'success' &&
           steps.post-summary.outcome == 'success' &&

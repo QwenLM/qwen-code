@@ -47,10 +47,13 @@ async function main() {
   const args = parseArgs();
   const repo = requireArg(args, 'repo');
   const prNumber = requireArg(args, 'pr');
+  console.log('Design Gate: reading PR shape');
   const shape = await readJson(requireArg(args, 'shape'));
+  console.log('Design Gate: reading history scan');
   const history = await readJson(requireArg(args, 'history'), { findings: [] });
   const out = requireArg(args, 'out');
 
+  console.log('Design Gate: resolving PR metadata');
   const pr =
     (await readJson(args['pr-json'], undefined)) ??
     JSON.parse(
@@ -65,11 +68,16 @@ async function main() {
       ]),
     );
 
+  console.log('Design Gate: loading anchors');
   const anchors = await loadAnchors({
     rootDir: args.root ?? process.cwd(),
     changedFiles: shape.changed_files,
   });
+  console.log(
+    `Design Gate: running LLM check (enabled=${process.env.QWEN_DESIGN_GATE_LLM === 'true'})`,
+  );
   const llm = await maybeRunLlm({ pr, shape, history, anchors });
+  console.log('Design Gate: evaluating findings');
   const result = evaluateDesignGate({ pr, shape, history, anchors, llm });
 
   await writeJson(out, result);

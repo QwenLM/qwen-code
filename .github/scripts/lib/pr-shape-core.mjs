@@ -112,7 +112,11 @@ export function detectPublicSurfaceChanges(files) {
 export function detectDependencyChanges(files) {
   const changes = new Set();
   for (const file of files) {
-    if (!/(^|\/)(package|package-lock)\.json$/.test(file.file)) {
+    // Only scan package.json. A routine package-lock.json update adds
+    // thousands of "name": "version" lines that would otherwise be
+    // serialized into the Design Gate LLM prompt and drown out
+    // higher-signal shape fields.
+    if (!/(^|\/)package\.json$/.test(file.file)) {
       continue;
     }
     for (const line of file.addedLines ?? []) {

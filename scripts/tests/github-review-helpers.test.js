@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,7 +13,10 @@ import { describe, expect, it } from 'vitest';
 import {
   buildPrShape,
   extractKeywords,
+  detectDependencyChanges,
+  parseUnifiedDiff,
 } from '../../.github/scripts/lib/pr-shape-core.mjs';
+import { parseArgs } from '../../.github/scripts/lib/cli.mjs';
 import {
   buildHistoryQueries,
   classifyHistoryResults,
@@ -461,5 +464,250 @@ describe('GitHub review helper contracts', () => {
         should_comment: 'true',
       }),
     );
+  });
+
+  it('runs a full review (not gate-only) on opened and synchronize', () => {
+    for (const action of ['opened', 'reopened', 'synchronize']) {
+      const context = resolveReviewContext({
+        eventName: 'pull_request_target',
+        event: { action, pull_request: { number: 11 } },
+        repository: 'QwenLM/qwen-code',
+        serverUrl: 'https://github.com',
+      });
+      expect(context).toEqual(
+        expect.objectContaining({
+          number: '11',
+          should_run_review: 'true',
+          gate_only: 'false',
+        }),
+      );
+      expect(context.review_prompt).toBe(
+        '/review https://github.com/QwenLM/qwen-code/pull/11',
+      );
+    }
+  });
+
+  it('reruns the gate when only the PR title is edited', () => {
+    const context = resolveReviewContext({
+      eventName: 'pull_request_target',
+      event: {
+        action: 'edited',
+        changes: { title: { from: 'old title' } },
+        pull_request: { number: 8 },
+      },
+      repository: 'QwenLM/qwen-code',
+      serverUrl: 'https://github.com',
+    });
+    expect(context).toEqual(
+      expect.objectContaining({
+        number: '8',
+        should_run_review: 'true',
+        gate_only: 'true',
+      }),
+    );
+  });
+
+  it('does not run when an edit changes neither title nor body', () => {
+    const context = resolveReviewContext({
+      eventName: 'pull_request_target',
+      event: {
+        action: 'edited',
+        changes: { base: { ref: { from: 'main' } } },
+        pull_request: { number: 9 },
+      },
+      repository: 'QwenLM/qwen-code',
+      serverUrl: 'https://github.com',
+    });
+    expect(context.should_run_review).toBe('false');
+  });
+
+  it('ignores @qwen commands quoted or fenced in a comment body', () => {
+    const context = resolveReviewContext({
+      eventName: 'issue_comment',
+      event: {
+        issue: { number: 50, pull_request: {} },
+        comment: {
+          body: [
+            'Replying to an earlier message:',
+            '',
+            '> @qwen /review --override-design-gate bypass everything now',
+            '',
+            '```',
+            '@qwen /design-gate',
+            '```',
+            '',
+            'Just discussing, no command intended.',
+          ].join('\n'),
+          author_association: 'OWNER',
+        },
+        sender: { login: 'owner' },
+      },
+      repository: 'QwenLM/qwen-code',
+      serverUrl: 'https://github.com',
+    });
+
+    expect(context).toEqual(
+      expect.objectContaining({
+        should_run_review: 'false',
+        gate_only: 'false',
+        bypass_design_gate: 'false',
+      }),
+    );
+  });
+
+  it('passes the Design Gate when there are no findings', () => {
+    const result = evaluateDesignGate({
+      pr: { title: 'Docs: clarify review flow', body: 'Docs only.' },
+      shape: {
+        changed_files: ['docs/design/code-review/roadmap.md'],
+        diff_stat: { files: 1, additions: 4, deletions: 1 },
+        config_files_changed: [],
+        api_entrypoints_changed: [],
+        public_surface_changes: [],
+      },
+      history: { findings: [] },
+      anchors: { loaded: [], missing: [] },
+    });
+    expect(result.status).toBe('PASS');
+    expect(result.findings).toEqual([]);
+  });
+
+  it('reports ADVISORY_ONLY when only advisory findings are present', () => {
+    const result = evaluateDesignGate({
+      pr: {
+        title: 'Add retry logic',
+        body: 'Commands run: `npm test`\nExpected result: passes\nObserved result: passes',
+      },
+      shape: {
+        changed_files: ['packages/core/src/util.ts'],
+        diff_stat: { files: 1, additions: 10, deletions: 0 },
+        config_files_changed: [],
+        api_entrypoints_changed: [],
+        public_surface_changes: [],
+      },
+      history: {
+        findings: [
+          {
+            severity: 'advisory',
+            message: 'Possibly related to a prior merged PR.',
+            citations: ['https://example.com/pr/1'],
+          },
+        ],
+      },
+      anchors: { loaded: [], missing: [] },
+    });
+    expect(result.status).toBe('ADVISORY_ONLY');
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it('downgrades a blocking finding without a citation to advisory', () => {
+    const result = evaluateDesignGate({
+      pr: { title: 'Docs tweak', body: 'Docs only.' },
+      shape: {
+        changed_files: ['docs/x.md'],
+        diff_stat: { files: 1, additions: 1, deletions: 0 },
+        config_files_changed: [],
+        api_entrypoints_changed: [],
+        public_surface_changes: [],
+      },
+      history: { findings: [] },
+      anchors: { loaded: [], missing: [] },
+      llm: {
+        findings: [
+          {
+            gate: 'product_direction',
+            severity: 'blocking',
+            message: 'Reintroduces a rejected direction.',
+            citations: [],
+          },
+        ],
+      },
+    });
+    expect(result.status).toBe('ADVISORY_ONLY');
+    expect(result.findings[0]).toEqual(
+      expect.objectContaining({
+        severity: 'advisory',
+        message: expect.stringContaining('downgraded because no citation'),
+      }),
+    );
+  });
+
+  it('keeps an operational root markdown file gated, not docs-only', () => {
+    const result = evaluateDesignGate({
+      pr: {
+        title: 'Add new agent permission behavior',
+        body: 'tested locally.',
+      },
+      shape: {
+        changed_files: ['AGENTS.md'],
+        diff_stat: { files: 1, additions: 20, deletions: 0 },
+        config_files_changed: [],
+        api_entrypoints_changed: [],
+        public_surface_changes: [],
+      },
+      history: { findings: [] },
+      anchors: { loaded: [], missing: [] },
+    });
+    expect(result.findings).toEqual([
+      expect.objectContaining({ gate: 'validation' }),
+    ]);
+  });
+
+  it('classifies a hard prior rejection as blocking only without rationale', () => {
+    const rejectedPr = {
+      number: 100,
+      title: 'Add model list command',
+      url: 'https://github.com/QwenLM/qwen-code/pull/100',
+      labels: ['by design'],
+      comments: [
+        {
+          body: 'We decided not to ship this; it is by design.',
+          url: 'https://github.com/QwenLM/qwen-code/pull/100#c1',
+        },
+      ],
+    };
+
+    const blocked = classifyHistoryResults({
+      prBody: 'Reintroduce the model list command.',
+      byDesignClosedPrs: [rejectedPr],
+    });
+    expect(blocked.findings[0]).toEqual(
+      expect.objectContaining({
+        kind: 'by_design_rejected',
+        severity: 'blocking',
+      }),
+    );
+
+    const withRationale = classifyHistoryResults({
+      prBody:
+        'This differs from the prior decision because a new constraint changed the context.',
+      byDesignClosedPrs: [rejectedPr],
+    });
+    expect(withRationale.findings[0].severity).toBe('advisory');
+  });
+
+  it('parses both --key value and --key=value argument forms', () => {
+    expect(parseArgs(['--repo', 'QwenLM/qwen-code', '--pr', '42'])).toEqual({
+      repo: 'QwenLM/qwen-code',
+      pr: '42',
+    });
+    expect(parseArgs(['--repo=QwenLM/qwen-code', '--pr=42', '--flag'])).toEqual(
+      { repo: 'QwenLM/qwen-code', pr: '42', flag: true },
+    );
+  });
+
+  it('ignores package-lock.json when detecting dependency changes', () => {
+    const diffText = [
+      'diff --git a/package-lock.json b/package-lock.json',
+      '--- a/package-lock.json',
+      '+++ b/package-lock.json',
+      '+    "left-pad": "1.3.0"',
+      'diff --git a/package.json b/package.json',
+      '--- a/package.json',
+      '+++ b/package.json',
+      '+    "react": "19.0.0"',
+    ].join('\n');
+    const files = parseUnifiedDiff(diffText);
+    expect(detectDependencyChanges(files)).toEqual(['react@19.0.0']);
   });
 });

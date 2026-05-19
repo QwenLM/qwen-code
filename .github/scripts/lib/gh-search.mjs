@@ -122,6 +122,18 @@ export async function scanHistory({ repo, pr, shape, limit = 20 }) {
   ];
   const byDesignAdvisoryQueries = queries.byDesignAdvisoryCandidates ?? [];
 
+  // Track failures so a fully-degraded scan (e.g. GitHub secondary rate
+  // limit fires on every search endpoint at once) cannot masquerade as
+  // a clean "no prior direction signal" history.
+  const searchErrors = [];
+  const guard = (label, promise) =>
+    promise.catch((error) => {
+      searchErrors.push(`${label}: ${error.message}`);
+      return [];
+    });
+  const guardAll = (label, promises) =>
+    Promise.all(promises.map((p, i) => guard(`${label}[${i}]`, p)));
+
   const [
     closedIssues,
     mergedPrs,
@@ -129,40 +141,47 @@ export async function scanHistory({ repo, pr, shape, limit = 20 }) {
     directionCandidatePrsByQuery,
     badSignals,
   ] = await Promise.all([
-    searchIssues({ query: queries.closedIssues, repo, limit }).catch(() => []),
-    searchPrs({
-      query: queries.mergedPrs,
-      repo,
-      merged: true,
-      limit,
-    }).catch(() => []),
-    Promise.all(
+    guard(
+      'closedIssues',
+      searchIssues({ query: queries.closedIssues, repo, limit }),
+    ),
+    guard(
+      'mergedPrs',
+      searchPrs({ query: queries.mergedPrs, repo, merged: true, limit }),
+    ),
+    guardAll(
+      'byDesignBlocking',
       byDesignBlockingQueries.map((query) =>
-        searchPrs({
-          query,
-          repo,
-          state: 'closed',
-          limit,
-        }).catch(() => []),
+        searchPrs({ query, repo, state: 'closed', limit }),
       ),
     ),
-    Promise.all(
+    guardAll(
+      'byDesignAdvisory',
       byDesignAdvisoryQueries.map((query) =>
-        searchPrs({
-          query,
-          repo,
-          state: 'closed',
-          limit,
-        }).catch(() => []),
+        searchPrs({ query, repo, state: 'closed', limit }),
       ),
     ),
-    searchPrs({
-      query: queries.regression,
-      repo,
-      merged: true,
-      limit: Math.min(limit, 10),
-    }).catch(() => []),
+    guard(
+      'regression',
+      searchPrs({
+        query: queries.regression,
+        repo,
+        merged: true,
+        limit: Math.min(limit, 10),
+      }),
+    ),
   ]);
+
+  // Five categories fire (issues, merged, blocking, advisory,
+  // regression). If every one came back empty AND at least one errored,
+  // the scan is degraded rather than genuinely clean.
+  const everyResultEmpty =
+    closedIssues.length === 0 &&
+    mergedPrs.length === 0 &&
+    byDesignClosedPrsByQuery.every((r) => r.length === 0) &&
+    directionCandidatePrsByQuery.every((r) => r.length === 0) &&
+    badSignals.length === 0;
+  const degraded = everyResultEmpty && searchErrors.length > 0;
 
   const byDesignClosedPrs = uniquePulls(byDesignClosedPrsByQuery.flat());
   const directionCandidatePrs = uniquePulls(
@@ -184,17 +203,32 @@ export async function scanHistory({ repo, pr, shape, limit = 20 }) {
     limit: 10,
   });
 
+  const classified = classifyHistoryResults({
+    prBody: pr.body,
+    closedIssues,
+    mergedPrs,
+    byDesignClosedPrs: byDesignWithComments,
+    directionCandidatePrs: directionCandidatesWithComments,
+    badSignals,
+  });
+
+  if (degraded) {
+    classified.findings.unshift({
+      kind: 'history_scan_degraded',
+      severity: 'advisory',
+      message:
+        'History scan returned no results and at least one GitHub search failed (likely rate limiting). Prior closed-unmerged direction decisions could not be verified for this run.',
+      citations: [],
+      source: { errors: searchErrors.slice(0, 5) },
+    });
+  }
+
   return {
     keywords,
     queries,
-    ...classifyHistoryResults({
-      prBody: pr.body,
-      closedIssues,
-      mergedPrs,
-      byDesignClosedPrs: byDesignWithComments,
-      directionCandidatePrs: directionCandidatesWithComments,
-      badSignals,
-    }),
+    degraded,
+    searchErrors,
+    ...classified,
     raw: {
       closedIssues,
       mergedPrs,

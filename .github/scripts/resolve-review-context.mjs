@@ -1,15 +1,27 @@
 #!/usr/bin/env node
 
+import { randomUUID } from 'node:crypto';
 import { appendFile, readFile } from 'node:fs/promises';
 
 import { resolveReviewContext } from './lib/review-context-core.mjs';
 
 function writeOutputValue(key, value) {
-  if (String(value).includes('\n')) {
-    const delimiter = `QWEN_REVIEW_CONTEXT_${key}_${Date.now()}`;
-    return `${key}<<${delimiter}\n${value}\n${delimiter}\n`;
+  const stringValue = String(value);
+  if (stringValue.includes('\n')) {
+    // Some of these values are comment-controlled (review_prompt embeds
+    // maintainer focus text, override_reason copies the comment). A
+    // Date.now()-derived delimiter is predictable: a commenter could
+    // emit the delimiter line followed by forged `key=value` output
+    // assignments (e.g. bypass_design_gate=true). A cryptographically
+    // random delimiter cannot be predicted, and we additionally reject
+    // the (astronomically unlikely) case where the value contains it.
+    let delimiter;
+    do {
+      delimiter = `QWEN_REVIEW_CONTEXT_${randomUUID()}`;
+    } while (stringValue.includes(delimiter));
+    return `${key}<<${delimiter}\n${stringValue}\n${delimiter}\n`;
   }
-  return `${key}=${value}\n`;
+  return `${key}=${stringValue}\n`;
 }
 
 async function main() {

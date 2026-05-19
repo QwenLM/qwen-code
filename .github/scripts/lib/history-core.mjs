@@ -80,7 +80,29 @@ function buildByDesignCandidates({ keywords = [], repoQualifier = '' }) {
   return unique(queries);
 }
 
-export function buildHistoryQueries({ keywords = [], repo }) {
+// GitHub search treats `qualifier:value` tokens specially. Even though
+// the keyword tokenizer currently strips colons, sanitize here so a
+// future tokenizer change can't silently turn PR-derived text into
+// query qualifiers (e.g. `author:nobody`, `label:bug`) that narrow or
+// suppress the history scan.
+const SEARCH_QUALIFIER =
+  /^(repo|org|user|author|assignee|mentions|commenter|involves|label|milestone|project|state|is|in|type|status|base|head|language|created|updated|closed|merged|comments|reactions|interactions|draft|review|reviewed-by|review-requested|team|archived|sort|no|linked)$/i;
+
+function sanitizeKeyword(word) {
+  return word
+    .split(':')
+    .filter((part) => part && !SEARCH_QUALIFIER.test(part))
+    .join(' ')
+    .replace(/["()<>]/g, ' ')
+    .trim();
+}
+
+function sanitizeKeywords(keywords) {
+  return keywords.map(sanitizeKeyword).filter(Boolean);
+}
+
+export function buildHistoryQueries({ keywords: rawKeywords = [], repo }) {
+  const keywords = sanitizeKeywords(rawKeywords);
   const queryText = keywords.slice(0, 6).join(' ').trim() || 'qwen code';
   const repoQualifier = repo ? ` repo:${repo}` : '';
   const allByDesignCandidates = buildByDesignCandidates({

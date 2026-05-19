@@ -34,14 +34,34 @@ function extractAssistantText(events) {
     .join('\n');
 }
 
+function snippet(value) {
+  const text = typeof value === 'string' ? value : String(value);
+  return text.length > 600 ? `${text.slice(0, 600)}…[truncated]` : text;
+}
+
 export function parseJsonFromText(text) {
   const fenced = /```json\s*([\s\S]*?)```/i.exec(text);
   const candidate = fenced ? fenced[1] : text;
-  return JSON.parse(candidate.trim());
+  try {
+    return JSON.parse(candidate.trim());
+  } catch (error) {
+    // A bare "Unexpected token" with no context makes CI failures
+    // impossible to diagnose; include what the model actually returned.
+    throw new Error(
+      `Failed to parse JSON from LLM output: ${error.message}. Raw text: ${snippet(text)}`,
+    );
+  }
 }
 
 export function parseQwenOutput(stdout) {
-  const parsed = JSON.parse(stdout);
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(
+      `Failed to parse qwen --output-format json stdout: ${error.message}. Raw stdout: ${snippet(stdout)}`,
+    );
+  }
   const text = extractAssistantText(parsed);
   return {
     text,
