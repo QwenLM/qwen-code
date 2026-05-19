@@ -84,6 +84,10 @@ export interface TurnDiff {
     filesChanged: number;
     linesAdded: number;
     linesRemoved: number;
+    /** Number of candidate files dropped because the turn touched more
+     *  than `MAX_TURN_DIFF_FILES`. Mirrors the Current source's
+     *  `hiddenFileCount` so the dialog can show "…and N more". */
+    filesOmitted: number;
   };
 }
 
@@ -314,6 +318,18 @@ interface EndpointReadOk {
   exists: boolean;
 }
 
+/** Sentinel returned when the underlying file is too large to read into memory
+ *  safely. Caller treats the row as oversized without ever holding the bytes. */
+interface EndpointReadOversized {
+  kind: 'oversized';
+  /** True when the path exists (only meaningful for the worktree branch — a
+   *  backup record with a real `backupFileName` always implies the file existed
+   *  at snapshot time). */
+  exists: boolean;
+}
+
+type EndpointRead = EndpointReadOk | 'unreadable' | EndpointReadOversized;
+
 /**
  * Read one endpoint of a turn diff (either a snapshot backup or, when the
  * "after" endpoint is the live worktree, the file on disk).
@@ -326,19 +342,44 @@ interface EndpointReadOk {
  * worktree that means the file was deleted; for a backup with a real
  * `backupFileName` it means the snapshot is corrupt and is reported
  * as unreadable.
+ *
+ * Returns `{ kind: 'oversized' }` when the on-disk file is larger than
+ * `MAX_DIFF_SIZE_BYTES`. We `stat()` first and bail before allocating —
+ * otherwise a 2 GB `write_file` blob would be slurped into the Node heap
+ * just for the downstream `Buffer.byteLength` check to reject it, OOM-ing
+ * the dialog before the cap can fire. The dialog renders these rows as
+ * "(oversized — diff omitted)" without ever holding the bytes.
  */
 async function readEndpointContent(
   backup: FileHistoryBackup | undefined,
   worktreePath: string | undefined,
   sessionId: string,
-): Promise<EndpointReadOk | 'unreadable'> {
+): Promise<EndpointRead> {
   if (worktreePath !== undefined) {
+    let size: number;
+    try {
+      const st = await stat(worktreePath);
+      size = st.size;
+    } catch (e: unknown) {
+      if (isENOENT(e)) {
+        // Genuine absence: file was deleted from the worktree.
+        return { content: '', exists: false };
+      }
+      // Permission/IO failure on stat — same semantics as a failed read.
+      debugLogger.error(
+        `FileHistory: live worktree stat failed for ${worktreePath}: ${e}`,
+      );
+      return 'unreadable';
+    }
+    if (size > MAX_DIFF_SIZE_BYTES) {
+      return { kind: 'oversized', exists: true };
+    }
     try {
       const text = await readFile(worktreePath, 'utf-8');
       return { content: text, exists: true };
     } catch (e: unknown) {
       if (isENOENT(e)) {
-        // Genuine absence: file was deleted from the worktree.
+        // Raced with a delete after stat — treat as absence.
         return { content: '', exists: false };
       }
       // Permission/IO/decode failure — the file IS there but unreadable.
@@ -352,9 +393,20 @@ async function readEndpointContent(
   }
   if (!backup) return { content: '', exists: false };
   if (backup.backupFileName === null) return { content: '', exists: false };
-  const text = await readFileOrNull(
-    resolveBackupPath(backup.backupFileName, sessionId),
-  );
+  const backupPath = resolveBackupPath(backup.backupFileName, sessionId);
+  // Same pre-read size guard on the backup branch: a backup made of a 2 GB
+  // file is just as fatal to allocate as the live one.
+  try {
+    const st = await stat(backupPath);
+    if (st.size > MAX_DIFF_SIZE_BYTES) {
+      return { kind: 'oversized', exists: true };
+    }
+  } catch {
+    // Fall through to readFileOrNull, which will return null and map to
+    // 'unreadable' below. We don't distinguish stat-vs-read failure modes
+    // here because both indicate the backup is gone or inaccessible.
+  }
+  const text = await readFileOrNull(backupPath);
   if (text === null) return 'unreadable';
   return { content: text, exists: true };
 }
@@ -742,9 +794,13 @@ export class FileHistoryService {
     // the same constant the git path uses (MAX_FILES_FOR_DETAILS = 500
     // files total), with two reads each → 1000 open()s worst case, still
     // comfortably below the typical 4096 fd ceiling.
-    if (candidatePaths.length > MAX_TURN_DIFF_FILES) {
+    const filesOmitted = Math.max(
+      0,
+      candidatePaths.length - MAX_TURN_DIFF_FILES,
+    );
+    if (filesOmitted > 0) {
       debugLogger.warn(
-        `FileHistory: getTurnDiff truncating ${candidatePaths.length - MAX_TURN_DIFF_FILES} files for prompt ${promptId} (cap: ${MAX_TURN_DIFF_FILES})`,
+        `FileHistory: getTurnDiff truncating ${filesOmitted} files for prompt ${promptId} (cap: ${MAX_TURN_DIFF_FILES})`,
       );
     }
     const cappedPaths = candidatePaths.slice(0, MAX_TURN_DIFF_FILES);
@@ -773,6 +829,7 @@ export class FileHistoryService {
         filesChanged: files.length,
         linesAdded: totalAdded,
         linesRemoved: totalRemoved,
+        filesOmitted,
       },
     };
   }
@@ -865,10 +922,42 @@ export class FileHistoryService {
       return null;
     }
 
-    const beforeContent = beforeRead.content;
-    const beforeExists = beforeRead.exists;
-    const afterContent = afterRead.content;
-    const afterExists = afterRead.exists;
+    // Pre-read size guard tripped — either endpoint sits above the cap.
+    // Bail before any content work so a 2 GB blob never lands in the heap;
+    // we cannot compute precise +N/-M stats without reading, but the row
+    // still shows up with the oversized badge and is treated correctly by
+    // the dialog (Enter is gated, hint surfaces "use git diff").
+    const beforeOversized =
+      typeof beforeRead === 'object' &&
+      'kind' in beforeRead &&
+      beforeRead.kind === 'oversized';
+    const afterOversized =
+      typeof afterRead === 'object' &&
+      'kind' in afterRead &&
+      afterRead.kind === 'oversized';
+    if (beforeOversized || afterOversized) {
+      const beforeExists = beforeOversized
+        ? (beforeRead as EndpointReadOversized).exists
+        : (beforeRead as EndpointReadOk).exists;
+      const afterExists = afterOversized
+        ? (afterRead as EndpointReadOversized).exists
+        : (afterRead as EndpointReadOk).exists;
+      return {
+        filePath: trackingPath,
+        hunks: [],
+        isNewFile: !beforeExists && afterExists,
+        isDeleted: beforeExists && !afterExists,
+        linesAdded: 0,
+        linesRemoved: 0,
+        oversized: true,
+        isBinary: false,
+      };
+    }
+
+    const beforeContent = (beforeRead as EndpointReadOk).content;
+    const beforeExists = (beforeRead as EndpointReadOk).exists;
+    const afterContent = (afterRead as EndpointReadOk).content;
+    const afterExists = (afterRead as EndpointReadOk).exists;
 
     if (beforeContent === afterContent && beforeExists === afterExists) {
       return null;

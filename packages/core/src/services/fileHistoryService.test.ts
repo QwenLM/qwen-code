@@ -882,9 +882,11 @@ describe('FileHistoryService', () => {
       expect(entry).toBeDefined();
       expect(entry!.oversized).toBe(true);
       expect(entry!.hunks).toEqual([]);
-      // Best-effort stats: we appended 2 lines (the empty line after the
-      // first \n and "appended").
-      expect(entry!.linesAdded).toBeGreaterThanOrEqual(1);
+      // Pre-read size guard bails before allocating, so we cannot compute
+      // a line-count delta. Stats are 0/0; the row's purpose is to signal
+      // the omission, not to estimate changes.
+      expect(entry!.linesAdded).toBe(0);
+      expect(entry!.linesRemoved).toBe(0);
     });
   });
 });

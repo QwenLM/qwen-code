@@ -63,12 +63,21 @@ export function useDiffData(cwd: string | undefined): CurrentDiffData {
         debugLogger.debug(`fetchGitDiffHunks failed: ${err}`);
         return new Map<string, Hunk[]>();
       }),
-    ]).then(([statsRes, hunksRes]) => {
-      if (cancelled) return;
-      setResult(statsRes);
-      setHunks(hunksRes);
-      setLoading(false);
-    });
+    ])
+      .then(([statsRes, hunksRes]) => {
+        if (cancelled) return;
+        setResult(statsRes);
+        setHunks(hunksRes);
+        setLoading(false);
+      })
+      .catch((err) => {
+        // Defense-in-depth: each inner promise already swallows its own
+        // errors, but a setState during unmount or a future refactor could
+        // still throw here. Log and unstick `loading` rather than letting
+        // the rejection propagate to the default-handler.
+        debugLogger.debug(`useDiffData pipeline failed: ${err}`);
+        if (!cancelled) setLoading(false);
+      });
     return () => {
       cancelled = true;
     };

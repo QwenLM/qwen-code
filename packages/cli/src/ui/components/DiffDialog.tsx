@@ -253,14 +253,17 @@ export function DiffDialog({
     (activeSource?.kind === 'current' && current.loading) ||
     (activeSource?.kind === 'turn' && turnsLoading);
 
-  // For "Current" source, `stats.filesCount` may exceed `files.length`
-  // when `fetchGitDiff` capped `perFileStats` at MAX_FILES (=50). Surface
-  // the gap so users know the list isn't exhaustive — otherwise capped
-  // entries look indistinguishable from "everything fit".
+  // For "Current", `stats.filesCount` may exceed `files.length` when
+  // `fetchGitDiff` capped `perFileStats` at MAX_FILES (=50). For turn
+  // sources, `getTurnDiff` reports `filesOmitted` when the turn touched
+  // more files than `MAX_TURN_DIFF_FILES`. Surface either gap so capped
+  // rows aren't indistinguishable from "everything fit".
   const hiddenFileCount =
     activeSource?.kind === 'current'
       ? Math.max(0, stats.filesCount - files.length)
-      : 0;
+      : activeSource?.kind === 'turn'
+        ? activeSource.entry.diff.stats.filesOmitted
+        : 0;
 
   return (
     <Box

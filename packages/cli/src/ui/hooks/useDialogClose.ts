@@ -144,10 +144,15 @@ export function useDialogClose(options: DialogCloseOptions) {
       return true;
     }
 
-    // Order must match `DialogManager`'s render priority — the diff
-    // dialog wins when both flags are true, so Ctrl+C dismisses what
-    // the user actually sees instead of silently closing the
-    // background-tasks dialog hidden behind it.
+    // Scoped invariant: the diff-dialog branch MUST sit above the
+    // background-tasks branch because `DialogManager` renders the diff
+    // dialog over `BackgroundTasksDialog` when both flags are true (see
+    // `DialogManager.tsx` — diff block at the `BackgroundTasksDialog`
+    // fall-through). The rest of this hook's ordering is **not** a
+    // mirror of `DialogManager` and isn't intended to be: most higher-
+    // priority dialogs in `DialogManager` (theme, auth, settings, …)
+    // already appear above this block in their own priority order. Only
+    // the diff-vs-background pair previously matched the wrong way.
     if (options.isDiffDialogOpen && options.closeDiffDialog) {
       // /diff dialog — same rationale as the background-tasks dialog:
       // Ctrl+C should dismiss the dialog rather than fall through to the
