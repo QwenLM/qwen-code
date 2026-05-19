@@ -10,11 +10,24 @@ async function ghJson(args) {
   return JSON.parse(stdout || '[]');
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripRepoQualifier(query, repo) {
+  if (!repo) {
+    return query;
+  }
+  return query
+    .replace(new RegExp(`\\s+repo:${escapeRegExp(repo)}(?=\\s|$)`, 'g'), '')
+    .trim();
+}
+
 async function searchIssues({ query, repo, state = 'closed', limit = 20 }) {
   return ghJson([
     'search',
     'issues',
-    query,
+    stripRepoQualifier(query, repo),
     '--repo',
     repo,
     '--state',
@@ -33,7 +46,13 @@ export function buildSearchPrsArgs({
   merged = false,
   limit = 20,
 }) {
-  const args = ['search', 'prs', query, '--repo', repo];
+  const args = [
+    'search',
+    'prs',
+    stripRepoQualifier(query, repo),
+    '--repo',
+    repo,
+  ];
 
   if (merged) {
     args.push('--merged');
@@ -55,6 +74,19 @@ async function searchPrs({ query, repo, state, merged = false, limit = 20 }) {
   return ghJson(buildSearchPrsArgs({ query, repo, state, merged, limit }));
 }
 
+function uniquePulls(pulls = []) {
+  const seen = new Set();
+  const unique = [];
+  for (const pull of pulls) {
+    if (seen.has(pull.number)) {
+      continue;
+    }
+    seen.add(pull.number);
+    unique.push(pull);
+  }
+  return unique;
+}
+
 async function issueComments({ repo, number }) {
   try {
     return ghJson([
@@ -69,6 +101,15 @@ async function issueComments({ repo, number }) {
   }
 }
 
+async function withIssueComments({ repo, pulls, limit }) {
+  return Promise.all(
+    pulls.slice(0, limit).map(async (pull) => ({
+      ...pull,
+      comments: await issueComments({ repo, number: pull.number }),
+    })),
+  );
+}
+
 export async function scanHistory({ repo, pr, shape, limit = 20 }) {
   const keywords = extractKeywords({
     title: pr.title,
@@ -76,38 +117,72 @@ export async function scanHistory({ repo, pr, shape, limit = 20 }) {
     files: shape.changed_files,
   });
   const queries = buildHistoryQueries({ keywords, repo });
+  const byDesignBlockingQueries = queries.byDesignBlockingCandidates ?? [
+    queries.byDesign,
+  ];
+  const byDesignAdvisoryQueries = queries.byDesignAdvisoryCandidates ?? [];
 
-  const [closedIssues, mergedPrs, byDesignClosedPrs, badSignals] =
-    await Promise.all([
-      searchIssues({ query: queries.closedIssues, repo, limit }).catch(
-        () => [],
+  const [
+    closedIssues,
+    mergedPrs,
+    byDesignClosedPrsByQuery,
+    directionCandidatePrsByQuery,
+    badSignals,
+  ] = await Promise.all([
+    searchIssues({ query: queries.closedIssues, repo, limit }).catch(() => []),
+    searchPrs({
+      query: queries.mergedPrs,
+      repo,
+      merged: true,
+      limit,
+    }).catch(() => []),
+    Promise.all(
+      byDesignBlockingQueries.map((query) =>
+        searchPrs({
+          query,
+          repo,
+          state: 'closed',
+          limit,
+        }).catch(() => []),
       ),
-      searchPrs({
-        query: queries.mergedPrs,
-        repo,
-        merged: true,
-        limit,
-      }).catch(() => []),
-      searchPrs({
-        query: queries.byDesign,
-        repo,
-        state: 'closed',
-        limit,
-      }).catch(() => []),
-      searchPrs({
-        query: queries.regression,
-        repo,
-        merged: true,
-        limit: Math.min(limit, 10),
-      }).catch(() => []),
-    ]);
+    ),
+    Promise.all(
+      byDesignAdvisoryQueries.map((query) =>
+        searchPrs({
+          query,
+          repo,
+          state: 'closed',
+          limit,
+        }).catch(() => []),
+      ),
+    ),
+    searchPrs({
+      query: queries.regression,
+      repo,
+      merged: true,
+      limit: Math.min(limit, 10),
+    }).catch(() => []),
+  ]);
 
-  const byDesignWithComments = await Promise.all(
-    byDesignClosedPrs.slice(0, 10).map(async (pull) => ({
-      ...pull,
-      comments: await issueComments({ repo, number: pull.number }),
-    })),
+  const byDesignClosedPrs = uniquePulls(byDesignClosedPrsByQuery.flat());
+  const directionCandidatePrs = uniquePulls(
+    directionCandidatePrsByQuery.flat(),
+  ).filter(
+    (pull) =>
+      !byDesignClosedPrs.some(
+        (blockingPull) => blockingPull.number === pull.number,
+      ),
   );
+  const byDesignWithComments = await withIssueComments({
+    repo,
+    pulls: byDesignClosedPrs,
+    limit: 10,
+  });
+  const directionCandidatesWithComments = await withIssueComments({
+    repo,
+    pulls: directionCandidatePrs,
+    limit: 10,
+  });
 
   return {
     keywords,
@@ -117,12 +192,17 @@ export async function scanHistory({ repo, pr, shape, limit = 20 }) {
       closedIssues,
       mergedPrs,
       byDesignClosedPrs: byDesignWithComments,
+      directionCandidatePrs: directionCandidatesWithComments,
       badSignals,
     }),
     raw: {
       closedIssues,
       mergedPrs,
-      byDesignClosedPrs: byDesignWithComments,
+      byDesignClosedPrs: uniquePulls([
+        ...byDesignWithComments,
+        ...directionCandidatesWithComments,
+      ]),
+      directionCandidatePrs: directionCandidatesWithComments,
       badSignals,
     },
   };

@@ -89,10 +89,10 @@
 - Design Gate 增加 4 类历史检测：
   - (a) 同一 issue 曾被解决过
   - (b) 已有 PR 实现过
-  - (c) by design 拒过 → **VIOLATION**
+  - (c) by design 拒过：高置信重复命中 → **VIOLATION**；domain 扩展召回先 advisory，避免把相关但不同的 PR 误拦
   - (d) 历史"坏"PR 信号
 - 在 `.github/scripts/history-scan.mjs` / 相关 helper 中实现 `gh search prs/issues` 调用 + 评论 / linked issue 解析
-- by-design 拒绝检测使用 `gh search prs "<keywords> is:unmerged" --state closed --repo ...`，不使用不存在的 `--is` flag
+- by-design 拒绝检测使用 `gh search prs "<keywords> is:unmerged" --state closed --repo ...`，不使用不存在的 `--is` flag；helper 传 `--repo` 时不要重复把 `repo:` qualifier 放进 query，避免 `is:unmerged` 召回为空
 
 **不在此 PR**：
 

@@ -10,31 +10,12 @@ import {
 } from './lib/cli.mjs';
 import { loadAnchors } from './lib/anchors.mjs';
 import {
+  buildDesignGateLlmPrompt,
   evaluateDesignGate,
   formatProcessComment,
   formatPromptAppend,
 } from './lib/design-gate-core.mjs';
 import { runQwenJson } from './lib/llm.mjs';
-
-function buildLlmPrompt({ pr, shape, history, anchors }) {
-  return [
-    'You are Qwen Code Design Gate. Return JSON only.',
-    'Schema: {"findings":[{"gate":"product_direction|scope|architecture|claude_code","severity":"advisory|blocking","message":"...","citations":["..."]}]}',
-    'Blocking findings require citations. Claude Code comparison findings must be advisory.',
-    '',
-    'PR:',
-    JSON.stringify({ title: pr.title, body: pr.body }, null, 2),
-    '',
-    'PR shape:',
-    JSON.stringify(shape, null, 2),
-    '',
-    'History scan:',
-    JSON.stringify(history.findings ?? [], null, 2),
-    '',
-    'Anchors:',
-    JSON.stringify(anchors.loaded, null, 2),
-  ].join('\n');
-}
 
 async function maybeRunLlm({ pr, shape, history, anchors }) {
   if (process.env.QWEN_DESIGN_GATE_LLM !== 'true') {
@@ -43,7 +24,7 @@ async function maybeRunLlm({ pr, shape, history, anchors }) {
 
   try {
     const result = await runQwenJson({
-      prompt: buildLlmPrompt({ pr, shape, history, anchors }),
+      prompt: buildDesignGateLlmPrompt({ pr, shape, history, anchors }),
     });
     return result.json && Array.isArray(result.json.findings)
       ? result.json

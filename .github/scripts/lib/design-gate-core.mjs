@@ -90,6 +90,51 @@ function statusFor(findings) {
   return 'PASS';
 }
 
+function closedUnmergedCandidatesForPrompt(history = {}) {
+  return (history.raw?.byDesignClosedPrs ?? []).slice(0, 8).map((pr) => ({
+    number: pr.number,
+    title: pr.title,
+    url: pr.url,
+    labels: (pr.labels ?? []).map((label) =>
+      typeof label === 'string' ? label : label?.name,
+    ),
+    decisionComments: (pr.comments ?? []).slice(0, 3).map((comment) => ({
+      url: comment.url,
+      body: comment.body,
+    })),
+  }));
+}
+
+export function buildDesignGateLlmPrompt({ pr, shape, history, anchors }) {
+  return [
+    'You are Qwen Code Design Gate. Return JSON only.',
+    'Schema: {"findings":[{"gate":"product_direction|scope|architecture|claude_code","severity":"advisory|blocking","message":"...","citations":["..."]}]}',
+    '',
+    'Severity rules:',
+    '- BLOCK only when a finding is backed by a concrete citation.',
+    '- Treat closed-unmerged maintainer decisions as strong anchors.',
+    '- If a PR appears to reintroduce a direction explicitly closed as "not planned", "decided not to ship", "direction call", or "rather not carry", emit product_direction/blocking unless the PR explains why this attempt is different.',
+    '- If history says the feature is still on the roadmap but not near-term priority, emit product_direction/advisory, not blocking.',
+    '- If the old PR was duplicate/superseded by another implementation, classify it as scope/advisory unless the new PR repeats the rejected direction.',
+    '- Claude Code comparison findings must be advisory.',
+    '',
+    'PR:',
+    JSON.stringify({ title: pr.title, body: pr.body }, null, 2),
+    '',
+    'PR shape:',
+    JSON.stringify(shape, null, 2),
+    '',
+    'History scan findings:',
+    JSON.stringify(history.findings ?? [], null, 2),
+    '',
+    'Closed-unmerged candidate PRs:',
+    JSON.stringify(closedUnmergedCandidatesForPrompt(history), null, 2),
+    '',
+    'Anchors:',
+    JSON.stringify(anchors.loaded, null, 2),
+  ].join('\n');
+}
+
 export function evaluateDesignGate({
   pr,
   shape,

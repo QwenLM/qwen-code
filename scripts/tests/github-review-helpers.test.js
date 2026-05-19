@@ -19,6 +19,7 @@ import {
   classifyHistoryResults,
 } from '../../.github/scripts/lib/history-core.mjs';
 import {
+  buildDesignGateLlmPrompt,
   evaluateDesignGate,
   formatProcessComment,
 } from '../../.github/scripts/lib/design-gate-core.mjs';
@@ -127,6 +128,122 @@ describe('GitHub review helper contracts', () => {
     expect(explained.findings[0].severity).toBe('advisory');
   });
 
+  it('adds domain-specific closed PR searches for model/provider direction decisions', () => {
+    const keywords = extractKeywords({
+      title: 'Allow API Key users to select models directly when configured',
+      body: [
+        'When modelProviders.USE_OPENAI is configured, AuthDialog should open ModelDialog.',
+        'This preserves API key authentication while allowing model selection.',
+      ].join('\n'),
+      files: [
+        'packages/cli/src/ui/auth/AuthDialog.tsx',
+        'packages/cli/src/ui/components/ModelDialog.tsx',
+        'packages/core/src/config/config.ts',
+      ],
+    });
+
+    const queries = buildHistoryQueries({ keywords, repo: 'QwenLM/qwen-code' });
+
+    expect(queries.byDesignCandidates).toContain(
+      'model list is:unmerged repo:QwenLM/qwen-code',
+    );
+    expect(queries.byDesignCandidates).toContain(
+      'openai-compatible models is:unmerged repo:QwenLM/qwen-code',
+    );
+  });
+
+  it('treats roadmap-but-not-now closed PRs as advisory rather than blocking', () => {
+    const history = classifyHistoryResults({
+      prBody: 'Adds a new Chrome extension surface.',
+      byDesignClosedPrs: [
+        {
+          number: 1432,
+          title: 'Support Chrome Extension',
+          url: 'https://github.com/QwenLM/qwen-code/pull/1432',
+          labels: [],
+          comments: [
+            {
+              url: 'https://github.com/QwenLM/qwen-code/pull/1432#issuecomment-1',
+              body: [
+                'Closing this draft for now to keep the PR queue clean.',
+                'The feature is still on the roadmap but not a near-term priority.',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(history.findings).toEqual([
+      expect.objectContaining({
+        kind: 'closed_unmerged_direction',
+        severity: 'advisory',
+        citations: [
+          'https://github.com/QwenLM/qwen-code/pull/1432#issuecomment-1',
+        ],
+      }),
+    ]);
+  });
+
+  it('keeps broad direction candidates advisory until the PR is proven to repeat the rejected direction', () => {
+    const history = classifyHistoryResults({
+      prBody:
+        'Allows users to select models that are already configured in settings.',
+      directionCandidatePrs: [
+        {
+          number: 3863,
+          title: 'feat(cli): add Anthropic model listing support',
+          url: 'https://github.com/QwenLM/qwen-code/pull/3863',
+          labels: [],
+          comments: [
+            {
+              url: 'https://github.com/QwenLM/qwen-code/pull/3863#issuecomment-1',
+              body: [
+                'Direction: We have decided not to ship /model list as a feature.',
+                'The OpenAI-compatible provider space is too fragmented.',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(history.findings).toEqual([
+      expect.objectContaining({
+        kind: 'closed_unmerged_direction_candidate',
+        severity: 'advisory',
+      }),
+    ]);
+  });
+
+  it('spells out direction gate severity rules in the LLM prompt', () => {
+    const prompt = buildDesignGateLlmPrompt({
+      pr: {
+        title: 'Add model listing',
+        body: 'Adds /model list for custom providers.',
+      },
+      shape: {
+        changed_files: ['packages/cli/src/ui/components/ModelDialog.tsx'],
+      },
+      history: {
+        findings: [
+          {
+            kind: 'by_design_rejected',
+            severity: 'blocking',
+            message: 'Prior not-planned decision for /model list.',
+            citations: ['https://github.com/QwenLM/qwen-code/pull/3863'],
+          },
+        ],
+      },
+      anchors: { loaded: [] },
+    });
+
+    expect(prompt).toContain('closed-unmerged maintainer decisions');
+    expect(prompt).toContain('not near-term priority');
+    expect(prompt).toContain('duplicate/superseded');
+    expect(prompt).toContain('BLOCK');
+  });
+
   it('blocks high-risk feature PRs without reviewer validation evidence', () => {
     const result = evaluateDesignGate({
       pr: {
@@ -211,6 +328,19 @@ describe('GitHub review helper contracts', () => {
     expect(args).toContain('--merged');
     expect(args).not.toContain('--state');
     expect(args).not.toContain('merged');
+  });
+
+  it('does not pass a duplicate repo qualifier to gh search prs', () => {
+    const args = buildSearchPrsArgs({
+      query: 'model list is:unmerged repo:QwenLM/qwen-code',
+      repo: 'QwenLM/qwen-code',
+      state: 'closed',
+      limit: 5,
+    });
+
+    expect(args[2]).toBe('model list is:unmerged');
+    expect(args).toContain('--repo');
+    expect(args).toContain('QwenLM/qwen-code');
   });
 
   it('runs Design Gate LLM through prompt mode, not an unreleased subcommand', () => {
