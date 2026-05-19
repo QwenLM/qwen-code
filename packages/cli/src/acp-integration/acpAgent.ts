@@ -71,6 +71,7 @@ import type {
 import { buildAuthMethods } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
+import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import type { ApprovalModeValue } from './session/types.js';
@@ -1560,34 +1561,18 @@ class QwenAgent implements Agent {
                 `Expected an array of strings.\n`,
             );
           }
-          // Codex review P2 (folded into F1 #4319): mirror the bootstrap
-          // normalization in `cli/src/config/config.ts` (search for
-          // `disabledTools` array population around the `tools.disabled`
-          // settings read — `typeof string` filter + `trim()` + skip
-          // empty + dedupe). A `tools.disabled: ['  Foo  ', '', 'Foo']`
-          // settings entry must produce the same `Set(['Foo'])` here
-          // as at boot — without the trim, `ToolRegistry.has(tool.name)`
-          // (exact string match) would fail to recognize a disabled
-          // tool after restart and silently re-register it.
-          //
-          // Pre-fix the comment hard-coded `config.ts:1426-1434`;
-          // wenshao round 5 (#4319) flagged that this drifts when
-          // config.ts is edited. Replaced with a content-anchor
-          // pointer that survives line shifts. Extracting both copies
-          // to a shared `normalizeDisabledToolList()` helper is a
-          // valid follow-up — tracked separately so F1 stays a
-          // mechanical-lift PR.
-          const disabledList: string[] = [];
-          if (Array.isArray(mergedDisabled)) {
-            const seen = new Set<string>();
-            for (const raw of mergedDisabled) {
-              if (typeof raw !== 'string') continue;
-              const trimmed = raw.trim();
-              if (!trimmed || seen.has(trimmed)) continue;
-              seen.add(trimmed);
-              disabledList.push(trimmed);
-            }
-          }
+          // #4329 F1 fold-in (#4319): use the shared
+          // `normalizeDisabledToolList` helper so the boot path
+          // (`cli/src/config/config.ts`) and this MCP restart refresh
+          // path agree byte-for-byte on what counts as "disabled".
+          // Without the shared helper a `tools.disabled: ['  Foo  ',
+          // '', 'Foo']` settings entry would produce different sets
+          // at boot vs after restart — `ToolRegistry.has(tool.name)`
+          // exact-match check would then silently re-register the
+          // trimmed tool. Helper is in `cli/src/config/normalizeDisabledTools.ts`
+          // with its own unit tests covering the trim / empty-skip /
+          // dedupe contract.
+          const disabledList = normalizeDisabledToolList(mergedDisabled);
           this.config.setDisabledTools(new Set(disabledList));
         } catch (err) {
           // #4297 fold-in 2 (wenshao S3): settings load failures are
