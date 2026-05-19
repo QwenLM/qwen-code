@@ -1418,12 +1418,22 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     (shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
     activeCompletion.showSuggestions;
 
-  // Notify parent about suggestions visibility changes
+  // Whether any input-side handler would consume a Tab keystroke. The parent
+  // (AppContainer) feeds this into useAutoAcceptIndicator's `shouldBlockTab`
+  // so the Windows-only "bare Tab cycles approval mode" fallback doesn't
+  // double-fire alongside an input-area Tab handler. See issue #4171.
+  const hasTabConsumer =
+    shouldShowSuggestions ||
+    (followup.state.isVisible && Boolean(followup.state.suggestion)) ||
+    Boolean(completion.midInputGhostText?.acceptText) ||
+    reverseSearchActive ||
+    commandSearchActive;
+
   useEffect(() => {
     if (onSuggestionsVisibilityChange) {
-      onSuggestionsVisibilityChange(shouldShowSuggestions);
+      onSuggestionsVisibilityChange(hasTabConsumer);
     }
-  }, [shouldShowSuggestions, onSuggestionsVisibilityChange]);
+  }, [hasTabConsumer, onSuggestionsVisibilityChange]);
 
   // Trigger prompt suggestion when prop changes
   useEffect(() => {

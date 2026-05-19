@@ -431,6 +431,89 @@ describe('InputPrompt', () => {
     });
   });
 
+  // Regression for #4171: onSuggestionsVisibilityChange (consumed by
+  // AppContainer as `shouldBlockTab`) must report `true` whenever ANY
+  // input-side handler would consume Tab — not just the autocomplete
+  // dropdown. Otherwise on Windows the bare-Tab approval-mode fallback
+  // double-fires alongside the input-side handler.
+  describe('hasTabConsumer reporting (issue #4171)', () => {
+    // Match the SUGGESTION_DELAY_MS debounce inside createFollowupController.
+    const SUGGESTION_VISIBLE_WAIT_MS = 700;
+
+    it('reports true while the followup prompt suggestion is visible', async () => {
+      const onSuggestionsVisibilityChange = vi.fn();
+      const { unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          promptSuggestion="commit this"
+          onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+        />,
+      );
+      await wait(SUGGESTION_VISIBLE_WAIT_MS);
+
+      expect(onSuggestionsVisibilityChange).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    it('reports true while mid-input ghost text offers an accept', async () => {
+      mockCommandCompletion.midInputGhostText = {
+        text: 'ile.txt',
+        insertPosition: 1,
+        acceptText: 'ile.txt',
+      };
+      const onSuggestionsVisibilityChange = vi.fn();
+      const { unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+        />,
+      );
+      await wait();
+
+      expect(onSuggestionsVisibilityChange).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    it('reports true while the autocomplete dropdown is visible', async () => {
+      mockCommandCompletion.showSuggestions = true;
+      mockCommandCompletion.suggestions = [
+        {
+          value: '/clear',
+          label: '/clear',
+          description: 'Clear screen',
+        },
+      ] as UseCommandCompletionReturn['suggestions'];
+      const onSuggestionsVisibilityChange = vi.fn();
+      const { unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+        />,
+      );
+      await wait();
+
+      expect(onSuggestionsVisibilityChange).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    it('reports false when the input area is idle (no dropdown, no followup, no ghost)', async () => {
+      const onSuggestionsVisibilityChange = vi.fn();
+      const { unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+        />,
+      );
+      await wait();
+
+      // Pin the actual value (not just "never true") — the mount-time effect
+      // must report false when nothing in the input area wants Tab.
+      expect(onSuggestionsVisibilityChange).toHaveBeenCalledWith(false);
+      expect(onSuggestionsVisibilityChange).not.toHaveBeenCalledWith(true);
+      unmount();
+    });
+  });
+
   it('should call shellHistory.getPreviousCommand on up arrow in shell mode', async () => {
     props.shellModeActive = true;
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
