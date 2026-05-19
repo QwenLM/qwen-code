@@ -66,6 +66,7 @@ const mapToolStatusToBullet = (
     case 'failed':
       return 'error';
     case 'in_progress':
+    case 'cancelled':
       return 'warning';
     case 'pending':
       return 'loading';

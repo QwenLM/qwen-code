@@ -12,6 +12,11 @@
       "import": "./dist/index.mjs",
       "require": "./dist/index.cjs"
     },
+    "./daemon": {
+      "types": "./dist/daemon/index.d.ts",
+      "import": "./dist/daemon/index.js",
+      "require": "./dist/daemon/index.cjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [

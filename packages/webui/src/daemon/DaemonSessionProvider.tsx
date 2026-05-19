@@ -1,0 +1,419 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from 'react';
+import {
+  DaemonClient,
+  DaemonHttpError,
+  DaemonSessionClient,
+  createDaemonTranscriptStore,
+  normalizeDaemonEvent,
+  selectPendingPermissionBlocks,
+  type CreateSessionRequest,
+  type DaemonTranscriptBlock,
+  type DaemonTranscriptState,
+  type DaemonTranscriptStore,
+  type DaemonUiSessionActions,
+  type PermissionResponse,
+  type PromptResult,
+  type SetModelResult,
+} from '@qwen-code/sdk/daemon';
+
+export type DaemonConnectionStatus =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'disconnected'
+  | 'error';
+
+export interface DaemonConnectionState {
+  status: DaemonConnectionStatus;
+  sessionId?: string;
+  workspaceCwd?: string;
+  error?: string;
+}
+
+export interface DaemonSessionProviderProps {
+  baseUrl: string;
+  token?: string;
+  workspaceCwd?: string;
+  createSessionRequest?: Omit<CreateSessionRequest, 'workspaceCwd'>;
+  maxQueued?: number;
+  suppressOwnUserEcho?: boolean;
+  includeRawEvent?: boolean;
+  autoConnect?: boolean;
+  autoReconnect?: boolean;
+  reconnectDelayMs?: number;
+  maxReconnectDelayMs?: number;
+  children: ReactNode;
+}
+
+export interface DaemonSessionContextValue {
+  store: DaemonTranscriptStore;
+  connection: DaemonConnectionState;
+  actions: DaemonUiSessionActions;
+}
+
+const DaemonStoreContext = createContext<DaemonTranscriptStore | undefined>(
+  undefined,
+);
+const DaemonConnectionContext = createContext<
+  DaemonConnectionState | undefined
+>(undefined);
+const DaemonActionsContext = createContext<DaemonUiSessionActions | undefined>(
+  undefined,
+);
+
+export function DaemonSessionProvider({
+  baseUrl,
+  token,
+  workspaceCwd,
+  createSessionRequest,
+  maxQueued = 1024,
+  suppressOwnUserEcho = true,
+  includeRawEvent = false,
+  autoConnect = true,
+  autoReconnect = true,
+  reconnectDelayMs = 1_000,
+  maxReconnectDelayMs = 10_000,
+  children,
+}: DaemonSessionProviderProps) {
+  const store = useMemo(() => createDaemonTranscriptStore(), []);
+  const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
+  const lastSessionIdRef = useRef<string | undefined>(undefined);
+  const promptAbortRef = useRef<AbortController | undefined>(undefined);
+  const promptBusyRef = useRef(false);
+  const modelServiceId = createSessionRequest?.modelServiceId;
+  const sessionScope = createSessionRequest?.sessionScope;
+  const [connection, setConnection] = useState<DaemonConnectionState>({
+    status: autoConnect ? 'connecting' : 'idle',
+  });
+
+  useEffect(() => {
+    if (!autoConnect) return undefined;
+    const abort = new AbortController();
+    let disposed = false;
+
+    const run = async () => {
+      const client = new DaemonClient({ baseUrl, token });
+      let session: DaemonSessionClient | undefined;
+      let reconnectAttempt = 0;
+
+      while (!disposed && !abort.signal.aborted) {
+        try {
+          if (!session) {
+            setConnection({ status: 'connecting' });
+            const caps = await client.capabilities();
+            const nextSession = await DaemonSessionClient.createOrAttach(
+              client,
+              {
+                ...(modelServiceId !== undefined ? { modelServiceId } : {}),
+                ...(sessionScope !== undefined ? { sessionScope } : {}),
+                workspaceCwd: workspaceCwd ?? caps.workspaceCwd,
+              },
+            );
+            const previousSessionId = lastSessionIdRef.current;
+            if (
+              previousSessionId !== undefined &&
+              nextSession.sessionId !== previousSessionId
+            ) {
+              store.reset();
+            }
+            session = nextSession;
+            lastSessionIdRef.current = session.sessionId;
+            sessionRef.current = session;
+          }
+
+          setConnection({
+            status: 'connected',
+            sessionId: session.sessionId,
+            workspaceCwd: session.workspaceCwd,
+          });
+
+          let sawEvent = false;
+          for await (const event of session.events({
+            signal: abort.signal,
+            maxQueued,
+          })) {
+            if (!sawEvent) {
+              sawEvent = true;
+              reconnectAttempt = 0;
+            }
+            try {
+              const uiEvents = normalizeDaemonEvent(event, {
+                clientId: session.clientId,
+                suppressOwnUserEcho,
+                includeRawEvent,
+              });
+              store.dispatch(uiEvents);
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              store.dispatch({
+                type: 'error',
+                text: `Skipped malformed daemon event: ${message}`,
+                recoverable: true,
+              });
+            }
+          }
+          if (!disposed && !abort.signal.aborted) {
+            session = undefined;
+            sessionRef.current = undefined;
+          }
+        } catch (error) {
+          if (disposed || abort.signal.aborted) return;
+          const message =
+            error instanceof Error ? error.message : String(error);
+          store.dispatch({ type: 'error', text: message, recoverable: true });
+          const sessionMissing =
+            error instanceof DaemonHttpError && error.status === 404;
+          if (sessionMissing) {
+            session = undefined;
+            sessionRef.current = undefined;
+          }
+          if (!autoReconnect) {
+            sessionRef.current = undefined;
+            setConnection({
+              status: 'error',
+              ...(session
+                ? {
+                    sessionId: session.sessionId,
+                    workspaceCwd: session.workspaceCwd,
+                  }
+                : {}),
+              error: message,
+            });
+            return;
+          }
+          setConnection({
+            status: 'disconnected',
+            ...(session
+              ? {
+                  sessionId: session.sessionId,
+                  workspaceCwd: session.workspaceCwd,
+                }
+              : {}),
+            error: message,
+          });
+        }
+
+        if (!autoReconnect) {
+          sessionRef.current = undefined;
+          setConnection((current) => ({
+            ...current,
+            status: 'disconnected',
+          }));
+          return;
+        }
+
+        reconnectAttempt += 1;
+        const delayMs = getReconnectDelayMs(
+          reconnectAttempt,
+          reconnectDelayMs,
+          maxReconnectDelayMs,
+        );
+        setConnection((current) => ({
+          ...current,
+          status: 'disconnected',
+          error: `Reconnecting in ${delayMs}ms`,
+        }));
+        await delay(delayMs, abort.signal);
+      }
+    };
+
+    void run();
+    return () => {
+      disposed = true;
+      abort.abort();
+      promptAbortRef.current?.abort();
+      promptAbortRef.current = undefined;
+      promptBusyRef.current = false;
+      sessionRef.current = undefined;
+    };
+  }, [
+    autoConnect,
+    autoReconnect,
+    baseUrl,
+    token,
+    workspaceCwd,
+    modelServiceId,
+    sessionScope,
+    maxQueued,
+    suppressOwnUserEcho,
+    includeRawEvent,
+    reconnectDelayMs,
+    maxReconnectDelayMs,
+    store,
+  ]);
+
+  const actions = useMemo<DaemonUiSessionActions>(
+    () => ({
+      async sendPrompt(text: string): Promise<PromptResult> {
+        const session = requireSession(sessionRef.current);
+        if (promptBusyRef.current) {
+          throw new Error('A prompt is already in progress');
+        }
+        promptBusyRef.current = true;
+        const promptAbort = new AbortController();
+        promptAbortRef.current = promptAbort;
+        store.appendLocalUserMessage(text);
+        try {
+          const result = await session.prompt(
+            {
+              prompt: [{ type: 'text', text }],
+            },
+            promptAbort.signal,
+          );
+          store.dispatch({ type: 'assistant.done', reason: result.stopReason });
+          return result;
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          store.dispatch({
+            type: 'error',
+            text: `Prompt failed: ${message}`,
+            recoverable: true,
+          });
+          throw error;
+        } finally {
+          if (promptAbortRef.current === promptAbort) {
+            promptAbortRef.current = undefined;
+          }
+          promptBusyRef.current = false;
+        }
+      },
+      async cancel(): Promise<void> {
+        await requireSession(sessionRef.current).cancel();
+      },
+      async setModel(modelId: string): Promise<SetModelResult> {
+        return await requireSession(sessionRef.current).setModel(modelId);
+      },
+      async respondToPermission(
+        requestId: string,
+        response: PermissionResponse,
+      ): Promise<boolean> {
+        return await requireSession(
+          sessionRef.current,
+        ).respondToSessionPermission(requestId, response);
+      },
+    }),
+    [store],
+  );
+
+  return (
+    <DaemonStoreContext.Provider value={store}>
+      <DaemonConnectionContext.Provider value={connection}>
+        <DaemonActionsContext.Provider value={actions}>
+          {children}
+        </DaemonActionsContext.Provider>
+      </DaemonConnectionContext.Provider>
+    </DaemonStoreContext.Provider>
+  );
+}
+
+export function useDaemonSession(): DaemonSessionContextValue {
+  return {
+    store: useDaemonTranscriptStore(),
+    connection: useDaemonConnection(),
+    actions: useDaemonActions(),
+  };
+}
+
+export function useDaemonTranscriptStore(): DaemonTranscriptStore {
+  const store = useContext(DaemonStoreContext);
+  if (!store) {
+    throw new Error(
+      'useDaemonTranscriptStore must be used within DaemonSessionProvider',
+    );
+  }
+  return store;
+}
+
+export function useDaemonTranscriptState(): DaemonTranscriptState {
+  const store = useDaemonTranscriptStore();
+  return useSyncExternalStore(
+    store.subscribe,
+    store.getSnapshot,
+    store.getSnapshot,
+  );
+}
+
+export function useDaemonTranscriptBlocks(): readonly DaemonTranscriptBlock[] {
+  return useDaemonTranscriptState().blocks;
+}
+
+export function useDaemonPendingPermissions() {
+  return selectPendingPermissionBlocks(useDaemonTranscriptState());
+}
+
+export function useDaemonActions(): DaemonUiSessionActions {
+  const actions = useContext(DaemonActionsContext);
+  if (!actions) {
+    throw new Error(
+      'useDaemonActions must be used within DaemonSessionProvider',
+    );
+  }
+  return actions;
+}
+
+export function useDaemonConnection(): DaemonConnectionState {
+  const connection = useContext(DaemonConnectionContext);
+  if (!connection) {
+    throw new Error(
+      'useDaemonConnection must be used within DaemonSessionProvider',
+    );
+  }
+  return connection;
+}
+
+function requireSession(
+  session: DaemonSessionClient | undefined,
+): DaemonSessionClient {
+  if (!session) {
+    throw new Error('Daemon session is not connected');
+  }
+  return session;
+}
+
+function getReconnectDelayMs(
+  attempt: number,
+  reconnectDelayMs: number,
+  maxReconnectDelayMs: number,
+): number {
+  const base =
+    Number.isFinite(reconnectDelayMs) && reconnectDelayMs > 0
+      ? reconnectDelayMs
+      : 1_000;
+  const max =
+    Number.isFinite(maxReconnectDelayMs) && maxReconnectDelayMs > 0
+      ? Math.max(base, maxReconnectDelayMs)
+      : base;
+  const exponential = base * 2 ** Math.max(0, attempt - 1);
+  return Math.min(exponential, max);
+}
+
+function delay(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (delayMs <= 0) return Promise.resolve();
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, delayMs);
+    function finish() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    }
+    signal.addEventListener('abort', finish, { once: true });
+  });
+}
