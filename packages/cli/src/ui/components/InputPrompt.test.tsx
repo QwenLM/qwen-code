@@ -512,6 +512,75 @@ describe('InputPrompt', () => {
       expect(onSuggestionsVisibilityChange).not.toHaveBeenCalledWith(true);
       unmount();
     });
+
+    it('reports false again after the autocomplete dropdown is dismissed', async () => {
+      mockedUseCommandCompletion.mockReturnValue({
+        ...mockCommandCompletion,
+        showSuggestions: true,
+        suggestions: [
+          {
+            value: '/clear',
+            label: '/clear',
+            description: 'Clear screen',
+          },
+        ] as UseCommandCompletionReturn['suggestions'],
+      });
+      const onSuggestionsVisibilityChange = vi.fn();
+      const { rerender, unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+        />,
+      );
+      await wait();
+      expect(onSuggestionsVisibilityChange).toHaveBeenLastCalledWith(true);
+
+      // Dismiss the dropdown and re-render — Windows Tab cycling must be
+      // re-enabled. Without this transition signal, the parent would keep
+      // suppressing the approval-mode fallback after the dropdown closed.
+      mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
+      rerender(
+        <InputPrompt
+          {...props}
+          onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+        />,
+      );
+      await wait();
+
+      expect(onSuggestionsVisibilityChange).toHaveBeenLastCalledWith(false);
+      unmount();
+    });
+
+    it('reports false on unmount even if a Tab consumer was active', async () => {
+      // Regression for the stale-signal bug: if InputPrompt unmounts while
+      // some Tab consumer is true (e.g. streaming starts while autocomplete
+      // is open), AppContainer would otherwise keep blocking Windows Tab
+      // approval-mode cycling for the entire streaming window.
+      mockedUseCommandCompletion.mockReturnValue({
+        ...mockCommandCompletion,
+        showSuggestions: true,
+        suggestions: [
+          {
+            value: '/clear',
+            label: '/clear',
+            description: 'Clear screen',
+          },
+        ] as UseCommandCompletionReturn['suggestions'],
+      });
+      const onSuggestionsVisibilityChange = vi.fn();
+      const { unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+        />,
+      );
+      await wait();
+      expect(onSuggestionsVisibilityChange).toHaveBeenLastCalledWith(true);
+
+      unmount();
+      // Last call after unmount must be false — the cleanup function fires.
+      expect(onSuggestionsVisibilityChange).toHaveBeenLastCalledWith(false);
+    });
   });
 
   it('should call shellHistory.getPreviousCommand on up arrow in shell mode', async () => {

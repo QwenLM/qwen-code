@@ -87,6 +87,16 @@ export interface InputPromptProps {
   onEscapePromptChange?: (showPrompt: boolean) => void;
   onToggleShortcuts?: () => void;
   showShortcuts?: boolean;
+  /**
+   * Reports whether any input-area Tab consumer is active — autocomplete
+   * dropdown, followup prompt suggestion, or mid-input ghost text. AppContainer
+   * feeds this into useAutoAcceptIndicator's `shouldBlockTab` to suppress the
+   * Windows-only "bare Tab cycles approval mode" fallback when an input-side
+   * handler already wants the Tab keystroke. See #4171.
+   *
+   * Name retained for backward compatibility with existing context wiring;
+   * the value tracks more than just suggestion-dropdown visibility.
+   */
   onSuggestionsVisibilityChange?: (visible: boolean) => void;
   vimHandleInput?: (key: Key) => boolean;
   isEmbeddedShellFocused?: boolean;
@@ -1422,17 +1432,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // (AppContainer) feeds this into useAutoAcceptIndicator's `shouldBlockTab`
   // so the Windows-only "bare Tab cycles approval mode" fallback doesn't
   // double-fire alongside an input-area Tab handler. See issue #4171.
+  //
+  // Note on reverse/command-search: when those overlays have matches, their
+  // `showSuggestions` flag flows into `shouldShowSuggestions` above and Tab IS
+  // consumed (ACCEPT_SUGGESTION_REVERSE_SEARCH). When they are active with no
+  // matches, Tab is not consumed — so the bare `reverseSearchActive` /
+  // `commandSearchActive` flags are intentionally NOT included here.
   const hasTabConsumer =
     shouldShowSuggestions ||
     (followup.state.isVisible && Boolean(followup.state.suggestion)) ||
-    Boolean(completion.midInputGhostText?.acceptText) ||
-    reverseSearchActive ||
-    commandSearchActive;
+    Boolean(completion.midInputGhostText?.acceptText);
 
   useEffect(() => {
-    if (onSuggestionsVisibilityChange) {
-      onSuggestionsVisibilityChange(hasTabConsumer);
-    }
+    onSuggestionsVisibilityChange?.(hasTabConsumer);
+    // Reset to false on unmount (e.g. when InputPrompt unmounts during
+    // streaming) so AppContainer's stale `hasTabConsumer` doesn't keep
+    // blocking Windows Tab approval-mode cycling while there is no input
+    // area to consume the keystroke.
+    return () => onSuggestionsVisibilityChange?.(false);
   }, [hasTabConsumer, onSuggestionsVisibilityChange]);
 
   // Trigger prompt suggestion when prop changes
