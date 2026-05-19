@@ -63,6 +63,7 @@ import {
   clearWorktreeSession,
   restoreWorktreeContext,
   GitWorktreeService,
+  readWorktreeSessionMarker,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
@@ -438,6 +439,17 @@ export const AppContainer = (props: AppContainerProps) => {
   const branchName = useGitBranchName(config.getTargetDir());
   const worktreeSession = useWorktreeSession(config);
   const [showWorktreeExitDialog, setShowWorktreeExitDialog] = useState(false);
+  /**
+   * One-shot worktree restore reminder for the TUI path. Set during
+   * `--resume` when the persisted sidecar names a live worktree, then
+   * consumed and cleared by `handleFinalSubmit` on the user's first
+   * prompt — same shape as ACP `Session.pendingWorktreeNotice` and
+   * headless's `<system-reminder>` prefix. Without this, the resumed
+   * model would see an INFO history item in the TUI but never receive
+   * the reminder in the next API request, leaving it free to edit the
+   * parent checkout. (PR #4174 review #3259975249.)
+   */
+  const pendingWorktreeNoticeRef = useRef<string | null>(null);
   const activeWorktree = useMemo(
     () =>
       worktreeSession
@@ -557,10 +569,17 @@ export const AppContainer = (props: AppContainerProps) => {
             console.debug('worktree session restore warning:', err);
           });
           if (restored.contextMessage) {
+            // UI: show the notice in the transcript so the user knows.
             historyManager.addItem(
               { type: MessageType.INFO, text: restored.contextMessage },
               Date.now(),
             );
+            // Model: queue the notice for one-shot injection into the
+            // next user prompt (consumed by handleFinalSubmit). The INFO
+            // history item alone is UI-only — the model never sees it,
+            // so without this it could resume editing the parent
+            // checkout despite the user seeing the worktree path.
+            pendingWorktreeNoticeRef.current = restored.contextMessage;
           }
         } catch (error) {
           // Best-effort: failures here only affect UI hint visibility,
@@ -1151,6 +1170,28 @@ export const AppContainer = (props: AppContainerProps) => {
           // so a service rooted at the subdir would never find it. (PR
           // #4174 review finding 3252368637.)
           const svc = new GitWorktreeService(activeWorktree.originalCwd);
+          // Ownership guard — read the in-worktree session marker and
+          // refuse to remove a worktree owned by a different session
+          // (stale sidecar, copied state from another machine, etc.).
+          // Mirrors the guard ExitWorktreeTool applies on the model
+          // path; without it the dialog could destroy a worktree it
+          // doesn't own. (PR #4174 review #3259975247.)
+          const owner = await readWorktreeSessionMarker(activeWorktree.path);
+          const currentSessionId = config.getSessionId();
+          if (owner !== null && owner !== currentSessionId) {
+            historyManager.addItem(
+              {
+                type: MessageType.ERROR,
+                text:
+                  `Refusing to remove worktree "${activeWorktree.slug}" — ` +
+                  `it was created by a different session (owner=${owner}). ` +
+                  `Resume the owning session to drop it, or remove it ` +
+                  `manually with \`git worktree remove ${activeWorktree.path}\`.`,
+              },
+              Date.now(),
+            );
+            return;
+          }
           // The user just clicked Remove on a dialog that already showed
           // the dirty-state and unmerged-commit counts ("discards N
           // commits, M files"). Force-delete the branch to honour that
@@ -1523,6 +1564,18 @@ export const AppContainer = (props: AppContainerProps) => {
           agent.interactiveAgent.enqueueMessage(submittedValue.trim());
           return;
         }
+      }
+      // Phase C: one-shot worktree restore reminder. Set during --resume
+      // when the persisted sidecar names a live worktree. We only inject
+      // on top-level user prompts (not btw-during-response, not slash
+      // commands — those go through different paths). Once consumed,
+      // clear the ref so subsequent prompts aren't repeatedly prefixed.
+      const worktreeNotice = pendingWorktreeNoticeRef.current;
+      if (worktreeNotice && !isSlashCommand(submittedValue)) {
+        pendingWorktreeNoticeRef.current = null;
+        submittedValue =
+          `<system-reminder>\n${worktreeNotice}\n</system-reminder>\n\n` +
+          submittedValue;
       }
       if (
         streamingState === StreamingState.Responding &&

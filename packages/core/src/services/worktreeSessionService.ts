@@ -196,6 +196,34 @@ export async function restoreWorktreeContext(
     return { contextMessage: null, session: null };
   }
 
+  // Structural sanity check: the worktreePath MUST live under
+  // `<originalCwd>/.qwen/worktrees/`. Schema validation (readWorktreeSession)
+  // already ensures the fields are strings, but a manually-edited or
+  // copy-pasted sidecar could still point worktreePath at an arbitrary
+  // existing directory — the model would then be directed to operate
+  // there. Restrict to the Qwen-managed worktrees subtree so a
+  // tampered sidecar can't redirect file operations to /etc, ~/, etc.
+  // (PR #4174 review #3256839787.)
+  const expectedParent = path.join(session.originalCwd, '.qwen', 'worktrees');
+  const resolvedWorktree = path.resolve(session.worktreePath);
+  if (
+    !resolvedWorktree.startsWith(expectedParent + path.sep) &&
+    resolvedWorktree !== expectedParent
+  ) {
+    onWarn?.(
+      new Error(
+        `worktreePath ${session.worktreePath} is outside ${expectedParent}; ` +
+          `treating sidecar as tampered and clearing.`,
+      ),
+    );
+    try {
+      await clearWorktreeSession(sidecarPath);
+    } catch (error) {
+      onWarn?.(error);
+    }
+    return { contextMessage: null, session: null };
+  }
+
   let worktreeAlive = false;
   try {
     const stat = await fs.stat(session.worktreePath);

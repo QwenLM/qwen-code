@@ -1183,25 +1183,43 @@ export class GitWorktreeService {
    * creation so the extra ~14ms isn't worth the file-parsing complexity).
    */
   private async configureHooksPath(worktreePath: string): Promise<void> {
+    // .husky/ is the convention for JS projects; check it first.
     const huskyPath = path.join(this.sourceRepoPath, '.husky');
-    const gitHooksPath = path.join(this.sourceRepoPath, '.git', 'hooks');
     let hooksPath: string | null = null;
-    for (const candidate of [huskyPath, gitHooksPath]) {
+    try {
+      await fs.stat(huskyPath);
+      hooksPath = huskyPath;
+    } catch (error) {
+      if (!(isNodeError(error) && error.code === 'ENOENT')) {
+        debugLogger.warn(
+          `configureHooksPath: cannot stat ${huskyPath}: ${error}`,
+        );
+      }
+    }
+
+    // Fall back to the canonical hooks dir. Construct `<sourceRepoPath>/.git/hooks`
+    // assumes `.git` is a directory — but when Qwen itself is launched
+    // from a linked worktree, `.git` is a FILE pointing at the real
+    // gitdir, and the constructed path ENOTDIRs. Use `git rev-parse
+    // --git-common-dir` to get the canonical hooks parent regardless
+    // of worktree/non-worktree shape. (PR #4174 review #3259975237.)
+    if (!hooksPath) {
       try {
+        const commonDir = (
+          await this.git.raw(['rev-parse', '--git-common-dir'])
+        ).trim();
+        const resolvedCommonDir = path.isAbsolute(commonDir)
+          ? commonDir
+          : path.resolve(this.sourceRepoPath, commonDir);
+        const candidate = path.join(resolvedCommonDir, 'hooks');
         await fs.stat(candidate);
         hooksPath = candidate;
-        break;
       } catch (error) {
-        // ENOENT is the expected "this candidate isn't present" signal;
-        // any other code (EACCES, EIO, ENOTDIR) means the candidate
-        // exists but we can't probe it — log so the silent fall-through
-        // to the next candidate (or to a no-hooks worktree) is visible.
-        if (isNodeError(error) && error.code === 'ENOENT') {
-          continue;
+        if (!(isNodeError(error) && error.code === 'ENOENT')) {
+          debugLogger.warn(
+            `configureHooksPath: cannot resolve git common hooks dir: ${error}`,
+          );
         }
-        debugLogger.warn(
-          `configureHooksPath: cannot stat ${candidate}: ${error}`,
-        );
       }
     }
     if (!hooksPath) return;
@@ -1219,8 +1237,18 @@ export class GitWorktreeService {
     } catch {
       // Key not set — empty string means "proceed with the write".
     }
-    if (existing !== hooksPath) {
+    // Only write when the key is unset. A non-empty existing value is
+    // either inherited (system / global / local config from the user
+    // or from a previous Qwen run) or an explicit user policy override
+    // — in both cases overwriting silently replaces the user's choice.
+    // (PR #4174 review #3259975242.)
+    if (existing === '') {
       await worktreeGit.raw(['config', 'core.hooksPath', hooksPath]);
+    } else if (existing !== hooksPath) {
+      debugLogger.debug(
+        `configureHooksPath: preserving existing core.hooksPath=${existing} ` +
+          `(Qwen would have set it to ${hooksPath})`,
+      );
     }
   }
 

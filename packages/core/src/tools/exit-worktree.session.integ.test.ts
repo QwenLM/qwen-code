@@ -68,18 +68,25 @@ describe('ExitWorktreeTool — WorktreeSession sidecar cleanup', () => {
     expect(result.error).toBeUndefined();
   }
 
-  it('clears the sidecar after keep', async () => {
-    await enterWorktree('keep-clears-sidecar');
+  it('preserves the sidecar after keep so --resume can restore the worktree binding', async () => {
+    // Phase C update (PR #4174 review #3259975245): `keep` used to clear
+    // the sidecar, but that broke the resume mechanism for kept worktrees.
+    // The model/user can still recover the kept worktree on --resume only
+    // because the sidecar persists.
+    await enterWorktree('keep-preserves-sidecar');
     const sessionPath = sessionService.getWorktreeSessionPath(sessionId);
-    expect(await readWorktreeSession(sessionPath)).not.toBeNull();
+    const before = await readWorktreeSession(sessionPath);
+    expect(before).not.toBeNull();
 
     const exit = new ExitWorktreeTool(makeConfig());
     const result = await exit
-      .build({ name: 'keep-clears-sidecar', action: 'keep' })
+      .build({ name: 'keep-preserves-sidecar', action: 'keep' })
       .execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
 
-    expect(await readWorktreeSession(sessionPath)).toBeNull();
+    // Sidecar should remain untouched after keep — same slug, same path.
+    const after = await readWorktreeSession(sessionPath);
+    expect(after).toEqual(before);
   });
 
   it('clears the sidecar after remove', async () => {

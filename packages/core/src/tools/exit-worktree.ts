@@ -182,7 +182,14 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     }
 
     if (this.params.action === 'keep') {
-      await this.maybeClearWorktreeSession();
+      // Phase C update: preserve the sidecar on `keep`. `keep` means
+      // "the worktree directory and branch remain on disk so it can be
+      // revisited later" — clearing the persisted binding would force
+      // a subsequent `--resume` (or interactive Footer / WorktreeExitDialog)
+      // to forget the worktree the user just chose to retain. The model
+      // can still reference the absolute path from the tool result;
+      // dropping the sidecar served no purpose beyond invalidating the
+      // restore mechanism. (PR #4174 review #3259975245.)
       const output: ExitWorktreeOutput = {
         action: 'keep',
         worktreePath,

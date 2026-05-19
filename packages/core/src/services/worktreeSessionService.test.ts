@@ -116,8 +116,17 @@ describe('restoreWorktreeContext', () => {
   });
 
   it('returns context message + session when worktree dir is alive', async () => {
-    // Point sample at a real existing directory (tmpDir itself).
-    const live: WorktreeSession = { ...sample, worktreePath: tmpDir };
+    // Build a sidecar where worktreePath sits under the structural
+    // invariant `<originalCwd>/.qwen/worktrees/<slug>` enforced by
+    // restoreWorktreeContext (Phase C review #3256839787).
+    const liveCwd = path.join(tmpDir, 'repo');
+    const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'my-feature');
+    await fs.mkdir(liveWorktree, { recursive: true });
+    const live: WorktreeSession = {
+      ...sample,
+      originalCwd: liveCwd,
+      worktreePath: liveWorktree,
+    };
     await writeWorktreeSession(filePath, live);
     const result = await restoreWorktreeContext(filePath);
 
@@ -127,6 +136,28 @@ describe('restoreWorktreeContext', () => {
     expect(result.contextMessage).toContain(live.worktreeBranch);
     // Sidecar should remain on disk so subsequent reads still see it.
     expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
+  it('rejects and clears a sidecar whose worktreePath escapes the managed subtree', async () => {
+    // A tampered sidecar pointing at /tmp itself (a real dir) but not
+    // under `<originalCwd>/.qwen/worktrees/` must be treated as
+    // untrusted, regardless of fs.stat success.
+    const escape: WorktreeSession = {
+      ...sample,
+      originalCwd: tmpDir,
+      worktreePath: tmpDir, // outside .qwen/worktrees/
+    };
+    await writeWorktreeSession(filePath, escape);
+    const warnings: unknown[] = [];
+
+    const result = await restoreWorktreeContext(filePath, (e) =>
+      warnings.push(e),
+    );
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    // Sidecar should have been cleared.
+    expect(await readWorktreeSession(filePath)).toBeNull();
+    expect(warnings.length).toBeGreaterThan(0);
   });
 
   it('cleans up stale sidecar when worktree dir is gone', async () => {

@@ -3441,7 +3441,16 @@ describe('runNonInteractive', () => {
         path.join(os.tmpdir(), 'wt-headless-resume-'),
       );
       const realTmpDir = await fs.realpath(tmpDir);
-      const worktreeDir = path.join(realTmpDir, 'worktree-real');
+      // restoreWorktreeContext enforces a structural invariant:
+      // worktreePath MUST live under `<originalCwd>/.qwen/worktrees/`
+      // (PR #4174 review #3256839787). The test fixture mirrors that
+      // shape so the restore path isn't rejected as tampered.
+      const worktreeDir = path.join(
+        realTmpDir,
+        '.qwen',
+        'worktrees',
+        'worktree-real',
+      );
       await fs.mkdir(worktreeDir, { recursive: true });
       const sidecarPath = path.join(realTmpDir, 'sidecar.worktree.json');
       const sidecar = {
