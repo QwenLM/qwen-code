@@ -91,7 +91,7 @@ import {
   addToolResultAttributes,
   type ToolBlockedDecision,
   type ToolBlockedSource,
-  type ToolSpanMetadata,
+  type StartHookSpanOptions,
   type HookSpanMetadata,
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
@@ -1027,12 +1027,15 @@ export class CoreToolScheduler {
    * Centralizes terminal-state cleanup so every cancel/error/success path
    * goes through one place — easier to audit for leaks. Idempotent:
    * second call for the same callId is a no-op.
+   *
+   * No `metadata` parameter: every caller pre-sets span status via
+   * `setToolSpan{Failure,Cancelled,Ok}` before this call (#4321 review).
    */
-  private finalizeToolSpan(callId: string, metadata?: ToolSpanMetadata): void {
+  private finalizeToolSpan(callId: string): void {
     const span = this.toolSpans.get(callId);
     if (!span) return;
     this.toolSpans.delete(callId);
-    endToolSpan(span, metadata);
+    endToolSpan(span);
   }
 
   /**
@@ -1061,6 +1064,35 @@ export class CoreToolScheduler {
    */
   private getBlockedSource(): ToolBlockedSource {
     return this.config.getIdeMode?.() ? 'ide' : 'cli';
+  }
+
+  /**
+   * Wrap a hook fire site with span lifecycle management. Centralizes the
+   * try/finally pattern across the 6 hook fire sites (PreToolUse,
+   * PostToolUse, 4× PostToolUseFailure) so future protocol changes
+   * (e.g. new metadata fields) can be made in one place instead of in
+   * lockstep across each site (#4321 review wenshao Suggestion).
+   *
+   * On the happy path `toEndMeta(result)` builds the metadata recorded on
+   * the span. On a throw, the default `endMeta = { success: false }`
+   * survives — today's hook helpers in `toolHookTriggers.ts` swallow
+   * throws internally so this branch is unreachable, but the pattern
+   * future-proofs the lifecycle if that contract changes.
+   */
+  private async withHookSpan<T>(
+    opts: StartHookSpanOptions,
+    fn: () => Promise<T>,
+    toEndMeta: (result: T) => HookSpanMetadata,
+  ): Promise<T> {
+    const hookSpan = startHookSpan(opts);
+    let endMeta: HookSpanMetadata = { success: false };
+    try {
+      const result = await fn();
+      endMeta = toEndMeta(result);
+      return result;
+    } finally {
+      endHookSpan(hookSpan, endMeta);
+    }
   }
 
   private buildInvocation(
@@ -2166,60 +2198,47 @@ export class CoreToolScheduler {
     if (hooksEnabled && messageBus) {
       // Convert ApprovalMode to permission_mode string for hooks
       const permissionMode = this.config.getApprovalMode();
-      const hookSpan = startHookSpan({
-        hookEvent: 'PreToolUse',
-        toolName: canonicalName,
-        toolUseId,
-      });
-      // try/finally (no catch): firePreToolUseHook is wrapped in its own
-      // safelyFire-style guard inside toolHookTriggers and never throws.
-      // The default endMeta records success: false so a future change that
-      // makes it throw would still close the span with a sensible state.
-      let endMeta: HookSpanMetadata = { success: false };
-      try {
-        const preHookResult = await firePreToolUseHook(
-          messageBus,
-          canonicalName,
-          toolInput,
-          toolUseId,
-          permissionMode,
-        );
-        endMeta = {
+      const preHookResult = await this.withHookSpan(
+        { hookEvent: 'PreToolUse', toolName: canonicalName, toolUseId },
+        () =>
+          firePreToolUseHook(
+            messageBus,
+            canonicalName,
+            toolInput,
+            toolUseId,
+            permissionMode,
+          ),
+        (r) => ({
           success: true,
-          shouldProceed: preHookResult.shouldProceed,
+          shouldProceed: r.shouldProceed,
           // Propagate the actual blockType ('denied' / 'ask' / 'stop')
           // instead of collapsing every block to 'denied'.
-          blockType: preHookResult.shouldProceed
-            ? undefined
-            : preHookResult.blockType,
-          hasAdditionalContext: !!preHookResult.additionalContext,
-        };
-
-        if (!preHookResult.shouldProceed) {
-          // Hook blocked the execution
-          const blockMessage =
-            preHookResult.blockReason || 'Tool execution blocked by hook';
-          const errorResponse = createErrorResponse(
-            scheduledCall.request,
-            new Error(blockMessage),
-            ToolErrorType.EXECUTION_DENIED,
-          );
-          addToolResultAttributes(
-            this.config,
-            span,
-            toolName,
-            `BLOCKED: ${blockMessage}`,
-          );
-          this.setStatusInternal(callId, 'error', errorResponse);
-          setToolSpanFailure(
-            span,
-            TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
-            TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED,
-          );
-          return;
-        }
-      } finally {
-        endHookSpan(hookSpan, endMeta);
+          blockType: r.shouldProceed ? undefined : r.blockType,
+          hasAdditionalContext: !!r.additionalContext,
+        }),
+      );
+      if (!preHookResult.shouldProceed) {
+        // Hook blocked the execution
+        const blockMessage =
+          preHookResult.blockReason || 'Tool execution blocked by hook';
+        const errorResponse = createErrorResponse(
+          scheduledCall.request,
+          new Error(blockMessage),
+          ToolErrorType.EXECUTION_DENIED,
+        );
+        addToolResultAttributes(
+          this.config,
+          span,
+          toolName,
+          `BLOCKED: ${blockMessage}`,
+        );
+        this.setStatusInternal(callId, 'error', errorResponse);
+        setToolSpanFailure(
+          span,
+          TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
+          TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED,
+        );
+        return;
       }
     }
 
@@ -2316,36 +2335,32 @@ export class CoreToolScheduler {
         // PostToolUseFailure Hook
         let cancelMessage = 'User cancelled tool execution.';
         if (hooksEnabled && messageBus) {
-          const hookSpan = startHookSpan({
-            hookEvent: 'PostToolUseFailure',
-            toolName: canonicalName,
-            toolUseId,
-            isInterrupt: true,
-          });
-          // safelyFirePostToolUseFailureHook absorbs throws — try/finally
-          // is enough; default endMeta covers a hypothetical future change.
-          let endMeta: HookSpanMetadata = { success: false };
-          try {
-            const failureHookResult = await safelyFirePostToolUseFailureHook(
-              messageBus,
+          const failureHookResult = await this.withHookSpan(
+            {
+              hookEvent: 'PostToolUseFailure',
+              toolName: canonicalName,
               toolUseId,
-              canonicalName,
-              toolInput,
-              cancelMessage,
-              true,
-              this.config.getApprovalMode(),
-            );
-            endMeta = {
+              isInterrupt: true,
+            },
+            () =>
+              safelyFirePostToolUseFailureHook(
+                messageBus,
+                toolUseId,
+                canonicalName,
+                toolInput,
+                cancelMessage,
+                true,
+                this.config.getApprovalMode(),
+              ),
+            (r) => ({
               success: true,
-              hasAdditionalContext: !!failureHookResult.additionalContext,
-            };
+              hasAdditionalContext: !!r.additionalContext,
+            }),
+          );
 
-            // Append additional context from hook if provided
-            if (failureHookResult.additionalContext) {
-              cancelMessage += `\n\n${failureHookResult.additionalContext}`;
-            }
-          } finally {
-            endHookSpan(hookSpan, endMeta);
+          // Append additional context from hook if provided
+          if (failureHookResult.additionalContext) {
+            cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
         addToolResultAttributes(
@@ -2371,35 +2386,24 @@ export class CoreToolScheduler {
             returnDisplay: toolResult.returnDisplay,
           };
           const permissionMode = this.config.getApprovalMode();
-          const hookSpan = startHookSpan({
-            hookEvent: 'PostToolUse',
-            toolName: canonicalName,
-            toolUseId,
-          });
-          // try/finally; firePostToolUseHook is wrapped via the
-          // safelyFire-style guard inside toolHookTriggers and never
-          // throws today. definite-assignment lets us use the result
-          // after the finally.
-          let endMeta: HookSpanMetadata = { success: false };
-          let postHookResult!: Awaited<ReturnType<typeof firePostToolUseHook>>;
-          try {
-            postHookResult = await firePostToolUseHook(
-              messageBus,
-              canonicalName,
-              toolInput,
-              toolResponse,
-              toolUseId,
-              permissionMode,
-            );
-            endMeta = {
+          const postHookResult = await this.withHookSpan(
+            { hookEvent: 'PostToolUse', toolName: canonicalName, toolUseId },
+            () =>
+              firePostToolUseHook(
+                messageBus,
+                canonicalName,
+                toolInput,
+                toolResponse,
+                toolUseId,
+                permissionMode,
+              ),
+            (r) => ({
               success: true,
-              shouldStop: postHookResult.shouldStop,
-              hasAdditionalContext: !!postHookResult.additionalContext,
-              blockType: postHookResult.shouldStop ? 'stop' : undefined,
-            };
-          } finally {
-            endHookSpan(hookSpan, endMeta);
-          }
+              shouldStop: r.shouldStop,
+              hasAdditionalContext: !!r.additionalContext,
+              blockType: r.shouldStop ? 'stop' : undefined,
+            }),
+          );
 
           // Append additional context from hook if provided
           if (postHookResult.additionalContext) {
@@ -2558,34 +2562,32 @@ export class CoreToolScheduler {
         // PostToolUseFailure Hook
         let errorMessage = toolResult.error.message;
         if (hooksEnabled && messageBus) {
-          const hookSpan = startHookSpan({
-            hookEvent: 'PostToolUseFailure',
-            toolName: canonicalName,
-            toolUseId,
-            isInterrupt: false,
-          });
-          let endMeta: HookSpanMetadata = { success: false };
-          try {
-            const failureHookResult = await safelyFirePostToolUseFailureHook(
-              messageBus,
+          const failureHookResult = await this.withHookSpan(
+            {
+              hookEvent: 'PostToolUseFailure',
+              toolName: canonicalName,
               toolUseId,
-              canonicalName,
-              toolInput,
-              toolResult.error.message,
-              false,
-              this.config.getApprovalMode(),
-            );
-            endMeta = {
+              isInterrupt: false,
+            },
+            () =>
+              safelyFirePostToolUseFailureHook(
+                messageBus,
+                toolUseId,
+                canonicalName,
+                toolInput,
+                toolResult.error!.message,
+                false,
+                this.config.getApprovalMode(),
+              ),
+            (r) => ({
               success: true,
-              hasAdditionalContext: !!failureHookResult.additionalContext,
-            };
+              hasAdditionalContext: !!r.additionalContext,
+            }),
+          );
 
-            // Append additional context from hook if provided
-            if (failureHookResult.additionalContext) {
-              errorMessage += `\n\n${failureHookResult.additionalContext}`;
-            }
-          } finally {
-            endHookSpan(hookSpan, endMeta);
+          // Append additional context from hook if provided
+          if (failureHookResult.additionalContext) {
+            errorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
 
@@ -2632,34 +2634,32 @@ export class CoreToolScheduler {
         // PostToolUseFailure Hook (user interrupt)
         let cancelMessage = 'User cancelled tool execution.';
         if (hooksEnabled && messageBus) {
-          const hookSpan = startHookSpan({
-            hookEvent: 'PostToolUseFailure',
-            toolName: canonicalName,
-            toolUseId,
-            isInterrupt: true,
-          });
-          let endMeta: HookSpanMetadata = { success: false };
-          try {
-            const failureHookResult = await safelyFirePostToolUseFailureHook(
-              messageBus,
+          const failureHookResult = await this.withHookSpan(
+            {
+              hookEvent: 'PostToolUseFailure',
+              toolName: canonicalName,
               toolUseId,
-              canonicalName,
-              toolInput,
-              cancelMessage,
-              true,
-              this.config.getApprovalMode(),
-            );
-            endMeta = {
+              isInterrupt: true,
+            },
+            () =>
+              safelyFirePostToolUseFailureHook(
+                messageBus,
+                toolUseId,
+                canonicalName,
+                toolInput,
+                cancelMessage,
+                true,
+                this.config.getApprovalMode(),
+              ),
+            (r) => ({
               success: true,
-              hasAdditionalContext: !!failureHookResult.additionalContext,
-            };
+              hasAdditionalContext: !!r.additionalContext,
+            }),
+          );
 
-            // Append additional context from hook if provided
-            if (failureHookResult.additionalContext) {
-              cancelMessage += `\n\n${failureHookResult.additionalContext}`;
-            }
-          } finally {
-            endHookSpan(hookSpan, endMeta);
+          // Append additional context from hook if provided
+          if (failureHookResult.additionalContext) {
+            cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
         addToolResultAttributes(
@@ -2675,34 +2675,32 @@ export class CoreToolScheduler {
         // PostToolUseFailure Hook
         let exceptionErrorMessage = errorMessage;
         if (hooksEnabled && messageBus) {
-          const hookSpan = startHookSpan({
-            hookEvent: 'PostToolUseFailure',
-            toolName: canonicalName,
-            toolUseId,
-            isInterrupt: false,
-          });
-          let endMeta: HookSpanMetadata = { success: false };
-          try {
-            const failureHookResult = await safelyFirePostToolUseFailureHook(
-              messageBus,
+          const failureHookResult = await this.withHookSpan(
+            {
+              hookEvent: 'PostToolUseFailure',
+              toolName: canonicalName,
               toolUseId,
-              canonicalName,
-              toolInput,
-              errorMessage,
-              false,
-              this.config.getApprovalMode(),
-            );
-            endMeta = {
+              isInterrupt: false,
+            },
+            () =>
+              safelyFirePostToolUseFailureHook(
+                messageBus,
+                toolUseId,
+                canonicalName,
+                toolInput,
+                errorMessage,
+                false,
+                this.config.getApprovalMode(),
+              ),
+            (r) => ({
               success: true,
-              hasAdditionalContext: !!failureHookResult.additionalContext,
-            };
+              hasAdditionalContext: !!r.additionalContext,
+            }),
+          );
 
-            // Append additional context from hook if provided
-            if (failureHookResult.additionalContext) {
-              exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
-            }
-          } finally {
-            endHookSpan(hookSpan, endMeta);
+          // Append additional context from hook if provided
+          if (failureHookResult.additionalContext) {
+            exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
         addToolResultAttributes(
