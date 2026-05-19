@@ -2826,11 +2826,13 @@ export class CoreToolScheduler {
           `Error checking confirmation for tool ${pendingTool.request.callId}:`,
           error,
         );
-        // Symmetry with the success branch above: finalize this sibling's
-        // blocked span with 'error' so the trace explains why it didn't
-        // get auto-approved. Without this, the span lingers until the
-        // 30-min TTL fires (#4321 review follow-up).
-        this.finalizeBlockedSpan(pendingTool.request.callId, 'error', 'system');
+        // Intentionally do NOT finalize the blocked span here: the tool
+        // remains in `awaiting_approval` and the user can still respond.
+        // Closing the span on a transient permission-flow error would
+        // make the user's eventual decision a no-op (Map already cleared)
+        // and the actual decision/source would be lost. If the user
+        // never responds, the 30-min TTL in session-tracing.ts cleans
+        // up the span (#4321 codex P3 review).
       }
     }
   }
