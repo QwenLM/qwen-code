@@ -1353,6 +1353,18 @@ export class NativeLspService {
       lines.splice(startLine, endLine - startLine + 1, ...newLines);
     }
 
+    // Honor file-level write permissions. Atomic rename (tmp + rename)
+    // would otherwise bypass a chmod 0444 lock because rename only needs
+    // parent-directory write access. ENOENT is fine — LSP may be creating
+    // the file via edits.
+    try {
+      fs.accessSync(filePath, fs.constants.W_OK);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        throw err;
+      }
+    }
+
     // Atomic write so a crash mid-edit can't leave the user file half-written.
     atomicWriteFileSync(filePath, lines.join('\n'), { encoding: 'utf-8' });
   }
