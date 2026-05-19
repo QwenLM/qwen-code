@@ -45,8 +45,9 @@ describe('modelCommand', () => {
   it('should have the correct name and description', () => {
     expect(modelCommand.name).toBe('model');
     expect(modelCommand.description).toBe(
-      'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
+      'Switch the model for this session (--default to persist, --fast for suggestion model).',
     );
+    expect(modelCommand.argumentHint).toBe('[--default|--fast] [<model-id>]');
   });
 
   it('should return error when config is not available', async () => {
@@ -151,7 +152,7 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should switch the main model directly in interactive mode when args are provided', async () => {
+  it('should switch the main model for the current session without persisting when args are provided', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);
     mockContext = createMockCommandContext({
@@ -178,6 +179,48 @@ describe('modelCommand', () => {
       'qwen-max',
       undefined,
     );
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Model: qwen-max',
+    });
+  });
+
+  it('should persist the main model only when --default is provided', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --default qwen-max',
+        name: 'model',
+        args: '--default qwen-max',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--default qwen-max',
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_OAUTH,
+      'qwen-max',
+      undefined,
+    );
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
       'model.name',
@@ -186,7 +229,7 @@ describe('modelCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Model: qwen-max',
+      content: 'Default model: qwen-max',
     });
   });
 
@@ -343,7 +386,7 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should switch provider-qualified models through switchModel', async () => {
+  it('should switch provider-qualified models for the current session without persisting', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);
     mockContext = createMockCommandContext({
@@ -378,16 +421,7 @@ describe('modelCommand', () => {
       'gpt-4',
       undefined,
     );
-    expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
-      'security.auth.selectedType',
-      AuthType.USE_OPENAI,
-    );
-    expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
-      'model.name',
-      'gpt-4',
-    );
+    expect(setValue).not.toHaveBeenCalled();
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
@@ -572,11 +606,7 @@ describe('modelCommand', () => {
       '--fast-model',
       undefined,
     );
-    expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
-      'model.name',
-      '--fast-model',
-    );
+    expect(setValue).not.toHaveBeenCalled();
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',

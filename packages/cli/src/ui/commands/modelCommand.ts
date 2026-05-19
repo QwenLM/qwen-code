@@ -32,7 +32,6 @@ function persistSetting(
 
 async function switchMainModel(
   config: Config,
-  settings: LoadedSettings,
   currentAuthType: AuthType,
   modelArg: string,
 ): Promise<string> {
@@ -47,12 +46,26 @@ async function switchMainModel(
         ? { requireCachedCredentials: true }
         : undefined,
     );
+    return parsed.modelId;
+  }
+
+  await config.switchModel(currentAuthType, modelArg, undefined);
+  return modelArg;
+}
+
+function persistMainModelDefault(
+  settings: LoadedSettings,
+  currentAuthType: AuthType,
+  modelArg: string,
+): string {
+  const parsed = parseAcpModelOption(modelArg);
+  if (parsed.authType) {
     persistSetting(settings, 'security.auth.selectedType', parsed.authType);
     persistSetting(settings, 'model.name', parsed.modelId);
     return parsed.modelId;
   }
 
-  await config.switchModel(currentAuthType, modelArg, undefined);
+  persistSetting(settings, 'security.auth.selectedType', currentAuthType);
   persistSetting(settings, 'model.name', modelArg);
   return modelArg;
 }
@@ -114,26 +127,40 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
+      'Switch the model for this session (--default to persist, --fast for suggestion model).',
     );
   },
-  argumentHint: '[--fast] [<model-id>]',
+  argumentHint: '[--default|--fast] [<model-id>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
-    if (partialArg && '--fast'.startsWith(partialArg)) {
-      return [
-        {
-          value: '--fast',
-          description: t(
-            'Set a lighter model for prompt suggestions and speculative execution',
-          ),
-        },
-      ];
-    } else if (partialArg.trim()) {
+    const trimmedPartialArg = partialArg.trim();
+    if (trimmedPartialArg.startsWith('--default ')) {
+      const modelPartial = trimmedPartialArg.replace('--default', '').trim();
+      return getAvailableModelIds(context)
+        .filter((id) => id.startsWith(modelPartial))
+        .map((id) => `--default ${id}`);
+    }
+
+    const flagCompletions = [
+      {
+        value: '--default',
+        description: t('Persist the selected model as the default'),
+      },
+      {
+        value: '--fast',
+        description: t(
+          'Set a lighter model for prompt suggestions and speculative execution',
+        ),
+      },
+    ].filter((completion) => completion.value.startsWith(trimmedPartialArg));
+
+    if (flagCompletions.length > 0) {
+      return flagCompletions;
+    } else if (trimmedPartialArg) {
       // Include model IDs matching the partial argument
       return getAvailableModelIds(context).filter((id) =>
-        id.startsWith(partialArg.trim()),
+        id.startsWith(trimmedPartialArg),
       );
     } else {
       return null;
@@ -156,6 +183,8 @@ export const modelCommand: SlashCommand = {
 
     // Handle --fast flag: /model --fast <modelName>
     const args = context.invocation?.args?.trim() || actionArgs.trim();
+    const isDefaultModelCommand =
+      args === '--default' || args.startsWith('--default ');
     const isFastModelCommand = args === '--fast' || args.startsWith('--fast ');
     if (isFastModelCommand) {
       const modelName = args.replace('--fast', '').trim();
@@ -256,9 +285,11 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    const modelName = args.trim().split(/\s+/)[0] ?? '';
+    const modelName = isDefaultModelCommand
+      ? args.replace('--default', '').trim().split(/\s+/)[0]
+      : (args.trim().split(/\s+/)[0] ?? '');
     if (modelName) {
-      if (!settings) {
+      if (isDefaultModelCommand && !settings) {
         return {
           type: 'message',
           messageType: 'error',
@@ -283,14 +314,27 @@ export const modelCommand: SlashCommand = {
       }
       const effectiveModelName = await switchMainModel(
         config,
-        settings,
         authType,
         modelName,
       );
+      if (isDefaultModelCommand) {
+        persistMainModelDefault(settings, authType, modelName);
+      }
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Model') + ': ' + effectiveModelName,
+        content:
+          (isDefaultModelCommand ? t('Default model') : t('Model')) +
+          ': ' +
+          effectiveModelName,
+      };
+    }
+
+    if (isDefaultModelCommand) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Usage: /model --default <model-id>'),
       };
     }
 

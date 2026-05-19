@@ -108,7 +108,6 @@ function persistAuthTypeSelection(
 }
 
 interface HandleModelSwitchSuccessParams {
-  settings: ReturnType<typeof useSettings>;
   uiState: UIState | null;
   after: ContentGeneratorConfig | undefined;
   effectiveAuthType: AuthType | undefined;
@@ -117,18 +116,12 @@ interface HandleModelSwitchSuccessParams {
 }
 
 function handleModelSwitchSuccess({
-  settings,
   uiState,
   after,
   effectiveAuthType,
   effectiveModelId,
   isRuntime,
 }: HandleModelSwitchSuccessParams): void {
-  persistModelSelection(settings, effectiveModelId);
-  if (effectiveAuthType) {
-    persistAuthTypeSelection(settings, effectiveAuthType);
-  }
-
   const baseUrl = after?.baseUrl ?? t('(default)');
   const maskedKey = maskApiKey(after?.apiKey);
   uiState?.historyManager.addItem(
@@ -142,6 +135,28 @@ function handleModelSwitchSuccess({
         `Base URL: ${baseUrl}` +
         `\n` +
         `API key: ${maskedKey}`,
+    },
+    Date.now(),
+  );
+}
+
+function persistDefaultModelSelection({
+  settings,
+  uiState,
+  authType,
+  modelId,
+}: {
+  settings: ReturnType<typeof useSettings>;
+  uiState: UIState | null;
+  authType: AuthType;
+  modelId: string;
+}): void {
+  persistModelSelection(settings, modelId);
+  persistAuthTypeSelection(settings, authType);
+  uiState?.historyManager.addItem(
+    {
+      type: 'success',
+      text: `${t('Default model')}: ${modelId}`,
     },
     Date.now(),
   );
@@ -354,15 +369,6 @@ export function ModelDialog({
         ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
         : '';
 
-  useKeypress(
-    (key) => {
-      if (key.name === 'escape' || (key.name === 'left' && isFastModelMode)) {
-        onClose();
-      }
-    },
-    { isActive: true },
-  );
-
   const initialIndex = useMemo(() => {
     const index = MODEL_OPTIONS.findIndex(
       (option) => option.value === preferredKey,
@@ -386,6 +392,37 @@ export function ModelDialog({
       },
     );
   }, [highlightedValue, preferredKey, availableModelEntries]);
+
+  useKeypress(
+    (key) => {
+      if (key.name === 'escape' || (key.name === 'left' && isFastModelMode)) {
+        onClose();
+        return;
+      }
+
+      if (key.name === 'd' && !isFastModelMode && highlightedEntry) {
+        if (
+          highlightedEntry.authType === AuthType.QWEN_OAUTH &&
+          !highlightedEntry.isRuntime
+        ) {
+          setErrorMessage(
+            t(
+              'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
+            ),
+          );
+          return;
+        }
+
+        persistDefaultModelSelection({
+          settings,
+          uiState,
+          authType: highlightedEntry.authType,
+          modelId: highlightedEntry.model.id,
+        });
+      }
+    },
+    { isActive: true },
+  );
 
   const handleSelect = useCallback(
     async (selected: string) => {
@@ -503,7 +540,6 @@ export function ModelDialog({
       }
 
       handleModelSwitchSuccess({
-        settings,
         uiState,
         after,
         effectiveAuthType,
@@ -618,7 +654,11 @@ export function ModelDialog({
 
       <Box marginTop={1} flexDirection="column">
         <Text color={theme.text.secondary}>
-          {t('Enter to select, ↑↓ to navigate, Esc to close')}
+          {isFastModelMode
+            ? t('Enter to select, ↑↓ to navigate, Esc to close')
+            : t(
+                'Enter to select, d to set default, ↑↓ to navigate, Esc to close',
+              )}
         </Text>
       </Box>
     </Box>

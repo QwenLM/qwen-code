@@ -224,7 +224,7 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
-  it('calls config.switchModel and onClose when selecting a non-OAuth model', async () => {
+  it('switches the current session without persisting when selecting a non-OAuth model', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
     const getAvailableModelsForAuthType = vi.fn((t: AuthType) => {
@@ -275,6 +275,42 @@ describe('<ModelDialog />', () => {
     expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'gpt-4', {
       baseUrl: undefined,
     });
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists the highlighted model as the default when "d" is pressed', () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+
+    const { props, mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType,
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'd',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: 'd',
+    });
+
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',
@@ -285,7 +321,8 @@ describe('<ModelDialog />', () => {
       'security.auth.selectedType',
       AuthType.USE_OPENAI,
     );
-    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
   });
 
   it('stores authType-qualified selectors in fast model mode', async () => {
