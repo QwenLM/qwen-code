@@ -21,6 +21,7 @@ import {
   type PoolEvent,
 } from './mcp-pool-events.js';
 import type { SessionMcpView } from './session-mcp-view.js';
+import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 
 const debugLogger = createDebugLogger('McpPool:Entry');
 
@@ -186,7 +187,11 @@ export class PoolEntry {
    *
    * Cancels drain timer (entry is no longer idle).
    */
-  attach(sessionId: string, view: SessionMcpView): PooledConnection {
+  attach(
+    sessionId: string,
+    view: SessionMcpView,
+    opts?: { skipReplay?: boolean; release?: () => void },
+  ): PooledConnection {
     if (this.state === 'closed' || this.state === 'failed') {
       throw new Error(
         `Cannot attach to PoolEntry ${this.id} in state ${this.state}`,
@@ -199,7 +204,14 @@ export class PoolEntry {
 
     // Snapshot replay: synchronously apply current state so the new
     // view doesn't see a transient empty state.
-    if (this.state === 'active') {
+    //
+    // skipReplay = true for the unpooled path (`createUnpooledConnection`)
+    // — the session's McpClient has already registered tools/prompts
+    // directly via the legacy `discover()` flow, and the view's
+    // snapshot is empty. Without this gate, `applyTools([])` would
+    // call `removeMcpToolsByServer` and wipe those registrations
+    // (commit-2 review P1 #2 fix).
+    if (this.state === 'active' && opts?.skipReplay !== true) {
       try {
         view.applyTools(this.toolsSnapshot);
         view.applyPrompts(this.promptsSnapshot);
@@ -210,7 +222,12 @@ export class PoolEntry {
       }
     }
 
-    const handle = new PooledConnectionImpl(this, sessionId, view);
+    const handle = new PooledConnectionImpl(
+      this,
+      sessionId,
+      view,
+      opts?.release,
+    );
     this.subscriberHandles.set(sessionId, handle);
     return handle;
   }
@@ -309,6 +326,30 @@ export class PoolEntry {
     // releaseSession explicitly (defense in depth).
     for (const [sid] of this.subscribers) {
       this.detach(sid);
+    }
+    // F2 commit 3: SIGTERM descendant processes BEFORE disconnecting
+    // the MCP client. Wrapper processes (`npx`, `uvx`, `pnpm dlx`)
+    // spawn the actual server as a grandchild; killing only the
+    // wrapper via `client.disconnect()` would leak the real server.
+    // Best-effort: pid lookup returns undefined for remote transports
+    // or already-exited stdio children; sigtermPids tolerates per-
+    // pid failures (ESRCH for already-dead pids).
+    try {
+      const rootPid = this.client.getTransportPid?.();
+      if (rootPid !== undefined) {
+        const descendants = await listDescendantPids(rootPid);
+        if (descendants.length > 0) {
+          const signaled = sigtermPids(descendants);
+          debugLogger.debug(
+            `Sent SIGTERM to ${signaled}/${descendants.length} descendants ` +
+              `of pid ${rootPid} for ${this.id} (${reason})`,
+          );
+        }
+      }
+    } catch (err) {
+      debugLogger.warn(
+        `Descendant pid sweep failed for ${this.id}: ${String(err)}. Proceeding with disconnect.`,
+      );
     }
     try {
       await this.client.disconnect();
@@ -434,11 +475,13 @@ class PooledConnectionImpl implements PooledConnection {
 
   constructor(
     private readonly entry: PoolEntry,
-    // sessionId kept for future use (per-subscriber metrics, audit
-    // log routing); referenced only via debug logs today.
     readonly sessionId: string,
     // View kept for parity / future use (e.g. per-subscriber filters).
     _view: SessionMcpView,
+    // Pool-supplied release callback. Wired by `pool.acquire` to call
+    // `pool.release(id, sessionId)` so subscribers can `handle.release()`
+    // without needing a pool reference (commit-2 review P1 #1 fix).
+    private readonly releaseCallback?: () => void,
   ) {}
 
   get id(): ConnectionId {
@@ -483,10 +526,11 @@ class PooledConnectionImpl implements PooledConnection {
       this.entry.internalOff(l);
     }
     this.listeners.clear();
-    // The entry-side detach happens through pool.release(id, sid)
-    // so the pool can manage refs + drain timers; we just notify
-    // by emitting an internal sentinel — but the pool actually
-    // owns ref accounting. For now this is a no-op; users call
-    // pool.release(id, sessionId) directly through the pool API.
+    // Invoke the pool-supplied release callback so refs are properly
+    // dropped and the drain timer can start at refs=0. Commit-2
+    // review P1 #1 fix: prior to wiring this callback, calling
+    // handle.release() was a no-op and leaked refs until the
+    // session's `releaseSession` bulk-cleanup fired.
+    this.releaseCallback?.();
   }
 }

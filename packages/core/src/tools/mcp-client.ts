@@ -261,6 +261,23 @@ export class McpClient {
     return this.status;
   }
 
+  /**
+   * The OS pid of the spawned MCP child process, if this is a stdio
+   * transport and the child is currently alive. Returns `undefined`
+   * for remote transports (sse / http / websocket) and for stdio
+   * transports that have not yet connected or have already exited.
+   *
+   * F2 (#4175) `PoolEntry.forceShutdown` reads this to enumerate
+   * descendant pids (via `listDescendantPids`) before calling
+   * `client.disconnect()`, so wrapper processes like
+   * `npx @modelcontextprotocol/server-X` and `uvx ...` don't leak.
+   */
+  getTransportPid(): number | undefined {
+    const t = this.transport as { pid?: number | null } | undefined;
+    if (!t || typeof t.pid !== 'number' || t.pid <= 0) return undefined;
+    return t.pid;
+  }
+
   async readResource(
     uri: string,
     options?: { signal?: AbortSignal },

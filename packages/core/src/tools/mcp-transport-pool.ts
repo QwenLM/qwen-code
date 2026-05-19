@@ -160,7 +160,9 @@ export class McpTransportPool {
         cfg,
       );
       this.indexAttach(sessionId, id);
-      return existing.attach(sessionId, view);
+      return existing.attach(sessionId, view, {
+        release: () => this.release(id, sessionId),
+      });
     }
 
     // In-flight path: another acquire for the same key is already
@@ -182,7 +184,9 @@ export class McpTransportPool {
       cfg,
     );
     this.indexAttach(sessionId, id);
-    return entry.attach(sessionId, view);
+    return entry.attach(sessionId, view, {
+      release: () => this.release(id, sessionId),
+    });
   }
 
   /**
@@ -548,7 +552,18 @@ export class McpTransportPool {
       // registration that would happen if we also called applyTools.
       await client.discover(this.cliConfig);
       entry.markActive([], []);
-      return entry.attach(sessionId, view);
+      // Unpooled handle: skipReplay prevents `attach` from calling
+      // `view.applyTools([])` which would `removeMcpToolsByServer`
+      // and wipe the tools `discover()` just registered (commit-2
+      // review P1 #2 fix). Release callback runs forceShutdown
+      // directly — no pool refcount accounting for unpooled entries
+      // since they're per-session.
+      return entry.attach(sessionId, view, {
+        skipReplay: true,
+        release: () => {
+          void entry.forceShutdown('manual');
+        },
+      });
     } catch (err) {
       try {
         await client.disconnect();
