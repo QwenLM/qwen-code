@@ -420,6 +420,39 @@ describe('applyProviderInstallPlan', () => {
     expect(process.env['TEST_API_KEY']).toBe('before-install');
   });
 
+  it('annotates the rethrown error with the failing step and preserves the original cause', async () => {
+    process.env['TEST_API_KEY'] = 'old';
+    const adapter = createAdapter();
+    const refreshAuth = vi.fn(async () => {
+      throw new Error('endpoint unreachable');
+    });
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      env: { TEST_API_KEY: 'new' },
+    };
+
+    let caught: unknown;
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        refreshAuth,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    const err = caught as Error & { cause?: Error };
+    expect(err.message).toContain('step "refreshAuth"');
+    expect(err.message).toContain('authType=openai');
+    expect(err.message).toContain('endpoint unreachable');
+    // Original error preserved via cause so callers matching on err.code
+    // (NodeJS.ErrnoException) still work.
+    expect(err.cause).toBeInstanceOf(Error);
+    expect((err.cause as Error).message).toBe('endpoint unreachable');
+  });
+
   it('continues throw + env rollback when reloadModelProviders rollback itself throws', async () => {
     process.env['TEST_API_KEY'] = 'before';
     const previousProviders = {

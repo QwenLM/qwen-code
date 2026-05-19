@@ -289,9 +289,11 @@ export class AuthMessageHandler extends BaseMessageHandler {
         // Enter on the OpenAI default. Defaults come from core's shared
         // getDefaultBaseUrlForProtocol so CLI and VS Code stay in sync.
         const effectiveProtocol = protocol ?? provider.protocol;
-        const placeholder =
-          getDefaultBaseUrlForProtocol(effectiveProtocol) ||
-          'https://api.openai.com/v1';
+        // No local fallback: getDefaultBaseUrlForProtocol owns the defaults.
+        // Adding an OpenAI fallback here would silently mask a new AuthType
+        // that core hadn't been taught about, diverging from the CLI flow
+        // (which shows an empty placeholder + scheme error in the same case).
+        const placeholder = getDefaultBaseUrlForProtocol(effectiveProtocol);
         const urlInput = await this.input({
           title: `${flowTitle}: Base URL`,
           prompt: 'Enter API base URL',

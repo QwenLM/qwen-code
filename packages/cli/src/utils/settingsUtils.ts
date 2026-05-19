@@ -656,8 +656,15 @@ export function restoreSettingsFromBackup(filePath: string): boolean {
       fs.unlinkSync(backupPath);
       return true;
     }
-  } catch (_e) {
-    // Ignore restore errors — caller should handle the failure
+  } catch (err) {
+    // Caller handles the boolean failure, but log the underlying cause so
+    // EACCES / disk full / file-locked don't all look identical from
+    // upstream — the adapter's own warning then has something to point at.
+    // eslint-disable-next-line no-console -- best-effort rollback path
+    console.error(
+      `[settingsUtils] restoreSettingsFromBackup(${filePath}) failed:`,
+      err,
+    );
   }
   return false;
 }

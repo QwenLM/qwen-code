@@ -655,3 +655,22 @@ describe('providerMatchesCredentials with function envKey (custom provider)', ()
     expect(providerMatchesCredentialsSrc(config, url, geminiKey)).toBe(true);
   });
 });
+
+import { resolveMetadataKey as resolveMetadataKeySrc } from '../provider-config.js';
+
+describe('resolveMetadataKey dotted-id guard', () => {
+  it('returns the id unchanged for normal providers with static models', () => {
+    const config = makeConfig({ id: 'deepseek', models: [{ id: 'm1' }] });
+    expect(resolveMetadataKeySrc(config)).toBe('deepseek');
+  });
+
+  it('returns undefined for providers without static models', () => {
+    const config = makeConfig({ id: 'custom-like', models: undefined });
+    expect(resolveMetadataKeySrc(config)).toBeUndefined();
+  });
+
+  it("throws when the id contains '.' (would corrupt dotted setValue writes)", () => {
+    const config = makeConfig({ id: 'company.ai', models: [{ id: 'm1' }] });
+    expect(() => resolveMetadataKeySrc(config)).toThrow(/must not contain/);
+  });
+});

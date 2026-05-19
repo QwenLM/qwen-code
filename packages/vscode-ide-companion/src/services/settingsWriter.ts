@@ -493,12 +493,15 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
 
     restore(): void {
       if (!backupData) return;
-      // Write to disk FIRST: if writeSettings throws (EACCES, disk full,
-      // EPERM on Windows), the on-disk file still holds the failed install's
-      // partial state. Updating in-memory `data` first would leave callers
-      // observing a clean memory snapshot while the file on disk lies. The
-      // CLI adapter (loadedSettingsAdapter) does it in the same order via
-      // restoreSettingsFromBackup() first.
+      // Write to disk FIRST. If writeSettings throws (EACCES / disk full /
+      // EPERM on Windows), the in-memory update is skipped on purpose:
+      // callers never observe a clean snapshot while the file on disk lies.
+      //
+      // Note: the CLI adapter (loadedSettingsAdapter) takes a different
+      // trade-off — restoreSettingsFromBackup() returns a boolean, so it
+      // logs on failure and *unconditionally* restores in-memory state.
+      // VS Code can be stricter because its writeSettings is the only path
+      // and a throw here is recoverable; the CLI lacks that escape hatch.
       writeSettings(backupData);
       data = backupData;
       backupData = null;
@@ -647,10 +650,16 @@ export function clearPersistedAuth(): void {
       // Every preset with a static models[] writes providerMetadata.<id>.version
       // via resolveProviderState — wipe them all on clear so stale entries
       // don't cause phantom "update available" notifications for a provider
-      // the user just signed out of.
+      // the user just signed out of. resolveMetadataKey throws when a future
+      // provider has '.' in its id; wrap per-iteration so one bad entry
+      // can't abort the whole cleanup and leave secrets on disk.
       for (const p of ALL_PROVIDERS) {
-        const key = resolveMetadataKey(p);
-        if (key) delete pm[key];
+        try {
+          const key = resolveMetadataKey(p);
+          if (key) delete pm[key];
+        } catch {
+          /* skip metadata cleanup for a misconfigured provider id */
+        }
       }
     }
 

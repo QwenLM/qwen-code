@@ -96,12 +96,19 @@ export async function applyProviderInstallPlan(
     ...settings.getModelProviders(),
   };
 
+  // Track which step is in flight so a rethrow at the bottom can name it
+  // (an EACCES from persist vs a refreshAuth rejection look identical
+  // otherwise — eight steps, one anonymous error).
+  let currentStep = 'init';
+
   try {
     // backup() inside the try so a failure here (e.g. structuredClone on a
     // non-serializable adapter) still triggers the catch + env rollback.
+    currentStep = 'backup';
     settings.backup?.();
 
     // Set environment variables (snapshot previous values for rollback)
+    currentStep = 'env';
     for (const [key, value] of Object.entries(plan.env ?? {})) {
       previousEnvValues.set(key, process.env[key]);
       settings.setValue(`env.${key}`, value);
@@ -109,6 +116,7 @@ export async function applyProviderInstallPlan(
     }
 
     // Apply model providers patches
+    currentStep = 'modelProviders';
     let updatedModelProviders: ModelProvidersConfig = {
       ...previousRuntimeProviders,
     };
@@ -125,9 +133,11 @@ export async function applyProviderInstallPlan(
     }
 
     // Set auth type
+    currentStep = 'authType';
     settings.setValue('security.auth.selectedType', plan.authType);
 
     // Legacy credentials
+    currentStep = 'legacyCredentials';
     if (plan.legacyCredentials?.apiKey != null) {
       settings.setValue('security.auth.apiKey', plan.legacyCredentials.apiKey);
     }
@@ -139,11 +149,13 @@ export async function applyProviderInstallPlan(
     }
 
     // Model selection
+    currentStep = 'modelSelection';
     if (plan.modelSelection?.modelId) {
       settings.setValue('model.name', plan.modelSelection.modelId);
     }
 
     // Provider state metadata
+    currentStep = 'providerState';
     for (const [key, entries] of Object.entries(plan.providerState ?? {})) {
       for (const [field, value] of Object.entries(entries)) {
         settings.setValue(`${key}.${field}`, value);
@@ -151,17 +163,22 @@ export async function applyProviderInstallPlan(
     }
 
     // Persist to disk
+    currentStep = 'persist';
     settings.persist();
 
     // Reload runtime config
+    currentStep = 'reloadModelProviders';
     reloadModelProviders?.(updatedModelProviders);
     if (plan.modelSelection?.modelId) {
+      currentStep = 'syncAuthState';
       syncAuthState?.(plan.authType, plan.modelSelection.modelId);
     }
     if (doRefreshAuth && refreshAuth) {
+      currentStep = 'refreshAuth';
       await refreshAuth(plan.authType);
     }
 
+    currentStep = 'cleanupBackup';
     settings.cleanupBackup?.();
 
     return { updatedModelProviders };
@@ -203,6 +220,16 @@ export async function applyProviderInstallPlan(
         reloadErr,
       );
     }
-    throw error;
+    // Annotate the rethrow with the step that failed so a downstream catch
+    // (handleAuthFailure, /doctor) can tell EACCES-from-persist apart from a
+    // refreshAuth rejection. Preserve the original via `cause`.
+    const errMsg = error instanceof Error ? error.message : String(error);
+    const annotated = new Error(
+      `applyProviderInstallPlan failed at step "${currentStep}" for authType=${plan.authType}: ${errMsg}`,
+      { cause: error instanceof Error ? error : undefined },
+    );
+    // Preserve the original name (e.g. NodeJS.ErrnoException) so callers
+    // matching on err.code still work via the `cause` chain.
+    throw annotated;
   }
 }

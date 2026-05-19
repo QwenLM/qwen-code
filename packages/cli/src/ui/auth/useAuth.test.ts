@@ -239,6 +239,32 @@ describe('useAuthCommand', () => {
     expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 
+  it('cancelAuthentication resets dialog + flags + clears authError', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    // Put the hook into the middle of an in-flight auth + an error to make
+    // sure cancel resets *all* the visible state, not just isAuthenticating.
+    act(() => {
+      result.current.onAuthError('boom');
+    });
+    expect(result.current.authError).toBe('boom');
+    expect(result.current.isAuthDialogOpen).toBe(true);
+
+    act(() => {
+      result.current.cancelAuthentication();
+    });
+
+    expect(result.current.isAuthenticating).toBe(false);
+    expect(result.current.externalAuthState).toBeNull();
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.authError).toBeNull();
+  });
+
   it('surfaces install-plan rejection as an auth error and records telemetry', async () => {
     const settings = createSettings();
     const config = createConfig();

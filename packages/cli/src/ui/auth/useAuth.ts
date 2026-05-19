@@ -120,15 +120,25 @@ export const useAuthCommand = (
   );
 
   const handleAuthFailure = useCallback(
-    (error: unknown) => {
+    (error: unknown, protocolForTelemetry?: AuthType) => {
       setIsAuthenticating(false);
       setExternalAuthState(null);
       const msg = t('Failed to authenticate. Message: {{message}}', {
         message: getErrorMessage(error),
       });
       onAuthError(msg);
-      if (pendingAuthType) {
-        logAuth(config, new AuthEvent(pendingAuthType, 'manual', 'error', msg));
+      // Prefer the explicit argument over the closed-over pendingAuthType:
+      // setPendingAuthType(protocol) queues an async React update, but a
+      // synchronous throw in handleProviderSubmit reaches the catch before
+      // the next render, so the closure may still see `undefined` here.
+      // Callers from the new unified flow pass `protocol` explicitly to
+      // sidestep that staleness; legacy callers fall back to the closure.
+      const effectiveProtocol = protocolForTelemetry ?? pendingAuthType;
+      if (effectiveProtocol) {
+        logAuth(
+          config,
+          new AuthEvent(effectiveProtocol, 'manual', 'error', msg),
+        );
       }
     },
     [onAuthError, pendingAuthType, config],
@@ -182,7 +192,9 @@ export const useAuthCommand = (
 
         logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
       } catch (error) {
-        handleAuthFailure(error);
+        // Pass protocol explicitly so error telemetry is recorded even when
+        // a synchronous throw beats the setPendingAuthType state update.
+        handleAuthFailure(error, protocol);
       }
     },
     [settings, config, completeAuthentication, addItem, handleAuthFailure],
