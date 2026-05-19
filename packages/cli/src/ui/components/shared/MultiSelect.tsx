@@ -14,6 +14,7 @@ import type { SelectionListItem } from '../../hooks/useSelectionList.js';
 
 export interface MultiSelectItem<T> extends SelectionListItem<T> {
   label: string;
+  separator?: boolean;
 }
 
 export interface MultiSelectProps<T> {
@@ -28,6 +29,8 @@ export interface MultiSelectProps<T> {
   showNumbers?: boolean;
   showScrollArrows?: boolean;
   maxItemsToShow?: number;
+  checkedText?: string;
+  showActiveMarker?: boolean;
 }
 
 const EMPTY_SELECTED_KEYS: string[] = [];
@@ -53,6 +56,8 @@ export function MultiSelect<T>({
   showNumbers = true,
   showScrollArrows = false,
   maxItemsToShow = 10,
+  checkedText = '[✓]',
+  showActiveMarker = false,
 }: MultiSelectProps<T>): React.JSX.Element {
   const [scrollOffset, setScrollOffset] = useState(0);
   const selectedKeySet = useMemo(() => new Set(selectedKeys), [selectedKeys]);
@@ -136,11 +141,16 @@ export function MultiSelect<T>({
         const itemIndex = scrollOffset + index;
         const isActive = activeIndex === itemIndex;
         const isChecked = selectedKeySet.has(item.key);
+        const activeMarker = isActive ? '›' : ' ';
 
         const itemNumberText = `${String(itemIndex + 1).padStart(
           numberColumnWidth,
         )}.`;
-        const checkboxText = item.disabled ? '[x]' : isChecked ? '[✓]' : '[ ]';
+        const checkboxText = item.disabled
+          ? '[x]'
+          : isChecked
+            ? checkedText
+            : '[ ]';
 
         let textColor = theme.text.primary;
         if (item.disabled) {
@@ -151,8 +161,31 @@ export function MultiSelect<T>({
           textColor = theme.text.accent;
         }
 
+        if (item.separator) {
+          return (
+            <Box key={item.key} alignItems="flex-start">
+              {showActiveMarker && (
+                <Box minWidth={2} flexShrink={0}>
+                  <Text color={textColor}>{activeMarker}</Text>
+                </Box>
+              )}
+              <Box minWidth={4} flexShrink={0}>
+                <Text> </Text>
+              </Box>
+              <Box flexGrow={1}>
+                <Text color={theme.text.secondary}>{item.label}</Text>
+              </Box>
+            </Box>
+          );
+        }
+
         return (
           <Box key={item.key} alignItems="flex-start">
+            {showActiveMarker && (
+              <Box minWidth={2} flexShrink={0}>
+                <Text color={textColor}>{activeMarker}</Text>
+              </Box>
+            )}
             <Box minWidth={4} flexShrink={0}>
               <Text color={textColor}>{checkboxText}</Text>
             </Box>

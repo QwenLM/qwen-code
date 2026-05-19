@@ -463,6 +463,88 @@ describe('ChatCompressionService', () => {
     expect(result.newHistory).toBeNull();
   });
 
+  it('should bypass the token threshold when requested without force=true', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: false,
+      bypassTokenThreshold: true,
+      model: mockModel,
+      config: mockConfig,
+      hasFailedCompressionAttempt: false,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+    expect(mockGenerateContent).toHaveBeenCalled();
+  });
+
+  it('should bypass the failed-attempt latch when heap pressure requests compaction', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: false,
+      bypassTokenThreshold: true,
+      model: mockModel,
+      config: mockConfig,
+      hasFailedCompressionAttempt: true,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+    expect(mockGenerateContent).toHaveBeenCalled();
+  });
+
   it('should return NOOP when contextPercentageThreshold is 0', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
@@ -505,6 +587,41 @@ describe('ChatCompressionService', () => {
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
     });
     expect(forcedResult.info).toMatchObject({
+      compressionStatus: CompressionStatus.NOOP,
+      originalTokenCount: 0,
+      newTokenCount: 0,
+    });
+    expect(mockGenerateContent).not.toHaveBeenCalled();
+    expect(tokenLimit).not.toHaveBeenCalled();
+  });
+
+  it('should return NOOP when contextPercentageThreshold is 0 even with token threshold bypass', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+      contextPercentageThreshold: 0,
+    });
+
+    const mockGenerateContent = vi.fn();
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: false,
+      bypassTokenThreshold: true,
+      model: mockModel,
+      config: mockConfig,
+      hasFailedCompressionAttempt: false,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info).toMatchObject({
       compressionStatus: CompressionStatus.NOOP,
       originalTokenCount: 0,
       newTokenCount: 0,

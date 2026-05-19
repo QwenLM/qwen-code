@@ -390,6 +390,27 @@ describe('HookRunner', () => {
       expect(result.success).toBe(false);
       expect(result.error).toBeDefined();
     });
+
+    it('should throw error for prompt hook without config', async () => {
+      // HookRunner without config cannot execute prompt hooks
+      const runnerWithoutConfig = new HookRunner();
+
+      const hookConfig: HookConfig = {
+        type: HookType.Prompt,
+        prompt: 'Test prompt: $ARGUMENTS',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await runnerWithoutConfig.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('Prompt hook requires Config');
+    });
   });
 
   describe('executeHooksParallel', () => {

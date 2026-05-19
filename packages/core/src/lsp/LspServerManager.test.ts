@@ -5,11 +5,33 @@
  */
 
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { LspServerManager } from './LspServerManager.js';
+import type { LspConnectionResult, LspServerConfig } from './types.js';
+
+const debugLoggerMock = vi.hoisted(() => ({
+  debug: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => debugLoggerMock),
+}));
+
+const serverConfig: LspServerConfig = {
+  name: 'clangd',
+  languages: ['cpp'],
+  command: 'clangd',
+  args: [],
+  transport: 'stdio',
+  rootUri: 'file:///workspace',
+  workspaceFolder: '/workspace',
+};
 
 type PathSafeManager = {
   isPathSafe(command: string, workspacePath: string, cwd?: string): boolean;
@@ -90,5 +112,71 @@ describe('LspServerManager', () => {
         manager.isPathSafe('tools/clangd', workspaceRoot, workspaceRoot),
       ).toBe(true);
     });
+  });
+
+  it('logs process diagnostics when startup fails after connection creation', async () => {
+    const manager = new LspServerManager(
+      {
+        isTrustedFolder: vi.fn().mockReturnValue(true),
+      } as unknown as CoreConfig,
+      {} as WorkspaceContext,
+      {} as FileDiscoveryService,
+      {
+        requireTrustedWorkspace: false,
+        workspaceRoot: '/workspace',
+      },
+    );
+    const processDiagnostics = {
+      stderrTail: 'clangd: unknown argument\n',
+      exitCode: 7,
+      exitSignal: null,
+    };
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        createLspConnection: (
+          config: LspServerConfig,
+        ) => Promise<LspConnectionResult>;
+      },
+      'createLspConnection',
+    ).mockResolvedValue({
+      connection: {},
+      processDiagnostics,
+    } as unknown as LspConnectionResult);
+    vi.spyOn(
+      manager as unknown as {
+        initializeLspServer: () => Promise<void>;
+      },
+      'initializeLspServer',
+    ).mockRejectedValue(new Error('initialize failed'));
+
+    manager.setServerConfigs([serverConfig]);
+    await manager.startAll();
+
+    expect(debugLoggerMock.error).toHaveBeenCalledWith(
+      'LSP server clangd process diagnostics:',
+      processDiagnostics,
+    );
+    expect(debugLoggerMock.error).toHaveBeenCalledWith(
+      'LSP server clangd failed to start:',
+      expect.any(Error),
+    );
   });
 });

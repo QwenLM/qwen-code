@@ -38,6 +38,7 @@ import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { FileHistoryService } from '../services/fileHistoryService.js';
 import {
   type FileSystemService,
   StandardFileSystemService,
@@ -58,8 +59,9 @@ import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
+import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { LspClient } from '../lsp/types.js';
+import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -74,6 +76,7 @@ import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -172,6 +175,23 @@ export enum ApprovalMode {
 }
 
 export const APPROVAL_MODES = Object.values(ApprovalMode);
+
+/**
+ * Thrown by `Config.setApprovalMode` when the requested mode would grant
+ * privileged tool autonomy in a folder the user has not marked as trusted.
+ *
+ * Why: the daemon mutation route at `POST /session/:id/approval-mode` needs
+ * to recognize this specific class of rejection and translate it into a
+ * structured `errorKind: 'auth_env_error'` rather than a generic 500.
+ * Using a named subclass lets the bridge match by `err.name` without
+ * depending on the message text (which would drift across i18n).
+ */
+export class TrustGateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TrustGateError';
+  }
+}
 
 /**
  * Information about an approval mode including display name and description.
@@ -451,6 +471,18 @@ export interface ConfigParameters {
    * the `QWEN_DISABLED_SLASH_COMMANDS` environment variable.
    */
   disabledSlashCommands?: string[];
+  /**
+   * Tool names hidden from the registry at construction time. Unlike
+   * `permissions.deny` (which keeps the tool registered and rejects
+   * invocation), tools listed here are not registered at all and never
+   * appear in `/tools`, `getAllTools()`, or function-call discovery.
+   * Sourced from `settings.tools.disabled` and the daemon mutation route
+   * `POST /workspace/tools/:name/enable {enabled:false}` (#4175 Wave 4 PR
+   * 17). Active sessions retain already-registered tools — the disabled
+   * set is consulted at register time, so toggling takes effect on the
+   * next ACP child spawn or `ToolRegistry.refresh()`.
+   */
+  disabledTools?: string[];
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -488,6 +520,9 @@ export interface ConfigParameters {
     enableFuzzySearch?: boolean;
   };
   checkpointing?: boolean;
+  fileCheckpointingEnabled?: boolean;
+  /** Directory where approved plan files are stored. Must resolve inside targetDir. */
+  plansDirectory?: string;
   proxy?: string;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
@@ -593,6 +628,11 @@ export interface ConfigParameters {
    */
   disableAllHooks?: boolean;
   /**
+   * Maximum consecutive blocking Stop/SubagentStop hook decisions before the
+   * runtime overrides the hook loop and allows the turn to end.
+   */
+  stopHookBlockingCap?: number;
+  /**
    * User-level hooks configuration (from user settings).
    * These hooks are always loaded regardless of folder trust status.
    */
@@ -673,6 +713,17 @@ export class Config {
   private sessionData?: ResumedSessionData;
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
+  /**
+   * PR 14b fix #2 (codex review round 1): callback stashed BEFORE
+   * `initialize()` runs and applied as soon as `toolRegistry` is up,
+   * so the manager's `setOnBudgetEvent` is wired before
+   * `startMcpDiscoveryInBackground` (or legacy blocking discovery)
+   * fires the first pass. Pre-fix the acpAgent registered after
+   * `initialize()` returned, missing the first pass entirely under
+   * `QWEN_CODE_LEGACY_MCP_BLOCKING=1` and racing against background
+   * discovery completion under the default mode.
+   */
+  private pendingMcpBudgetCallback?: (event: McpBudgetEvent) => void;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
@@ -715,6 +766,7 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
+  private readonly disabledTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -724,6 +776,7 @@ export class Config {
   private mcpServers: Record<string, MCPServerConfig> | undefined;
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
+  private lspInitializationError?: string;
   private readonly allowedMcpServers?: string[];
   private excludedMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
@@ -753,6 +806,8 @@ export class Config {
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private readonly checkpointing: boolean;
+  private readonly fileCheckpointingEnabled: boolean;
+  private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
   private readonly explicitIncludeDirectories: string[];
@@ -812,12 +867,15 @@ export class Config {
   private readonly jsonFile: string | undefined;
   private readonly jsonSchema: Record<string, unknown> | undefined;
   private readonly inputFile: string | undefined;
+  private readonly plansDir: string;
+  private readonly plansDirectoryConfigured: boolean;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
   private readonly enableAutoSkill: boolean;
   private fastModel?: string;
   private readonly disableAllHooks: boolean;
+  private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
   private readonly userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
@@ -838,6 +896,8 @@ export class Config {
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.plansDirectoryConfigured = Boolean(params.plansDirectory?.trim());
+    this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
     this.explicitIncludeDirectories = Array.from(
       new Set(params.includeDirectories ?? []),
     );
@@ -861,6 +921,7 @@ export class Config {
     this.disabledSlashCommands = Object.freeze([
       ...(params.disabledSlashCommands ?? []),
     ]);
+    this.disabledTools = new Set(params.disabledTools ?? []);
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -909,6 +970,9 @@ export class Config {
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
     this.checkpointing = params.checkpointing ?? false;
+    this.fileCheckpointingEnabled =
+      params.fileCheckpointingEnabled ??
+      (!params.sdkMode && (params.interactive ?? false));
     this.proxy = params.proxy;
     this.cwd = params.cwd ?? process.cwd();
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
@@ -946,6 +1010,7 @@ export class Config {
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.warnings = params.warnings ?? [];
+    this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
@@ -1020,6 +1085,9 @@ export class Config {
     this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
+    this.stopHookBlockingCap = resolveStopHookBlockingCap(
+      params.stopHookBlockingCap,
+    );
     // Store user and project hooks separately for proper source attribution
     this.userHooks = params.userHooks;
     this.projectHooks = params.projectHooks;
@@ -1727,6 +1795,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
     // and a session-scoped prompt counter — both stop being meaningful
@@ -2224,6 +2293,17 @@ export class Config {
     return this.disabledSlashCommands;
   }
 
+  /**
+   * Returns the read-only set of tool names hidden from this Config's
+   * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
+   * `ToolRegistry.registerFactory` to skip registration. Toggling at
+   * runtime requires re-spawning the ACP child (the set is frozen at
+   * construction time). See `disabledTools` in ConfigParameters.
+   */
+  getDisabledTools(): ReadonlySet<string> {
+    return this.disabledTools;
+  }
+
   getToolCallCommand(): string | undefined {
     return this.toolCallCommand;
   }
@@ -2289,6 +2369,50 @@ export class Config {
     return this.lspClient;
   }
 
+  getLspStatusSnapshot(): LspStatusSnapshot {
+    if (!this.isLspEnabled()) {
+      return this.createLspStatusSnapshot(false);
+    }
+
+    const clientSnapshot = this.lspClient?.getStatusSnapshot?.();
+    if (clientSnapshot) {
+      return {
+        ...clientSnapshot,
+        enabled: true,
+        initializationError:
+          this.lspInitializationError ?? clientSnapshot.initializationError,
+      };
+    }
+
+    if (this.lspClient) {
+      return {
+        ...this.createLspStatusSnapshot(true),
+        statusUnavailable: true,
+      };
+    }
+
+    return this.createLspStatusSnapshot(
+      true,
+      this.lspInitializationError ?? 'LSP client is not initialized',
+    );
+  }
+
+  private createLspStatusSnapshot(
+    enabled: boolean,
+    initializationError?: string,
+  ): LspStatusSnapshot {
+    return {
+      enabled,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+      ...(initializationError ? { initializationError } : {}),
+    };
+  }
+
   /**
    * Allows wiring an LSP client after Config construction but before initialize().
    */
@@ -2297,6 +2421,14 @@ export class Config {
       throw new Error('Cannot set LSP client after initialization');
     }
     this.lspClient = client;
+  }
+
+  setLspInitializationError(error: Error | string | undefined): void {
+    if (this.initialized) {
+      throw new Error('Cannot set LSP status after initialization');
+    }
+    this.lspInitializationError =
+      error instanceof Error ? error.message : error;
   }
 
   getSessionSubagents(): SubagentConfig[] {
@@ -2396,7 +2528,7 @@ export class Config {
       mode !== ApprovalMode.DEFAULT &&
       mode !== ApprovalMode.PLAN
     ) {
-      throw new Error(
+      throw new TrustGateError(
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
@@ -2413,27 +2545,142 @@ export class Config {
   }
 
   /**
+   * Returns the directory where this session's plan file is stored.
+   */
+  getPlansDir(): string {
+    return this.plansDir;
+  }
+
+  private assertPlansDirWithinTargetDir(): void {
+    if (!this.plansDirectoryConfigured) {
+      return;
+    }
+
+    Storage.assertPathWithinDirectory(
+      this.plansDir,
+      this.targetDir,
+      `plansDirectory must resolve within the project root.`,
+    );
+  }
+
+  private assertPlanFilePathWithinTargetDir(filePath: string): void {
+    if (!this.plansDirectoryConfigured) {
+      return;
+    }
+
+    Storage.assertPathWithinDirectory(
+      filePath,
+      this.targetDir,
+      `plansDirectory must resolve within the project root.`,
+    );
+  }
+
+  private addLegacyPlanLocationWarning(): void {
+    try {
+      if (!this.plansDirectoryConfigured) {
+        return;
+      }
+
+      const legacyPlansDir = Storage.getPlansDir();
+      const legacyPlanFiles = this.getPlanFileNames(legacyPlansDir);
+      if (legacyPlanFiles.length === 0) {
+        return;
+      }
+
+      const configuredPlanFiles = new Set(this.getPlanFileNames(this.plansDir));
+      const hiddenLegacyPlanFiles = legacyPlanFiles.filter(
+        (fileName) => !configuredPlanFiles.has(fileName),
+      );
+      if (hiddenLegacyPlanFiles.length === 0) {
+        return;
+      }
+
+      this.warnings.push(
+        `Warning: Saved plan files exist at ${legacyPlansDir}, but ` +
+          `plansDirectory is configured to use ${this.plansDir}. Move ` +
+          `existing plan files to ${this.plansDir} if you want to keep ` +
+          `using them.`,
+      );
+    } catch (err: unknown) {
+      const message = `Failed to check legacy plan directory migration warning: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      this.warnings.push(message);
+      this.debugLogger.warn(message, err);
+    }
+  }
+
+  private getPlanFileNames(plansDir: string): string[] {
+    try {
+      return fs.readdirSync(plansDir).filter((entry) => entry.endsWith('.md'));
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        return [];
+      }
+      if (code === 'EACCES' || code === 'EPERM') {
+        const message = `Failed to read plan directory ${plansDir}: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        this.warnings.push(message);
+        this.debugLogger.warn(message, err);
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Returns the file path for this session's plan file.
    */
   getPlanFilePath(): string {
-    return Storage.getPlanFilePath(this.sessionId);
+    return path.join(
+      this.plansDir,
+      `${Storage.sanitizePlanSessionId(this.sessionId)}.md`,
+    );
   }
 
   /**
    * Saves a plan to disk for the current session.
    */
   savePlan(plan: string): void {
+    this.assertPlansDirWithinTargetDir();
     const filePath = this.getPlanFilePath();
     const dir = path.dirname(filePath);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(filePath, plan, 'utf-8');
+    // Write to a temp file first, then atomically rename to avoid
+    // leaving a corrupted file if the process crashes mid-write.
+    const tmpPath = filePath + '.tmp';
+    fs.writeFileSync(tmpPath, plan, 'utf-8');
+    try {
+      fs.renameSync(tmpPath, filePath);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV') {
+        throw err;
+      }
+
+      fs.copyFileSync(tmpPath, filePath);
+      fs.unlinkSync(tmpPath);
+    }
+    try {
+      this.assertPlanFilePathWithinTargetDir(filePath);
+    } catch (err) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // Ignore rollback errors; the containment check already failed.
+      }
+      throw err;
+    }
   }
 
   /**
    * Loads the plan for the current session, or returns undefined if none exists.
    */
   loadPlan(): string | undefined {
+    this.assertPlansDirWithinTargetDir();
     const filePath = this.getPlanFilePath();
+    this.assertPlanFilePathWithinTargetDir(filePath);
     try {
       return fs.readFileSync(filePath, 'utf-8');
     } catch (error: unknown) {
@@ -2579,6 +2826,21 @@ export class Config {
     return this.checkpointing;
   }
 
+  getFileCheckpointingEnabled(): boolean {
+    return this.fileCheckpointingEnabled;
+  }
+
+  getFileHistoryService(): FileHistoryService {
+    if (!this.fileHistoryService) {
+      this.fileHistoryService = new FileHistoryService(
+        this.sessionId,
+        this.fileCheckpointingEnabled,
+        this.cwd,
+      );
+    }
+    return this.fileHistoryService;
+  }
+
   getProxy(): string | undefined {
     return normalizeProxyUrl(this.proxy);
   }
@@ -2637,8 +2899,13 @@ export class Config {
    * registered hooks for the given event name.  Callers can use this to skip
    * expensive MessageBus round-trips when no hooks are configured.
    */
-  hasHooksForEvent(eventName: string): boolean {
-    return this.hookSystem?.hasHooksForEvent(eventName) ?? false;
+  hasHooksForEvent(eventName: string, sessionId?: string): boolean {
+    return (
+      this.hookSystem?.hasHooksForEvent(
+        eventName,
+        sessionId ?? this.getSessionId(),
+      ) ?? false
+    );
   }
 
   /**
@@ -2646,6 +2913,10 @@ export class Config {
    */
   getDisableAllHooks(): boolean {
     return this.disableAllHooks || this.getBareMode();
+  }
+
+  getStopHookBlockingCap(): number {
+    return this.stopHookBlockingCap;
   }
 
   getManagedAutoMemoryEnabled(): boolean {
@@ -3043,9 +3314,7 @@ export class Config {
 
   async loadPausedBackgroundAgents(
     sessionId: string = this.getSessionId(),
-  ): Promise<
-    ReadonlyArray<import('../agents/background-tasks.js').BackgroundTaskEntry>
-  > {
+  ): Promise<ReadonlyArray<import('../agents/background-tasks.js').AgentTask>> {
     return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
       sessionId,
     );
@@ -3054,9 +3323,7 @@ export class Config {
   async resumeBackgroundAgent(
     agentId: string,
     initialMessage?: string,
-  ): Promise<
-    import('../agents/background-tasks.js').BackgroundTaskEntry | undefined
-  > {
+  ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
       agentId,
       initialMessage,
@@ -3420,6 +3687,34 @@ export class Config {
       return new MonitorTool(this);
     });
 
+    // PR 14b fix #2 (codex review round 1): apply any pending MCP
+    // budget-event callback BEFORE `discoverAllTools` (legacy blocking
+    // mode runs MCP discovery synchronously in there) and BEFORE the
+    // post-`createToolRegistry` `startMcpDiscoveryInBackground` (default
+    // mode). Either way the manager has its callback wired at the
+    // moment the first discovery pass fires, so end-of-pass events
+    // for that pass are routed through the SDK push channel.
+    if (this.pendingMcpBudgetCallback) {
+      const mgr = registry.getMcpClientManager();
+      if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
+        mgr.setOnBudgetEvent(this.pendingMcpBudgetCallback);
+      }
+      // PR 14b fix (codex round 6): clear after consumption so a
+      // subsequent `createToolRegistry` call (e.g. subagent override
+      // via `createApprovalModeOverride` /
+      // `buildSubagentContextOverride`) doesn't re-apply the parent
+      // session's callback to a fresh manager. Subagent contexts run
+      // their own MCP clients but should NOT push budget events
+      // through the parent's ACP session — that would route subagent
+      // telemetry to the wrong subscriber.
+      //
+      // Late-call setter (`setMcpBudgetEventCallback` after
+      // `initialize()`) is unaffected: it dispatches directly to the
+      // existing manager via the `if (this.toolRegistry)` branch,
+      // not through `pendingMcpBudgetCallback`.
+      this.pendingMcpBudgetCallback = undefined;
+    }
+
     if (!options?.skipDiscovery) {
       await registry.discoverAllTools();
     }
@@ -3427,5 +3722,46 @@ export class Config {
       `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
     );
     return registry;
+  }
+
+  /**
+   * PR 14b fix #2 (codex review round 1): register the MCP guardrail
+   * push-event callback. Acceptable to call at any point in the
+   * Config lifecycle — before, during, or after `initialize()`.
+   *
+   * Two paths:
+   * - **Pre-init** (no `toolRegistry` yet): stash on
+   *   `pendingMcpBudgetCallback`. `createToolRegistry` will apply it
+   *   to the freshly-constructed manager and clear the stash (round
+   *   6 fix). The stash is the ONLY way to reach a manager that
+   *   doesn't exist yet.
+   * - **Late** (`toolRegistry` already exists): dispatch directly to
+   *   the existing manager. **DO NOT** also stash — that's the
+   *   round-7 fix. Pre-fix, both paths assigned to
+   *   `pendingMcpBudgetCallback` regardless, so a subsequent
+   *   `createToolRegistry` (subagent override via
+   *   `createApprovalModeOverride` /
+   *   `buildSubagentContextOverride`) would re-apply the parent
+   *   session's callback to the subagent's fresh manager — routing
+   *   subagent telemetry through the wrong ACP session.
+   *
+   * `cb: undefined` clears the registration. `off`-mode managers
+   * silently drop the callback (their state machine never runs).
+   */
+  setMcpBudgetEventCallback(
+    cb: ((event: McpBudgetEvent) => void) | undefined,
+  ): void {
+    if (this.toolRegistry) {
+      // Late-call path: apply directly. Do NOT stash — see comment
+      // above for the subagent isolation rationale.
+      const mgr = this.toolRegistry.getMcpClientManager?.();
+      if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
+        mgr.setOnBudgetEvent(cb);
+      }
+      this.pendingMcpBudgetCallback = undefined;
+      return;
+    }
+    // Pre-init path: stash for `createToolRegistry` to consume.
+    this.pendingMcpBudgetCallback = cb;
   }
 }

@@ -6,9 +6,9 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { Storage, resolveBundleDir } from '@qwen-code/qwen-code-core';
 import {
   type SupportedLanguage,
   SUPPORTED_LANGUAGES,
@@ -37,10 +37,14 @@ type TranslationLoadResult =
   | { translations?: undefined; error: Error };
 
 // Path helpers
-const getBuiltinLocalesDir = (): string => {
-  const __filename = fileURLToPath(import.meta.url);
-  return path.join(path.dirname(__filename), 'locales');
-};
+//
+// Anchor the bundled locales directory at the on-disk sibling of `cli.js`
+// (i.e. `dist/locales/`, populated by `prepare-package.js`). See
+// `resolveBundleDir` for the rationale behind stripping a trailing
+// `chunks/` segment when this module is hoisted into a shared esbuild
+// chunk.
+const getBuiltinLocalesDir = (): string =>
+  path.join(resolveBundleDir(import.meta.url), 'locales');
 
 const getUserLocalesDir = (): string =>
   path.join(Storage.getGlobalQwenDir(), 'locales');

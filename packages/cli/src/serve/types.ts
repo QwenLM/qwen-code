@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  SERVE_FEATURES,
+  type ServeFeature,
+  type ServeProtocolVersions,
+} from './capabilities.js';
+
 /**
  * Stage 1 daemon mode shape.
  *
@@ -58,6 +64,16 @@ export interface ServeOptions {
    */
   maxConnections?: number;
   /**
+   * Per-session SSE replay ring depth. Threaded into the bridge as
+   * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
+   * construction site. Defaults to 8000 (the target named in
+   * #3803 §02 for chatty Stage 1 sessions). Must be a positive
+   * finite integer — `0` / `NaN` / negative fail at boot. Larger
+   * rings let clients with longer reconnect gaps replay more history
+   * at the cost of a few hundred KB extra RAM per session.
+   */
+  eventRingSize?: number;
+  /**
    * Absolute workspace path this daemon binds to. Per #3803 §02 the
    * daemon is **1 daemon = 1 workspace × N sessions**: one bound
    * workspace at boot, sessions multiplexed on the single
@@ -77,6 +93,45 @@ export interface ServeOptions {
    * Defaults to `process.cwd()` when omitted.
    */
   workspace?: string;
+  /**
+   * Issue #4175 PR 15. When true, refuses to boot without a bearer
+   * token — even on loopback. Loopback's no-token developer default
+   * is convenient for local prototyping but unsafe to ship inside
+   * shared dev environments / CI runners / multi-tenant workstations
+   * (any local user can hit `127.0.0.1:4170` and drive the agent).
+   * `--require-auth` opts the operator into "token mandatory"
+   * regardless of bind interface; the global `bearerAuth` middleware
+   * then gates every route, including `/health`.
+   *
+   * Default `false` so existing single-user loopback workflows keep
+   * working bit-for-bit. Non-loopback binds already require a token
+   * irrespective of this flag.
+   */
+  requireAuth?: boolean;
+  /**
+   * Issue #4175 PR 14. Cap on live MCP clients spawned inside the
+   * ACP child for the bound workspace. When set, the daemon
+   * forwards `QWEN_SERVE_MCP_CLIENT_BUDGET` to the child's env so
+   * core's `McpClientManager` picks it up. Combined with
+   * `mcpBudgetMode`:
+   *   - `warn` (default when budget set): no refusal, snapshot
+   *     surfaces `status: 'warning'` at >=75% of budget.
+   *   - `enforce`: connects past the cap are refused, per-server
+   *     cell shows `disabledReason: 'budget'`, deterministic by
+   *     `Object.entries(mcpServers)` declaration order.
+   *   - `off`: no accounting-driven enforcement (the implicit
+   *     default when no budget is configured).
+   *
+   * Positive integer required; non-positive / NaN values throw at
+   * boot.
+   */
+  mcpClientBudget?: number;
+  /**
+   * Issue #4175 PR 14. Enforcement mode for `mcpClientBudget`.
+   * Boot rejects `enforce` without a budget; otherwise resolves to
+   * `warn` when budget set / `off` when budget unset.
+   */
+  mcpBudgetMode?: 'enforce' | 'warn' | 'off';
 }
 
 /**
@@ -87,6 +142,11 @@ export interface ServeOptions {
  */
 export interface CapabilitiesEnvelope {
   v: 1;
+  /**
+   * Serve protocol versions supported by this daemon. Optional because this is
+   * additive to v=1; older v=1 daemons omit it.
+   */
+  protocolVersions?: ServeProtocolVersions;
   mode: ServeMode;
   features: string[];
   /**
@@ -119,34 +179,8 @@ export interface CapabilitiesEnvelope {
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;
 
-/**
- * Stage 1 ships only the routes wired in `server.ts`. As routes land in
- * follow-up PRs, append the corresponding feature tag here so clients can
- * progressively enable UI affordances.
- *
- * The annotation is intentionally absent: `as const` widens to
- * `readonly ['health', 'capabilities', ...]` and the derived
- * `Stage1Feature` union catches typos at compile time. Annotating as
- * `readonly string[]` would erase the literal information.
- */
-// FIXME(stage-1.5, chiga0 finding 5):
-// `STAGE1_FEATURES` is a hard-coded constant — `extMethod` plugins
-// can't contribute to the capability set without editing the daemon.
-// Stage 1.5 should convert this to a registry that bridges and
-// plugins push into, alongside an `ext_*` event family + a
-// `POST /ext/:method` route. Tracked under #3803.
-// Reference: https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
-export const STAGE1_FEATURES = [
-  'health',
-  'capabilities',
-  'session_create',
-  'session_list',
-  'session_prompt',
-  'session_cancel',
-  'session_events',
-  'session_set_model',
-  'permission_vote',
-] as const;
+/** @deprecated Use SERVE_FEATURES from the capability registry. */
+export const STAGE1_FEATURES = SERVE_FEATURES;
 
-/** Compile-time-checked feature identifier — element of STAGE1_FEATURES. */
-export type Stage1Feature = (typeof STAGE1_FEATURES)[number];
+/** @deprecated Use ServeFeature from the capability registry. */
+export type Stage1Feature = ServeFeature;

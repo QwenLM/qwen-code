@@ -90,6 +90,7 @@ export interface SlashCommandProcessorActions {
   openEditorDialog: () => void;
   openMemoryDialog: () => void;
   openSettingsDialog: () => void;
+  openStatusLineDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
   openManageModelsDialog: () => void;
   openTrustDialog: () => void;
@@ -639,6 +640,12 @@ export const useSlashCommandProcessor = (
                       content: result.content,
                       timestamp: new Date(),
                     });
+                  } else if (result.messageType === 'warning') {
+                    addMessage({
+                      type: MessageType.WARNING,
+                      content: result.content,
+                      timestamp: new Date(),
+                    });
                   } else {
                     addMessage({
                       type: MessageType.ERROR,
@@ -672,6 +679,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'settings':
                       actions.openSettingsDialog();
+                      return { type: 'handled' };
+                    case 'statusline':
+                      actions.openStatusLineDialog();
                       return { type: 'handled' };
                     case 'memory':
                       actions.openMemoryDialog();

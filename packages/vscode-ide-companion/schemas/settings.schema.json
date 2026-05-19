@@ -18,6 +18,10 @@
       "type": "object",
       "additionalProperties": true
     },
+    "plansDirectory": {
+      "description": "Custom directory for approved Plan Mode files. Relative paths are resolved from the project root, and the resolved path must stay within the project root. Defaults to ~/.qwen/plans.",
+      "type": "string"
+    },
     "env": {
       "description": "Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.",
       "type": "object",
@@ -119,6 +123,11 @@
           "type": "string",
           "default": "auto"
         },
+        "dynamicCommandTranslation": {
+          "description": "Enable AI translation for dynamic slash command descriptions. When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.",
+          "type": "boolean",
+          "default": false
+        },
         "terminalBell": {
           "description": "Play terminal bell sound when response completes or needs approval.",
           "type": "boolean",
@@ -177,7 +186,7 @@
           "default": "Qwen Dark"
         },
         "statusLine": {
-          "description": "Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
+          "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
           "type": "object",
           "additionalProperties": true
         },
@@ -393,7 +402,7 @@
       "type": "object",
       "properties": {
         "includeSensitiveSpanAttributes": {
-          "description": "Include prompt, function_args, and response_text in spans created by the log-to-span bridge. Only controls bridge spans; OTel logs and other telemetry sinks may still receive response_text.",
+          "description": "When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.",
           "type": "boolean",
           "default": false
         }
@@ -691,6 +700,13 @@
             "type": "string"
           }
         },
+        "disabled": {
+          "description": "Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "approvalMode": {
           "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, yolo",
           "enum": [
@@ -895,6 +911,11 @@
       "description": "Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).",
       "type": "boolean",
       "default": false
+    },
+    "stopHookBlockingCap": {
+      "description": "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP.",
+      "type": "number",
+      "default": 8
     },
     "hooks": {
       "description": "Hook event configurations for extending CLI behavior at various lifecycle points.",

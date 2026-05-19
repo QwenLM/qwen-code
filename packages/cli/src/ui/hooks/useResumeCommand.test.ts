@@ -10,6 +10,7 @@ import {
   BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
   useResumeCommand,
 } from './useResumeCommand.js';
+import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 
 const resumeMocks = vi.hoisted(() => {
   let resolveLoadSession:
@@ -41,6 +42,10 @@ const resumeMocks = vi.hoisted(() => {
 
 vi.mock('../utils/resumeHistoryUtils.js', () => ({
   buildResumedHistoryItems: vi.fn(() => [{ id: 1, type: 'user', text: 'hi' }]),
+}));
+
+vi.mock('../utils/restoreGoal.js', () => ({
+  restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => {
@@ -224,6 +229,15 @@ describe('useResumeCommand', () => {
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
     expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);
+    // Goal must be re-armed under the resumed sessionId so the in-memory
+    // activeGoalStore entry (potentially stale across /new + /resume) gets
+    // a fresh setAt / hookId / observer — otherwise the footer pill ticks
+    // from the pre-/new setAt and the Stop hook is silently dead.
+    expect(restoreGoalFromHistory).toHaveBeenCalledWith(
+      expect.any(Array),
+      config,
+      historyManager.addItem,
+    );
   });
 
   it('adds a recovered-background-agents notice when paused agents are restored', async () => {

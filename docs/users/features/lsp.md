@@ -344,7 +344,7 @@ You can override trust requirements for specific servers in their configuration:
 2. **Check if the server is installed**: Run the command manually (e.g. `clangd --version`) to verify
 3. **Check the command**: The server binary must be in your system `PATH`, or specified as an absolute path (e.g. `/opt/llvm/bin/clangd`). Relative paths that escape the workspace are blocked
 4. **Check workspace trust**: The workspace must be trusted for LSP (use `/trust`)
-5. **Check logs**: Look for `[LSP]` entries in the debug log (see Debugging section below)
+5. **Check logs**: Start Qwen Code with `--debug`, then search for LSP-related entries in the debug log (see Debugging section below)
 6. **Check the process**: Run `ps aux | grep <server-name>` to verify the server process is running
 
 ### Slow Performance
@@ -361,19 +361,78 @@ You can override trust requirements for specific servers in their configuration:
 
 ### Debugging
 
-LSP debug logs are automatically written to session log files in `~/.qwen/debug/`. To check LSP-related entries:
+LSP does not have a separate debug flag. Use Qwen Code's normal debug mode together with the LSP feature flag:
 
 ```bash
-# View the latest session log
-grep '\[LSP\]' ~/.qwen/debug/latest
-
-# Common error messages to look for:
-#   "command path is unsafe"  → relative path escapes workspace, use absolute path or add to PATH
-#   "command not found"       → server binary not installed or not in PATH
-#   "requires trusted workspace" → run /trust first
+qwen --experimental-lsp --debug
 ```
 
-You can also verify the server process is running:
+Debug logs are written to the session debug log directory. To check LSP-related entries:
+
+```bash
+# Default runtime directory
+rg "LSP|Native LSP|clangd|connection closed" ~/.qwen/debug/latest
+# Or, without ripgrep:
+grep -E "LSP|Native LSP|clangd|connection closed" ~/.qwen/debug/latest
+
+# If QWEN_RUNTIME_DIR is configured
+rg "LSP|Native LSP|clangd|connection closed" "$QWEN_RUNTIME_DIR/debug/latest"
+```
+
+Useful entries include:
+
+- `[LSP] ...`: Logs emitted by the native LSP service and server manager.
+- `[CONFIG] Native LSP status after discovery: ...`: LSP server configuration discovered for the session.
+- `[CONFIG] Native LSP status after startup: ...`: Server startup result, including ready/failed counts.
+- `[STATUS] LSP status snapshot for /status: ...`: Status snapshot printed when running `/status` in debug mode.
+
+You can also run `/status` in the CLI to see a short LSP summary:
+
+```text
+LSP: disabled
+LSP: enabled, 1/1 ready
+LSP: enabled, 0/1 ready (1 failed)
+LSP: enabled, no servers configured
+LSP: enabled, status unavailable
+```
+
+For per-server details, run `/lsp`:
+
+```text
+**LSP Server Status**
+
+| Server | Command | Languages | Status |
+|--------|---------|-----------|--------|
+| clangd | `clangd` | c, cpp | READY |
+| pyright | `pyright-langserver` | python | FAILED - startup failed |
+```
+
+Common error messages to look for:
+
+```text
+command path is unsafe        -> relative path escapes workspace, use absolute path or add to PATH
+command not found             -> server binary not installed or not in PATH
+requires trusted workspace    -> run /trust first
+LSP connection closed         -> server started but exited or closed stdio before replying to initialize
+```
+
+For clangd startup failures, verify the server directly from the project root:
+
+```bash
+clangd --version
+clangd --check=/path/to/file.cpp --log=verbose
+```
+
+C/C++ projects should usually provide a `compile_commands.json` or `compile_flags.txt`. If the compile database is in a build directory, pass it to clangd:
+
+```json
+{
+  "cpp": {
+    "command": "clangd",
+    "args": ["--background-index", "--compile-commands-dir=build"]
+  }
+}
+```
 
 ```bash
 ps aux | grep clangd   # or typescript-language-server, jdtls, etc.
@@ -402,7 +461,25 @@ qwen --experimental-lsp
 
 ### Q: How do I know which language servers are running?
 
-Check the debug log for `[LSP]` entries (`grep '\[LSP\]' ~/.qwen/debug/latest`), or verify the process directly with `ps aux | grep <server-name>`.
+Start Qwen Code with LSP and debug mode enabled:
+
+```bash
+qwen --experimental-lsp --debug
+```
+
+Then run `/status` for a short summary, `/lsp` for per-server status, or inspect the debug log:
+
+```bash
+# Default runtime directory
+rg "LSP|Native LSP|<server-name>" ~/.qwen/debug/latest
+# Or:
+grep -E "LSP|Native LSP|<server-name>" ~/.qwen/debug/latest
+
+# If QWEN_RUNTIME_DIR is configured
+rg "LSP|Native LSP|<server-name>" "$QWEN_RUNTIME_DIR/debug/latest"
+```
+
+LSP uses Qwen Code's normal `--debug` mode; there is no separate LSP debug flag.
 
 ### Q: Can I use multiple language servers for the same file type?
 

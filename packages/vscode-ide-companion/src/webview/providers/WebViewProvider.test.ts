@@ -126,6 +126,11 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
 });
 
 vi.mock('vscode', () => ({
+  ExtensionMode: {
+    Production: 1,
+    Development: 2,
+    Test: 3,
+  },
   ConfigurationTarget: {
     Global: 'global',
   },
@@ -330,11 +335,14 @@ vi.mock('../../utils/errorMessage.js', () => ({
   getErrorMessage: vi.fn((error: unknown) => String(error)),
 }));
 
-import { WebViewProvider } from './WebViewProvider.js';
+import { WebViewProvider, resolveQwenCliEntryPath } from './WebViewProvider.js';
 import {
   truncatePanelTitle,
   MAX_PANEL_TITLE_LENGTH,
 } from '../utils/panelTitleUtils.js';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
 
 const createConfigChangeEvent = (...affectedSections: string[]) => ({
   affectsConfiguration: (section: string) => affectedSections.includes(section),
@@ -344,6 +352,38 @@ type WebViewMessageHandler = (message: {
   type: string;
   data?: unknown;
 }) => Promise<void>;
+
+describe('resolveQwenCliEntryPath', () => {
+  it('uses the source dev entry when the extension runs in development mode', () => {
+    const tempRoot = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-dev-'));
+    try {
+      const extensionRoot = path.join(
+        tempRoot,
+        'packages',
+        'vscode-ide-companion',
+      );
+      const devEntry = path.join(tempRoot, 'scripts', 'dev.js');
+      mkdirSync(extensionRoot, { recursive: true });
+      mkdirSync(path.dirname(devEntry), { recursive: true });
+      writeFileSync(devEntry, '');
+
+      expect(
+        resolveQwenCliEntryPath({ fsPath: extensionRoot } as never, 2),
+      ).toBe(devEntry);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the bundled CLI outside development mode', () => {
+    expect(
+      resolveQwenCliEntryPath(
+        { fsPath: '/extension-root' } as never,
+        undefined,
+      ),
+    ).toBe('/extension-root/dist/qwen-cli/cli.js');
+  });
+});
 
 /**
  * Create a mock webview + provider and attach them.

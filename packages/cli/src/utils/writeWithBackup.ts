@@ -78,7 +78,7 @@ export function writeWithBackupSync(
 
   try {
     // Step 1: Write to temporary file
-    fs.writeFileSync(tempPath, content, { encoding });
+    fs.writeFileSync(tempPath, content, { encoding, flush: true });
 
     // Step 2: If target exists, back it up
     if (fs.existsSync(targetPath)) {

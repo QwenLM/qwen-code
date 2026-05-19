@@ -62,7 +62,7 @@ export class HookSystem {
 
     // Initialize components
     this.hookRegistry = new HookRegistry(config);
-    this.hookRunner = new HookRunner(allowedHttpUrls);
+    this.hookRunner = new HookRunner(allowedHttpUrls, config); // Pass config for prompt hooks
     this.hookAggregator = new HookAggregator();
     this.hookPlanner = new HookPlanner(this.hookRegistry);
     this.sessionHooksManager = new SessionHooksManager();
@@ -132,10 +132,10 @@ export class HookSystem {
    * This is a fast-path check to avoid expensive MessageBus round-trips
    * when no hooks are configured for a given event.
    */
-  hasHooksForEvent(eventName: string): boolean {
-    return (
-      this.hookRegistry.getHooksForEvent(eventName as HookEventName).length > 0
-    );
+  hasHooksForEvent(eventName: string, sessionId?: string): boolean {
+    const event = eventName as HookEventName;
+    if (this.hookRegistry.getHooksForEvent(event).length > 0) return true;
+    return this.sessionHooksManager.hasHooksForEvent(event, sessionId);
   }
 
   async fireUserPromptSubmitEvent(
