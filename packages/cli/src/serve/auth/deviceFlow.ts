@@ -25,6 +25,55 @@
 
 import { randomUUID } from 'node:crypto';
 
+/**
+ * Strip / replace bytes that could forge log lines or inject terminal
+ * control sequences when interpolated into a stderr / audit breadcrumb.
+ *
+ * PR #4291 follow-up review (gpt-5.5, round-3 #2): originally lived in
+ * `qwenDeviceFlowProvider.ts` to sanitize the attacker-controlled
+ * `oauthError` field. PR #4291 follow-up review (deepseek-v4-pro,
+ * round-5 #2/#3): the registry's late-poll observer also interpolates
+ * provider-controlled values (`latePollResult.kind`, `lateErr.name`)
+ * into audit hints; same sanitization vector. Lifted to `deviceFlow.ts`
+ * so both layers share a single helper — without exporting it from a
+ * lower-level module, qwenDeviceFlowProvider couldn't import it
+ * (deviceFlow is the foundation; provider depends on deviceFlow, not
+ * the other way around).
+ *
+ * PR #4291 follow-up review (deepseek-v4-pro, round-5 #4): regex
+ * extended beyond ASCII C0/C1 + DEL to cover Unicode lookalike
+ * controls a malicious IdP could use to bypass the ASCII-only filter:
+ *   - U+200B–U+200F: zero-width characters + LRM/RLM (invisible but
+ *     can alter terminal rendering)
+ *   - U+2028–U+2029: LINE / PARAGRAPH SEPARATOR — rendered as newlines
+ *     in many Unicode-aware terminals; the most direct log-forging vector
+ *   - U+202A–U+202E: bidirectional EMBEDDING / OVERRIDE controls
+ *   - U+2066–U+2069: bidirectional ISOLATE controls (LRI / RLI / FSI / PDI) —
+ *     the primary CVE-2021-42574 ("Trojan Source") attack vectors. A hostile
+ *     IdP swapping U+2066 (LRI) for U+202D (LRO) would otherwise bypass the
+ *     embedding/override range entirely while achieving the same bidi visual
+ *     reordering. Round-5 shipped without these; round-6 review caught it.
+ *   - U+FEFF: BYTE ORDER MARK / zero-width no-break space
+ *
+ * Replaces each with `?` so the operator can still see SOMETHING was
+ * present at that index (length-preserving) instead of silently dropping.
+ */
+const SANITIZE_FOR_STDERR_RE = new RegExp(
+  // ASCII C0 (0x00–0x1f), DEL (0x7f), C1 (0x80–0x9f) — the original
+  // round-3 coverage. Plus Unicode lookalikes added in round-5:
+  //   \u200b–\u200f: zero-width chars + LRM/RLM
+  //   \u2028–\u2029: LINE / PARAGRAPH SEPARATOR (terminal newline equivalents)
+  //   \u202a–\u202e: bidirectional EMBEDDING / OVERRIDE controls
+  //   \u2066–\u2069: bidirectional ISOLATE controls (CVE-2021-42574)
+  //   \ufeff:         BOM / ZWNBSP
+  String.raw`[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]`,
+  'g',
+);
+
+export function sanitizeForStderr(value: string): string {
+  return value.replace(SANITIZE_FOR_STDERR_RE, '?');
+}
+
 export const DEVICE_FLOW_DEFAULT_INTERVAL_MS = 5_000;
 export const DEVICE_FLOW_TERMINAL_GRACE_MS = 5 * 60_000;
 export const DEVICE_FLOW_SWEEP_INTERVAL_MS = 30_000;
@@ -619,15 +668,53 @@ export class UpstreamDeviceFlowError extends Error {
  * provider code when the actual issue is a hung IdP / network
  * partition. The sentinel lets the catch differentiate the two and
  * emit a timeout-specific audit + hint.
+ *
+ * **Public-export caveat (round-6 review #4):** the class is exported
+ * only because the test file needs to construct it for the sentinel-
+ * filter regression test. Providers MUST NOT throw this type — that
+ * would spoof the registry's "I caused the timeout" signal. The
+ * registry uses the `_isRegistryTimeout` runtime brand below (NOT
+ * `instanceof`) to gate `pollTimedOut`, so a provider that imports
+ * + throws `new DeviceFlowPollTimeoutError(...)` STILL routes through
+ * the generic provider-throw audit path — the sentinel is brand-only
+ * for objects the registry constructed itself.
  */
 export class DeviceFlowPollTimeoutError extends Error {
   readonly code = 'poll_timeout';
   readonly timeoutMs: number;
+  /**
+   * Runtime brand the registry sets ONLY on instances it constructed
+   * inside its own timer callback. Default `false` for any
+   * `new DeviceFlowPollTimeoutError(...)` call from outside the registry
+   * (provider code, test fixtures via the public constructor, etc.).
+   * Round-6 review (qwen-latest, #4): without this, a provider that
+   * imported the exported class and threw it would set `pollTimedOut`
+   * spuriously and attach a phantom late-poll observer.
+   */
+  readonly _isRegistryTimeout: boolean = false;
   constructor(timeoutMs: number) {
     super(`device-flow poll timeout after ${timeoutMs}ms`);
     this.name = 'DeviceFlowPollTimeoutError';
     this.timeoutMs = timeoutMs;
   }
+}
+
+/**
+ * Internal-only constructor: build a `DeviceFlowPollTimeoutError` whose
+ * `_isRegistryTimeout` brand is `true`. The only call site is the
+ * registry's own race-timer callback. Keeping this as a separate
+ * unexported function (vs. a constructor flag) makes it grep-easy to
+ * audit "every place we mint a real timeout error" while the public
+ * `new DeviceFlowPollTimeoutError(ms)` path stays brand-`false`.
+ */
+function makeRegistryPollTimeoutError(
+  timeoutMs: number,
+): DeviceFlowPollTimeoutError {
+  const err = new DeviceFlowPollTimeoutError(timeoutMs);
+  // The brand is declared `readonly` for callers; this assignment is
+  // the registry's privileged construction site.
+  (err as { _isRegistryTimeout: boolean })._isRegistryTimeout = true;
+  return err;
 }
 
 /**
@@ -1104,15 +1191,30 @@ export class DeviceFlowRegistry {
     try {
       result = await new Promise<DeviceFlowPollResult>((resolve, reject) => {
         pollTimer = this.schedule(DEVICE_FLOW_POLL_TIMEOUT_MS, () => {
-          pollTimedOut = true;
+          // PR #4291 follow-up review (qwen-latest, round-4 #3): build the
+          // sentinel ONCE so `signal.reason.stack` and the caught
+          // rejection's stack point to the same throw site (operators
+          // grepping the audit see one timeout, not two with divergent
+          // stacks). Each `new Error(...)` triggers V8 stack-trace
+          // capture; reusing avoids the duplicate cost too.
+          const timeoutError = makeRegistryPollTimeoutError(
+            DEVICE_FLOW_POLL_TIMEOUT_MS,
+          );
           try {
-            entry.cancelController.abort(
-              new DeviceFlowPollTimeoutError(DEVICE_FLOW_POLL_TIMEOUT_MS),
-            );
+            entry.cancelController.abort(timeoutError);
           } catch {
             // best-effort
           }
-          reject(new DeviceFlowPollTimeoutError(DEVICE_FLOW_POLL_TIMEOUT_MS));
+          reject(timeoutError);
+          // PR #4291 follow-up review (deepseek-v4-pro, round-5 #1): do
+          // NOT set `pollTimedOut = true` here. If the provider settled
+          // the wrapper at 29.9s, the `await` unblocks and `finally`
+          // calls `clearScheduled(pollTimer)` — but if the timer
+          // callback was already queued for execution before the clear
+          // landed, this branch can still run and incorrectly mark
+          // `pollTimedOut`. Move the flag to the catch block where the
+          // settled cause is unambiguous (`err instanceof
+          // DeviceFlowPollTimeoutError`).
         });
         providerPollPromise = provider.poll(
           {
@@ -1143,7 +1245,27 @@ export class DeviceFlowRegistry {
       // "provider bug" and waste time investigating provider code.
       // Branch on `DeviceFlowPollTimeoutError` to use a dedicated
       // hint + suppress the misleading "raw" audit path.
-      if (err instanceof DeviceFlowPollTimeoutError) {
+      //
+      // PR #4291 follow-up review (qwen-latest, round-6 #4): the gate
+      // is the runtime brand `_isRegistryTimeout`, NOT bare
+      // `instanceof`. The class is `export`ed (the test file needs the
+      // constructor for the sentinel-filter regression test), so a
+      // misbehaving provider that imported it and threw `new
+      // DeviceFlowPollTimeoutError(...)` would otherwise spoof the
+      // "I caused the timeout" signal. Only the registry's own
+      // `makeRegistryPollTimeoutError` helper sets the brand to true;
+      // a provider's `new ...` produces an instance with brand `false`,
+      // which falls through to the generic provider-throw path.
+      if (
+        err instanceof DeviceFlowPollTimeoutError &&
+        err._isRegistryTimeout === true
+      ) {
+        // PR #4291 follow-up review (deepseek-v4-pro, round-5 #1): the
+        // catch is the canonical place to confirm "the wrapper settled
+        // BECAUSE of our timer." Setting the flag here (not in the
+        // timer callback) proves the late-observer attaches only when
+        // the provider genuinely lost the race.
+        pollTimedOut = true;
         result = {
           kind: 'error',
           errorKind: 'upstream_error',
@@ -1172,52 +1294,112 @@ export class DeviceFlowRegistry {
     // `lost_success_after_timeout` pattern on the persist path.
     if (pollTimedOut && providerPollPromise !== undefined) {
       const tracked = providerPollPromise;
+      // PR #4291 follow-up review (qwen-latest, round-4 #1): destructure
+      // the few entry fields we actually need so the observer closure
+      // does NOT capture `entry` by reference. Otherwise, if the
+      // tracked promise never settles (the exact scenario this audit
+      // exists to catch), the closure would retain the entire entry
+      // — including `deviceCode` / `pkceVerifier` BrandedSecrets and
+      // the live `cancelController` — for the lifetime of the daemon.
+      // Memory leak + indefinite secret retention.
+      const auditDeviceFlowId = entry.deviceFlowId;
+      const auditProviderId = entry.providerId;
+      const auditClientId = entry.initiatorClientId;
+      const audit = this.deps.audit;
       // Detached on purpose; the catch on the ORIGINAL promise has
       // already happened (via the wrapper) — the observer below
       // sees the eventual settlement of the same promise. Both
       // success and error branches go through audit only.
-      void tracked.then(
-        (latePollResult) => {
-          this.deps.audit?.record({
-            deviceFlowId: entry.deviceFlowId,
-            providerId: entry.providerId,
-            clientId: entry.initiatorClientId,
-            status: 'failed',
-            errorKind: 'upstream_error',
-            // PR #4291 follow-up review (qwen-latest, N1): the late-
-            // poll resolve branch fires when `provider.poll()` returns
-            // a result AFTER our race timer settled the wrapper. For a
-            // cooperative provider whose abort path resolves to
-            // `{kind: 'error', errorKind: 'upstream_error'}` (the Qwen
-            // implementation does this in response to AbortError), the
-            // "response" is just the abort-cooperation path — the IdP
-            // could be completely down. Don't assert "responsive but
-            // slow" on the error kind: route operators correctly by
-            // distinguishing "real late response" (pending / slow_down /
-            // success) from "provider's abort cooperation" (error).
-            hint:
-              latePollResult.kind === 'error'
-                ? `lost_late_poll_after_timeout: provider.poll() resolved kind=error after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — likely abort-driven cooperation; IdP responsiveness unknown`
-                : `lost_late_poll_after_timeout: provider.poll() resolved kind=${latePollResult.kind} after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — IdP is responsive but slow; consider raising the operator-side IdP latency alert threshold`,
-          });
-        },
-        (lateErr: unknown) => {
-          // Late rejection from the same provider promise. Don't
-          // double-audit if the wrapper already saw this same error
-          // (we'd be double-counting the same I/O failure).
-          if (lateErr instanceof DeviceFlowPollTimeoutError) return;
-          const detail =
-            lateErr instanceof Error ? lateErr.message : String(lateErr);
-          this.deps.audit?.record({
-            deviceFlowId: entry.deviceFlowId,
-            providerId: entry.providerId,
-            clientId: entry.initiatorClientId,
-            status: 'failed',
-            errorKind: 'upstream_error',
-            hint: `lost_late_poll_after_timeout: provider.poll() rejected after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling: ${detail.length > 256 ? `${detail.slice(0, 256)}…[+${detail.length - 256} bytes]` : detail}`,
-          });
-        },
-      );
+      void tracked
+        .then(
+          (latePollResult) => {
+            audit?.record({
+              deviceFlowId: auditDeviceFlowId,
+              providerId: auditProviderId,
+              clientId: auditClientId,
+              status: 'failed',
+              errorKind: 'upstream_error',
+              // PR #4291 follow-up review (qwen-latest, N1): the late-
+              // poll resolve branch fires when `provider.poll()` returns
+              // a result AFTER our race timer settled the wrapper. For a
+              // cooperative provider whose abort path resolves to
+              // `{kind: 'error', errorKind: 'upstream_error'}` (the Qwen
+              // implementation does this in response to AbortError), the
+              // "response" is just the abort-cooperation path — the IdP
+              // could be completely down. Don't assert "responsive but
+              // slow" on the error kind: route operators correctly by
+              // distinguishing "real late response" (pending / slow_down /
+              // success) from "provider's abort cooperation" (error).
+              // PR #4291 follow-up review (deepseek-v4-pro, round-5 #3):
+              // `latePollResult.kind` is provider-controlled. The typed
+              // shape is `'pending' | 'slow_down' | 'success' | 'error'`,
+              // but a non-conforming provider could return an arbitrary
+              // string containing newlines / control characters. Same
+              // log-injection vector as `oauthError`. Route through
+              // `sanitizeForStderr` before interpolation; the kind=error
+              // branch is a static literal so it doesn't need the call.
+              hint:
+                latePollResult.kind === 'error'
+                  ? `lost_late_poll_after_timeout: provider.poll() resolved kind=error after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — likely abort-driven cooperation; IdP responsiveness unknown`
+                  : `lost_late_poll_after_timeout: provider.poll() resolved kind=${sanitizeForStderr(latePollResult.kind)} after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — IdP is responsive but slow; consider raising the operator-side IdP latency alert threshold`,
+            });
+          },
+          (lateErr: unknown) => {
+            // Late rejection from the same provider promise. Don't
+            // double-audit if the wrapper already saw this same error
+            // (we'd be double-counting the same I/O failure).
+            // Self-filter the registry's own timeout sentinel. Round-6
+            // review (qwen-latest, #4): also gate on the runtime brand
+            // so a provider-thrown `DeviceFlowPollTimeoutError` (without
+            // the brand) is NOT silently swallowed — it should still
+            // audit through the normal late-rejection path.
+            if (
+              lateErr instanceof DeviceFlowPollTimeoutError &&
+              lateErr._isRegistryTimeout === true
+            )
+              return;
+            // PR #4291 follow-up review (qwen-latest, round-4 #7): use
+            // the `name + length` redaction pattern (the same one the
+            // provider catch uses) instead of interpolating the raw
+            // `lateErr.message`. The provider's catch was carefully
+            // shaped to suppress raw upstream bodies that may contain
+            // WAF-echoed `device_code` / PKCE; the registry layer must
+            // not undo that hardening just because the same failure
+            // settled late. The 256-byte truncation we used previously
+            // was insufficient — the first 256 bytes of a WAF error
+            // page can carry a full `device_code` value.
+            //
+            // PR #4291 follow-up review (deepseek-v4-pro, round-5 #2):
+            // `Error.name` is a freely assignable string property, same
+            // attacker-controlled vector closed at the provider layer
+            // for `err.name`. Route through `sanitizeForStderr` so a
+            // hostile `e.name = "X\n[serve] FAKE\x1b[31m"` can't forge
+            // log lines via this audit path either.
+            const safeDetail =
+              lateErr instanceof Error
+                ? `${sanitizeForStderr(lateErr.name)} (message ${lateErr.message.length} bytes; raw suppressed)`
+                : `<non-Error throw: ${typeof lateErr}>`;
+            audit?.record({
+              deviceFlowId: auditDeviceFlowId,
+              providerId: auditProviderId,
+              clientId: auditClientId,
+              status: 'failed',
+              errorKind: 'upstream_error',
+              hint: `lost_late_poll_after_timeout: provider.poll() rejected after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling: ${safeDetail}`,
+            });
+          },
+          // PR #4291 follow-up review (qwen-latest, round-6 #2): chain a
+          // terminal `.catch(() => {})` so a synchronous throw inside
+          // either of the handlers above (e.g., a custom `audit.record`
+          // that throws on a malformed sink) doesn't surface as an
+          // unhandled rejection. Node 22's default
+          // `--unhandled-rejections=throw` would otherwise crash the
+          // daemon. Mirrors the persist-tracker pattern earlier in this
+          // file. We deliberately swallow the rejection — the original
+          // failure already settled the wrapper, and the audit path is
+          // a best-effort breadcrumb.
+        )
+        .catch(() => {});
     }
     // PR #4255 round-12 #1 (gpt-5.5 review CzSpN): also re-check
     // `this.disposed` after the await. `dispose()` clears
@@ -1512,11 +1694,35 @@ export class DeviceFlowRegistry {
             // err.message in the audit hint so operators can debug
             // the contract violation. The SSE-broadcast hint stays
             // truncated to DEVICE_FLOW_POLL_HINT_MAX_LEN.
+            //
+            // PR #4291 follow-up review (qwen-latest, round-4 #5): when
+            // `rawProviderError` is undefined the timeout branch
+            // settled the wrapper (a registry-side timeout, NOT a
+            // provider throw). The earlier shape omitted `hint`
+            // entirely, leaving operators reading the durable audit
+            // trail with no signal whether the upstream_error was a
+            // hung IdP or a generic provider failure. Use the
+            // structured `result.hint` (which already contains the
+            // timeout-specific `provider.poll() timed out after Nms;
+            // check IdP connectivity` text built in the catch block)
+            // so the audit trail matches the SSE event.
             ...(rawProviderError !== undefined
               ? {
-                  hint: `provider.poll() threw (raw): ${rawProviderError}`,
+                  // PR #4291 follow-up review (qwen-latest, round-6 #3):
+                  // run the captured `rawProviderError` through
+                  // `sanitizeForStderr` before interpolating into the
+                  // audit hint. `JSON.stringify` (which audit sinks
+                  // typically use) escapes ASCII controls but per
+                  // ES2019+ does NOT escape U+2028/U+2029 — those would
+                  // still forge log lines downstream. Apply the same
+                  // sanitization the late-observer + provider catches
+                  // already use, so every provider-controlled audit
+                  // path has consistent hardening.
+                  hint: `provider.poll() threw (raw): ${sanitizeForStderr(rawProviderError)}`,
                 }
-              : {}),
+              : result.hint !== undefined
+                ? { hint: result.hint }
+                : {}),
           });
         }
         return;
