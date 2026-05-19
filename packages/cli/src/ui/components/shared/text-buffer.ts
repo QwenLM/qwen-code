@@ -2247,6 +2247,9 @@ export function useTextBuffer({
           process.env['EDITOR'] ??
           (process.platform === 'win32' ? 'notepad' : 'vi');
         editorArgs = [filePath];
+        if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
+          useShell = true;
+        }
       }
 
       if (useShell) {
@@ -2263,6 +2266,7 @@ export function useTextBuffer({
         const { status, error } = spawnSync(editorCmd, editorArgs, {
           stdio: 'inherit',
           shell: useShell,
+          timeout: 30 * 60 * 1000,
         });
         if (error) throw error;
         if (typeof status === 'number' && status !== 0)

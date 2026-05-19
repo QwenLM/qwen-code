@@ -352,6 +352,57 @@ describe('openInExternalEditor', () => {
     }
   });
 
+  it('should detect .cmd/.bat in env-var fallback and enable shell mode on Windows', async () => {
+    const origPlatform = process.platform;
+    const origVISUAL = process.env['VISUAL'];
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    process.env['VISUAL'] = 'code.cmd';
+
+    try {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'hello',
+          viewport,
+          isValidPath: () => false,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.openInExternalEditor();
+      });
+
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'code.cmd',
+        expect.arrayContaining([expect.stringMatching(/^".*"$/)]),
+        expect.objectContaining({ shell: true }),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { value: origPlatform });
+      if (origVISUAL === undefined) delete process.env['VISUAL'];
+      else process.env['VISUAL'] = origVISUAL;
+    }
+  });
+
+  it('should pass timeout to spawnSync', async () => {
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(mockSpawnSync).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Array),
+      expect.objectContaining({ timeout: 30 * 60 * 1000 }),
+    );
+  });
+
   it('should update text after successful editor session', async () => {
     (fs.readFileSync as Mock).mockReturnValue('new content');
 
