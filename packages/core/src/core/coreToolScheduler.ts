@@ -1086,7 +1086,16 @@ export class CoreToolScheduler {
     toEndMeta: (result: T) => HookSpanMetadata,
   ): Promise<T> {
     const hookSpan = startHookSpan(opts);
-    let endMeta: HookSpanMetadata = { success: false };
+    // Default endMeta carries an `error` so OTel maps the span to ERROR
+    // status if `fn()` ever throws (today unreachable — hook helpers
+    // catch internally — but kept as a defensive contract). Without
+    // an `error` field, the span would record `success: false` as an
+    // attribute but `code: UNSET` as status, which trace backends
+    // filtering on ERROR would miss (#4321 review code-reviewer).
+    let endMeta: HookSpanMetadata = {
+      success: false,
+      error: 'hook fn threw before toEndMeta',
+    };
     try {
       const result = await fn();
       endMeta = toEndMeta(result);

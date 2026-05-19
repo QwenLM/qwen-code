@@ -4069,6 +4069,35 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(hookSpans[0].hookMetadata?.blockType).toBe('denied');
   });
 
+  it('hook span records error when underlying hook helper surfaces hookError (#4321)', async () => {
+    // Runner-layer failure (URL validation, fn exception, etc) shows up
+    // as response.success: false with response.error populated. Our
+    // helpers now forward response.error into hookError; withHookSpan's
+    // toEndMeta callbacks must produce { success: false, error } so
+    // operators see the failure in telemetry instead of a fake "allow".
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'pre-hook',
+        success: false,
+        error: new Error('URL validation failed: hooks-server unreachable'),
+      }),
+    };
+    await runSingleTool({ messageBus, disableHooks: false });
+
+    // shouldProceed defaults to true on hookError, so the tool runs and
+    // a PostToolUse hook span fires too. The PreToolUse one is the one
+    // we care about — it must report failure + the actual error.
+    const preHookSpan = getHookSpans().find(
+      (s) => s.attributes['hook_event'] === 'PreToolUse',
+    );
+    expect(preHookSpan).toBeDefined();
+    expect(preHookSpan!.hookMetadata?.success).toBe(false);
+    expect(preHookSpan!.hookMetadata?.error).toBe(
+      'URL validation failed: hooks-server unreachable',
+    );
+  });
+
   it('hook span records shouldStop=true when post-hook stops execution (#3731 Phase 2)', async () => {
     // Hook protocol: continue:false + stopReason on the post-hook response
     // is what the production code maps to shouldStop=true.

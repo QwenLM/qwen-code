@@ -119,7 +119,15 @@ export async function firePreToolUseHook(
     );
 
     if (!response.success || !response.output) {
-      return { shouldProceed: true };
+      // Hook runner reported failure (URL validation, fn exception,
+      // prompt-runner crash, ...). The `response.error` from the runner
+      // is the canonical cause — forward it so telemetry and operators
+      // see the actual failure instead of a fake "allow" success
+      // (#4321 review silent-failure-hunter HIGH).
+      const message = response.error?.message;
+      return message
+        ? { shouldProceed: true, hookError: message }
+        : { shouldProceed: true };
     }
 
     const preToolOutput = createHookOutput(
@@ -218,7 +226,11 @@ export async function firePostToolUseHook(
     );
 
     if (!response.success || !response.output) {
-      return { shouldStop: false };
+      // See firePreToolUseHook for the rationale.
+      const message = response.error?.message;
+      return message
+        ? { shouldStop: false, hookError: message }
+        : { shouldStop: false };
     }
 
     const postToolOutput = createHookOutput(
@@ -297,7 +309,9 @@ export async function firePostToolUseFailureHook(
     );
 
     if (!response.success || !response.output) {
-      return {};
+      // See firePreToolUseHook for the rationale.
+      const message = response.error?.message;
+      return message ? { hookError: message } : {};
     }
 
     const failureOutput = createHookOutput(
