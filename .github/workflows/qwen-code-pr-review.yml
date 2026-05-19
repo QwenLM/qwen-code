@@ -431,19 +431,48 @@ jobs:
           comments. Output only; the maintainer reads it from the CI log."
           fi
 
-          out=qwen-review-output.txt
-          # tee -> output streams to the live job log in real time AND is
-          # captured for the summary. No $(...) buffering. `timeout`
-          # bounds it below the job timeout so a stall exits visibly.
+          out=qwen-review-stream.jsonl
+          # Plain `qwen ... | tee` does NOT stream: qwen is a Node CLI and
+          # Node full-buffers stdout when it is a pipe, so nothing shows
+          # until exit. `--output-format stream-json --include-partial-
+          # messages` is qwen's purpose-built incremental event stream —
+          # each event is written as it happens, so `tee` shows real
+          # progress in the live job log. `timeout` bounds a stall.
+          echo "::group::Qwen /review (live stream-json events)"
           set +e
-          timeout 50m qwen --yolo --prompt "$prompt" 2>&1 | tee "$out"
+          timeout 50m qwen --yolo \
+            --output-format stream-json --include-partial-messages \
+            --prompt "$prompt" 2>&1 | tee "$out"
           status=${PIPESTATUS[0]}
           set -e
+          echo "::endgroup::"
+
+          # Extract the final assistant text from the stream for a
+          # human-readable summary (downstream comment step / artifact).
+          node -e '
+            const fs=require("fs");
+            const lines=fs.readFileSync(process.argv[1],"utf8").split(/\r?\n/);
+            let txt="";
+            for (const l of lines) {
+              if (!l.trim()) continue;
+              let e; try { e=JSON.parse(l); } catch { continue; }
+              const c=e?.message?.content;
+              if ((e.type==="assistant"||e.type==="message") && Array.isArray(c)) {
+                const t=c.filter(p=>p?.type==="text").map(p=>p.text).join("");
+                if (t) txt=t;
+              }
+            }
+            fs.writeFileSync("qwen-review-summary.md", txt || "(no assistant text parsed; see raw stream in the job log)");
+          ' "$out" || cp "$out" qwen-review-summary.md
+
+          echo "::group::Parsed review summary"
+          cat qwen-review-summary.md
+          echo "::endgroup::"
 
           delimiter="QWEN_REVIEW_SUMMARY_$(openssl rand -hex 8)"
           {
             echo "summary<<$delimiter"
-            cat "$out"
+            cat qwen-review-summary.md
             echo ""
             echo "$delimiter"
           } >> "$GITHUB_OUTPUT"
