@@ -3494,6 +3494,9 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     expect(execute).not.toHaveBeenCalled();
     expect(completedCalls[0].status).toBe('error');
+    // This test exercises the actual PreToolUse hook deny path inside
+    // _executeToolCallBody — which is the only site that should still emit
+    // 'pre_hook_blocked' (#4321 review C-Critical).
     expectSanitizedFailure(
       spanRecord,
       'Tool execution blocked by hook',
@@ -4336,6 +4339,41 @@ describe('CoreToolScheduler telemetry spans', () => {
     // Pre-fix this would have been 'aborted' / 'system'. The fix flips
     // precedence so an explicit user Cancel always wins.
     expect(blockedSpan?.blockedMetadata?.decision).toBe('cancel');
+    expect(blockedSpan?.blockedMetadata?.source).toBe('cli');
+  });
+
+  it('blocked_on_user span ends with decision=proceed_once on single ProceedOnce confirmation (#4321)', async () => {
+    // ProceedOnce is the most common user interaction; previously only
+    // 'cancel' and 'proceed_always' (auto-approve) had decision-label
+    // assertions. Cover the gap so swapping or dropping the decision
+    // label for one-off approvals is caught.
+    toolSpanRecords.length = 0;
+    const { scheduler, onToolCallsUpdate } = buildApprovalScheduler({});
+    await scheduler.schedule(
+      [
+        {
+          callId: 'proceed-once-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-proceed-once',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    const blockedSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.blocked_on_user',
+    );
+    expect(blockedSpan?.blockedMetadata?.decision).toBe('proceed_once');
     expect(blockedSpan?.blockedMetadata?.source).toBe('cli');
   });
 });

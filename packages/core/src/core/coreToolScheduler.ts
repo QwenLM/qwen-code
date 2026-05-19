@@ -102,9 +102,26 @@ const TOOL_FAILURE_KIND_POST_HOOK_STOPPED = 'post_hook_stopped';
 const TOOL_FAILURE_KIND_TOOL_ERROR = 'tool_error';
 const TOOL_FAILURE_KIND_TOOL_EXCEPTION = 'tool_exception';
 const TOOL_FAILURE_KIND_CANCELLED = 'cancelled';
+// Approval-flow failure kinds — distinct from `pre_hook_blocked` (which
+// only applies to actual PreToolUse hook denials in `_executeToolCallBody`)
+// so dashboards can attribute denies to their real cause (#4321 review).
+const TOOL_FAILURE_KIND_PERMISSION_DENIED = 'permission_denied';
+const TOOL_FAILURE_KIND_PERMISSION_HOOK_DENIED = 'permission_hook_denied';
+const TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED = 'plan_mode_blocked';
+const TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED = 'non_interactive_denied';
+const TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED = 'background_agent_denied';
 
 const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
 const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
+const TOOL_SPAN_STATUS_PERMISSION_DENIED = 'Permission denied for tool';
+const TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED =
+  'Permission denied by permission_request hook';
+const TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED =
+  'Plan mode blocked a non-read-only tool call';
+const TOOL_SPAN_STATUS_NON_INTERACTIVE_DENIED =
+  'Non-interactive mode declined permission';
+const TOOL_SPAN_STATUS_BACKGROUND_AGENT_DENIED =
+  'Background agent cannot prompt for confirmation';
 const TOOL_SPAN_STATUS_TOOL_ERROR = 'Tool execution failed';
 const TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception';
 const TOOL_SPAN_STATUS_TOOL_CANCELLED = 'Tool execution cancelled by user';
@@ -1424,8 +1441,8 @@ export class CoreToolScheduler {
             );
             setToolSpanFailure(
               toolSpan,
-              TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
-              TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED,
+              TOOL_FAILURE_KIND_PERMISSION_DENIED,
+              TOOL_SPAN_STATUS_PERMISSION_DENIED,
             );
             this.finalizeToolSpan(reqInfo.callId);
             continue;
@@ -1475,8 +1492,8 @@ export class CoreToolScheduler {
               });
               setToolSpanFailure(
                 toolSpan,
-                TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
-                'Plan mode blocked a non-read-only tool call.',
+                TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
+                TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
               );
               this.finalizeToolSpan(reqInfo.callId);
               continue;
@@ -1513,8 +1530,8 @@ export class CoreToolScheduler {
               );
               setToolSpanFailure(
                 toolSpan,
-                TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
-                'Non-interactive mode declined permission',
+                TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED,
+                TOOL_SPAN_STATUS_NON_INTERACTIVE_DENIED,
               );
               this.finalizeToolSpan(reqInfo.callId);
               continue;
@@ -1584,8 +1601,8 @@ export class CoreToolScheduler {
                   );
                   setToolSpanFailure(
                     toolSpan,
-                    TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
-                    TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED,
+                    TOOL_FAILURE_KIND_PERMISSION_HOOK_DENIED,
+                    TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED,
                   );
                   this.finalizeToolSpan(reqInfo.callId);
                 }
@@ -1608,8 +1625,8 @@ export class CoreToolScheduler {
               );
               setToolSpanFailure(
                 toolSpan,
-                TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
-                'Background agent cannot prompt for confirmation',
+                TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED,
+                TOOL_SPAN_STATUS_BACKGROUND_AGENT_DENIED,
               );
               this.finalizeToolSpan(reqInfo.callId);
               continue;
