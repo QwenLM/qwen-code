@@ -342,14 +342,14 @@ describe('stripSuppressOnRestore', () => {
       id: 1,
       type: 'user',
       text: 'hello',
-      display: { kind: 'some-other-kind' },
+      display: {},
     } as HistoryItem;
     const result = stripSuppressOnRestore(item);
     expect(result).toEqual({
       id: 1,
       type: 'user',
       text: 'hello',
-      display: { kind: 'some-other-kind' },
+      display: {},
     });
   });
 

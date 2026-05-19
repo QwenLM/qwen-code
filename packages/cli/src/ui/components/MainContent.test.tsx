@@ -472,7 +472,7 @@ describe('<MainContent />', () => {
         type: 'info' as const,
         id: 3,
         text: 'History collapsed: 1 messages hidden.',
-        display: { kind: 'collapse-summary' },
+        display: { kind: 'collapse-summary' as const },
       },
     ];
     const uiState = createUIState({ history });
