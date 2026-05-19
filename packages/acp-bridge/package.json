@@ -55,6 +55,10 @@
       "types": "./dist/spawnChannel.d.ts",
       "import": "./dist/spawnChannel.js"
     },
+    "./bridgeClient": {
+      "types": "./dist/bridgeClient.d.ts",
+      "import": "./dist/bridgeClient.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

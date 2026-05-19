@@ -14,3 +14,4 @@ export * from './bridgeErrors.js';
 export * from './bridgeTypes.js';
 export * from './bridgeOptions.js';
 export * from './spawnChannel.js';
+export * from './bridgeClient.js';
