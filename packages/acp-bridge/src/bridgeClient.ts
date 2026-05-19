@@ -18,6 +18,7 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, EventBus } from './eventBus.js';
+import type { BridgeFileSystem } from './bridgeFileSystem.js';
 
 /**
  * Inline `writeStderrLine` (lifted from `cli/src/utils/stdioHelpers.ts` in
@@ -231,6 +232,18 @@ export class BridgeClient implements Client {
      * Infinity = disabled.
      */
     private readonly maxPendingPerSession: number,
+    /**
+     * Optional fs injection seam (#4175 PR F1 step 5). When provided,
+     * `writeTextFile` / `readTextFile` delegate to this implementation
+     * instead of running the inline `fs.realpath` / `fs.writeFile` /
+     * `fs.readFile` proxy below. Production `qwen serve` wires a
+     * serve-side adapter wrapping PR 18's `WorkspaceFileSystem` here
+     * so writes get the TOCTOU + symlink + trust-gate + audit machinery
+     * the inline proxy lacks. Omitted by tests + Mode A in-process
+     * consumers + channels / IDE companion — preserves the pre-F1
+     * inline proxy behavior.
+     */
+    private readonly fileSystem?: BridgeFileSystem,
   ) {}
 
   // FIXME(stage-1.5, chiga0 finding 3):
@@ -656,6 +669,17 @@ export class BridgeClient implements Client {
   async writeTextFile(
     params: WriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {
+    // #4175 PR F1 step 5: delegate to the injected `BridgeFileSystem`
+    // when present. Production `qwen serve` wires PR 18's
+    // `WorkspaceFileSystem` through a serve-side adapter so writes get
+    // the trust-gate + TOCTOU + symlink + `.gitignore` + audit
+    // machinery the inline proxy below lacks. Bridge tests, Mode A
+    // consumers, channels, and the VSCode IDE companion omit the
+    // injection and fall through to the inline path so pre-F1 behavior
+    // is preserved verbatim where no adapter has been wired.
+    if (this.fileSystem) {
+      return this.fileSystem.writeText(params);
+    }
     // Stage 1 known divergence: this raw `fs.writeFile` reimplements file
     // I/O instead of delegating to core's filesystem service. The
     // user-visible scenarios where they differ:
@@ -792,6 +816,14 @@ export class BridgeClient implements Client {
   async readTextFile(
     params: ReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
+    // #4175 PR F1 step 5: delegate to the injected `BridgeFileSystem`
+    // when present (parallels the write path above). Production
+    // `qwen serve` wires PR 18's `WorkspaceFileSystem` adapter; tests +
+    // Mode A + channels + IDE companion fall through to the inline
+    // proxy below.
+    if (this.fileSystem) {
+      return this.fileSystem.readText(params);
+    }
     // Reject obviously-degenerate `limit` up front. Without this,
     // `sliceLineRange` hits the `end < start` path and returns an
     // unexpectedly-larger slice (or empty depending on internals).

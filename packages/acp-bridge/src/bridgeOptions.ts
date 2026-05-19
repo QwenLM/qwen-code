@@ -14,6 +14,7 @@
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { ChannelFactory } from './channel.js';
 import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
+import type { BridgeFileSystem } from './bridgeFileSystem.js';
 
 /**
  * Optional injection seam for daemon-host-specific status cells —
@@ -251,4 +252,25 @@ export interface BridgeOptions {
    * still query the routes; they'll see empty/idle cells.
    */
   statusProvider?: DaemonStatusProvider;
+
+  /**
+   * Optional fs injection seam (#4175 PR F1 step 5, originally the
+   * 22b' scope). When provided, `BridgeClient.readTextFile` and
+   * `BridgeClient.writeTextFile` delegate every ACP fs call to this
+   * implementation instead of using BridgeClient's inline
+   * `fs.realpath` / `fs.writeFile` / `fs.readFile` proxy.
+   *
+   * Production `qwen serve` wires this to a serve-side adapter that
+   * wraps PR 18's `WorkspaceFileSystem` so writes pick up its TOCTOU
+   * + symlink-substitution + trust-gate + `.gitignore` + audit
+   * machinery — closing the `ws.ts:613` follow-up thread tracked
+   * since PR 18 landed.
+   *
+   * When omitted (tests, Mode A in-process consumers, channels /
+   * IDE companion using the bridge directly), BridgeClient's inline
+   * proxy is used — preserves the pre-F1 behavior verbatim so
+   * existing test fixtures don't need updating and channels /
+   * IDE keep working without depending on `cli/src/serve/fs/`.
+   */
+  fileSystem?: BridgeFileSystem;
 }

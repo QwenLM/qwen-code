@@ -63,6 +63,10 @@
       "types": "./dist/bridge.d.ts",
       "import": "./dist/bridge.js"
     },
+    "./bridgeFileSystem": {
+      "types": "./dist/bridgeFileSystem.d.ts",
+      "import": "./dist/bridgeFileSystem.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

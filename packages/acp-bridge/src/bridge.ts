@@ -765,6 +765,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           resolvePending(rid, { outcome: { outcome: 'cancelled' } }),
         permissionTimeoutMs,
         maxPendingPerSession,
+        // #4175 PR F1 step 5: forward the optional `BridgeFileSystem`
+        // injection so production `qwen serve` can wire PR 18's
+        // `WorkspaceFileSystem` adapter into BridgeClient's fs proxy
+        // methods. Tests + Mode A consumers + channels / IDE companion
+        // omit it; BridgeClient falls back to its inline fs proxy.
+        opts.fileSystem,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
