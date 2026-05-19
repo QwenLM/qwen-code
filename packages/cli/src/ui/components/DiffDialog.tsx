@@ -93,6 +93,10 @@ export function DiffDialog({
   const [sourceIndex, setSourceIndex] = useState(0);
   const [fileIndex, setFileIndex] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
+  // Transient hint shown in place of the nav line when Enter lands on a
+  // non-enterable row (binary / oversized / no-hunks). Cleared on the next
+  // navigation keypress so it doesn't linger past the user's response.
+  const [keyHint, setKeyHint] = useState<string | null>(null);
 
   // Derive clamped indexes inline rather than via a useEffect + setState.
   // Effect-based clamping causes an extra render frame (the first paint
@@ -151,11 +155,13 @@ export function DiffDialog({
   const filesLenRef = useRef(files.length);
   const selectedFileRef = useRef(selectedFile);
   const onCloseRef = useRef(onClose);
+  const setKeyHintRef = useRef(setKeyHint);
   viewModeRef.current = viewMode;
   sourcesLenRef.current = sources.length;
   filesLenRef.current = files.length;
   selectedFileRef.current = selectedFile;
   onCloseRef.current = onClose;
+  setKeyHintRef.current = setKeyHint;
 
   const handleKeypress = useCallback((key: { name?: string }) => {
     const name = key.name;
@@ -177,6 +183,9 @@ export function DiffDialog({
       }
       return;
     }
+    // Any navigation key clears a previously displayed Enter-rejection
+    // hint so it doesn't outlive the user's next action.
+    setKeyHintRef.current(null);
     if (name === 'left') {
       setSourceIndex((i) => Math.max(0, i - 1));
       return;
@@ -201,9 +210,24 @@ export function DiffDialog({
       // binary / oversized rows are presented with explicit notes in
       // the list, and rows with no hunks (untracked files, capped
       // entries) would otherwise land users on a dead-end screen.
-      if (sel && !sel.isBinary && !sel.oversized && sel.hasHunks) {
-        setViewMode('detail');
+      // Surface a transient hint so the keypress isn't silently
+      // consumed — without it users could mistake the dialog for hung.
+      if (!sel) return;
+      if (sel.isBinary) {
+        setKeyHintRef.current(t('Binary file — no diff to view.'));
+        return;
       }
+      if (sel.oversized) {
+        setKeyHintRef.current(
+          t('Oversized file — diff omitted. Use `git diff` to inspect.'),
+        );
+        return;
+      }
+      if (!sel.hasHunks) {
+        setKeyHintRef.current(t('No diff content available for this file.'));
+        return;
+      }
+      setViewMode('detail');
       return;
     }
   }, []);
@@ -306,12 +330,14 @@ export function DiffDialog({
       </Box>
 
       <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          {viewMode === 'list'
-            ? sources.length > 1
-              ? t('←/→ source · ↑/↓ file · Enter view · Esc close')
-              : t('↑/↓ file · Enter view · Esc close')
-            : t('← back · Esc close')}
+        <Text color={keyHint ? theme.status.warning : theme.text.secondary}>
+          {keyHint && viewMode === 'list'
+            ? keyHint
+            : viewMode === 'list'
+              ? sources.length > 1
+                ? t('←/→ source · ↑/↓ file · Enter view · Esc close')
+                : t('↑/↓ file · Enter view · Esc close')
+              : t('← back · Esc close')}
         </Text>
       </Box>
     </Box>

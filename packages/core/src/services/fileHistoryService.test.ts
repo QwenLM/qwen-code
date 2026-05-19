@@ -14,7 +14,7 @@ import {
   readFile,
 } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const mockStorageDir = vi.hoisted(() => vi.fn());
@@ -25,6 +25,7 @@ vi.mock('../config/storage.js', () => ({
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => ({
     debug: vi.fn(),
+    warn: vi.fn(),
     error: vi.fn(),
   }),
 }));
@@ -670,7 +671,8 @@ describe('FileHistoryService', () => {
       const turn1 = await service.getTurnDiff('p1');
       expect(turn1).toBeDefined();
       expect(turn1!.files).toHaveLength(1);
-      expect(turn1!.files[0].filePath).toBe(file);
+      // filePath is repo-relative (matches Current source convention).
+      expect(turn1!.files[0].filePath).toBe(basename(file));
       expect(turn1!.files[0].linesAdded).toBe(1);
       expect(turn1!.files[0].linesRemoved).toBe(1);
       expect(turn1!.files[0].isNewFile).toBe(false);
@@ -708,7 +710,7 @@ describe('FileHistoryService', () => {
 
       const turn1 = await service.getTurnDiff('p1');
       expect(turn1).toBeDefined();
-      const entry = turn1!.files.find((f) => f.filePath === file);
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
       expect(entry).toBeDefined();
       expect(entry!.isNewFile).toBe(true);
       expect(entry!.isDeleted).toBe(false);
@@ -773,7 +775,7 @@ describe('FileHistoryService', () => {
 
       const turn1 = await service.getTurnDiff('p1');
       expect(turn1).toBeDefined();
-      const entry = turn1!.files.find((f) => f.filePath === file);
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
       expect(entry).toBeDefined();
       expect(entry!.isDeleted).toBe(true);
       expect(entry!.isNewFile).toBe(false);
@@ -797,7 +799,7 @@ describe('FileHistoryService', () => {
 
       const turn1 = await service.getTurnDiff('p1');
       expect(turn1).toBeDefined();
-      const entry = turn1!.files.find((f) => f.filePath === file);
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
       expect(entry).toBeDefined();
       expect(entry!.isBinary).toBe(true);
       expect(entry!.hunks).toEqual([]);
@@ -831,8 +833,8 @@ describe('FileHistoryService', () => {
       const turn1 = await service.getTurnDiff('p1');
       expect(turn1).toBeDefined();
       const paths = turn1!.files.map((f) => f.filePath);
-      expect(paths).toContain(fileA);
-      expect(paths).not.toContain(fileB);
+      expect(paths).toContain(basename(fileA));
+      expect(paths).not.toContain(basename(fileB));
     });
 
     // Regression for the live-worktree read-failure collapse: if a file
@@ -855,7 +857,7 @@ describe('FileHistoryService', () => {
 
       const turn1 = await service.getTurnDiff('p1');
       expect(turn1).toBeDefined();
-      const entry = turn1!.files.find((f) => f.filePath === file);
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
       // Row dropped because the live endpoint is unreadable, not because
       // the file is gone.
       expect(entry).toBeUndefined();
@@ -876,7 +878,7 @@ describe('FileHistoryService', () => {
 
       const turn1 = await service.getTurnDiff('p1');
       expect(turn1).toBeDefined();
-      const entry = turn1!.files.find((f) => f.filePath === file);
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
       expect(entry).toBeDefined();
       expect(entry!.oversized).toBe(true);
       expect(entry!.hunks).toEqual([]);

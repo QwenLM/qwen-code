@@ -726,7 +726,15 @@ export class FileHistoryService {
     // `trackEdit` mutates `mostRecent` in place, so by the time we read
     // target.trackedFileBackups it already contains every file touched
     // during target's turn, including newly created or deleted ones.
-    const candidatePaths = Object.keys(target.trackedFileBackups);
+    // Sort so the cap below is deterministic. `Object.keys` order is
+    // spec-defined as insertion order for string keys, but sorting makes
+    // the kept-vs-dropped split reproducible across runs that may insert
+    // in different orders (e.g. a session resumed from disk vs. one that
+    // grew live), which matters for both reviewer reproducibility and
+    // for the truncation log line below.
+    const candidatePaths = Object.keys(target.trackedFileBackups).sort((a, b) =>
+      a.localeCompare(b),
+    );
 
     // Cap concurrent file reads. Each candidate reads up to two backups,
     // so a 250-file turn would issue ~500 simultaneous opens — enough to
@@ -734,6 +742,11 @@ export class FileHistoryService {
     // the same constant the git path uses (MAX_FILES_FOR_DETAILS = 500
     // files total), with two reads each → 1000 open()s worst case, still
     // comfortably below the typical 4096 fd ceiling.
+    if (candidatePaths.length > MAX_TURN_DIFF_FILES) {
+      debugLogger.warn(
+        `FileHistory: getTurnDiff truncating ${candidatePaths.length - MAX_TURN_DIFF_FILES} files for prompt ${promptId} (cap: ${MAX_TURN_DIFF_FILES})`,
+      );
+    }
     const cappedPaths = candidatePaths.slice(0, MAX_TURN_DIFF_FILES);
     const results = await Promise.all(
       cappedPaths.map((trackingPath) =>
@@ -788,7 +801,11 @@ export class FileHistoryService {
     before: FileHistorySnapshot,
     after: FileHistorySnapshot | undefined,
   ): Promise<TurnFileDiff | null> {
-    const filePath = this.maybeExpandFilePath(trackingPath);
+    // `trackingPath` is repo-relative (or absolute for files outside cwd)
+    // per `maybeShortenFilePath`; matches the convention `fetchGitDiff` uses
+    // for the Current source so the dialog renders both consistently.
+    // `absoluteFilePath` is used only for live-worktree I/O below.
+    const absoluteFilePath = this.maybeExpandFilePath(trackingPath);
 
     const beforeBackup = before.trackedFileBackups[trackingPath];
     if (beforeBackup?.failed) return null;
@@ -829,13 +846,24 @@ export class FileHistoryService {
     );
     // A non-null backup name that fails to read means we cannot produce a
     // trustworthy "before" content — fabricating an empty string would
-    // present every line as a fresh addition. Skip the row instead.
-    if (beforeRead === 'unreadable') return null;
+    // present every line as a fresh addition. Skip the row instead, but
+    // log so a missing/permission-flipped backup leaves a trace.
+    if (beforeRead === 'unreadable') {
+      debugLogger.warn(
+        `FileHistory: skipping turn diff for ${trackingPath}: before backup unreadable`,
+      );
+      return null;
+    }
 
     const afterRead = afterFromWorktree
-      ? await readEndpointContent(undefined, filePath, this.sessionId)
+      ? await readEndpointContent(undefined, absoluteFilePath, this.sessionId)
       : await readEndpointContent(afterBackup, undefined, this.sessionId);
-    if (afterRead === 'unreadable') return null;
+    if (afterRead === 'unreadable') {
+      debugLogger.warn(
+        `FileHistory: skipping turn diff for ${trackingPath}: after ${afterFromWorktree ? 'worktree' : 'backup'} unreadable`,
+      );
+      return null;
+    }
 
     const beforeContent = beforeRead.content;
     const beforeExists = beforeRead.exists;
@@ -854,7 +882,7 @@ export class FileHistoryService {
     const isBinary = looksBinary(beforeContent) || looksBinary(afterContent);
     if (isBinary) {
       return {
-        filePath,
+        filePath: trackingPath,
         hunks: [],
         isNewFile: !beforeExists && afterExists,
         isDeleted: beforeExists && !afterExists,
@@ -880,7 +908,7 @@ export class FileHistoryService {
       const beforeLines = beforeExists ? countLines(beforeContent) : 0;
       const afterLines = afterExists ? countLines(afterContent) : 0;
       return {
-        filePath,
+        filePath: trackingPath,
         hunks: [],
         isNewFile: !beforeExists && afterExists,
         isDeleted: beforeExists && !afterExists,
@@ -892,8 +920,8 @@ export class FileHistoryService {
     }
 
     const patch = structuredPatch(
-      filePath,
-      filePath,
+      trackingPath,
+      trackingPath,
       beforeContent,
       afterContent,
       '',
@@ -915,7 +943,7 @@ export class FileHistoryService {
     }
 
     return {
-      filePath,
+      filePath: trackingPath,
       hunks: patch.hunks,
       isNewFile: !beforeExists && afterExists,
       isDeleted: beforeExists && !afterExists,

@@ -7,10 +7,13 @@
 import { useEffect, useState } from 'react';
 import type { Hunk } from 'diff';
 import {
+  createDebugLogger,
   fetchGitDiff,
   fetchGitDiffHunks,
   type GitDiffResult,
 } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('DiffDialog');
 
 export interface CurrentDiffData {
   /** `null` ⇒ not a git repo / HEAD missing / mid-rebase / etc. */
@@ -53,13 +56,11 @@ export function useDiffData(cwd: string | undefined): CurrentDiffData {
     setLoading(true);
     Promise.all([
       fetchGitDiff(cwd).catch((err) => {
-        // eslint-disable-next-line no-console
-        console.debug('[DiffDialog] fetchGitDiff failed:', err);
+        debugLogger.debug(`fetchGitDiff failed: ${err}`);
         return null;
       }),
       fetchGitDiffHunks(cwd).catch((err) => {
-        // eslint-disable-next-line no-console
-        console.debug('[DiffDialog] fetchGitDiffHunks failed:', err);
+        debugLogger.debug(`fetchGitDiffHunks failed: ${err}`);
         return new Map<string, Hunk[]>();
       }),
     ]).then(([statsRes, hunksRes]) => {

@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react';
 import type { FileHistoryService, TurnDiff } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemUser } from '../types.js';
 import { isRealUserTurn } from '../utils/historyMapping.js';
+import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 
 export interface TurnDiffEntry {
   /** 1-based index displayed to the user (T1 = oldest). */
@@ -97,7 +98,12 @@ const PREVIEW_MAX = 60;
 
 function previewOfUserItem(item: HistoryItem): string {
   if (item.type !== 'user' || !item.text) return '';
-  const oneLine = item.text.replace(/\s+/g, ' ').trim();
+  // Neutralize ANSI / OSC escapes so a prompt containing pasted terminal
+  // output (or a hostile OSC 8 hyperlink) cannot reach the terminal raw
+  // via the source-tab label. `HistoryItemDisplay` already applies the
+  // same defense to the chat surface.
+  const safe = escapeAnsiCtrlCodes(item.text);
+  const oneLine = safe.replace(/\s+/g, ' ').trim();
   if (oneLine.length <= PREVIEW_MAX) return oneLine;
   return `${oneLine.slice(0, PREVIEW_MAX - 1)}…`;
 }

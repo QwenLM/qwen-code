@@ -144,19 +144,23 @@ export function useDialogClose(options: DialogCloseOptions) {
       return true;
     }
 
-    if (options.isBackgroundTasksDialogOpen) {
-      // Background tasks dialog — routed through closeAnyOpenDialog so
-      // Ctrl+C and the global escape path dismiss it without escalating
-      // to exit prompts.
-      options.closeBackgroundTasksDialog();
-      return true;
-    }
-
+    // Order must match `DialogManager`'s render priority — the diff
+    // dialog wins when both flags are true, so Ctrl+C dismisses what
+    // the user actually sees instead of silently closing the
+    // background-tasks dialog hidden behind it.
     if (options.isDiffDialogOpen && options.closeDiffDialog) {
       // /diff dialog — same rationale as the background-tasks dialog:
       // Ctrl+C should dismiss the dialog rather than fall through to the
       // exit-prompt path or cancel the (non-existent) request.
       options.closeDiffDialog();
+      return true;
+    }
+
+    if (options.isBackgroundTasksDialogOpen) {
+      // Background tasks dialog — routed through closeAnyOpenDialog so
+      // Ctrl+C and the global escape path dismiss it without escalating
+      // to exit prompts.
+      options.closeBackgroundTasksDialog();
       return true;
     }
 
