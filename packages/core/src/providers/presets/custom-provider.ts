@@ -23,29 +23,66 @@ export const CUSTOM_API_KEY_ENV_PREFIX = 'QWEN_CUSTOM_API_KEY_';
  * dashboard stays manageable, and collision probability at this size is
  * ~1 in 16M per pair — fine for an interactive setup flow.
  */
+/**
+ * Normalize a string to a `[A-Z0-9_]+` env-var-safe segment without using any
+ * `+`-quantified regex. CodeQL flags polynomial regex on user-controlled
+ * input even though V8 handles these patterns linearly; a single-pass
+ * character scan side-steps both the warning and the (theoretical) worst
+ * case. Collapses runs of non-alphanumeric characters to a single `_` and
+ * strips leading/trailing underscores.
+ */
+function normalizeEnvSegment(value: string): string {
+  const upper = value.trim().toUpperCase();
+  let result = '';
+  let prevWasUnderscore = false;
+  for (let i = 0; i < upper.length; i++) {
+    const code = upper.charCodeAt(i);
+    const isAlphaNum =
+      (code >= 65 /* A */ && code <= 90) /* Z */ ||
+      (code >= 48 /* 0 */ && code <= 57) /* 9 */;
+    if (isAlphaNum) {
+      result += upper[i];
+      prevWasUnderscore = false;
+    } else if (!prevWasUnderscore) {
+      result += '_';
+      prevWasUnderscore = true;
+    }
+  }
+  // Strip leading/trailing underscores.
+  let start = 0;
+  let end = result.length;
+  while (start < end && result.charCodeAt(start) === 95 /* _ */) start++;
+  while (end > start && result.charCodeAt(end - 1) === 95 /* _ */) end--;
+  return result.slice(start, end);
+}
+
+/**
+ * Strip trailing `/` characters from a URL without a `+`-quantified regex
+ * (CodeQL flags `/\/+$/` as polynomial on uncontrolled input). Linear.
+ */
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47 /* / */) end--;
+  return value.slice(0, end);
+}
+
 export function generateCustomEnvKey(
   protocol: AuthType,
   baseUrl: string,
 ): string {
-  const normalize = (value: string) =>
-    value
-      .trim()
-      .toUpperCase()
-      .replace(/[^A-Z0-9]+/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_+|_+$/g, '');
-
   // Strip trailing slashes before hashing so callers that differ only in
   // that (e.g. .../v1 vs .../v1/) still resolve to the same env-var bucket,
   // preserving the prior implementation's invariant.
-  const canonicalBaseUrl = baseUrl.trim().replace(/\/+$/, '');
+  const canonicalBaseUrl = stripTrailingSlashes(baseUrl.trim());
   const suffix = createHash('sha256')
     .update(`${protocol}\0${canonicalBaseUrl}`)
     .digest('hex')
     .slice(0, 6)
     .toUpperCase();
 
-  return `${CUSTOM_API_KEY_ENV_PREFIX}${normalize(protocol)}_${normalize(baseUrl)}_${suffix}`;
+  return `${CUSTOM_API_KEY_ENV_PREFIX}${normalizeEnvSegment(
+    protocol,
+  )}_${normalizeEnvSegment(baseUrl)}_${suffix}`;
 }
 
 export const customProvider: ProviderConfig = {
