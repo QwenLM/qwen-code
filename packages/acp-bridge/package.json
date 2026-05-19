@@ -59,6 +59,10 @@
       "types": "./dist/bridgeClient.d.ts",
       "import": "./dist/bridgeClient.js"
     },
+    "./bridge": {
+      "types": "./dist/bridge.d.ts",
+      "import": "./dist/bridge.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
