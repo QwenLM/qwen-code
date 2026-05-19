@@ -458,6 +458,33 @@ export function createIdleWorkspaceProvidersStatus(
 }
 
 /**
+ * #4175 PR 22b/2: idle envelope for `/workspace/env` when the bridge
+ * has no `DaemonStatusProvider` injected (Mode A in-process consumers,
+ * tests, embedded callers that don't need daemon-host cells). Single
+ * construction site so future optional-field additions to
+ * `ServeWorkspaceEnvStatus` only need updating in one place — the
+ * production builder in `cli/src/serve/envSnapshot.ts buildEnvStatusFromProcess`
+ * and this helper would otherwise diverge silently (TS won't flag a
+ * missing optional field).
+ *
+ * Note: `initialized: true` matches `buildEnvStatusFromProcess` —
+ * the daemon answers env from `process.*` state without consulting
+ * ACP, so even an "empty" envelope is initialized.
+ */
+export function createIdleEnvStatus(
+  workspaceCwd: string,
+  acpChannelLive: boolean,
+): ServeWorkspaceEnvStatus {
+  return {
+    v: STATUS_SCHEMA_VERSION,
+    workspaceCwd,
+    initialized: true,
+    acpChannelLive,
+    cells: [],
+  };
+}
+
+/**
  * Discriminant for diagnostic cells emitted by `/workspace/env`.
  * `env_var` cells are presence-only (the daemon never echoes secret values
  * even when redacted). The other kinds expose non-sensitive values like

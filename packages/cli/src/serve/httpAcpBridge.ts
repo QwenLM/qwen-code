@@ -25,6 +25,7 @@ import {
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
   createIdleAcpPreflightCells,
+  createIdleEnvStatus,
   createIdleWorkspaceMcpStatus,
   createIdleWorkspaceProvidersStatus,
   createIdleWorkspaceSkillsStatus,
@@ -3140,18 +3141,32 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // PR 22b/2: daemon-host env snapshot delegated to
       // `BridgeOptions.statusProvider`. When omitted (Mode A in-process
       // consumers, tests) the bridge returns an idle envelope —
-      // `cells: []` matches the "queryable but empty" pattern PR 12 / 13
+      // matches the "queryable but empty" pattern PR 12 / 13
       // established for diagnostic routes.
-      if (opts.statusProvider) {
-        return opts.statusProvider.getEnvStatus(boundWorkspace, acpChannelLive);
+      //
+      // Wenshao review fold-in (#4304): a custom provider that throws
+      // would otherwise propagate past the bridge into `/workspace/env`
+      // as a 500. Catch + log + fall back to the idle envelope so the
+      // route still responds — the `daemon cells always answerable`
+      // invariant the pre-injection `buildEnvStatusFromProcess` carried
+      // (it never threw because it was synchronous and self-contained)
+      // is preserved structurally.
+      if (!opts.statusProvider) {
+        return createIdleEnvStatus(boundWorkspace, acpChannelLive);
       }
-      return {
-        v: STATUS_SCHEMA_VERSION,
-        workspaceCwd: boundWorkspace,
-        initialized: true,
-        acpChannelLive,
-        cells: [],
-      };
+      try {
+        return await opts.statusProvider.getEnvStatus(
+          boundWorkspace,
+          acpChannelLive,
+        );
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: statusProvider.getEnvStatus failed; ` +
+            `falling back to idle envelope: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+        return createIdleEnvStatus(boundWorkspace, acpChannelLive);
+      }
     },
 
     async getWorkspacePreflightStatus() {
@@ -3159,9 +3174,31 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `BridgeOptions.statusProvider`. Without a provider the daemon
       // half is empty `[]`; ACP-side cells are still fetched normally
       // when a child is live.
-      const daemonCells: ServePreflightCell[] = opts.statusProvider
-        ? await opts.statusProvider.getDaemonPreflightCells(boundWorkspace)
-        : [];
+      //
+      // Wenshao review fold-in (#4304): a throwing provider would
+      // otherwise propagate past the bridge and turn the entire
+      // preflight envelope into a 500 — losing both daemon cells AND
+      // the ACP-side cells fetched below. Catch + log + fall back to
+      // empty so ACP cells still render. Pre-injection
+      // `buildDaemonPreflightCells` used `Promise.allSettled` and was
+      // effectively unthrowable; this preserves that route-level
+      // invariant for custom provider impls that may throw.
+      let daemonCells: ServePreflightCell[];
+      if (!opts.statusProvider) {
+        daemonCells = [];
+      } else {
+        try {
+          daemonCells =
+            await opts.statusProvider.getDaemonPreflightCells(boundWorkspace);
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: statusProvider.getDaemonPreflightCells failed; ` +
+              `falling back to empty daemon cells: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+          daemonCells = [];
+        }
+      }
       const acpChannelLive = !!liveChannelInfo();
 
       let acpResponse:
