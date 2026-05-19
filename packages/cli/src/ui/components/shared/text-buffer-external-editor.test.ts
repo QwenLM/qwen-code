@@ -31,24 +31,14 @@ vi.mock('node:os', async (importOriginal) => {
   };
 });
 
-vi.mock('node:crypto', async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return {
-    ...actual,
-    default: {
-      ...(actual['default'] as object),
-      randomUUID: () => 'test-uuid-1234',
-    },
-    randomUUID: () => 'test-uuid-1234',
-  };
-});
-
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   const mocks = {
+    mkdtempSync: vi.fn().mockReturnValue('/tmp/qwen-edit-mock'),
     writeFileSync: vi.fn(),
     readFileSync: vi.fn().mockReturnValue('edited text'),
     unlinkSync: vi.fn(),
+    rmdirSync: vi.fn(),
   };
   return {
     ...actual,
@@ -74,14 +64,16 @@ const viewport = { height: 5, width: 40 };
 describe('openInExternalEditor', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    (fs.mkdtempSync as Mock).mockReturnValue('/tmp/qwen-edit-mock');
     (fs.writeFileSync as Mock).mockImplementation(() => {});
     (fs.readFileSync as Mock).mockReturnValue('edited text');
     (fs.unlinkSync as Mock).mockImplementation(() => {});
+    (fs.rmdirSync as Mock).mockImplementation(() => {});
     mockSpawnSync.mockReturnValue({ status: 0, error: null });
     mockGetExternalEditorCommand.mockReturnValue(null);
   });
 
-  it('should use .txt extension for temp file', async () => {
+  it('should create temp file in private mkdtemp directory', async () => {
     const { result } = renderHook(() =>
       useTextBuffer({
         initialText: 'hello',
@@ -94,8 +86,11 @@ describe('openInExternalEditor', () => {
       await result.current.openInExternalEditor();
     });
 
+    expect(fs.mkdtempSync).toHaveBeenCalledWith(
+      expect.stringContaining('qwen-edit-'),
+    );
     const writePath = (fs.writeFileSync as Mock).mock.calls[0]?.[0] as string;
-    expect(writePath).toMatch(/\.txt$/);
+    expect(writePath).toBe('/tmp/qwen-edit-mock/buffer.txt');
   });
 
   it('should write temp file with mode 0o600', async () => {
@@ -180,7 +175,7 @@ describe('openInExternalEditor', () => {
   it('should use getExternalEditorCommand when preferredEditor is set', async () => {
     mockGetExternalEditorCommand.mockReturnValue({
       command: 'code',
-      args: ['/tmp/qwen-edit-test-uuid-1234.txt', '--wait'],
+      args: ['/tmp/qwen-edit-mock/buffer.txt', '--wait'],
       isTerminal: false,
       needsShell: false,
     });
@@ -212,7 +207,7 @@ describe('openInExternalEditor', () => {
   it('should quote args when needsShell is true', async () => {
     mockGetExternalEditorCommand.mockReturnValue({
       command: 'code.cmd',
-      args: ['/tmp/qwen-edit-test-uuid-1234.txt', '--wait'],
+      args: ['/tmp/qwen-edit-mock/buffer.txt', '--wait'],
       isTerminal: false,
       needsShell: true,
     });
@@ -444,7 +439,7 @@ describe('openInExternalEditor', () => {
     expect(result.current.text).toBe('original');
   });
 
-  it('should not create undo snapshot when editor fails', async () => {
+  it('should not create undo snapshot when editor fails — undo is no-op', async () => {
     mockSpawnSync.mockReturnValue({ status: 1, error: null });
     (fs.readFileSync as Mock).mockReturnValue('should not see this');
 
@@ -461,5 +456,52 @@ describe('openInExternalEditor', () => {
     });
 
     expect(result.current.text).toBe('original');
+
+    act(() => {
+      result.current.undo();
+    });
+    expect(result.current.text).toBe('original');
+  });
+
+  it('should skip undo snapshot when content is unchanged', async () => {
+    (fs.readFileSync as Mock).mockReturnValue('unchanged');
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'unchanged',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(result.current.text).toBe('unchanged');
+
+    act(() => {
+      result.current.undo();
+    });
+    expect(result.current.text).toBe('unchanged');
+  });
+
+  it('should clean up tmpDir and file in finally', async () => {
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(fs.unlinkSync).toHaveBeenCalledWith(
+      '/tmp/qwen-edit-mock/buffer.txt',
+    );
+    expect(fs.rmdirSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock');
   });
 });

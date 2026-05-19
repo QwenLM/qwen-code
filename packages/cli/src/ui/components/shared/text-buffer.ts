@@ -5,7 +5,6 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import pathMod from 'node:path';
@@ -2218,10 +2217,8 @@ export function useTextBuffer({
 
   const openInExternalEditor = useCallback(
     async (opts: { editor?: string } = {}): Promise<void> => {
-      const filePath = pathMod.join(
-        os.tmpdir(),
-        `qwen-edit-${crypto.randomUUID()}.txt`,
-      );
+      const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
+      const filePath = pathMod.join(tmpDir, 'buffer.txt');
 
       let editorCmd: string;
       let editorArgs: string[];
@@ -2278,14 +2275,17 @@ export function useTextBuffer({
 
         let newText = fs.readFileSync(filePath, 'utf8');
         newText = newText.replace(/\r\n?/g, '\n');
-        dispatch({ type: 'create_undo_snapshot' });
-        dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
+        if (newText !== text) {
+          dispatch({ type: 'create_undo_snapshot' });
+          dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
+        }
       } catch (err) {
         debugLogger.error('[useTextBuffer] external editor error', err);
       } finally {
         if (wasRaw) setRawMode?.(true);
         try {
           fs.unlinkSync(filePath);
+          fs.rmdirSync(tmpDir);
         } catch {
           /* ignore */
         }
@@ -2642,8 +2642,9 @@ export interface TextBuffer {
    * buffer with whatever the user saved.
    *
    * The operation is treated as a single undoable edit – we snapshot the
-   * previous state *once* before launching the editor so one `undo()` will
-   * revert the entire change set.
+   * previous state *once* after reading back the edited file so one `undo()`
+   * will revert the entire change set.  No snapshot is created when the
+   * editor fails or the content is unchanged.
    *
    * Note: We purposefully rely on the *synchronous* spawn API so that the
    * calling process genuinely waits for the editor to close before
