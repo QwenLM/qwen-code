@@ -1794,6 +1794,70 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      offlineLicense: {
+        type: 'object',
+        label: 'Offline License',
+        category: 'Security',
+        requiresRestart: true,
+        default: undefined as
+          | {
+              enabled?: boolean;
+              licensePath?: string;
+              activationPath?: string;
+              publicKeyPem?: string;
+              requiredFeature?: string;
+            }
+          | undefined,
+        description: 'Offline license enforcement settings.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable Offline License',
+            category: 'Security',
+            requiresRestart: true,
+            default: false,
+            description: 'Enable offline license enforcement at startup.',
+            showInDialog: false,
+          },
+          licensePath: {
+            type: 'string',
+            label: 'License Path',
+            category: 'Security',
+            requiresRestart: true,
+            default: undefined as string | undefined,
+            description: 'Path to the signed offline license file.',
+            showInDialog: false,
+          },
+          activationPath: {
+            type: 'string',
+            label: 'Activation Path',
+            category: 'Security',
+            requiresRestart: true,
+            default: undefined as string | undefined,
+            description: 'Path to the local activation status file.',
+            showInDialog: false,
+          },
+          publicKeyPem: {
+            type: 'string',
+            label: 'License Public Key',
+            category: 'Security',
+            requiresRestart: true,
+            default: undefined as string | undefined,
+            description: 'Public key used to verify the offline license.',
+            showInDialog: false,
+          },
+          requiredFeature: {
+            type: 'string',
+            label: 'Required Feature',
+            category: 'Security',
+            requiresRestart: true,
+            default: 'agent-cli',
+            description: 'Feature required for the CLI to start.',
+            showInDialog: false,
+          },
+        },
+      },
       allowedHttpHookUrls: {
         type: 'array',
         label: 'Allowed HTTP Hook URLs',

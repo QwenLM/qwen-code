@@ -817,6 +817,34 @@
             }
           }
         },
+        "offlineLicense": {
+          "description": "Offline license enforcement settings.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable offline license enforcement at startup.",
+              "type": "boolean",
+              "default": false
+            },
+            "licensePath": {
+              "description": "Path to the signed offline license file.",
+              "type": "string"
+            },
+            "activationPath": {
+              "description": "Path to the local activation status file.",
+              "type": "string"
+            },
+            "publicKeyPem": {
+              "description": "Public key used to verify the offline license.",
+              "type": "string"
+            },
+            "requiredFeature": {
+              "description": "Feature required for the CLI to start.",
+              "type": "string",
+              "default": "agent-cli"
+            }
+          }
+        },
         "allowedHttpHookUrls": {
           "description": "Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).",
           "type": "array",

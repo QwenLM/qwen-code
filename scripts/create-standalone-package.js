@@ -94,9 +94,16 @@ async function main() {
   const version = args.version || readPackageVersion();
   const outDir = path.resolve(args.outDir || path.join(distDir, 'standalone'));
   fs.mkdirSync(outDir, { recursive: true });
+  const license = args.licenseFile
+    ? readOfflineLicense(args.licenseFile)
+    : undefined;
 
   const targetConfig = TARGETS.get(target);
-  const outputName = `qwen-code-${target}.${targetConfig.outputExtension}`;
+  const outputName = formatStandaloneArchiveName({
+    license,
+    outputExtension: targetConfig.outputExtension,
+    target,
+  });
   const outputPath = path.join(outDir, outputName);
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-standalone-'));
 
@@ -107,6 +114,9 @@ async function main() {
     fs.mkdirSync(runtimeExtractDir, { recursive: true });
 
     copyRuntimeAssets(packageRoot, outDir);
+    if (license) {
+      injectOfflineLicense(packageRoot, license);
+    }
     extractNodeArchive(nodeArchive, runtimeExtractDir);
     const nodeDir = path.join(packageRoot, 'node');
     copyExtractedNode(runtimeExtractDir, nodeDir);
@@ -116,7 +126,30 @@ async function main() {
       version,
       target,
       nodeArchive: path.basename(nodeArchive),
+      offlineLicense: license
+        ? {
+            customerId: license.customerId,
+            expiresAt: license.expiresAt,
+            seats: license.seats,
+            features: license.features,
+            licensePath: 'offline-license/license.json',
+            publicKeyPath: 'offline-license/public-key.pem',
+          }
+        : undefined,
     });
+    if (license) {
+      writeDeliveryManifest(outDir, outputName, {
+        archive: outputName,
+        customerId: license.customerId,
+        target,
+        expiresAt: license.expiresAt,
+        seats: license.seats,
+        features: license.features,
+        licensePath: 'offline-license/license.json',
+        publicKeyPath: 'offline-license/public-key.pem',
+      });
+      writeOfflineLicenseInstructions(packageRoot, license);
+    }
 
     if (fs.existsSync(outputPath)) {
       fs.rmSync(outputPath, { force: true });
@@ -144,6 +177,7 @@ function isMainModule() {
 function parseArgs(argv) {
   const args = {
     help: false,
+    licenseFile: undefined,
     outDir: undefined,
     nodeArchive: undefined,
     skipChecksums: false,
@@ -164,6 +198,10 @@ function parseArgs(argv) {
         break;
       case '--node-archive':
         args.nodeArchive = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--license-file':
+        args.licenseFile = readOptionValue(argv, index, arg);
         index += 1;
         break;
       case '--out-dir':
@@ -202,6 +240,7 @@ Usage:
 Options:
   --target TARGET         One of: ${Array.from(TARGETS.keys()).join(', ')}
   --node-archive PATH    Downloaded Node.js runtime archive.
+  --license-file PATH    Signed customer license JSON to inject.
   --out-dir DIR          Output directory. Defaults to dist/standalone.
   --version VERSION      Qwen Code version. Defaults to package.json version.
   --skip-checksums       Do not update SHA256SUMS. Used by release packaging.
@@ -265,6 +304,126 @@ function copyRuntimeAssets(packageRoot, outDir) {
     path.join(rootDir, 'package.json'),
     path.join(packageRoot, 'package.json'),
   );
+}
+
+function injectOfflineLicense(packageRoot, license) {
+  const licenseDir = path.join(packageRoot, 'offline-license');
+  fs.mkdirSync(licenseDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(licenseDir, 'license.json'),
+    `${JSON.stringify(license.raw, null, 2)}\n`,
+  );
+  fs.writeFileSync(
+    path.join(licenseDir, 'public-key.pem'),
+    license.publicKeyPem,
+  );
+}
+
+function writeOfflineLicenseInstructions(packageRoot, license) {
+  const instructions = `# Offline License
+
+This package includes a signed offline license for ${license.customerId}.
+
+Install the archive, start \`qwen\`, and paste the activation code on first launch.
+After activation, the client writes local state only and does not call external services.
+
+Bundled files:
+- \`offline-license/license.json\`
+- \`offline-license/public-key.pem\`
+- \`manifest.json\`
+`;
+
+  fs.writeFileSync(
+    path.join(packageRoot, 'OFFLINE_LICENSE.md'),
+    `${instructions}\n`,
+  );
+}
+
+function writeDeliveryManifest(outDir, archiveName, manifest) {
+  const deliveryPath = path.join(
+    outDir,
+    archiveName.replace(/\.(tar\.gz|zip)$/, '.delivery.json'),
+  );
+  fs.writeFileSync(deliveryPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+function readOfflineLicense(licensePath) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(licensePath, 'utf8'));
+  } catch (error) {
+    fail(
+      `Invalid offline license file: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
+  if (!isOfflineLicense(parsed)) {
+    fail(
+      'Offline license file has invalid shape. Expected signed payload with customerId, expiresAt, seats, features, activationHash, signature, and publicKeyPem.',
+    );
+  }
+
+  if (typeof parsed.publicKeyPem !== 'string' || !parsed.publicKeyPem.trim()) {
+    fail('Offline license file must include publicKeyPem.');
+  }
+
+  return {
+    raw: parsed,
+    customerId: parsed.payload.customerId,
+    expiresAt: parsed.payload.expiresAt,
+    seats: parsed.payload.seats,
+    features: parsed.payload.features,
+    publicKeyPem: parsed.publicKeyPem,
+  };
+}
+
+function formatStandaloneArchiveName({ license, outputExtension, target }) {
+  if (!license) {
+    return `qwen-code-${target}.${outputExtension}`;
+  }
+
+  return `qwen-code-${sanitizeArchiveComponent(
+    license.customerId,
+  )}-${target}-${toCompactDate(license.expiresAt)}.${outputExtension}`;
+}
+
+function sanitizeArchiveComponent(value) {
+  const fragment = value
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return fragment || 'customer';
+}
+
+function isOfflineLicense(value) {
+  return (
+    value &&
+    typeof value === 'object' &&
+    value.version === 1 &&
+    value.payload &&
+    typeof value.payload.customerId === 'string' &&
+    typeof value.payload.expiresAt === 'string' &&
+    Number.isInteger(value.payload.seats) &&
+    Array.isArray(value.payload.features) &&
+    value.payload.features.every((feature) => typeof feature === 'string') &&
+    typeof value.payload.activationHash === 'string' &&
+    value.payload.activationHash.length > 0 &&
+    value.signature &&
+    value.signature.algorithm === 'ed25519' &&
+    typeof value.signature.value === 'string' &&
+    value.signature.value.length > 0 &&
+    typeof value.publicKeyPem === 'string' &&
+    value.publicKeyPem.trim().length > 0
+  );
+}
+
+function toCompactDate(isoDate) {
+  const date = new Date(isoDate);
+  if (Number.isNaN(date.getTime())) {
+    fail(`Invalid offline license expiry: ${isoDate}`);
+  }
+  return date.toISOString().slice(0, 10).replace(/-/g, '');
 }
 
 function topLevelDistEntryForPath(candidatePath) {
@@ -515,6 +674,7 @@ function writeManifest(packageRoot, manifest) {
         version: manifest.version,
         target: manifest.target,
         nodeArchive: manifest.nodeArchive,
+        offlineLicense: manifest.offlineLicense,
         createdAt: new Date().toISOString(),
       },
       null,
@@ -608,4 +768,9 @@ function fail(message) {
   throw new Error(`Error: ${message}`);
 }
 
-export { writeSha256Sums };
+export {
+  formatStandaloneArchiveName,
+  readOfflineLicense,
+  sanitizeArchiveComponent,
+  writeSha256Sums,
+};

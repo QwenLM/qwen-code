@@ -927,6 +927,34 @@ describe('loadCliConfig', () => {
     expect(config.getIncludePartialMessages()).toBe(true);
   });
 
+  it('should block startup when offline license enforcement is enabled but not activated', async () => {
+    const { publicKey } = await import('node:crypto').then((crypto) =>
+      crypto.generateKeyPairSync('ed25519'),
+    );
+    const publicKeyPem = publicKey.export({
+      format: 'pem',
+      type: 'spki',
+    }) as string;
+    const licenseDir = '/tmp/offline-license';
+
+    await expect(
+      loadCliConfig(
+        {
+          security: {
+            offlineLicense: {
+              enabled: true,
+              licensePath: path.join(licenseDir, 'license.json'),
+              activationPath: path.join(licenseDir, 'activation.json'),
+              publicKeyPem,
+              requiredFeature: 'agent-cli',
+            },
+          },
+        } as Settings,
+        {} as CliArgs,
+      ),
+    ).rejects.toThrow('Offline license file is missing.');
+  });
+
   it('should fork and load a new session when --resume is combined with --fork-session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {

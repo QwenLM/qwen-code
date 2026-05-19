@@ -850,6 +850,14 @@ install_standalone() {
 
     rm -rf "${old_install_dir}"
     export PATH="${INSTALL_BIN_DIR}:${PATH}"
+    if [[ -f "${INSTALL_LIB_DIR}/offline-license/license.json" ]]; then
+        local qwen_home_dir="${QWEN_HOME:-${HOME:-}/.qwen}"
+        mkdir -p "${qwen_home_dir}"
+        cp "${INSTALL_LIB_DIR}/offline-license/license.json" "${qwen_home_dir}/license.json"
+        if [[ -f "${INSTALL_LIB_DIR}/offline-license/public-key.pem" ]]; then
+            cp "${INSTALL_LIB_DIR}/offline-license/public-key.pem" "${qwen_home_dir}/public-key.pem"
+        fi
+    fi
 
     create_source_json
     rm -rf "${temp_dir}"
