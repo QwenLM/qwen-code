@@ -501,6 +501,15 @@ export class GeminiChat {
   private breakerWarningEmitted = false;
 
   /**
+   * Throttle flag for the hard-rescue-budget-exhausted warning.
+   * Symmetric with `breakerWarningEmitted`: once the rescue budget
+   * exhausts and the chat stays over the hard threshold, this warn
+   * would fire on every send without a throttle. Cleared in the
+   * COMPRESSED success branch alongside the counter resets. (R8.4)
+   */
+  private budgetExhaustedWarningEmitted = false;
+
+  /**
    * Heap-pressure compaction is process-wide pressure applied per chat. If one
    * heap-triggered attempt cannot reduce history, briefly back off this chat
    * so every subsequent send does not immediately pay for another compression
@@ -658,9 +667,11 @@ export class GeminiChat {
       // resets on any compression success, not just hard-rescue success.)
       this.consecutiveFailures = 0;
       this.hardRescueFailureCount = 0;
-      // R7.9: clear throttle so a subsequent trip emits its first-of-cycle
-      // warn rather than being silently swallowed by a stale flag.
+      // R7.9 / R8.4: clear log throttles so a subsequent trip /
+      // exhaustion emits its first-of-cycle warn rather than being
+      // silently swallowed by a stale flag.
       this.breakerWarningEmitted = false;
+      this.budgetExhaustedWarningEmitted = false;
       this.heapPressureCompressionCooldownUntil = 0;
     } else if (bypassTokenThreshold) {
       // Heap-pressure compaction failed: skip touching the failure counter
@@ -842,16 +853,19 @@ export class GeminiChat {
         );
         this.consecutiveFailures = 0;
         this.hardRescueFailureCount += 1;
-      } else if (wantHardRescue) {
-        // Rescue suppressed because the budget is exhausted. Log so an
-        // oncall debugging "why isn't hard-rescue firing" doesn't have
-        // to reverse-engineer two counters from source. Reactive
-        // overflow is now the only remaining defence layer.
+      } else if (wantHardRescue && !this.budgetExhaustedWarningEmitted) {
+        // Rescue suppressed because the budget is exhausted. R8.4:
+        // throttle to once per exhaustion (cleared on COMPRESSED
+        // recovery) so an oncall debugging "why isn't hard-rescue
+        // firing" still gets the signal, but a session stuck above
+        // hard doesn't spam the log on every send.
         debugLogger.warn(
           `[compaction] hard-tier rescue skipped: budget exhausted ` +
             `(hardRescueFailureCount=${this.hardRescueFailureCount}/${MAX_CONSECUTIVE_FAILURES}). ` +
-            `Reactive overflow is the remaining safety net; run /compress to recover.`,
+            `Reactive overflow is the remaining safety net; run /compress to recover. ` +
+            `(This message is logged once per exhaustion.)`,
         );
+        this.budgetExhaustedWarningEmitted = true;
       }
 
       compressionInfo = await this.tryCompress(

@@ -541,10 +541,21 @@ export class ChatCompressionService {
     // EMPTY_SUMMARY when the cap is hit mid-snapshot.
     const rawSummaryText = summaryResult.text;
     const isRawEmpty = !rawSummaryText || rawSummaryText.trim().length === 0;
+    // R8.6: anchor on the LAST opening `<state_snapshot>` tag, not the
+    // first. The compression prompt instructs the model to "generate
+    // the <state_snapshot>", so the scratchpad is plausibly going to
+    // mention the literal tag name. A non-greedy match from the first
+    // occurrence would capture scratchpad content through to the real
+    // closing tag — bypassing the data-retention fix entirely. Using
+    // a greedy prefix `[\s\S]*<state_snapshot>` forces the regex
+    // engine to find the LAST opening tag, then the non-greedy
+    // `[\s\S]*?</state_snapshot>` captures the smallest valid envelope.
     const snapshotMatch = rawSummaryText?.match(
-      /<state_snapshot>[\s\S]*?<\/state_snapshot>/,
+      /[\s\S]*<state_snapshot>([\s\S]*?)<\/state_snapshot>/,
     );
-    const summary = snapshotMatch ? snapshotMatch[0] : '';
+    const summary = snapshotMatch
+      ? `<state_snapshot>${snapshotMatch[1]}</state_snapshot>`
+      : '';
     const isSummaryEmpty = summary.trim().length === 0;
     if (
       !isSummaryEmpty &&
@@ -556,6 +567,24 @@ export class ChatCompressionService {
         .debug(
           `[chat-compression] stripped ${rawSummaryText.length - summary.length} chars ` +
             `of pre/post-snapshot text (likely scratchpad) before persisting summary`,
+        );
+    }
+    // R8.1: format violation is the surprising case — model produced
+    // text but didn't follow the <state_snapshot> contract. Without a
+    // distinguishing log, this is indistinguishable from a model that
+    // genuinely returned nothing (which warrants different operator
+    // action: prompt vs. provider). Log the length + a short slice for
+    // diagnostic context. Slice is bounded so a runaway scratchpad
+    // can't flood the log; the snapshot envelope itself, if any, is
+    // already either persisted (above) or absent (this branch).
+    if (!isRawEmpty && isSummaryEmpty) {
+      const slice = rawSummaryText!.slice(0, 200);
+      config
+        .getDebugLogger()
+        .warn(
+          `[chat-compression] model output (${rawSummaryText!.length} chars) ` +
+            `contained no <state_snapshot> tags — treating as empty summary. ` +
+            `First 200 chars: ${slice}`,
         );
     }
     const compressionUsageMetadata = summaryResult.usage;
@@ -660,10 +689,16 @@ export class ChatCompressionService {
       // Best-effort token math using *only* model-reported token counts.
       //
       // Note: compressionInputTokenCount includes the compression prompt and
-      // the extra "reason in your scratchpad" instruction(approx. 1000 tokens), and
-      // compressionOutputTokenCount reflects the summary tokens only since
-      // thinking is disabled.
-      // We accept these inaccuracies to avoid local token estimation.
+      // the extra "reason in your scratchpad" instruction(approx. 1000 tokens).
+      //
+      // R8.7: compressionOutputTokenCount counts the FULL model output
+      // (scratchpad + snapshot), but R7.1 only persists the snapshot
+      // envelope. Using the raw API count inflates newTokenCount by
+      // the scratchpad's share, which makes the next cheap-gate fire
+      // earlier than it should. Scale by the char ratio so the
+      // bookkeeping reflects what we actually kept. Using the API count
+      // (rather than char/4 of the summary alone) preserves the
+      // provider's tokenizer fidelity for the snapshot portion.
       if (
         typeof compressionInputTokenCount === 'number' &&
         compressionInputTokenCount > 0 &&
@@ -671,11 +706,21 @@ export class ChatCompressionService {
         compressionOutputTokenCount > 0
       ) {
         canCalculateNewTokenCount = true;
+        const rawLen = rawSummaryText ? rawSummaryText.length : summary.length;
+        const persistedOutputTokens =
+          rawLen > 0
+            ? Math.max(
+                1,
+                Math.round(
+                  compressionOutputTokenCount * (summary.length / rawLen),
+                ),
+              )
+            : compressionOutputTokenCount;
         newTokenCount = Math.max(
           0,
           originalTokenCount -
             (compressionInputTokenCount - 1000) +
-            compressionOutputTokenCount,
+            persistedOutputTokens,
         );
       }
     }

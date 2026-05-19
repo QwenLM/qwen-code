@@ -2125,9 +2125,12 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     // 20K cap — the guard should drop the result and surface it as a
     // failure with a status distinct from EMPTY_SUMMARY so telemetry can
     // separate prompt-quality failures from capacity failures.
-    // (R1.1 made the breaker tick; R5.2 split the status; R6.2 changed
-    // `>=` to `>` so the exact-cap case is treated as a legitimate
-    // summary — only true overruns trigger the guard.)
+    // (R1.1 made the breaker tick; R5.2 split the status; R7.8 reverted
+    // R6.2's `>` back to `>=` — the API hard-caps at 20K, so `>` was
+    // dead code that silently persisted truncated summaries. The
+    // separate `treats output at exactly COMPACT_MAX_OUTPUT_TOKENS as
+    // truncated` test below pins the exact-cap case the revert exists
+    // to catch.)
     vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>truncated...</state_snapshot>',
       usage: {
@@ -2180,6 +2183,370 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
     );
+  });
+
+  it('treats output at exactly COMPACT_MAX_OUTPUT_TOKENS as truncated (R8.2 / R7.8 exact-cap boundary)', async () => {
+    // The whole point of R7.8 reverting `>` back to `>=`: a model whose
+    // tokenizer lands exactly at the cap is far more likely truncated
+    // than legitimately completing. This test would PASS under `>=` and
+    // FAIL under `>` — pinning the revert against accidental
+    // re-introduction.
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>truncated...</state_snapshot>',
+      usage: {
+        promptTokenCount: 50_000,
+        candidatesTokenCount: 20_000, // exactly at cap
+        totalTokenCount: 70_000,
+      },
+    } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    const mockChat = {
+      getHistory: vi.fn().mockReturnValue(history),
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+    } as unknown as Config;
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+  });
+
+  it('persists only the <state_snapshot> envelope, stripping pre/post scratchpad content (R8.3a / R7.1 data-retention)', async () => {
+    // R7.1's data-retention fix: with `includeThoughts: false` the
+    // model emits its <scratchpad> reasoning as plain text alongside
+    // <state_snapshot>. Persisting the concatenation would leak
+    // sensitive tool output that the model quoted to reason about.
+    // Verify the persisted summary is the snapshot envelope ONLY.
+    const SCRATCHPAD =
+      '<scratchpad>secret API_KEY=sk-xxxYYY in tool output</scratchpad>';
+    const SNAPSHOT = '<state_snapshot>Clean summary</state_snapshot>';
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: `${SCRATCHPAD}\n${SNAPSHOT}`,
+      usage: {
+        // Realistic compression side-query: input ≈ originalTokenCount
+        // (most of the history) + ~1000 prompt overhead. Without this
+        // the `originalTokenCount - (input - 1000) + output` formula
+        // makes the new count > original and trips the inflation guard.
+        promptTokenCount: 175_000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 175_500,
+      },
+    } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    const mockChat = {
+      getHistory: vi.fn().mockReturnValue(history),
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+    } as unknown as Config;
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+    const persisted = result.newHistory![0].parts![0].text!;
+    // Snapshot envelope persists exactly; scratchpad content nowhere
+    // in the persisted history.
+    expect(persisted).toBe(SNAPSHOT);
+    expect(persisted).not.toContain('API_KEY');
+    expect(persisted).not.toContain('scratchpad');
+    expect(persisted).not.toContain('sk-xxxYYY');
+  });
+
+  it('extracts the real snapshot when the scratchpad literally mentions <state_snapshot> (R8.6 / R7.1 regex anchor)', async () => {
+    // Reviewer R8.6: the compression prompt instructs the model to
+    // "generate the <state_snapshot>", so the scratchpad is plausibly
+    // going to mention the tag literally. A non-greedy match from the
+    // first occurrence would capture the scratchpad's mention through
+    // to the real closing tag — bypassing the data-retention fix.
+    // The regex must anchor on the LAST opening tag so the captured
+    // envelope is always the real snapshot, never the mention.
+    const RAW =
+      'I need to generate a <state_snapshot> of this conversation now. ' +
+      'Reasoning: API_KEY=sk-xxx was mentioned in the chat.\n' +
+      '<state_snapshot>Real summary content here</state_snapshot>';
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: RAW,
+      usage: {
+        promptTokenCount: 175_000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 175_500,
+      },
+    } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    const mockChat = {
+      getHistory: vi.fn().mockReturnValue(history),
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+    } as unknown as Config;
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    const persisted = result.newHistory![0].parts![0].text!;
+    expect(persisted).toBe(
+      '<state_snapshot>Real summary content here</state_snapshot>',
+    );
+    expect(persisted).not.toContain('API_KEY');
+    expect(persisted).not.toContain('Reasoning:');
+  });
+
+  it('warns and surfaces EMPTY_SUMMARY when model output is non-empty but lacks <state_snapshot> tags (R8.1 / R8.3b format-violation)', async () => {
+    // Format violation: the model produced text but didn't follow the
+    // <state_snapshot> envelope contract. The persisted summary becomes
+    // empty (regex no-match) and we surface EMPTY_SUMMARY — but pre-R8.1
+    // this branch was silent, making it indistinguishable from a model
+    // that genuinely returned nothing. A warn log with a content slice
+    // is the actionable diagnostic an oncall needs.
+    const FORMAT_VIOLATION_RAW =
+      'Sure, here is the summary: The user asked X and Y happened. ' +
+      'No <state_snapshot> tags emitted at all.';
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: FORMAT_VIOLATION_RAW,
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    const mockChat = {
+      getHistory: vi.fn().mockReturnValue(history),
+    } as unknown as GeminiChat;
+    const warn = vi.fn();
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn, debug: vi.fn() }),
+    } as unknown as Config;
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+    );
+    // Warn must fire with a content fingerprint so oncall can identify
+    // "format violation" vs "genuinely empty model output".
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('state_snapshot'),
+    );
+  });
+
+  it('breaker-tripped NOOP returns the caller originalTokenCount, not zero (R8.3c / R7.6 telemetry)', async () => {
+    // R7.6 changed the breaker-tripped NOOP from returning
+    // `{ originalTokenCount: 0, newTokenCount: 0 }` to forwarding the
+    // caller's count so telemetry/dashboards aren't misled by a zero on
+    // the trip event. Pin that contract.
+    const ORIGINAL = 175_000;
+    const mockChat = {
+      getHistory: vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'msg' }] }]),
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+    } as unknown as Config;
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: false,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: MAX_CONSECUTIVE_FAILURES, // breaker tripped
+      originalTokenCount: ORIGINAL,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+    expect(result.info.originalTokenCount).toBe(ORIGINAL);
+    expect(result.info.newTokenCount).toBe(ORIGINAL);
+  });
+
+  it('newTokenCount accounts for only the persisted snapshot, not the discarded scratchpad (R8.7)', async () => {
+    // Pre-R8.7: newTokenCount used compressionOutputTokenCount from the
+    // API, which counts the full model output (scratchpad + snapshot).
+    // The persisted history only contains the snapshot, so the inflated
+    // count made the next cheap-gate trigger compaction earlier than
+    // necessary. Fix: scale by summary/raw character ratio so the
+    // bookkeeping reflects what we actually keep.
+    //
+    // Mock raw output where scratchpad is ~3x the snapshot in chars,
+    // and assert newTokenCount tracks the snapshot share — not the full
+    // candidatesTokenCount.
+    const SCRATCHPAD = '<scratchpad>' + 'x'.repeat(3000) + '</scratchpad>';
+    const SNAPSHOT =
+      '<state_snapshot>' + 'y'.repeat(1000) + '</state_snapshot>';
+    const RAW = `${SCRATCHPAD}\n${SNAPSHOT}`;
+
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: RAW,
+      usage: {
+        promptTokenCount: 175_000, // realistic — slimmed history + prompt
+        candidatesTokenCount: 1024, // full output (scratchpad + snapshot)
+        totalTokenCount: 176_024,
+      },
+    } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    const mockChat = {
+      getHistory: vi.fn().mockReturnValue(history),
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+    } as unknown as Config;
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    // The persisted summary is SNAPSHOT (~1016 chars). The raw was
+    // ~4030 chars. The scaled "snapshot share" of the 1024-token
+    // candidatesTokenCount is approximately 1024 * 1016/4030 ≈ 258.
+    // Pre-R8.7, the code used the full 1024 verbatim. Asserting the
+    // count is *materially* smaller pins the scaling behaviour without
+    // hard-coding the exact value (different scaling strategies are
+    // acceptable; the contract is "smaller than the raw API count").
+    const apiOutputTokens = 1024;
+    const persistedOutputTokens =
+      result.info.newTokenCount - 180_000 + (175_000 - 1000); // invert the formula
+    expect(persistedOutputTokens).toBeGreaterThan(0);
+    expect(persistedOutputTokens).toBeLessThan(apiOutputTokens * 0.5); // snapshot is ~25% of raw
   });
 });
 
