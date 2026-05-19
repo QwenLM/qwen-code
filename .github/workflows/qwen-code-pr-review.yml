@@ -421,14 +421,29 @@ jobs:
 
           # Dry run: we still want the FULL review the model produces,
           # streamed into this job log, but nothing posted to GitHub.
+          # Also run a CI-lightweight agent set: the full bundled
+          # /review (9 agents incl. Agent 7 = npm ci + whole-monorepo
+          # build/test) cannot finish a heavy PR within the job timeout,
+          # and the repo's own CI already builds/tests every PR, so
+          # Agent 7 is redundant here. Prompt-level steering only — the
+          # bundled SKILL.md is unchanged.
           prompt="$REVIEW_PROMPT"
           if [ "${SHOULD_COMMENT:-}" != "true" ]; then
             prompt="${prompt}
 
-          DRY RUN MODE: Produce the complete code review and print it in
-          full to stdout. Do NOT post anything to GitHub — no gh pr
-          comment, no gh pr review, no GitHub API writes, no inline
-          comments. Output only; the maintainer reads it from the CI log."
+          CI LIGHTWEIGHT DRY RUN — follow these execution constraints,
+          they override the skill's defaults for this run:
+          1. Do NOT run \`npm ci\`/install, build, or the test suite, and
+             do NOT launch Agent 7 (Build & Test). The repository's own
+             CI already builds and tests this PR; it is redundant here.
+          2. Run Agents 1-5 (Correctness, Security, Code Quality,
+             Performance, Test Coverage) and ONE consolidated audit
+             instead of the three separate 6a/6b/6c personas.
+          3. Skip the local linter/typecheck step (Step 3).
+          4. Produce the complete code review and print it in full to
+             stdout. Do NOT post anything to GitHub — no gh pr comment,
+             no gh pr review, no GitHub API writes, no inline comments.
+             Output only; the maintainer reads it from the CI log."
           fi
 
           out=qwen-review-stream.jsonl
