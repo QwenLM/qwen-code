@@ -41,6 +41,18 @@ export interface BridgeFileSystem {
    * expected to surface boundary / trust / encoding errors as
    * thrown JS errors — the bridge's existing error-mapping path
    * (`mapDomainErrorToErrorKind`) will classify them downstream.
+   *
+   * Adapter MUST replicate the inline proxy's two defensive
+   * gates (the inline path is fully bypassed when a fileSystem is
+   * injected):
+   *   1. Reject non-regular files (sockets / pipes / char devices
+   *      / procfs / sysfs entries can produce unbounded data on
+   *      read despite reporting `stats.size === 0`). Inline path
+   *      throws with `describeStatKind(stats)` in the message.
+   *   2. Cap the buffered size (the inline path uses
+   *      `READ_FILE_SIZE_CAP = 100 MiB` to defend against a small
+   *      `{ line: 1, limit: 10 }` request against a 500 MB log
+   *      from costing 500 MB of RSS just to return 10 lines).
    */
   readText(params: ReadTextFileRequest): Promise<ReadTextFileResponse>;
 
@@ -49,6 +61,17 @@ export interface BridgeFileSystem {
    * MUST preserve mode/owner where possible, resolve symlinks
    * before write, and reject paths outside the bound workspace.
    * Returns the ACP-shaped empty response on success.
+   *
+   * Adapter MUST replicate the inline proxy's defenses:
+   *   - Write-then-rename atomicity (avoid truncation on
+   *     SIGKILL / OOM mid-write).
+   *   - Dangling-symlink → write through to the symlink's intended
+   *     target (don't replace the symlink with a regular file).
+   *   - Preserve target mode bits + owner/group where the daemon
+   *     has permission.
+   *   - Default to `0o600` for newly-created files (NOT umask
+   *     defaults — the inline `mode` arg bypasses umask for
+   *     atomicity of secret writes).
    */
   writeText(params: WriteTextFileRequest): Promise<WriteTextFileResponse>;
 }

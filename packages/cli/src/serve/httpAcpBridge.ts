@@ -60,6 +60,8 @@ export type {
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 
+export type { BridgeFileSystem } from '@qwen-code/acp-bridge/bridgeFileSystem';
+
 export type {
   BridgeSpawnRequest,
   BridgeSession,
