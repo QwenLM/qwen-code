@@ -39,7 +39,12 @@ import {
 import type { ModelsConfig } from '../models/modelsConfig.js';
 import { UnauthorizedError } from '../utils/errors.js';
 import { retryWithBackoff } from '../utils/retry.js';
-import { CompressionStatus, GeminiEventType, Turn } from './turn.js';
+import {
+  CompressionStatus,
+  GeminiEventType,
+  Turn,
+  type ServerGeminiStreamEvent,
+} from './turn.js';
 
 vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
@@ -2700,20 +2705,9 @@ hello
     });
 
     it('should not block the main request when auto-memory recall is slow', async () => {
-      // Simulate a recall that takes longer than the 2.5s deadline
-      mockMemoryManager.recall.mockReturnValue(
-        new Promise((resolve) =>
-          setTimeout(
-            () =>
-              resolve({
-                prompt: '## Relevant memory\n\nSlow memory result.',
-                selectedDocs: [],
-                strategy: 'model',
-              }),
-            10_000,
-          ),
-        ),
-      );
+      // Recall never settles — settledAt stays null so the UserQuery consume
+      // point skips it and turn.run() is called immediately without memory.
+      mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
 
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -2726,38 +2720,28 @@ hello
       };
       client['chat'] = mockChat as GeminiChat;
 
-      vi.useFakeTimers();
-      try {
-        const streamPromise = (async () => {
-          const stream = client.sendMessageStream(
-            [{ text: 'Quick question' }],
-            new AbortController().signal,
-            'prompt-id-slow-memory',
-          );
-          for await (const _ of stream) {
-            // consume stream
-          }
-        })();
-
-        // Advance past the 2.5s deadline — the main request should proceed
-        await vi.advanceTimersByTimeAsync(3_000);
-        await streamPromise;
-
-        // The main request should have been called without the slow memory
-        expect(mockTurnRunFn).toHaveBeenCalledWith(
-          'test-model',
-          expect.not.arrayContaining([
-            expect.stringContaining('Slow memory result'),
-          ]),
-          expect.any(AbortSignal),
-        );
-      } finally {
-        vi.useRealTimers();
+      const stream = client.sendMessageStream(
+        [{ text: 'Quick question' }],
+        new AbortController().signal,
+        'prompt-id-slow-memory',
+      );
+      for await (const _ of stream) {
+        // consume stream
       }
+
+      // turn.run() must have been called without the slow memory
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.not.arrayContaining([
+          expect.stringContaining('Slow memory result'),
+        ]),
+        expect.any(AbortSignal),
+      );
     });
 
-    it('should include auto-memory prompt when recall completes within deadline', async () => {
-      // Simulate a fast recall that completes well within the deadline
+    it('should inject auto-memory at UserQuery consume point when recall already settled', async () => {
+      // mockResolvedValue settles synchronously; by the time the consume-point
+      // check runs (after at least one await), settledAt is set.
       mockMemoryManager.recall.mockResolvedValue({
         prompt: '## Relevant memory\n\nFast memory result.',
         selectedDocs: [],
@@ -2789,6 +2773,322 @@ hello
         expect.arrayContaining(['## Relevant memory\n\nFast memory result.']),
         expect.any(AbortSignal),
       );
+    });
+
+    it('should inject auto-memory on first ToolResult when recall settles after UserQuery', async () => {
+      // Controllable promise — recall stays pending across the UserQuery turn
+      // and only settles before the ToolResult turn runs.
+      let resolveRecall:
+        | ((value: {
+            prompt: string;
+            selectedDocs: never[];
+            strategy: 'model';
+          }) => void)
+        | undefined;
+      mockMemoryManager.recall.mockReturnValue(
+        new Promise((resolve) => {
+          resolveRecall = resolve;
+        }),
+      );
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // Turn 1: UserQuery — recall still pending, no injection
+      const userStream = client.sendMessageStream(
+        [{ text: 'What is my name?' }],
+        new AbortController().signal,
+        'prompt-id-user-query',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of userStream) {
+        // consume
+      }
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        expect.not.arrayContaining([
+          expect.stringContaining('Deferred memory result'),
+        ]),
+        expect.any(AbortSignal),
+      );
+
+      // Recall settles between turns
+      resolveRecall!({
+        prompt: '## Relevant memory\n\nDeferred memory result.',
+        selectedDocs: [],
+        strategy: 'model',
+      });
+      // Drain microtasks so the settledAt finally() callback runs
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Turn 2: ToolResult — settledAt is now non-null, memory should inject
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'world' };
+        })(),
+      );
+      const toolStream = client.sendMessageStream(
+        [{ functionResponse: { name: 'foo', response: { ok: true } } }],
+        new AbortController().signal,
+        'prompt-id-tool-result',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of toolStream) {
+        // consume
+      }
+
+      // Memory must come AFTER the functionResponse part so the Qwen API
+      // call/response pairing isn't broken (see client.ts:1209-1213).
+      const lastCallArgs = mockTurnRunFn.mock.lastCall;
+      const requestArr = lastCallArgs![1] as unknown[];
+      const functionResponseIdx = requestArr.findIndex(
+        (p) => typeof p === 'object' && p !== null && 'functionResponse' in p,
+      );
+      const memoryIdx = requestArr.findIndex(
+        (p) => p === '## Relevant memory\n\nDeferred memory result.',
+      );
+      expect(functionResponseIdx).toBeGreaterThanOrEqual(0);
+      expect(memoryIdx).toBeGreaterThan(functionResponseIdx);
+    });
+
+    it('should abort the pending prefetch when the caller signal aborts', async () => {
+      let abortHandlerInvoked = false;
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          abortHandlerInvoked = true;
+        });
+        return new Promise(() => {});
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+
+      const callerController = new AbortController();
+      const stream = client.sendMessageStream(
+        [{ text: 'user typed but then aborted' }],
+        callerController.signal,
+        'prompt-id-aborted',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      expect(abortHandlerInvoked).toBe(false);
+      callerController.abort();
+      expect(abortHandlerInvoked).toBe(true);
+    });
+
+    it('should abort the previous prefetch when a new UserQuery arrives mid-flight', async () => {
+      // Pending recall on first UserQuery — never resolves on its own.
+      const abortSignals: AbortSignal[] = [];
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        abortSignals.push(opts.abortSignal as AbortSignal);
+        return new Promise(() => {});
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+
+      // First UserQuery — installs prefetch #1
+      const stream1 = client.sendMessageStream(
+        [{ text: 'first' }],
+        new AbortController().signal,
+        'prompt-id-1',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream1) {
+        // consume
+      }
+      expect(abortSignals.length).toBe(1);
+      expect(abortSignals[0].aborted).toBe(false);
+
+      // Second UserQuery — should abort #1 before installing #2
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello again' };
+        })(),
+      );
+      const stream2 = client.sendMessageStream(
+        [{ text: 'second' }],
+        new AbortController().signal,
+        'prompt-id-2',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream2) {
+        // consume
+      }
+
+      expect(abortSignals.length).toBe(2);
+      expect(abortSignals[0].aborted).toBe(true);
+      expect(abortSignals[1].aborted).toBe(false);
+    });
+
+    it('should abort the pending prefetch on resetChat', async () => {
+      let abortHandlerInvoked = false;
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          abortHandlerInvoked = true;
+        });
+        return new Promise(() => {});
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'first' }],
+        new AbortController().signal,
+        'prompt-id-reset-1',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      expect(abortHandlerInvoked).toBe(false);
+      await client.resetChat();
+      expect(abortHandlerInvoked).toBe(true);
+      expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
+    it('should abort the pending prefetch when LoopDetected fires mid-stream', async () => {
+      let abortHandlerInvoked = false;
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          abortHandlerInvoked = true;
+        });
+        return new Promise(() => {});
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // Force LoopDetector to trip on the first event.
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'addAndCheck').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(null);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-loop',
+        { type: SendMessageType.UserQuery },
+      );
+      const events = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
+        true,
+      );
+      expect(abortHandlerInvoked).toBe(true);
+      expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
+    it('should PRESERVE the pending prefetch when next-speaker continueTurn returns', async () => {
+      // Self-inflicted-regression guard for the round-4 finding:
+      // the bottom-of-try `normalCompletion = true` doesn't cover the
+      // `return continueTurn;` path, so the outer's finally used to cancel
+      // the still-pending prefetch — meaning a subsequent ToolResult turn
+      // would have no memory to consume.
+      let abortHandlerInvoked = false;
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          abortHandlerInvoked = true;
+        });
+        return new Promise(() => {}); // never settles
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'outer reply' };
+        })(),
+      );
+
+      // Force the next-speaker check to recurse so we hit `return continueTurn`.
+      // The recursion call passes through this same mock stream and returns.
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
+      const mockedCheckNextSpeaker = vi.mocked(checkNextSpeaker);
+      mockedCheckNextSpeaker
+        .mockResolvedValueOnce({
+          reasoning: 'forced',
+          next_speaker: 'model',
+        })
+        .mockResolvedValue(null); // inner recursion: stop
+      // Each recursive sendMessageStream call asks turn.run() for a new stream.
+      mockTurnRunFn.mockImplementation(
+        () =>
+          (async function* () {
+            yield { type: 'content', value: 'reply' };
+          })() as unknown as AsyncGenerator<ServerGeminiStreamEvent>,
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hello' }],
+        new AbortController().signal,
+        'prompt-id-continueturn',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      // The prefetch must survive the continueTurn return so a follow-up
+      // ToolResult turn can consume it.
+      expect(abortHandlerInvoked).toBe(false);
+      expect(client['pendingMemoryPrefetch']).not.toBeUndefined();
     });
 
     it('should proceed without auto-memory when managed auto-memory is disabled', async () => {
