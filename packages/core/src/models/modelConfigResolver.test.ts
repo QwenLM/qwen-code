@@ -886,6 +886,58 @@ describe('modelConfigResolver', () => {
       // in modelsConfig.ts applyResolvedModelDefaults() lines 791-797.
       expect(result.config.modalities).toBeDefined();
       expect(result.config.modalities?.image).toBe(true);
+      expect(result.config.modalities?.video).toBe(true);
+      expect(result.sources['modalities'].kind).toBe('computed');
+    });
+
+    it('env-var-only path: modalities defaults to {} for unknown model (text-only)', () => {
+      // Locks the invariant: defaultModalities() returns {} (text-only) for
+      // unknown model patterns, never undefined. After this fix, env-var-only
+      // setups never re-expose `modalities === undefined` for downstream
+      // consumers to misinterpret as "unresolved" (issue #4219).
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'some-unknown-model-xyz',
+        },
+      });
+
+      expect(result.config.modalities).toEqual({});
+      expect(result.sources['modalities'].kind).toBe('computed');
+    });
+
+    it('env-var-only path: explicit settings.generationConfig.modalities is not overridden by fallback', () => {
+      // Locks the `=== undefined` guard: when user explicitly configures
+      // modalities in settings, the fallback must not clobber them with
+      // defaultModalities() — even for a model whose name would otherwise
+      // auto-resolve to multimodal.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          generationConfig: {
+            modalities: {
+              image: false,
+              pdf: false,
+              video: false,
+              audio: false,
+            },
+          },
+        },
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'qwen3.6-35b-a3b', // defaultModalities → { image: true, video: true }
+        },
+      });
+
+      expect(result.config.modalities?.image).toBe(false);
+      expect(result.config.modalities?.video).toBe(false);
+      expect(result.sources['modalities'].kind).toBe('settings');
     });
   });
 });

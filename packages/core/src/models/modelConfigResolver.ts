@@ -402,6 +402,13 @@ function resolveGenerationConfig(
   // modelsConfig.applyResolvedModelDefaults so all paths agree on which models
   // are multimodal — without this, env-var-only setups silently drop @image
   // attachments for image-capable models (issue #4219).
+  //
+  // Invariant: defaultModalities() returns `{}` (text-only) for unknown
+  // models, never `undefined`. After this fallback runs with a known modelId,
+  // `result.modalities` is always defined. Downstream code must NOT branch
+  // on `modalities === undefined` to mean "unresolved" — use the sources map
+  // (kind === 'computed' vs 'modelProviders'/'settings') if that distinction
+  // matters.
   if (result.modalities === undefined && modelId) {
     result.modalities = defaultModalities(modelId);
     sources['modalities'] = computedSource('auto-detected from model');
