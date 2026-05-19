@@ -275,15 +275,27 @@ export class AuthMessageHandler extends BaseMessageHandler {
         if (!selected) return;
         baseUrl = selected;
       } else {
-        // Free-form URL input
+        // Free-form URL input. Show a protocol-specific default as
+        // placeholder (NOT pre-filled value) so picking Anthropic/Gemini
+        // doesn't silently write the OpenAI endpoint when the user hits
+        // Enter on the OpenAI default.
+        const effectiveProtocol = protocol ?? provider.protocol;
+        const defaultByProtocol: Record<string, string> = {
+          openai: 'https://api.openai.com/v1',
+          anthropic: 'https://api.anthropic.com/v1',
+          gemini: 'https://generativelanguage.googleapis.com',
+        };
+        const placeholder =
+          defaultByProtocol[String(effectiveProtocol)] ??
+          'https://api.openai.com/v1';
         const urlInput = await this.input({
           title: `${flowTitle}: Base URL`,
           prompt: 'Enter API base URL',
-          placeHolder: 'https://api.openai.com/v1',
-          value: 'https://api.openai.com/v1',
+          placeHolder: placeholder,
+          value: '',
         });
         if (urlInput === undefined) return;
-        baseUrl = urlInput;
+        baseUrl = urlInput.trim() || placeholder;
         if (!/^https?:\/\//i.test(baseUrl)) {
           this.sendToWebView({
             type: 'authError',
@@ -338,6 +350,15 @@ export class AuthMessageHandler extends BaseMessageHandler {
         .split(',')
         .map((id) => id.trim())
         .filter(Boolean);
+      if (modelIds.length === 0) {
+        // E.g. user typed only whitespace/commas like ", , ,".
+        this.sendToWebView({
+          type: 'authError',
+          data: { message: 'Model IDs cannot be empty.' },
+        });
+        this.notifyAuthCancelled();
+        return;
+      }
     } else {
       modelIds = getDefaultModelIds(provider);
     }

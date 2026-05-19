@@ -10,6 +10,8 @@ import {
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
+  findProviderByCredentials,
+  getAllProviderBaseUrls,
   getDefaultModelIds,
   resolveBaseUrl,
   shouldShowStep,
@@ -479,5 +481,60 @@ describe('buildProviderTemplate', () => {
     });
     const template = buildProviderTemplate(config, 'https://intl.com');
     expect(template[0]?.name).toBe('[Intl] m');
+  });
+});
+
+describe('findProviderByCredentials', () => {
+  it('finds a preset by its env key + base URL', () => {
+    const found = findProviderByCredentials(
+      'https://api.deepseek.com',
+      'DEEPSEEK_API_KEY',
+    );
+    expect(found?.id).toBe('deepseek');
+  });
+
+  it('returns undefined for an unknown env key', () => {
+    expect(
+      findProviderByCredentials('https://api.deepseek.com', 'NOT_A_REAL_KEY'),
+    ).toBeUndefined();
+  });
+
+  it('returns undefined for a known env key but mismatched base URL', () => {
+    expect(
+      findProviderByCredentials(
+        'https://wrong.example.com/v1',
+        'DEEPSEEK_API_KEY',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('matches a multi-baseUrl preset against any of its registered URLs', () => {
+    // coding-plan ships both China and Singapore endpoints under the same env key.
+    const china = findProviderByCredentials(
+      'https://coding.dashscope.aliyuncs.com/v1',
+      'BAILIAN_CODING_PLAN_API_KEY',
+    );
+    const intl = findProviderByCredentials(
+      'https://coding-intl.dashscope.aliyuncs.com/v1',
+      'BAILIAN_CODING_PLAN_API_KEY',
+    );
+    expect(china?.id).toBe('coding-plan');
+    expect(intl?.id).toBe('coding-plan');
+  });
+});
+
+describe('getAllProviderBaseUrls', () => {
+  it('returns a non-empty list including known preset URLs', () => {
+    const urls = getAllProviderBaseUrls();
+    expect(urls.length).toBeGreaterThan(0);
+    expect(urls).toContain('https://api.deepseek.com');
+    expect(urls).toContain('https://openrouter.ai/api/v1');
+  });
+
+  it('expands BaseUrlOption[] presets into each option URL', () => {
+    const urls = getAllProviderBaseUrls();
+    // coding-plan has China + Singapore options
+    expect(urls).toContain('https://coding.dashscope.aliyuncs.com/v1');
+    expect(urls).toContain('https://coding-intl.dashscope.aliyuncs.com/v1');
   });
 });

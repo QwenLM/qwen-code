@@ -1336,6 +1336,9 @@ export class WebViewProvider {
       await this.doInitializeAgentConnection({ autoAuthenticate: false });
 
       // Only emit authSuccess when the reconnection actually authenticated.
+      // doInitializeAgentConnection sets this.authState via sendMessageToWebView
+      // — when credentials are rejected (wrong key / bad endpoint) it stays
+      // false, and showing a success toast then would mislead the user.
       if (this.authState === true) {
         this.sendMessageToWebView({
           type: 'authSuccess',

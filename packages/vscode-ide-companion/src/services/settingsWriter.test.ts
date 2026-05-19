@@ -25,9 +25,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, type ProviderInstallPlan } from '@qwen-code/qwen-code-core';
 import { CODING_PLAN_ENV_KEY } from './subscriptionPlanDefinitions.js';
 import {
+  applyProviderInstallPlanToFile,
   readQwenSettingsForVSCode,
   writeCodingPlanConfig,
   writeModelProvidersConfig,
@@ -101,6 +102,133 @@ describe('settingsWriter', () => {
       provider: 'api-key',
       apiKey: 'manual-key',
       codingPlanRegion: 'china',
+    });
+  });
+
+  describe('applyProviderInstallPlanToFile', () => {
+    it('writes env, auth selection, and model providers to settings.json', async () => {
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        env: { TEST_API_KEY: 'sk-test' },
+        modelSelection: { modelId: 'gpt-4o' },
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models: [{ id: 'gpt-4o', envKey: 'TEST_API_KEY' }],
+            mergeStrategy: 'prepend-and-remove-owned',
+            ownsModel: (m) => m.envKey === 'TEST_API_KEY',
+          },
+        ],
+      };
+
+      await applyProviderInstallPlanToFile(plan);
+
+      const written = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(written.env.TEST_API_KEY).toBe('sk-test');
+      expect(written.security.auth.selectedType).toBe(AuthType.USE_OPENAI);
+      expect(written.model.name).toBe('gpt-4o');
+      expect(written.modelProviders[AuthType.USE_OPENAI]).toEqual([
+        { id: 'gpt-4o', envKey: 'TEST_API_KEY' },
+      ]);
+    });
+
+    it('rejects __proto__ in install-plan env keys (prototype-pollution guard)', async () => {
+      // {__proto__: 'x'} literal sets the object's prototype rather than a
+      // real property, so build the env via defineProperty to land an actual
+      // "__proto__" own-property that survives Object.entries.
+      const env: Record<string, string> = {};
+      Object.defineProperty(env, '__proto__', {
+        value: 'polluted',
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+      const plan: ProviderInstallPlan = {
+        providerId: 'evil',
+        authType: AuthType.USE_OPENAI,
+        env,
+      };
+
+      await expect(applyProviderInstallPlanToFile(plan)).rejects.toThrow(
+        /reserved segment/,
+      );
+      // Ensure prototype was not polluted by the failed call
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    });
+
+    it('rejects writes that would overwrite an intermediate scalar segment', async () => {
+      // Hand-edited settings with `env` as a string (legacy / mistake).
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({ env: 'legacy-string' }),
+        'utf-8',
+      );
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        env: { NEW_KEY: 'value' },
+      };
+
+      await expect(applyProviderInstallPlanToFile(plan)).rejects.toThrow(
+        /segment "env" is a string/,
+      );
+      // Original scalar must be untouched
+      const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(after.env).toBe('legacy-string');
+    });
+
+    it('throws on malformed settings file instead of silently overwriting it', async () => {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      // Note the broken bracket — neither comments nor trailing commas fix it.
+      fs.writeFileSync(settingsPath, '{ "broken": [1, 2', 'utf-8');
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        env: { K: 'v' },
+      };
+
+      await expect(applyProviderInstallPlanToFile(plan)).rejects.toThrow();
+      // Bad file is preserved, not silently clobbered with {}
+      expect(fs.readFileSync(settingsPath, 'utf-8')).toBe('{ "broken": [1, 2');
+    });
+
+    it('parses JSONC with trailing commas (and preserves comma inside strings)', async () => {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      // Comments + trailing commas + a string containing a literal ",]".
+      const jsonc = `{
+  // hand-edited
+  "preserveMe": ",]",
+  "list": [1, 2,],
+}`;
+      fs.writeFileSync(settingsPath, jsonc, 'utf-8');
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        env: { K: 'v' },
+      };
+
+      await applyProviderInstallPlanToFile(plan);
+
+      const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(after.preserveMe).toBe(',]'); // literal preserved, not corrupted
+      expect(after.list).toEqual([1, 2]);
+      expect(after.env.K).toBe('v');
+    });
+
+    it('writes atomically — no .tmp residue on success', async () => {
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        env: { K: 'v' },
+      };
+      await applyProviderInstallPlanToFile(plan);
+      const dir = path.dirname(settingsPath);
+      const leftovers = fs
+        .readdirSync(dir)
+        .filter((f) => f.startsWith('settings.json.') && f.endsWith('.tmp'));
+      expect(leftovers).toEqual([]);
     });
   });
 });

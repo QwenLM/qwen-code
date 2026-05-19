@@ -88,6 +88,13 @@ export async function applyProviderInstallPlan(
   } = options;
 
   const previousEnvValues = new Map<string, string | undefined>();
+  // Snapshot the runtime providers map *before* any setValue/reload so we can
+  // restore in-memory state if a callback later in the flow rejects (e.g.
+  // refreshAuth() against a bad endpoint). Without this the live session
+  // could be left holding providers that the plan failed to install.
+  const previousRuntimeProviders: ModelProvidersConfig = {
+    ...settings.getModelProviders(),
+  };
 
   try {
     // backup() inside the try so a failure here (e.g. structuredClone on a
@@ -103,7 +110,7 @@ export async function applyProviderInstallPlan(
 
     // Apply model providers patches
     let updatedModelProviders: ModelProvidersConfig = {
-      ...settings.getModelProviders(),
+      ...previousRuntimeProviders,
     };
 
     for (const patch of plan.modelProviders ?? []) {
@@ -159,13 +166,34 @@ export async function applyProviderInstallPlan(
 
     return { updatedModelProviders };
   } catch (error) {
-    settings.restore?.();
+    // Best-effort rollback. Each step is wrapped so a failure in one
+    // doesn't mask the original error or skip the later steps.
+    try {
+      settings.restore?.();
+    } catch (restoreErr) {
+      // eslint-disable-next-line no-console -- best-effort rollback path
+      console.error(
+        '[applyProviderInstallPlan] settings.restore failed during rollback:',
+        restoreErr,
+      );
+    }
     for (const [key, prev] of previousEnvValues) {
       if (prev === undefined) {
         delete process.env[key];
       } else {
         process.env[key] = prev;
       }
+    }
+    // Restore in-memory runtime providers — reloadModelProviders may have run
+    // before the failure (e.g. before a refreshAuth rejection).
+    try {
+      reloadModelProviders?.(previousRuntimeProviders);
+    } catch (reloadErr) {
+      // eslint-disable-next-line no-console -- best-effort rollback path
+      console.error(
+        '[applyProviderInstallPlan] reloadModelProviders failed during rollback:',
+        reloadErr,
+      );
     }
     throw error;
   }

@@ -22,7 +22,6 @@ import {
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
-  resolveMetadataKey,
   type ProviderConfig,
 } from '@qwen-code/qwen-code-core';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
@@ -206,15 +205,15 @@ export function AuthDialog(): React.JSX.Element {
     contentGenConfig?.baseUrl,
     contentGenConfig?.apiKeyEnvKey,
   );
-  const isCurrentlyCodingPlan = !!(
-    matchedProvider && resolveMetadataKey(matchedProvider)
-  );
 
+  // Land on the tab that matches the active provider's uiGroup so a DeepSeek
+  // / MiniMax / OpenRouter user opens Third-party Providers, not Alibaba.
+  // (resolveMetadataKey returns config.id for *any* provider with a static
+  // models[], so it can't be used to detect "Alibaba" specifically.)
   const defaultMainIndex = useMemo(() => {
-    if (isCurrentlyCodingPlan) return 0;
     if (matchedProvider?.uiGroup === 'third-party') return 1;
     return 0;
-  }, [isCurrentlyCodingPlan, matchedProvider]);
+  }, [matchedProvider]);
 
   // -- Handlers -------------------------------------------------------------
 

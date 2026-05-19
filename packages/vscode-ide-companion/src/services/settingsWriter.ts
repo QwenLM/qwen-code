@@ -102,12 +102,47 @@ function stripJsonComments(text: string): string {
 
 /**
  * Strip trailing commas inside arrays/objects (`,]` / `,}`) — VSCode's own
- * settings.json allows them and they crash strict JSON.parse. Operates on the
- * already-comment-stripped text, so a literal `,]` inside a string is safe
- * (string-literal copy in stripJsonComments preserves contents).
+ * settings.json allows them and they crash strict JSON.parse. Uses a
+ * character-by-character scanner so that the `,]` substring inside a string
+ * literal (e.g. `"MY_VAR": ",]"`) is preserved unchanged — a regex would
+ * silently rewrite it and corrupt the value.
  */
 function stripTrailingCommas(text: string): string {
-  return text.replace(/,(\s*[}\]])/g, '$1');
+  let result = '';
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') {
+      // Copy the entire string literal (including escapes) verbatim.
+      let j = i + 1;
+      while (j < text.length) {
+        if (text[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (text[j] === '"') {
+          j++;
+          break;
+        }
+        j++;
+      }
+      result += text.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === ',') {
+      // Drop comma only if the next non-whitespace char is } or ].
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j]!)) j++;
+      if (j < text.length && (text[j] === ']' || text[j] === '}')) {
+        i++;
+        continue;
+      }
+    }
+    result += ch;
+    i++;
+  }
+  return result;
 }
 
 /**
