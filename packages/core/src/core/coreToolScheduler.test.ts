@@ -67,6 +67,17 @@ type ToolSpanRecord = {
    * tests can assert success/error/cancelled values are forwarded correctly.
    */
   endMetadata?: { success?: boolean; error?: string; cancelled?: boolean };
+  /** Metadata passed to endToolBlockedOnUserSpan. */
+  blockedMetadata?: { decision?: string; source?: string };
+  /** Metadata passed to endHookSpan. */
+  hookMetadata?: {
+    success?: boolean;
+    shouldProceed?: boolean;
+    shouldStop?: boolean;
+    blockType?: string;
+    hasAdditionalContext?: boolean;
+    error?: string;
+  };
 };
 
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
@@ -158,6 +169,53 @@ vi.mock('../telemetry/session-tracing.js', () => ({
     ) => {
       if (metadata) {
         span.endMetadata = metadata;
+      }
+      span.ended = true;
+    },
+  ),
+  startToolBlockedOnUserSpan: vi.fn(
+    (_toolSpan: unknown, attrs?: { tool_name?: string; call_id?: string }) => {
+      const extra: Record<string, string | number | boolean> = {};
+      if (attrs?.tool_name !== undefined) extra['tool.name'] = attrs.tool_name;
+      if (attrs?.call_id !== undefined) extra['tool.call_id'] = attrs.call_id;
+      return createMockToolSpan('tool.blocked_on_user', extra);
+    },
+  ),
+  endToolBlockedOnUserSpan: vi.fn(
+    (
+      span: ToolSpanRecord & ReturnType<typeof createMockToolSpan>,
+      metadata?: { decision?: string; source?: string },
+    ) => {
+      if (metadata) {
+        span.blockedMetadata = metadata;
+      }
+      span.ended = true;
+    },
+  ),
+  startHookSpan: vi.fn(
+    (opts: {
+      hookEvent: string;
+      toolName: string;
+      toolUseId?: string;
+      isInterrupt?: boolean;
+    }) => {
+      const attrs: Record<string, string | number | boolean> = {
+        hook_event: opts.hookEvent,
+        'tool.name': opts.toolName,
+      };
+      if (opts.toolUseId !== undefined) attrs['tool.use_id'] = opts.toolUseId;
+      if (opts.isInterrupt !== undefined)
+        attrs['is_interrupt'] = opts.isInterrupt;
+      return createMockToolSpan('hook', attrs);
+    },
+  ),
+  endHookSpan: vi.fn(
+    (
+      span: ToolSpanRecord & ReturnType<typeof createMockToolSpan>,
+      metadata?: ToolSpanRecord['hookMetadata'],
+    ) => {
+      if (metadata) {
+        span.hookMetadata = metadata;
       }
       span.ended = true;
     },
@@ -3821,6 +3879,209 @@ describe('CoreToolScheduler telemetry spans', () => {
     // signal not aborted — this is a real exception, must surface as ERROR
     // status. cancelled stays falsy.
     expect(exec!.endMetadata?.cancelled).toBeFalsy();
+  });
+
+  // -------------------------------------------------------------------
+  // #3731 Phase 2 — tool span lifecycle now spans validating →
+  // awaiting_approval → executing in one span; blocked_on_user is a child
+  // span; each hook fire site gets its own hook span.
+  // -------------------------------------------------------------------
+
+  function getToolSpans(): ToolSpanRecord[] {
+    return toolSpanRecords.filter((r) => r.name === 'tool.mockTool');
+  }
+  function getBlockedSpans(): ToolSpanRecord[] {
+    return toolSpanRecords.filter((r) => r.name === 'tool.blocked_on_user');
+  }
+  function getHookSpans(): ToolSpanRecord[] {
+    return toolSpanRecords.filter((r) => r.name === 'hook');
+  }
+
+  it('tool span is started in _schedule and ended even when pre-hook denies execution (#3731 Phase 2)', async () => {
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'pre-hook',
+        success: true,
+        output: { decision: 'deny', reason: 'denied' },
+      }),
+    };
+    await runSingleTool({ messageBus, disableHooks: false });
+
+    const toolSpans = getToolSpans();
+    expect(toolSpans).toHaveLength(1);
+    expect(toolSpans[0].ended).toBe(true);
+    // No execution sub-span — request didn't reach _executeToolCallBody.
+    expect(getExecutionSpan()).toBeUndefined();
+    // No blocked span either — the deny path takes the permission_hook
+    // branch BEFORE awaiting_approval is set.
+    expect(getBlockedSpans()).toHaveLength(0);
+  });
+
+  it('blocked_on_user span ends with cancel when the user rejects (#3731 Phase 2)', async () => {
+    // Reuses MockEditTool — same setup as the existing edit-cancellation
+    // test in `CoreToolScheduler edit cancellation`, just instrumented for
+    // the new Phase 2 spans.
+    toolSpanRecords.length = 0;
+    const mockEditTool = new MockEditTool();
+    const mockToolRegistry = {
+      getTool: () => mockEditTool,
+      ensureTool: async () => mockEditTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => mockEditTool,
+      getToolByDisplayName: () => mockEditTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'block-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-block',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    // The blocked span is open while waiting for the user.
+    const blockedSpans = toolSpanRecords.filter(
+      (r) => r.name === 'tool.blocked_on_user',
+    );
+    expect(blockedSpans).toHaveLength(1);
+    expect(blockedSpans[0].ended).toBe(false);
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.Cancel,
+    );
+
+    // After cancel: blocked + tool spans both ended; decision/source recorded.
+    expect(blockedSpans[0].ended).toBe(true);
+    expect(blockedSpans[0].blockedMetadata?.decision).toBe('cancel');
+    expect(blockedSpans[0].blockedMetadata?.source).toBe('cli');
+
+    const toolSpans = toolSpanRecords.filter(
+      (r) => r.name === 'tool.mockEditTool',
+    );
+    expect(toolSpans).toHaveLength(1);
+    expect(toolSpans[0].ended).toBe(true);
+  });
+
+  it('hook span records shouldProceed=false / blockType=denied when pre-hook blocks (#3731 Phase 2)', async () => {
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'pre-hook',
+        success: true,
+        output: { decision: 'block', reason: 'denied' },
+      }),
+    };
+    await runSingleTool({ messageBus, disableHooks: false });
+
+    // The PreToolUse hook span is the only one fired in this path.
+    const hookSpans = getHookSpans();
+    expect(hookSpans).toHaveLength(1);
+    expect(hookSpans[0].attributes['hook_event']).toBe('PreToolUse');
+    expect(hookSpans[0].hookMetadata?.success).toBe(true);
+    expect(hookSpans[0].hookMetadata?.shouldProceed).toBe(false);
+    expect(hookSpans[0].hookMetadata?.blockType).toBe('denied');
+  });
+
+  it('hook span records shouldStop=true when post-hook stops execution (#3731 Phase 2)', async () => {
+    // Hook protocol: continue:false + stopReason on the post-hook response
+    // is what the production code maps to shouldStop=true.
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output: { decision: 'allow' },
+        })
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'post-hook',
+          success: true,
+          output: {
+            decision: 'allow',
+            continue: false,
+            stopReason: 'stop reason',
+          },
+        }),
+    };
+    await runSingleTool({ messageBus, disableHooks: false });
+
+    const postHookSpan = getHookSpans().find(
+      (s) => s.attributes['hook_event'] === 'PostToolUse',
+    );
+    expect(postHookSpan).toBeDefined();
+    expect(postHookSpan!.hookMetadata?.shouldStop).toBe(true);
+    expect(postHookSpan!.hookMetadata?.blockType).toBe('stop');
+  });
+
+  it('every span recorded in a successful tool call is ended (#3731 Phase 2)', async () => {
+    // Leak guard: every span we record should be ended by the time
+    // schedule() returns. If a future change forgets to finalize a tool
+    // span on some terminal path, this assertion catches it.
+    await runSingleTool();
+
+    const lifecycleSpans = toolSpanRecords.filter(
+      (r) =>
+        r.name === 'tool.mockTool' ||
+        r.name === 'tool.execution' ||
+        r.name === 'tool.blocked_on_user' ||
+        r.name === 'hook',
+    );
+    expect(lifecycleSpans.length).toBeGreaterThan(0);
+    for (const span of lifecycleSpans) {
+      expect(span.ended).toBe(true);
+    }
   });
 });
 

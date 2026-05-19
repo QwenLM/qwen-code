@@ -17,9 +17,11 @@ import {
 import type { Config } from '../config/config.js';
 import {
   SERVICE_NAME,
+  SPAN_HOOK,
   SPAN_INTERACTION,
   SPAN_LLM_REQUEST,
   SPAN_TOOL,
+  SPAN_TOOL_BLOCKED_ON_USER,
   SPAN_TOOL_EXECUTION,
 } from './constants.js';
 import { clearDetailedSpanState } from './detailed-span-attributes.js';
@@ -521,6 +523,227 @@ export function endToolExecutionSpan(
   } catch (error) {
     debugLogger.warn(
       `Failed to end tool execution span: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  activeSpans.delete(spanId);
+  strongSpans.delete(spanId);
+}
+
+// --- Tool Blocked-on-User Spans ---
+
+export type ToolBlockedDecision =
+  | 'proceed_once'
+  | 'proceed_always'
+  | 'cancel'
+  | 'aborted'
+  | 'auto_approved';
+
+export type ToolBlockedSource = 'cli' | 'ide' | 'hook' | 'auto' | 'system';
+
+/**
+ * Brackets the time a tool spends in `awaiting_approval` waiting on the user.
+ *
+ * The parent is passed explicitly because this span starts BEFORE the tool
+ * body's `runInToolSpanContext` block — so `toolContext.getStore()` is empty.
+ * Passing the span object also avoids the `findLast`-by-type concurrency bug
+ * (claude-code's sessionTracing has it; we deliberately don't).
+ */
+export function startToolBlockedOnUserSpan(
+  toolSpan: Span,
+  attrs?: { tool_name?: string; call_id?: string },
+): Span {
+  if (!isTelemetrySdkInitialized()) {
+    return NOOP_SPAN;
+  }
+
+  const parentSpanId = getSpanId(toolSpan);
+  const parentSpanCtx = activeSpans.get(parentSpanId)?.deref();
+  // If the tool span was already ended (defensive — shouldn't happen on the
+  // happy path), fall back to the standard parent-resolution chain so we
+  // still produce a span correlated with the session.
+  const ctx = parentSpanCtx
+    ? trace.setSpan(otelContext.active(), parentSpanCtx.span)
+    : resolveParentContext(undefined);
+
+  const attributes: Attributes = {};
+  if (attrs?.tool_name !== undefined) attributes['tool.name'] = attrs.tool_name;
+  if (attrs?.call_id !== undefined) attributes['tool.call_id'] = attrs.call_id;
+
+  const span = getTracer().startSpan(
+    SPAN_TOOL_BLOCKED_ON_USER,
+    { kind: SpanKind.INTERNAL, attributes },
+    ctx,
+  );
+
+  const spanId = getSpanId(span);
+  const spanContextObj: SpanContext = {
+    span,
+    startTime: Date.now(),
+    attributes: attributes as Record<string, string | number | boolean>,
+    type: 'tool.blocked_on_user',
+  };
+  activeSpans.set(spanId, new WeakRef(spanContextObj));
+  strongSpans.set(spanId, spanContextObj);
+
+  return span;
+}
+
+/**
+ * Status stays UNSET — waiting on the user is neither OK nor ERROR.
+ * The decision/source attributes are the canonical signal.
+ */
+export function endToolBlockedOnUserSpan(
+  span: Span,
+  metadata?: {
+    decision?: ToolBlockedDecision;
+    source?: ToolBlockedSource;
+  },
+): void {
+  const spanId = getSpanId(span);
+  const spanCtx = activeSpans.get(spanId)?.deref();
+  if (!spanCtx || spanCtx.ended) return;
+
+  spanCtx.ended = true;
+
+  try {
+    const duration = Date.now() - spanCtx.startTime;
+    const endAttributes: Attributes = { duration_ms: duration };
+    if (metadata?.decision !== undefined)
+      endAttributes['decision'] = metadata.decision;
+    if (metadata?.source !== undefined)
+      endAttributes['source'] = metadata.source;
+    spanCtx.span.setAttributes(endAttributes);
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to update blocked_on_user span attributes: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    spanCtx.span.end();
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to end blocked_on_user span: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  activeSpans.delete(spanId);
+  strongSpans.delete(spanId);
+}
+
+// --- Hook Spans ---
+
+export type HookEvent = 'PreToolUse' | 'PostToolUse' | 'PostToolUseFailure';
+
+export interface StartHookSpanOptions {
+  hookEvent: HookEvent;
+  toolName: string;
+  toolUseId?: string;
+  /** PostToolUseFailure only: true when the failure is a user interrupt. */
+  isInterrupt?: boolean;
+}
+
+export interface HookSpanMetadata {
+  /** Whether the hook fire site completed without throwing. */
+  success?: boolean;
+  /** PreToolUse: false means the hook blocked tool execution. */
+  shouldProceed?: boolean;
+  /** PostToolUse: true means the hook stopped further processing. */
+  shouldStop?: boolean;
+  /** Discriminator for blocking decision when applicable. */
+  blockType?: 'denied' | 'ask' | 'stop';
+  hasAdditionalContext?: boolean;
+  /** Hook threw — span ends as ERROR with this message. */
+  error?: string;
+}
+
+export function startHookSpan(opts: StartHookSpanOptions): Span {
+  if (!isTelemetrySdkInitialized()) {
+    return NOOP_SPAN;
+  }
+
+  // Hooks fire from inside `runInToolSpanContext` so toolContext is the
+  // natural parent. resolveParentContext also covers the rare case where a
+  // hook span is started outside any tool (defensive — keeps the trace tree
+  // correlated with the session).
+  const parentCtx =
+    toolContext.getStore() ?? interactionContext.getStore() ?? undefined;
+  const ctx = resolveParentContext(parentCtx);
+
+  const attributes: Attributes = {
+    hook_event: opts.hookEvent,
+    'tool.name': opts.toolName,
+  };
+  if (opts.toolUseId !== undefined) attributes['tool.use_id'] = opts.toolUseId;
+  if (opts.isInterrupt !== undefined)
+    attributes['is_interrupt'] = opts.isInterrupt;
+
+  const span = getTracer().startSpan(
+    SPAN_HOOK,
+    { kind: SpanKind.INTERNAL, attributes },
+    ctx,
+  );
+
+  const spanId = getSpanId(span);
+  const spanContextObj: SpanContext = {
+    span,
+    startTime: Date.now(),
+    attributes: attributes as Record<string, string | number | boolean>,
+    type: 'hook',
+  };
+  activeSpans.set(spanId, new WeakRef(spanContextObj));
+  strongSpans.set(spanId, spanContextObj);
+
+  return span;
+}
+
+/**
+ * Status: UNSET on normal flow (including blocking decisions like
+ * shouldProceed: false or shouldStop: true — those are intentional, not
+ * errors). Only an actual hook-side throw (caught by the safelyFire wrapper
+ * or rethrown) maps to ERROR via the `error` metadata field.
+ */
+export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
+  const spanId = getSpanId(span);
+  const spanCtx = activeSpans.get(spanId)?.deref();
+  if (!spanCtx || spanCtx.ended) return;
+
+  spanCtx.ended = true;
+
+  try {
+    const duration = Date.now() - spanCtx.startTime;
+    const endAttributes: Attributes = { duration_ms: duration };
+
+    if (metadata) {
+      if (metadata.success !== undefined)
+        endAttributes['success'] = metadata.success;
+      if (metadata.shouldProceed !== undefined)
+        endAttributes['should_proceed'] = metadata.shouldProceed;
+      if (metadata.shouldStop !== undefined)
+        endAttributes['should_stop'] = metadata.shouldStop;
+      if (metadata.blockType !== undefined)
+        endAttributes['block_type'] = metadata.blockType;
+      if (metadata.hasAdditionalContext !== undefined)
+        endAttributes['has_additional_context'] = metadata.hasAdditionalContext;
+      if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+    }
+
+    spanCtx.span.setAttributes(endAttributes);
+
+    if (metadata?.error !== undefined) {
+      spanCtx.span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: metadata.error,
+      });
+    }
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to update hook span attributes/status: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    spanCtx.span.end();
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to end hook span: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   activeSpans.delete(spanId);

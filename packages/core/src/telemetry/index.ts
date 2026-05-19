@@ -146,6 +146,10 @@ export {
   runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
+  startToolBlockedOnUserSpan,
+  endToolBlockedOnUserSpan,
+  startHookSpan,
+  endHookSpan,
   getActiveInteractionSpan,
 } from './session-tracing.js';
 export type {
@@ -153,6 +157,11 @@ export type {
   EndInteractionOptions,
   LLMRequestMetadata,
   ToolSpanMetadata,
+  ToolBlockedDecision,
+  ToolBlockedSource,
+  HookEvent,
+  StartHookSpanOptions,
+  HookSpanMetadata,
 } from './session-tracing.js';
 export {
   addUserPromptAttributes,
