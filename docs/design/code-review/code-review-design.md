@@ -65,11 +65,11 @@ bundled `/review` skill 跑完一次就退出，不维护跨 run 状态。所有
 
 ## Workflow Review Pipeline（Phase 1-3 形态）
 
-| Stage | 触发动作                                                                | 成本     | 失败处理                                              |
-| ----- | ----------------------------------------------------------------------- | -------- | ----------------------------------------------------- |
-| 0     | GitHub `if:`（event type / author_association / `@qwen /review`）       | 0        | 静默不跑                                              |
-| 1     | workflow shell step（env / model 配置校验、PR size gate、PR 元数据）    | <5s      | post process comment（"PR too large" / 配置缺失）     |
-| 2     | bundled `/review` deep review（9-agent + reverse audit + verification） | 5-30 min | post inline + summary review comment；失败发 fallback |
+| Stage | 触发动作                                                                | 成本                                                             | 失败处理                                              |
+| ----- | ----------------------------------------------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------- |
+| 0     | GitHub `if:`（event type / author_association / `@qwen /review`）       | 0                                                                | 静默不跑                                              |
+| 1     | workflow shell step（env / model 配置校验、PR size gate、PR 元数据）    | <5s                                                              | post process comment（"PR too large" / 配置缺失）     |
+| 2     | bundled `/review` deep review（9-agent + reverse audit + verification） | 增量 ~5-15 min；全量可达 ~45-60 min（job `timeout-minutes: 60`） | post inline + summary review comment；失败发 fallback |
 
 > Phase 4 会在 Stage 1 与 Stage 2 之间插入一个独立的 Design Gate step；本 PR 不含该 step，Stage 1 通过即直接进 bundled `/review`。
 

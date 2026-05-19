@@ -65,7 +65,11 @@ jobs:
     concurrency:
       group: 'qwen-pr-review-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.pr_number }}'
       cancel-in-progress: true
-    timeout-minutes: 30
+    # 30 min was empirically too low: a full (no-cache) 9-agent deep
+    # review on a ~800-line PR exceeded it and the job was killed
+    # mid-review. Incremental (synchronize) reviews are far shorter, but
+    # opened/comment/dispatch run the full path. 60 min leaves headroom.
+    timeout-minutes: 60
     runs-on: 'ubuntu-latest'
     permissions:
       checks: 'read'
