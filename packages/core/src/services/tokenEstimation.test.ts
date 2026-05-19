@@ -88,4 +88,28 @@ describe('estimatePromptTokens', () => {
     const fullEst = estimateContentTokens([...history, user]);
     expect(estimatePromptTokens(history, user, 0)).toBe(fullEst);
   });
+
+  it('adds lastCandidatesTokenCount in the steady-state branch (R10.1)', () => {
+    // R10.1: `lastPromptTokenCount` from the previous turn covers the
+    // input sent on that turn but NOT the model response that has since
+    // been appended to history. Without the candidates term, the
+    // estimate lags by one response (typically 500–5000 tokens), which
+    // matters when the hard tier sits only HARD_BUFFER (~3K) from the
+    // window edge — the rescue fires late and the API call overflows.
+    const userEst = estimateContentTokens([user]);
+    const lastPrompt = 5000;
+    const lastCandidates = 800;
+    expect(
+      estimatePromptTokens(history, user, lastPrompt, 1600, lastCandidates),
+    ).toBe(lastPrompt + lastCandidates + userEst);
+  });
+
+  it('defaults lastCandidatesTokenCount to 0 for backward-compatible callers', () => {
+    // The new param is optional with default 0 so existing callers
+    // (none-yet outside geminiChat) keep their pre-R10 behavior. The
+    // missing-response under-count is documented; the hard-rescue path
+    // upstream now plumbs the real value.
+    const userEst = estimateContentTokens([user]);
+    expect(estimatePromptTokens(history, user, 5000)).toBe(5000 + userEst);
+  });
 });

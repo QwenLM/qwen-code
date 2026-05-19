@@ -445,6 +445,25 @@ export class GeminiChat {
   private lastPromptTokenCount = 0;
 
   /**
+   * Previous turn's `candidatesTokenCount` (the model's output). Captured
+   * alongside `lastPromptTokenCount` in the streaming usage-metadata
+   * handler. The cheap-gate / hard-rescue threshold check adds this to
+   * the prompt-size estimate so the next send accounts for the model
+   * response that's been appended to `history` since the previous API
+   * call. Without it the estimate is systematically one response short
+   * (typically 500–5000 tokens), which matters when the hard tier sits
+   * only HARD_BUFFER (~3K) from the window edge — the rescue would fire
+   * late and the API call would overflow. (review #4168 R10.1)
+   *
+   * Reset to 0 whenever `lastPromptTokenCount` is updated from anything
+   * other than a fresh API response — i.e. after successful compression
+   * (the new compressed history doesn't have a "previous response" to
+   * count) or when seeded via `setLastPromptTokenCount` for inherited
+   * histories.
+   */
+  private lastCandidatesTokenCount = 0;
+
+  /**
    * Number of consecutive auto-compaction failures for this chat. The
    * cheap-gate NOOPs once this reaches MAX_CONSECUTIVE_FAILURES (default 3)
    * until a successful compress (forced or not) resets it to 0. Replaces the
@@ -559,6 +578,12 @@ export class GeminiChat {
    */
   setLastPromptTokenCount(count: number): void {
     this.lastPromptTokenCount = count;
+    // R10.1: external seeding (inherited history, post-compression) has
+    // no "previous turn's response" to anchor on — the history slice
+    // either was just rewritten (compression) or was carried over from
+    // a parent chat with its own API response history already in place.
+    // Reset to 0; the next real API response will set the live value.
+    this.lastCandidatesTokenCount = 0;
   }
 
   /**
@@ -656,6 +681,12 @@ export class GeminiChat {
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       this.lastPromptTokenCount = info.newTokenCount;
+      // R10.1: compression rewrote `history` — the previous turn's
+      // response is gone from the new history slice (or absorbed into
+      // the snapshot envelope, which is already counted in
+      // `info.newTokenCount`). Reset so the next steady-state estimate
+      // doesn't double-count.
+      this.lastCandidatesTokenCount = 0;
       // Mirror to the global singleton only when wired (main session).
       // Subagents pass `telemetryService=undefined` to keep their context
       // usage out of the main agent's UI counters.
@@ -815,14 +846,17 @@ export class GeminiChat {
         this.config.getChatCompression(),
       ).imageTokenEstimate;
       // When lastPromptTokenCount > 0, estimatePromptTokens uses the
-      // API-authoritative count + a tiny estimate of just the new user
-      // message — it does NOT touch the history at all in that branch, so
-      // skip the costly `getHistory(true)` clone on the steady-state path.
+      // API-authoritative count + the previous turn's response (added
+      // to history since that API call returned) + a tiny estimate of
+      // just the new user message — it does NOT touch the history at
+      // all in that branch, so skip the costly `getHistory(true)` clone
+      // on the steady-state path. (R10.1 added the candidates term.)
       const effectiveTokens = estimatePromptTokens(
         this.lastPromptTokenCount > 0 ? [] : this.getHistory(true),
         userContent,
         this.lastPromptTokenCount,
         imageTokenEstimate,
+        this.lastCandidatesTokenCount,
       );
       // Bound hard-rescue retries with pessimistic accounting. Without
       // a bound, a chat whose history can't shrink (model consistently
@@ -1612,6 +1646,14 @@ export class GeminiChat {
           // Always update the per-chat counter so this chat (including
           // subagents) can make its own compaction decisions.
           this.lastPromptTokenCount = lastPromptTokenCount;
+          // R10.1: also capture the model's response size — it gets
+          // appended to history immediately after this handler runs,
+          // and the next turn's prompt-size estimate needs to add it
+          // back since `lastPromptTokenCount` only reflects the input
+          // sent on THIS turn. Coalesce undefined → 0 so we never feed
+          // NaN into the gate arithmetic.
+          this.lastCandidatesTokenCount =
+            usageMetadata.candidatesTokenCount ?? 0;
           // Mirror to the global telemetry only when wired — subagents
           // pass `telemetryService=undefined` to keep their context usage
           // out of the main session's UI counters.

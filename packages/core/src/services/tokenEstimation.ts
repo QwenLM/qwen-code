@@ -53,8 +53,18 @@ export function estimateContentTokens(
  * Compute an effective prompt-token count for the auto-compaction gate.
  *
  * `lastPromptTokenCount` (from the previous turn's usage metadata) lacks
- * two things: the current user message, and any initial value on the
- * very first send. This helper closes both gaps via local estimation.
+ * three things: the current user message, the previous turn's MODEL
+ * RESPONSE that has since been appended to history, and any initial
+ * value on the very first send. This helper closes all three gaps via
+ * local estimation.
+ *
+ * R10.1: `lastCandidatesTokenCount` is the previous turn's
+ * `candidatesTokenCount` (model output) — captured alongside
+ * `lastPromptTokenCount` in the same usage-metadata handler. Without it
+ * the steady-state estimate lags by one response (typically 500–5000
+ * tokens) and the hard-tier rescue (which sits only HARD_BUFFER ≈ 3K
+ * from the window edge) fires late, costing a doomed API round-trip
+ * before reactive recovery catches the overflow.
  *
  * WARNING: like estimateContentTokens, this is a conservative lower
  * bound. Use it to TRIGGER earlier, never to SKIP — the fallback path
@@ -66,10 +76,12 @@ export function estimatePromptTokens(
   userMessage: Content,
   lastPromptTokenCount: number,
   imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  lastCandidatesTokenCount: number = 0,
 ): number {
   if (lastPromptTokenCount > 0) {
     return (
       lastPromptTokenCount +
+      lastCandidatesTokenCount +
       estimateContentTokens([userMessage], imageTokenEstimate)
     );
   }
@@ -78,5 +90,9 @@ export function estimatePromptTokens(
   // skill content, and cache headers — typically ~15-20K of under-estimate.
   // The reactive overflow handler is the safety net if the hard-tier rescue
   // misses for that reason. See review #4168 R3.3.
+  //
+  // The cold-start branch does NOT add `lastCandidatesTokenCount` — by
+  // definition we have no prior API response when this branch runs, and
+  // any pre-existing model turns are walked via `history`.
   return estimateContentTokens([...history, userMessage], imageTokenEstimate);
 }
