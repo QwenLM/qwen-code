@@ -1040,6 +1040,8 @@ export default {
   // ============================================================================
   'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
+  'Switch the model for this session (--default to persist, --fast for suggestion model).':
+    'Switch the model for this session (--default to persist, --fast for suggestion model).',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Set a lighter model for prompt suggestions and speculative execution',
   'Content generator configuration not available.':

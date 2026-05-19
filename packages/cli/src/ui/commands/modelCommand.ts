@@ -65,6 +65,7 @@ function persistMainModelDefault(
     return parsed.modelId;
   }
 
+  // Unqualified model ids belong to the currently active auth provider.
   persistSetting(settings, 'security.auth.selectedType', currentAuthType);
   persistSetting(settings, 'model.name', modelArg);
   return modelArg;

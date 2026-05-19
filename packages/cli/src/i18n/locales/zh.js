@@ -991,6 +991,8 @@ export default {
   // ============================================================================
   'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型）',
+  'Switch the model for this session (--default to persist, --fast for suggestion model).':
+    '切换此会话的模型（--default 可持久化，--fast 可设置建议模型）',
   'Set a lighter model for prompt suggestions and speculative execution':
     '设置用于输入建议和推测执行的轻量模型',
   'Content generator configuration not available.': '内容生成器配置不可用',
