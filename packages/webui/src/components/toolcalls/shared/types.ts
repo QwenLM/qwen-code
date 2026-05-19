@@ -35,7 +35,12 @@ export interface ToolCallLocation {
 /**
  * Tool call status type
  */
-export type ToolCallStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+export type ToolCallStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
 
 export type AgentExecutionStatus =
   | 'running'
