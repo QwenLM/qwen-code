@@ -19,6 +19,7 @@ import type {
   ToolConfirmationPayload,
 } from '../tools.js';
 import type { Config } from '../../config/config.js';
+import type { PermissionDecision } from '../../permissions/types.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
@@ -886,6 +887,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
   getDescription(): string {
     return this.params.description;
+  }
+
+  /**
+   * Launching a sub-agent hands off control to a new instance with its
+   * own tool access. In AUTO mode the classifier needs to inspect the
+   * prompt before the spawn happens — but the scheduler short-circuits
+   * at L4 when `finalPermission === 'allow'`, so the L3 default must be
+   * `'ask'` or the classifier projection added in this PR would never
+   * be reached.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
   }
 
   /**

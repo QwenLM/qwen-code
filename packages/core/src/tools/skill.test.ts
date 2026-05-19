@@ -554,7 +554,13 @@ describe('SkillTool', () => {
       expect(llmText).toContain('Loading failed');
     });
 
-    it('should not require confirmation', async () => {
+    it("L3 default is 'ask' so AUTO mode routes through the classifier", async () => {
+      // Previously this returned 'allow', but skills load user-defined
+      // code that runs with the agent's tool access — a privileged sink.
+      // The AUTO scheduler short-circuits at L4 when finalPermission ===
+      // 'allow', so without this override the classifier projection
+      // added in PR #4151 would never be reached and arbitrary skill
+      // invocations would bypass classifier review.
       const params: SkillParams = {
         skill: 'code-review',
       };
@@ -564,7 +570,7 @@ describe('SkillTool', () => {
       ).createInvocation(params);
       const permission = await invocation.getDefaultPermission();
 
-      expect(permission).toBe('allow');
+      expect(permission).toBe('ask');
     });
 
     it('should provide correct description', () => {

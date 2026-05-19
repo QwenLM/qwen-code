@@ -6,6 +6,7 @@ import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import { parseCron } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 
@@ -28,6 +29,18 @@ class CronCreateInvocation extends BaseToolInvocation<
 
   getDescription(): string {
     return `${this.params.cron}: ${this.params.prompt}`;
+  }
+
+  /**
+   * The scheduled prompt fires against the agent at cron-trigger time
+   * and executes with full tool access. The CronCreateTool's L3 default
+   * must NOT be 'allow', because AUTO mode short-circuits at L4 when
+   * `finalPermission === 'allow'` — the classifier never runs and an
+   * arbitrary scheduled prompt is silently approved. `'ask'` routes
+   * the call through the classifier (or manual approval in DEFAULT).
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
   }
 
   async execute(): Promise<ToolResult> {
