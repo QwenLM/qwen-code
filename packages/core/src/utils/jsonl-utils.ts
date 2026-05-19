@@ -23,6 +23,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { atomicWriteFileSync } from './atomicFileWrite.js';
 import readline from 'node:readline';
 import { finished } from 'node:stream/promises';
 import { Mutex } from 'async-mutex';
@@ -267,7 +268,12 @@ export async function writeLine(
       await fs.promises.mkdir(dir, { recursive: true });
       ensuredDirs.add(dir);
     }
-    await fs.promises.appendFile(filePath, line, 'utf8');
+    // flush:true fsyncs after each line so a process killed mid-write
+    // doesn't leave a glued `}{` record on disk (closes #3681).
+    await fs.promises.appendFile(filePath, line, {
+      encoding: 'utf8',
+      flush: true,
+    });
   });
 }
 
@@ -282,7 +288,7 @@ export function writeLineSync(filePath: string, data: unknown): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.appendFileSync(filePath, line, 'utf8');
+  fs.appendFileSync(filePath, line, { encoding: 'utf8', flush: true });
 }
 
 /**
@@ -296,7 +302,7 @@ export function write(filePath: string, data: unknown[]): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(filePath, `${lines}\n`, 'utf8');
+  atomicWriteFileSync(filePath, `${lines}\n`, { encoding: 'utf8' });
 }
 
 /**

@@ -148,7 +148,9 @@ function writeLog(
   const line = buildLogLine(level, message, tag, traceCtx);
 
   void ensureDebugDirExists()
-    .then(() => fs.appendFile(logFilePath, line, 'utf8'))
+    .then(() =>
+      fs.appendFile(logFilePath, line, { encoding: 'utf8', flush: true }),
+    )
     .catch(() => {
       hasWriteFailure = true;
     });
