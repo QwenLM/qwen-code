@@ -69,11 +69,15 @@ jobs:
       OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
       QWEN_PR_REVIEW_MAX_CHANGED_LINES: "${{ vars.QWEN_PR_REVIEW_MAX_CHANGED_LINES || '1500' }}"
     steps:
-      - name: 'Checkout base branch'
+      # Security: pull_request_target runs with repository secrets, so it
+      # MUST check out trusted base code (main), never the PR head.
+      # workflow_dispatch is maintainer-triggered, so it runs the
+      # dispatched ref's own code — this is the pre-merge dry-run path.
+      - name: 'Checkout review code'
         uses: 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' # v4.2.2
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'
-          ref: 'main'
+          ref: "${{ github.event_name == 'workflow_dispatch' && github.ref || 'main' }}"
           fetch-depth: 0
 
       - name: 'Resolve PR context'
@@ -223,7 +227,7 @@ jobs:
 
           pr_json="$(gh pr view "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
-            --json additions,deletions,changedFiles,title,baseRefName,baseRefOid,headRefName,headRefOid,isCrossRepository,headRepositoryOwner,headRepository)"
+            --json additions,deletions,changedFiles,title,baseRefName,baseRefOid,headRefName,headRefOid)"
           additions="$(jq -r '.additions' <<< "$pr_json")"
           deletions="$(jq -r '.deletions' <<< "$pr_json")"
           changed_files="$(jq -r '.changedFiles' <<< "$pr_json")"
@@ -232,9 +236,6 @@ jobs:
           base_sha="$(jq -r '.baseRefOid // ""' <<< "$pr_json")"
           head_ref="$(jq -r '.headRefName' <<< "$pr_json")"
           head_sha="$(jq -r '.headRefOid // ""' <<< "$pr_json")"
-          is_cross_repository="$(jq -r '.isCrossRepository' <<< "$pr_json")"
-          head_owner="$(jq -r '.headRepositoryOwner.login // ""' <<< "$pr_json")"
-          head_repo="$(jq -r '.headRepository.name // ""' <<< "$pr_json")"
           changed_lines=$((additions + deletions))
 
           # Reject empty head_sha / base_sha early. Both are queried via
@@ -265,21 +266,16 @@ jobs:
           # base, or base retarget), which is exactly the boundary we
           # want to invalidate the cache on.
           #
-          # Skip merge-base for cross-repository PRs: the compare endpoint
-          # can fail to resolve fork SHAs in the base repo's namespace,
-          # which would abort this step (set -euo pipefail) before the
-          # is_cross_repository guard below has a chance to post the
-          # fork-rejection comment. Forks never reach the cache restore /
-          # save steps anyway because should_review is set to false.
-          merge_base_sha=""
-          if [ "$is_cross_repository" != "true" ]; then
-            merge_base_sha="$(gh api \
-              "repos/${GITHUB_REPOSITORY}/compare/${base_sha}...${head_sha}" \
-              --jq '.merge_base_commit.sha // ""')"
-            if [ -z "$merge_base_sha" ]; then
-              echo "::error::Could not resolve PR merge base via gh api compare."
-              exit 1
-            fi
+          # merge-base is best-effort: the compare endpoint can fail to
+          # resolve SHAs for fork PRs in the base repo's namespace. That
+          # must not abort the review (set -euo pipefail) — it only means
+          # the incremental cache can't be scoped this run, so we fall
+          # back to a full review rather than failing the job.
+          merge_base_sha="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${base_sha}...${head_sha}" \
+            --jq '.merge_base_commit.sha // ""' 2>/dev/null || true)"
+          if [ -z "$merge_base_sha" ]; then
+            echo "::warning::Could not resolve PR merge base; incremental cache will fall back to a full review this run."
           fi
 
           write_output "changed_lines=$changed_lines"
@@ -289,34 +285,13 @@ jobs:
           write_output "merge_base_sha=$merge_base_sha"
           echo "Review target: PR #$PR_NUMBER"
           echo "Review title: $title"
-          echo "Review branch: $base_ref ($base_sha) <- $head_owner/$head_repo:$head_ref ($head_sha)"
+          echo "Review branch: $base_ref ($base_sha) <- $head_ref ($head_sha)"
           if [ -n "$merge_base_sha" ]; then
             echo "Review merge base: $merge_base_sha"
           else
-            echo "Review merge base: (skipped for cross-repository PR)"
+            echo "Review merge base: (unresolved; full review this run)"
           fi
           echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines changed lines)"
-
-          if [ "$is_cross_repository" = "true" ]; then
-            write_output "should_review=false"
-            cat > qwen-pr-review-fork-comment.md <<'EOF'
-          Qwen Code automated PR review is disabled for cross-repository PRs because this workflow runs with review credentials and the bundled "/review" flow may install dependencies from the PR head.
-
-          A maintainer can still review this PR manually, or copy trusted patches into a branch in this repository before requesting automated review.
-          EOF
-            if [ "$SHOULD_COMMENT" = "true" ]; then
-              gh pr comment "$PR_NUMBER" \
-                --repo "$GITHUB_REPOSITORY" \
-                --body-file qwen-pr-review-fork-comment.md
-            else
-              {
-                printf '### Qwen PR review dry run\n\n'
-                cat qwen-pr-review-fork-comment.md
-                printf "\nReview mode: \`%s\`; no PR comments were posted.\n" "$REVIEW_MODE"
-              } >> "$GITHUB_STEP_SUMMARY"
-            fi
-            exit 0
-          fi
 
           if [ "$changed_lines" -gt "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" ]; then
             write_output "should_review=false"
