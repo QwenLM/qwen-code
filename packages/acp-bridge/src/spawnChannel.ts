@@ -320,8 +320,25 @@ function killChild(child: ChildProcess): Promise<void> {
     // After the deadline give up: the child is probably stuck in a
     // kernel call we can't cancel, and `process.exit(0)` will reap it
     // when the daemon returns to its caller.
+    //
+    // #4319 wenshao round 5 fold-in: emit a stderr line BEFORE we
+    // abandon the child so operators see a signal that a zombie
+    // exists. Without this, `shutdown()` returns "graceful" while a
+    // wedged `qwen --acp` process keeps holding FDs / memory / locks;
+    // under systemd/k8s supervision, the daemon respawn would then
+    // race the orphan for the same workspace. Single-line warning is
+    // intentionally noisy on the daemon's stderr so monitoring/log
+    // aggregators catch it.
     setTimeout(() => {
-      if (!resolved) finish();
+      if (!resolved) {
+        process.stderr.write(
+          `qwen serve: killChild hard deadline (${KILL_HARD_DEADLINE_MS}ms) ` +
+            `reached; child pid=${child.pid} still alive (uninterruptible sleep?) — ` +
+            `abandoning. Operator should check for zombie qwen --acp processes ` +
+            `holding workspace resources.\n`,
+        );
+        finish();
+      }
     }, KILL_HARD_DEADLINE_MS).unref();
   });
 }

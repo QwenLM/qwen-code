@@ -1561,13 +1561,22 @@ class QwenAgent implements Agent {
             );
           }
           // Codex review P2 (folded into F1 #4319): mirror the bootstrap
-          // normalization in `cli/src/config/config.ts:1426-1434` —
-          // `typeof string` filter + `trim()` + skip empty + dedupe —
-          // so a `tools.disabled: ['  Foo  ', '', 'Foo']` settings entry
-          // produces the same `Set(['Foo'])` here as at boot. Without
-          // the trim, `ToolRegistry.has(tool.name)` (exact string match)
-          // would fail to recognize a disabled tool after restart and
-          // silently re-register it.
+          // normalization in `cli/src/config/config.ts` (search for
+          // `disabledTools` array population around the `tools.disabled`
+          // settings read — `typeof string` filter + `trim()` + skip
+          // empty + dedupe). A `tools.disabled: ['  Foo  ', '', 'Foo']`
+          // settings entry must produce the same `Set(['Foo'])` here
+          // as at boot — without the trim, `ToolRegistry.has(tool.name)`
+          // (exact string match) would fail to recognize a disabled
+          // tool after restart and silently re-register it.
+          //
+          // Pre-fix the comment hard-coded `config.ts:1426-1434`;
+          // wenshao round 5 (#4319) flagged that this drifts when
+          // config.ts is edited. Replaced with a content-anchor
+          // pointer that survives line shifts. Extracting both copies
+          // to a shared `normalizeDisabledToolList()` helper is a
+          // valid follow-up — tracked separately so F1 stays a
+          // mechanical-lift PR.
           const disabledList: string[] = [];
           if (Array.isArray(mergedDisabled)) {
             const seen = new Set<string>();
