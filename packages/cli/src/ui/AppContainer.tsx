@@ -1384,8 +1384,11 @@ export const AppContainer = (props: AppContainerProps) => {
     hideTips: tipsDisabled,
   });
 
-  // Track whether suggestions are visible for Tab key handling
-  const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
+  // Track whether the input area has any Tab consumer (autocomplete dropdown,
+  // followup suggestion, mid-input ghost text, reverse/command search). When
+  // true, we suppress the Windows-only "bare Tab cycles approval mode"
+  // fallback so a single Tab keystroke triggers only one action. See #4171.
+  const [hasTabConsumer, setHasTabConsumer] = useState(false);
 
   const agentViewState = useAgentViewState();
   const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
@@ -1411,7 +1414,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     addItem: historyManager.addItem,
     onApprovalModeChange: handleApprovalModeChange,
-    shouldBlockTab: () => hasSuggestionsVisible,
+    shouldBlockTab: () => hasTabConsumer,
     disabled: agentViewState.activeView !== 'main',
   });
 
@@ -3443,7 +3446,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFolderTrustSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
-      onSuggestionsVisibilityChange: setHasSuggestionsVisible,
+      onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,
       handleRetryLastPrompt: retryLastPrompt,
