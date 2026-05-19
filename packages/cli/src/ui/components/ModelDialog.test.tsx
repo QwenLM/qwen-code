@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { render, cleanup } from '@testing-library/react';
+import { render, cleanup, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ModelDialog } from './ModelDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -279,7 +279,7 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('persists the highlighted model as the default when "d" is pressed', () => {
+  it('persists the highlighted model as the default when "d" is pressed', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
 
@@ -311,22 +311,96 @@ describe('<ModelDialog />', () => {
       sequence: 'd',
     });
 
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      SettingScope.User,
-      'model.name',
-      'gpt-4',
-    );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      SettingScope.User,
-      'security.auth.selectedType',
-      AuthType.USE_OPENAI,
-    );
-    expect(switchModel).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'gpt-4', {
+        baseUrl: undefined,
+      });
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'gpt-4',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'security.auth.selectedType',
+        AuthType.USE_OPENAI,
+      );
+    });
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
   it('blocks setting qwen-oauth as default with "d" (discontinued)', () => {
     const { props, mockConfig, mockSettings } = renderComponent();
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'd',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: 'd',
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(mockConfig.switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it('ignores Ctrl+D for setting the highlighted model as default', () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+
+    const { props, mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType,
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'd',
+      ctrl: true,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '\x04',
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it('blocks setting runtime qwen-oauth as default with "d"', () => {
+    const runtimeSnapshotId = `$runtime|${AuthType.QWEN_OAUTH}|${DEFAULT_QWEN_MODEL}`;
+    const { props, mockConfig, mockSettings } = renderComponent({}, {
+      getActiveRuntimeModelSnapshot: vi.fn(() => ({
+        id: runtimeSnapshotId,
+      })),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: DEFAULT_QWEN_MODEL,
+          label: DEFAULT_QWEN_MODEL,
+          description: '',
+          authType: AuthType.QWEN_OAUTH,
+          isRuntimeModel: true,
+          runtimeSnapshotId,
+        },
+      ]),
+    } as unknown as Partial<Config>);
 
     const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
     keyPressHandler({

@@ -400,11 +400,14 @@ export function ModelDialog({
         return;
       }
 
-      if (key.name === 'd' && !isFastModelMode && highlightedEntry) {
-        if (
-          highlightedEntry.authType === AuthType.QWEN_OAUTH &&
-          !highlightedEntry.isRuntime
-        ) {
+      if (
+        key.name === 'd' &&
+        !key.ctrl &&
+        !key.meta &&
+        !isFastModelMode &&
+        highlightedEntry
+      ) {
+        if (highlightedEntry.authType === AuthType.QWEN_OAUTH) {
           setErrorMessage(
             t(
               'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
@@ -413,12 +416,33 @@ export function ModelDialog({
           return;
         }
 
-        persistDefaultModelSelection({
-          settings,
-          uiState,
-          authType: highlightedEntry.authType,
-          modelId: highlightedEntry.model.id,
-        });
+        setErrorMessage(null);
+        void (async () => {
+          if (!config) {
+            return;
+          }
+
+          try {
+            await config.switchModel(
+              highlightedEntry.authType,
+              highlightedEntry.model.id,
+              { baseUrl: highlightedEntry.model.baseUrl },
+            );
+          } catch (e) {
+            const baseErrorMessage = e instanceof Error ? e.message : String(e);
+            setErrorMessage(
+              `Failed to switch model to '${highlightedEntry.model.id}'.\n\n${baseErrorMessage}`,
+            );
+            return;
+          }
+
+          persistDefaultModelSelection({
+            settings,
+            uiState,
+            authType: highlightedEntry.authType,
+            modelId: highlightedEntry.model.id,
+          });
+        })();
       }
     },
     { isActive: true },
