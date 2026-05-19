@@ -264,8 +264,9 @@ export interface BridgeOptions {
    * wraps PR 18's `WorkspaceFileSystem` and a `runQwenServe` wiring
    * patch so production `qwen serve` writes pick up its TOCTOU +
    * symlink-substitution + trust-gate + `.gitignore` + audit
-   * machinery — closing the `ws.ts:613` follow-up thread tracked
-   * since PR 18 landed. Until that lands, BridgeClient's inline
+   * machinery — closing the post-PR-18 follow-up thread about
+   * `BridgeClient`'s inline fs proxy bypassing `WorkspaceFileSystem`
+   * (originally raised in #4250 review). Until that lands, BridgeClient's inline
    * proxy continues to handle writes (current behavior preserved).
    *
    * When omitted (tests, Mode A in-process consumers, channels /

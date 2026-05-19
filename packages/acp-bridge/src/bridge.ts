@@ -2267,7 +2267,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // agent CRUD) need a fan-out path that doesn't require a session
       // id. Iterate every live session's bus best-effort — a closed bus
       // (mid-shutdown, or evicted under load) is silently skipped, same
-      // posture as `permission_resolved` at line 1717.
+      // posture as the `permission_resolved` publish inside
+      // `resolvePending`.
       //
       // The route handler's contract is "read-after-write" and any SSE
       // subscriber that misses the event can re-fetch via the route's
@@ -2296,8 +2297,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       //   - this `publishWorkspaceEvent` member (PR 16) — used by
       //     workspace-mutation routes that have a bridge proxy
       //     reference (memory / agents).
-      //   - the local `broadcastWorkspaceEvent` closure at ~line 2127
-      //     (PR 17 mutation surface) — used by `setSessionApprovalMode`
+      //   - the local `broadcastWorkspaceEvent` closure declared above
+      //     in this factory body (PR 17 mutation surface) — used by
+      //     `setSessionApprovalMode`
       //     / `setWorkspaceToolEnabled` / `restartMcpServer` / `initWorkspace`
       //     because their call sites run inside the factory closure
       //     where `this` isn't yet the proxy. The closure also takes
@@ -3491,16 +3493,6 @@ async function verifyParentWithinWorkspace(
       `parent-directory permissions.`,
   );
 }
-
-/**
- * Re-export of the workspace canonicalizer for callers that historically
- * imported it from `httpAcpBridge.ts`. The implementation lives in
- * `./workspacePaths.ts` so the `WorkspaceFileSystem` boundary can
- * reuse the same primitive without pulling in the 3.6k-line bridge
- * module. See `./workspacePaths.ts` for the cross-module contract
- * that governs this function.
- */
-export { canonicalizeWorkspace };
 
 /**
  * Race `p` against a timeout. The timeout REJECTS the returned

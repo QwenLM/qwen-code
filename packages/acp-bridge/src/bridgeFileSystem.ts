@@ -17,8 +17,10 @@ import type {
  * a serve-side adapter that wraps PR 18's `WorkspaceFileSystem` so
  * production `qwen serve` writes pick up the TOCTOU + symlink +
  * trust-gate + audit machinery PR 18 introduced — closing the
- * `ws.ts:613` follow-up thread that has been tracked since PR 18
- * landed. Until that adapter ships and `runQwenServe` wires it
+ * post-PR-18 follow-up thread about `BridgeClient`'s inline fs
+ * proxy bypassing `WorkspaceFileSystem` (originally raised in
+ * #4250 review; see also FIXME(stage-1.5, chiga0 finding 4) lifted
+ * to this package as part of #4175 F1). Until that adapter ships and `runQwenServe` wires it
  * through `BridgeOptions.fileSystem`, BridgeClient continues to use
  * its inline fs proxy (preserving pre-F1 behavior).
  *
