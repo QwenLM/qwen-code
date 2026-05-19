@@ -1125,18 +1125,37 @@ describe('useSlashCompletion', () => {
   });
 
   describe('isDirectory propagation', () => {
-    it('should propagate isDirectory flag from CommandCompletionItem to Suggestion', () => {
-      // This test verifies the toSuggestion pass-through behavior
-      // We create mock CommandCompletionItems and verify they become Suggestions with isDirectory set
-      import('./useSlashCompletion.js').then((module) => {
-        // toSuggestion is not exported, so we verify through directoryCommand instead
-        // The integration happens in useSlashCompletion's completion callback flow
+    it('should propagate isDirectory from CommandCompletionItem to Suggestion', async () => {
+      const mockCompletionFn = vi.fn().mockResolvedValue([
+        { value: '/tmp/workspace/', isDirectory: true },
+        { value: '/tmp/file.txt' },
+      ]);
+
+      const slashCommands = [
+        createTestCommand({
+          name: 'dir',
+          description: 'test',
+          completion: mockCompletionFn,
+        }),
+      ];
+
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/dir ',
+          slashCommands,
+          mockCommandContext,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(2);
       });
 
-      // For now, just verify the structure is correct by checking getDirPathCompletions output
-      // Note: Real testing for getDirPathCompletions and isDirectory propagation
-      // happens in directoryCommand.test.tsx which has comprehensive filesystem tests
-      expect(directoryCommand).toBeDefined();
+      // First suggestion (directory) should have isDirectory: true
+      expect(result.current.suggestions[0].isDirectory).toBe(true);
+      // Second suggestion (file) should NOT have isDirectory flag
+      expect(result.current.suggestions[1].isDirectory).toBeFalsy();
     });
   });
 });

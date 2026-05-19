@@ -86,7 +86,7 @@ export function getDirPathCompletions(partialArg: string): CommandCompletionItem
           !e.name.startsWith('.'),
       )
       .map((e) => ({
-        value: prefix + path.join(searchDir, e.name) + '/',
+        value: prefix + path.join(searchDir, e.name) + path.sep,
         isDirectory: true,
       }))
       .slice(0, 8);

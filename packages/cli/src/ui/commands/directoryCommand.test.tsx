@@ -330,14 +330,18 @@ describe('directoryCommand', () => {
 });
 
 describe('getDirPathCompletions', () => {
-  // Create temporary directories for testing
-  let tempTestDir: string;
+  let tempTestDir = '';
 
   beforeEach(() => {
     // Clean up any previous test runs
-    try {
-      fs.rmSync(tempTestDir, { recursive: true, force: true });
-    } catch {}
+    if (tempTestDir) {
+      try {
+        fs.rmSync(tempTestDir, { recursive: true, force: true });
+      } catch (err) {
+        // ignore cleanup errors
+        void err;
+      }
+    }
 
     tempTestDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-dir-test-'));
     // Create a nested directory structure: root/sub1, root/sub2, root/sub1/deep
@@ -355,9 +359,14 @@ describe('getDirPathCompletions', () => {
 
   afterAll(() => {
     // Cleanup after all tests
-    try {
-      fs.rmSync(tempTestDir, { recursive: true, force: true });
-    } catch {}
+    if (tempTestDir) {
+      try {
+        fs.rmSync(tempTestDir, { recursive: true, force: true });
+      } catch (err) {
+        // ignore cleanup errors
+        void err;
+      }
+    }
   });
 
   describe('directory completions should include isDirectory flag', () => {
@@ -372,8 +381,8 @@ describe('getDirPathCompletions', () => {
         expect(suggestion.value).toBeDefined();
         expect(suggestion.isDirectory).toBe(true);
 
-        // Directory values should end with / for continued navigation
-        expect(suggestion.value.endsWith('/')).toBe(true);
+        // Directory values should end with path separator for continued navigation
+        expect(suggestion.value.endsWith(path.sep)).toBe(true);
 
         // Should match one of our created directories
         const dirNameWithoutSlash = suggestion.value.slice(0, -1);
