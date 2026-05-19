@@ -288,8 +288,9 @@ function writeServeDebugLine(message: string): void {
 }
 
 // `InvalidPermissionOptionError` lifted to
-// `@qwen-code/acp-bridge/bridgeErrors` in #4175 PR 22b — see
-// the consolidated re-export block earlier in this file.
+// `@qwen-code/acp-bridge/bridgeErrors` in #4175 PR 22b. Imported above
+// from `./bridgeErrors.js`; the package barrel (`./index.ts`) re-
+// exports it to outside callers.
 
 const MAX_DISPLAY_NAME_LENGTH = 256;
 
@@ -306,8 +307,9 @@ function hasControlCharacter(value: string): boolean {
 // `InvalidSessionMetadataError`, `WorkspaceInitConflictError`,
 // `WorkspaceInitPathEscapeError`, `WorkspaceInitSymlinkError`,
 // `McpServerNotFoundError`, `McpServerRestartFailedError` lifted to
-// `@qwen-code/acp-bridge/bridgeErrors` in #4175 PR 22b — see the
-// consolidated re-export block earlier in this file.
+// `@qwen-code/acp-bridge/bridgeErrors` in #4175 PR 22b. Imported above
+// from `./bridgeErrors.js`; the package barrel (`./index.ts`) re-
+// exports them to outside callers.
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 /**
@@ -3457,11 +3459,13 @@ async function verifyParentWithinWorkspace(
 
 /**
  * Re-export of the workspace canonicalizer for callers that historically
- * imported it from `httpAcpBridge.ts`. The implementation was extracted
- * to `./fs/paths.ts` in #4175 PR 18 (commit 1) so the forthcoming
- * `WorkspaceFileSystem` boundary can reuse the same primitive without
- * pulling in the 3.6k-line bridge module. See `./fs/paths.ts` for the
- * cross-module contract that governs this function.
+ * imported it from `httpAcpBridge.ts`. The implementation was first
+ * extracted to `cli/src/serve/fs/paths.ts` in #4175 PR 18 (commit 1)
+ * and then lifted to `./workspacePaths.ts` here in #4175 PR 22b/1, so
+ * the `WorkspaceFileSystem` boundary can reuse the same primitive
+ * without pulling in the 3.6k-line bridge module. See
+ * `./workspacePaths.ts` for the cross-module contract that governs
+ * this function.
  */
 export { canonicalizeWorkspace };
 

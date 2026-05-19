@@ -84,28 +84,11 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // would let a prompt-injected shell turn the agent into an
   // authenticated client of its own daemon — escalation the agent
   // doesn't otherwise have).
-  const childEnv: NodeJS.ProcessEnv = { ...process.env };
-  for (const key of SCRUBBED_CHILD_ENV_KEYS) {
-    delete childEnv[key];
-  }
-  // PR 14 fix (review #4247 wenshao R5 runQwenServe.ts:216): apply
-  // per-handle env overrides on top of the process.env snapshot.
-  // `undefined` value means "delete this var from the child env" so
-  // an embedded caller can scrub a stale inherited var without
-  // having to mutate the daemon's global process.env. Applied AFTER
-  // `SCRUBBED_CHILD_ENV_KEYS` so the daemon-only secret list still
-  // wins (operators can't override the scrub by passing
-  // `QWEN_SERVER_TOKEN` in overrides — defense in depth).
-  if (childEnvOverrides) {
-    for (const [key, value] of Object.entries(childEnvOverrides)) {
-      if (SCRUBBED_CHILD_ENV_KEYS.has(key)) continue;
-      if (value === undefined) {
-        delete childEnv[key];
-      } else {
-        childEnv[key] = value;
-      }
-    }
-  }
+  const childEnv = scrubChildEnv(
+    process.env,
+    SCRUBBED_CHILD_ENV_KEYS,
+    childEnvOverrides,
+  );
   // CodeQL `js/path-injection` flags the `cwd: workspaceCwd` flow.
   // Stage 1 trust model accepts this — see the function-level comment
   // above for the design rationale. Defense-in-depth: the cwd is
@@ -255,6 +238,50 @@ const KILL_HARD_DEADLINE_MS = 10_000;
 const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
   'QWEN_SERVER_TOKEN',
 ]);
+
+/**
+ * Build the env passed to the `qwen --acp` child. Pure function, exported
+ * for unit-test access (the surrounding `defaultSpawnChannelFactory` is
+ * unit-test-hostile because it actually spawns Node). Behavior:
+ *
+ *   1. Start from a shallow clone of `source` (no aliasing into the
+ *      daemon's `process.env`).
+ *   2. Delete every key listed in `scrubbed` (the daemon-internal secret
+ *      denylist — currently just `QWEN_SERVER_TOKEN`, see security
+ *      rationale on the constant).
+ *   3. Apply `overrides` per-handle. `undefined` value deletes the key
+ *      (lets an embedded caller scrub a stale inherited var without
+ *      mutating the daemon's global `process.env`). Anything else
+ *      assigns. **`overrides` CANNOT re-introduce a scrubbed key** —
+ *      defense-in-depth so an operator passing
+ *      `{ QWEN_SERVER_TOKEN: 'x' }` in overrides can't smuggle the
+ *      daemon's bearer token back into the child.
+ *
+ * Used by `defaultSpawnChannelFactory` above. The split mirrors the
+ * "scrub" comment block's structure 1:1; behavior is byte-identical to
+ * the pre-extraction inline implementation.
+ */
+export function scrubChildEnv(
+  source: NodeJS.ProcessEnv,
+  scrubbed: ReadonlySet<string>,
+  overrides?: Readonly<Record<string, string | undefined>>,
+): NodeJS.ProcessEnv {
+  const childEnv: NodeJS.ProcessEnv = { ...source };
+  for (const key of scrubbed) {
+    delete childEnv[key];
+  }
+  if (overrides) {
+    for (const [key, value] of Object.entries(overrides)) {
+      if (scrubbed.has(key)) continue;
+      if (value === undefined) {
+        delete childEnv[key];
+      } else {
+        childEnv[key] = value;
+      }
+    }
+  }
+  return childEnv;
+}
 
 function killChild(child: ChildProcess): Promise<void> {
   return new Promise<void>((resolve) => {
