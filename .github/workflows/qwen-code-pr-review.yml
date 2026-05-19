@@ -5,10 +5,6 @@ on:
     types: ['opened', 'reopened', 'ready_for_review', 'synchronize']
   issue_comment:
     types: ['created', 'edited']
-  pull_request_review_comment:
-    types: ['created', 'edited']
-  pull_request_review:
-    types: ['submitted']
   workflow_dispatch:
     inputs:
       pr_number:
@@ -51,17 +47,7 @@ jobs:
         contains(github.event.comment.body, '@qwen /review') &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'COLLABORATOR')) ||
-      (github.event_name == 'pull_request_review_comment' &&
-        contains(github.event.comment.body, '@qwen /review') &&
-        (github.event.comment.author_association == 'OWNER' ||
-         github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'COLLABORATOR')) ||
-      (github.event_name == 'pull_request_review' &&
-        contains(github.event.review.body, '@qwen /review') &&
-        (github.event.review.author_association == 'OWNER' ||
-         github.event.review.author_association == 'MEMBER' ||
-         github.event.review.author_association == 'COLLABORATOR'))
+         github.event.comment.author_association == 'COLLABORATOR'))
     concurrency:
       group: 'qwen-pr-review-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.pr_number }}'
       cancel-in-progress: true
@@ -111,10 +97,10 @@ jobs:
               additional_instructions="${WORKFLOW_ADDITIONAL_INSTRUCTIONS:-}"
               comment_body=""
               ;;
-            pull_request_target|pull_request_review_comment|pull_request_review)
+            pull_request_target)
               pr_number="$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
               review_mode="comment"
-              comment_body="$(jq -r '.comment.body // .review.body // ""' "$GITHUB_EVENT_PATH")"
+              comment_body=""
               ;;
             issue_comment)
               pr_number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
