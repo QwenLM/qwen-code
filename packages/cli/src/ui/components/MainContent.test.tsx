@@ -460,6 +460,7 @@ describe('<MainContent />', () => {
 
   it('filters out suppressed history items from rendering', async () => {
     staticItemsSpy.mockClear();
+    historyItemDisplayPropsSpy.mockClear();
     const history = [
       { type: 'user' as const, id: 1, text: 'hello' },
       {
@@ -477,11 +478,13 @@ describe('<MainContent />', () => {
     ];
     const uiState = createUIState({ history });
     renderMainContent(uiState);
-    expect(staticItemsSpy).toHaveBeenCalled();
-    const renderedItems = staticItemsSpy.mock.calls.at(-1)?.[0];
+    expect(historyItemDisplayPropsSpy).toHaveBeenCalled();
+    const renderedHistoryItems = historyItemDisplayPropsSpy.mock.calls.map(
+      (c) => c[0].item,
+    );
     // Only the unsuppressed user message should render
-    expect(renderedItems).toHaveLength(1);
-    expect(renderedItems?.[0]).toMatchObject({ id: 1 });
+    expect(renderedHistoryItems).toHaveLength(1);
+    expect(renderedHistoryItems[0]).toMatchObject({ id: 1 });
   });
 
   it('does NOT reset progressive replay when only currentModel changes (PR #4119 regression guard)', async () => {

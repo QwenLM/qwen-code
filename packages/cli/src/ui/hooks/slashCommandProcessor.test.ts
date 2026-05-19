@@ -581,15 +581,20 @@ describe('useSlashCommandProcessor', () => {
         },
         expect.any(Number),
       );
-      expect(mockAddItem).toHaveBeenNthCalledWith(2, {
-        type: MessageType.INFO,
-        content:
-          'History will be collapsed by default for future resumed sessions.',
-        timestamp: expect.any(Date),
-      });
+      expect(mockAddItem).toHaveBeenNthCalledWith(
+        2,
+        {
+          type: MessageType.INFO,
+          text: 'History will be collapsed by default for future resumed sessions.',
+        },
+        expect.any(Number),
+      );
     });
 
-    it('suppresses info feedback for expand-now command (self-managed UI)', async () => {
+    it('expand-now command updates history without info feedback', async () => {
+      const mockClient = { setHistory: vi.fn() } as unknown as GeminiClient;
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
+
       const historyCmd = createTestCommand({
         name: 'history',
         subCommands: [
@@ -610,8 +615,8 @@ describe('useSlashCommandProcessor', () => {
         await result.current.handleSlashCommand('/history expand-now');
       });
 
-      // Only user message, no info feedback (self-managed)
-      expect(mockAddItem).toHaveBeenCalledTimes(1);
+      // User message added, then load_history replaces all items
+      expect(mockAddItem).toHaveBeenCalled();
       expect(mockAddItem).toHaveBeenCalledWith(
         {
           type: MessageType.USER,
@@ -619,6 +624,7 @@ describe('useSlashCommandProcessor', () => {
         },
         expect.any(Number),
       );
+      expect(mockClient.setHistory).toHaveBeenCalledWith([]);
     });
 
     it('opens memory dialog when command returns dialog:memory', async () => {

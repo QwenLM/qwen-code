@@ -106,16 +106,12 @@ describe('historyCommand', () => {
 
     const result = await expandNowCommand.action!(mockContext, '');
 
-    expect(result).toEqual({
-      type: 'load_history',
-      history: [
-        expect.objectContaining({ id: 1, display: undefined }),
-        expect.objectContaining({ id: 2, display: undefined }),
-      ],
-      clientHistory: [],
-    });
-    expect(mockLoadHistory).not.toHaveBeenCalled();
-    expect(mockRefreshStatic).not.toHaveBeenCalled();
+    expect(result).toBeUndefined();
+    expect(mockLoadHistory).toHaveBeenCalledWith([
+      expect.objectContaining({ id: 1, display: undefined }),
+      expect.objectContaining({ id: 2, display: undefined }),
+    ]);
+    expect(mockRefreshStatic).toHaveBeenCalled();
   });
 
   it('expand-now returns already expanded when expanding an uncollapsed session', async () => {

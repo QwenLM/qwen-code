@@ -564,11 +564,13 @@ export function applyCollapsePolicyAndSummary(
   rawItems: HistoryItem[],
   collapseOnResume: boolean,
 ): HistoryItem[] {
-  const uiHistoryItems = collapseOnResume
-    ? applyResumeDisplayPolicy(rawItems, { collapseOnResume })
-    : [...rawItems];
+  if (!collapseOnResume) return rawItems;
 
-  if (collapseOnResume && rawItems.length > 0) {
+  const uiHistoryItems = applyResumeDisplayPolicy(rawItems, {
+    collapseOnResume,
+  });
+
+  if (rawItems.length > 0) {
     const nextId = rawItems[rawItems.length - 1].id + 1;
     return [
       ...uiHistoryItems,

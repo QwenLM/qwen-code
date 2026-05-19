@@ -649,16 +649,11 @@ export const useSlashCommandProcessor = (
                   };
                 case 'message':
                   if (result.messageType === 'info') {
-                    // Only suppress info messages when the command explicitly
-                    // self-manages its UI feedback (e.g., /history expand-now
-                    // which uses load_history to replace the transcript).
-                    if (!result.selfManaged) {
-                      addMessage({
-                        type: MessageType.INFO,
-                        content: result.content,
-                        timestamp: new Date(),
-                      });
-                    }
+                    addMessage({
+                      type: MessageType.INFO,
+                      content: result.content,
+                      timestamp: new Date(),
+                    });
                   } else if (result.messageType === 'warning') {
                     addMessage({
                       type: MessageType.WARNING,

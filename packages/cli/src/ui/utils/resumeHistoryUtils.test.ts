@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   buildResumedHistoryItems,
   stripSuppressOnRestore,
+  expandCollapsedHistory,
 } from './resumeHistoryUtils.js';
 import { ToolCallStatus } from '../types.js';
 import type {
@@ -383,5 +384,69 @@ describe('stripSuppressOnRestore', () => {
       text: 'hello',
       display: undefined,
     });
+  });
+});
+
+describe('expandCollapsedHistory', () => {
+  it('returns empty array for empty input', () => {
+    expect(expandCollapsedHistory([])).toEqual([]);
+  });
+
+  it('filters out collapse-summary items and strips suppressOnRestore', () => {
+    const items = [
+      {
+        id: 1,
+        type: 'user',
+        text: 'hello',
+        display: { suppressOnRestore: true },
+      },
+      {
+        id: 2,
+        type: 'gemini',
+        text: 'hi',
+        display: { suppressOnRestore: true },
+      },
+      {
+        id: 3,
+        type: 'info',
+        text: 'Summary',
+        display: { kind: 'collapse-summary' },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([
+      { id: 1, type: 'user', text: 'hello', display: undefined },
+      { id: 2, type: 'gemini', text: 'hi', display: undefined },
+    ]);
+  });
+
+  it('preserves items without suppressOnRestore', () => {
+    const items = [
+      { id: 1, type: 'user', text: 'hello' },
+      {
+        id: 2,
+        type: 'gemini',
+        text: 'hi',
+        display: { suppressOnRestore: true },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([
+      { id: 1, type: 'user', text: 'hello' },
+      { id: 2, type: 'gemini', text: 'hi', display: undefined },
+    ]);
+  });
+
+  it('handles items with both suppressOnRestore and kind', () => {
+    const items = [
+      {
+        id: 1,
+        type: 'user',
+        text: 'hello',
+        display: { suppressOnRestore: true, kind: 'collapse-summary' },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([]);
   });
 });

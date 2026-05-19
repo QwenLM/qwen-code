@@ -4,11 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  SlashCommand,
-  MessageActionReturn,
-  LoadHistoryActionReturn,
-} from './types.js';
+import type { SlashCommand, MessageActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
@@ -65,8 +61,8 @@ const expandNowCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
-  action: (context): MessageActionReturn | LoadHistoryActionReturn | void => {
-    const { history } = context.ui;
+  action: (context): MessageActionReturn | void => {
+    const { history, loadHistory, refreshStatic } = context.ui;
 
     const hasSuppressed = history.some(
       (item) => item.display?.suppressOnRestore,
@@ -82,12 +78,9 @@ const expandNowCommand: SlashCommand = {
 
     // Remove suppressOnRestore from all items and drop collapse summary items.
     const updated = expandCollapsedHistory(history);
-
-    return {
-      type: 'load_history',
-      history: updated,
-      clientHistory: [],
-    };
+    loadHistory(updated);
+    refreshStatic();
+    // No return — the loadHistory/refreshStatic calls handle the UI update
   },
 };
 
