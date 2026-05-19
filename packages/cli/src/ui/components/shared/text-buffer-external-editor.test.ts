@@ -227,6 +227,8 @@ describe('openInExternalEditor', () => {
       await result.current.openInExternalEditor();
     });
 
+    const spawnCmd = mockSpawnSync.mock.calls[0]?.[0] as string;
+    expect(spawnCmd).toBe('"code.cmd"');
     const spawnArgs = mockSpawnSync.mock.calls[0]?.[1] as string[];
     for (const arg of spawnArgs) {
       expect(arg).toMatch(/^".*"$/);
@@ -369,7 +371,7 @@ describe('openInExternalEditor', () => {
       });
 
       expect(mockSpawnSync).toHaveBeenCalledWith(
-        'code.cmd',
+        '"code.cmd"',
         expect.arrayContaining([expect.stringMatching(/^".*"$/)]),
         expect.objectContaining({ shell: true }),
       );
@@ -503,5 +505,72 @@ describe('openInExternalEditor', () => {
 
     expect(fs.unlinkSync).toHaveBeenCalledWith(expectedTmpFile);
     expect(fs.rmdirSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock');
+  });
+
+  it('should normalize CRLF to LF in editor output', async () => {
+    (fs.readFileSync as Mock).mockReturnValue('line1\r\nline2\rline3\nline4');
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'original',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(result.current.text).toBe('line1\nline2\nline3\nline4');
+  });
+
+  it('should keep buffer unchanged when readFileSync throws', async () => {
+    (fs.readFileSync as Mock).mockImplementation(() => {
+      throw new Error('EACCES');
+    });
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'original',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(result.current.text).toBe('original');
+    expect(fs.unlinkSync).toHaveBeenCalled();
+  });
+
+  it('should quote editorCmd when shell mode is enabled', async () => {
+    const origPlatform = process.platform;
+    const origVISUAL = process.env['VISUAL'];
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    process.env['VISUAL'] = 'C:\\Program Files\\Code\\code.cmd';
+
+    try {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'hello',
+          viewport,
+          isValidPath: () => false,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.openInExternalEditor();
+      });
+
+      const spawnCmd = mockSpawnSync.mock.calls[0]?.[0] as string;
+      expect(spawnCmd).toBe('"C:\\Program Files\\Code\\code.cmd"');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: origPlatform });
+      if (origVISUAL === undefined) delete process.env['VISUAL'];
+      else process.env['VISUAL'] = origVISUAL;
+    }
   });
 });

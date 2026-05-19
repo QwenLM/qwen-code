@@ -2250,10 +2250,11 @@ export function useTextBuffer({
       }
 
       if (useShell) {
-        // .cmd/.bat launch through cmd.exe on Windows. These args are
-        // process-generated temp-file paths, so quoting handles spaces and
-        // command separators. Do not reuse for user-controlled arguments;
-        // avoid shell execution instead of extending ad-hoc escaping.
+        // .cmd/.bat launch through cmd.exe on Windows. Quote both the
+        // command and args so paths with spaces survive cmd.exe parsing.
+        // These are process-generated paths; do not reuse for
+        // user-controlled arguments.
+        editorCmd = `"${editorCmd}"`;
         editorArgs = editorArgs.map((a) => `"${a}"`);
       }
 
@@ -2280,9 +2281,16 @@ export function useTextBuffer({
           dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
         }
       } catch (err) {
-        debugLogger.error('[useTextBuffer] external editor error', err);
+        debugLogger.error(
+          `[useTextBuffer] external editor error (cmd=${editorCmd}, shell=${useShell}, source=${resolved ? 'preferred' : 'env/default'})`,
+          err,
+        );
       } finally {
-        if (wasRaw) setRawMode?.(true);
+        try {
+          if (wasRaw) setRawMode?.(true);
+        } catch {
+          /* stdin may have been destroyed while the editor was open */
+        }
         try {
           fs.unlinkSync(filePath);
           fs.rmdirSync(tmpDir);
