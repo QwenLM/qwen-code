@@ -100,6 +100,7 @@ export {
   WorkspaceInitConflictError,
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
+  WorkspaceInitRaceError,
   type AcpChannel,
   type BridgeOptions,
   type BridgeSession,

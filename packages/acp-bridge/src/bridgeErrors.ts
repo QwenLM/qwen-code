@@ -238,6 +238,34 @@ export class WorkspaceInitSymlinkError extends Error {
 }
 
 /**
+ * #4297 fold-in 10 (qwen-latest, addresses #3263954690). Thrown by
+ * `initWorkspace` when the target file's inode misbehaved at write
+ * time IN A NON-SYMLINK WAY — typically a TOCTOU race against a
+ * concurrent writer:
+ *   - `'eexist'`: a regular file (or symlink) appeared at the target
+ *     path between the absence check and our atomic `'wx'` create.
+ *   - `'enoent'`: the target was deleted between the content check
+ *     and the `O_NOFOLLOW` overwrite (concurrent git checkout, editor
+ *     save, etc.).
+ *
+ * Split out from `WorkspaceInitSymlinkError` so the HTTP error code
+ * isn't misleading: an operator chasing a `workspace_init_race`
+ * code knows it's a benign concurrent-modification window, not a
+ * symlink attack vector. Same 400 mapping as the sibling class —
+ * the route layer still recognizes both.
+ */
+export class WorkspaceInitRaceError extends Error {
+  readonly target: string;
+  readonly kind: 'eexist' | 'enoent';
+  constructor(target: string, kind: 'eexist' | 'enoent', detail: string) {
+    super(detail);
+    this.name = 'WorkspaceInitRaceError';
+    this.target = target;
+    this.kind = kind;
+  }
+}
+
+/**
  * #4282 fold-in 1 (gpt-5.5 C5). Thrown by `restartMcpServer` when the
  * caller asks for a server name that isn't in the daemon's
  * `McpServers` config. Translated to HTTP 404 + structured body by

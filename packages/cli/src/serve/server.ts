@@ -46,6 +46,7 @@ import {
   WorkspaceInitConflictError,
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
+  WorkspaceInitRaceError,
   WorkspaceMismatchError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
@@ -2393,6 +2394,23 @@ function sendBridgeError(
     res.status(400).json({
       error: err.message,
       code: 'workspace_init_symlink',
+      target: err.target,
+      kind: err.kind,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceInitRaceError) {
+    // #4297 fold-in 10 (qwen-latest S2, addresses #3263954690).
+    // Race-condition variant: EEXIST after our absence check (target
+    // appeared mid-create) or ENOENT after our content check (target
+    // disappeared mid-overwrite). Same 400 mapping as the symlink
+    // sibling — operator fix is "rerun init" or investigate the
+    // concurrent writer (git checkout, editor save, …). Distinct
+    // `code: 'workspace_init_race'` so dashboards don't misclassify
+    // these as symlink-attack indicators.
+    res.status(400).json({
+      error: err.message,
+      code: 'workspace_init_race',
       target: err.target,
       kind: err.kind,
     });

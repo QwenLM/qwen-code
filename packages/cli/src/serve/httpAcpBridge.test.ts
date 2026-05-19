@@ -50,6 +50,7 @@ import {
   WorkspaceInitConflictError,
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
+  WorkspaceInitRaceError,
   WorkspaceMismatchError,
   type AcpChannel,
   type BridgeOptions,
@@ -5049,8 +5050,13 @@ describe('createHttpAcpBridge', () => {
         const err = await bridge
           .initWorkspace({ force: true }, undefined)
           .catch((e) => e);
-        expect(err).toBeInstanceOf(WorkspaceInitSymlinkError);
-        expect((err as WorkspaceInitSymlinkError).kind).toBe('target');
+        // #4297 fold-in 10 (qwen-latest S2): ENOENT race-delete now
+        // surfaces as `WorkspaceInitRaceError(kind: 'enoent')` (HTTP
+        // code `workspace_init_race`), not `WorkspaceInitSymlinkError`
+        // — distinguishes a benign concurrent-modification window
+        // from a symlink attack vector at the dashboard level.
+        expect(err).toBeInstanceOf(WorkspaceInitRaceError);
+        expect((err as WorkspaceInitRaceError).kind).toBe('enoent');
         // Message must reference deletion / concurrent writer — NOT
         // "swapped to a symlink" (which is only accurate for ELOOP).
         expect((err as Error).message).toMatch(
@@ -5198,8 +5204,13 @@ describe('createHttpAcpBridge', () => {
         try {
           const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
           const err = await bridge.initWorkspace({}, undefined).catch((e) => e);
-          expect(err).toBeInstanceOf(WorkspaceInitSymlinkError);
-          expect((err as WorkspaceInitSymlinkError).kind).toBe('target');
+          // #4297 fold-in 10 (qwen-latest S2): EEXIST race now surfaces
+          // as `WorkspaceInitRaceError(kind: 'eexist')` — the inode
+          // could be a regular file OR symlink, we don't know which,
+          // so the dedicated race class is more accurate than the
+          // symlink-implying one.
+          expect(err).toBeInstanceOf(WorkspaceInitRaceError);
+          expect((err as WorkspaceInitRaceError).kind).toBe('eexist');
           // External file must not have been touched.
           expect(await fsp.readFile(externalFile, 'utf8')).toBe('# external');
         } finally {
