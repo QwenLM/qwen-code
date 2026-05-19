@@ -462,6 +462,85 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
           fs.rmSync(ws, { recursive: true, force: true });
         }
       }, 120_000);
+
+      // PR 14b cross-check: validate the daemon's in-process MCP
+      // accounting on `GET /workspace/mcp` (`clientCount`, the field
+      // SDK consumers and dashboards see, and the same source the
+      // push-event channel — `mcp_budget_warning` /
+      // `mcp_child_refused_batch` — reads) against external `pgrep -P`
+      // measurement.
+      //
+      // Architectural note (PR 22a): a `qwen serve` ACP child runs
+      // two `Config` objects, each carrying its own
+      // `McpClientManager`. The bootstrap Config (`runAcpAgent` →
+      // `config.initialize`) discovers MCP servers when the child
+      // starts, and `/workspace/mcp` reads its manager via
+      // `buildWorkspaceMcpStatus(this.config)` (`acpAgent.ts:1399`).
+      // The per-session Config (`newSessionConfig` →
+      // `config.initialize`) spawns a SECOND set of MCP children for
+      // the SAME servers — its accounting is NOT what the
+      // workspace-level snapshot reflects. So pgrep observes
+      // `(1 + sessionCount) * MCP_SERVERS_CONFIGURED` grandchildren
+      // while `clientCount` stays at `MCP_SERVERS_CONFIGURED`.
+      //
+      // What this test validates:
+      // 1. `clientCount` is exactly the configured server count
+      //    (bootstrap manager accounting is honest).
+      // 2. pgrep observes the architectural 2×N grandchildren after
+      //    one session is created — encoded literally so a future
+      //    refactor that unifies bootstrap + session managers (#4175
+      //    follow-up to drop the duplicate discovery) fails this
+      //    assertion and forces a deliberate test update.
+      // 3. `clientCount` NEVER exceeds the observed pgrep count —
+      //    the original "snapshot must never over-report" guard.
+      //
+      // Skip-gated like the parent describe (POSIX, non-sandbox);
+      // idle MCP fixtures are stdio-only so the relationship between
+      // `clientCount` and pgrep is exact (no amplification slack
+      // required at idle).
+      it('clientCount matches external pgrep observation', async () => {
+        const ws = makeTempWorkspace('mcp-counter');
+        let daemon: SpawnedDaemon | undefined;
+        try {
+          writeWorkspaceSettings(ws, {
+            mcpServers: {
+              idle1: { command: 'node', args: [IDLE_MCP_PATH] },
+              idle2: { command: 'node', args: [IDLE_MCP_PATH] },
+            },
+          });
+          daemon = await spawnDaemon({ workspaceCwd: ws });
+          await daemon.client.createOrAttachSession({ workspaceCwd: ws });
+
+          // Wait until the OS sees the FULL post-session set
+          // (`MCP_SERVERS_CONFIGURED * 2` grandchildren — see the
+          // architectural note above), then read the snapshot.
+          // pgrep first to lock the comparison floor; snapshot
+          // second so the daemon can't sneak in a new connect
+          // between the two reads.
+          const expectedGrandchildren = MCP_SERVERS_CONFIGURED * 2;
+          const observed = await waitForMcpGrandchildren(
+            daemon.daemon.pid!,
+            expectedGrandchildren,
+          );
+          const snapshot = await daemon.client.workspaceMcp();
+
+          // (1) Bootstrap manager accounting is honest.
+          expect(snapshot.clientCount).toBe(MCP_SERVERS_CONFIGURED);
+          // (2) pgrep observes both managers' children. If a future
+          // refactor unifies them, change this to
+          // `MCP_SERVERS_CONFIGURED` (and update the architectural
+          // note above).
+          expect(observed.mcpGrandchildren.length).toBe(expectedGrandchildren);
+          // (3) Snapshot never over-reports OS reality. Holds under
+          // both the current 2× regime and the unified 1× future.
+          expect(snapshot.clientCount).toBeLessThanOrEqual(
+            observed.mcpGrandchildren.length,
+          );
+        } finally {
+          if (daemon) await daemon.dispose();
+          fs.rmSync(ws, { recursive: true, force: true });
+        }
+      }, 120_000);
     });
 
     describe('SSE backpressure (unit)', () => {

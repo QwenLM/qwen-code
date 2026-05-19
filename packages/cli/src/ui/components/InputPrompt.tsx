@@ -87,7 +87,22 @@ export interface InputPromptProps {
   onEscapePromptChange?: (showPrompt: boolean) => void;
   onToggleShortcuts?: () => void;
   showShortcuts?: boolean;
+  /**
+   * Reports autocomplete-dropdown visibility specifically. Composer uses
+   * this to hide the Footer / KeyboardShortcuts when the dropdown would
+   * overlap their vertical space. Must stay narrow — followup suggestions
+   * and mid-input ghost text don't take Footer's space and shouldn't hide
+   * it. See #4171 / #4308 review.
+   */
   onSuggestionsVisibilityChange?: (visible: boolean) => void;
+  /**
+   * Reports whether any input-area handler will consume a Tab keystroke
+   * (autocomplete dropdown, followup prompt suggestion, or mid-input ghost
+   * text). AppContainer feeds this into useAutoAcceptIndicator's
+   * `shouldBlockTab` to suppress the Windows-only "bare Tab cycles approval
+   * mode" fallback. See #4171.
+   */
+  onTabConsumerChange?: (active: boolean) => void;
   vimHandleInput?: (key: Key) => boolean;
   isEmbeddedShellFocused?: boolean;
   /** Prompt suggestion text to display after response completes */
@@ -122,6 +137,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   onToggleShortcuts,
   showShortcuts,
   onSuggestionsVisibilityChange,
+  onTabConsumerChange,
   vimHandleInput,
   isEmbeddedShellFocused,
   promptSuggestion,
@@ -1418,12 +1434,37 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     (shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
     activeCompletion.showSuggestions;
 
-  // Notify parent about suggestions visibility changes
+  // Whether any input-side handler would consume a Tab keystroke. AppContainer
+  // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
+  // Windows-only "bare Tab cycles approval mode" fallback doesn't double-fire
+  // alongside an input-area Tab handler. See issue #4171.
+  //
+  // Note on reverse/command-search: when those overlays have matches, their
+  // `showSuggestions` flag flows into `shouldShowSuggestions` above and Tab IS
+  // consumed (ACCEPT_SUGGESTION_REVERSE_SEARCH). When they are active with no
+  // matches, Tab is not consumed — so the bare `reverseSearchActive` /
+  // `commandSearchActive` flags are intentionally NOT included here.
+  const hasTabConsumer =
+    shouldShowSuggestions ||
+    (followup.state.isVisible && Boolean(followup.state.suggestion)) ||
+    Boolean(completion.midInputGhostText?.acceptText);
+
+  // Narrow signal — autocomplete dropdown only. Composer hides Footer /
+  // KeyboardShortcuts when this is true because the dropdown competes for
+  // the same vertical space. Followup / ghost text are inline within the
+  // input box and must NOT hide the Footer (#4308 review).
   useEffect(() => {
-    if (onSuggestionsVisibilityChange) {
-      onSuggestionsVisibilityChange(shouldShowSuggestions);
-    }
+    onSuggestionsVisibilityChange?.(shouldShowSuggestions);
   }, [shouldShowSuggestions, onSuggestionsVisibilityChange]);
+
+  // Broad signal — any Tab consumer. Reset to false on unmount (e.g. when
+  // InputPrompt unmounts during streaming) so AppContainer's stale
+  // `hasTabConsumer` doesn't keep blocking Windows Tab approval-mode cycling
+  // while there is no input area to consume the keystroke.
+  useEffect(() => {
+    onTabConsumerChange?.(hasTabConsumer);
+    return () => onTabConsumerChange?.(false);
+  }, [hasTabConsumer, onTabConsumerChange]);
 
   // Trigger prompt suggestion when prop changes
   useEffect(() => {

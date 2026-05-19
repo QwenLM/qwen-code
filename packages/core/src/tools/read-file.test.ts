@@ -645,6 +645,50 @@ describe('ReadFileTool', () => {
         expect(second.returnDisplay).toMatch(/^Unchanged: /);
       });
 
+      it('re-emits bytes (no placeholder) after the read was evicted from history by microcompaction (issue #4239)', async () => {
+        const filePath = path.join(tempRootDir, 'evicted.txt');
+        await fsp.writeFile(filePath, 'hello world', 'utf-8');
+
+        const first = await read({ file_path: filePath });
+        expect(first.llmContent).toBe('hello world');
+
+        // Simulate idle microcompaction blanking this read's output:
+        // the bytes are no longer quotable from history.
+        fileReadCache.markReadEvictedFromHistory(fs.statSync(filePath));
+
+        // The fast-path must NOT serve a placeholder pointing at content
+        // the model can no longer retrieve — it must re-emit real bytes.
+        const second = await read({ file_path: filePath });
+        expect(second.llmContent).toBe('hello world');
+        expect(second.llmContent).not.toMatch(/unchanged since/);
+
+        // And a re-read re-arms the fast-path (bytes are back in history).
+        const third = await read({ file_path: filePath });
+        expect(third.llmContent).toMatch(
+          /unchanged since last read in this session/,
+        );
+      });
+
+      it('a partial read after eviction does NOT re-arm the placeholder (Codex P2)', async () => {
+        const filePath = path.join(tempRootDir, 'evicted-partial.txt');
+        await fsp.writeFile(filePath, 'line1\nline2\nline3\n', 'utf-8');
+
+        // Full read, then microcompaction blanks it.
+        await read({ file_path: filePath });
+        fileReadCache.markReadEvictedFromHistory(fs.statSync(filePath));
+
+        // A partial (ranged) read of the unchanged file: only a slice
+        // is now resident, not the full bytes.
+        const partial = await read({ file_path: filePath, limit: 1 });
+        expect(partial.llmContent).not.toMatch(/unchanged since/);
+
+        // A follow-up full Read must STILL re-emit real bytes — the
+        // full content is not in history, only the slice is.
+        const full = await read({ file_path: filePath });
+        expect(full.llmContent).toContain('line3');
+        expect(full.llmContent).not.toMatch(/unchanged since/);
+      });
+
       it('serves a fresh full Read after an external modification (stale)', async () => {
         const filePath = path.join(tempRootDir, 'mut.txt');
         await fsp.writeFile(filePath, 'one', 'utf-8');

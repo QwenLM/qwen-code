@@ -6,7 +6,7 @@
 
 import process from 'node:process';
 import os from 'node:os';
-import { execSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import type { CommandContext } from '../ui/commands/types.js';
 import { getCliVersion } from './version.js';
 import {
@@ -52,28 +52,53 @@ export interface ExtendedSystemInfo extends SystemInfo {
   lspStatus?: string;
 }
 
+// `execFile` (not the shell-spawning `exec`) so a hostile binary on PATH
+// can't inject shell metacharacters. The timeout protects the daemon's
+// event loop from a hung `git` / `npm` (NFS stall, Gatekeeper prompt,
+// broken install) — `execSync` would have blocked indefinitely.
+const VERSION_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * Run a tiny `<binary> --version` probe with a hard timeout, return stdout
+ * trimmed, or `'unknown'` on any failure (including timeout). Helper kept
+ * inline (rather than `const probeVersion = promisify(execFile)`) so a
+ * `vi.mock('node:child_process', { execFile: vi.fn() })` test can override
+ * each call individually — the promisified value would otherwise capture
+ * the original `execFile` reference at module load.
+ */
+function probeVersion(binary: string): Promise<string> {
+  return new Promise<string>((resolve) => {
+    execFile(
+      binary,
+      ['--version'],
+      { timeout: VERSION_PROBE_TIMEOUT_MS, encoding: 'utf-8' },
+      (err, stdout) => {
+        if (err) {
+          resolve('unknown');
+          return;
+        }
+        resolve(typeof stdout === 'string' ? stdout.trim() : 'unknown');
+      },
+    );
+  });
+}
+
 /**
  * Gets the NPM version, handling cases where npm might not be available.
- * Returns 'unknown' if npm command fails or is not found.
+ * Returns 'unknown' if npm command fails, is not found, or exceeds the
+ * version-probe timeout.
  */
 export async function getNpmVersion(): Promise<string> {
-  try {
-    return execSync('npm --version', { encoding: 'utf-8' }).trim();
-  } catch {
-    return 'unknown';
-  }
+  return probeVersion('npm');
 }
 
 /**
  * Gets the Git version, handling cases where git might not be available.
- * Returns 'unknown' if git command fails or is not found.
+ * Returns 'unknown' if git command fails, is not found, or exceeds the
+ * version-probe timeout.
  */
 export async function getGitVersion(): Promise<string> {
-  try {
-    return execSync('git --version', { encoding: 'utf-8' }).trim();
-  } catch {
-    return 'unknown';
-  }
+  return probeVersion('git');
 }
 
 /**

@@ -137,11 +137,13 @@ export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
+export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
 export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
+export * from './services/worktreeSessionService.js';
 export {
   stripTerminalControlSequences,
   TERMINAL_OSC_REGEX,
@@ -169,6 +171,10 @@ export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
 export * from './memory/const.js';
+// Issue #4175 PR 16: write helper for hierarchical context files,
+// re-exported so the `qwen serve` daemon can mutate workspace memory
+// via `POST /workspace/memory` without depending on internal paths.
+export * from './memory/writeContextFile.js';
 
 // ============================================================================
 // IDE Support
@@ -280,6 +286,11 @@ export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
 export * from './utils/fileUtils.js';
 export * from './utils/filesearch/fileSearch.js';
+export {
+  Ignore,
+  loadIgnoreRules,
+  type LoadIgnoreRulesOptions,
+} from './utils/filesearch/ignore.js';
 export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';

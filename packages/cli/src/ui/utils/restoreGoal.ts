@@ -13,14 +13,18 @@ import {
   type GoalTerminalEvent,
   type GoalTerminalKind,
 } from '@qwen-code/qwen-code-core';
-import type { HistoryItem, HistoryItemGoalStatus } from '../types.js';
-import { MessageType } from '../types.js';
+import {
+  isTerminalGoalStatusKind,
+  MessageType,
+  type HistoryItem,
+  type HistoryItemGoalStatus,
+} from '../types.js';
 
 /**
  * Finds the most recent `goal_status` history item. Returns the active
  * condition when the latest goal event is non-terminal (`set` or `checking`),
  * or `null` if the last goal_status was terminal/cancelled
- * (achieved / cleared / aborted) or none exists.
+ * (achieved / failed / cleared / aborted) or none exists.
  */
 export function findGoalToRestore(history: HistoryItem[]): string | null {
   for (let i = history.length - 1; i >= 0; i--) {
@@ -35,7 +39,7 @@ export function findGoalToRestore(history: HistoryItem[]): string | null {
 }
 
 /**
- * Finds the most recent terminal (achieved / aborted) goal_status item in
+ * Finds the most recent terminal (achieved / failed / aborted) goal_status item in
  * the transcript. Sentinel-style entries (`set`, `cleared`, `checking`) are
  * SKIPPED — `/goal clear` after an achievement is intentionally a no-op on
  * this scan, matching Claude Code's `yjK` behavior (`if (!K.met || K.sentinel)
@@ -49,7 +53,7 @@ export function findLastTerminalGoal(
     const item = history[i];
     if (item?.type !== MessageType.GOAL_STATUS) continue;
     const goal = item as HistoryItemGoalStatus;
-    if (goal.kind !== 'achieved' && goal.kind !== 'aborted') continue;
+    if (!isTerminalGoalStatusKind(goal.kind)) continue;
     return {
       kind: goal.kind as GoalTerminalKind,
       condition: goal.condition,

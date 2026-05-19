@@ -1141,6 +1141,17 @@ export class GitWorktreeService {
         base,
       ]);
 
+      // Configure core.hooksPath so commits inside the worktree run the
+      // main repo's hooks (the new worktree's .git directory has no hooks
+      // of its own). Priority: .husky/ first (common for JS projects),
+      // .git/hooks fallback. Mirrors claude-code's performPostCreationSetup.
+      // Best-effort: hook failures must not abort worktree creation.
+      await this.configureHooksPath(worktreePath).catch((error) => {
+        debugLogger.warn(
+          `createUserWorktree: failed to configure core.hooksPath for ${slug}: ${error}`,
+        );
+      });
+
       const worktree: WorktreeInfo = {
         id: slug,
         name: slug,
@@ -1154,6 +1165,90 @@ export class GitWorktreeService {
       const message = `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`;
       debugLogger.warn(`createUserWorktree: ${message}`);
       return { success: false, error: message };
+    }
+  }
+
+  /**
+   * Configures `core.hooksPath` inside `worktreePath` to point at the main
+   * repository's hooks directory. Prefers `.husky/` over `.git/hooks/` to
+   * match the convention most JS projects use (husky's prepare script
+   * configures `core.hooksPath=.husky` in the main repo).
+   *
+   * Skips the `git config` write subprocess when the value already
+   * matches the desired one — common when this method runs against a
+   * worktree that already inherits the same `core.hooksPath` from a
+   * prior creation cycle. The probe read itself is still a subprocess
+   * (claude-code's `parseGitConfigValue` reads the config file
+   * directly to avoid even that, but the read runs once per worktree
+   * creation so the extra ~14ms isn't worth the file-parsing complexity).
+   */
+  private async configureHooksPath(worktreePath: string): Promise<void> {
+    // .husky/ is the convention for JS projects; check it first.
+    const huskyPath = path.join(this.sourceRepoPath, '.husky');
+    let hooksPath: string | null = null;
+    try {
+      await fs.stat(huskyPath);
+      hooksPath = huskyPath;
+    } catch (error) {
+      if (!(isNodeError(error) && error.code === 'ENOENT')) {
+        debugLogger.warn(
+          `configureHooksPath: cannot stat ${huskyPath}: ${error}`,
+        );
+      }
+    }
+
+    // Fall back to the canonical hooks dir. Construct `<sourceRepoPath>/.git/hooks`
+    // assumes `.git` is a directory — but when Qwen itself is launched
+    // from a linked worktree, `.git` is a FILE pointing at the real
+    // gitdir, and the constructed path ENOTDIRs. Use `git rev-parse
+    // --git-common-dir` to get the canonical hooks parent regardless
+    // of worktree/non-worktree shape. (PR #4174 review #3259975237.)
+    if (!hooksPath) {
+      try {
+        const commonDir = (
+          await this.git.raw(['rev-parse', '--git-common-dir'])
+        ).trim();
+        const resolvedCommonDir = path.isAbsolute(commonDir)
+          ? commonDir
+          : path.resolve(this.sourceRepoPath, commonDir);
+        const candidate = path.join(resolvedCommonDir, 'hooks');
+        await fs.stat(candidate);
+        hooksPath = candidate;
+      } catch (error) {
+        if (!(isNodeError(error) && error.code === 'ENOENT')) {
+          debugLogger.warn(
+            `configureHooksPath: cannot resolve git common hooks dir: ${error}`,
+          );
+        }
+      }
+    }
+    if (!hooksPath) return;
+
+    const worktreeGit = simpleGit(worktreePath);
+    let existing = '';
+    try {
+      // Saves the write subprocess when value already matches. The probe
+      // read is also a subprocess — claude-code skips even that via
+      // parseGitConfigValue, but the read runs once per worktree
+      // creation so the extra ~14ms isn't worth the file-parser tax.
+      existing = (
+        await worktreeGit.raw(['config', '--local', 'core.hooksPath'])
+      ).trim();
+    } catch {
+      // Key not set — empty string means "proceed with the write".
+    }
+    // Only write when the key is unset. A non-empty existing value is
+    // either inherited (system / global / local config from the user
+    // or from a previous Qwen run) or an explicit user policy override
+    // — in both cases overwriting silently replaces the user's choice.
+    // (PR #4174 review #3259975242.)
+    if (existing === '') {
+      await worktreeGit.raw(['config', 'core.hooksPath', hooksPath]);
+    } else if (existing !== hooksPath) {
+      debugLogger.debug(
+        `configureHooksPath: preserving existing core.hooksPath=${existing} ` +
+          `(Qwen would have set it to ${hooksPath})`,
+      );
     }
   }
 
