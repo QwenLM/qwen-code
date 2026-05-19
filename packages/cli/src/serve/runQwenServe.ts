@@ -16,6 +16,7 @@ import {
   createHttpAcpBridge,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
+import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import { createDefaultFsAuditEmit, createServeApp } from './server.js';
@@ -386,6 +387,23 @@ export async function runQwenServe(
     );
   }
 
+  // F1 follow-up (#4319): construct `fsFactory` BEFORE the bridge so
+  // the bridge can wire it through `BridgeFileSystem` for ACP-side
+  // writeTextFile / readTextFile calls. Pre-fix the bridge constructed
+  // first and `fsFactory` lived only inside the HTTP route layer —
+  // agent-triggered fs calls used `BridgeClient`'s inline `fs.realpath`
+  // / `fs.writeFile` proxy, bypassing PR 18's TOCTOU + symlink + trust
+  // gate + audit machinery. See `bridgeFileSystemAdapter.ts` for the
+  // translation layer.
+  const trustedWorkspace = deps.trustedWorkspace ?? true;
+  const fsFactory =
+    deps.fsFactory ??
+    createWorkspaceFileSystemFactory({
+      boundWorkspace,
+      trusted: trustedWorkspace,
+      emit: deps.fsAuditEmit ?? createDefaultFsAuditEmit(),
+    });
+
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -401,6 +419,12 @@ export async function runQwenServe(
       // implementation wraps `buildEnvStatusFromProcess` and the
       // (lifted) `buildDaemonPreflightCells` body.
       statusProvider: createDaemonStatusProvider(),
+      // F1 follow-up (#4319): inject the WorkspaceFileSystem adapter so
+      // agent ACP `writeTextFile` / `readTextFile` calls go through
+      // PR 18's defensive fs layer (trust gate + atomic write + symlink
+      // resolution + audit emit) instead of `BridgeClient`'s inline
+      // raw-fs proxy. Closes the `ws.ts:613` follow-up thread.
+      fileSystem: createBridgeFileSystemAdapter(fsFactory),
       ...(contextFilenameForInit !== undefined
         ? { contextFilename: contextFilenameForInit }
         : {}),
@@ -467,34 +491,12 @@ export async function runQwenServe(
   // callers of createServeApp (tests / embeds) omit it and the
   // server canonicalizes itself.
   //
-  // PR 19 — wire up `fsFactory` so the new read routes
-  // (`GET /file|/list|/glob|/stat`) consume a per-request boundary
-  // built against THIS daemon's bound workspace. Trust snapshot
-  // defaults to true; tests / future hardening flows pass an
-  // explicit `trustedWorkspace` to flip the gate. The audit-emit
-  // hook plugs into PR 21's SSE fan-out once that lands; until then
-  // the warning-emit fallback in `createServeApp` makes any silent
-  // drop visible in operator logs.
-  const trustedWorkspace = deps.trustedWorkspace ?? true;
-  // Reuse `createDefaultFsAuditEmit` so the throttle behavior here
-  // matches what `createServeApp`'s built-in fallback would emit.
-  // The earlier per-event `writeStderrLine` would print one line for
-  // every `/file` / `/list` / `/glob` / `/stat` audit event under
-  // normal traffic — a workspace scan can flood operator logs in
-  // seconds. The shared helper warns once + every 100th drop and
-  // includes payload context (errorKind / intent / pathHash), so a
-  // genuine wiring regression still surfaces but routine audit
-  // traffic stays quiet. Future PR 21 SSE fan-out replaces this
-  // default with the workspace-scoped event channel; until then the
-  // throttled stderr warning is the canonical "emit channel orphaned"
-  // breadcrumb.
-  const fsFactory =
-    deps.fsFactory ??
-    createWorkspaceFileSystemFactory({
-      boundWorkspace,
-      trusted: trustedWorkspace,
-      emit: deps.fsAuditEmit ?? createDefaultFsAuditEmit(),
-    });
+  // PR 19 — `fsFactory` is now constructed above (before the bridge)
+  // so the bridge can wire it through `BridgeFileSystem`. The HTTP
+  // read routes (`GET /file|/list|/glob|/stat`) still consume the
+  // same factory instance — trust snapshot + audit-emit hook flow
+  // through both surfaces identically, so a single operator audit
+  // stream covers HTTP fs + ACP fs.
   const app = createServeApp(opts, () => actualPort, {
     bridge,
     boundWorkspace,

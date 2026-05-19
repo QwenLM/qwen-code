@@ -28,6 +28,7 @@ import {
   type DeviceFlowPublicView,
 } from './auth/deviceFlow.js';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
+import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
 import { isLoopbackBind } from './loopbackBinds.js';
@@ -240,6 +241,22 @@ export function createServeApp(
   const boundWorkspace =
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  // F1 follow-up (#4319): construct `fsFactory` BEFORE the bridge so
+  // the bridge can wire it through `BridgeFileSystem` for ACP-side
+  // writeTextFile / readTextFile calls. Symmetric with
+  // `runQwenServe.ts` — without this wiring, direct embeds / tests
+  // that don't inject `deps.bridge` would silently lose the PR 18
+  // defensive fs layer for agent-triggered fs (the inline raw-fs
+  // proxy in `BridgeClient` would still run, bypassing trust /
+  // TOCTOU / audit). Default trust here is `false` (test-safe) to
+  // match the existing `createServeApp` posture below.
+  const fsFactory: WorkspaceFileSystemFactory =
+    deps.fsFactory ??
+    createWorkspaceFileSystemFactory({
+      boundWorkspace,
+      trusted: false,
+      emit: createDefaultFsAuditEmit(),
+    });
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -260,6 +277,10 @@ export function createServeApp(
       // here preserves byte-for-byte route output on the default
       // bridge construction path.
       statusProvider: createDaemonStatusProvider(),
+      // F1 follow-up (#4319): wire the WorkspaceFileSystem adapter so
+      // ACP writeTextFile / readTextFile pick up trust / TOCTOU /
+      // audit. See `bridgeFileSystemAdapter.ts`.
+      fileSystem: createBridgeFileSystemAdapter(fsFactory),
     });
 
   // Allow same-origin requests from the demo page. Browsers send an
@@ -303,13 +324,12 @@ export function createServeApp(
   // audit destination — `runQwenServe` will inject one whose
   // `trusted` mirrors `Config.isTrustedFolder()` and whose `emit`
   // plumbs into the per-session EventBus once PR 19/20 lands.
-  const fsFactory: WorkspaceFileSystemFactory =
-    deps.fsFactory ??
-    createWorkspaceFileSystemFactory({
-      boundWorkspace,
-      trusted: false,
-      emit: createDefaultFsAuditEmit(),
-    });
+  //
+  // F1 follow-up (#4319): the `fsFactory` is now constructed earlier
+  // (above the bridge) so the bridge can wire it into the
+  // `BridgeFileSystem` seam for ACP fs methods. Re-using the same
+  // instance for HTTP fs routes + ACP fs ensures a single operator
+  // audit stream covers both surfaces.
   // Park the factory on `app.locals` so PR 19/20 route handlers can
   // pick it up via `req.app.locals.fsFactory` without re-threading
   // the value through every handler signature, and so PR 18 tests
