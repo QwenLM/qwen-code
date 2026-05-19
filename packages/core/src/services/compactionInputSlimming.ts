@@ -20,7 +20,15 @@ import type { ChatCompressionSettings } from '../config/config.js';
 
 export const DEFAULT_IMAGE_TOKEN_ESTIMATE = 1600;
 
-const TOKEN_TO_CHAR_RATIO = 4;
+/**
+ * Average chars-per-token ratio for the char-based token estimator. This
+ * constant is the single source of truth: `tokenEstimation.ts` re-exports
+ * it as `CHARS_PER_TOKEN` and the auto-compaction threshold gate divides
+ * by it. Keeping a single declaration eliminates the silent-drift risk
+ * the two-copy pattern carried (one file's update would have desynced
+ * splitter sizing from gate sizing without any compiler signal). (R7.4)
+ */
+export const TOKEN_TO_CHAR_RATIO = 4;
 const DEFAULT_MIME = 'application/octet-stream';
 
 /**

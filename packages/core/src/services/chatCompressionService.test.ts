@@ -539,7 +539,7 @@ describe('ChatCompressionService', () => {
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         promptTokenCount: 1100,
         candidatesTokenCount: 50,
@@ -580,7 +580,7 @@ describe('ChatCompressionService', () => {
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         promptTokenCount: 1100,
         candidatesTokenCount: 50,
@@ -637,7 +637,7 @@ describe('ChatCompressionService', () => {
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         // Realistic compression usage so the inflation guard doesn't fire:
         //   newTokens = max(0, 100000 - (99000 - 1000) + 1500) = 3500 → COMPRESSED
@@ -720,7 +720,7 @@ describe('ChatCompressionService', () => {
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
     // newTokenCount = 800 - (1600 - 1000) + 50 = 800 - 600 + 50 = 250 <= 800 (success)
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         promptTokenCount: 1600,
         candidatesTokenCount: 50,
@@ -743,7 +743,9 @@ describe('ChatCompressionService', () => {
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(result.info.newTokenCount).toBe(250); // 800 - (1600 - 1000) + 50
     expect(result.newHistory).not.toBeNull();
-    expect(result.newHistory![0].parts![0].text).toBe('Summary');
+    expect(result.newHistory![0].parts![0].text).toBe(
+      '<state_snapshot>Summary</state_snapshot>',
+    );
     expect(mockGenerateContent).toHaveBeenCalled();
     expect(mockGetHookSystem).toHaveBeenCalled();
   });
@@ -761,7 +763,7 @@ describe('ChatCompressionService', () => {
 
     // newTokenCount = 100 - (1100 - 1000) + 50 = 100 - 100 + 50 = 50 <= 100 (success)
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         promptTokenCount: 1100,
         candidatesTokenCount: 50,
@@ -798,7 +800,7 @@ describe('ChatCompressionService', () => {
     vi.mocked(tokenLimit).mockReturnValue(1000);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         promptTokenCount: 1100,
         candidatesTokenCount: 50,
@@ -834,7 +836,7 @@ describe('ChatCompressionService', () => {
     vi.mocked(tokenLimit).mockReturnValue(1000);
 
     const mockGenerateText = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         promptTokenCount: 1100,
         candidatesTokenCount: 50,
@@ -883,7 +885,7 @@ describe('ChatCompressionService', () => {
     vi.mocked(tokenLimit).mockReturnValue(1000);
 
     const mockGenerateText = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         promptTokenCount: 200,
         candidatesTokenCount: 50,
@@ -925,7 +927,7 @@ describe('ChatCompressionService', () => {
     vi.mocked(tokenLimit).mockReturnValue(1000);
 
     const mockGenerateText = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         promptTokenCount: 1100,
         candidatesTokenCount: 50,
@@ -971,7 +973,7 @@ describe('ChatCompressionService', () => {
     vi.mocked(tokenLimit).mockReturnValue(1000);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         promptTokenCount: 1,
         candidatesTokenCount: 20,
@@ -1012,7 +1014,7 @@ describe('ChatCompressionService', () => {
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       // No usage -> keep original token count
       usage: undefined,
     });
@@ -1113,7 +1115,7 @@ describe('ChatCompressionService', () => {
     vi.mocked(tokenLimit).mockReturnValue(1000);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         promptTokenCount: 1,
         candidatesTokenCount: 20,
@@ -1154,7 +1156,7 @@ describe('ChatCompressionService', () => {
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      text: '<state_snapshot>Summary</state_snapshot>',
       usage: {
         promptTokenCount: 1600,
         candidatesTokenCount: 50,
@@ -1206,7 +1208,7 @@ describe('ChatCompressionService', () => {
       vi.mocked(tokenLimit).mockReturnValue(1000);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'Summary',
+        text: '<state_snapshot>Summary</state_snapshot>',
         usage: {
           promptTokenCount: 1100,
           candidatesTokenCount: 50,
@@ -1251,7 +1253,7 @@ describe('ChatCompressionService', () => {
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'Summary',
+        text: '<state_snapshot>Summary</state_snapshot>',
         usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
@@ -1340,7 +1342,7 @@ describe('ChatCompressionService', () => {
       );
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'Summary',
+        text: '<state_snapshot>Summary</state_snapshot>',
         usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
@@ -1388,7 +1390,7 @@ describe('ChatCompressionService', () => {
       });
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'Summary',
+        text: '<state_snapshot>Summary</state_snapshot>',
         usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
@@ -1430,7 +1432,7 @@ describe('ChatCompressionService', () => {
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'Summary',
+        text: '<state_snapshot>Summary</state_snapshot>',
         usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
@@ -1485,7 +1487,7 @@ describe('ChatCompressionService', () => {
       vi.mocked(tokenLimit).mockReturnValue(1000);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'Summary',
+        text: '<state_snapshot>Summary</state_snapshot>',
         usage: {
           promptTokenCount: 1100,
           candidatesTokenCount: 50,
@@ -1508,7 +1510,7 @@ describe('ChatCompressionService', () => {
 
       expect(mockFirePostCompactEvent).toHaveBeenCalledWith(
         PostCompactTrigger.Manual,
-        'Summary',
+        '<state_snapshot>Summary</state_snapshot>',
         undefined,
       );
     });
@@ -1530,7 +1532,7 @@ describe('ChatCompressionService', () => {
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'Auto Summary',
+        text: '<state_snapshot>Auto Summary</state_snapshot>',
         usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
@@ -1553,7 +1555,7 @@ describe('ChatCompressionService', () => {
 
       expect(mockFirePostCompactEvent).toHaveBeenCalledWith(
         PostCompactTrigger.Auto,
-        'Auto Summary',
+        '<state_snapshot>Auto Summary</state_snapshot>',
         undefined,
       );
     });
@@ -1619,7 +1621,7 @@ describe('ChatCompressionService', () => {
       );
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'Summary',
+        text: '<state_snapshot>Summary</state_snapshot>',
         usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
@@ -1670,7 +1672,7 @@ describe('ChatCompressionService', () => {
       });
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'Summary',
+        text: '<state_snapshot>Summary</state_snapshot>',
         usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
@@ -1713,7 +1715,7 @@ describe('ChatCompressionService', () => {
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'Summary',
+        text: '<state_snapshot>Summary</state_snapshot>',
         usage: {
           promptTokenCount: 1600,
           candidatesTokenCount: 50,
@@ -1792,7 +1794,7 @@ describe('ChatCompressionService', () => {
       vi.mocked(tokenLimit).mockReturnValue(1000);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'Summary of all work done',
+        text: '<state_snapshot>Summary of all work done</state_snapshot>',
         usage: {
           promptTokenCount: 1100,
           candidatesTokenCount: 50,
@@ -1866,7 +1868,7 @@ describe('ChatCompressionService', () => {
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'state snapshot summary',
+        text: '<state_snapshot>state snapshot summary</state_snapshot>',
         usage: {
           promptTokenCount: 2000,
           candidatesTokenCount: 50,
@@ -1958,7 +1960,7 @@ describe('ChatCompressionService', () => {
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'state snapshot summary',
+        text: '<state_snapshot>state snapshot summary</state_snapshot>',
         usage: {
           promptTokenCount: 60_000,
           candidatesTokenCount: 200,
@@ -1986,7 +1988,9 @@ describe('ChatCompressionService', () => {
       // [summary_user, summary_ack_model, continuation_bridge_user, ...keep]
       // where keep starts with the retained model+functionCall.
       expect(newHistory[0].role).toBe('user');
-      expect(newHistory[0].parts?.[0].text).toBe('state snapshot summary');
+      expect(newHistory[0].parts?.[0].text).toBe(
+        '<state_snapshot>state snapshot summary</state_snapshot>',
+      );
       expect(newHistory[1].role).toBe('model');
       expect(newHistory[2].role).toBe('user');
       expect(newHistory[2].parts?.[0].text).toMatch(/Continue/);
@@ -2221,11 +2225,9 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
     // originalTokenCount = 160K (under by 7K), but caller's precomputed
     // estimate factors in the pending user message → 170K, crosses 167K.
     // R6.14 collapsed the "estimate-inside-the-service" branch; callers
-    // pass `precomputedEffectiveTokens` upstream now.
-    const userMessage: Content = {
-      role: 'user',
-      parts: [{ text: 'x'.repeat(40_000) }],
-    };
+    // pass `precomputedEffectiveTokens` upstream now. (R7.5 removed the
+    // now-dead `pendingUserMessage` field; only the precomputed value
+    // remains in the contract.)
 
     const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>x</state_snapshot>',
@@ -2243,7 +2245,6 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 160_000,
-      pendingUserMessage: userMessage,
       precomputedEffectiveTokens: 170_000,
     });
 
@@ -2264,10 +2265,6 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 80_000,
-      pendingUserMessage: {
-        role: 'user',
-        parts: [{ text: 'short' }],
-      },
       precomputedEffectiveTokens: 80_010,
     });
 

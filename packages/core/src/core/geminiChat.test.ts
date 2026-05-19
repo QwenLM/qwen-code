@@ -1400,13 +1400,12 @@ describe('GeminiChat', async () => {
 
       expect(compressSpy).toHaveBeenCalledTimes(1);
       const passedOpts = compressSpy.mock.calls[0][1];
-      expect(passedOpts.pendingUserMessage).toBeDefined();
-      expect(passedOpts.pendingUserMessage?.role).toBe('user');
-      expect(
-        passedOpts.pendingUserMessage?.parts?.some(
-          (part) => part.text === userMessageText,
-        ),
-      ).toBe(true);
+      // R7.5: the `pendingUserMessage` field was removed from
+      // CompressOptions / TryCompressOptions — it was dead code since
+      // R6.14 removed its only consumer. The real contract sendMessageStream
+      // upholds is "compute effectiveTokens upstream and forward via
+      // precomputedEffectiveTokens", which we pin below.
+      expect(passedOpts.precomputedEffectiveTokens).toBeTypeOf('number');
     });
 
     it('triggers compaction end-to-end through the real ChatCompressionService when lastPromptTokenCount === 0 and inherited history is large (R3.4)', async () => {
@@ -2058,17 +2057,12 @@ describe('GeminiChat', async () => {
       expect(compressSpy).toHaveBeenCalledTimes(1);
       const passedOpts = compressSpy.mock.calls[0][1];
       expect(passedOpts.force).toBe(true);
-      expect(passedOpts.pendingUserMessage).toBeDefined();
-      expect(passedOpts.pendingUserMessage?.role).toBe('user');
-      expect(
-        passedOpts.pendingUserMessage?.parts?.some(
-          (part) => part.text === userMessage,
-        ),
-      ).toBe(true);
       // R6.15: pin the estimation-reuse perf optimization. sendMessageStream
       // computes effectiveTokens once and passes it through so the service
       // doesn't redo the work. Catching a regression that drops this field
-      // back to undefined would be otherwise invisible.
+      // back to undefined would be otherwise invisible. (R7.5 removed
+      // the now-dead pendingUserMessage forwarding assertions; the real
+      // contract is that the precomputed value lands in opts.)
       expect(passedOpts.precomputedEffectiveTokens).toBeTypeOf('number');
       expect(passedOpts.precomputedEffectiveTokens).toBeGreaterThanOrEqual(
         177_000,
@@ -2174,6 +2168,249 @@ describe('GeminiChat', async () => {
 
       expect(compressSpy).toHaveBeenCalledTimes(1);
       expect(compressSpy.mock.calls[0][1].force).toBe(false);
+    });
+
+    // R7.11: hardRescueFailureCount budget — three branches the previous
+    // round left untested. Without these, regressions to the counter
+    // accounting (the "every failure-shape strikes the budget" guarantee
+    // from R7.2 + R7.3) would silently disable the rescue's bound.
+    it('stops firing the rescue after MAX_CONSECUTIVE_FAILURES rescue failures (R7.11)', async () => {
+      // Each send crosses the hard threshold, but compression always
+      // fails. After MAX rescue strikes, subsequent sends should NOT
+      // pass force=true any longer — the budget is exhausted and the
+      // chat falls back to the normal cheap-gate path (which will be a
+      // NOOP because consecutiveFailures has been reset and the gate
+      // re-evaluates from there).
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 178_000,
+            newTokenCount: 178_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => makeStreamResponse(),
+      );
+
+      chat.setLastPromptTokenCount(176_999);
+      // Burn the rescue budget.
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        const s = await chat.sendMessageStream(
+          'test-model',
+          { message: `burn-${i}` },
+          `prompt-burn-${i}`,
+        );
+        for await (const _ of s) {
+          /* consume */
+        }
+        expect(compressSpy.mock.calls[i][1].force).toBe(true);
+      }
+
+      // Next send still crosses hard, but the rescue must be suppressed.
+      chat.setLastPromptTokenCount(176_999);
+      const s = await chat.sendMessageStream(
+        'test-model',
+        { message: 'after-budget' },
+        'prompt-after-budget',
+      );
+      for await (const _ of s) {
+        /* consume */
+      }
+      const lastCallIdx = compressSpy.mock.calls.length - 1;
+      // After the budget is exhausted, the only remaining defence is
+      // reactive overflow — sendMessageStream MUST NOT pass force=true
+      // any longer.
+      expect(compressSpy.mock.calls[lastCallIdx][1].force).toBe(false);
+    });
+
+    it('increments hardRescueFailureCount on a NOOP from the forced rescue (R7.11 / R7.3)', async () => {
+      // NOOP is what we get when force=true skips the cheap-gate but
+      // the history is too small to split (curated empty,
+      // MIN_COMPRESSION_FRACTION undercut, etc). Before R7.3 this case
+      // left the counter at 0 forever; now the pessimistic pre-call
+      // increment makes it tick uniformly with other failure shapes.
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 178_000,
+            newTokenCount: 178_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => makeStreamResponse(),
+      );
+
+      chat.setLastPromptTokenCount(176_999);
+      // MAX rescue NOOPs must exhaust the budget; the next send must
+      // skip the force=true path.
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        const s = await chat.sendMessageStream(
+          'test-model',
+          { message: `noop-${i}` },
+          `prompt-noop-${i}`,
+        );
+        for await (const _ of s) {
+          /* consume */
+        }
+        expect(compressSpy.mock.calls[i][1].force).toBe(true);
+      }
+      chat.setLastPromptTokenCount(176_999);
+      const s = await chat.sendMessageStream(
+        'test-model',
+        { message: 'after-noop-budget' },
+        'prompt-after-noop-budget',
+      );
+      for await (const _ of s) {
+        /* consume */
+      }
+      const lastCallIdx = compressSpy.mock.calls.length - 1;
+      expect(compressSpy.mock.calls[lastCallIdx][1].force).toBe(false);
+    });
+
+    it('counts a thrown exception from the forced rescue against the budget (R7.11 / R7.2)', async () => {
+      // R7.2: before pessimistic accounting, a throw inside tryCompress
+      // skipped both the consecutiveFailures and hardRescueFailureCount
+      // increments — every subsequent send re-fired the doomed rescue.
+      // Verify the budget exhausts after MAX consecutive throws.
+      let throwCount = 0;
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockImplementation(async () => {
+          // Pessimistic: the throw must still strike the budget. We
+          // count throws so the test can also assert how many actually
+          // ran.
+          if (throwCount < MAX_CONSECUTIVE_FAILURES) {
+            throwCount += 1;
+            throw new Error(`simulated provider 5xx #${throwCount}`);
+          }
+          // After the budget is exhausted, sendMessageStream should
+          // pass force=false; we make this a NOOP so the send can
+          // complete cleanly.
+          return {
+            newHistory: null,
+            info: {
+              originalTokenCount: 178_000,
+              newTokenCount: 178_000,
+              compressionStatus: CompressionStatus.NOOP,
+            },
+          };
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => makeStreamResponse(),
+      );
+      chat.setLastPromptTokenCount(176_999);
+
+      // The first MAX sends throw. sendMessageStream re-throws, so we
+      // catch and continue.
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `throw-${i}` },
+            `prompt-throw-${i}`,
+          ),
+        ).rejects.toThrow(/simulated provider 5xx/);
+        expect(compressSpy.mock.calls[i][1].force).toBe(true);
+      }
+      // Next send must NOT fire force=true — budget exhausted purely
+      // via throws.
+      chat.setLastPromptTokenCount(176_999);
+      const s = await chat.sendMessageStream(
+        'test-model',
+        { message: 'after-throw-budget' },
+        'prompt-after-throw-budget',
+      );
+      for await (const _ of s) {
+        /* consume */
+      }
+      const lastCallIdx = compressSpy.mock.calls.length - 1;
+      expect(compressSpy.mock.calls[lastCallIdx][1].force).toBe(false);
+    });
+
+    it('reactive overflow catch block increments consecutiveFailures on thrown exceptions (R7.11 / R6.7)', async () => {
+      // The status-based reactive failure path was tested in R6.7's
+      // initial commit. This pins the OTHER half: if reactive
+      // compression throws (network 5xx, abort, etc.), the catch block
+      // must still bump consecutiveFailures so the proactive cheap-gate
+      // breaker eventually trips.
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          // First call: the cheap-gate NOOPs (below hard threshold), so
+          // we reach the API call.
+          newHistory: null,
+          info: {
+            originalTokenCount: 50_000,
+            newTokenCount: 50_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        // Second call: reactive overflow recovery — make it throw.
+        .mockRejectedValueOnce(new Error('reactive 5xx'));
+
+      // Make generateContentStream throw a context-overflow-shaped error
+      // so the reactive recovery branch is exercised.
+      const overflowError = Object.assign(
+        new Error('context length exceeded'),
+        {
+          status: 400,
+        },
+      );
+      vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+        overflowError,
+      );
+
+      chat.setLastPromptTokenCount(50_000);
+      // The send will fail (reactive recovery threw); we just need the
+      // counter to have ticked.
+      await expect(
+        chat
+          .sendMessageStream(
+            'test-model',
+            { message: 'trigger-reactive' },
+            'prompt-reactive-throw',
+          )
+          .then(async (s) => {
+            for await (const _ of s) {
+              /* consume */
+            }
+          }),
+      ).rejects.toThrow();
+
+      // Now send again under conditions that would invoke the cheap-gate
+      // breaker. consecutiveFailures must be at least 1 after the
+      // throw above.
+      compressSpy.mockClear();
+      compressSpy.mockResolvedValueOnce({
+        newHistory: null,
+        info: {
+          originalTokenCount: 60_000,
+          newTokenCount: 60_000,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(makeStreamResponse());
+      const s = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next' },
+        'prompt-next-after-reactive-throw',
+      );
+      for await (const _ of s) {
+        /* consume */
+      }
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      expect(
+        compressSpy.mock.calls[0][1].consecutiveFailures,
+      ).toBeGreaterThanOrEqual(1);
     });
   });
 

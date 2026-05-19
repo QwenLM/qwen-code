@@ -291,20 +291,14 @@ export interface CompressOptions {
   trigger?: CompactTrigger;
   signal?: AbortSignal;
   /**
-   * Pending user message about to be sent. When present, the cheap-gate
-   * adds its estimated token count to `originalTokenCount` (which reflects
-   * only the prior turn's API usage) so the gate sees the real prompt size.
-   * Optional for backward compatibility with callers that don't have a
-   * user message in hand (e.g. manual /compress force=true paths).
-   */
-  pendingUserMessage?: Content;
-  /**
    * Pre-computed effective-token count from `estimatePromptTokens()`. When
-   * provided, the cheap-gate skips its own estimation pass (and the
-   * accompanying `chat.getHistory(true)` clone). Callers that already
-   * computed this value upstream — primarily `sendMessageStream` for the
-   * hard-tier rescue — pass it through to avoid duplicate work.
-   * (review #4168 R1.3 / R1.4)
+   * provided, the cheap-gate uses this directly and skips its own
+   * estimation pass (along with the accompanying `chat.getHistory(true)`
+   * clone). Callers that already computed this value upstream —
+   * primarily `sendMessageStream` for the hard-tier rescue — pass it
+   * through to avoid duplicate work. When omitted (manual `/compress`,
+   * heap-pressure bypass, direct service callers), the cheap-gate falls
+   * back to `originalTokenCount`. (review #4168 R1.3 / R1.4)
    */
   precomputedEffectiveTokens?: number;
 }
@@ -333,27 +327,24 @@ export class ChatCompressionService {
     // bypass must also bypass the consecutive-failure breaker, otherwise N
     // failed compactions would disable this memory-pressure safety net for
     // the rest of the chat.
+    //
+    // R7.9: this NOOP is silent at the service layer. The caller
+    // (`GeminiChat.tryCompress`) emits a warn-once log on the first send
+    // after the breaker trips, so observability is preserved without
+    // spamming on every subsequent send for the rest of the session.
+    // R7.6: return the caller's `originalTokenCount` rather than 0 so
+    // telemetry/dashboards see the real session token count on the trip
+    // event, not a misleading zero.
     if (
       consecutiveFailures >= MAX_CONSECUTIVE_FAILURES &&
       !force &&
       !bypassTokenThreshold
     ) {
-      // R6.1: the breaker NOOP path used to be silent — easy to misdiagnose
-      // a context overflow as "auto-compaction never ran" when in fact it
-      // tripped after 3 failures. Log once per send so the symptom is
-      // visible at warn level.
-      config
-        .getDebugLogger()
-        .warn(
-          `[chat-compression] breaker tripped: consecutiveFailures=` +
-            `${consecutiveFailures} >= MAX=${MAX_CONSECUTIVE_FAILURES}; ` +
-            `skipping auto-compaction. Use /compress to force a recovery.`,
-        );
       return {
         newHistory: null,
         info: {
-          originalTokenCount: 0,
-          newTokenCount: 0,
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
           compressionStatus: CompressionStatus.NOOP,
         },
       };
@@ -526,8 +517,50 @@ export class ChatCompressionService {
       abortSignal: signal ?? new AbortController().signal,
       promptId,
     });
-    const summary = summaryResult.text;
-    const isSummaryEmpty = !summary || summary.trim().length === 0;
+    // R7.1: extract just the `<state_snapshot>` XML envelope from the
+    // raw response. The compression prompt asks the model to reason in
+    // a private `<scratchpad>` block first, then emit `<state_snapshot>`.
+    // With `includeThoughts: false`, the underlying provider doesn't
+    // tag the scratchpad as a thought part — it arrives as plain text
+    // alongside the snapshot, so `summaryResult.text` (from
+    // `getResponseText` filtering `!part.thought`) returns BOTH the
+    // scratchpad and the snapshot concatenated. Persisting the
+    // scratchpad as part of the chat's compressed memory is a data
+    // retention regression: scratchpads can quote sensitive tool output
+    // (API keys, filesystem paths, fragments of private files) the
+    // model needed to reason about but should not survive the turn.
+    // Extracting just the snapshot envelope keeps memory limited to the
+    // structured fields the prompt actually requests.
+    //
+    // If the model failed to emit the tags at all (prompt drift / format
+    // violation), the regex returns no match and we fall through to the
+    // empty-summary branch — `COMPRESSION_FAILED_EMPTY_SUMMARY` ticks
+    // the breaker, the right signal for "model didn't follow format".
+    //
+    // The truncation guard below operates on `isRawEmpty` (not
+    // `isSummaryEmpty`) so the TRUNCATED status remains distinguishable
+    // from EMPTY_SUMMARY in telemetry: a cap-hit with non-empty raw
+    // output (even if the snapshot's closing tag was cut) is a capacity
+    // failure, not a prompt-format failure.
+    const rawSummaryText = summaryResult.text;
+    const isRawEmpty = !rawSummaryText || rawSummaryText.trim().length === 0;
+    const snapshotMatch = rawSummaryText?.match(
+      /<state_snapshot>[\s\S]*?<\/state_snapshot>/,
+    );
+    const summary = snapshotMatch ? snapshotMatch[0] : '';
+    const isSummaryEmpty = summary.trim().length === 0;
+    if (
+      !isSummaryEmpty &&
+      rawSummaryText &&
+      rawSummaryText.length > summary.length
+    ) {
+      config
+        .getDebugLogger()
+        .debug(
+          `[chat-compression] stripped ${rawSummaryText.length - summary.length} chars ` +
+            `of pre/post-snapshot text (likely scratchpad) before persisting summary`,
+        );
+    }
     const compressionUsageMetadata = summaryResult.usage;
     const compressionInputTokenCount =
       compressionUsageMetadata?.promptTokenCount;
@@ -557,20 +590,26 @@ export class ChatCompressionService {
     // (Gemini), but `runSideQuery` doesn't surface it today. Plumb it
     // through and tighten this guard when that's available.
     //
-    // R6.2: use `>` rather than `>=` to shrink the false-positive window —
-    // a model whose tokenizer happens to emit a clean summary at exactly
-    // 20K tokens shouldn't be conflated with a truncated one. The API
-    // enforces `<= maxOutputTokens` hard, so `>` will essentially never
-    // fire today, but it's the right semantics once we have finish_reason
-    // (the heuristic moves to a finish_reason check; this fallback only
-    // triggers on values that exceed the cap, which shouldn't happen).
-    // With the COMPRESSION_FAILED_OUTPUT_TRUNCATED status now ticking the
-    // breaker (R5.2b), false-positives are costly — 3 of them disable
-    // auto-compaction — so erring on the liberal side is the safer trade.
+    // R7.8: reverted R6.2's `>` back to `>=`. With the API hard-capping
+    // output at `COMPACT_MAX_OUTPUT_TOKENS`, the `>` form could never
+    // fire — making the entire guard dead code that silently persisted
+    // truncated summaries as successful compressions. `>=` catches
+    // exactly the case that matters (output landed at the cap, almost
+    // certainly truncated). False-positive risk: a legitimate summary
+    // that hits exactly 20K tokens is conflated with a truncated one.
+    // Per the claude-code reference data the p99 summary is ~17K, so
+    // the false-positive window is extraordinarily narrow; the
+    // COMPRESSION_FAILED_OUTPUT_TRUNCATED breaker bounds the worst
+    // case to 3 strikes before NOOP. The proper fix lives in the
+    // TODO(finish_reason) plumbing above; this is the right interim.
+    // We declined the alternative `>= cap * 0.95` heuristic (R7.8
+    // reviewer suggestion) because it broadens the false-positive
+    // window into the p99-realistic range (~19K) without solving the
+    // root cause — finish_reason is the right signal.
     if (
-      !isSummaryEmpty &&
+      !isRawEmpty &&
       typeof compressionOutputTokenCount === 'number' &&
-      compressionOutputTokenCount > COMPACT_MAX_OUTPUT_TOKENS
+      compressionOutputTokenCount >= COMPACT_MAX_OUTPUT_TOKENS
     ) {
       config
         .getDebugLogger()

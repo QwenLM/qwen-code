@@ -150,13 +150,6 @@ interface TryCompressOptions {
   originalTokenCountOverride?: number;
   trigger?: CompactTrigger;
   /**
-   * Pending user message about to be sent. Threaded through to the
-   * compression service's cheap-gate so it can see the real prompt size
-   * even when `lastPromptTokenCount === 0` (first send after inherited
-   * history). See `estimatePromptTokens` for the fallback math.
-   */
-  pendingUserMessage?: Content;
-  /**
    * Pre-computed `estimatePromptTokens` value from the caller. When set,
    * the cheap-gate uses this instead of recomputing — avoids a second
    * `getHistory(true)` clone per send. (review #4168 R1.3 / R1.4)
@@ -486,9 +479,27 @@ export class GeminiChat {
    * rescue failures, `sendMessageStream` stops gating on hard threshold
    * and lets reactive overflow take over as the next layer of defence.
    * Any successful compression (rescue or otherwise) resets it to 0.
-   * (R6.3)
+   *
+   * Accounting (R6.3 / R7.2 / R7.3): incremented **pessimistically** —
+   * before calling `tryCompress` from the hard-rescue path — and only
+   * refunded on a `COMPRESSED` outcome (handled inside `tryCompress`
+   * alongside the `consecutiveFailures` reset). This guarantees the
+   * strike sticks for every non-success shape uniformly, including
+   * thrown exceptions (post-call site unreachable), NOOP returns
+   * (history not compressible), and failure statuses. The earlier
+   * post-call-only pattern silently leaked thrown / NOOP outcomes.
    */
   private hardRescueFailureCount = 0;
+
+  /**
+   * Throttle flag for the breaker-tripped warning. Without throttling
+   * the warn fires on every `compress()` call after the breaker
+   * latches, drowning the actually-actionable signal in noise. We emit
+   * once when the breaker first trips and clear the flag whenever
+   * `consecutiveFailures` resets to 0 (success or manual `/compress`).
+   * (R7.9)
+   */
+  private breakerWarningEmitted = false;
 
   /**
    * Heap-pressure compaction is process-wide pressure applied per chat. If one
@@ -585,6 +596,26 @@ export class GeminiChat {
       );
     }
 
+    // R7.9: warn-once on the first send after the breaker trips so an
+    // oncall sees the symptom without the log spamming every send for
+    // the rest of the session. The flag clears in the COMPRESSED branch
+    // below alongside `consecutiveFailures = 0`. Mirrors the service's
+    // own gate check so the log line matches the NOOP it predicts.
+    if (
+      this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES &&
+      !force &&
+      !bypassTokenThreshold &&
+      !this.breakerWarningEmitted
+    ) {
+      debugLogger.warn(
+        `[chat-compression] breaker tripped: consecutiveFailures=` +
+          `${this.consecutiveFailures} >= MAX=${MAX_CONSECUTIVE_FAILURES}; ` +
+          `skipping auto-compaction. Use /compress to force a recovery. ` +
+          `(This message is logged once per trip.)`,
+      );
+      this.breakerWarningEmitted = true;
+    }
+
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
       promptId,
@@ -595,7 +626,6 @@ export class GeminiChat {
       originalTokenCount:
         options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
       bypassTokenThreshold,
-      pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
       signal,
@@ -629,6 +659,9 @@ export class GeminiChat {
       // resets on any compression success, not just hard-rescue success.)
       this.consecutiveFailures = 0;
       this.hardRescueFailureCount = 0;
+      // R7.9: clear throttle so a subsequent trip emits its first-of-cycle
+      // warn rather than being silently swallowed by a stale flag.
+      this.breakerWarningEmitted = false;
       this.heapPressureCompressionCooldownUntil = 0;
     } else if (bypassTokenThreshold) {
       // Heap-pressure compaction failed: skip touching the failure counter
@@ -781,26 +814,47 @@ export class GeminiChat {
         this.lastPromptTokenCount,
         imageTokenEstimate,
       );
-      // R6.3: bound hard-rescue retries. Without this gate, a chat whose
-      // history can't shrink (model consistently produces unusable summaries,
-      // network is broken, etc.) would fire hard-rescue on every send
-      // forever — force=true skips the regular consecutiveFailures
+      // R6.3 / R7.2 / R7.3: bound hard-rescue retries with pessimistic
+      // accounting. Without a bound, a chat whose history can't shrink
+      // (model consistently produces unusable summaries, network broken,
+      // history too small to split, etc.) would fire hard-rescue on every
+      // send forever — force=true skips the regular consecutiveFailures
       // increment, and the rescue's own pre-call reset wipes any state
-      // proactive compaction may have accumulated. After
-      // MAX_CONSECUTIVE_FAILURES rescue failures we stop trying and let
-      // reactive overflow handle the next layer of defence.
+      // proactive compaction may have accumulated.
+      //
+      // Pessimistic pattern: increment the rescue strike BEFORE calling
+      // tryCompress, and only reset on COMPRESSED success. This covers
+      // every failure-shape uniformly:
+      //   - throw  (provider 5xx / abort)      → strike kept (post-call unreachable)
+      //   - NOOP   (history too small to split) → strike kept (neither branch matched before)
+      //   - failure status                      → strike kept
+      //   - COMPRESSED                          → strike refunded
+      // Without the pessimistic increment, throws and NOOPs would silently
+      // leave the counter untouched and the rescue could loop indefinitely.
+      const wantHardRescue = effectiveTokens >= hard;
       const shouldForceFromHard =
-        effectiveTokens >= hard &&
+        wantHardRescue &&
         this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
       if (shouldForceFromHard) {
-        // R6.6: log the rescue trigger so it's not invisible. The counter
-        // reset right after is documented in the consecutiveFailures JSDoc.
+        // R6.6 + R7.2 + R7.3: log trigger AND mutate counters before the
+        // call so unreachable post-call paths can't desync state.
         debugLogger.info(
           `[compaction] hard-tier rescue: effectiveTokens=${effectiveTokens} >= hard=${hard}, ` +
             `forcing compaction (consecutiveFailures ${this.consecutiveFailures} → 0, ` +
-            `hardRescueFailureCount=${this.hardRescueFailureCount})`,
+            `hardRescueFailureCount ${this.hardRescueFailureCount} → ${this.hardRescueFailureCount + 1})`,
         );
         this.consecutiveFailures = 0;
+        this.hardRescueFailureCount += 1;
+      } else if (wantHardRescue) {
+        // R7.7: rescue suppressed because the budget is exhausted. Log
+        // so an oncall debugging "why isn't hard-rescue firing" doesn't
+        // have to reverse-engineer two counters from source. Reactive
+        // overflow is now the only remaining defence layer.
+        debugLogger.warn(
+          `[compaction] hard-tier rescue skipped: budget exhausted ` +
+            `(hardRescueFailureCount=${this.hardRescueFailureCount}/${MAX_CONSECUTIVE_FAILURES}). ` +
+            `Reactive overflow is the remaining safety net; run /compress to recover.`,
+        );
       }
 
       compressionInfo = await this.tryCompress(
@@ -809,25 +863,32 @@ export class GeminiChat {
         shouldForceFromHard,
         params.config?.abortSignal,
         {
-          pendingUserMessage: userContent,
           precomputedEffectiveTokens: effectiveTokens,
         },
       );
 
-      // R6.3: account for the rescue outcome on its dedicated counter.
-      // force=true skipped the increment inside tryCompress, so we mirror
-      // the reactive-failure pattern here.
+      // R7.2 / R7.3: post-call diagnostics only. Counter accounting was
+      // resolved by the pre-call pessimistic increment plus the
+      // COMPRESSED success path in `tryCompress` (which resets
+      // `hardRescueFailureCount` to 0 alongside `consecutiveFailures`).
+      // The branches below are observability — no further state mutation.
       if (shouldForceFromHard) {
         if (isCompressionFailureStatus(compressionInfo.compressionStatus)) {
-          this.hardRescueFailureCount += 1;
           debugLogger.warn(
             `[compaction] hard-tier rescue failed: status=${compressionInfo.compressionStatus}, ` +
               `hardRescueFailureCount=${this.hardRescueFailureCount}/${MAX_CONSECUTIVE_FAILURES}`,
           );
         } else if (
-          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+          compressionInfo.compressionStatus === CompressionStatus.NOOP
         ) {
-          this.hardRescueFailureCount = 0;
+          // force=true bypasses the cheap-gate breaker NOOP, so a NOOP
+          // here means history was too small to split (curated empty /
+          // MIN_COMPRESSION_FRACTION / no compressible slice). Log so
+          // the strike is attributable.
+          debugLogger.warn(
+            `[compaction] hard-tier rescue NOOP (history not compressible): ` +
+              `hardRescueFailureCount=${this.hardRescueFailureCount}/${MAX_CONSECUTIVE_FAILURES}`,
+          );
         }
       }
 
