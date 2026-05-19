@@ -1307,12 +1307,17 @@ export class NativeLspService {
       throw new Error(`Refusing to apply edits outside workspace: ${filePath}`);
     }
 
-    // Read the current file content
+    // Read the current file content. Only treat ENOENT as "new file"; any
+    // other read failure (EACCES on a read-protected file, EISDIR, etc.)
+    // must propagate — otherwise the atomic rename below would silently
+    // replace the unreadable target with edits applied to an empty buffer.
     let content: string;
     try {
       content = fs.readFileSync(filePath, 'utf-8');
-    } catch {
-      // File doesn't exist, treat as empty
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        throw err;
+      }
       content = '';
     }
 

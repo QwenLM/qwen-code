@@ -76,6 +76,8 @@ vi.mock('../utils/session.js', () => ({
 
 // Re-export the real atomicWriteFile so tests can override individual
 // calls (e.g. .mockRejectedValueOnce) while preserving normal behavior.
+// The default implementation is re-attached in `beforeEach` because the
+// suite calls `vi.resetAllMocks()` which strips vi.fn(impl) back to no-op.
 vi.mock('../utils/atomicFileWrite.js', async () => {
   const actual = await vi.importActual<
     typeof import('../utils/atomicFileWrite.js')
@@ -85,6 +87,12 @@ vi.mock('../utils/atomicFileWrite.js', async () => {
     atomicWriteFile: vi.fn(actual.atomicWriteFile),
   };
 });
+
+const realAtomicWriteFile = (
+  await vi.importActual<typeof import('../utils/atomicFileWrite.js')>(
+    '../utils/atomicFileWrite.js',
+  )
+).atomicWriteFile;
 
 vi.mock('../utils/debugLogger.js', async (importOriginal) => {
   const original =
@@ -106,6 +114,9 @@ describe('Logger', () => {
 
   beforeEach(async () => {
     vi.resetAllMocks();
+    // resetAllMocks blanks the vi.fn(actual) delegation — re-attach so the
+    // logger's initialize/append paths still hit the real disk.
+    vi.mocked(atomicWriteFile).mockImplementation(realAtomicWriteFile);
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2025-01-01T12:00:00.000Z'));
     originalHome = process.env['HOME'];

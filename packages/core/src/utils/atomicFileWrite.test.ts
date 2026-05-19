@@ -463,12 +463,34 @@ describe('forceMode option', () => {
     },
   );
 
-  it('forceMode without mode is a no-op (preserves existing)', async () => {
-    const filePath = path.join(tmpDir, 'file.txt');
-    await fs.writeFile(filePath, 'old');
+  it.skipIf(process.platform === 'win32')(
+    'forceMode without mode preserves existing permissions (does not drop to umask)',
+    async () => {
+      const filePath = path.join(tmpDir, 'file.txt');
+      await fs.writeFile(filePath, 'old');
+      await fs.chmod(filePath, 0o600);
 
-    await atomicWriteFile(filePath, 'new', { forceMode: true });
+      // forceMode:true without mode is meaningless (nothing to force) — must
+      // not silently downgrade to umask default. Regression: pre-fix this
+      // dropped the file to 0o644 because forceMode skipped the stat.
+      await atomicWriteFile(filePath, 'new', { forceMode: true });
 
-    expect(await fs.readFile(filePath, 'utf-8')).toBe('new');
-  });
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('new');
+      expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'atomicWriteFileSync: forceMode without mode preserves existing permissions',
+    () => {
+      const filePath = path.join(tmpDir, 'file.txt');
+      fsSync.writeFileSync(filePath, 'old');
+      fsSync.chmodSync(filePath, 0o600);
+
+      atomicWriteFileSync(filePath, 'new', { forceMode: true });
+
+      expect(fsSync.readFileSync(filePath, 'utf-8')).toBe('new');
+      expect(fsSync.statSync(filePath).mode & 0o777).toBe(0o600);
+    },
+  );
 });

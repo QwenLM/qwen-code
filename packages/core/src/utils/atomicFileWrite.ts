@@ -133,10 +133,11 @@ export async function atomicWriteFile(
 
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
-  // forceMode skips permission preservation — caller insists on options.mode
-  // (used for credentials that must heal historically over-permissive files).
+  // forceMode skips permission preservation only when an explicit mode is
+  // supplied — otherwise we'd silently downgrade an existing file's perms
+  // to the process umask. forceMode without mode falls back to preservation.
   let existingMode: number | undefined;
-  if (!options?.forceMode) {
+  if (!options?.forceMode || options?.mode === undefined) {
     try {
       const stat = await fs.stat(targetPath);
       existingMode = stat.mode & 0o7777;
@@ -309,8 +310,10 @@ export function atomicWriteFileSync(
   const targetPath = resolveSymlinkChainSync(filePath);
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
+  // forceMode without mode falls back to permission preservation — otherwise
+  // we'd silently downgrade an existing file's perms to the process umask.
   let existingMode: number | undefined;
-  if (!options?.forceMode) {
+  if (!options?.forceMode || options?.mode === undefined) {
     try {
       const stat = fsSync.statSync(targetPath);
       existingMode = stat.mode & 0o7777;
