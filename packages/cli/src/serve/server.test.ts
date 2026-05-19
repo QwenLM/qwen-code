@@ -35,10 +35,14 @@ import {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   MAX_WORKSPACE_PATH_LENGTH,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
   WorkspaceMismatchError,
   type BridgeHeartbeatResult,
   type BridgeHeartbeatState,
@@ -2445,6 +2449,49 @@ describe('createServeApp', () => {
         existingSize: 1234,
       });
     });
+
+    it('400 + code:workspace_init_path_escape on WorkspaceInitPathEscapeError (#4297 fold-in 1, addresses #3260501161)', async () => {
+      // Without a typed mapping these used to fall through to 500, so
+      // an operator misreading their `context.fileName` would see a
+      // generic "daemon broken" error. 400 with structured body
+      // tells the operator exactly what's wrong.
+      const bridge = fakeBridge({
+        initWorkspaceImpl: async () => {
+          throw new WorkspaceInitPathEscapeError(
+            '../outside.md',
+            '/work/bound',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({});
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_init_path_escape',
+        filename: '../outside.md',
+        boundWorkspace: '/work/bound',
+      });
+    });
+
+    it('400 + code:workspace_init_symlink on WorkspaceInitSymlinkError (#4297 fold-in 1)', async () => {
+      const bridge = fakeBridge({
+        initWorkspaceImpl: async () => {
+          throw new WorkspaceInitSymlinkError(
+            '/work/bound/QWEN.md',
+            'target',
+            'Workspace context file "/work/bound/QWEN.md" is a symlink.',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({});
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_init_symlink',
+        target: '/work/bound/QWEN.md',
+        kind: 'target',
+      });
+    });
   });
 
   describe('POST /workspace/mcp/:server/restart (#4175 Wave 4 PR 17)', () => {
@@ -2568,6 +2615,46 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_server_name');
       expect(bridge.restartMcpServerCalls).toHaveLength(0);
+    });
+
+    it('404 + code:mcp_server_not_found when bridge throws McpServerNotFoundError (#4297 fold-in 1, addresses #3260501148)', async () => {
+      // Pin the `sendBridgeError` mapping under a route-layer test so
+      // a future change to the `instanceof McpServerNotFoundError`
+      // branch (e.g. cross-package bundling that breaks the prototype
+      // chain) fails CI rather than silently degrading to 500.
+      const bridge = fakeBridge({
+        restartMcpServerImpl: async () => {
+          throw new McpServerNotFoundError('ghost');
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/ghost/restart'),
+      ).send({});
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({
+        code: 'mcp_server_not_found',
+        serverName: 'ghost',
+      });
+    });
+
+    it('502 + code:mcp_server_restart_failed when bridge throws McpServerRestartFailedError (#4297 fold-in 1)', async () => {
+      const bridge = fakeBridge({
+        restartMcpServerImpl: async () => {
+          throw new McpServerRestartFailedError('docs', 'DISCONNECTED');
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart'),
+      ).send({});
+      expect(res.status).toBe(502);
+      expect(res.body).toMatchObject({
+        code: 'mcp_server_restart_failed',
+        errorKind: 'protocol_error',
+        serverName: 'docs',
+        mcpStatus: 'DISCONNECTED',
+      });
     });
   });
 

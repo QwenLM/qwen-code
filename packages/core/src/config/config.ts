@@ -766,7 +766,15 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
-  private readonly disabledTools: ReadonlySet<string>;
+  // #4282 fold-in 5 (Codex P2-2). `disabledTools` is set at construction
+  // time but can be re-synced by the daemon mutation surface
+  // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
+  // `discoverMcpToolsForServer` sees the latest disabled set instead
+  // of the bootstrap snapshot. Stays `ReadonlySet` for callers; the
+  // setter swaps the reference rather than mutating in place so any
+  // captured reference (e.g. by ToolRegistry mid-iteration) remains
+  // self-consistent.
+  private disabledTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -2296,12 +2304,45 @@ export class Config {
   /**
    * Returns the read-only set of tool names hidden from this Config's
    * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
-   * `ToolRegistry.registerFactory` to skip registration. Toggling at
-   * runtime requires re-spawning the ACP child (the set is frozen at
-   * construction time). See `disabledTools` in ConfigParameters.
+   * `ToolRegistry.registerFactory` to skip registration.
+   *
+   * Mutability semantics (#4282 fold-in 5 P2-2): the snapshot is
+   * mutable via `setDisabledTools()` so the daemon's
+   * `setWorkspaceToolEnabled` route can re-sync the set after a
+   * `tools.disabled` settings write — without that sync, the
+   * documented "toggle + restart" workflow would re-register the
+   * just-disabled MCP tool against the bootstrap snapshot.
+   *
+   * Already-registered tools are NOT retroactively unregistered:
+   * `ToolRegistry` consults the set at registration time only, so a
+   * mid-session disable only takes effect on the next `registerTool`
+   * call (next ACP child spawn, MCP rediscover, etc.). This matches
+   * the documented "toggling does not unregister live tools"
+   * contract.
+   *
+   * See `disabledTools` in ConfigParameters and `setDisabledTools`
+   * for the runtime sync entry point.
    */
   getDisabledTools(): ReadonlySet<string> {
     return this.disabledTools;
+  }
+
+  /**
+   * #4282 fold-in 5 (Codex P2-2). Replace the in-process `disabledTools`
+   * snapshot with a fresh set sourced from the workspace settings.
+   * Intended for the `qwen serve` mutation surface
+   * (`setWorkspaceToolEnabled` → ACP `qwen/control/...` → here): the
+   * settings file is the source of truth, and this setter keeps the
+   * in-memory Config in sync so a subsequent MCP rediscovery / next
+   * tool registration honors the just-toggled value.
+   *
+   * Already-registered tools are NOT retroactively unregistered —
+   * `ToolRegistry` consults the set at registration time only, which
+   * matches the documented "toggling does not unregister live tools"
+   * contract.
+   */
+  setDisabledTools(disabled: ReadonlySet<string>): void {
+    this.disabledTools = new Set(disabled);
   }
 
   getToolCallCommand(): string | undefined {

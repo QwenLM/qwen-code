@@ -50,6 +50,41 @@ function formatHostForUrl(host: string): string {
 }
 
 /**
+ * #4297 fold-in 7 (deepseek S1, addresses #3262690842). Pull the
+ * `context.fileName` snapshot out of merged settings into a typed
+ * string, falling back to `undefined` when the value is missing or
+ * malformed. Exported so the daemon entrypoint can extract it from
+ * a `LoadedSettings` instance and tests can validate the four
+ * branches (string / array-with-string / array-with-non-strings /
+ * non-string non-array) without spinning up a real daemon.
+ *
+ * Validation contract:
+ *   - non-empty string after trim → returned trimmed
+ *   - array → first non-empty string element after trim, or undefined
+ *   - anything else (object, number, boolean, undefined) → undefined
+ *
+ * Returning `undefined` is the bridge's signal to use its own
+ * `getCurrentGeminiMdFilename()` default — so a malformed value
+ * keeps the daemon alive rather than producing a garbage filename.
+ */
+export function extractContextFilename(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed === '' ? undefined : trimmed;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry === 'string') {
+        const trimmed = entry.trim();
+        if (trimmed !== '') return trimmed;
+      }
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
  * #4282 fold-in 4 (qwen-latest C2). Per-workspace promise chain that
  * serializes settings read-modify-write cycles inside this process.
  *
@@ -305,6 +340,52 @@ export async function runQwenServe(
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
   };
 
+  // #4282 fold-in 5 (Codex P2-1). Snapshot the workspace's preferred
+  // context filename at boot. The daemon parent doesn't go through
+  // `loadCliConfig` (it spawns an ACP child that does), so the
+  // process-global `getCurrentGeminiMdFilename()` stays on the
+  // default `QWEN.md` even when the workspace has
+  // `context.fileName: 'AGENTS.md'`. Reading merged settings here
+  // and forwarding to the bridge ensures `POST /workspace/init`
+  // writes the same file the ACP child reads. Settings changes made
+  // after daemon boot need a daemon restart to take effect — this
+  // value rarely changes, and a snapshot avoids re-reading on every
+  // init request.
+  //
+  // #4297 fold-in 2 (copilot S2): only accept string-typed values.
+  // Hand-edited `settings.json` could land an object / number /
+  // nested array in `context.fileName`; the previous `String(...)`
+  // coerce would have produced a literal `"[object Object]"`
+  // filename. Falling back to `undefined` makes the bridge use its
+  // own `getCurrentGeminiMdFilename()` default — a sane recovery
+  // posture that keeps the daemon alive instead of writing a
+  // garbage filename.
+  //
+  // #4297 fold-in 7 (qwen-latest critical, addresses #3262625091):
+  // wrap the boot-time `loadSettings` read in try/catch. A
+  // corrupted, malformed, or temporarily unreadable
+  // `settings.json` (partial write by a concurrent editor,
+  // permission denied, transient disk IO) used to throw
+  // synchronously and BLOCK DAEMON BOOT. Pre-PR this never
+  // happened because `loadSettings` was called lazily inside
+  // request handlers (which had their own error handling). We
+  // catch + log + fall back to the bridge's default filename so
+  // the daemon stays bootable.
+  let contextFilenameForInit: string | undefined;
+  try {
+    const bootSettings = loadSettings(boundWorkspace);
+    contextFilenameForInit = extractContextFilename(
+      bootSettings.merged.context?.fileName,
+    );
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: could not read settings for context.fileName ` +
+        `(${err instanceof Error ? err.message : String(err)}); ` +
+        `falling back to the daemon's default context filename. ` +
+        `Restart with a valid settings.json to use a custom name.`,
+    );
+  }
+
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -320,6 +401,9 @@ export async function runQwenServe(
       // implementation wraps `buildEnvStatusFromProcess` and the
       // (lifted) `buildDaemonPreflightCells` body.
       statusProvider: createDaemonStatusProvider(),
+      ...(contextFilenameForInit !== undefined
+        ? { contextFilename: contextFilenameForInit }
+        : {}),
       // #4175 Wave 4 PR 17: `POST /session/:id/approval-mode` accepts
       // an opt-in `persist: true` flag. We re-load settings on each
       // persist call rather than caching a `LoadedSettings` handle —

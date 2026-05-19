@@ -45,6 +45,9 @@ import {
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
+  WorkspaceInitRaceError,
   WorkspaceMismatchError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
@@ -2365,6 +2368,50 @@ function sendBridgeError(
       code: 'workspace_init_conflict',
       path: err.path,
       existingSize: err.existingSize,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceInitPathEscapeError) {
+    // #4297 fold-in 1 (16:32:44-round S1). The configured
+    // `context.fileName` resolves outside the bound workspace via
+    // path arithmetic. 400 because this is a misconfiguration that
+    // an operator can fix in workspace settings — not a daemon
+    // failure.
+    res.status(400).json({
+      error: err.message,
+      code: 'workspace_init_path_escape',
+      filename: err.filename,
+      boundWorkspace: err.boundWorkspace,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceInitSymlinkError) {
+    // #4297 fold-in 1 (16:32:44-round S1). Either the target file is
+    // a symlink, or a parent directory is a symlink that escapes the
+    // workspace. Same 400 rationale as `WorkspaceInitPathEscapeError`
+    // — operator fix is "replace the symlink with a real file/dir."
+    res.status(400).json({
+      error: err.message,
+      code: 'workspace_init_symlink',
+      target: err.target,
+      kind: err.kind,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceInitRaceError) {
+    // #4297 fold-in 10 (qwen-latest S2, addresses #3263954690).
+    // Race-condition variant: EEXIST after our absence check (target
+    // appeared mid-create) or ENOENT after our content check (target
+    // disappeared mid-overwrite). Same 400 mapping as the symlink
+    // sibling — operator fix is "rerun init" or investigate the
+    // concurrent writer (git checkout, editor save, …). Distinct
+    // `code: 'workspace_init_race'` so dashboards don't misclassify
+    // these as symlink-attack indicators.
+    res.status(400).json({
+      error: err.message,
+      code: 'workspace_init_race',
+      target: err.target,
+      kind: err.kind,
     });
     return;
   }

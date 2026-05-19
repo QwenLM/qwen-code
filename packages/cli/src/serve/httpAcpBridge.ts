@@ -6,7 +6,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { promises as fs, constants as fsConstants } from 'node:fs';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import {
@@ -132,6 +132,9 @@ import {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
+  WorkspaceInitRaceError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -146,6 +149,9 @@ export {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
+  WorkspaceInitRaceError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   MAX_WORKSPACE_PATH_LENGTH,
@@ -193,7 +199,10 @@ export type { AcpChannel, AcpChannelExitInfo, ChannelFactory };
 // `createDaemonStatusProvider()` (production impl in
 // `cli/src/serve/daemonStatusProvider.ts`) when the bridge is built;
 // embedded callers that don't need daemon-host cells may omit it,
-// in which case the factory returns idle placeholders.
+// in which case the factory returns idle placeholders. The
+// `contextFilename` option (added by #4282 fold-in 5) was lifted
+// alongside the rest of the surface — see the lifted definition in
+// `packages/acp-bridge/src/bridgeOptions.ts`.
 import type {
   BridgeOptions,
   DaemonStatusProvider,
@@ -458,6 +467,7 @@ function hasControlCharacter(value: string): boolean {
 }
 
 // `InvalidSessionMetadataError`, `WorkspaceInitConflictError`,
+// `WorkspaceInitPathEscapeError`, `WorkspaceInitSymlinkError`,
 // `McpServerNotFoundError`, `McpServerRestartFailedError` lifted to
 // `@qwen-code/acp-bridge/bridgeErrors` in #4175 PR 22b — see the
 // consolidated re-export block earlier in this file.
@@ -1297,6 +1307,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     );
   }
   const boundWorkspace = opts.boundWorkspace;
+  // #4282 fold-in 5 (Codex P2-1). Snapshot the configured context
+  // filename at construction time. The daemon parent never updates
+  // the process-global through `loadCliConfig`, so `runQwenServe`
+  // reads the workspace's merged settings and forwards the value
+  // here. Falling back to `getCurrentGeminiMdFilename()` keeps
+  // bridge tests + embedded callers working without explicit setup.
+  const contextFilename = opts.contextFilename ?? getCurrentGeminiMdFilename();
   const persistApprovalMode = opts.persistApprovalMode;
   const persistDisabledTools = opts.persistDisabledTools;
 
@@ -2088,26 +2105,84 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
 
   /**
    * Fan-out an event to every live session bus. PR 17 mutation events
-   * (`tool_toggled`, `workspace_initialized`, `mcp_server_restart*`)
-   * call this; semantically identical to PR 16's
-   * `publishWorkspaceEvent` member on the bridge object (same
-   * `byId.values()` iteration, same per-entry try/catch posture).
-   * Kept as a local closure alias rather than a member method because
-   * call sites within the bridge implementation can't invoke own
-   * methods through `this` here. PR 16's richer success/failure
-   * accounting (per-entry shutdown/debug logging) lives only on the
-   * member version — these PR 17 events are best-effort, so the
-   * simpler swallow-and-skip is acceptable.
+   * (`tool_toggled`, `workspace_initialized`, `mcp_server_restart*`,
+   * persisted `approval_mode_changed` mirror) call this.
+   *
+   * Mirrors PR 16's `publishWorkspaceEvent` member: per-entry
+   * success/failure accounting + an "ALL buses dropped" stderr
+   * elevation so monitoring catches the all-closed-during-shutdown
+   * scenario. Was a local swallow-and-skip until #4297 fold-in 1
+   * picked up the suggestion to align with the instrumented path.
+   *
+   * Kept as a local closure rather than a member method because call
+   * sites within the bridge implementation run inside the factory
+   * scope where `this` is not yet the proxy.
+   *
+   * Optional `skipSessionId` — when set, that session is excluded
+   * from the broadcast. Used by `setSessionApprovalMode` to avoid
+   * delivering `approval_mode_changed` twice to the requesting
+   * session (which already received the session-scoped publish on
+   * its own bus). Without the skip, the SDK reducer's
+   * `approvalModeChangedCount` reaches 2 for a single mutation on
+   * the requesting client.
    */
   const broadcastWorkspaceEvent = (
     envelope: Omit<BridgeEvent, 'id' | 'v'>,
+    skipSessionId?: string,
   ): void => {
-    for (const entry of byId.values()) {
-      try {
-        entry.events.publish(envelope);
-      } catch {
-        /* bus closed for this session; skip */
+    const sessions = Array.from(byId.values());
+    let successCount = 0;
+    let failureCount = 0;
+    let skippedCount = 0;
+    for (const entry of sessions) {
+      if (skipSessionId !== undefined && entry.sessionId === skipSessionId) {
+        skippedCount += 1;
+        continue;
       }
+      try {
+        const published = entry.events.publish(envelope);
+        if (published === undefined) {
+          failureCount += 1;
+          writeServeDebugLine(
+            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
+          );
+        } else {
+          successCount += 1;
+        }
+      } catch (err) {
+        failureCount += 1;
+        const detail =
+          `broadcastWorkspaceEvent: bus publish failed for session ` +
+          `${JSON.stringify(entry.sessionId)} (type=${envelope.type}): ` +
+          `${err instanceof Error ? err.message : String(err)}`;
+        if (shuttingDown) {
+          writeServeDebugLine(detail);
+        } else {
+          writeStderrLine(`qwen serve: ${detail}`);
+        }
+      }
+    }
+    // Only elevate when the broadcast had at least one eligible
+    // recipient (excluding the skipped requester) and ALL of them
+    // dropped the event. Single-session workspaces with the requester
+    // skipped naturally produce zero recipients — that's not an
+    // "all dropped" condition, just nobody to deliver to.
+    //
+    // #4297 fold-in 6 (deepseek S1, addresses #3261079572): count the
+    // sessions we actually skipped instead of unconditionally
+    // subtracting 1 when `skipSessionId` is set. The previous shape
+    // suppressed the all-dropped alarm when a non-matching
+    // `skipSessionId` was passed (caller mistake, stale id, or the
+    // matching session was just torn down) — eligible would land at
+    // `sessions.length - 1` even though every session was published
+    // to and every publish failed. Counting actual skips makes the
+    // alarm condition self-consistent regardless of how the caller
+    // mis-uses the param.
+    const eligible = sessions.length - skippedCount;
+    if (eligible > 0 && successCount === 0 && !shuttingDown) {
+      writeStderrLine(
+        `qwen serve: broadcastWorkspaceEvent type=${envelope.type} dropped on ALL ${failureCount} session bus(es); SSE subscribers will miss this event (GET fallback still authoritative)`,
+      );
     }
   };
 
@@ -3065,8 +3140,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // signal). When zero sessions are active OR every active bus
       // dropped the event, we elevate to unconditional stderr so
       // monitoring catches the all-buses-dropped scenario.
-      // Inherited from the (now removed) `broadcastWorkspaceEvent`
-      // PR 21 added — PR 16's helper is now the single fan-out.
+      // Two near-duplicate fan-outs coexist in this file:
+      //   - this `publishWorkspaceEvent` member (PR 16) — used by
+      //     workspace-mutation routes that have a bridge proxy
+      //     reference (memory / agents).
+      //   - the local `broadcastWorkspaceEvent` closure at ~line 2127
+      //     (PR 17 mutation surface) — used by `setSessionApprovalMode`
+      //     / `setWorkspaceToolEnabled` / `restartMcpServer` / `initWorkspace`
+      //     because their call sites run inside the factory closure
+      //     where `this` isn't yet the proxy. The closure also takes
+      //     an optional `skipSessionId` for the persisted approval-mode
+      //     mirror; this member doesn't.
+      // The duplication is acknowledged debt — addressed in #4297
+      // fold-in 11 (#3263954688). A future refactor can extract a
+      // shared `fanOutToSessions(envelope, sessions, opts?)` helper
+      // once the `skipSessionId` semantics stabilize.
       const sessions = Array.from(byId.values());
       let successCount = 0;
       let failureCount = 0;
@@ -3459,17 +3547,26 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // spawn an ACP child. The session-scoped publish above remains the
       // authoritative signal for the requesting session (and carries the
       // sessionId in `data`); the workspace mirror is informational.
+      //
+      // #4297 fold-in 1: skip the requesting session in the broadcast.
+      // The session-scoped publish above already delivered the event on
+      // its own bus, so a broadcast that included it would double-count
+      // in the SDK reducer's `approvalModeChangedCount` (peers see 1,
+      // requester used to see 2 — silent contract violation).
       if (persisted) {
-        broadcastWorkspaceEvent({
-          type: 'approval_mode_changed',
-          data: {
-            sessionId: entry.sessionId,
-            previous: response.previous,
-            next: response.current,
-            persisted,
+        broadcastWorkspaceEvent(
+          {
+            type: 'approval_mode_changed',
+            data: {
+              sessionId: entry.sessionId,
+              previous: response.previous,
+              next: response.current,
+              persisted,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
           },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
+          entry.sessionId,
+        );
       }
       return {
         sessionId: entry.sessionId,
@@ -3608,22 +3705,54 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // operator chose and the trust dialog flow doesn't yet exist
       // for the daemon. The CV1 symlink reject below covers the
       // immediate boundary-escape concern.
-      const filename = getCurrentGeminiMdFilename();
-      // #4282 gpt-5.5 C1 fold-in: `getCurrentGeminiMdFilename()` is
-      // settings-controlled. A daemon configured with
-      // `context.fileName: "../outside.md"` would otherwise resolve
-      // outside `boundWorkspace` and let this strict-gated mutation
-      // create or truncate a file outside the workspace boundary.
-      // Resolve the joined path and reject anything that escapes.
+      // #4282 fold-in 5 (Codex P2-1). Use the snapshot from
+      // `BridgeOptions.contextFilename` (sourced from the workspace's
+      // merged settings at daemon boot) instead of the process-global
+      // `getCurrentGeminiMdFilename()` — the daemon parent never goes
+      // through `loadCliConfig`, so a workspace configured with
+      // `context.fileName: 'AGENTS.md'` would otherwise see init
+      // create `QWEN.md` while the rest of the workspace reads a
+      // different file.
+      const filename = contextFilename;
+      // #4282 gpt-5.5 C1 fold-in: `context.fileName` is settings-
+      // controlled. A daemon configured with `context.fileName:
+      // "../outside.md"` would otherwise resolve outside
+      // `boundWorkspace` and let this strict-gated mutation create
+      // or truncate a file outside the workspace boundary. Resolve
+      // the joined path and reject anything that escapes.
       const target = path.resolve(boundWorkspace, filename);
       const withinWorkspace =
         target === boundWorkspace ||
         target.startsWith(boundWorkspace + path.sep);
       if (!withinWorkspace) {
-        throw new Error(
+        throw new WorkspaceInitPathEscapeError(filename, boundWorkspace);
+      }
+      // #4282 fold-in 5 (Codex P2-4). The textual `withinWorkspace`
+      // and final-component `lstat` checks miss intermediate symlinks
+      // — e.g. `context.fileName: "docs/QWEN.md"` with `docs` a
+      // symlink to `/tmp` would let the later `writeFile(target)`
+      // follow the parent symlink and create or truncate outside
+      // `boundWorkspace`. Resolve the parent chain via
+      // `realpath`, walking up through any not-yet-existing ancestors,
+      // and verify the canonical parent stays within the canonical
+      // workspace.
+      const wsCanonical = await fs.realpath(boundWorkspace);
+      const parentCanonical = await canonicalizeExistingAncestor(
+        path.dirname(target),
+      );
+      const parentWithinWorkspace =
+        parentCanonical === wsCanonical ||
+        parentCanonical.startsWith(wsCanonical + path.sep);
+      if (!parentWithinWorkspace) {
+        throw new WorkspaceInitSymlinkError(
+          target,
+          'parent',
           `Configured workspace context filename ${JSON.stringify(filename)} ` +
-            `resolves outside the bound workspace ${JSON.stringify(boundWorkspace)}. ` +
-            `Refusing to write.`,
+            `has a parent path that resolves outside the bound workspace ` +
+            `(parent canonicalizes to ${JSON.stringify(parentCanonical)}, ` +
+            `workspace canonicalizes to ${JSON.stringify(wsCanonical)}). ` +
+            `Refusing to write — replace any symlinked parent directory ` +
+            `with a real directory before re-running init.`,
         );
       }
       // #4282 fold-in 2 (gpt-5.5 CV1): the textual `withinWorkspace`
@@ -3639,13 +3768,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       try {
         const lst = await fs.lstat(target);
         if (lst.isSymbolicLink()) {
-          throw new Error(
+          throw new WorkspaceInitSymlinkError(
+            target,
+            'target',
             `Workspace context file ${JSON.stringify(target)} is a symlink. ` +
               `Refusing to follow it for write — replace the symlink with a ` +
               `regular file (or remove it) before re-running init.`,
           );
         }
       } catch (err) {
+        if (err instanceof WorkspaceInitSymlinkError) throw err;
         const code = (err as { code?: unknown } | null | undefined)?.code;
         if (code !== 'ENOENT') throw err;
         // ENOENT — target doesn't exist; fresh create is fine.
@@ -3679,8 +3811,139 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         if (code !== 'ENOENT') throw err;
         // ENOENT — fall through to create.
       }
-      if (action !== 'noop') {
-        await fs.writeFile(target, '', 'utf8');
+      if (action === 'created') {
+        // #4297 fold-in 5 (wenshao critical, addresses #3260836305).
+        // Close the TOCTOU window between the `lstat`/`readFile`
+        // checks above and this write by using `'wx'`
+        // (O_WRONLY|O_CREAT|O_EXCL): the open atomically refuses
+        // when ANY inode (regular file, dir, symlink, …) exists at
+        // the target path, so a local attacker can't slip a symlink
+        // between our checks and follow it through here.
+        //
+        // #4297 fold-in 10 (qwen-latest S2, addresses #3263954690):
+        // EEXIST bubbles up as `WorkspaceInitRaceError(kind:
+        // 'eexist')` — a sibling class to `WorkspaceInitSymlinkError`
+        // so the HTTP code distinguishes a race-created inode (could
+        // be regular file OR symlink — we don't know which) from the
+        // symlink-confirmed cases at the lstat / O_NOFOLLOW sites.
+        let fh: import('node:fs/promises').FileHandle;
+        try {
+          fh = await fs.open(target, 'wx');
+        } catch (err) {
+          const code = (err as { code?: unknown } | null | undefined)?.code;
+          if (code === 'EEXIST') {
+            throw new WorkspaceInitRaceError(
+              target,
+              'eexist',
+              `Workspace context file ${JSON.stringify(target)} appeared ` +
+                `between our absence check and the create — refusing to ` +
+                `proceed (a regular file or symlink was just placed at the ` +
+                `target path, and following it could escape the workspace).`,
+            );
+          }
+          throw err;
+        }
+        try {
+          // #4297 fold-in 10 (qwen-latest S5, addresses #3263954707):
+          // post-open parent re-verification narrows the parent-symlink
+          // TOCTOU window between `canonicalizeExistingAncestor` and
+          // `fs.open`. `O_NOFOLLOW` only protects the final component;
+          // a local writer could swap a real `docs/` parent for a
+          // `docs -> /tmp` symlink between our pre-check and this open
+          // and the kernel would resolve the parent unconditionally.
+          // Re-canonicalizing the parent post-open and refusing the
+          // write when it moved out of the workspace catches that race
+          // (cost: one extra realpath syscall per init).
+          await verifyParentWithinWorkspace(target, wsCanonical, 'create', fh);
+          await fh.writeFile('', 'utf8');
+        } finally {
+          await fh.close();
+        }
+      } else if (action === 'overwrote') {
+        // #4297 fold-in 7 (gpt-5.5 critical, addresses #3262615446):
+        // close the TOCTOU window on the `force: true` path with
+        // `O_WRONLY|O_TRUNC|O_NOFOLLOW`. `O_NOFOLLOW` causes
+        // `open()` to fail with ELOOP if the final component is a
+        // symlink — even if a local writer races a symlink in
+        // between our `lstat`/`readFile` checks and this open, the
+        // open refuses rather than truncating the link target.
+        // (The symbol exists on Linux/macOS; on Windows the constant
+        // is 0/no-op since the OS always follows symlinks, which
+        // is consistent with the documented Stage-1 trust posture
+        // there — Windows daemon support is best-effort.)
+        let fh: import('node:fs/promises').FileHandle;
+        try {
+          fh = await fs.open(
+            target,
+            // #4297 fold-in 10 (qwen-latest S3, addresses #3263954697):
+            // `O_NOFOLLOW ?? 0` matches the defensive pattern in
+            // `core/src/utils/{sessionStorageUtils,gitDiff}.ts` and
+            // `cli/src/ui/utils/customBanner.ts` for platforms that
+            // don't expose the constant. Functionally a no-op (JS
+            // bitwise coerces `undefined` to 0) but keeps the codebase
+            // consistent for the next greppy refactor.
+            fsConstants.O_WRONLY |
+              fsConstants.O_TRUNC |
+              (fsConstants.O_NOFOLLOW ?? 0),
+          );
+        } catch (err) {
+          const code = (err as { code?: unknown } | null | undefined)?.code;
+          // #4297 fold-in 8 (qwen-latest S1, addresses #3262861754):
+          // split ELOOP and ENOENT diagnostics so operators don't
+          // misdiagnose. ELOOP is the genuine `O_NOFOLLOW` rejection
+          // — a symlink at the final component, possibly an attack
+          // race. ENOENT here means the file was DELETED between
+          // the readFile content check and this open — a benign race
+          // with a concurrent writer (git checkout, editor save).
+          // Both still surface as `WorkspaceInitSymlinkError(kind:
+          // 'target')` so the route maps to a structured 400; the
+          // class doubles as the workspace-init race-condition
+          // bucket, but the message is now accurate per case.
+          if (code === 'ELOOP') {
+            throw new WorkspaceInitSymlinkError(
+              target,
+              'target',
+              `Workspace context file ${JSON.stringify(target)} could not ` +
+                `be opened with O_NOFOLLOW (ELOOP); the path may have been ` +
+                `swapped to a symlink between the content check and the ` +
+                `overwrite. Refusing to follow it.`,
+            );
+          }
+          if (code === 'ENOENT') {
+            // #4297 fold-in 10 (qwen-latest S2, addresses #3263954690):
+            // ENOENT here means race-deletion, not a symlink — use the
+            // sibling `WorkspaceInitRaceError` so the HTTP code
+            // (`workspace_init_race`) doesn't mislead operators into
+            // hunting a symlink attack on benign concurrent-modification.
+            throw new WorkspaceInitRaceError(
+              target,
+              'enoent',
+              `Workspace context file ${JSON.stringify(target)} was deleted ` +
+                `between the content check and the overwrite (likely a ` +
+                `concurrent writer — git checkout, editor save, etc.). ` +
+                `Refusing to recreate blindly; rerun init.`,
+            );
+          }
+          throw err;
+        }
+        try {
+          // #4297 fold-in 10 (qwen-latest S5, addresses #3263954707):
+          // same post-open parent re-verification as the create path.
+          // The overwrite branch is more sensitive — race-substituting
+          // a parent symlink to redirect TRUNCATE outside the workspace
+          // is the worst-case escape. Verifying after `O_NOFOLLOW` open
+          // succeeds catches the parent-only race that O_NOFOLLOW
+          // doesn't cover (the kernel resolved the parent path).
+          await verifyParentWithinWorkspace(
+            target,
+            wsCanonical,
+            'overwrite',
+            fh,
+          );
+          await fh.writeFile('', 'utf8');
+        } finally {
+          await fh.close();
+        }
       }
       broadcastWorkspaceEvent({
         type: 'workspace_initialized',
@@ -3944,6 +4207,107 @@ function describeStatKind(stats: import('node:fs').Stats): string {
   if (stats.isFIFO()) return 'named pipe (FIFO)';
   if (stats.isSocket()) return 'socket';
   return 'non-regular file';
+}
+
+/**
+ * #4282 fold-in 5 (Codex P2-4). Resolve `inputPath` to its real
+ * filesystem path, walking up through directory components that
+ * don't yet exist on disk. Used by `initWorkspace` to make sure
+ * every parent directory of the target file canonicalizes inside
+ * the bound workspace — a symlink at any level (e.g. `docs/QWEN.md`
+ * with `docs -> /tmp`) would otherwise let `writeFile` escape the
+ * workspace boundary.
+ *
+ * The walk-up mirrors what `realpath` would do if it accepted
+ * non-existent terminal segments: the deepest extant ancestor
+ * dictates the canonical prefix, and any not-yet-created components
+ * inherit it. Hitting the filesystem root (`path.dirname(p) === p`)
+ * without finding anything that exists rethrows the underlying
+ * ENOENT — by that point the input was unrooted in a way the
+ * caller's contract can't honor.
+ */
+async function canonicalizeExistingAncestor(
+  inputPath: string,
+): Promise<string> {
+  let current = inputPath;
+  while (true) {
+    try {
+      return await fs.realpath(current);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | null | undefined)?.code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+      const parent = path.dirname(current);
+      if (parent === current) throw err;
+      current = parent;
+    }
+  }
+}
+
+/**
+ * #4297 fold-in 10 (qwen-latest S5, addresses #3263954707). Re-verify
+ * the parent directory canonicalizes inside the workspace AFTER the
+ * `fs.open()` succeeded. `O_NOFOLLOW` only covers the final path
+ * component; a local writer with workspace write access could race-
+ * substitute a parent dir for a symlink between the pre-open
+ * `canonicalizeExistingAncestor` check and the actual open. The
+ * kernel resolves parent symlinks unconditionally during open, so
+ * the fd we just opened may point outside `wsCanonical`.
+ *
+ * Catching the race after the fact: re-realpath the parent and
+ * compare against `wsCanonical`. If the parent moved, the open
+ * succeeded against an out-of-workspace inode; we throw
+ * `WorkspaceInitSymlinkError(kind: 'parent')` so the route maps
+ * to a 400 (config / race / attack ambiguous, but not a daemon
+ * failure).
+ *
+ * The cleanup parameter distinguishes:
+ *   - `'create'`: the open created the file; on race detection we
+ *     unlink it best-effort to avoid leaving an empty file in the
+ *     attacker's redirected location.
+ *   - `'overwrite'`: the open truncated an existing file we'd
+ *     already content-checked. The truncate happened at open time
+ *     so the damage (zero-length file at the redirected path) is
+ *     already done — but the throw at least prevents subsequent
+ *     write content; documented residual risk.
+ *
+ * Residual race window: between this `realpath` and the next
+ * `writeFile` on the fd, the parent could in principle be swapped
+ * again. The fd we hold is still valid against the inode it was
+ * opened against, which is what `writeFile` writes to — so this
+ * remaining window is sub-millisecond and bounded to "fd opened
+ * against an inode that briefly was under wsCanonical." Acceptable
+ * residual posture for the Stage-1 trust model.
+ */
+async function verifyParentWithinWorkspace(
+  target: string,
+  wsCanonical: string,
+  cleanup: 'create' | 'overwrite',
+  fh: import('node:fs/promises').FileHandle,
+): Promise<void> {
+  const parentCanonical = await canonicalizeExistingAncestor(
+    path.dirname(target),
+  );
+  const within =
+    parentCanonical === wsCanonical ||
+    parentCanonical.startsWith(wsCanonical + path.sep);
+  if (within) return;
+  // Best-effort cleanup before throwing. We're already in a failure
+  // path; ignore secondary errors so the original race-detection
+  // throw isn't shadowed.
+  if (cleanup === 'create') {
+    await fh.close().catch(() => {});
+    await fs.unlink(target).catch(() => {});
+  }
+  throw new WorkspaceInitSymlinkError(
+    target,
+    'parent',
+    `Workspace context file ${JSON.stringify(target)}'s parent moved ` +
+      `outside the workspace between the pre-open canonicalize and ` +
+      `the post-open verify (parent canonicalizes to ${JSON.stringify(parentCanonical)}, ` +
+      `workspace canonicalizes to ${JSON.stringify(wsCanonical)}). ` +
+      `Refusing to write — investigate the concurrent writer or the ` +
+      `parent-directory permissions.`,
+  );
 }
 
 /**

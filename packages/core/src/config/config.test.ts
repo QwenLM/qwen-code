@@ -7,7 +7,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
-import { Config, ApprovalMode, MCPServerConfig } from './config.js';
+import {
+  Config,
+  ApprovalMode,
+  MCPServerConfig,
+  TrustGateError,
+} from './config.js';
 import { Storage } from './storage.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -2227,17 +2232,28 @@ describe('setApprovalMode with folder trust', () => {
     cwd: '.',
   };
 
-  it('should throw an error when setting YOLO mode in an untrusted folder', () => {
+  it('should throw a TrustGateError when setting YOLO mode in an untrusted folder', () => {
+    // #4297 fold-in 1 (16:32:44-round S3): assert on the typed class,
+    // not just message text. The 403 mapping in `serve/server.ts`
+    // matches `err instanceof TrustGateError`; an accidental revert
+    // to `throw new Error(...)` would silently downgrade to 500
+    // while the message text test kept passing.
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+      TrustGateError,
+    );
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
   });
 
-  it('should throw an error when setting AUTO_EDIT mode in an untrusted folder', () => {
+  it('should throw a TrustGateError when setting AUTO_EDIT mode in an untrusted folder', () => {
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
+      TrustGateError,
+    );
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
@@ -2812,6 +2828,68 @@ describe('setApprovalMode with folder trust', () => {
       expect(grepRegistrations.length).toBe(1);
       expect(canUseRipgrep).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+  };
+
+  it('initializes from `disabledTools` ConfigParameters', () => {
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['Foo', 'Bar'],
+    });
+    expect(config.getDisabledTools()).toEqual(new Set(['Foo', 'Bar']));
+  });
+
+  it('defaults to an empty set when `disabledTools` is omitted', () => {
+    const config = new Config(baseParams);
+    expect(config.getDisabledTools()).toEqual(new Set());
+  });
+
+  it('setDisabledTools replaces the live snapshot for runtime sync', () => {
+    // The daemon's `acpAgent` MCP-restart handler calls
+    // `setDisabledTools(new Set(disabledList))` after re-reading
+    // workspace settings, so a `tools.disabled` toggle applied
+    // since this Config was constructed takes effect on the next
+    // `ToolRegistry.registerTool` call. Pin that contract so a
+    // future regression that drops the setter (or re-freezes the
+    // field) fails this test instead of silently re-enabling
+    // tools the user just disabled.
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['A', 'B'],
+    });
+    expect(config.getDisabledTools()).toEqual(new Set(['A', 'B']));
+    config.setDisabledTools(new Set(['B', 'C']));
+    expect(config.getDisabledTools()).toEqual(new Set(['B', 'C']));
+  });
+
+  it('setDisabledTools copies the input — caller mutations do not leak', () => {
+    // The setter constructs a fresh `new Set(disabled)` from the
+    // input, so a caller that holds a reference to the input set
+    // and later mutates it cannot retroactively change the live
+    // Config snapshot. Locks this defensive-copy contract.
+    const config = new Config(baseParams);
+    const liveInput = new Set(['X']);
+    config.setDisabledTools(liveInput);
+    liveInput.add('Y');
+    expect(config.getDisabledTools()).toEqual(new Set(['X']));
+    expect(config.getDisabledTools().has('Y')).toBe(false);
+  });
+
+  it('setDisabledTools accepts an empty set (clears the live snapshot)', () => {
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['A', 'B'],
+    });
+    config.setDisabledTools(new Set());
+    expect(config.getDisabledTools()).toEqual(new Set());
   });
 });
 

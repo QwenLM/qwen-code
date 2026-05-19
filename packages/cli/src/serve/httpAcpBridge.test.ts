@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
@@ -45,7 +45,12 @@ import {
   MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
   SessionNotFoundError,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
+  WorkspaceInitRaceError,
   WorkspaceMismatchError,
   type AcpChannel,
   type BridgeOptions,
@@ -4513,15 +4518,29 @@ describe('createHttpAcpBridge', () => {
         { persist: true },
         undefined,
       );
-      // Session A receives both the session-scoped event and the
-      // workspace-scoped mirror; collect two events.
+      // #4297 fold-in 1: requester gets the event exactly once (via
+      // its own session-scoped publish); the broadcast skips the
+      // requester so the SDK reducer's `approvalModeChangedCount`
+      // increments by 1, not 2, on the requesting client.
       const aFirst = await itA.next();
-      const aSecond = await itA.next();
-      const aTypes = [aFirst.value?.type, aSecond.value?.type];
-      expect(aTypes.filter((t) => t === 'approval_mode_changed').length).toBe(
-        2,
-      );
-      // Session B receives only the workspace-scoped mirror.
+      expect(aFirst.value?.type).toBe('approval_mode_changed');
+      expect(aFirst.value?.data).toMatchObject({
+        sessionId: a.sessionId,
+        previous: 'default',
+        next: 'yolo',
+        persisted: true,
+      });
+      // Race A's next event against a 50ms timer to confirm no second
+      // delivery (which would be the duplicate the broadcast used to
+      // produce).
+      const aTimedSecond = await Promise.race([
+        itA.next().then((v) => ({ kind: 'event' as const, v })),
+        new Promise((r) => setTimeout(r, 50)).then(() => ({
+          kind: 'timeout' as const,
+        })),
+      ]);
+      expect(aTimedSecond.kind).toBe('timeout');
+      // Peer session B still receives the workspace-scoped mirror.
       const bFirst = await itB.next();
       expect(bFirst.value?.type).toBe('approval_mode_changed');
       expect(bFirst.value?.data).toMatchObject({
@@ -4699,6 +4718,185 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('restartMcpServer (#4297 fold-in 1, addresses #3260501141)', () => {
+    /**
+     * Build a channel factory whose ACP `extMethod` handler returns a
+     * configurable response for `qwen/control/workspace/mcp/restart`.
+     * Reusable across happy-path / soft-skip / hard-error tests so each
+     * test's intent is the response shape, not the boilerplate.
+     */
+    function restartFactory(
+      respond: (
+        params: Record<string, unknown>,
+      ) =>
+        | Record<string, unknown>
+        | Promise<Record<string, unknown>>
+        | Promise<never>,
+    ): ChannelFactory {
+      return async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/workspace/mcp/restart') {
+              return Promise.resolve(respond(params));
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+    }
+
+    it('returns the restarted shape on success and broadcasts mcp_server_restarted', async () => {
+      const bridge = makeBridge({
+        channelFactory: restartFactory(() => ({
+          serverName: 'docs',
+          restarted: true,
+          durationMs: 1234,
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      const result = await bridge.restartMcpServer('docs', undefined);
+      expect(result).toEqual({
+        serverName: 'docs',
+        restarted: true,
+        durationMs: 1234,
+      });
+      const next = await it.next();
+      expect(next.value?.type).toBe('mcp_server_restarted');
+      expect(next.value?.data).toMatchObject({
+        serverName: 'docs',
+        durationMs: 1234,
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('returns the soft-skip shape and broadcasts mcp_server_restart_refused', async () => {
+      const bridge = makeBridge({
+        channelFactory: restartFactory(() => ({
+          serverName: 'docs',
+          restarted: false,
+          skipped: true,
+          reason: 'budget_would_exceed',
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      const result = await bridge.restartMcpServer('docs', undefined);
+      expect(result).toEqual({
+        serverName: 'docs',
+        restarted: false,
+        skipped: true,
+        reason: 'budget_would_exceed',
+      });
+      const next = await it.next();
+      expect(next.value?.type).toBe('mcp_server_restart_refused');
+      expect(next.value?.data).toMatchObject({
+        serverName: 'docs',
+        reason: 'budget_would_exceed',
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('translates ACP mcp_server_not_found into McpServerNotFoundError', async () => {
+      // The ACP child raises a JSON-RPC error whose `data.errorKind` is
+      // `'mcp_server_not_found'` for unknown server names. The bridge
+      // re-instantiates the typed class so `sendBridgeError` can map
+      // it to a stable HTTP 404 — without this the route would fall
+      // through to the generic 500 handler.
+      const bridge = makeBridge({
+        channelFactory: restartFactory(
+          () =>
+            Promise.reject(
+              new RequestError(-32004, 'MCP server not configured: "ghost"', {
+                errorKind: 'mcp_server_not_found',
+                serverName: 'ghost',
+              }),
+            ) as Promise<never>,
+        ),
+      });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const err = await bridge
+        .restartMcpServer('ghost', undefined)
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(McpServerNotFoundError);
+      expect((err as McpServerNotFoundError).serverName).toBe('ghost');
+      await bridge.shutdown();
+    });
+
+    it('translates ACP mcp_restart_failed into McpServerRestartFailedError', async () => {
+      // Post-discover, the ACP child checks the live MCP server status
+      // and raises a JSON-RPC error with `errorKind:
+      // 'mcp_restart_failed'` when the server didn't reach CONNECTED.
+      // The bridge re-instantiates the typed class so the route maps
+      // it to HTTP 502 + `errorKind: 'protocol_error'`.
+      const bridge = makeBridge({
+        channelFactory: restartFactory(
+          () =>
+            Promise.reject(
+              new RequestError(
+                -32099,
+                'MCP server "docs" did not reach a connected state',
+                {
+                  errorKind: 'mcp_restart_failed',
+                  serverName: 'docs',
+                  mcpStatus: 'DISCONNECTED',
+                },
+              ),
+            ) as Promise<never>,
+        ),
+      });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const err = await bridge
+        .restartMcpServer('docs', undefined)
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(McpServerRestartFailedError);
+      expect((err as McpServerRestartFailedError).serverName).toBe('docs');
+      expect((err as McpServerRestartFailedError).mcpStatus).toBe(
+        'DISCONNECTED',
+      );
+      await bridge.shutdown();
+    });
+
+    it('stamps mcp_server_restarted with the originator clientId when supplied', async () => {
+      const bridge = makeBridge({
+        channelFactory: restartFactory(() => ({
+          serverName: 'docs',
+          restarted: true,
+          durationMs: 0,
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      await bridge.restartMcpServer('docs', session.clientId);
+      const next = await it.next();
+      expect(next.value?.originatorClientId).toBe(session.clientId);
+      abort.abort();
+      await bridge.shutdown();
+    });
+  });
+
   describe('initWorkspace (#4175 Wave 4 PR 17)', () => {
     /**
      * Per-test workspace temp dir so the bridge's writeFile lands on a
@@ -4760,6 +4958,311 @@ describe('createHttpAcpBridge', () => {
       const res = await bridge.initWorkspace({ force: true }, undefined);
       expect(res.action).toBe('overwrote');
       expect(await fsp.readFile(target, 'utf8')).toBe('');
+    });
+
+    it('force:true overwrite refuses an O_NOFOLLOW ELOOP race (#4297 fold-in 7 TOCTOU)', async () => {
+      // Pin the new `O_WRONLY|O_TRUNC|O_NOFOLLOW` open path on the
+      // overwrote branch. Pre-fold-in-7 the overwrite used plain
+      // `fs.writeFile` and could be redirected outside `boundWorkspace`
+      // by a local writer racing a symlink between the lstat/readFile
+      // checks and the write. Now `O_NOFOLLOW` causes open() to fail
+      // with ELOOP on a symlink — translated to
+      // `WorkspaceInitSymlinkError(kind: 'target')`.
+      //
+      // Test strategy: pre-write a regular file so action lands on
+      // `overwrote`, then mock `fs.lstat` and `fs.readFile` to lie
+      // about the file (pretend it's still a regular file with non-
+      // whitespace content), but pre-replace the on-disk file with a
+      // symlink so `fs.open(..., O_NOFOLLOW)` fails.
+      const escapeTarget = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-init-overwrite-toctou-'),
+      );
+      try {
+        const externalFile = path.join(escapeTarget, 'EXTERNAL.md');
+        await fsp.writeFile(externalFile, '# external', 'utf8');
+        const targetPath = path.join(tmpWs, 'QWEN.md');
+        // Real on-disk state: a symlink pointing outside the workspace.
+        await fsp.symlink(externalFile, targetPath);
+        // Stubbed lstat/readFile: pretend it's a regular file with
+        // existing content, so we land on the `overwrote` action.
+        const fakeStats = {
+          isSymbolicLink: () => false,
+          isFile: () => true,
+          isDirectory: () => false,
+          isCharacterDevice: () => false,
+          isBlockDevice: () => false,
+          isFIFO: () => false,
+          isSocket: () => false,
+        } as unknown as import('node:fs').Stats;
+        const lstatSpy = vi
+          .spyOn(fsp, 'lstat')
+          .mockResolvedValueOnce(fakeStats);
+        const readFileSpy = vi
+          .spyOn(fsp, 'readFile')
+          .mockResolvedValueOnce('# Old non-whitespace content' as never);
+        try {
+          const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+          const err = await bridge
+            .initWorkspace({ force: true }, undefined)
+            .catch((e) => e);
+          expect(err).toBeInstanceOf(WorkspaceInitSymlinkError);
+          expect((err as WorkspaceInitSymlinkError).kind).toBe('target');
+          expect((err as Error).message).toMatch(
+            /could not be opened with O_NOFOLLOW \(ELOOP\)/,
+          );
+          // External file untouched — the boundary held.
+          expect(await fsp.readFile(externalFile, 'utf8')).toBe('# external');
+        } finally {
+          lstatSpy.mockRestore();
+          readFileSpy.mockRestore();
+        }
+      } finally {
+        await fsp.rm(escapeTarget, { recursive: true, force: true });
+      }
+    });
+
+    it('force:true overwrite distinguishes ENOENT race-delete from ELOOP symlink (#4297 fold-in 8)', async () => {
+      // Pin the diagnostic split. ENOENT in the overwrite open path
+      // means the file was DELETED between the readFile content
+      // check and the open (concurrent writer — git checkout,
+      // editor save) — NOT a symlink swap. The error message must
+      // not say "swapped to a symlink"; otherwise an operator
+      // diagnosing a benign race wastes time hunting a symlink
+      // attack that didn't happen.
+      // Pretend lstat says it's a regular file with content (so we
+      // land on the overwrote action), but the actual on-disk path
+      // doesn't exist when fs.open runs — forcing ENOENT.
+      const fakeStats = {
+        isSymbolicLink: () => false,
+        isFile: () => true,
+        isDirectory: () => false,
+        isCharacterDevice: () => false,
+        isBlockDevice: () => false,
+        isFIFO: () => false,
+        isSocket: () => false,
+      } as unknown as import('node:fs').Stats;
+      const lstatSpy = vi.spyOn(fsp, 'lstat').mockResolvedValueOnce(fakeStats);
+      const readFileSpy = vi
+        .spyOn(fsp, 'readFile')
+        .mockResolvedValueOnce('# Old content' as never);
+      try {
+        const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+        const err = await bridge
+          .initWorkspace({ force: true }, undefined)
+          .catch((e) => e);
+        // #4297 fold-in 10 (qwen-latest S2): ENOENT race-delete now
+        // surfaces as `WorkspaceInitRaceError(kind: 'enoent')` (HTTP
+        // code `workspace_init_race`), not `WorkspaceInitSymlinkError`
+        // — distinguishes a benign concurrent-modification window
+        // from a symlink attack vector at the dashboard level.
+        expect(err).toBeInstanceOf(WorkspaceInitRaceError);
+        expect((err as WorkspaceInitRaceError).kind).toBe('enoent');
+        // Message must reference deletion / concurrent writer — NOT
+        // "swapped to a symlink" (which is only accurate for ELOOP).
+        expect((err as Error).message).toMatch(
+          /was deleted between the content check and the overwrite/,
+        );
+        expect((err as Error).message).not.toMatch(/swapped to a symlink/);
+      } finally {
+        lstatSpy.mockRestore();
+        readFileSpy.mockRestore();
+      }
+    });
+
+    it('honors `contextFilename` from BridgeOptions (#4282 fold-in 5 P2-1)', async () => {
+      // The daemon parent never goes through `loadCliConfig`, so the
+      // process-global `getCurrentGeminiMdFilename()` stays on the
+      // default `QWEN.md`. `runQwenServe` snapshots the workspace's
+      // `context.fileName` setting at boot and forwards it via the
+      // `contextFilename` option so init writes the same file the
+      // ACP child reads.
+      const bridge = createHttpAcpBridge({
+        boundWorkspace: tmpWs,
+        contextFilename: 'AGENTS.md',
+      });
+      const res = await bridge.initWorkspace({}, undefined);
+      expect(res.action).toBe('created');
+      expect(res.path).toBe(path.join(tmpWs, 'AGENTS.md'));
+      // Default name must NOT have been written; otherwise observers
+      // would see two files appear and clients would race over which
+      // is canonical.
+      expect(
+        await fsp
+          .stat(path.join(tmpWs, 'QWEN.md'))
+          .then(() => true)
+          .catch(() => false),
+      ).toBe(false);
+    });
+
+    it('rejects writes when a parent directory symlinks outside the workspace (#4282 fold-in 5 P2-4)', async () => {
+      // `lstat(target)` only checks the final component. A symlink at
+      // any parent level — e.g. `docs -> /tmp` with `context.fileName:
+      // 'docs/AGENTS.md'` — would let `writeFile` follow the parent
+      // link and create or truncate outside `boundWorkspace`. The
+      // canonical-parent check resolves the chain via `realpath`
+      // before any read or write.
+      const escapeTarget = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-init-escape-'),
+      );
+      try {
+        await fsp.symlink(escapeTarget, path.join(tmpWs, 'docs'));
+        const bridge = createHttpAcpBridge({
+          boundWorkspace: tmpWs,
+          contextFilename: 'docs/AGENTS.md',
+        });
+        const err = await bridge.initWorkspace({}, undefined).catch((e) => e);
+        // #4297 fold-in 1 (16:32:44-round S1): typed class so
+        // `sendBridgeError` can map to 400 rather than 500.
+        expect(err).toBeInstanceOf(WorkspaceInitSymlinkError);
+        expect((err as WorkspaceInitSymlinkError).kind).toBe('parent');
+        expect((err as Error).message).toMatch(
+          /parent path that resolves outside the bound workspace/,
+        );
+        // Confirm nothing was written outside the workspace.
+        expect(
+          await fsp
+            .stat(path.join(escapeTarget, 'AGENTS.md'))
+            .then(() => true)
+            .catch(() => false),
+        ).toBe(false);
+      } finally {
+        await fsp.rm(escapeTarget, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects writes when the target file itself is a symlink (#4297 fold-in 1)', async () => {
+      // The original PR 17 boundary guard: `lstat(target)` should
+      // refuse to follow a symlink at the QWEN.md path. Without this
+      // test, a future refactor that drops the `lstat` could silently
+      // re-open path traversal through this strict-gated mutation
+      // route. Pairs with the parent-symlink test above to lock both
+      // boundary checks under unit coverage.
+      const escapeTarget = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-init-target-symlink-'),
+      );
+      try {
+        const externalFile = path.join(escapeTarget, 'EXTERNAL.md');
+        await fsp.writeFile(externalFile, '# external', 'utf8');
+        await fsp.symlink(externalFile, path.join(tmpWs, 'QWEN.md'));
+        const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+        const err = await bridge.initWorkspace({}, undefined).catch((e) => e);
+        expect(err).toBeInstanceOf(WorkspaceInitSymlinkError);
+        expect((err as WorkspaceInitSymlinkError).kind).toBe('target');
+        expect((err as Error).message).toMatch(/is a symlink/);
+        // External file untouched.
+        expect(await fsp.readFile(externalFile, 'utf8')).toBe('# external');
+      } finally {
+        await fsp.rm(escapeTarget, { recursive: true, force: true });
+      }
+    });
+
+    it('atomic create refuses an EEXIST race after lstat passed (#4297 fold-in 5 TOCTOU)', async () => {
+      // The PR 17 `lstat` check is point-in-time: a local attacker
+      // with workspace write access could replace the target with a
+      // symlink between the check and the write, and the previous
+      // `fs.writeFile` would have followed the link out of the
+      // workspace. The fold-in 5 fix uses `fs.open(target, 'wx')` —
+      // O_WRONLY|O_CREAT|O_EXCL — which atomically refuses any
+      // pre-existing inode at the path.
+      //
+      // This test simulates the race by pre-creating a symlink AND
+      // stubbing `fs.lstat` to lie about it (return a regular-file
+      // shape). Without the `'wx'` guard the bridge would proceed to
+      // `writeFile` and follow the symlink. With it, the open call
+      // fails with EEXIST and we throw `WorkspaceInitSymlinkError`.
+      const escapeTarget = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-init-toctou-'),
+      );
+      try {
+        const externalFile = path.join(escapeTarget, 'EXTERNAL.md');
+        await fsp.writeFile(externalFile, '# external', 'utf8');
+        const targetPath = path.join(tmpWs, 'QWEN.md');
+        await fsp.symlink(externalFile, targetPath);
+        // Pretend `lstat` reports a regular file (the race window
+        // where the symlink was placed AFTER our stat). The 'wx'
+        // open should still atomically refuse.
+        const fakeStats = {
+          isSymbolicLink: () => false,
+          isFile: () => true,
+          isDirectory: () => false,
+          isCharacterDevice: () => false,
+          isBlockDevice: () => false,
+          isFIFO: () => false,
+          isSocket: () => false,
+        } as unknown as import('node:fs').Stats;
+        const lstatSpy = vi
+          .spyOn(fsp, 'lstat')
+          .mockResolvedValueOnce(fakeStats);
+        // ALSO stub readFile so the existence check above doesn't
+        // short-circuit into the conflict path; we want the create
+        // branch to attempt `fs.open(target, 'wx')`.
+        const readFileSpy = vi
+          .spyOn(fsp, 'readFile')
+          .mockRejectedValueOnce(
+            Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
+          );
+        try {
+          const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+          const err = await bridge.initWorkspace({}, undefined).catch((e) => e);
+          // #4297 fold-in 10 (qwen-latest S2): EEXIST race now surfaces
+          // as `WorkspaceInitRaceError(kind: 'eexist')` — the inode
+          // could be a regular file OR symlink, we don't know which,
+          // so the dedicated race class is more accurate than the
+          // symlink-implying one.
+          expect(err).toBeInstanceOf(WorkspaceInitRaceError);
+          expect((err as WorkspaceInitRaceError).kind).toBe('eexist');
+          // External file must not have been touched.
+          expect(await fsp.readFile(externalFile, 'utf8')).toBe('# external');
+        } finally {
+          lstatSpy.mockRestore();
+          readFileSpy.mockRestore();
+        }
+      } finally {
+        await fsp.rm(escapeTarget, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects writes when contextFilename resolves outside the workspace (#4297 fold-in 1)', async () => {
+      // The pre-canonicalize textual `withinWorkspace` check at
+      // `httpAcpBridge.ts:~4045`: a `context.fileName: '../outside.md'`
+      // is the simplest config-error escape. Locking it under a typed
+      // assertion means a future path-arithmetic refactor that
+      // weakens the check fails this test instead of silently
+      // re-opening the boundary.
+      const bridge = createHttpAcpBridge({
+        boundWorkspace: tmpWs,
+        contextFilename: '../outside.md',
+      });
+      const err = await bridge.initWorkspace({}, undefined).catch((e) => e);
+      expect(err).toBeInstanceOf(WorkspaceInitPathEscapeError);
+      expect((err as WorkspaceInitPathEscapeError).filename).toBe(
+        '../outside.md',
+      );
+      expect((err as Error).message).toMatch(
+        /resolves outside the bound workspace/,
+      );
+      // Confirm no file was created at the escape target.
+      const sibling = path.resolve(tmpWs, '..', 'outside.md');
+      expect(
+        await fsp
+          .stat(sibling)
+          .then(() => true)
+          .catch(() => false),
+      ).toBe(false);
+    });
+
+    it('accepts writes when a parent directory is a real subdir (#4282 fold-in 5 P2-4)', async () => {
+      // Symmetric coverage for the parent-realpath check: when `docs`
+      // is a real directory (not a symlink), the write must succeed
+      // and land at the nested target.
+      await fsp.mkdir(path.join(tmpWs, 'docs'));
+      const bridge = createHttpAcpBridge({
+        boundWorkspace: tmpWs,
+        contextFilename: 'docs/AGENTS.md',
+      });
+      const res = await bridge.initWorkspace({}, undefined);
+      expect(res.action).toBe('created');
+      expect(res.path).toBe(path.join(tmpWs, 'docs', 'AGENTS.md'));
     });
 
     it('does NOT spawn an ACP child', async () => {
