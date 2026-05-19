@@ -2260,24 +2260,25 @@ export function useTextBuffer({
         editorArgs = editorArgs.map((a) => `"${a}"`);
       }
 
-      dispatch({ type: 'create_undo_snapshot' });
-
       const wasRaw = stdin?.isRaw ?? false;
       try {
         fs.writeFileSync(filePath, text, { encoding: 'utf8', mode: 0o600 });
         setRawMode?.(false);
 
-        const { status, error } = spawnSync(editorCmd, editorArgs, {
+        const { status, error, signal } = spawnSync(editorCmd, editorArgs, {
           stdio: 'inherit',
           shell: useShell,
           timeout: 30 * 60 * 1000,
         });
         if (error) throw error;
+        if (signal)
+          throw new Error(`External editor was killed by signal ${signal}`);
         if (typeof status === 'number' && status !== 0)
           throw new Error(`External editor exited with status ${status}`);
 
         let newText = fs.readFileSync(filePath, 'utf8');
         newText = newText.replace(/\r\n?/g, '\n');
+        dispatch({ type: 'create_undo_snapshot' });
         dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
       } catch (err) {
         debugLogger.error('[useTextBuffer] external editor error', err);

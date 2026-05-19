@@ -420,4 +420,46 @@ describe('openInExternalEditor', () => {
 
     expect(result.current.text).toBe('new content');
   });
+
+  it('should not read temp file when editor is killed by signal', async () => {
+    mockSpawnSync.mockReturnValue({
+      status: null,
+      error: null,
+      signal: 'SIGKILL',
+    });
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'original',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(fs.readFileSync).not.toHaveBeenCalled();
+    expect(result.current.text).toBe('original');
+  });
+
+  it('should not create undo snapshot when editor fails', async () => {
+    mockSpawnSync.mockReturnValue({ status: 1, error: null });
+    (fs.readFileSync as Mock).mockReturnValue('should not see this');
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'original',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(result.current.text).toBe('original');
+  });
 });
