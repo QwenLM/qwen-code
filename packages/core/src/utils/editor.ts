@@ -146,7 +146,6 @@ export function isTerminalEditor(editor: EditorType): boolean {
 export interface ExternalEditorCommand {
   command: string;
   args: string[];
-  isTerminal: boolean;
   needsShell: boolean;
 }
 
@@ -178,7 +177,6 @@ export function getExternalEditorCommand(
       return {
         command: executable,
         args: [filePath],
-        isTerminal: true,
         needsShell,
       };
     case 'vscode':
@@ -190,7 +188,6 @@ export function getExternalEditorCommand(
       return {
         command: executable,
         args: [filePath, '--wait'],
-        isTerminal: false,
         needsShell,
       };
     }

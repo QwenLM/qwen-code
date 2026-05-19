@@ -178,7 +178,6 @@ describe('openInExternalEditor', () => {
     mockGetExternalEditorCommand.mockReturnValue({
       command: 'code',
       args: [expectedTmpFile, '--wait'],
-      isTerminal: false,
       needsShell: false,
     });
 
@@ -210,7 +209,6 @@ describe('openInExternalEditor', () => {
     mockGetExternalEditorCommand.mockReturnValue({
       command: 'code.cmd',
       args: [expectedTmpFile, '--wait'],
-      isTerminal: false,
       needsShell: true,
     });
 

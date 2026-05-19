@@ -810,7 +810,6 @@ describe('editor utils', () => {
       expect(result).not.toBeNull();
       expect(result!.command).toBe('code');
       expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-      expect(result!.isTerminal).toBe(false);
     });
 
     it('should return --wait flag for vscodium', () => {
@@ -820,7 +819,6 @@ describe('editor utils', () => {
       expect(result).not.toBeNull();
       expect(result!.command).toBe('codium');
       expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-      expect(result!.isTerminal).toBe(false);
     });
 
     it('should return --wait flag for windsurf', () => {
@@ -830,7 +828,6 @@ describe('editor utils', () => {
       expect(result).not.toBeNull();
       expect(result!.command).toBe('windsurf');
       expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-      expect(result!.isTerminal).toBe(false);
     });
 
     it('should return --wait flag for cursor', () => {
@@ -839,7 +836,6 @@ describe('editor utils', () => {
       const result = getExternalEditorCommand('cursor', '/tmp/file.txt');
       expect(result).not.toBeNull();
       expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-      expect(result!.isTerminal).toBe(false);
     });
 
     it('should return --wait flag for trae', () => {
@@ -849,7 +845,6 @@ describe('editor utils', () => {
       expect(result).not.toBeNull();
       expect(result!.command).toBe('trae');
       expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-      expect(result!.isTerminal).toBe(false);
     });
 
     it('should return --wait flag for zed', () => {
@@ -858,7 +853,6 @@ describe('editor utils', () => {
       const result = getExternalEditorCommand('zed', '/tmp/file.txt');
       expect(result).not.toBeNull();
       expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-      expect(result!.isTerminal).toBe(false);
     });
 
     it('should return plain args for vim (terminal editor)', () => {
@@ -868,7 +862,6 @@ describe('editor utils', () => {
       expect(result).not.toBeNull();
       expect(result!.command).toBe('vim');
       expect(result!.args).toEqual(['/tmp/file.txt']);
-      expect(result!.isTerminal).toBe(true);
     });
 
     it('should return plain args for neovim (terminal editor)', () => {
@@ -878,7 +871,6 @@ describe('editor utils', () => {
       expect(result).not.toBeNull();
       expect(result!.command).toBe('nvim');
       expect(result!.args).toEqual(['/tmp/file.txt']);
-      expect(result!.isTerminal).toBe(true);
     });
 
     it('should return plain args for emacs (terminal editor)', () => {
@@ -888,7 +880,6 @@ describe('editor utils', () => {
       expect(result).not.toBeNull();
       expect(result!.command).toBe('emacs');
       expect(result!.args).toEqual(['/tmp/file.txt']);
-      expect(result!.isTerminal).toBe(true);
     });
 
     it('should set needsShell=true for .cmd executables on Windows', () => {
