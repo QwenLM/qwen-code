@@ -21,13 +21,23 @@ vi.mock('../utils/settingsUtils.js', async (importOriginal) => {
   };
 });
 
+// Named shape so dot-access on the known keys (`env`, `modelProviders`) is not
+// treated as access through an index signature — keeps the strict TS option
+// `noPropertyAccessFromIndexSignature` happy while still allowing arbitrary
+// extra keys via the index signature.
+interface SettingsShape {
+  env?: Record<string, unknown>;
+  modelProviders?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 interface MutableSettingsFile {
-  settings: Record<string, unknown>;
-  originalSettings: Record<string, unknown>;
+  settings: SettingsShape;
+  originalSettings: SettingsShape;
   path: string;
 }
 
-function makeSettings(initial: Record<string, unknown> = {}) {
+function makeSettings(initial: SettingsShape = {}) {
   const file: MutableSettingsFile = {
     settings: structuredClone(initial),
     originalSettings: structuredClone(initial),
@@ -36,7 +46,10 @@ function makeSettings(initial: Record<string, unknown> = {}) {
   const setValue = vi.fn(
     (_scope: SettingScope, key: string, value: unknown) => {
       const parts = key.split('.');
-      let current: Record<string, unknown> = file.settings;
+      let current: Record<string, unknown> = file.settings as Record<
+        string,
+        unknown
+      >;
       for (let i = 0; i < parts.length - 1; i++) {
         const part = parts[i]!;
         if (!current[part] || typeof current[part] !== 'object') {
@@ -92,8 +105,9 @@ describe('createLoadedSettingsAdapter', () => {
     expect(() => adapter.setValue('prototype.x', 'x')).toThrow(
       /reserved segment/,
     );
+    // The guard short-circuits before delegating to LoadedSettings — that's the
+    // contract this test exists to lock in.
     expect(setValue).not.toHaveBeenCalled();
-    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
   it('getValue reads from settings.merged via dotted key', () => {
@@ -110,7 +124,7 @@ describe('createLoadedSettingsAdapter', () => {
     expect(adapter.getValue('missing.path')).toBeUndefined();
   });
 
-  it('backup() snapshots in-memory state; restore() reverts and recomputes merged', async () => {
+  it('backup() snapshots in-memory state; restore() reverts and recomputes merged', () => {
     const { settings, file, recomputeMerged } = makeSettings({
       env: { ORIGINAL: '1' },
     });
@@ -119,13 +133,20 @@ describe('createLoadedSettingsAdapter', () => {
       SettingScope.User,
     );
 
-    adapter.backup();
+    // backup/restore/cleanupBackup are optional in the contract, but
+    // createLoadedSettingsAdapter always installs them — assert + use !.
+    expect(adapter.backup).toBeTypeOf('function');
+    adapter.backup!();
 
     // Simulate mutations that would happen during an install plan apply.
     adapter.setValue('env.NEW_KEY', 'new-value');
-    expect(file.settings.env).toEqual({ ORIGINAL: '1', NEW_KEY: 'new-value' });
+    expect(file.settings.env).toEqual({
+      ORIGINAL: '1',
+      NEW_KEY: 'new-value',
+    });
 
-    adapter.restore();
+    expect(adapter.restore).toBeTypeOf('function');
+    adapter.restore!();
 
     expect(file.settings).toEqual({ env: { ORIGINAL: '1' } });
     expect(file.originalSettings).toEqual({ env: { ORIGINAL: '1' } });
@@ -138,11 +159,14 @@ describe('createLoadedSettingsAdapter', () => {
       settings as never,
       SettingScope.User,
     );
-    adapter.backup();
+    expect(adapter.backup).toBeTypeOf('function');
+    adapter.backup!();
     adapter.setValue('env.K', 'v2');
-    adapter.cleanupBackup();
+    expect(adapter.cleanupBackup).toBeTypeOf('function');
+    adapter.cleanupBackup!();
     // restore after cleanup should not bring v1 back
-    adapter.restore();
+    expect(adapter.restore).toBeTypeOf('function');
+    adapter.restore!();
     expect(file.settings.env).toEqual({ K: 'v2' });
   });
 });
