@@ -92,14 +92,25 @@ export interface DaemonClientOptions {
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 /**
- * #4282 fold-in 5 (Codex P2-3). The daemon's `MCP_RESTART_TIMEOUT_MS`
- * (5 minutes — see `httpAcpBridge.ts`) is the upper bound on a single
- * MCP rediscovery; the SDK matches that ceiling so a slow but valid
- * stdio restart isn't aborted client-side while the daemon is still
- * working. Callers needing a tighter or looser cap pass their own
- * `timeoutMs` to `restartMcpServer`.
+ * #4282 fold-in 5 (Codex P2-3) + post-merge Codex review P2 (folded
+ * into F1 #4319). The daemon's `MCP_RESTART_TIMEOUT_MS` (5 minutes —
+ * see `bridge.ts`) is the upper bound on a single MCP rediscovery.
+ * The SDK previously matched that ceiling EXACTLY (300_000ms), which
+ * raced the daemon's own deadline: for restarts that finish or fail
+ * near 300s, the client `AbortSignal` could fire before the daemon
+ * serialized + transmitted the structured success/error response,
+ * yielding a client `TimeoutError` even though the daemon was still
+ * within its own budget.
+ *
+ * Adding 30s headroom over the server ceiling lets the daemon's
+ * response (typed McpServerRestartFailedError JSON envelope or
+ * success summary) reach the client even when the daemon's work
+ * runs right up to its budget. 330_000ms is a defensive ceiling on
+ * end-to-end "daemon finished + response in-flight + client
+ * decoded"; callers needing tighter caps pass their own `timeoutMs`
+ * to `restartMcpServer`.
  */
-const MCP_RESTART_DEFAULT_TIMEOUT_MS = 300_000;
+const MCP_RESTART_DEFAULT_TIMEOUT_MS = 330_000;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
 
 /**

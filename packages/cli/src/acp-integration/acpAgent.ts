@@ -1560,9 +1560,25 @@ class QwenAgent implements Agent {
                 `Expected an array of strings.\n`,
             );
           }
-          const disabledList = Array.isArray(mergedDisabled)
-            ? mergedDisabled.filter((v): v is string => typeof v === 'string')
-            : [];
+          // Codex review P2 (folded into F1 #4319): mirror the bootstrap
+          // normalization in `cli/src/config/config.ts:1426-1434` —
+          // `typeof string` filter + `trim()` + skip empty + dedupe —
+          // so a `tools.disabled: ['  Foo  ', '', 'Foo']` settings entry
+          // produces the same `Set(['Foo'])` here as at boot. Without
+          // the trim, `ToolRegistry.has(tool.name)` (exact string match)
+          // would fail to recognize a disabled tool after restart and
+          // silently re-register it.
+          const disabledList: string[] = [];
+          if (Array.isArray(mergedDisabled)) {
+            const seen = new Set<string>();
+            for (const raw of mergedDisabled) {
+              if (typeof raw !== 'string') continue;
+              const trimmed = raw.trim();
+              if (!trimmed || seen.has(trimmed)) continue;
+              seen.add(trimmed);
+              disabledList.push(trimmed);
+            }
+          }
           this.config.setDisabledTools(new Set(disabledList));
         } catch (err) {
           // #4297 fold-in 2 (wenshao S3): settings load failures are
