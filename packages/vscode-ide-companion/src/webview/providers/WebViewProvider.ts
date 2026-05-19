@@ -6,6 +6,8 @@
 
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
+import { existsSync } from 'node:fs';
+import * as path from 'node:path';
 import { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import { ConversationStore } from '../../services/conversationStore.js';
 import type {
@@ -59,6 +61,26 @@ const AUTH_RELATED_QWEN_SETTINGS = [
   'qwen-code.apiKey',
   'qwen-code.codingPlanRegion',
 ] as const;
+
+export function resolveQwenCliEntryPath(
+  extensionUri: vscode.Uri,
+  extensionMode: vscode.ExtensionMode | undefined,
+): string {
+  if (extensionMode === vscode.ExtensionMode.Development) {
+    const devCliEntry = path.resolve(
+      extensionUri.fsPath,
+      '..',
+      '..',
+      'scripts',
+      'dev.js',
+    );
+    if (existsSync(devCliEntry)) {
+      return devCliEntry;
+    }
+  }
+
+  return vscode.Uri.joinPath(extensionUri, 'dist', 'qwen-cli', 'cli.js').fsPath;
+}
 
 function isInsightCommand(command: string): boolean {
   const [firstToken = ''] = command.trim().split(/\s+/, 1);
@@ -1206,12 +1228,10 @@ export class WebViewProvider {
         `[WebViewProvider] Using CLI-managed authentication (autoAuth=${autoAuthenticate})`,
       );
 
-      const bundledCliEntry = vscode.Uri.joinPath(
+      const cliEntry = resolveQwenCliEntryPath(
         this.extensionUri,
-        'dist',
-        'qwen-cli',
-        'cli.js',
-      ).fsPath;
+        this.context.extensionMode,
+      );
 
       try {
         console.log('[WebViewProvider] Connecting to agent...');
@@ -1219,7 +1239,7 @@ export class WebViewProvider {
         // Pass the detected CLI path to ensure we use the correct installation
         const connectResult = await this.agentManager.connect(
           workingDir,
-          bundledCliEntry,
+          cliEntry,
           options,
         );
         console.log('[WebViewProvider] Agent connected successfully');

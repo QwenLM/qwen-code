@@ -411,6 +411,92 @@ export interface DaemonWriteMemoryResult {
   changed?: boolean;
 }
 
+export type DaemonContentHash = `sha256:${string}`;
+
+const DAEMON_CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
+
+export function isDaemonContentHash(
+  value: unknown,
+): value is DaemonContentHash {
+  return typeof value === 'string' && DAEMON_CONTENT_HASH_RE.test(value);
+}
+
+export interface DaemonWorkspaceFile {
+  kind: 'file';
+  path: string;
+  content: string;
+  encoding: string;
+  bom: boolean;
+  lineEnding: 'crlf' | 'lf';
+  sizeBytes: number;
+  returnedBytes: number;
+  truncated: boolean;
+  hash?: DaemonContentHash;
+  matchedIgnore: 'file' | 'directory' | null;
+  originalLineCount: number | null;
+}
+
+export interface DaemonWorkspaceFileBytes {
+  kind: 'file_bytes';
+  path: string;
+  offset: number;
+  sizeBytes: number;
+  returnedBytes: number;
+  truncated: boolean;
+  contentBase64: string;
+  hash?: DaemonContentHash;
+}
+
+interface DaemonWorkspaceFileWriteRequestBase {
+  path: string;
+  content: string;
+  bom?: boolean;
+  encoding?: string;
+  lineEnding?: 'crlf' | 'lf';
+}
+
+export type DaemonWorkspaceFileWriteRequest =
+  | (DaemonWorkspaceFileWriteRequestBase & {
+      mode: 'create';
+      expectedHash?: DaemonContentHash;
+    })
+  | (DaemonWorkspaceFileWriteRequestBase & {
+      mode: 'replace';
+      expectedHash: DaemonContentHash;
+    });
+
+export interface DaemonWorkspaceFileEditRequest {
+  path: string;
+  oldText: string;
+  newText: string;
+  expectedHash: DaemonContentHash;
+}
+
+export interface DaemonWorkspaceFileWriteResult {
+  kind: 'file_write';
+  path: string;
+  mode: 'create' | 'replace';
+  created: boolean;
+  sizeBytes: number;
+  hash: DaemonContentHash;
+  encoding: string;
+  bom: boolean;
+  lineEnding: 'crlf' | 'lf';
+  matchedIgnore: 'file' | 'directory' | null;
+}
+
+export interface DaemonWorkspaceFileEditResult {
+  kind: 'file_edit';
+  path: string;
+  replacements: 1;
+  sizeBytes: number;
+  hash: DaemonContentHash;
+  encoding: string;
+  bom: boolean;
+  lineEnding: 'crlf' | 'lf';
+  matchedIgnore: 'file' | 'directory' | null;
+}
+
 /**
  * Issue #4175 PR 16: subagent CRUD types. `agentType` on the wire is
  * the `name` field from the agent's frontmatter (case-insensitive);
@@ -606,6 +692,104 @@ export interface DaemonSessionSupportedCommandsStatus {
 export interface SetModelResult {
   [key: string]: unknown;
 }
+
+/**
+ * #4175 Wave 4 PR 17. Closed enumeration of session approval modes the
+ * daemon exposes via `POST /session/:id/approval-mode`. Mirrors core's
+ * `ApprovalMode` enum — the drift detector test in
+ * `packages/cli/src/acp-integration/approvalMode.test.ts` walks the
+ * core enum and fails CI if any value is missing here.
+ *
+ * Order matters for diagnostic UIs that render the modes in the
+ * advertised sequence.
+ */
+export const DAEMON_APPROVAL_MODES = [
+  'plan',
+  'default',
+  'auto-edit',
+  'yolo',
+] as const;
+export type DaemonApprovalMode = (typeof DAEMON_APPROVAL_MODES)[number];
+
+/**
+ * Result body of `POST /session/:id/approval-mode`. `previous` and
+ * `mode` are typed as `string` (rather than `DaemonApprovalMode`) so
+ * older SDK builds against a hypothetical future fifth mode literal
+ * still parse — branch on the values you handle and treat the rest as
+ * opaque. `persisted: true` indicates the change was also written to
+ * `tools.approvalMode` in workspace settings (set via the route's
+ * optional `persist: true` body flag).
+ */
+export interface DaemonApprovalModeResult {
+  sessionId: string;
+  mode: string;
+  previous: string;
+  persisted: boolean;
+}
+
+/**
+ * #4175 Wave 4 PR 17. Result body of `POST /workspace/tools/:name/
+ * enable`. The `enabled` flag echoes the requested state; daemon
+ * always succeeds when the bridge has a `persistDisabledTools` hook
+ * (production wires it). Already-registered tools in active sessions
+ * are not retroactively unregistered — see `tool_toggled` event docs.
+ */
+export interface DaemonToolToggleResult {
+  toolName: string;
+  enabled: boolean;
+}
+
+/**
+ * #4175 Wave 4 PR 17. Result body of `POST /workspace/init`.
+ *
+ * - `'created'`: the target file did not exist; daemon scaffolded an
+ *   empty file fresh.
+ * - `'overwrote'`: the target file had non-whitespace content and the
+ *   caller passed `force: true`; daemon truncated to empty.
+ * - `'noop'`: the target file already existed but contained only
+ *   whitespace, so the daemon left it alone (no write, no on-disk
+ *   change). Honors the "init only if absent" intent without
+ *   requiring `force: true` (#4282 fold-in 1, wenshao H4).
+ *
+ * Note: `path` is the absolute path on the daemon host filesystem —
+ * not the client's. Per the runtime-locality contract, file ops
+ * resolve in the daemon environment.
+ */
+export interface DaemonInitWorkspaceResult {
+  path: string;
+  action: 'created' | 'overwrote' | 'noop';
+}
+
+/**
+ * #4175 Wave 4 PR 17. Result body of `POST /workspace/mcp/:server/
+ * restart`. Discriminated by `restarted`: `true` carries the wall-
+ * clock duration of the disconnect+reconnect+rediscover sequence;
+ * `false` is a soft skip with the reason. Both shapes return HTTP
+ * 200 — only hard errors (server not configured, no live ACP child)
+ * surface as non-2xx.
+ *
+ * Soft skip reasons:
+ * - `'in_flight'`: another restart / discovery is already in progress
+ *   for this server. Caller should wait or retry.
+ * - `'disabled'`: the server is configured but in
+ *   `excludedMcpServers`. Re-enable it before restart.
+ * - `'budget_would_exceed'`: under `--mcp-budget-mode=enforce`, the
+ *   target server is not currently in `reservedSlots` and the live
+ *   total has reached `clientBudget`. Caller should free a slot
+ *   (disconnect another server) before retrying.
+ */
+export type DaemonMcpRestartResult =
+  | {
+      serverName: string;
+      restarted: true;
+      durationMs: number;
+    }
+  | {
+      serverName: string;
+      restarted: false;
+      skipped: true;
+      reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+    };
 
 /**
  * Returned from `POST /session/:id/heartbeat`. `lastSeenAt` is the

@@ -12,6 +12,7 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 - **Reconnect-safe streaming** — SSE with `Last-Event-ID` reconnect lets a client drop and pick up exactly where it left off (within the ring's replay window).
 - **First-responder permissions** — when the agent asks for permission to run a tool, every connected client sees the request; whichever client answers first wins.
 - **One daemon, one workspace** — each `qwen serve` process binds to exactly one workspace at boot (per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02). Multi-workspace deployments run one daemon per workspace on separate ports (or behind an orchestrator).
+- **Remote runtime control** ([#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 17) — change a session's approval mode (`POST /session/:id/approval-mode`), toggle a tool per workspace (`POST /workspace/tools/:name/enable`), scaffold an empty `QWEN.md` (`POST /workspace/init`, mechanical only — does NOT call the model; for AI-fill, follow up with `POST /session/:id/prompt`), or restart a single MCP server with a budget pre-check (`POST /workspace/mcp/:server/restart`). All four are strict-gated — configure `--token` first.
 
 ## Quickstart
 
@@ -70,6 +71,20 @@ to populate them. Failures map to a closed `errorKind` enum (`missing_binary`,
 `auth_env_error`, `init_timeout`, `protocol_error`, `missing_file`,
 `parse_error`, `blocked_egress`) so client UIs can render structured
 remediation.
+
+The daemon also exposes workspace file helpers:
+
+- `GET /file` reads text files and returns a raw-byte `sha256:<hex>` hash.
+- `GET /file/bytes` reads bounded raw byte windows and returns base64 content.
+- `POST /file/write` creates or replaces text files.
+- `POST /file/edit` applies one exact text replacement.
+
+Write/edit are **strict mutation routes**: even on loopback they require a
+configured bearer token, otherwise they return `token_required`. Replacements
+and edits require the latest `expectedHash` from `GET /file` (or a full-window
+`GET /file/bytes`). `create` never overwrites. Explicit writes to ignored paths
+are allowed but audited. Binary writes, delete/move/mkdir, and recursive parent
+creation are not part of this surface.
 
 ### 3. Open a session
 
@@ -194,6 +209,8 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 > ```
 >
 > This is **not** the same as claude-code's `MCP_SERVER_CONNECTION_BATCH_SIZE` (which gates startup concurrency); they're orthogonal. PR 23 will add a real shared MCP pool (a `scope: 'workspace'` cell in `budgets[]` alongside the per-session cell); PR 14 v1 is the in-process counter + soft enforcement on the existing per-session manager.
+>
+> **Push events (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14b).** SDK clients subscribed to `GET /session/:id/events` receive typed frames when budget thresholds cross — `mcp_budget_warning` (synthetic, fires once per upward 75% crossing with hysteresis re-arm at 37.5%, advertised via `mcp_guardrail_events`) and `mcp_child_refused_batch` (coalesced once per discovery pass under `enforce` mode; length-1 from `readResource` lazy-spawn refusal). The snapshot at `GET /workspace/mcp` is still the source-of-truth for state-after-reconnect; events are change-edges. Useful when dashboarding in real-time without polling.
 
 ## Default deployment threat model
 

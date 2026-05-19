@@ -652,6 +652,16 @@ const SETTINGS_SCHEMA = {
         description: 'Custom theme definitions.',
         showInDialog: false,
       },
+      hideBuiltinWorktreeIndicator: {
+        type: 'boolean',
+        label: 'Hide Built-in Worktree Indicator',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When true, the built-in `⎇ worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself — otherwise an active worktree silently has no UI affordance.',
+        showInDialog: false,
+      },
       hideWindowTitle: {
         type: 'boolean',
         label: 'Hide Window Title',
@@ -1568,6 +1578,17 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description: 'Deprecated. Use permissions.deny instead.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      disabled: {
+        type: 'array',
+        label: 'Disabled Tools',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },

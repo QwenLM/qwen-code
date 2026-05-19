@@ -520,47 +520,61 @@ export class LoggingContentGenerator implements ContentGenerator {
       const streamResponseText = isInternal
         ? undefined
         : this.extractResponseText(consolidatedResponse);
-      runInSpan(() =>
-        this.safelyLogApiResponse(
-          firstResponseId,
-          durationMs,
-          firstModelVersion || model,
-          userPromptId,
-          lastUsageMetadata,
-          streamResponseText,
-        ),
-      );
-      if (!isInternal && span) {
-        addModelOutputAttributes(this.config, span, streamResponseText);
+      // If the idle timeout already closed the span as failed, do not contradict
+      // it with a "success" api_response log or model-output span attributes.
+      // The OpenAI interaction log is also skipped — telemetry already carries
+      // the timeout signal and a parallel "success" record would be confusing
+      // during incident response (#4212).
+      if (!spanEndedByTimeout) {
+        runInSpan(() =>
+          this.safelyLogApiResponse(
+            firstResponseId,
+            durationMs,
+            firstModelVersion || model,
+            userPromptId,
+            lastUsageMetadata,
+            streamResponseText,
+          ),
+        );
+        if (!isInternal && span) {
+          addModelOutputAttributes(this.config, span, streamResponseText);
+        }
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(
+            openaiRequest,
+            consolidatedResponse,
+            undefined,
+            userPromptId,
+          ),
+        );
       }
-      await runInSpan(() =>
-        this.safelyLogOpenAIInteraction(
-          openaiRequest,
-          consolidatedResponse,
-          undefined,
-          userPromptId,
-        ),
-      );
     } catch (error) {
       errorOccurred = true;
-      const durationMs = Date.now() - startTime;
-      runInSpan(() =>
-        this.safelyLogApiError(
-          firstResponseId,
-          durationMs,
-          error,
-          firstModelVersion || model,
-          userPromptId,
-        ),
-      );
-      await runInSpan(() =>
-        this.safelyLogOpenAIInteraction(
-          openaiRequest,
-          undefined,
-          error,
-          userPromptId,
-        ),
-      );
+      // Same gating as the success path above: if the idle timeout already
+      // closed the span as failed, do not emit a parallel api_error log
+      // (the span is the canonical signal). Otherwise we'd produce the
+      // exact contradictory pair the timeout fix targets — span timed-out
+      // + api_error log — just on the error branch (#4302 review).
+      if (!spanEndedByTimeout) {
+        const durationMs = Date.now() - startTime;
+        runInSpan(() =>
+          this.safelyLogApiError(
+            firstResponseId,
+            durationMs,
+            error,
+            firstModelVersion || model,
+            userPromptId,
+          ),
+        );
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(
+            openaiRequest,
+            undefined,
+            error,
+            userPromptId,
+          ),
+        );
+      }
       throw error;
     } finally {
       if (spanEndTimeout !== undefined) {

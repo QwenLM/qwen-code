@@ -59,6 +59,7 @@ import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
+import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
 
@@ -174,6 +175,23 @@ export enum ApprovalMode {
 }
 
 export const APPROVAL_MODES = Object.values(ApprovalMode);
+
+/**
+ * Thrown by `Config.setApprovalMode` when the requested mode would grant
+ * privileged tool autonomy in a folder the user has not marked as trusted.
+ *
+ * Why: the daemon mutation route at `POST /session/:id/approval-mode` needs
+ * to recognize this specific class of rejection and translate it into a
+ * structured `errorKind: 'auth_env_error'` rather than a generic 500.
+ * Using a named subclass lets the bridge match by `err.name` without
+ * depending on the message text (which would drift across i18n).
+ */
+export class TrustGateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TrustGateError';
+  }
+}
 
 /**
  * Information about an approval mode including display name and description.
@@ -453,6 +471,18 @@ export interface ConfigParameters {
    * the `QWEN_DISABLED_SLASH_COMMANDS` environment variable.
    */
   disabledSlashCommands?: string[];
+  /**
+   * Tool names hidden from the registry at construction time. Unlike
+   * `permissions.deny` (which keeps the tool registered and rejects
+   * invocation), tools listed here are not registered at all and never
+   * appear in `/tools`, `getAllTools()`, or function-call discovery.
+   * Sourced from `settings.tools.disabled` and the daemon mutation route
+   * `POST /workspace/tools/:name/enable {enabled:false}` (#4175 Wave 4 PR
+   * 17). Active sessions retain already-registered tools — the disabled
+   * set is consulted at register time, so toggling takes effect on the
+   * next ACP child spawn or `ToolRegistry.refresh()`.
+   */
+  disabledTools?: string[];
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -683,6 +713,17 @@ export class Config {
   private sessionData?: ResumedSessionData;
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
+  /**
+   * PR 14b fix #2 (codex review round 1): callback stashed BEFORE
+   * `initialize()` runs and applied as soon as `toolRegistry` is up,
+   * so the manager's `setOnBudgetEvent` is wired before
+   * `startMcpDiscoveryInBackground` (or legacy blocking discovery)
+   * fires the first pass. Pre-fix the acpAgent registered after
+   * `initialize()` returned, missing the first pass entirely under
+   * `QWEN_CODE_LEGACY_MCP_BLOCKING=1` and racing against background
+   * discovery completion under the default mode.
+   */
+  private pendingMcpBudgetCallback?: (event: McpBudgetEvent) => void;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
@@ -725,6 +766,7 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
+  private readonly disabledTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -879,6 +921,7 @@ export class Config {
     this.disabledSlashCommands = Object.freeze([
       ...(params.disabledSlashCommands ?? []),
     ]);
+    this.disabledTools = new Set(params.disabledTools ?? []);
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -2250,6 +2293,17 @@ export class Config {
     return this.disabledSlashCommands;
   }
 
+  /**
+   * Returns the read-only set of tool names hidden from this Config's
+   * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
+   * `ToolRegistry.registerFactory` to skip registration. Toggling at
+   * runtime requires re-spawning the ACP child (the set is frozen at
+   * construction time). See `disabledTools` in ConfigParameters.
+   */
+  getDisabledTools(): ReadonlySet<string> {
+    return this.disabledTools;
+  }
+
   getToolCallCommand(): string | undefined {
     return this.toolCallCommand;
   }
@@ -2474,7 +2528,7 @@ export class Config {
       mode !== ApprovalMode.DEFAULT &&
       mode !== ApprovalMode.PLAN
     ) {
-      throw new Error(
+      throw new TrustGateError(
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
@@ -3633,6 +3687,34 @@ export class Config {
       return new MonitorTool(this);
     });
 
+    // PR 14b fix #2 (codex review round 1): apply any pending MCP
+    // budget-event callback BEFORE `discoverAllTools` (legacy blocking
+    // mode runs MCP discovery synchronously in there) and BEFORE the
+    // post-`createToolRegistry` `startMcpDiscoveryInBackground` (default
+    // mode). Either way the manager has its callback wired at the
+    // moment the first discovery pass fires, so end-of-pass events
+    // for that pass are routed through the SDK push channel.
+    if (this.pendingMcpBudgetCallback) {
+      const mgr = registry.getMcpClientManager();
+      if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
+        mgr.setOnBudgetEvent(this.pendingMcpBudgetCallback);
+      }
+      // PR 14b fix (codex round 6): clear after consumption so a
+      // subsequent `createToolRegistry` call (e.g. subagent override
+      // via `createApprovalModeOverride` /
+      // `buildSubagentContextOverride`) doesn't re-apply the parent
+      // session's callback to a fresh manager. Subagent contexts run
+      // their own MCP clients but should NOT push budget events
+      // through the parent's ACP session — that would route subagent
+      // telemetry to the wrong subscriber.
+      //
+      // Late-call setter (`setMcpBudgetEventCallback` after
+      // `initialize()`) is unaffected: it dispatches directly to the
+      // existing manager via the `if (this.toolRegistry)` branch,
+      // not through `pendingMcpBudgetCallback`.
+      this.pendingMcpBudgetCallback = undefined;
+    }
+
     if (!options?.skipDiscovery) {
       await registry.discoverAllTools();
     }
@@ -3640,5 +3722,46 @@ export class Config {
       `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
     );
     return registry;
+  }
+
+  /**
+   * PR 14b fix #2 (codex review round 1): register the MCP guardrail
+   * push-event callback. Acceptable to call at any point in the
+   * Config lifecycle — before, during, or after `initialize()`.
+   *
+   * Two paths:
+   * - **Pre-init** (no `toolRegistry` yet): stash on
+   *   `pendingMcpBudgetCallback`. `createToolRegistry` will apply it
+   *   to the freshly-constructed manager and clear the stash (round
+   *   6 fix). The stash is the ONLY way to reach a manager that
+   *   doesn't exist yet.
+   * - **Late** (`toolRegistry` already exists): dispatch directly to
+   *   the existing manager. **DO NOT** also stash — that's the
+   *   round-7 fix. Pre-fix, both paths assigned to
+   *   `pendingMcpBudgetCallback` regardless, so a subsequent
+   *   `createToolRegistry` (subagent override via
+   *   `createApprovalModeOverride` /
+   *   `buildSubagentContextOverride`) would re-apply the parent
+   *   session's callback to the subagent's fresh manager — routing
+   *   subagent telemetry through the wrong ACP session.
+   *
+   * `cb: undefined` clears the registration. `off`-mode managers
+   * silently drop the callback (their state machine never runs).
+   */
+  setMcpBudgetEventCallback(
+    cb: ((event: McpBudgetEvent) => void) | undefined,
+  ): void {
+    if (this.toolRegistry) {
+      // Late-call path: apply directly. Do NOT stash — see comment
+      // above for the subagent isolation rationale.
+      const mgr = this.toolRegistry.getMcpClientManager?.();
+      if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
+        mgr.setOnBudgetEvent(cb);
+      }
+      this.pendingMcpBudgetCallback = undefined;
+      return;
+    }
+    // Pre-init path: stash for `createToolRegistry` to consume.
+    this.pendingMcpBudgetCallback = cb;
   }
 }

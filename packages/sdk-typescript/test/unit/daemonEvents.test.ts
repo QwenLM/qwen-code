@@ -661,12 +661,28 @@ describe('daemon event schema', () => {
   });
 
   it('recognizes slow_client_warning frames as known events', () => {
+    // PR 14b fix (codex round 8 — sibling consistency): `satisfies
+    // DaemonEvent` keeps `v: 1` / `type: 'slow_client_warning'`
+    // narrow rather than widening to `number` / `string`. The same
+    // pattern was applied to PR 14b's own fixtures in round 3
+    // (`mcp_budget_warning` + `mcp_child_refused_batch`); this is the
+    // closest sibling fixture in the same describe block, so
+    // matching it here keeps the sdk-test typing style coherent.
+    //
+    // Note: a tsconfig audit found ~17 OTHER fixtures in this file
+    // with the same widening shape (PR 4 / PR 10 / PR 11 era). They
+    // remain unfixed because (a) they're outside PR 14b's scope, and
+    // (b) the sdk package's `tsconfig.json` excludes the test
+    // directory from `tsc --noEmit`, so none of them block CI today.
+    // A future PR that opts tests into the typecheck scope can fix
+    // all of them at once. Round 3 only signed up for PR 14b's own
+    // fixtures.
     const warning = {
       // No `id` on synthetic frames (matches the daemon's emit shape).
       v: 1,
       type: 'slow_client_warning',
       data: { queueSize: 192, maxQueued: 256, lastEventId: 42 },
-    };
+    } satisfies DaemonEvent;
     const known = asKnownDaemonEvent(warning);
     expect(known?.type).toBe('slow_client_warning');
 
@@ -748,6 +764,336 @@ describe('daemon event schema', () => {
     expect(state.lastEventId).toBe(1);
   });
 
+  // PR 14b: MCP guardrail push events. Mirrors the slow_client_warning
+  // test patterns (predicate validation + reducer state) — the two
+  // event types are siblings on the per-session SSE bus and use the
+  // same KnownDaemonEvent narrowing.
+  it('recognizes mcp_budget_warning frames as known events', () => {
+    // PR 14b fix (codex round 3): `satisfies DaemonEvent` keeps the
+    // discriminator literals (`v: 1`, `type: 'mcp_budget_warning'`)
+    // narrow without widening to `number`/`string`. Required so the
+    // fixture passes through `asKnownDaemonEvent`'s `event.type`
+    // switch under strict typecheck. The sdk package's tsconfig
+    // currently scopes `tsc --noEmit` to `src/**/*.ts` only — tests
+    // aren't gated yet — but the fixture stays type-safe for when
+    // they are.
+    const warning = {
+      id: 7,
+      v: 1,
+      type: 'mcp_budget_warning',
+      data: {
+        liveCount: 4,
+        reservedCount: 4,
+        budget: 4,
+        thresholdRatio: 0.75,
+        mode: 'warn',
+      },
+    } satisfies DaemonEvent;
+    const known = asKnownDaemonEvent(warning);
+    expect(known?.type).toBe('mcp_budget_warning');
+
+    // Schema: required numeric fields, exact-literal `thresholdRatio`,
+    // and `mode` constrained to `'warn' | 'enforce'`. Bad shapes are
+    // rejected so the reducer routes them through the
+    // `unrecognizedKnownEventCount` branch.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      }),
+    ).toBeUndefined();
+    // PR 14b fix (codex round 6): `thresholdRatio` is validated as a
+    // finite number rather than the literal 0.75 — the SDK's role is
+    // wire-shape validation, not threshold-value enforcement. Pinning
+    // the literal would mean a daemon-side bump to e.g. 0.80 silently
+    // routes every warning through `unrecognizedKnownEventCount` (a
+    // cross-package coordination hazard). Forward-compat for a future
+    // 0.5 critical threshold falls out for free; the daemon constant
+    // and protocol docs are the source of truth for threshold values.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.5, // forward-compat threshold value
+          mode: 'warn',
+        },
+      }),
+    ).toBeDefined();
+    // Non-finite values (NaN / Infinity) are still rejected — the
+    // predicate uses `isFiniteNumber`, not bare `typeof === 'number'`.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: Number.NaN,
+          mode: 'warn',
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'off', // off-mode never fires the warning — bad payload.
+        },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('reduces mcp_budget_warning into the view state without ending the stream', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { sessionId: 's-1', phase: 'prompting' },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          liveCount: 3,
+          reservedCount: 3,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      },
+      {
+        id: 3,
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'enforce',
+        },
+      },
+    ]);
+
+    expect(state.mcpBudgetWarningCount).toBe(2);
+    expect(state.lastMcpBudgetWarning).toEqual({
+      liveCount: 4,
+      reservedCount: 4,
+      budget: 4,
+      thresholdRatio: 0.75,
+      mode: 'enforce',
+    });
+    // Non-terminal — stream stays alive.
+    expect(state.alive).toBe(true);
+    expect(state.terminalEvent).toBeUndefined();
+    expect(state.lastEventId).toBe(3);
+  });
+
+  it('recognizes mcp_child_refused_batch frames as known events', () => {
+    // PR 14b fix (codex round 3): `satisfies DaemonEvent` preserves
+    // the literal discriminator (`v: 1`, `type:
+    // 'mcp_child_refused_batch'`) — see sibling fixture above for
+    // the full rationale.
+    const batch = {
+      id: 9,
+      v: 1,
+      type: 'mcp_child_refused_batch',
+      data: {
+        refusedServers: [
+          { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+          { name: 'c', transport: 'http', reason: 'budget_exhausted' },
+        ],
+        budget: 1,
+        liveCount: 1,
+        reservedCount: 1,
+        mode: 'enforce',
+      },
+    } satisfies DaemonEvent;
+    const known = asKnownDaemonEvent(batch);
+    expect(known?.type).toBe('mcp_child_refused_batch');
+
+    // `mode: 'warn'` must be rejected — warn mode never refuses, so a
+    // refused-batch tagged with warn is protocol garbage. The
+    // reducer's safety net (`unrecognizedKnownEventCount`) catches it
+    // instead of letting the `last*` field hold a malformed shape.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [
+            { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'warn',
+        },
+      }),
+    ).toBeUndefined();
+
+    // Unknown transport family rejected (forward-compat: a future
+    // daemon emitting a new transport speaks a newer wire than this
+    // SDK release).
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [
+            { name: 'b', transport: 'quic', reason: 'budget_exhausted' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      }),
+    ).toBeUndefined();
+
+    // Bad reason rejected — only `'budget_exhausted'` is valid in
+    // PR 14b. Future causes extend the literal set.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [
+            { name: 'b', transport: 'stdio', reason: 'something_else' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      }),
+    ).toBeUndefined();
+
+    // Empty `refusedServers` is structurally valid (the daemon would
+    // never emit an empty batch — `emitRefusedBatchIfAny` is gated on
+    // `lastRefusedServerNames.length > 0` — but the SDK predicate
+    // doesn't enforce that invariant; it's a daemon-side correctness
+    // property, not a wire-format requirement). Verify the predicate
+    // accepts it so a future daemon contract change doesn't break
+    // adapters.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      }),
+    ).toBeDefined();
+  });
+
+  it('reduces mcp_child_refused_batch into the view state without ending the stream', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { sessionId: 's-1', phase: 'prompting' },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [
+            { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      },
+      // Length-1 batch from `readResource` lazy-spawn refusal
+      // arrives next.
+      {
+        id: 3,
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [
+            { name: 'c', transport: 'http', reason: 'budget_exhausted' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      },
+    ]);
+
+    expect(state.mcpChildRefusedBatchCount).toBe(2);
+    expect(state.lastMcpChildRefusedBatch).toEqual({
+      refusedServers: [
+        { name: 'c', transport: 'http', reason: 'budget_exhausted' },
+      ],
+      budget: 1,
+      liveCount: 1,
+      reservedCount: 1,
+      mode: 'enforce',
+    });
+    expect(state.alive).toBe(true);
+    expect(state.terminalEvent).toBeUndefined();
+    expect(state.lastEventId).toBe(3);
+  });
+
+  it('rejected MCP guardrail payloads route through unrecognizedKnownEventCount', () => {
+    // The reducer's safety net for "type matches a known type but
+    // schema fails": increments `unrecognizedKnownEventCount` and
+    // captures the raw event in `lastUnrecognizedKnownEvent`. Mirrors
+    // the slow_client_warning sibling pattern.
+    const state = reduceDaemonSessionEvent(reduceDaemonSessionEvents([]), {
+      id: 1,
+      v: 1,
+      type: 'mcp_child_refused_batch',
+      data: {
+        // `mode: 'warn'` is invalid (warn never refuses) — predicate
+        // rejects, reducer routes through the unrecognized branch.
+        refusedServers: [
+          { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+        ],
+        budget: 1,
+        liveCount: 1,
+        reservedCount: 1,
+        mode: 'warn',
+      },
+    });
+    expect(state.unrecognizedKnownEventCount).toBe(1);
+    expect(state.lastUnrecognizedKnownEvent?.type).toBe(
+      'mcp_child_refused_batch',
+    );
+    // Refused-batch counter NOT incremented — the malformed payload
+    // didn't reach the typed reducer arm.
+    expect(state.mcpChildRefusedBatchCount).toBe(0);
+    expect(state.lastMcpChildRefusedBatch).toBeUndefined();
+  });
   it('narrows memory_changed events and rejects malformed payloads', () => {
     const valid: DaemonEvent = {
       id: 7,
@@ -1196,5 +1542,157 @@ describe('PR 21 — auth device-flow events', () => {
     expect(next.alive).toBe(true);
     expect(next.terminalEvent).toBeUndefined();
     expect(next.unrecognizedKnownEventCount).toBe(0);
+  });
+
+  // #4282 fold-in 3 (gpt-5.5 C8): reducer + parser coverage for the 5
+  // PR 17 mutation events. Covers happy-path counter + last-snapshot
+  // accumulation, malformed-payload rejection (must round-trip through
+  // `asKnownDaemonEvent → undefined` and increment
+  // `unrecognizedKnownEventCount` rather than the event-specific
+  // counter), and the envelope-level `originatorClientId` merge.
+  describe('PR 17 mutation events', () => {
+    it('approval_mode_changed: increments counter, copies envelope originator', () => {
+      const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 5,
+        v: 1,
+        type: 'approval_mode_changed',
+        originatorClientId: 'client-A',
+        data: {
+          sessionId: 'sess-1',
+          previous: 'default',
+          next: 'yolo',
+          persisted: true,
+        },
+      });
+      expect(next.approvalModeChangedCount).toBe(1);
+      expect(next.approvalMode).toBe('yolo');
+      expect(next.lastApprovalModeChange?.next).toBe('yolo');
+      expect(next.lastApprovalModeChange?.persisted).toBe(true);
+      // Envelope `originatorClientId` was merged onto the snapshot.
+      expect(next.lastApprovalModeChange?.originatorClientId).toBe('client-A');
+    });
+
+    it('approval_mode_changed: malformed payload routes to unrecognized counter', () => {
+      const malformed: DaemonEvent = {
+        id: 6,
+        v: 1,
+        type: 'approval_mode_changed',
+        // Missing `next`, `persisted` — fails `isApprovalModeChangedData`.
+        data: { sessionId: 'sess-1', previous: 'default' },
+      };
+      expect(asKnownDaemonEvent(malformed)).toBeUndefined();
+      const next = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        malformed,
+      );
+      expect(next.unrecognizedKnownEventCount).toBe(1);
+      expect(next.approvalModeChangedCount).toBe(0);
+      expect(next.approvalMode).toBeUndefined();
+    });
+
+    it('tool_toggled: increments counter, stores last snapshot with envelope originator', () => {
+      const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 7,
+        v: 1,
+        type: 'tool_toggled',
+        originatorClientId: 'client-B',
+        data: { toolName: 'run_shell_command', enabled: false },
+      });
+      expect(next.toolToggleCount).toBe(1);
+      expect(next.lastToolToggle?.toolName).toBe('run_shell_command');
+      expect(next.lastToolToggle?.enabled).toBe(false);
+      expect(next.lastToolToggle?.originatorClientId).toBe('client-B');
+    });
+
+    it('workspace_initialized: accepts noop / created / overwrote actions', () => {
+      const initial = createDaemonSessionViewState();
+      const afterCreate = reduceDaemonSessionEvent(initial, {
+        id: 8,
+        v: 1,
+        type: 'workspace_initialized',
+        data: { path: '/work/QWEN.md', action: 'created' },
+      });
+      expect(afterCreate.workspaceInitCount).toBe(1);
+      expect(afterCreate.lastWorkspaceInit?.action).toBe('created');
+      const afterNoop = reduceDaemonSessionEvent(afterCreate, {
+        id: 9,
+        v: 1,
+        type: 'workspace_initialized',
+        data: { path: '/work/QWEN.md', action: 'noop' },
+      });
+      expect(afterNoop.workspaceInitCount).toBe(2);
+      expect(afterNoop.lastWorkspaceInit?.action).toBe('noop');
+      // Bogus action literal is rejected by the parser.
+      const malformed: DaemonEvent = {
+        id: 10,
+        v: 1,
+        type: 'workspace_initialized',
+        data: { path: '/work/QWEN.md', action: 'replaced' },
+      };
+      expect(asKnownDaemonEvent(malformed)).toBeUndefined();
+    });
+
+    it('mcp_server_restarted: counter + last snapshot + envelope originator merge', () => {
+      const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 11,
+        v: 1,
+        type: 'mcp_server_restarted',
+        originatorClientId: 'client-C',
+        data: { serverName: 'docs', durationMs: 1234 },
+      });
+      expect(next.mcpRestartCount).toBe(1);
+      expect(next.mcpRestartRefusedCount).toBe(0);
+      expect(next.lastMcpRestart?.serverName).toBe('docs');
+      expect(next.lastMcpRestart?.durationMs).toBe(1234);
+      expect(next.lastMcpRestart?.originatorClientId).toBe('client-C');
+    });
+
+    it('mcp_server_restart_refused: routes to refused counter only, all reasons accepted', () => {
+      const initial = createDaemonSessionViewState();
+      const reasons: Array<'in_flight' | 'disabled' | 'budget_would_exceed'> = [
+        'in_flight',
+        'disabled',
+        'budget_would_exceed',
+      ];
+      let state = initial;
+      for (const [i, reason] of reasons.entries()) {
+        state = reduceDaemonSessionEvent(state, {
+          id: 12 + i,
+          v: 1,
+          type: 'mcp_server_restart_refused',
+          data: { serverName: 'docs', reason },
+        });
+      }
+      expect(state.mcpRestartRefusedCount).toBe(3);
+      expect(state.mcpRestartCount).toBe(0);
+      expect(state.lastMcpRestartRefused?.reason).toBe('budget_would_exceed');
+      // Bogus reason literal is rejected by the parser.
+      const malformed: DaemonEvent = {
+        id: 99,
+        v: 1,
+        type: 'mcp_server_restart_refused',
+        data: { serverName: 'docs', reason: 'made_up_reason' },
+      };
+      expect(asKnownDaemonEvent(malformed)).toBeUndefined();
+    });
+
+    it('mergeOriginator: prefers data-level originator over envelope when both present', () => {
+      // The daemon does not currently populate `data.originatorClientId`,
+      // but the field is declared on the Data interfaces. If a future
+      // daemon version sets it directly, we must not clobber it with
+      // the envelope value.
+      const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 50,
+        v: 1,
+        type: 'tool_toggled',
+        originatorClientId: 'envelope-client',
+        data: {
+          toolName: 'Bash',
+          enabled: true,
+          originatorClientId: 'data-client',
+        },
+      });
+      expect(next.lastToolToggle?.originatorClientId).toBe('data-client');
+    });
   });
 });

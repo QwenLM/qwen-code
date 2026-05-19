@@ -59,7 +59,7 @@ export interface UIActions {
   handleFolderTrustSelect: (choice: FolderTrustChoice) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
-  onSuggestionsVisibilityChange: (visible: boolean) => void;
+  onTabConsumerChange: (active: boolean) => void;
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;
   handleRetryLastPrompt: () => void;
@@ -68,6 +68,10 @@ export interface UIActions {
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;
+  // Worktree exit dialog
+  handleWorktreeExit: (
+    choice: 'keep' | 'remove' | 'cancel',
+  ) => void | Promise<void>;
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;

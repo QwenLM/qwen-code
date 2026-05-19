@@ -53,6 +53,25 @@ function truncateForStderr(detail: string): string {
 }
 
 /**
+ * Strip / replace bytes that could forge log lines or inject terminal
+ * control sequences when interpolated into a stderr breadcrumb. PR #4291
+ * follow-up review (gpt-5.5, #2): `QwenOAuthPollError.oauthError` comes
+ * directly from the upstream JSON `error` field — attacker-controlled
+ * if the IdP, a reverse proxy, or a WAF is hostile / compromised. A
+ * value like `slow_down\n[serve] FAKE LOG LINE 2026-...` would otherwise
+ * forge an extra log line; a value containing `\x1b[…m` could inject
+ * ANSI color or cursor-movement sequences into operator terminals.
+ *
+ * Strips C0 controls (0x00–0x1f), DEL (0x7f), and C1 controls (0x80–0x9f).
+ * Replaces each with `?` so the operator can still see SOMETHING was
+ * present at that index (length-preserving) instead of silently dropping.
+ */
+function sanitizeForStderr(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\x00-\x1f\x7f-\x9f]/g, '?');
+}
+
+/**
  * Qwen-OAuth implementation of `DeviceFlowProvider` for `qwen serve`.
  *
  * Uses the lower-level `QwenOAuth2Client` primitives (`requestDeviceAuthorization`
@@ -199,6 +218,66 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
         err instanceof QwenOAuthPollError
           ? mapRfc8628OAuthCode(err.oauthError)
           : 'upstream_error';
+      // PR #4255 follow-up review thread (deepseek-v4-pro): mirror the
+      // `start()` path's stderr audit so on-call can distinguish WAF
+      // block from network reset from malformed JSON at 3 AM.
+      //
+      // Three follow-up tightenings:
+      //
+      // 1. **Skip ONLY when the registry-owned signal aborted (#4291,
+      //    follow-up gpt-5.5 review).** Earlier shape also skipped
+      //    when `err.name === 'AbortError'`, but `AbortError` can
+      //    come from sources WE didn't initiate — upstream IdP TCP
+      //    RST, proxy timeout, undici/node-fetch wrapping unrelated
+      //    transport failures as AbortError. Those are real failures
+      //    that the operator needs visibility into; silently dropping
+      //    them was a signal-loss bug. Now we skip iff `opts.signal`
+      //    was driven aborted by `cancel()` / `dispose()` — anything
+      //    else, including unexpected `AbortError`, falls through to
+      //    the sanitized breadcrumb path with `signalAborted=false`.
+      //
+      // 2. **Don't echo raw `err.message`** (Copilot review on
+      //    #4291). `pollDeviceToken` POSTs `device_code` +
+      //    `code_verifier` (PKCE) per RFC 8628 §3.4. A WAF / reverse
+      //    proxy that echoes the request body in its error response
+      //    would put those bearer-equivalent values into daemon
+      //    stderr — violating the BrandedSecret-style "secrets never
+      //    appear in logs" contract the registry depends on. Log
+      //    STRUCTURED diagnostics only: `QwenOAuthPollError.oauthError`
+      //    (RFC 8628 §3.5 enum), or for non-OAuth errors, just the
+      //    constructor name + a bounded message length so the
+      //    on-call still gets a breadcrumb without the request-body
+      //    echo path.
+      //
+      // 3. **Sanitize `oauthError` before interpolation (#4291,
+      //    follow-up gpt-5.5 review).** The OAuth error code field
+      //    is attacker-controlled JSON from the IdP / proxy / WAF.
+      //    A value like `slow_down\n[serve] FAKE LOG ENTRY ...` would
+      //    forge additional log lines; a value with `\x1b[31m` could
+      //    inject ANSI control sequences into operator terminals.
+      //    Strip C0/C1 controls before interpolation.
+      const aborted = opts.signal.aborted;
+      if (!aborted) {
+        let safeDetail: string;
+        if (err instanceof QwenOAuthPollError) {
+          // Structured upstream OAuth error envelope — no raw body,
+          // but the `oauthError` field IS attacker-controlled, so
+          // sanitize C0/C1 controls before interpolating.
+          const rawOauthError = err.oauthError ?? '(missing)';
+          safeDetail = `oauthError=${sanitizeForStderr(rawOauthError)}`;
+        } else if (err instanceof Error) {
+          // Non-OAuth (network / parse / unexpected upstream shape /
+          // unexpected AbortError). The constructor name + length is
+          // enough for triage; the raw message MAY contain WAF-echoed
+          // request body fields.
+          safeDetail = `${err.name} (message ${err.message.length} bytes; raw suppressed to avoid echoing device_code/PKCE)`;
+        } else {
+          safeDetail = `<non-Error throw: ${typeof err}>`;
+        }
+        writeStderrLine(
+          `[serve] qwen device-flow poll failed (errorKind=${errorKind}): ${truncateForStderr(safeDetail)}`,
+        );
+      }
       return {
         kind: 'error',
         errorKind,

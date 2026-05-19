@@ -10,11 +10,13 @@ import * as path from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import type { BridgeEvent } from './eventBus.js';
 import { getDeviceFlowRegistry } from './auth/deviceFlow.js';
+import { loadSettings, SettingScope } from '../config/settings.js';
 import {
   canonicalizeWorkspace,
   createHttpAcpBridge,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
+import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import { createDefaultFsAuditEmit, createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
@@ -45,6 +47,40 @@ function formatHostForUrl(host: string): string {
     return `[${encoded}]`;
   }
   return host;
+}
+
+/**
+ * #4282 fold-in 4 (qwen-latest C2). Per-workspace promise chain that
+ * serializes settings read-modify-write cycles inside this process.
+ *
+ * Both `persistApprovalMode` and `persistDisabledTools` re-read
+ * `tools.disabled` (or `tools.approvalMode`) from disk before writing
+ * the merged result back, which is a textbook lost-update window if
+ * two concurrent HTTP requests land at the same workspace. Threading
+ * each call through this lock collapses the window: the first request
+ * holds the chain until its `setValue` flush completes, and the second
+ * sees the post-write state when it runs its own load.
+ *
+ * Scope is INTRA-process: a separate `qwen serve` invocation against
+ * the same workspace would not share the Map, but per-workspace
+ * single-daemon is the supported deployment shape (see #3803 §02).
+ * The lock decays naturally — when no callers are queued, the chain
+ * resolves and stays mounted in the Map; the per-workspace memory
+ * cost is one settled Promise and one Map entry.
+ *
+ * Errors propagate to the caller; the chain advances to the next
+ * waiter regardless via the `.then(fn, fn)` pattern, so a single
+ * failed write doesn't permanently stall persistence.
+ */
+const settingsWriteLocks = new Map<string, Promise<unknown>>();
+function withSettingsLock<T>(
+  workspace: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prev = settingsWriteLocks.get(workspace) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  settingsWriteLocks.set(workspace, next);
+  return next;
 }
 
 export interface RunHandle {
@@ -278,6 +314,65 @@ export async function runQwenServe(
         : {}),
       boundWorkspace,
       childEnvOverrides,
+      // #4175 PR 22b/2: inject the daemon-host status provider so the
+      // bridge can pull env / preflight cells through a typed seam
+      // instead of importing daemon-host helpers directly. Production
+      // implementation wraps `buildEnvStatusFromProcess` and the
+      // (lifted) `buildDaemonPreflightCells` body.
+      statusProvider: createDaemonStatusProvider(),
+      // #4175 Wave 4 PR 17: `POST /session/:id/approval-mode` accepts
+      // an opt-in `persist: true` flag. We re-load settings on each
+      // persist call rather than caching a `LoadedSettings` handle —
+      // another writer (CLI, another daemon, an editor) could have
+      // touched the file between calls, so the freshest state wins
+      // over a stale in-memory cache.
+      //
+      // #4282 fold-in 4 (qwen-latest C2): both persist callbacks run
+      // through `withSettingsLock` — a per-workspace promise chain that
+      // serializes the read-modify-write cycle. Without the lock, two
+      // concurrent `POST /workspace/tools/:name/enable` requests could
+      // both read the same pre-modification state and the second write
+      // would silently overwrite the first toggle, leaving the disk
+      // copy out of sync with the SDK reducer's view. The lock costs
+      // one tick of latency per call but eliminates the lost-update
+      // window for the entire process; cross-daemon races against the
+      // same workspace file remain (rare; documented).
+      persistApprovalMode: (workspace, mode) =>
+        withSettingsLock(workspace, async () => {
+          const fresh = loadSettings(workspace);
+          fresh.setValue(SettingScope.Workspace, 'tools.approvalMode', mode);
+        }),
+      // #4175 Wave 4 PR 17: `POST /workspace/tools/:name/enable` writes
+      // through this callback. Re-reads settings on each call (same
+      // freshness rationale as `persistApprovalMode`) and merges into
+      // the existing `tools.disabled` array — concurrent toggles from
+      // other writers stay safe across the read/modify/write window.
+      //
+      // #4282 wenshao H2 fold-in: read from the WORKSPACE scope only.
+      // Reading `fresh.merged.tools?.disabled` (the UNION across
+      // System / SystemDefaults / User / Workspace) and writing the
+      // result back into `SettingScope.Workspace` would copy entries
+      // from higher scopes into the workspace file on the first
+      // toggle. Subsequent removals at the originating scope (e.g.
+      // User) would no longer take effect because the names have been
+      // baked into the workspace file with no obvious source.
+      persistDisabledTools: (workspace, toolName, enabled) =>
+        withSettingsLock(workspace, async () => {
+          const fresh = loadSettings(workspace);
+          const wsScope = fresh.forScope(SettingScope.Workspace).settings;
+          const wsDisabled = wsScope.tools?.disabled;
+          const current = Array.isArray(wsDisabled)
+            ? wsDisabled.filter((v): v is string => typeof v === 'string')
+            : [];
+          const next = new Set(current);
+          if (enabled) next.delete(toolName);
+          else next.add(toolName);
+          fresh.setValue(
+            SettingScope.Workspace,
+            'tools.disabled',
+            [...next].sort(),
+          );
+        }),
     });
   let actualPort = opts.port;
   // Pass the already-canonical `boundWorkspace` into `createServeApp`

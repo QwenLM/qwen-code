@@ -4,15 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getAvailableCommands,
   handleSlashCommand,
 } from './nonInteractiveCliCommands.js';
-import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  __resetActiveGoalStoreForTests,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './config/settings.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
+import { goalCommand } from './ui/commands/goalCommand.js';
 
 // Mock the CommandService
 const mockGetCommands = vi.hoisted(() => vi.fn());
@@ -32,6 +36,7 @@ describe('handleSlashCommand', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetActiveGoalStoreForTests();
     // getCommandsForMode applies real mode filtering on top of getCommands()
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
       filterCommandsForMode(mockGetCommands(), mode),
@@ -55,6 +60,12 @@ describe('handleSlashCommand', () => {
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue({
+        addFunctionHook: vi.fn().mockReturnValue('goal-hook-id'),
+        removeFunctionHook: vi.fn().mockReturnValue(true),
+      }),
       setModelInvocableCommandsProvider: vi.fn(),
       setModelInvocableCommandsExecutor: vi.fn(),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
@@ -69,6 +80,10 @@ describe('handleSlashCommand', () => {
     } as LoadedSettings;
 
     abortController = new AbortController();
+  });
+
+  afterEach(() => {
+    __resetActiveGoalStoreForTests();
   });
 
   it('should return no_command for non-slash input', async () => {
@@ -196,6 +211,26 @@ describe('handleSlashCommand', () => {
     expect(result.type).toBe('message');
     if (result.type === 'message') {
       expect(result.content).toBe('btw> question\nanswer');
+    }
+  });
+
+  it('should execute /goal in non-interactive mode as a submit_prompt command', async () => {
+    mockGetCommands.mockReturnValue([goalCommand]);
+
+    const result = await handleSlashCommand(
+      '/goal write a hello world script',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.content).toEqual([
+        expect.objectContaining({
+          text: expect.stringContaining('write a hello world script'),
+        }),
+      ]);
     }
   });
 
