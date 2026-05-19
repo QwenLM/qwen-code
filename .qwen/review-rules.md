@@ -63,6 +63,20 @@ by itself block.
 - Dogfooding notes should explain the quickest reviewer path to exercise the
   feature and what result to expect.
 
+**Required review output — Validation Evidence verdict.** Every review of a
+PR MUST include a section titled exactly `## Validation Evidence` with one
+of:
+
+- `PRESENT` — name the concrete evidence found (commands / logs / JSON
+  trace / before-after / screenshot / GIF / recording / test report).
+- `MISSING` — state what reviewer-facing evidence is absent and what the
+  author should add. For feature / user-visible / high-risk PRs treat this
+  as a blocking-severity finding; for docs-only / pure-refactor it is
+  advisory.
+
+End that section with this line verbatim:
+`> This is an automated, advisory, comment-only review — it never approves or requests changes. After adding validation evidence, comment \`@qwen /review\` to re-run; editing the PR description alone does NOT re-trigger this review in the current phase.`
+
 ### Functional Review
 
 - Once the gates pass, focus detailed code review on correctness, security,

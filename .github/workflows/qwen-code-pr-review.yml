@@ -419,20 +419,17 @@ jobs:
           qwen --version
           echo "::endgroup::"
 
-          # Dry run: we still want the FULL review the model produces,
-          # streamed into this job log, but nothing posted to GitHub.
-          # Also run a CI-lightweight agent set: the full bundled
-          # /review (9 agents incl. Agent 7 = npm ci + whole-monorepo
-          # build/test) cannot finish a heavy PR within the job timeout,
-          # and the repo's own CI already builds/tests every PR, so
-          # Agent 7 is redundant here. Prompt-level steering only — the
-          # bundled SKILL.md is unchanged.
-          prompt="$REVIEW_PROMPT"
-          if [ "${SHOULD_COMMENT:-}" != "true" ]; then
-            prompt="${prompt}
+          # CI-lightweight steering applies to EVERY CI run (comment and
+          # dry-run): the full bundled /review (9 agents incl. Agent 7 =
+          # npm ci + whole-monorepo build/test) cannot finish a heavy PR
+          # within the job timeout, and the repo's own CI already
+          # builds/tests every PR, so Agent 7 is redundant here. The
+          # extra "do not post" clause is added only for dry-run.
+          # Prompt-level steering only — the bundled SKILL.md is unchanged.
+          prompt="${REVIEW_PROMPT}
 
-          CI LIGHTWEIGHT DRY RUN — follow these execution constraints,
-          they override the skill's defaults for this run:
+          CI LIGHTWEIGHT MODE — follow these execution constraints, they
+          override the skill's defaults for this run:
           1. Do NOT run \`npm ci\`/install, build, or the test suite, and
              do NOT launch Agent 7 (Build & Test). The repository's own
              CI already builds and tests this PR; it is redundant here.
@@ -440,10 +437,20 @@ jobs:
              Performance, Test Coverage) and ONE consolidated audit
              instead of the three separate 6a/6b/6c personas.
           3. Skip the local linter/typecheck step (Step 3).
-          4. Produce the complete code review and print it in full to
-             stdout. Do NOT post anything to GitHub — no gh pr comment,
-             no gh pr review, no GitHub API writes, no inline comments.
-             Output only; the maintainer reads it from the CI log."
+          4. The review MUST include a section titled exactly
+             \`## Validation Evidence\` stating PRESENT (name the
+             commands/logs/trace/screenshot/recording/test-report found)
+             or MISSING (what reviewer-facing evidence is absent); end
+             that section with the verbatim advisory/comment-only line
+             from .qwen/review-rules.md.
+          5. Produce the complete code review."
+          if [ "${SHOULD_COMMENT:-}" != "true" ]; then
+            prompt="${prompt}
+
+          DRY RUN: print the full review to stdout and do NOT post
+          anything to GitHub — no gh pr comment, no gh pr review, no
+          GitHub API writes, no inline comments. Output only; the
+          maintainer reads it from the CI log."
           fi
 
           out=qwen-review-stream.jsonl
