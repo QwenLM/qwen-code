@@ -1241,7 +1241,7 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
     // in `err.message` would otherwise forge log lines downstream.
     // Apply `sanitizeForStderr` before interpolation; pin via a
     // hostile message containing U+2028 + ANSI escape.
-    const U_2028 = ' ';
+    const U_2028 = '\u2028';
     const provider = new FakeProvider();
     provider.poll = async () => {
       provider.pollCount += 1;
