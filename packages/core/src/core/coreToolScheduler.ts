@@ -65,16 +65,15 @@ import {
   isAutoEditApproved,
 } from './permissionFlow.js';
 import {
+  applyAutoModeDecision,
   evaluateAutoMode,
-  formatClassifierBlockMessage,
   shouldRunAutoModeForCall,
 } from '../permissions/autoMode.js';
+import { MAX_TRANSCRIPT_MESSAGES } from '../permissions/classifier-transcript.js';
 import {
   isApproveOutcome,
   recordAllow,
-  recordBlock,
   recordFallbackApprove,
-  recordUnavailable,
   shouldFallback,
 } from '../permissions/denialTracking.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
@@ -1381,12 +1380,15 @@ export class CoreToolScheduler {
           if (shouldRunAutoModeForCall(approvalMode, canonicalName)) {
             const denialState = this.config.getAutoModeDenialState();
             const fallback = shouldFallback(denialState);
-            // `buildClassifierContents` retains only the most recent 40
-            // messages; ask the chat client for exactly that tail rather
-            // than triggering a `structuredClone` of the whole session
-            // on every non-fast-path AUTO call.
+            // `buildClassifierContents` retains only the most recent
+            // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
+            // exactly that tail rather than triggering a
+            // `structuredClone` of the whole session on every non-
+            // fast-path AUTO call.
             const messages =
-              this.config.getGeminiClient?.()?.getHistoryTail(40, false) ?? [];
+              this.config
+                .getGeminiClient?.()
+                ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
             const decision = await evaluateAutoMode({
               ctx: pmCtx,
               pmForcedAsk,
@@ -1397,36 +1399,26 @@ export class CoreToolScheduler {
               skipClassifier: fallback.fallback,
             });
 
-            const markApproved = () => {
-              this.config.setAutoModeDenialState(recordAllow(denialState));
-              this.setToolCallOutcome(
-                reqInfo.callId,
-                ToolConfirmationOutcome.ProceedAlways,
-              );
-              this.setStatusInternal(reqInfo.callId, 'scheduled');
-            };
-
-            switch (decision.via) {
-              case 'fast-path:accept-edits':
-              case 'fast-path:allowlist':
-                markApproved();
-                continue;
-              case 'classifier':
-                if (!decision.shouldBlock) {
-                  markApproved();
-                  continue;
-                }
-                this.config.setAutoModeDenialState(
-                  decision.unavailable
-                    ? recordUnavailable(denialState)
-                    : recordBlock(denialState),
+            const outcome = applyAutoModeDecision(
+              decision,
+              this.config,
+              denialState,
+            );
+            switch (outcome.kind) {
+              case 'approved':
+                this.setToolCallOutcome(
+                  reqInfo.callId,
+                  ToolConfirmationOutcome.ProceedAlways,
                 );
+                this.setStatusInternal(reqInfo.callId, 'scheduled');
+                continue;
+              case 'blocked':
                 this.setStatusInternal(
                   reqInfo.callId,
                   'error',
                   createErrorResponse(
                     reqInfo,
-                    new Error(formatClassifierBlockMessage(decision)),
+                    new Error(outcome.errorMessage),
                     ToolErrorType.EXECUTION_DENIED,
                   ),
                 );
@@ -1434,7 +1426,9 @@ export class CoreToolScheduler {
               case 'fallback':
                 // Drop through to the manual-approval flow below. The
                 // pending dialog tells the user what's being asked;
-                // operators see the cause in the debug log.
+                // operators see the cause in the debug log (only when
+                // fallback was specifically armed by denialTracking —
+                // a pmForcedAsk fallback isn't an audit-worthy event).
                 if (fallback.fallback) {
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
@@ -1442,15 +1436,7 @@ export class CoreToolScheduler {
                 }
                 break;
               default: {
-                const _exhaustive: never = decision;
-                // Surface drift at runtime, not just compile-time. The TS
-                // exhaustiveness check is bypassable (`as` cast, JS
-                // interop, partial build), and without this log every
-                // tool call would silently degrade with zero operator-
-                // visible signal.
-                debugLogger.error(
-                  `Auto mode: unrecognised decision.via "${(decision as { via: string }).via}" — falling through to manual approval`,
-                );
+                const _exhaustive: never = outcome;
                 void _exhaustive;
               }
             }

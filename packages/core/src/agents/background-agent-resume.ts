@@ -540,10 +540,11 @@ export class BackgroundAgentResumeService {
       // continuing to read the parent's. Reusing `this.config`
       // directly here would short-circuit that isolation. See the
       // matching wrapper in `agent.ts:createApprovalModeOverride`.
-      const agentConfig = await createApprovalModeOverride(
-        this.config,
-        resolvedApprovalMode as ApprovalMode,
-      );
+      const { config: agentConfig, cleanup: restoreParentPM } =
+        await createApprovalModeOverride(
+          this.config,
+          resolvedApprovalMode as ApprovalMode,
+        );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const bgConfig = Object.create(agentConfig) as any;
       bgConfig.getShouldAvoidPermissionPrompts = () => true;
@@ -823,6 +824,10 @@ export class BackgroundAgentResumeService {
             .getToolRegistry()
             .stop()
             .catch(() => {});
+          // Restore parent PermissionManager's dangerous allow rules if
+          // this override stripped them. See createApprovalModeOverride
+          // strip-lifecycle comment in agent.ts.
+          restoreParentPM();
         }
       };
 

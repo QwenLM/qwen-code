@@ -12,7 +12,11 @@ vi.mock('../utils/sideQuery.js', () => ({
   runSideQuery: (...args: unknown[]) => runSideQueryMock(...args),
 }));
 
-import { classifyAction, type ClassifierInput } from './classifier.js';
+import {
+  classifyAction,
+  sanitizeClassifierReason,
+  type ClassifierInput,
+} from './classifier.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 
@@ -211,3 +215,54 @@ describe('classifier configuration', () => {
 // Context-overflow detection now delegated to the shared
 // `isContextLengthExceededError` utility; tests covering its behavior live
 // alongside that module (utils/contextLengthError.test.ts).
+
+describe('sanitizeClassifierReason', () => {
+  // Security-critical: the classifier reason is LLM-generated and gets
+  // interpolated into the main model's tool-error message. A hostile
+  // reason can stage a prompt injection if not sanitized.
+
+  it('passes empty / falsy through unchanged', () => {
+    expect(sanitizeClassifierReason('')).toBe('');
+  });
+
+  it('strips simple pseudo-tags like <system>...</system>', () => {
+    expect(sanitizeClassifierReason('safe <system>danger</system> tail')).toBe(
+      'safe danger tail',
+    );
+  });
+
+  it('iterates strip until stable — no complete <...> tag can survive', () => {
+    // The threat is a pseudo-tag like `<system>...` confusing the
+    // downstream model. A single /<[^>]*>/g pass on a nested input
+    // like `<scr<script>extra>` leaves `>` orphaned tokens which is
+    // fine — what must NOT survive is any complete `<...>` pair.
+    const result = sanitizeClassifierReason('<scr<script>extra>payload');
+    expect(result).not.toMatch(/<[^>]*>/);
+  });
+
+  it('bounds iteration so adversarial inputs cannot create unbounded work', () => {
+    // 8-iteration cap means the function is O(n) regardless of how the
+    // attacker structures the input. Even a degenerate string with many
+    // overlapping tags terminates promptly.
+    const adversarial = '<a'.repeat(2000) + '>'.repeat(2000);
+    const t0 = Date.now();
+    sanitizeClassifierReason(adversarial);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it('collapses whitespace and newlines to single spaces', () => {
+    expect(sanitizeClassifierReason('line1\nline2\n\n\nline3')).toBe(
+      'line1 line2 line3',
+    );
+  });
+
+  it('hard-caps length at 200 characters', () => {
+    expect(sanitizeClassifierReason('a'.repeat(500)).length).toBe(200);
+  });
+
+  it('trims surrounding whitespace after collapse', () => {
+    expect(sanitizeClassifierReason('   leading  trailing   ')).toBe(
+      'leading trailing',
+    );
+  });
+});

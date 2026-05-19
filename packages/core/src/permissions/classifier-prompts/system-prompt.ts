@@ -110,6 +110,17 @@ export function buildClassifierSystemPrompt(config: Config): string {
 }
 
 /**
+ * Per-entry character cap and per-section count cap on user-provided
+ * hints / environment lines. Documented in `auto-mode.md` ("Each entry
+ * is capped at 200 characters", "accept up to 50 entries each") —
+ * enforce them here so a hostile or accidental large hint payload
+ * cannot bloat the classifier system prompt and overflow the fast
+ * model's context window.
+ */
+export const MAX_USER_HINT_LENGTH = 200;
+export const MAX_USER_HINTS_PER_SECTION = 50;
+
+/**
  * Render built-in entries as plain bullets, then append user-provided
  * entries as JSON-quoted string literals labelled `user hint`.
  *
@@ -130,8 +141,15 @@ function formatSection(
   userEntries: readonly string[],
 ): string {
   const lines = builtIn.map((entry) => `- ${entry}`);
-  for (const entry of userEntries) {
-    lines.push(`- user hint: ${JSON.stringify(entry)}`);
+  // Enforce documented caps: take at most MAX_USER_HINTS_PER_SECTION
+  // entries and truncate each to MAX_USER_HINT_LENGTH characters.
+  const capped = userEntries.slice(0, MAX_USER_HINTS_PER_SECTION);
+  for (const entry of capped) {
+    const truncated =
+      entry.length > MAX_USER_HINT_LENGTH
+        ? entry.slice(0, MAX_USER_HINT_LENGTH) + '…'
+        : entry;
+    lines.push(`- user hint: ${JSON.stringify(truncated)}`);
   }
   return lines.join('\n');
 }

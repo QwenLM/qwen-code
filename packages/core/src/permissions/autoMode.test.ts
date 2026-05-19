@@ -11,7 +11,9 @@ import {
   formatClassifierBlockMessage,
   isInSafeToolAllowlist,
   passesAcceptEditsFastPath,
+  shouldRunAutoModeForCall,
 } from './autoMode.js';
+import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from './types.js';
@@ -348,5 +350,57 @@ describe('formatClassifierBlockMessage', () => {
         unavailable: true,
       }),
     ).toBe('Auto mode classifier unavailable; action blocked for safety');
+  });
+});
+
+// ─── shouldRunAutoModeForCall ─────────────────────────────────────────────
+
+describe('shouldRunAutoModeForCall', () => {
+  // Security-critical gate. Drift here would either silently skip AUTO
+  // for tools that need it (false negative — bypass) or invoke the
+  // classifier on tools that must always reach the user
+  // (false positive — UX break for ask_user_question / exit_plan_mode).
+
+  it('returns false when approval mode is not AUTO', () => {
+    for (const mode of [
+      ApprovalMode.DEFAULT,
+      ApprovalMode.PLAN,
+      ApprovalMode.AUTO_EDIT,
+      ApprovalMode.YOLO,
+    ]) {
+      expect(shouldRunAutoModeForCall(mode, ToolNames.SHELL)).toBe(false);
+    }
+  });
+
+  it('returns true for arbitrary tools when mode is AUTO', () => {
+    for (const tool of [
+      ToolNames.SHELL,
+      ToolNames.EDIT,
+      ToolNames.WRITE_FILE,
+      ToolNames.WEB_FETCH,
+      ToolNames.AGENT,
+      ToolNames.SKILL,
+      ToolNames.READ_FILE,
+    ]) {
+      expect(shouldRunAutoModeForCall(ApprovalMode.AUTO, tool)).toBe(true);
+    }
+  });
+
+  it('excludes ASK_USER_QUESTION even under AUTO — must always reach the user', () => {
+    expect(
+      shouldRunAutoModeForCall(ApprovalMode.AUTO, ToolNames.ASK_USER_QUESTION),
+    ).toBe(false);
+  });
+
+  it('excludes EXIT_PLAN_MODE even under AUTO — plan exits are operator-driven', () => {
+    expect(
+      shouldRunAutoModeForCall(ApprovalMode.AUTO, ToolNames.EXIT_PLAN_MODE),
+    ).toBe(false);
+  });
+
+  it('returns false for unknown tool names when not in AUTO', () => {
+    expect(shouldRunAutoModeForCall(ApprovalMode.DEFAULT, 'unknown_tool')).toBe(
+      false,
+    );
   });
 });

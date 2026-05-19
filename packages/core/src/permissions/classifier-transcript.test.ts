@@ -6,7 +6,10 @@
 
 import { describe, it, expect } from 'vitest';
 import type { Content } from '@google/genai';
-import { buildClassifierContents } from './classifier-transcript.js';
+import {
+  buildClassifierContents,
+  MAX_TRANSCRIPT_MESSAGES,
+} from './classifier-transcript.js';
 import {
   DeclarativeTool,
   type ToolInvocation,
@@ -313,5 +316,54 @@ describe('buildClassifierContents', () => {
     const serialized = JSON.stringify(result);
     expect(serialized).toContain('evil.example.com');
     expect(serialized).toContain('Prior action: run_shell_command');
+  });
+
+  // ─── MAX_TRANSCRIPT_MESSAGES truncation ─────────────────────────────
+  // Security-relevant: without truncation, a long session's transcript
+  // can overflow the fast model's context window, fail-close the
+  // classifier, and trigger denialTracking. The constant is exported
+  // so scheduler + Session can request exactly this slice from
+  // GeminiClient.getHistoryTail — verify the truncation actually fires
+  // when the input exceeds the window.
+
+  it('exports MAX_TRANSCRIPT_MESSAGES so callers can size getHistoryTail correctly', () => {
+    expect(typeof MAX_TRANSCRIPT_MESSAGES).toBe('number');
+    expect(MAX_TRANSCRIPT_MESSAGES).toBeGreaterThan(0);
+  });
+
+  it('truncates input to the most recent MAX_TRANSCRIPT_MESSAGES messages', () => {
+    // Build a history twice the cap; the oldest half should be dropped.
+    const messages: Content[] = [];
+    for (let i = 0; i < MAX_TRANSCRIPT_MESSAGES * 2; i++) {
+      messages.push({
+        role: 'user',
+        parts: [{ text: `msg-${i}` }],
+      });
+    }
+    const result = buildClassifierContents(messages, makeRegistry({}), {
+      toolName: 'read_file',
+      toolParams: { path: 'x.ts' },
+    });
+    const serialized = JSON.stringify(result);
+    // The oldest message must NOT appear — got dropped by truncation.
+    expect(serialized).not.toContain('"msg-0"');
+    // Earliest retained message is at index N (where 2N is total input).
+    expect(serialized).toContain(`"msg-${MAX_TRANSCRIPT_MESSAGES}"`);
+    // Most-recent message must appear.
+    expect(serialized).toContain(`"msg-${MAX_TRANSCRIPT_MESSAGES * 2 - 1}"`);
+  });
+
+  it('passes through history shorter than the cap unchanged', () => {
+    const messages: Content[] = [
+      { role: 'user', parts: [{ text: 'first' }] },
+      { role: 'user', parts: [{ text: 'second' }] },
+    ];
+    const result = buildClassifierContents(messages, makeRegistry({}), {
+      toolName: 'read_file',
+      toolParams: { path: 'x.ts' },
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).toContain('first');
+    expect(serialized).toContain('second');
   });
 });

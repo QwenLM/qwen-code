@@ -20,8 +20,17 @@
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { classifyAction, type ClassifierResult } from './classifier.js';
+import {
+  recordAllow,
+  recordBlock,
+  recordUnavailable,
+  type AutoModeDenialState,
+} from './denialTracking.js';
 import type { PermissionCheckContext } from './types.js';
+
+const autoModeDebugLogger = createDebugLogger('AUTO_MODE');
 
 /**
  * Built-in tools whose any-parameter behavior is safe under the AUTO mode
@@ -89,14 +98,37 @@ export function shouldRunAutoModeForCall(
 }
 
 /**
+ * Paths inside the workspace that nevertheless execute code on subsequent
+ * tooling operations (git commit, npm install, CI runs, …) and must NOT
+ * take the acceptEdits fast-path. Without this list, a hostile AGENTS.md
+ * could instruct the agent to write `.git/hooks/pre-commit` → fast-path
+ * approves (it's in workspace) → next `git commit` runs arbitrary code
+ * without classifier review.
+ *
+ * Edits to these paths still pass through the AUTO classifier; users
+ * who want to allow specific hook/script edits can add an explicit
+ * `permissions.allow` rule.
+ */
+const PERSISTENCE_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
+  /(^|\/)\.git\//, // git config, hooks, alias — covers .git/hooks/* and .git/config
+  /(^|\/)\.husky\//, // git hooks via husky
+  /(^|\/)package\.json$/, // npm scripts (root + nested workspaces)
+  /(^|\/)\.npmrc$/, // registry override → malicious package fetch on next install
+  /(^|\/)(Makefile|makefile|GNUmakefile)$/, // make targets
+  /(^|\/)\.?[Jj]ustfile$/, // just task runner
+  /(^|\/)Taskfile\.ya?ml$/, // go-task
+  /(^|\/)\.github\/workflows\//, // CI workflow definitions
+]);
+
+/**
  * Returns true when the pending action is a file edit / write targeting a
- * path that lies within the current workspace (cwd + additional directories).
+ * path that lies within the current workspace (cwd + additional directories)
+ * AND is NOT in {@link PERSISTENCE_PATH_PATTERNS}.
  *
  * Symlinks ARE resolved via `WorkspaceContext.isPathWithinWorkspace`, which
  * internally calls `fs.realpathSync`. A symlink whose target is outside the
  * workspace correctly fails this check and falls through to the classifier
- * — fail-safe by implementation. (Earlier revisions of this comment
- * claimed the opposite; the actual behavior has always been to resolve.)
+ * — fail-safe by implementation.
  *
  * Caller should only consult this when L4 evaluation returned `'default'`.
  */
@@ -106,6 +138,12 @@ export function passesAcceptEditsFastPath(
 ): boolean {
   if (!EDIT_TOOL_NAMES.has(ctx.toolName)) return false;
   if (!ctx.filePath) return false;
+  // Persistence paths (hooks, package.json scripts, CI definitions) must
+  // never auto-approve via fast-path — they execute code on subsequent
+  // tooling operations.
+  if (PERSISTENCE_PATH_PATTERNS.some((p) => p.test(ctx.filePath!))) {
+    return false;
+  }
   return config.getWorkspaceContext().isPathWithinWorkspace(ctx.filePath);
 }
 
@@ -130,6 +168,74 @@ export type AutoModeDecision =
       durationMs: number;
     }
   | { via: 'fallback' };
+
+/**
+ * Outcome of {@link applyAutoModeDecision}. Boils the union of
+ * `AutoModeDecision` plus denial-tracking state updates down to a
+ * three-way "what should the caller do" instruction so the scheduler /
+ * ACP paths share one decision handler instead of duplicating the
+ * switch + state-update boilerplate.
+ */
+export type AutoModeOutcome =
+  | { kind: 'approved' }
+  | { kind: 'blocked'; errorMessage: string }
+  | { kind: 'fallback' };
+
+/**
+ * Apply an {@link AutoModeDecision} to denial-tracking state and return
+ * an outcome the caller can act on. Shared between
+ * `coreToolScheduler.ts` and `acp-integration/session/Session.ts` — the
+ * switch on `decision.via`, the `recordAllow / recordBlock /
+ * recordUnavailable` updates, and the formatted block message used to
+ * all be duplicated line-for-line across the two files. Drift between
+ * those copies was a recurring class of bug across PR #4151 review
+ * rounds; this helper makes the two paths share one source of truth.
+ *
+ * Callers retain responsibility for the surrounding integration
+ * (marking the tool call scheduled vs writing an error response,
+ * logging the fallback reason with denial-state context, etc.) — those
+ * pieces differ between scheduler and Session.
+ */
+export function applyAutoModeDecision(
+  decision: AutoModeDecision,
+  config: Config,
+  denialState: AutoModeDenialState,
+): AutoModeOutcome {
+  switch (decision.via) {
+    case 'fast-path:accept-edits':
+    case 'fast-path:allowlist':
+      config.setAutoModeDenialState(recordAllow(denialState));
+      return { kind: 'approved' };
+    case 'classifier':
+      if (decision.shouldBlock) {
+        config.setAutoModeDenialState(
+          decision.unavailable
+            ? recordUnavailable(denialState)
+            : recordBlock(denialState),
+        );
+        return {
+          kind: 'blocked',
+          errorMessage: formatClassifierBlockMessage(decision),
+        };
+      }
+      config.setAutoModeDenialState(recordAllow(denialState));
+      return { kind: 'approved' };
+    case 'fallback':
+      return { kind: 'fallback' };
+    default: {
+      const _exhaustive: never = decision;
+      // Surface drift at runtime — TS exhaustiveness can be bypassed
+      // via `as` cast / JS interop / partial build. Without this log
+      // every tool call would silently degrade to manual approval with
+      // zero operator-visible signal.
+      autoModeDebugLogger.error(
+        `Auto mode: unrecognised decision.via "${(decision as { via: string }).via}" — falling through to manual approval`,
+      );
+      void _exhaustive;
+      return { kind: 'fallback' };
+    }
+  }
+}
 
 /**
  * Build the tool-error message the scheduler / ACP session returns when

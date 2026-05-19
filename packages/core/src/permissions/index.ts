@@ -11,9 +11,11 @@ export type { PermissionManagerConfig } from './permission-manager.js';
 export { extractShellOperations } from './shell-semantics.js';
 export type { ShellOperation } from './shell-semantics.js';
 export {
+  applyAutoModeDecision,
   evaluateAutoMode,
   formatClassifierBlockMessage,
   type AutoModeDecision,
+  type AutoModeOutcome,
   type EvaluateAutoModeInput,
   SAFE_TOOL_ALLOWLIST,
   isInSafeToolAllowlist,
@@ -33,3 +35,4 @@ export {
   resetDenialState,
   shouldFallback,
 } from './denialTracking.js';
+export { MAX_TRANSCRIPT_MESSAGES } from './classifier-transcript.js';

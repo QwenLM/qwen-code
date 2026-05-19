@@ -48,7 +48,15 @@ export interface PendingAction {
  * while preserving enough of the recent action chain for the classifier to
  * apply its "untrusted tool-output" rule across a multi-step interaction.
  */
-const MAX_TRANSCRIPT_MESSAGES = 40;
+/**
+ * Maximum number of session messages forwarded to the classifier as
+ * context. Exported so the scheduler / ACP session paths can request
+ * exactly this slice via `getHistoryTail(MAX_TRANSCRIPT_MESSAGES)`
+ * rather than hardcoding `40` — keeping the constant single-sourced
+ * means tuning the window doesn't require lockstep edits across
+ * three files.
+ */
+export const MAX_TRANSCRIPT_MESSAGES = 40;
 
 /**
  * Build the `contents` array for the classifier sideQuery call.

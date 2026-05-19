@@ -60,13 +60,11 @@ import {
   isPlanModeBlocked,
   abortGoalForStopHookCap,
   formatStopHookBlockingCapWarning,
+  applyAutoModeDecision,
   evaluateAutoMode,
-  formatClassifierBlockMessage,
   isApproveOutcome,
-  recordAllow,
-  recordBlock,
+  MAX_TRANSCRIPT_MESSAGES,
   recordFallbackApprove,
-  recordUnavailable,
   shouldFallback,
   shouldRunAutoModeForCall,
 } from '@qwen-code/qwen-code-core';
@@ -1923,13 +1921,15 @@ export class Session implements SessionContext {
       // existing manual-approval flow below.
       if (!autoModeAllowed && shouldRunAutoModeForCall(approvalMode, fc.name)) {
         const denialState = this.config.getAutoModeDenialState();
-        // `buildClassifierContents` retains only the most recent 40
-        // messages; ask the chat client for exactly that tail rather
-        // than triggering a `structuredClone` of the whole session
-        // on every non-fast-path AUTO call. Parallels
-        // coreToolScheduler.ts.
+        // `buildClassifierContents` retains only the most recent
+        // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
+        // exactly that tail rather than triggering a `structuredClone`
+        // of the whole session on every non-fast-path AUTO call.
+        // Parallels coreToolScheduler.ts.
         const messages =
-          this.config.getGeminiClient?.()?.getHistoryTail(40, false) ?? [];
+          this.config
+            .getGeminiClient?.()
+            ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
         const decision = await evaluateAutoMode({
           ctx: pmCtx,
           pmForcedAsk,
@@ -1940,45 +1940,27 @@ export class Session implements SessionContext {
           skipClassifier: shouldFallback(denialState).fallback,
         });
 
-        // Exhaustive switch (parallels the switch(decision.via) block in
-        // coreToolScheduler.ts, inside the evaluateAutoMode result
-        // handling). Using an `if/else if` here would silently fall
-        // through to "allow" if a new `via` variant were added to
-        // `AutoModeDecision` — fail-open. The `_exhaustive: never` arm
-        // makes that drift a compile-time error.
-        switch (decision.via) {
-          case 'fast-path:accept-edits':
-          case 'fast-path:allowlist':
-            this.config.setAutoModeDenialState(recordAllow(denialState));
+        // Apply decision via shared helper — eliminates ~40 lines of
+        // line-for-line duplication with coreToolScheduler.ts and makes
+        // the CLI / ACP paths share one source of truth for the
+        // switch + denial-tracking state updates + exhaustiveness
+        // guard.
+        const outcome = applyAutoModeDecision(
+          decision,
+          this.config,
+          denialState,
+        );
+        switch (outcome.kind) {
+          case 'approved':
             autoModeAllowed = true;
             break;
-          case 'classifier':
-            if (decision.shouldBlock) {
-              this.config.setAutoModeDenialState(
-                decision.unavailable
-                  ? recordUnavailable(denialState)
-                  : recordBlock(denialState),
-              );
-              return earlyErrorResponse(
-                new Error(formatClassifierBlockMessage(decision)),
-                fc.name,
-              );
-            }
-            this.config.setAutoModeDenialState(recordAllow(denialState));
-            autoModeAllowed = true;
-            break;
+          case 'blocked':
+            return earlyErrorResponse(new Error(outcome.errorMessage), fc.name);
           case 'fallback':
             // Drop through to the manual-approval flow below.
             break;
           default: {
-            const _exhaustive: never = decision;
-            // Surface drift at runtime, not just compile-time. The TS
-            // exhaustiveness check is bypassable (`as` cast, JS interop,
-            // partial build), and without this log every tool call would
-            // silently degrade with zero operator-visible signal.
-            debugLogger.error(
-              `Auto mode: unrecognised decision.via "${(decision as { via: string }).via}" — falling through to manual approval`,
-            );
+            const _exhaustive: never = outcome;
             void _exhaustive;
           }
         }

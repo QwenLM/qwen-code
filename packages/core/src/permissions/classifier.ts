@@ -186,6 +186,12 @@ export async function classifyAction(
   }
 
   if (!stage1.shouldBlock) {
+    // Audit-trail at debug level (off by default, on when investigating
+    // "why was this dangerous command allowed"). Info would be noise on
+    // every non-fast-path AUTO call; debug is grep-able when needed.
+    debugLogger.debug(
+      `ALLOW stage=fast tool=${input.toolName} durationMs=${Date.now() - overallStart}`,
+    );
     return {
       shouldBlock: false,
       reason: '',
@@ -234,6 +240,14 @@ export async function classifyAction(
     };
   }
 
+  // Audit-trail at debug level for the stage-2 verdict — both ALLOW
+  // (where stage 1 flagged but stage 2 cleared) and the implicit BLOCK
+  // (stage 2 confirmed). The reason+thinking already carry the full
+  // explanation; this line just makes the verdict grep-able.
+  debugLogger.debug(
+    `${stage2.shouldBlock ? 'BLOCK' : 'ALLOW'} stage=thinking ` +
+      `tool=${input.toolName} durationMs=${Date.now() - overallStart}`,
+  );
   return {
     shouldBlock: stage2.shouldBlock,
     // Stage-2 reason is LLM-generated and ends up interpolated into the
