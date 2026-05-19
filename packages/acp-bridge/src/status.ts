@@ -458,6 +458,33 @@ export function createIdleWorkspaceProvidersStatus(
 }
 
 /**
+ * #4175 PR 22b/2: idle envelope for `/workspace/env` when the bridge
+ * has no `DaemonStatusProvider` injected (Mode A in-process consumers,
+ * tests, embedded callers that don't need daemon-host cells). Single
+ * construction site so future optional-field additions to
+ * `ServeWorkspaceEnvStatus` only need updating in one place — the
+ * production builder in `cli/src/serve/envSnapshot.ts buildEnvStatusFromProcess`
+ * and this helper would otherwise diverge silently (TS won't flag a
+ * missing optional field).
+ *
+ * Note: `initialized: true` matches `buildEnvStatusFromProcess` —
+ * the daemon answers env from `process.*` state without consulting
+ * ACP, so even an "empty" envelope is initialized.
+ */
+export function createIdleEnvStatus(
+  workspaceCwd: string,
+  acpChannelLive: boolean,
+): ServeWorkspaceEnvStatus {
+  return {
+    v: STATUS_SCHEMA_VERSION,
+    workspaceCwd,
+    initialized: true,
+    acpChannelLive,
+    cells: [],
+  };
+}
+
+/**
  * Discriminant for diagnostic cells emitted by `/workspace/env`.
  * `env_var` cells are presence-only (the daemon never echoes secret values
  * even when redacted). The other kinds expose non-sensitive values like
@@ -609,9 +636,24 @@ export function mapDomainErrorToErrorKind(
   if (err instanceof BridgeTimeoutError) return 'init_timeout';
   if (err instanceof BridgeChannelClosedError) return 'protocol_error';
   if (err instanceof MissingCliEntryError) return 'missing_binary';
-  if (err instanceof SkillError) {
-    if (SKILL_PARSE_CODES.has(err.code)) return 'parse_error';
-    if (SKILL_FILE_CODES.has(err.code)) return 'missing_file';
+  // `SkillError` is defined in `@qwen-code/qwen-code-core/skills`; same
+  // cross-package bundling concern as `TrustGateError` below — when this
+  // function is consumed from outside the monorepo (or under a bundler
+  // that doesn't dedupe `file:` workspace deps), the `SkillError` class
+  // identity at the throw site (cli's `SkillManager`) can diverge from
+  // the one resolved here through acp-bridge's `@qwen-code/qwen-code-core`
+  // dependency, silently making `instanceof` return `false` and
+  // dropping the skill `errorKind` classification on diagnostic cells.
+  // The `OR .name === 'SkillError'` branch keeps classification working
+  // regardless of which copy of the class the value carries.
+  // Wenshao review fold-in (#4298 thread r3262781757).
+  if (
+    err instanceof SkillError ||
+    (err as Error | undefined)?.name === 'SkillError'
+  ) {
+    const code = (err as { code?: string }).code;
+    if (code && SKILL_PARSE_CODES.has(code)) return 'parse_error';
+    if (code && SKILL_FILE_CODES.has(code)) return 'missing_file';
     return undefined;
   }
   if (err instanceof SyntaxError) return 'parse_error';
