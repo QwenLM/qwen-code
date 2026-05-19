@@ -707,6 +707,7 @@ export const DAEMON_APPROVAL_MODES = [
   'plan',
   'default',
   'auto-edit',
+  'auto',
   'yolo',
 ] as const;
 export type DaemonApprovalMode = (typeof DAEMON_APPROVAL_MODES)[number];
