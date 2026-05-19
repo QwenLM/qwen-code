@@ -1320,7 +1320,7 @@ export class WebViewProvider {
         '../../services/settingsWriter.js'
       );
       const plan = buildInstallPlan(providerConfig, inputs);
-      applyProviderInstallPlanToFile(plan);
+      await applyProviderInstallPlanToFile(plan);
 
       // Disconnect + reconnect
       if (this.agentInitialized) {

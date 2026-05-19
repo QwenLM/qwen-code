@@ -367,15 +367,17 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
 /**
  * Apply a ProviderInstallPlan to ~/.qwen/settings.json.
  * This is the primary entry point for the VSCode interactive auth flow.
+ *
+ * `applyProviderInstallPlan` is async, so a returned (or thrown) Promise must
+ * be awaited — otherwise an `EACCES` from `persist()` or the prototype-pollution
+ * guard in `setValue()` would be swallowed and the caller would carry on
+ * reconnecting the agent as if the settings write had succeeded.
  */
-export function applyProviderInstallPlanToFile(
+export async function applyProviderInstallPlanToFile(
   plan: ProviderInstallPlan,
-): void {
+): Promise<void> {
   const settings = createFileSettingsAdapter();
-  // Synchronous-safe: core's applyProviderInstallPlan is async but the file I/O
-  // portion (setValue + persist) is synchronous. The async part (refreshAuth etc.)
-  // is only triggered by optional callbacks we don't pass here.
-  void applyProviderInstallPlan(plan, { settings });
+  await applyProviderInstallPlan(plan, { settings });
 }
 
 // ---------------------------------------------------------------------------

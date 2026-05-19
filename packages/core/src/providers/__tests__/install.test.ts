@@ -167,6 +167,39 @@ describe('applyProviderInstallPlan', () => {
     ]);
   });
 
+  it('falls back to id+baseUrl identity when ownsModel is omitted', async () => {
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [
+        // Same id, different baseUrl → should be preserved (different identity)
+        { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
+        // Same id+baseUrl as incoming → should be removed
+        { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
+        // Different id, same baseUrl as incoming → should be preserved
+        { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
+      ],
+    });
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [{ id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' }],
+          mergeStrategy: 'prepend-and-remove-owned',
+          // ownsModel intentionally omitted — exercises isSameModelIdentity path
+        },
+      ],
+    };
+
+    await applyProviderInstallPlan(plan, { settings: adapter });
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
+      { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
+      { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
+    ]);
+  });
+
   it('writes provider state and legacy credentials', async () => {
     const adapter = createAdapter();
     const plan: ProviderInstallPlan = {
