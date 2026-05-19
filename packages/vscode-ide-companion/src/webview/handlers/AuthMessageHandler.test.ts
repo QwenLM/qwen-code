@@ -163,4 +163,135 @@ describe('AuthMessageHandler', () => {
       ]),
     );
   });
+
+  // -- Custom provider flow ------------------------------------------------
+  // The custom provider exercises every step in runProviderSetupFlow:
+  // protocol pick, free-form URL input + scheme validation, API key,
+  // comma-split model IDs + empty-input guard, and advanced config.
+
+  it('drives custom provider through protocol + url + key + models + advanced', async () => {
+    // 1) Provider pick → custom (custom-openai-compatible)
+    // 2) Protocol pick → Anthropic
+    // 3) Advanced config pick → modality-only (no thinking)
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'anthropic' })
+      .mockResolvedValueOnce({ value: 'no' });
+    // URL → API key → model IDs (advanced is a separate pick already mocked)
+    mockShowInputBox
+      .mockResolvedValueOnce('https://my-proxy.example.com/v1')
+      .mockResolvedValueOnce('sk-custom-anthropic')
+      .mockResolvedValueOnce('claude-3-opus, claude-3-sonnet');
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(authInteractiveHandler).toHaveBeenCalledTimes(1);
+    const [providerConfig, inputs] = authInteractiveHandler.mock.calls[0]!;
+    expect(providerConfig.id).toBe('custom-openai-compatible');
+    expect(inputs).toMatchObject({
+      // Protocol from the picker is threaded through.
+      protocol: 'anthropic',
+      baseUrl: 'https://my-proxy.example.com/v1',
+      apiKey: 'sk-custom-anthropic',
+      modelIds: ['claude-3-opus', 'claude-3-sonnet'],
+    });
+  });
+
+  it('rejects a non-http(s) custom base URL with authError', async () => {
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'openai' });
+    // file:// URL must be rejected before reaching authInteractiveHandler.
+    mockShowInputBox.mockResolvedValueOnce('file:///etc/passwd');
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'authError',
+      data: { message: expect.stringContaining('http') },
+    });
+    expect(authInteractiveHandler).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the protocol-specific default when custom URL input is blank', async () => {
+    // User picks Anthropic protocol and hits Enter on the URL with no input.
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'anthropic' })
+      .mockResolvedValueOnce({ value: 'no' });
+    mockShowInputBox
+      .mockResolvedValueOnce('') // blank URL → fallback to Anthropic default
+      .mockResolvedValueOnce('sk-anthropic')
+      .mockResolvedValueOnce('claude-3-opus');
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({
+        // Empty input resolved to Anthropic's default, not the OpenAI one.
+        baseUrl: 'https://api.anthropic.com/v1',
+        protocol: 'anthropic',
+      }),
+    );
+  });
+
+  it('rejects whitespace-only model IDs with authError', async () => {
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'openai' });
+    mockShowInputBox
+      .mockResolvedValueOnce('https://api.example.com/v1')
+      .mockResolvedValueOnce('sk-test')
+      // Only whitespace + commas — must not reach authInteractiveHandler.
+      .mockResolvedValueOnce(' , , ,');
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'authError',
+      data: { message: expect.stringContaining('Model IDs') },
+    });
+    expect(authInteractiveHandler).not.toHaveBeenCalled();
+  });
 });

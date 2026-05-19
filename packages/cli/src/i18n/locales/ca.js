@@ -1113,9 +1113,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Benvingut de nou! (Darrera actualització: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Objectiu general:',
-  'Select Authentication Method': "Seleccioneu el mètode d'autenticació",
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    "Cal seleccionar un mètode d'autenticació per continuar. Premeu Ctrl+C de nou per sortir.",
+  'Connect a Provider': 'Connectar un proveïdor',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'Cal connectar un proveïdor per continuar. Premeu Ctrl+C de nou per sortir.',
   'Terms of Services and Privacy Notice':
     'Termes de servei i avís de privacitat',
   'Qwen OAuth': 'Qwen OAuth',

@@ -30,7 +30,7 @@ describe('generateCustomEnvKey', () => {
     // Readable prefix + 6-hex-char SHA-256 suffix.
     expect(key1).toMatch(
       new RegExp(
-        `^${CUSTOM_API_KEY_ENV_PREFIX}OPENAI_HTTPS_API_EXAMPLE_COM_V1_[0-9A-F]{6}$`,
+        `^${CUSTOM_API_KEY_ENV_PREFIX}OPENAI_HTTPS_API_EXAMPLE_COM_V1_[0-9A-F]{12}$`,
       ),
     );
   });
@@ -79,7 +79,7 @@ describe('generateCustomEnvKey', () => {
     // Readable prefix matches; trailing 6-hex suffix is separate.
     expect(k1).toMatch(
       new RegExp(
-        `^${CUSTOM_API_KEY_ENV_PREFIX}OPENAI_HTTP_API_A_B_COM_[0-9A-F]{6}$`,
+        `^${CUSTOM_API_KEY_ENV_PREFIX}OPENAI_HTTP_API_A_B_COM_[0-9A-F]{12}$`,
       ),
     );
   });
@@ -110,8 +110,29 @@ describe('customProvider', () => {
     ]);
   });
 
-  it('does not define ownsModel (falls back to id-based filtering)', () => {
-    expect(customProvider.ownsModel).toBeUndefined();
+  it('owns any model whose envKey starts with the QWEN_CUSTOM_API_KEY_ prefix', () => {
+    // Without ownsModel, applyModelProvidersPatch falls back to id+baseUrl
+    // identity matching, so reinstalling a custom provider under a different
+    // baseUrl would leave the old entries behind. Prefix-match cleanly
+    // identifies "ours" without false positives against presets.
+    expect(customProvider.ownsModel).toBeTypeOf('function');
+    expect(
+      customProvider.ownsModel?.({
+        id: 'whatever',
+        envKey: `${CUSTOM_API_KEY_ENV_PREFIX}OPENAI_HTTPS_API_FOO_COM_ABCDEF`,
+      }),
+    ).toBe(true);
+    expect(
+      customProvider.ownsModel?.({
+        id: 'preset-model',
+        envKey: 'DEEPSEEK_API_KEY',
+      }),
+    ).toBe(false);
+    expect(
+      customProvider.ownsModel?.({
+        id: 'no-env-key',
+      }),
+    ).toBe(false);
   });
 
   it('shows protocol, baseUrl, models, and advancedConfig steps', () => {

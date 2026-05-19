@@ -29,6 +29,7 @@ import { AuthType, type ProviderInstallPlan } from '@qwen-code/qwen-code-core';
 import { CODING_PLAN_ENV_KEY } from './subscriptionPlanDefinitions.js';
 import {
   applyProviderInstallPlanToFile,
+  clearPersistedAuth,
   readQwenSettingsForVSCode,
   writeCodingPlanConfig,
   writeModelProvidersConfig,
@@ -258,6 +259,58 @@ describe('settingsWriter', () => {
         .readdirSync(dir)
         .filter((f) => f.startsWith('settings.json.') && f.endsWith('.tmp'));
       expect(leftovers).toEqual([]);
+    });
+  });
+
+  describe('clearPersistedAuth', () => {
+    it('wipes preset, custom, and subscription-plan env keys without touching unrelated env', () => {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      // Pre-populate a settings file representing a user who has used
+      // multiple providers (so each preset's envKey is set) plus a
+      // hand-set NODE_OPTIONS the clear must leave alone.
+      const initial = {
+        env: {
+          OPENAI_API_KEY: 'sk-openai',
+          DEEPSEEK_API_KEY: 'sk-deepseek',
+          MINIMAX_API_KEY: 'sk-minimax',
+          ZAI_API_KEY: 'sk-zai',
+          IDEALAB_API_KEY: 'sk-idealab',
+          MODELSCOPE_API_KEY: 'sk-modelscope',
+          OPENROUTER_API_KEY: 'sk-openrouter',
+          BAILIAN_CODING_PLAN_API_KEY: 'sk-coding',
+          BAILIAN_TOKEN_PLAN_API_KEY: 'sk-token',
+          QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_FOO_COM_ABC123DEF456:
+            'sk-custom-1',
+          QWEN_CUSTOM_API_KEY_ANTHROPIC_HTTPS_API_BAR_COM_DEAD0BEEF000:
+            'sk-custom-2',
+          NODE_OPTIONS: '--max-old-space-size=8192',
+        },
+        security: { auth: { selectedType: 'openai' } },
+        providerMetadata: {
+          'coding-plan': { version: '1' },
+          deepseek: { version: '1' },
+          openrouter: { version: '2' },
+        },
+      };
+      fs.writeFileSync(settingsPath, JSON.stringify(initial, null, 2), 'utf-8');
+
+      clearPersistedAuth();
+
+      const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      // Every preset + subscription + OPENAI + every QWEN_CUSTOM_API_KEY_*
+      // is gone; NODE_OPTIONS survives.
+      expect(after.env).toEqual({ NODE_OPTIONS: '--max-old-space-size=8192' });
+      // selectedType is wiped.
+      expect(after.security?.auth?.selectedType).toBeUndefined();
+      // providerMetadata is empty (or only holds keys that weren't ours).
+      expect(after.providerMetadata['coding-plan']).toBeUndefined();
+      expect(after.providerMetadata['deepseek']).toBeUndefined();
+      expect(after.providerMetadata['openrouter']).toBeUndefined();
+    });
+
+    it('is a no-op when no settings file exists', () => {
+      // No settings file written — clear must not throw.
+      expect(() => clearPersistedAuth()).not.toThrow();
     });
   });
 });

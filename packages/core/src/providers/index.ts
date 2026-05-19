@@ -23,6 +23,7 @@ export {
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
+  getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
   providerMatchesCredentials,
   PROVIDER_METADATA_NS,

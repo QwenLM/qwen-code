@@ -75,7 +75,19 @@ export function createLoadedSettingsAdapter(
     },
 
     restore(): void {
-      restoreSettingsFromBackup(settingsFile.path);
+      // restoreSettingsFromBackup returns false (rather than throwing) when
+      // the .orig copy can't be restored (EACCES, disk full, missing .orig).
+      // Log loudly so a user staring at the next CLI session knows the
+      // on-disk file may be inconsistent with the recovered in-memory state.
+      const restored = restoreSettingsFromBackup(settingsFile.path);
+      if (!restored) {
+        // eslint-disable-next-line no-console -- best-effort rollback path
+        console.error(
+          `[loadedSettingsAdapter] On-disk rollback of ${settingsFile.path} failed; ` +
+            `in-memory state was restored but the file may be inconsistent. ` +
+            `Re-run /auth or inspect the file directly to recover.`,
+        );
+      }
       if (settingsSnapshot !== null) {
         settingsFile.settings =
           settingsSnapshot as typeof settingsFile.settings;

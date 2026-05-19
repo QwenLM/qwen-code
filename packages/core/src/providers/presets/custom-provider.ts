@@ -19,9 +19,10 @@ export const CUSTOM_API_KEY_ENV_PREFIX = 'QWEN_CUSTOM_API_KEY_';
  * `API_EXAMPLE_COM`. A 6-hex-char suffix derived from a SHA-256 of the raw
  * (protocol, baseUrl) pair disambiguates structurally distinct endpoints so
  * configuring one custom provider can't silently overwrite another's API
- * key. The suffix is short enough that a paste of the env var name into a
- * dashboard stays manageable, and collision probability at this size is
- * ~1 in 16M per pair — fine for an interactive setup flow.
+ * key. 12 hex chars (48 bits) gives ~280 trillion values — well past the
+ * point where an attacker controlling a user-typed URL could realistically
+ * collide an existing entry to redirect an API key write, while still
+ * keeping the env var name pasteable into a dashboard.
  */
 /**
  * Normalize a string to a `[A-Z0-9_]+` env-var-safe segment without using any
@@ -39,7 +40,7 @@ function normalizeEnvSegment(value: string): string {
     const code = upper.charCodeAt(i);
     const isAlphaNum =
       (code >= 65 /* A */ && code <= 90) /* Z */ ||
-      (code >= 48 /* 0 */ && code <= 57) /* 9 */;
+      (code >= 48 /* 0 */ && code <= 57); /* 9 */
     if (isAlphaNum) {
       result += upper[i];
       prevWasUnderscore = false;
@@ -77,7 +78,7 @@ export function generateCustomEnvKey(
   const suffix = createHash('sha256')
     .update(`${protocol}\0${canonicalBaseUrl}`)
     .digest('hex')
-    .slice(0, 6)
+    .slice(0, 12)
     .toUpperCase();
 
   return `${CUSTOM_API_KEY_ENV_PREFIX}${normalizeEnvSegment(
@@ -101,5 +102,14 @@ export const customProvider: ProviderConfig = {
   models: undefined,
   modelNamePrefix: '',
   showAdvancedConfig: true,
+  // Without this, applyModelProvidersPatch falls back to id+baseUrl identity
+  // matching, so reinstalling a custom provider under a different baseUrl
+  // leaves the old model entries behind — they accumulate over time.
+  // Every key we mint via generateCustomEnvKey starts with the well-known
+  // prefix, so a prefix match cleanly identifies "ours" without false
+  // positives against preset entries.
+  ownsModel: (model) =>
+    typeof model.envKey === 'string' &&
+    model.envKey.startsWith(CUSTOM_API_KEY_ENV_PREFIX),
   uiGroup: 'custom',
 };

@@ -964,9 +964,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 歡迎回來！（最後更新：{{timeAgo}}）',
   '🎯 Overall Goal:': '🎯 總體目標：',
-  'Select Authentication Method': '選擇認證方式',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    '您必須選擇認證方法才能繼續。再次按 Ctrl+C 退出',
+  'Connect a Provider': '連接服務商',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    '必須連接一個服務商才能繼續。再次按 Ctrl+C 退出',
   'Terms of Services and Privacy Notice': '服務條款和隱私聲明',
   'Qwen OAuth': 'Qwen OAuth (免費)',
   'Discontinued — switch to Coding Plan or API Key':

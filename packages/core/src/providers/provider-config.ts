@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { AuthType } from '../core/contentGenerator.js';
 import type {
   ModelSpec,
   ProviderConfig,
@@ -175,8 +176,18 @@ function buildModelConfigs(
  * Only defined for providers with a static `models` list.
  */
 export function resolveMetadataKey(config: ProviderConfig): string | undefined {
-  if (config.models) return config.id;
-  return undefined;
+  if (!config.models) return undefined;
+  // setValue uses dotted-path traversal — a provider id containing '.' would
+  // be split into multiple nested objects (`providerMetadata.foo.bar` →
+  // `providerMetadata.foo.bar = ...` vs `providerMetadata['foo.bar'] = ...`).
+  // Reject early so the bug is loud at registration time rather than
+  // silently corrupting the settings tree at install time.
+  if (config.id.includes('.')) {
+    throw new Error(
+      `Provider id must not contain '.' (would corrupt providerMetadata.${config.id} dotted writes): ${config.id}`,
+    );
+  }
+  return config.id;
 }
 
 /**
@@ -243,6 +254,26 @@ export function buildInstallPlan(
 
 export function computeModelListVersion(models: ProviderModelConfig[]): string {
   return createHash('sha256').update(JSON.stringify(models)).digest('hex');
+}
+
+/**
+ * Default base URLs per protocol, used as placeholder/fallback when the user
+ * doesn't supply one for a custom provider. Kept in core so the CLI flow
+ * (useProviderSetupFlow) and the VS Code flow (AuthMessageHandler) agree on
+ * the same value — if Anthropic ships a new endpoint we only update it here.
+ */
+const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
+  [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
+  [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
+  [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
+};
+
+/** Resolve the placeholder/default base URL for a chosen protocol. */
+export function getDefaultBaseUrlForProtocol(
+  protocol: AuthType | undefined,
+): string {
+  if (protocol === undefined) return '';
+  return DEFAULT_BASE_URLS[protocol] ?? '';
 }
 
 // ---------------------------------------------------------------------------

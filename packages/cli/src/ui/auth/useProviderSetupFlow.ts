@@ -9,6 +9,7 @@ import {
   AuthType,
   shouldShowStep,
   resolveBaseUrl,
+  getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -17,12 +18,6 @@ import type {
   ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
-
-const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
-  [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
-  [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
-  [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
-};
 import { normalizeModelIds, maskApiKey } from './useAuth.js';
 
 // ---------------------------------------------------------------------------
@@ -148,7 +143,9 @@ export function useProviderSetupFlow(
       // default endpoint for the chosen protocol.
       const resolved = resolveBaseUrl(config);
       setBaseUrl(resolved);
-      setBaseUrlPlaceholder(resolved ? '' : (DEFAULT_BASE_URLS[proto] ?? ''));
+      setBaseUrlPlaceholder(
+        resolved ? '' : getDefaultBaseUrlForProtocol(proto),
+      );
       setBaseUrlOptionIndex(0);
       setBaseUrlError(null);
 
@@ -204,7 +201,7 @@ export function useProviderSetupFlow(
       // Clear baseUrl so the user types fresh; show the protocol's default
       // endpoint as a placeholder (used if they submit blank).
       setBaseUrl('');
-      setBaseUrlPlaceholder(DEFAULT_BASE_URLS[selectedProtocol] ?? '');
+      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
       setApiKey('');
       setApiKeyError(null);
       goNext();

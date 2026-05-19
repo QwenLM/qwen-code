@@ -14,6 +14,7 @@ import {
   THIRD_PARTY_PROVIDERS,
   shouldShowStep,
   resolveBaseUrl,
+  getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
   type ProviderConfig,
   type ProviderSetupInputs,
@@ -285,15 +286,11 @@ export class AuthMessageHandler extends BaseMessageHandler {
         // Free-form URL input. Show a protocol-specific default as
         // placeholder (NOT pre-filled value) so picking Anthropic/Gemini
         // doesn't silently write the OpenAI endpoint when the user hits
-        // Enter on the OpenAI default.
+        // Enter on the OpenAI default. Defaults come from core's shared
+        // getDefaultBaseUrlForProtocol so CLI and VS Code stay in sync.
         const effectiveProtocol = protocol ?? provider.protocol;
-        const defaultByProtocol: Record<string, string> = {
-          openai: 'https://api.openai.com/v1',
-          anthropic: 'https://api.anthropic.com/v1',
-          gemini: 'https://generativelanguage.googleapis.com',
-        };
         const placeholder =
-          defaultByProtocol[String(effectiveProtocol)] ??
+          getDefaultBaseUrlForProtocol(effectiveProtocol) ||
           'https://api.openai.com/v1';
         const urlInput = await this.input({
           title: `${flowTitle}: Base URL`,

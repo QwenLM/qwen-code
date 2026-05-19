@@ -15,6 +15,7 @@ import {
   CUSTOM_API_KEY_ENV_PREFIX,
   Storage,
   applyProviderInstallPlan,
+  resolveMetadataKey,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
   type ModelProvidersConfig,
@@ -222,7 +223,20 @@ function writeSettings(settings: Record<string, unknown>): void {
     encoding: 'utf-8',
     mode: SETTINGS_FILE_MODE,
   });
-  fs.renameSync(tmpPath, settingsPath);
+  try {
+    fs.renameSync(tmpPath, settingsPath);
+  } catch (renameErr) {
+    // renameSync can fail on Windows when a watcher / antivirus holds the
+    // target (EPERM/EBUSY). The temp file otherwise lingers in ~/.qwen
+    // containing API keys — clean it up so secrets don't accumulate on
+    // disk across repeated failed writes.
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      /* best-effort cleanup; surface the original rename error below */
+    }
+    throw renameErr;
+  }
   // Tighten any pre-existing settings file inherited from older writes that
   // used the default umask. chmodSync is a no-op on the just-written file but
   // covers the case where the file was created earlier with looser bits.
@@ -478,11 +492,16 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
     },
 
     restore(): void {
-      if (backupData) {
-        data = backupData;
-        writeSettings(data);
-        backupData = null;
-      }
+      if (!backupData) return;
+      // Write to disk FIRST: if writeSettings throws (EACCES, disk full,
+      // EPERM on Windows), the on-disk file still holds the failed install's
+      // partial state. Updating in-memory `data` first would leave callers
+      // observing a clean memory snapshot while the file on disk lies. The
+      // CLI adapter (loadedSettingsAdapter) does it in the same order via
+      // restoreSettingsFromBackup() first.
+      writeSettings(backupData);
+      data = backupData;
+      backupData = null;
     },
 
     cleanupBackup(): void {
@@ -625,8 +644,14 @@ export function clearPersistedAuth(): void {
     }
     const pm = settings.providerMetadata as Record<string, unknown> | undefined;
     if (pm) {
-      delete pm['coding-plan'];
-      delete pm['token-plan'];
+      // Every preset with a static models[] writes providerMetadata.<id>.version
+      // via resolveProviderState — wipe them all on clear so stale entries
+      // don't cause phantom "update available" notifications for a provider
+      // the user just signed out of.
+      for (const p of ALL_PROVIDERS) {
+        const key = resolveMetadataKey(p);
+        if (key) delete pm[key];
+      }
     }
 
     writeSettings(settings);

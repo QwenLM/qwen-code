@@ -1028,9 +1028,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 С возвращением! (Последнее обновление: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Общая цель:',
-  'Select Authentication Method': 'Выберите метод авторизации',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'Вы должны выбрать метод авторизации для продолжения. Нажмите Ctrl+C снова для выхода.',
+  'Connect a Provider': 'Подключить провайдера',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'Необходимо подключить провайдера для продолжения. Нажмите Ctrl+C снова для выхода.',
   'Terms of Services and Privacy Notice':
     'Условия обслуживания и уведомление о конфиденциальности',
   'Qwen OAuth': 'Qwen OAuth',
