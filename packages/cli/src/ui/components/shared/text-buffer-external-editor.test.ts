@@ -57,9 +57,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 import fs from 'node:fs';
+import pathMod from 'node:path';
 import { useTextBuffer } from './text-buffer.js';
 
 const viewport = { height: 5, width: 40 };
+const expectedTmpFile = pathMod.join('/tmp/qwen-edit-mock', 'buffer.txt');
 
 describe('openInExternalEditor', () => {
   beforeEach(() => {
@@ -90,7 +92,7 @@ describe('openInExternalEditor', () => {
       expect.stringContaining('qwen-edit-'),
     );
     const writePath = (fs.writeFileSync as Mock).mock.calls[0]?.[0] as string;
-    expect(writePath).toBe('/tmp/qwen-edit-mock/buffer.txt');
+    expect(writePath).toBe(expectedTmpFile);
   });
 
   it('should write temp file with mode 0o600', async () => {
@@ -175,7 +177,7 @@ describe('openInExternalEditor', () => {
   it('should use getExternalEditorCommand when preferredEditor is set', async () => {
     mockGetExternalEditorCommand.mockReturnValue({
       command: 'code',
-      args: ['/tmp/qwen-edit-mock/buffer.txt', '--wait'],
+      args: [expectedTmpFile, '--wait'],
       isTerminal: false,
       needsShell: false,
     });
@@ -207,7 +209,7 @@ describe('openInExternalEditor', () => {
   it('should quote args when needsShell is true', async () => {
     mockGetExternalEditorCommand.mockReturnValue({
       command: 'code.cmd',
-      args: ['/tmp/qwen-edit-mock/buffer.txt', '--wait'],
+      args: [expectedTmpFile, '--wait'],
       isTerminal: false,
       needsShell: true,
     });
@@ -499,9 +501,7 @@ describe('openInExternalEditor', () => {
       await result.current.openInExternalEditor();
     });
 
-    expect(fs.unlinkSync).toHaveBeenCalledWith(
-      '/tmp/qwen-edit-mock/buffer.txt',
-    );
+    expect(fs.unlinkSync).toHaveBeenCalledWith(expectedTmpFile);
     expect(fs.rmdirSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock');
   });
 });
