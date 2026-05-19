@@ -31,11 +31,14 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * Object keys that would let a caller climb into the prototype chain when
- * walking a dotted key path. Any attempt to write into one of these is
- * rejected so install-plan inputs cannot pollute Object.prototype.
+ * Mode for ~/.qwen/settings.json — owner-only read/write. The unified install
+ * plan now persists API keys into `env.*` inside this file, so on multi-user
+ * systems the default 0644 (process umask) would expose those secrets to any
+ * local user. Keep this in sync with `loadedSettingsAdapter`'s expectations.
  */
-const UNSAFE_KEY_PARTS = new Set(['__proto__', 'constructor', 'prototype']);
+const SETTINGS_FILE_MODE = 0o600;
+/** Directory mode for ~/.qwen — owner-only. */
+const SETTINGS_DIR_MODE = 0o700;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -184,11 +187,25 @@ function writeSettings(settings: Record<string, unknown>): void {
   const settingsPath = Storage.getGlobalSettingsPath();
   const dir = path.dirname(settingsPath);
   if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: SETTINGS_DIR_MODE });
   }
   const tmpPath = `${settingsPath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify(settings, null, 2), 'utf-8');
+  // Create the temp file with owner-only permissions so secrets in `env.*`
+  // are never observable to other local users even briefly.
+  fs.writeFileSync(tmpPath, JSON.stringify(settings, null, 2), {
+    encoding: 'utf-8',
+    mode: SETTINGS_FILE_MODE,
+  });
   fs.renameSync(tmpPath, settingsPath);
+  // Tighten any pre-existing settings file inherited from older writes that
+  // used the default umask. chmodSync is a no-op on the just-written file but
+  // covers the case where the file was created earlier with looser bits.
+  try {
+    fs.chmodSync(settingsPath, SETTINGS_FILE_MODE);
+  } catch {
+    // Best effort — surface nothing to the user if the FS rejects chmod
+    // (e.g. Windows, mounted FS without POSIX permissions).
+  }
 }
 
 /**
@@ -379,34 +396,47 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
 
     setValue(key: string, value: unknown): void {
       const parts = key.split('.');
-      // Refuse to walk through prototype-pollution keys. ProviderInstallPlan
-      // contents come from in-process callers, but install plans accept
-      // arbitrary string keys (env vars, providerState namespaces) so the
-      // input is untrusted enough to warrant the guard.
-      if (parts.some((p) => UNSAFE_KEY_PARTS.has(p))) {
-        throw new Error(
-          `Refusing to write settings key with reserved segment: ${key}`,
-        );
-      }
       let current = data;
-      for (let i = 0; i < parts.length - 1; i++) {
+      for (let i = 0; i < parts.length; i++) {
         const part = parts[i]!;
+        // Refuse to walk through prototype-pollution keys. ProviderInstallPlan
+        // contents come from in-process callers, but install plans accept
+        // arbitrary string keys (env vars, providerState namespaces) so the
+        // input is untrusted enough to warrant the guard. Literal === checks
+        // (not Set.has) are what CodeQL's prototype-pollution sanitiser
+        // recognises — keep them at the only step that actually writes to
+        // `current`.
+        if (
+          part === '__proto__' ||
+          part === 'constructor' ||
+          part === 'prototype'
+        ) {
+          throw new Error(
+            `Refusing to write settings key with reserved segment: ${key}`,
+          );
+        }
+        if (i === parts.length - 1) {
+          current[part] = value;
+          break;
+        }
         const existing = Object.prototype.hasOwnProperty.call(current, part)
           ? current[part]
           : undefined;
         if (existing == null) {
           current[part] = {};
-        } else if (typeof existing !== 'object') {
-          // Refuse to silently overwrite a scalar at an intermediate segment —
-          // would destroy user data (e.g. {"env": "legacy-string"} losing the
-          // string when env.NEW_KEY is written).
+        } else if (Array.isArray(existing) || typeof existing !== 'object') {
+          // Refuse to silently overwrite a scalar (or treat an array as an
+          // object) at an intermediate segment — would either destroy user
+          // data (e.g. {"env": "legacy-string"} losing the string when
+          // env.NEW_KEY is written) or set string keys on an array.
           throw new Error(
-            `Cannot write settings key "${key}": segment "${part}" is a ${typeof existing}, not an object`,
+            `Cannot write settings key "${key}": segment "${part}" is ${
+              Array.isArray(existing) ? 'an array' : `a ${typeof existing}`
+            }, not an object`,
           );
         }
         current = current[part] as Record<string, unknown>;
       }
-      current[parts[parts.length - 1]!] = value;
     },
 
     getModelProviders(): ModelProvidersConfig {
@@ -457,10 +487,23 @@ export async function applyProviderInstallPlanToFile(
 
 /**
  * Read ~/.qwen/settings.json and extract values for VSCode Settings UI.
- * Returns null if no valid configuration found.
+ * Returns null if no valid configuration found, or if the file is
+ * malformed — the panel falls back to the empty/default state instead of
+ * crashing the extension on activation. `readSettings` itself now throws
+ * on parse failure (so we never silently overwrite a corrupt file in the
+ * write paths), so this caller has to catch.
  */
 export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
-  const settings = readSettings();
+  let settings: Record<string, unknown>;
+  try {
+    settings = readSettings();
+  } catch (error) {
+    console.error(
+      '[settingsWriter] readQwenSettingsForVSCode failed; returning null:',
+      error,
+    );
+    return null;
+  }
 
   const security = settings.security as Record<string, unknown> | undefined;
   const auth = security?.auth as Record<string, unknown> | undefined;

@@ -245,9 +245,16 @@ export class AuthMessageHandler extends BaseMessageHandler {
       provider.protocolOptions &&
       provider.protocolOptions.length > 1
     ) {
+      // AuthType's raw string values ('openai' / 'anthropic' / 'gemini') are
+      // implementation detail; QuickPick should show human-readable labels.
+      const protocolLabels: Record<string, string> = {
+        [AuthType.USE_OPENAI]: 'OpenAI Compatible',
+        [AuthType.USE_ANTHROPIC]: 'Anthropic',
+        [AuthType.USE_GEMINI]: 'Gemini',
+      };
       const selected = await this.pick(
         provider.protocolOptions.map((p) => ({
-          label: String(p),
+          label: protocolLabels[String(p)] ?? String(p),
           value: String(p),
         })),
         `${flowTitle}: Protocol`,

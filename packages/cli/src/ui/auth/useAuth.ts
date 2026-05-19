@@ -147,7 +147,14 @@ export const useAuthCommand = (
 
   const handleProviderSubmit = useCallback(
     async (providerConfig: ProviderConfig, inputs: ProviderSetupInputs) => {
+      // Resolve the protocol once and store it as pendingAuthType so that if
+      // applyProviderInstallPlan rejects, handleAuthFailure (which gates the
+      // AuthEvent telemetry on pendingAuthType being defined) can record the
+      // failure under the right AuthType bucket instead of silently dropping
+      // it.
+      const protocol = inputs.protocol ?? providerConfig.protocol;
       try {
+        setPendingAuthType(protocol);
         setIsAuthenticating(true);
         setAuthError(null);
 
@@ -173,7 +180,6 @@ export const useAuthCommand = (
           Date.now(),
         );
 
-        const protocol = inputs.protocol ?? providerConfig.protocol;
         logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
       } catch (error) {
         handleAuthFailure(error);

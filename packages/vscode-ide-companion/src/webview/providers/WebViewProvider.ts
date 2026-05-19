@@ -1312,8 +1312,18 @@ export class WebViewProvider {
       return;
     }
 
+    // Log only the host so we don't leak credentials embedded in user-info
+    // (`https://user:sk-secret@host/v1`) or query strings into extension-host
+    // logs / diagnostic bundles.
+    const baseUrlHost = (() => {
+      try {
+        return new URL(inputs.baseUrl).hostname;
+      } catch {
+        return '[invalid]';
+      }
+    })();
     console.log(
-      `[WebViewProvider] authInteractive: provider=${providerConfig.id}, baseUrl=${inputs.baseUrl}`,
+      `[WebViewProvider] authInteractive: provider=${providerConfig.id}, host=${baseUrlHost}`,
     );
 
     try {
