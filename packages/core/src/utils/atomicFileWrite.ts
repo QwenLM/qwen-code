@@ -5,6 +5,7 @@
  */
 
 import * as crypto from 'node:crypto';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { isNodeError } from './errors.js';
@@ -23,6 +24,14 @@ export interface AtomicWriteFileOptions extends AtomicWriteOptions {
   flush?: boolean;
   /** Encoding for string content. Default: 'utf-8'. */
   encoding?: BufferEncoding;
+  /**
+   * Ignore the existing target's permission bits and apply `mode`
+   * regardless. Use for secrets that must heal historically over-permissive
+   * files (e.g. a credential file accidentally restored from backup at
+   * 0o644 must be forced back to 0o600). No effect when `mode` is unset.
+   * Default: false.
+   */
+  forceMode?: boolean;
 }
 
 /**
@@ -124,14 +133,17 @@ export async function atomicWriteFile(
 
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
-  // Stat the target to preserve existing permissions (mask out file-type bits).
+  // forceMode skips permission preservation — caller insists on options.mode
+  // (used for credentials that must heal historically over-permissive files).
   let existingMode: number | undefined;
-  try {
-    const stat = await fs.stat(targetPath);
-    existingMode = stat.mode & 0o7777;
-  } catch (err) {
-    if (!isNodeError(err) || err.code !== 'ENOENT') {
-      throw err;
+  if (!options?.forceMode) {
+    try {
+      const stat = await fs.stat(targetPath);
+      existingMode = stat.mode & 0o7777;
+    } catch (err) {
+      if (!isNodeError(err) || err.code !== 'ENOENT') {
+        throw err;
+      }
     }
   }
 
@@ -199,4 +211,153 @@ export async function atomicWriteJSON(
     encoding: 'utf-8',
     ...options,
   });
+}
+
+// --- Synchronous variants ----------------------------------------------------
+
+/**
+ * True blocking sleep without busy-wait. Backed by a tiny SharedArrayBuffer
+ * since Atomics.wait requires an Int32Array view of shared memory.
+ */
+function blockingSleep(ms: number): void {
+  if (ms <= 0) return;
+  const sab = new SharedArrayBuffer(4);
+  const i32 = new Int32Array(sab);
+  Atomics.wait(i32, 0, 0, ms);
+}
+
+/**
+ * Sync mirror of {@link renameWithRetry}. Retries on EPERM/EACCES with
+ * exponential backoff (common on Windows under concurrent AV scans).
+ */
+export function renameWithRetrySync(
+  src: string,
+  dest: string,
+  retries: number,
+  delayMs: number,
+): void {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      fsSync.renameSync(src, dest);
+      return;
+    } catch (error: unknown) {
+      const isRetryable =
+        isNodeError(error) &&
+        (error.code === 'EPERM' || error.code === 'EACCES');
+      if (!isRetryable || attempt === retries) {
+        throw error;
+      }
+      blockingSleep(delayMs * 2 ** attempt);
+    }
+  }
+}
+
+/**
+ * Sync mirror of {@link resolveSymlinkChain}. Walks symlinks (including
+ * broken ones) up to POSIX SYMLOOP_MAX. Returns the original path for
+ * non-symlinks.
+ */
+function resolveSymlinkChainSync(filePath: string): string {
+  const maxHops = 40;
+  let current = filePath;
+  for (let i = 0; i < maxHops; i++) {
+    let lstats: fsSync.Stats;
+    try {
+      lstats = fsSync.lstatSync(current);
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') {
+        return current;
+      }
+      throw err;
+    }
+    if (!lstats.isSymbolicLink()) {
+      return current;
+    }
+    const linkTarget = fsSync.readlinkSync(current);
+    if (path.isAbsolute(linkTarget)) {
+      current = linkTarget;
+    } else {
+      const parentDir = fsSync.realpathSync(path.dirname(current));
+      current = path.resolve(parentDir, linkTarget);
+    }
+  }
+  const err = new Error(
+    `ELOOP: too many levels of symbolic links, resolve '${filePath}'`,
+  );
+  (err as NodeJS.ErrnoException).code = 'ELOOP';
+  throw err;
+}
+
+/**
+ * Synchronous variant of {@link atomicWriteFile}. Same semantics: symlink
+ * resolution, permission preservation (or `forceMode` override), fsync via
+ * `flush: true`, EPERM/EACCES rename retry, EXDEV fallback to direct write.
+ *
+ * Use for code paths that cannot await (e.g. settings persistence on
+ * `process.exit`). Prefer the async variant when possible.
+ */
+export function atomicWriteFileSync(
+  filePath: string,
+  data: string | Buffer,
+  options?: AtomicWriteFileOptions,
+): void {
+  const retries = options?.retries ?? 3;
+  const delayMs = options?.delayMs ?? 50;
+  const flush = options?.flush ?? true;
+  const encoding = options?.encoding ?? 'utf-8';
+
+  const targetPath = resolveSymlinkChainSync(filePath);
+  const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+
+  let existingMode: number | undefined;
+  if (!options?.forceMode) {
+    try {
+      const stat = fsSync.statSync(targetPath);
+      existingMode = stat.mode & 0o7777;
+    } catch (err) {
+      if (!isNodeError(err) || err.code !== 'ENOENT') {
+        throw err;
+      }
+    }
+  }
+
+  const desiredMode = existingMode ?? options?.mode;
+
+  const writeOptions: {
+    encoding?: BufferEncoding;
+    flush?: boolean;
+    mode?: number;
+  } = {};
+  if (typeof data === 'string') writeOptions.encoding = encoding;
+  if (flush) writeOptions.flush = true;
+  if (desiredMode !== undefined) writeOptions.mode = desiredMode;
+
+  const tryChmodSync = (target: string): void => {
+    if (desiredMode === undefined) return;
+    try {
+      fsSync.chmodSync(target, desiredMode);
+    } catch {
+      // Not all filesystems support chmod (FAT/exFAT).
+    }
+  };
+
+  try {
+    fsSync.writeFileSync(tmpPath, data, writeOptions);
+    tryChmodSync(tmpPath);
+    renameWithRetrySync(tmpPath, targetPath, retries, delayMs);
+  } catch (error) {
+    try {
+      fsSync.unlinkSync(tmpPath);
+    } catch {
+      // Ignore cleanup errors.
+    }
+
+    if (isNodeError(error) && error.code === 'EXDEV') {
+      fsSync.writeFileSync(targetPath, data, writeOptions);
+      tryChmodSync(targetPath);
+      return;
+    }
+
+    throw error;
+  }
 }
