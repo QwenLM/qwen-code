@@ -358,15 +358,30 @@ jobs:
           restore-keys: |
             qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-
 
+      # Action SHA, input casing, settings_json and GITHUB_TOKEN are
+      # aligned with the currently-deployed (proven-working) review job
+      # on main. The previous config (old action SHA a08dc886, lowercase
+      # inputs, no settings_json, no token) hung for the full job timeout
+      # with zero output because the bundled /review skill had no shell /
+      # write tools and no gh auth, then waited on input with no TTY.
+      # The bundled `/review <url>` prompt (this PR's purpose) is kept;
+      # only the enabling configuration is corrected.
       - name: 'Run Qwen Code Review'
         id: 'review'
         if: |-
           steps.size.outputs.should_review == 'true'
-        uses: 'QwenLM/qwen-code-action@a08dc886c2094312d6cf2df08ba5fd0437c53339' # main pinned on 2026-05-14
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2' # matches main's deployed working pin
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
         with:
-          openai_api_key: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
-          openai_base_url: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
-          openai_model: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          settings_json: |-
+            {
+              "coreTools": ["run_shell_command", "write_file"],
+              "sandbox": false
+            }
           prompt: '${{ steps.pr.outputs.review_prompt }}'
 
       - name: 'Post dry-run summary'
