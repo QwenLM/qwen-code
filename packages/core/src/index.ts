@@ -133,6 +133,7 @@ export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 
 export {
   computeThresholds,
+  SUMMARY_RESERVE,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';

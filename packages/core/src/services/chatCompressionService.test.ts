@@ -2116,18 +2116,21 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     expect(callArg.config?.maxOutputTokens).toBe(20_000);
   });
 
-  it('returns FAILED_OUTPUT_TRUNCATED when the summary output hits the COMPACT_MAX_OUTPUT_TOKENS cap (likely truncated)', async () => {
-    // Mock the side-query to return a non-empty summary that exactly hits the
-    // 20K cap — the guard should drop the result and surface it as a failure
-    // with a status distinct from EMPTY_SUMMARY so telemetry can separate
-    // prompt-quality failures (empty) from capacity failures (truncated).
-    // (R1.1 made the breaker tick; R5.2 split the status.)
+  it('returns FAILED_OUTPUT_TRUNCATED when the summary output exceeds the COMPACT_MAX_OUTPUT_TOKENS cap (likely truncated)', async () => {
+    // Mock the side-query to return a non-empty summary that exceeds the
+    // 20K cap — the guard should drop the result and surface it as a
+    // failure with a status distinct from EMPTY_SUMMARY so telemetry can
+    // separate prompt-quality failures from capacity failures.
+    // (R1.1 made the breaker tick; R5.2 split the status; R6.2 changed
+    // `>=` to `>` so the exact-cap case is treated as a legitimate
+    // summary — only true overruns trigger the guard.)
     vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
-      text: '<state_snapshot>truncated...',
+      text: '<state_snapshot>truncated...</state_snapshot>',
       usage: {
         promptTokenCount: 50_000,
-        candidatesTokenCount: 20_000, // ← exactly at COMPACT_MAX_OUTPUT_TOKENS
-        totalTokenCount: 70_000,
+        // 1 token over the cap — only `>` triggers, not `>=`.
+        candidatesTokenCount: 20_001,
+        totalTokenCount: 70_001,
       },
     } as never);
 
@@ -2213,10 +2216,12 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
     } as unknown as Config;
   }
 
-  it('triggers compaction when API-reported tokens are below threshold but estimated tokens with the pending user message exceed it', async () => {
+  it('triggers compaction when precomputedEffectiveTokens crosses the auto threshold even though originalTokenCount is below it', async () => {
     // 200K window, computeThresholds(200K).auto = 167K
-    // originalTokenCount = 160K (under by 7K)
-    // user message ~ 10K tokens (40K chars / 4) -> effectiveTokens = 170K, crosses 167K
+    // originalTokenCount = 160K (under by 7K), but caller's precomputed
+    // estimate factors in the pending user message → 170K, crosses 167K.
+    // R6.14 collapsed the "estimate-inside-the-service" branch; callers
+    // pass `precomputedEffectiveTokens` upstream now.
     const userMessage: Content = {
       role: 'user',
       parts: [{ text: 'x'.repeat(40_000) }],
@@ -2239,6 +2244,7 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
       consecutiveFailures: 0,
       originalTokenCount: 160_000,
       pendingUserMessage: userMessage,
+      precomputedEffectiveTokens: 170_000,
     });
 
     // cheap-gate let it through (not NOOP), so spy was called
@@ -2246,7 +2252,7 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
     expect(result.info.compressionStatus).not.toBe(CompressionStatus.NOOP);
   });
 
-  it('NOOPs when neither originalTokenCount nor estimated total reaches threshold', async () => {
+  it('NOOPs when neither precomputedEffectiveTokens nor originalTokenCount reaches threshold', async () => {
     const spy = vi
       .spyOn(sideQueryModule, 'runSideQuery')
       .mockResolvedValue({ text: 's', usage: {} } as never);
@@ -2262,10 +2268,64 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
         role: 'user',
         parts: [{ text: 'short' }],
       },
+      precomputedEffectiveTokens: 80_010,
     });
 
     expect(spy).not.toHaveBeenCalled();
     expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+  });
+
+  it('falls back to originalTokenCount when no precomputedEffectiveTokens is supplied (R6.14)', async () => {
+    // Direct callers (tests, future internal paths) without precomputed
+    // estimate use originalTokenCount as the gate input — the
+    // pendingUserMessage-only branch was removed because the service
+    // shouldn't double-clone history that the caller already paid for.
+    const spy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({ text: 's', usage: {} } as never);
+
+    const result = await new ChatCompressionService().compress(makeFakeChat(), {
+      promptId: 'p',
+      force: false,
+      model: 'qwen-test',
+      config: makeFakeConfig({ contextWindowSize: 200_000 }),
+      consecutiveFailures: 0,
+      originalTokenCount: 50_000, // below auto=167K → NOOP
+    });
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+  });
+
+  it('precomputedEffectiveTokens path skips estimation work (R6.15)', async () => {
+    // R6.15: pin the perf optimization. When the caller supplies
+    // precomputedEffectiveTokens, the service must NOT recompute the
+    // estimate (no `getHistory(true)` clone). Verifies that the
+    // precomputed value alone drives the gate decision — even if
+    // originalTokenCount is way below the threshold.
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>x</state_snapshot>',
+      usage: {
+        promptTokenCount: 99_000,
+        candidatesTokenCount: 1500,
+        totalTokenCount: 100_500,
+      },
+    } as never);
+
+    const result = await new ChatCompressionService().compress(makeFakeChat(), {
+      promptId: 'p',
+      force: false,
+      model: 'qwen-test',
+      config: makeFakeConfig({ contextWindowSize: 200_000 }),
+      consecutiveFailures: 0,
+      // Raw count low, but caller's precomputed estimate has already
+      // crossed auto=167K — the gate trusts the precomputed value.
+      originalTokenCount: 10_000,
+      precomputedEffectiveTokens: 180_000,
+    });
+
+    expect(spy).toHaveBeenCalled();
+    expect(result.info.compressionStatus).not.toBe(CompressionStatus.NOOP);
   });
 });
 

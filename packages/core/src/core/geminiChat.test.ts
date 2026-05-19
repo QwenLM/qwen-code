@@ -2065,6 +2065,14 @@ describe('GeminiChat', async () => {
           (part) => part.text === userMessage,
         ),
       ).toBe(true);
+      // R6.15: pin the estimation-reuse perf optimization. sendMessageStream
+      // computes effectiveTokens once and passes it through so the service
+      // doesn't redo the work. Catching a regression that drops this field
+      // back to undefined would be otherwise invisible.
+      expect(passedOpts.precomputedEffectiveTokens).toBeTypeOf('number');
+      expect(passedOpts.precomputedEffectiveTokens).toBeGreaterThanOrEqual(
+        177_000,
+      );
     });
 
     it('resets consecutiveFailures before forcing when hard threshold crossed', async () => {
@@ -4274,6 +4282,38 @@ describe('GeminiChat', async () => {
       // Next unforced call: counter is back to 0.
       await chat.tryCompress('p3', 'm1');
       expect(compressSpy.mock.calls[3][1].consecutiveFailures).toBe(0);
+    });
+
+    it('counts COMPRESSION_FAILED_OUTPUT_TRUNCATED toward the breaker (R6.15)', async () => {
+      // The truncation guard (R1.1 + R5.2b) returns OUTPUT_TRUNCATED on
+      // cap overruns. isCompressionFailureStatus() includes it so the
+      // breaker should trip after MAX_CONSECUTIVE_FAILURES — verify
+      // explicitly so a future enum reshuffle that drops it from the
+      // failure-status list is caught.
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy.mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 100_000,
+          newTokenCount: 100_000,
+          compressionStatus:
+            CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+        },
+      });
+      chat.setHistory([userMsg('a'), modelMsg('b'), userMsg('c')]);
+
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await chat.tryCompress(`p-trunc-${i}`, 'm1');
+      }
+      // Counter should have reached MAX after these truncation-status
+      // failures, just like INFLATED and EMPTY_SUMMARY do.
+      await chat.tryCompress('p-trunc-after', 'm1');
+      expect(
+        compressSpy.mock.calls[MAX_CONSECUTIVE_FAILURES][1].consecutiveFailures,
+      ).toBe(MAX_CONSECUTIVE_FAILURES);
     });
   });
 });

@@ -5,6 +5,7 @@
  */
 
 import type {
+  CompactionThresholds,
   CompressionStatus,
   MCPServerConfig,
   ThoughtSummary,
@@ -344,16 +345,12 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
 
 export type ContextTier = 'safe' | 'warn' | 'auto' | 'hard';
 
-export interface ContextThresholds {
-  /** Window minus 20K summary reserve — the budget available for input + summary. */
-  effectiveWindow: number;
-  /** Token count at which the warn tier triggers. */
-  warn: number;
-  /** Token count at which auto-compaction triggers. */
-  auto: number;
-  /** Token count at which auto-compaction is forced (resets failure counter). */
-  hard: number;
-}
+/**
+ * Re-export of core's `CompactionThresholds` to keep the CLI's display
+ * layer and core's compaction layer on the exact same shape. (R6.4: a
+ * locally-duplicated shape silently drifts if core's fields change.)
+ */
+export type ContextThresholds = CompactionThresholds;
 
 export interface ContextCategoryBreakdown {
   systemPrompt: number;

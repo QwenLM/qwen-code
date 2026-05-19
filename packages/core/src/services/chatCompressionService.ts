@@ -20,7 +20,6 @@ import {
   resolveSlimmingConfig,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
-import { estimatePromptTokens } from './tokenEstimation.js';
 
 /**
  * The fraction of the latest chat history to keep. A value of 0.3
@@ -339,6 +338,17 @@ export class ChatCompressionService {
       !force &&
       !bypassTokenThreshold
     ) {
+      // R6.1: the breaker NOOP path used to be silent — easy to misdiagnose
+      // a context overflow as "auto-compaction never ran" when in fact it
+      // tripped after 3 failures. Log once per send so the symptom is
+      // visible at warn level.
+      config
+        .getDebugLogger()
+        .warn(
+          `[chat-compression] breaker tripped: consecutiveFailures=` +
+            `${consecutiveFailures} >= MAX=${MAX_CONSECUTIVE_FAILURES}; ` +
+            `skipping auto-compaction. Use /compress to force a recovery.`,
+        );
       return {
         newHistory: null,
         info: {
@@ -357,24 +367,19 @@ export class ChatCompressionService {
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
       const { auto } = computeThresholds(contextLimit);
-      // Order of preference for the effective-token estimate:
-      //   1. Caller already computed it (sendMessageStream hard-tier rescue)
-      //   2. Compute it here from history + pending user message
-      //   3. Fall back to the raw API-reported count
-      // Path 1 avoids a second `getHistory(true)` clone per send when
-      // sendMessageStream already paid for one. (R1.3 / R1.4)
-      const pendingUserMessage = opts.pendingUserMessage;
+      // Effective-token source: the only production caller of the auto-compact
+      // gate (`sendMessageStream` → hard-tier rescue) always passes
+      // `precomputedEffectiveTokens`. Manual /compress and heap-pressure
+      // bypass the gate entirely via `force` / `bypassTokenThreshold`. So in
+      // practice the precomputed branch is the only live one. We keep the
+      // fallback to `originalTokenCount` for direct service callers (tests,
+      // future call sites without a pending message) — but DO NOT take the
+      // "estimate here" path: that would double-clone the history (the
+      // caller already did it). The previous pendingUserMessage-only
+      // branch was unreachable in production; removing avoids the latent
+      // clone risk if a future caller forgot to precompute. (R6.14)
       const effectiveTokens =
-        opts.precomputedEffectiveTokens !== undefined
-          ? opts.precomputedEffectiveTokens
-          : pendingUserMessage
-            ? estimatePromptTokens(
-                chat.getHistory(true),
-                pendingUserMessage,
-                originalTokenCount,
-                slimmingConfig.imageTokenEstimate,
-              )
-            : originalTokenCount;
+        opts.precomputedEffectiveTokens ?? originalTokenCount;
       if (effectiveTokens < auto) {
         return {
           newHistory: null,
@@ -547,15 +552,25 @@ export class ChatCompressionService {
     // call on every send. Reactive overflow still catches the catastrophic
     // case. See docs/design/auto-compaction-threshold-redesign.md risk #2.
     //
-    // TODO(finish_reason): the current `>= cap` check is a heuristic that
-    // false-positives on legitimate summaries that happen to land exactly at
-    // the cap. The proper signal is `finish_reason === 'length'` (OpenAI) /
-    // `MAX_TOKENS` (Gemini), but `runSideQuery` doesn't surface it today.
-    // Plumb it through and tighten this guard when that's available.
+    // TODO(finish_reason): the current cap check is a heuristic. The proper
+    // signal is `finish_reason === 'length'` (OpenAI) / `MAX_TOKENS`
+    // (Gemini), but `runSideQuery` doesn't surface it today. Plumb it
+    // through and tighten this guard when that's available.
+    //
+    // R6.2: use `>` rather than `>=` to shrink the false-positive window —
+    // a model whose tokenizer happens to emit a clean summary at exactly
+    // 20K tokens shouldn't be conflated with a truncated one. The API
+    // enforces `<= maxOutputTokens` hard, so `>` will essentially never
+    // fire today, but it's the right semantics once we have finish_reason
+    // (the heuristic moves to a finish_reason check; this fallback only
+    // triggers on values that exceed the cap, which shouldn't happen).
+    // With the COMPRESSION_FAILED_OUTPUT_TRUNCATED status now ticking the
+    // breaker (R5.2b), false-positives are costly — 3 of them disable
+    // auto-compaction — so erring on the liberal side is the safer trade.
     if (
       !isSummaryEmpty &&
       typeof compressionOutputTokenCount === 'number' &&
-      compressionOutputTokenCount >= COMPACT_MAX_OUTPUT_TOKENS
+      compressionOutputTokenCount > COMPACT_MAX_OUTPUT_TOKENS
     ) {
       config
         .getDebugLogger()

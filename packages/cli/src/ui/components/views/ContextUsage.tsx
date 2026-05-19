@@ -150,8 +150,7 @@ const ThresholdRow: React.FC<{
   label: string;
   tokens: number;
   isCurrent?: boolean;
-  hint?: string;
-}> = ({ label, tokens, isCurrent, hint }) => {
+}> = ({ label, tokens, isCurrent }) => {
   const tokenStr = `${formatTokens(tokens)} ${t('tokens')}`;
   return (
     <Box width={CONTENT_WIDTH}>
@@ -164,10 +163,7 @@ const ThresholdRow: React.FC<{
         <Text color={theme.text.primary}>{label}</Text>
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
-        <Text color={theme.text.secondary}>
-          {tokenStr}
-          {hint ? `  ${hint}` : ''}
-        </Text>
+        <Text color={theme.text.secondary}>{tokenStr}</Text>
       </Box>
     </Box>
   );

@@ -39,8 +39,11 @@ export const tipRegistry: ContextualTip[] = [
   // --- Post-response contextual tips (priority: higher = more urgent) ---
   {
     id: 'context-critical',
+    // R6.8: tip fires post-response — hard-tier rescue (if it ran)
+    // already forced compaction on the send that produced this response,
+    // so the tense should be past, not future.
     content:
-      'Context near hard limit — auto-compact will force on next send. Consider /clear if you want to start fresh.',
+      'Context near hard limit — auto-compact was forced on this turn. Consider /clear if context remains tight.',
     trigger: 'post-response',
     isRelevant: (ctx) =>
       ctx.thresholds !== undefined &&

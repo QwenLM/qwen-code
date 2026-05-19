@@ -46,6 +46,7 @@ import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
   computeThresholds,
+  MAX_CONSECUTIVE_FAILURES,
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
 import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
@@ -457,23 +458,37 @@ export class GeminiChat {
    * single-shot hasFailedCompressionAttempt lock that previously disabled
    * auto-compaction for the rest of the session on any failure.
    *
-   * SEMANTICS (R5.3): this counter tracks "non-force, non-hard-rescue
-   * consecutive failures", NOT every failure literally.
+   * SEMANTICS (R5.3 / R6.3): this counter tracks the cheap-gate path's
+   * health. Hard-tier rescue has its own bound (`hardRescueFailureCount`,
+   * below) because its trigger condition (token cross hard threshold) and
+   * failure-mode (model can't compress further) are different from a
+   * regular proactive compression failure. Detail:
    *   - Auto-compaction failures (cheap-gate path): increment by 1.
    *   - Manual `/compress` failures: skipped (`force=true` → `!force`
    *     guard in the failure branch).
-   *   - Hard-tier rescue failures: skipped (force=true) AND the counter
-   *     is reset to 0 BEFORE the rescue call (sendMessageStream), so
-   *     repeated hard-rescue failures never accumulate here. The rationale
-   *     is fail-open: hard predicts imminent overflow, so we should keep
-   *     trying regardless of recent failures. Reactive overflow is the
-   *     real safety net for that path — it bumps the counter by +1 so
-   *     N reactive failures will still trip the breaker.
-   *
-   * If you're debugging "why is hard-rescue firing but the counter is 0",
-   * that's by design.
+   *   - Hard-tier rescue failures: skipped (force=true); see
+   *     `hardRescueFailureCount` for that path's retry budget.
+   *   - Reactive overflow failures: explicitly +1 (also force=true, but
+   *     the post-call site bumps the counter — see ~L984). Status-based
+   *     and thrown failures both increment now (R6.7).
    */
   private consecutiveFailures = 0;
+
+  /**
+   * Consecutive hard-tier rescue failures for this chat. Hard rescue is
+   * force=true so `tryCompress`'s normal `!force` guard skips the
+   * `consecutiveFailures` increment, and the rescue itself resets that
+   * counter to 0 to let force-compress proceed past the cheap-gate
+   * breaker. Without a dedicated counter, repeated hard-rescue failures
+   * would burn one compaction API call per send forever.
+   *
+   * Bounded by MAX_CONSECUTIVE_FAILURES: after that many consecutive
+   * rescue failures, `sendMessageStream` stops gating on hard threshold
+   * and lets reactive overflow take over as the next layer of defence.
+   * Any successful compression (rescue or otherwise) resets it to 0.
+   * (R6.3)
+   */
+  private hardRescueFailureCount = 0;
 
   /**
    * Heap-pressure compaction is process-wide pressure applied per chat. If one
@@ -610,8 +625,10 @@ export class GeminiChat {
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
       // tripped. Also clear the heap-pressure cooldown — pressure has eased
-      // enough that compaction worked.
+      // enough that compaction worked. (R6.3: hardRescueFailureCount also
+      // resets on any compression success, not just hard-rescue success.)
       this.consecutiveFailures = 0;
+      this.hardRescueFailureCount = 0;
       this.heapPressureCompressionCooldownUntil = 0;
     } else if (bypassTokenThreshold) {
       // Heap-pressure compaction failed: skip touching the failure counter
@@ -764,8 +781,25 @@ export class GeminiChat {
         this.lastPromptTokenCount,
         imageTokenEstimate,
       );
-      const shouldForceFromHard = effectiveTokens >= hard;
+      // R6.3: bound hard-rescue retries. Without this gate, a chat whose
+      // history can't shrink (model consistently produces unusable summaries,
+      // network is broken, etc.) would fire hard-rescue on every send
+      // forever — force=true skips the regular consecutiveFailures
+      // increment, and the rescue's own pre-call reset wipes any state
+      // proactive compaction may have accumulated. After
+      // MAX_CONSECUTIVE_FAILURES rescue failures we stop trying and let
+      // reactive overflow handle the next layer of defence.
+      const shouldForceFromHard =
+        effectiveTokens >= hard &&
+        this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
       if (shouldForceFromHard) {
+        // R6.6: log the rescue trigger so it's not invisible. The counter
+        // reset right after is documented in the consecutiveFailures JSDoc.
+        debugLogger.info(
+          `[compaction] hard-tier rescue: effectiveTokens=${effectiveTokens} >= hard=${hard}, ` +
+            `forcing compaction (consecutiveFailures ${this.consecutiveFailures} → 0, ` +
+            `hardRescueFailureCount=${this.hardRescueFailureCount})`,
+        );
         this.consecutiveFailures = 0;
       }
 
@@ -779,6 +813,23 @@ export class GeminiChat {
           precomputedEffectiveTokens: effectiveTokens,
         },
       );
+
+      // R6.3: account for the rescue outcome on its dedicated counter.
+      // force=true skipped the increment inside tryCompress, so we mirror
+      // the reactive-failure pattern here.
+      if (shouldForceFromHard) {
+        if (isCompressionFailureStatus(compressionInfo.compressionStatus)) {
+          this.hardRescueFailureCount += 1;
+          debugLogger.warn(
+            `[compaction] hard-tier rescue failed: status=${compressionInfo.compressionStatus}, ` +
+              `hardRescueFailureCount=${this.hardRescueFailureCount}/${MAX_CONSECUTIVE_FAILURES}`,
+          );
+        } else if (
+          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+        ) {
+          this.hardRescueFailureCount = 0;
+        }
+      }
 
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
@@ -994,6 +1045,12 @@ export class GeminiChat {
                     'Reactive compression failed.',
                     compressionError,
                   );
+                  // Thrown exceptions (network errors, model 5xx, timeouts)
+                  // also count as a reactive failure — without this increment
+                  // a consistently throwing reactive path would never trip
+                  // the breaker. Mirrors the status-based increment above
+                  // for consistent fail accounting. (R6.7)
+                  self.consecutiveFailures += 1;
                 }
               } else {
                 debugLogger.warn(

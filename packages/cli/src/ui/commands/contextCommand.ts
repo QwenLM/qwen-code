@@ -27,6 +27,7 @@ import {
   buildSkillLlmContent,
   computeThresholds,
   type CompactionThresholds,
+  SUMMARY_RESERVE,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
@@ -40,7 +41,14 @@ function currentTier(
   tokens: number,
   thresholds: CompactionThresholds,
 ): ContextTier {
-  if (tokens >= thresholds.hard) return 'hard';
+  // R6.12: for small windows `computeThresholds` collapses hard to auto
+  // (when `rawHard < auto`). Checking `>= hard` first would then make
+  // the 'auto' tier unreachable — small-window users would jump straight
+  // from 'warn' to 'hard'. Only return 'hard' when there's a meaningful
+  // gap above auto, so 'auto' is reachable when the two collapse.
+  if (thresholds.hard > thresholds.auto && tokens >= thresholds.hard) {
+    return 'hard';
+  }
   if (tokens >= thresholds.auto) return 'auto';
   if (tokens >= thresholds.warn) return 'warn';
   return 'safe';
@@ -317,10 +325,17 @@ export async function collectContextData(
   // walks the real history). This is a UI/runtime divergence — for a
   // single render — that resolves the moment any send happens.
   //
-  // TODO: plumb the chat history into collectContextData and use
-  // estimatePromptTokens(history, undefined, 0, imageTokenEstimate) here
-  // for same-source-of-truth as the cheap-gate. Defer because Config
-  // doesn't expose the active chat instance today.
+  // TODO (R6.11): plumb the chat history into collectContextData for
+  // same-source-of-truth as the cheap-gate. Implementation sketch:
+  //   1. Make `estimatePromptTokens.userMessage` optional (today it's
+  //      required because every send-path caller has a real message).
+  //   2. Add a `chat?: GeminiChat` parameter to collectContextData,
+  //      passed from the UI layer that already holds the active chat.
+  //   3. Here, when `chat` is available, call
+  //      `estimatePromptTokens(chat.getHistory(true), undefined, 0,
+  //      imageTokenEstimate)` to get the actual size of inherited history.
+  // Deferred because step (1) is a non-trivial signature change across
+  // tokenEstimation.ts + tests + every caller.
   const tierTokens = isEstimated ? rawOverhead : apiTotalTokens;
 
   const breakdown: ContextCategoryBreakdown = {
@@ -423,19 +438,31 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       `Model: ${modelName}  Context window: ${fmtTokens(contextWindowSize)} tokens`,
     );
     lines.push('');
-    lines.push(fmtCategoryRow('Used', totalTokens, contextWindowSize));
-    lines.push(fmtCategoryRow('Free', breakdown.freeSpace, contextWindowSize));
-    lines.push('');
-    lines.push('**Compaction thresholds**');
+    lines.push(fmtCategoryRow(t('Used'), totalTokens, contextWindowSize));
     lines.push(
-      `  Effective window:   ${formatNum(breakdown.thresholds.effectiveWindow)}  (window − 20K reserve)`,
+      fmtCategoryRow(t('Free'), breakdown.freeSpace, contextWindowSize),
     );
-    lines.push(`  Warn threshold:     ${formatNum(breakdown.thresholds.warn)}`);
-    lines.push(`  Auto threshold:     ${formatNum(breakdown.thresholds.auto)}`);
-    lines.push(`  Hard threshold:     ${formatNum(breakdown.thresholds.hard)}`);
-    lines.push(`  Current tier:       ${breakdown.currentTier}`);
     lines.push('');
-    lines.push('**Usage by category**');
+    lines.push(`**${t('Compaction thresholds')}**`);
+    // R6.13: i18n the labels + derive the reserve hint from the
+    // SUMMARY_RESERVE constant so it doesn't go stale if the constant
+    // changes. Numbers stay locale-formatted via formatNum.
+    const reserveK = `${Math.round(SUMMARY_RESERVE / 1000)}K`;
+    lines.push(
+      `  ${t('Effective window')}:   ${formatNum(breakdown.thresholds.effectiveWindow)}  (${t('window − {{reserve}} reserve', { reserve: reserveK })})`,
+    );
+    lines.push(
+      `  ${t('Warn threshold')}:     ${formatNum(breakdown.thresholds.warn)}`,
+    );
+    lines.push(
+      `  ${t('Auto threshold')}:     ${formatNum(breakdown.thresholds.auto)}`,
+    );
+    lines.push(
+      `  ${t('Hard threshold')}:     ${formatNum(breakdown.thresholds.hard)}`,
+    );
+    lines.push(`  ${t('Current tier')}:       ${breakdown.currentTier}`);
+    lines.push('');
+    lines.push(`**${t('Usage by category')}**`);
   }
 
   lines.push(
