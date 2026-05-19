@@ -4117,6 +4117,227 @@ describe('CoreToolScheduler telemetry spans', () => {
       expect(span.ended).toBe(true);
     }
   });
+
+  // -------------------------------------------------------------------
+  // #4321 follow-up review tests — three behaviors introduced by the
+  // 6767469b2 follow-up that were not previously asserted.
+  // -------------------------------------------------------------------
+
+  /**
+   * Build a scheduler around a single MockEditTool that requires
+   * approval. Used by the awaiting_approval-flow tests below.
+   */
+  function buildApprovalScheduler(overrides: { getIdeMode?: () => boolean }): {
+    scheduler: CoreToolScheduler;
+    onToolCallsUpdate: ReturnType<typeof vi.fn>;
+  } {
+    const mockEditTool = new MockEditTool();
+    const mockToolRegistry = {
+      getTool: () => mockEditTool,
+      ensureTool: async () => mockEditTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => mockEditTool,
+      getToolByDisplayName: () => mockEditTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: overrides.getIdeMode ?? (() => false),
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    return { scheduler, onToolCallsUpdate };
+  }
+
+  it('blocked_on_user span ends with decision=error when getConfirmationDetails throws (#4321)', async () => {
+    // Trigger _schedule's outer catch (line ~1711) by making
+    // getConfirmationDetails throw. The blocked span hasn't been started
+    // yet at the catch point — the span only opens AFTER setStatusInternal
+    // 'awaiting_approval' which never runs in this path. So the outer
+    // finalizeBlockedSpan('error', 'system') call is a no-op. Assert the
+    // tool span still ends correctly.
+    toolSpanRecords.length = 0;
+    const declarativeTool = new StructuredErrorOnConfirmationTool(
+      ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+    );
+    const mockToolRegistry = {
+      getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => declarativeTool,
+      getToolByDisplayName: () => declarativeTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'err-1',
+          name: 'structuredErrorOnConfirmationTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-err',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    // Tool span exists and ended; no blocked span ever opened (the throw
+    // happens before setStatusInternal awaiting_approval).
+    const toolSpans = toolSpanRecords.filter(
+      (r) => r.name === 'tool.structuredErrorOnConfirmationTool',
+    );
+    expect(toolSpans).toHaveLength(1);
+    expect(toolSpans[0].ended).toBe(true);
+    expect(
+      toolSpanRecords.filter((r) => r.name === 'tool.blocked_on_user'),
+    ).toHaveLength(0);
+  });
+
+  it('blocked_on_user span source=ide when getIdeMode returns true (#4321)', async () => {
+    toolSpanRecords.length = 0;
+    const { scheduler, onToolCallsUpdate } = buildApprovalScheduler({
+      getIdeMode: () => true,
+    });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'ide-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-ide',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.Cancel,
+    );
+
+    const blockedSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.blocked_on_user',
+    );
+    expect(blockedSpan?.blockedMetadata?.decision).toBe('cancel');
+    // Key assertion: getBlockedSource() honored getIdeMode -> 'ide'.
+    expect(blockedSpan?.blockedMetadata?.source).toBe('ide');
+  });
+
+  it('explicit Cancel takes precedence over signal.aborted in decision label (#4321)', async () => {
+    toolSpanRecords.length = 0;
+    const abortController = new AbortController();
+    const { scheduler, onToolCallsUpdate } = buildApprovalScheduler({});
+    await scheduler.schedule(
+      [
+        {
+          callId: 'cancel-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-cancel',
+        },
+      ],
+      abortController.signal,
+    );
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    // Abort the signal AND pass Cancel as outcome — both conditions true.
+    abortController.abort();
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.Cancel,
+    );
+
+    const blockedSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.blocked_on_user',
+    );
+    // Pre-fix this would have been 'aborted' / 'system'. The fix flips
+    // precedence so an explicit user Cancel always wins.
+    expect(blockedSpan?.blockedMetadata?.decision).toBe('cancel');
+    expect(blockedSpan?.blockedMetadata?.source).toBe('cli');
+  });
 });
 
 // Integration tests for the fire* functions

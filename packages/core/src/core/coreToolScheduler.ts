@@ -2826,6 +2826,11 @@ export class CoreToolScheduler {
           `Error checking confirmation for tool ${pendingTool.request.callId}:`,
           error,
         );
+        // Symmetry with the success branch above: finalize this sibling's
+        // blocked span with 'error' so the trace explains why it didn't
+        // get auto-approved. Without this, the span lingers until the
+        // 30-min TTL fires (#4321 review follow-up).
+        this.finalizeBlockedSpan(pendingTool.request.callId, 'error', 'system');
       }
     }
   }
