@@ -43,9 +43,19 @@ function makeSettings(initial: SettingsShape = {}) {
     originalSettings: structuredClone(initial),
     path: '/tmp/qwen-test-settings.json',
   };
+  // Mirror the real LoadedSettings/setNestedPropertySafe contract: any caller
+  // that slipped a `__proto__` / `constructor` / `prototype` segment past the
+  // adapter-layer guard would have its write rejected here too. The adapter
+  // already short-circuits these (see the test below), but guarding the mock
+  // keeps it semantically aligned with the production helper and quiets
+  // CodeQL's prototype-pollution scanner on the mock fixture itself.
+  const UNSAFE_KEY_PARTS = new Set(['__proto__', 'constructor', 'prototype']);
   const setValue = vi.fn(
     (_scope: SettingScope, key: string, value: unknown) => {
       const parts = key.split('.');
+      if (parts.some((p) => UNSAFE_KEY_PARTS.has(p))) {
+        throw new Error(`mock setValue refused reserved segment in: ${key}`);
+      }
       let current: Record<string, unknown> = file.settings as Record<
         string,
         unknown
