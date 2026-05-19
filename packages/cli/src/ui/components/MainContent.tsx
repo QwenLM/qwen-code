@@ -219,16 +219,16 @@ export const MainContent = () => {
   //
   // Detection: if history length grew but mergedHistory length did NOT grow
   // proportionally (i.e., a merge consolidated items), trigger a refresh.
-  const prevHistoryLengthRef = useRef(uiState.history.length);
+  const prevHistoryLengthRef = useRef(visibleHistory.length);
   const prevMergedLengthRef = useRef(visibleMergedHistory.length);
   useEffect(() => {
     if (!compactMode) {
-      prevHistoryLengthRef.current = uiState.history.length;
+      prevHistoryLengthRef.current = visibleHistory.length;
       prevMergedLengthRef.current = visibleMergedHistory.length;
       return;
     }
     const prevHLen = prevHistoryLengthRef.current;
-    const currHLen = uiState.history.length;
+    const currHLen = visibleHistory.length;
     const prevMLen = prevMergedLengthRef.current;
     const currMLen = visibleMergedHistory.length;
     // History grew, but merged length stayed same or shrank → a merge happened.
@@ -237,7 +237,7 @@ export const MainContent = () => {
     }
     prevHistoryLengthRef.current = currHLen;
     prevMergedLengthRef.current = currMLen;
-  }, [compactMode, uiState.history, visibleMergedHistory, uiActions]);
+  }, [compactMode, visibleHistory, visibleMergedHistory, uiActions]);
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {

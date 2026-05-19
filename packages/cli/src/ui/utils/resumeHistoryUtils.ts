@@ -548,27 +548,32 @@ export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
 }
 
 /**
+ * Removes collapse-summary items and strips suppressOnRestore from the rest.
+ * Shared between the rewind path and the expand-now command.
+ */
+export function expandCollapsedHistory(items: HistoryItem[]): HistoryItem[] {
+  return items
+    .filter((item) => item.display?.kind !== 'collapse-summary')
+    .map(stripSuppressOnRestore);
+}
+
+/**
  * Helper to apply the collapse policy and append the summary item if needed.
  */
 export function applyCollapsePolicyAndSummary(
   rawItems: HistoryItem[],
   collapseOnResume: boolean,
 ): HistoryItem[] {
-  const uiHistoryItems = applyResumeDisplayPolicy(rawItems, {
-    collapseOnResume,
-  });
+  const uiHistoryItems = collapseOnResume
+    ? applyResumeDisplayPolicy(rawItems, { collapseOnResume })
+    : [...rawItems];
 
   if (collapseOnResume && rawItems.length > 0) {
-    let maxId = 0;
-    for (const item of rawItems) {
-      if (item.id > maxId) maxId = item.id;
-    }
-    const nextId = maxId + 1;
-    const summaryHistoryItem: HistoryItem = {
-      id: nextId,
-      ...createHistoryCollapseSummaryItem(rawItems.length),
-    };
-    uiHistoryItems.push(summaryHistoryItem);
+    const nextId = rawItems[rawItems.length - 1].id + 1;
+    return [
+      ...uiHistoryItems,
+      { id: nextId, ...createHistoryCollapseSummaryItem(rawItems.length) },
+    ];
   }
 
   return uiHistoryItems;

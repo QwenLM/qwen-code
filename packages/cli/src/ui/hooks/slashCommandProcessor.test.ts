@@ -592,12 +592,13 @@ describe('useSlashCommandProcessor', () => {
     it('suppresses info feedback for expand-now command (self-managed UI)', async () => {
       const historyCmd = createTestCommand({
         name: 'history',
-        subcommands: [
+        subCommands: [
           {
             name: 'expand-now',
             action: vi.fn().mockResolvedValue({
               type: 'load_history',
-              items: [],
+              history: [],
+              clientHistory: [],
             }),
           },
         ],
@@ -618,6 +619,44 @@ describe('useSlashCommandProcessor', () => {
         },
         expect.any(Number),
       );
+    });
+
+    it('opens memory dialog when command returns dialog:memory', async () => {
+      const actions = createMockActions();
+      const memoryCommand = createTestCommand({
+        name: 'memorycmd',
+        action: vi.fn().mockResolvedValue({ type: 'dialog', dialog: 'memory' }),
+      });
+      mockBuiltinLoadCommands.mockResolvedValue(Object.freeze([memoryCommand]));
+
+      const { result } = renderHook(() =>
+        useSlashCommandProcessor(
+          mockConfig,
+          mockSettings,
+          [],
+          mockAddItem,
+          mockClearItems,
+          mockLoadHistory,
+          vi.fn(),
+          vi.fn(),
+          false,
+          vi.fn(),
+          { current: true },
+          vi.fn(),
+          actions,
+          new Map(),
+          true,
+          null,
+        ),
+      );
+
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/memorycmd');
+      });
+
+      expect(actions.openMemoryDialog).toHaveBeenCalled();
     });
 
     it('should pass interactive execution mode to command actions', async () => {

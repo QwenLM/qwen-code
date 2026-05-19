@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { buildResumedHistoryItems } from './resumeHistoryUtils.js';
+import {
+  buildResumedHistoryItems,
+  stripSuppressOnRestore,
+} from './resumeHistoryUtils.js';
 import { ToolCallStatus } from '../types.js';
 import type {
   AnyDeclarativeTool,
@@ -14,6 +17,7 @@ import type {
   ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
+import type { HistoryItem } from '../types.js';
 
 const makeConfig = (tools: Record<string, AnyDeclarativeTool>) =>
   ({
@@ -324,5 +328,60 @@ describe('resumeHistoryUtils', () => {
       },
       { id: 8, type: 'gemini', text: 'Follow-up' },
     ]);
+  });
+});
+
+describe('stripSuppressOnRestore', () => {
+  it('returns item unchanged when display is undefined', () => {
+    const item = { id: 1, type: 'user', text: 'hello' } as HistoryItem;
+    expect(stripSuppressOnRestore(item)).toBe(item);
+  });
+
+  it('returns item unchanged when suppressOnRestore is absent', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { kind: 'some-other-kind' },
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { kind: 'some-other-kind' },
+    });
+  });
+
+  it('strips suppressOnRestore while preserving other display properties', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { suppressOnRestore: true, kind: 'collapse-summary' },
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { kind: 'collapse-summary' },
+    });
+  });
+
+  it('sets display to undefined when suppressOnRestore was the only property', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { suppressOnRestore: true },
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: undefined,
+    });
   });
 });

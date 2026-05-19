@@ -137,6 +137,9 @@ export interface MessageActionReturn {
   type: 'message';
   messageType: 'info' | 'warning' | 'error';
   content: string;
+  /** When true, the slash processor suppresses displaying this message since
+   *  the command self-manages its own UI feedback. */
+  selfManaged?: boolean;
 }
 
 /**

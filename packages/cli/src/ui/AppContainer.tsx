@@ -64,7 +64,7 @@ import {
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
-  stripSuppressOnRestore,
+  expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
@@ -2353,12 +2353,9 @@ export const AppContainer = (props: AppContainerProps) => {
 
           // Strip suppressOnRestore flags and filter out collapse-summary items
           // so rewound items remain visible without stale summary text
-          const truncatedUi = originalHistory
-            .filter(
-              (h) =>
-                h.id < userItem.id && h.display?.kind !== 'collapse-summary',
-            )
-            .map(stripSuppressOnRestore);
+          const truncatedUi = expandCollapsedHistory(
+            originalHistory.filter((h) => h.id < userItem.id),
+          );
           historyManager.loadHistory(truncatedUi);
 
           refreshStatic();

@@ -7,7 +7,7 @@
 import {
   useCallback,
   useMemo,
-  useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type MutableRefObject,
@@ -39,7 +39,6 @@ import type {
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { type CommandContext, type SlashCommand } from '../commands/types.js';
-import { historyCommand } from '../commands/historyCommand.js';
 import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
@@ -140,7 +139,7 @@ export const useSlashCommandProcessor = (
   // Ref avoids adding `history` to the commandContext useMemo deps,
   // which would cause a full context rebuild on every history append.
   const historyRef = useRef(history);
-  useEffect(() => {
+  useLayoutEffect(() => {
     historyRef.current = history;
   }, [history]);
 
@@ -649,14 +648,10 @@ export const useSlashCommandProcessor = (
                   };
                 case 'message':
                   if (result.messageType === 'info') {
-                    // Only suppress info messages from /history expand-now
-                    // (which self-manages UI via loadHistory + refreshStatic).
-                    // Other subcommands like collapse-on-resume need their
-                    // confirmation messages shown to the user.
-                    const isSelfManaged =
-                      resolvedCommandPath[0] === historyCommand.name &&
-                      resolvedCommandPath[1] === 'expand-now';
-                    if (!isSelfManaged) {
+                    // Only suppress info messages when the command explicitly
+                    // self-manages its UI feedback (e.g., /history expand-now
+                    // which uses load_history to replace the transcript).
+                    if (!result.selfManaged) {
                       addMessage({
                         type: MessageType.INFO,
                         content: result.content,

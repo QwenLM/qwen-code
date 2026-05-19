@@ -107,15 +107,15 @@ describe('historyCommand', () => {
     const result = await expandNowCommand.action!(mockContext, '');
 
     expect(result).toEqual({
-      type: 'message',
-      messageType: 'info',
-      content: expect.stringContaining('History expanded'),
+      type: 'load_history',
+      history: [
+        expect.objectContaining({ id: 1, display: undefined }),
+        expect.objectContaining({ id: 2, display: undefined }),
+      ],
+      clientHistory: [],
     });
-    expect(mockLoadHistory).toHaveBeenCalledWith([
-      expect.objectContaining({ id: 1, display: undefined }),
-      expect.objectContaining({ id: 2, display: undefined }),
-    ]);
-    expect(mockRefreshStatic).toHaveBeenCalled();
+    expect(mockLoadHistory).not.toHaveBeenCalled();
+    expect(mockRefreshStatic).not.toHaveBeenCalled();
   });
 
   it('expand-now returns already expanded when expanding an uncollapsed session', async () => {
@@ -129,6 +129,8 @@ describe('historyCommand', () => {
       messageType: 'info',
       content: 'History is already expanded in this session.',
     });
+    expect(mockLoadHistory).not.toHaveBeenCalled();
+    expect(mockRefreshStatic).not.toHaveBeenCalled();
   });
 
   it('returns usage error for unknown subcommand', async () => {

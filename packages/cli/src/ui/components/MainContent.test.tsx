@@ -458,6 +458,32 @@ describe('<MainContent />', () => {
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(53);
   });
 
+  it('filters out suppressed history items from rendering', async () => {
+    staticItemsSpy.mockClear();
+    const history = [
+      { type: 'user' as const, id: 1, text: 'hello' },
+      {
+        type: 'gemini' as const,
+        id: 2,
+        text: 'hi',
+        display: { suppressOnRestore: true },
+      },
+      {
+        type: 'info' as const,
+        id: 3,
+        text: 'History collapsed: 1 messages hidden.',
+        display: { kind: 'collapse-summary' },
+      },
+    ];
+    const uiState = createUIState({ history });
+    renderMainContent(uiState);
+    expect(staticItemsSpy).toHaveBeenCalled();
+    const renderedItems = staticItemsSpy.mock.calls.at(-1)?.[0];
+    // Only the unsuppressed user message should render
+    expect(renderedItems).toHaveLength(1);
+    expect(renderedItems?.[0]).toMatchObject({ id: 1 });
+  });
+
   it('does NOT reset progressive replay when only currentModel changes (PR #4119 regression guard)', async () => {
     // Wenshao's review on PR #4119: if AppContainer splits the model-change
     // wiring into two separate effects (setCurrentModel first, refreshStatic
