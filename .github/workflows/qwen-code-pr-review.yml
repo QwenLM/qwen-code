@@ -399,6 +399,7 @@ jobs:
             else
               printf '_Qwen Code review completed, but no summary was captured. See the workflow logs for details._\n'
             fi
+            printf '\n\n---\n_Reviewed by `%s` via Qwen Code `/review` (automated). Reply `@qwen /review` to re-run._\n' "${OPENAI_MODEL:-unknown}"
           } > qwen-pr-review-summary-comment.md
 
           gh pr comment "$PR_NUMBER" \
