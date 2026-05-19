@@ -2220,9 +2220,8 @@ export function useTextBuffer({
     async (opts: { editor?: string } = {}): Promise<void> => {
       const filePath = pathMod.join(
         os.tmpdir(),
-        `qwen-edit-${crypto.randomUUID()}.md`,
+        `qwen-edit-${crypto.randomUUID()}.txt`,
       );
-      fs.writeFileSync(filePath, text, 'utf8');
 
       let editorCmd: string;
       let editorArgs: string[];
@@ -2250,10 +2249,15 @@ export function useTextBuffer({
         editorArgs = [filePath];
       }
 
+      if (useShell) {
+        editorArgs = editorArgs.map((a) => `"${a}"`);
+      }
+
       dispatch({ type: 'create_undo_snapshot' });
 
       const wasRaw = stdin?.isRaw ?? false;
       try {
+        fs.writeFileSync(filePath, text, { encoding: 'utf8', mode: 0o600 });
         setRawMode?.(false);
 
         const { status, error } = spawnSync(editorCmd, editorArgs, {

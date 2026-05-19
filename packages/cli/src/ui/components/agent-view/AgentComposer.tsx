@@ -24,7 +24,7 @@ import {
   isTerminalStatus,
   ApprovalMode,
   APPROVAL_MODES,
- isValidEditorType } from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core';
 import {
   useAgentViewState,
   useAgentViewActions,
@@ -43,7 +43,7 @@ import { QueuedMessageDisplay } from '../QueuedMessageDisplay.js';
 import { AgentFooter } from './AgentFooter.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { theme } from '../../semantic-colors.js';
-import { useSettings } from '../../contexts/SettingsContext.js';
+import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { t } from '../../../i18n/index.js';
 
 // ─── Types ──────────────────────────────────────────────────
@@ -66,7 +66,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   const interactiveAgent = agent?.interactiveAgent;
 
   const config = useConfig();
-  const settings = useSettings();
+  const preferredEditor = usePreferredEditor();
   const { columns: terminalWidth } = useTerminalSize();
   const { inputWidth } = calculatePromptWidths(terminalWidth);
   const { stdin, setRawMode } = useStdin();
@@ -122,11 +122,6 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   // ── Input buffer (independent from main agent) ──
 
   const isValidPath = useCallback((): boolean => false, []);
-
-  const prefEditorRaw = settings.merged.general?.preferredEditor ?? '';
-  const preferredEditor = isValidEditorType(prefEditorRaw)
-    ? prefEditorRaw
-    : undefined;
 
   const buffer = useTextBuffer({
     initialText: '',

@@ -899,6 +899,14 @@ describe('editor utils', () => {
       expect(result!.needsShell).toBe(true);
     });
 
+    it('should set needsShell=true for .bat executables on Windows', () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      (execSync as Mock).mockReturnValue(Buffer.from('C:\\code.bat'));
+      const result = getExternalEditorCommand('vscode', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.needsShell).toBe(true);
+    });
+
     it('should set needsShell=false for non-.cmd executables on Windows', () => {
       Object.defineProperty(process, 'platform', { value: 'win32' });
       (execSync as Mock).mockReturnValue(Buffer.from('C:\\cursor'));

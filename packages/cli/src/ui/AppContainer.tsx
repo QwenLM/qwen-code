@@ -33,7 +33,6 @@ import type { RestoreOption } from './components/RewindSelector.js';
 import { MessageType, StreamingState } from './types.js';
 import {
   type EditorType,
-  isValidEditorType,
   type Config,
   type IdeInfo,
   type IdeContext,
@@ -107,6 +106,7 @@ import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
+import { usePreferredEditor } from './hooks/usePreferredEditor.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useManageModelsCommand } from './hooks/useManageModelsCommand.js';
@@ -780,10 +780,7 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, []);
 
-  const prefEditorRaw = settings.merged.general?.preferredEditor ?? '';
-  const preferredEditor = isValidEditorType(prefEditorRaw)
-    ? prefEditorRaw
-    : undefined;
+  const preferredEditor = usePreferredEditor();
 
   const buffer = useTextBuffer({
     initialText: '',

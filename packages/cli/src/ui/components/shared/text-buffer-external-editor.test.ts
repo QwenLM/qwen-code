@@ -1,0 +1,372 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { renderHook, act } from '@testing-library/react';
+
+const { mockSpawnSync, mockGetExternalEditorCommand } = vi.hoisted(() => ({
+  mockSpawnSync: vi.fn().mockReturnValue({ status: 0, error: null }),
+  mockGetExternalEditorCommand: vi.fn().mockReturnValue(null),
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  // Named re-exports must be spelled out for vitest ESM mocking to rebind them.
+  return {
+    ...actual,
+    default: { ...actual, spawnSync: mockSpawnSync },
+    spawnSync: mockSpawnSync,
+  };
+});
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    default: { ...(actual['default'] as object), tmpdir: () => '/tmp' },
+    tmpdir: () => '/tmp',
+  };
+});
+
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    default: {
+      ...(actual['default'] as object),
+      randomUUID: () => 'test-uuid-1234',
+    },
+    randomUUID: () => 'test-uuid-1234',
+  };
+});
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  const mocks = {
+    writeFileSync: vi.fn(),
+    readFileSync: vi.fn().mockReturnValue('edited text'),
+    unlinkSync: vi.fn(),
+  };
+  return {
+    ...actual,
+    ...mocks,
+    default: { ...(actual['default'] as object), ...mocks },
+  };
+});
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    getExternalEditorCommand: mockGetExternalEditorCommand,
+  };
+});
+
+import fs from 'node:fs';
+import { useTextBuffer } from './text-buffer.js';
+
+const viewport = { height: 5, width: 40 };
+
+describe('openInExternalEditor', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    (fs.writeFileSync as Mock).mockImplementation(() => {});
+    (fs.readFileSync as Mock).mockReturnValue('edited text');
+    (fs.unlinkSync as Mock).mockImplementation(() => {});
+    mockSpawnSync.mockReturnValue({ status: 0, error: null });
+    mockGetExternalEditorCommand.mockReturnValue(null);
+  });
+
+  it('should use .txt extension for temp file', async () => {
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    const writePath = (fs.writeFileSync as Mock).mock.calls[0]?.[0] as string;
+    expect(writePath).toMatch(/\.txt$/);
+  });
+
+  it('should write temp file with mode 0o600', async () => {
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    const writeOpts = (fs.writeFileSync as Mock).mock.calls[0]?.[2] as {
+      mode?: number;
+    };
+    expect(writeOpts).toEqual(expect.objectContaining({ mode: 0o600 }));
+  });
+
+  it('should clean up temp file even when editor fails', async () => {
+    mockSpawnSync.mockReturnValue({ status: 1, error: null });
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(fs.unlinkSync).toHaveBeenCalled();
+  });
+
+  it('should clean up temp file when writeFileSync throws', async () => {
+    (fs.writeFileSync as Mock).mockImplementation(() => {
+      throw new Error('disk full');
+    });
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(fs.unlinkSync).toHaveBeenCalled();
+    expect(mockSpawnSync).not.toHaveBeenCalled();
+  });
+
+  it('should fall back to env/default when no preferredEditor', async () => {
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(mockGetExternalEditorCommand).not.toHaveBeenCalled();
+    expect(mockSpawnSync).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.arrayContaining([expect.stringMatching(/\.txt$/)]),
+      expect.objectContaining({ stdio: 'inherit' }),
+    );
+  });
+
+  it('should use getExternalEditorCommand when preferredEditor is set', async () => {
+    mockGetExternalEditorCommand.mockReturnValue({
+      command: 'code',
+      args: ['/tmp/qwen-edit-test-uuid-1234.txt', '--wait'],
+      isTerminal: false,
+      needsShell: false,
+    });
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+        preferredEditor: 'vscode',
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(mockGetExternalEditorCommand).toHaveBeenCalledWith(
+      'vscode',
+      expect.stringMatching(/\.txt$/),
+    );
+    expect(mockSpawnSync).toHaveBeenCalledWith(
+      'code',
+      expect.arrayContaining(['--wait']),
+      expect.objectContaining({ shell: false }),
+    );
+  });
+
+  it('should quote args when needsShell is true', async () => {
+    mockGetExternalEditorCommand.mockReturnValue({
+      command: 'code.cmd',
+      args: ['/tmp/qwen-edit-test-uuid-1234.txt', '--wait'],
+      isTerminal: false,
+      needsShell: true,
+    });
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+        preferredEditor: 'vscode',
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    const spawnArgs = mockSpawnSync.mock.calls[0]?.[1] as string[];
+    for (const arg of spawnArgs) {
+      expect(arg).toMatch(/^".*"$/);
+    }
+    expect(mockSpawnSync.mock.calls[0]?.[2]).toEqual(
+      expect.objectContaining({ shell: true }),
+    );
+  });
+
+  it('should fall back to env/default when preferredEditor is set but not found', async () => {
+    mockGetExternalEditorCommand.mockReturnValue(null);
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+        preferredEditor: 'vscode',
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(mockGetExternalEditorCommand).toHaveBeenCalledWith(
+      'vscode',
+      expect.stringMatching(/\.txt$/),
+    );
+    expect(mockSpawnSync).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.arrayContaining([expect.stringMatching(/\.txt$/)]),
+      expect.objectContaining({ stdio: 'inherit' }),
+    );
+  });
+
+  it('should clean up temp file when spawnSync returns error object', async () => {
+    mockSpawnSync.mockReturnValue({
+      status: 0,
+      error: new Error('ENOENT'),
+    });
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(fs.unlinkSync).toHaveBeenCalled();
+    expect(result.current.text).toBe('hello');
+  });
+
+  it('should respect VISUAL > EDITOR > default fallback order', async () => {
+    const origVISUAL = process.env['VISUAL'];
+    const origEDITOR = process.env['EDITOR'];
+
+    process.env['VISUAL'] = 'my-visual-editor';
+    process.env['EDITOR'] = 'my-editor';
+    try {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'hello',
+          viewport,
+          isValidPath: () => false,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.openInExternalEditor();
+      });
+
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'my-visual-editor',
+        expect.any(Array),
+        expect.any(Object),
+      );
+    } finally {
+      if (origVISUAL === undefined) delete process.env['VISUAL'];
+      else process.env['VISUAL'] = origVISUAL;
+      if (origEDITOR === undefined) delete process.env['EDITOR'];
+      else process.env['EDITOR'] = origEDITOR;
+    }
+  });
+
+  it('should fall back to EDITOR when VISUAL is not set', async () => {
+    const origVISUAL = process.env['VISUAL'];
+    const origEDITOR = process.env['EDITOR'];
+
+    delete process.env['VISUAL'];
+    process.env['EDITOR'] = 'my-editor';
+    try {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'hello',
+          viewport,
+          isValidPath: () => false,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.openInExternalEditor();
+      });
+
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'my-editor',
+        expect.any(Array),
+        expect.any(Object),
+      );
+    } finally {
+      if (origVISUAL === undefined) delete process.env['VISUAL'];
+      else process.env['VISUAL'] = origVISUAL;
+      if (origEDITOR === undefined) delete process.env['EDITOR'];
+      else process.env['EDITOR'] = origEDITOR;
+    }
+  });
+
+  it('should update text after successful editor session', async () => {
+    (fs.readFileSync as Mock).mockReturnValue('new content');
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'old content',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(result.current.text).toBe('new content');
+  });
+});

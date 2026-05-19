@@ -169,7 +169,7 @@ export function getExternalEditorCommand(
   }
 
   const needsShell =
-    process.platform === 'win32' && executable.endsWith('.cmd');
+    process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable);
 
   switch (editorType) {
     case 'vim':
