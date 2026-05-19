@@ -121,6 +121,22 @@ export interface UIState {
   cancelBtw: () => void;
   nightly: boolean;
   branchName: string | undefined;
+  /**
+   * Active worktree session (from the `<sessionId>.worktree.json` sidecar).
+   * Set when `enter_worktree` has been called, cleared when `exit_worktree`
+   * removes the sidecar. Used by the Footer to display the worktree
+   * indicator and by WorktreeExitDialog to know what to operate on.
+   */
+  activeWorktree: {
+    slug: string;
+    branch: string;
+    path: string;
+    originalCwd: string;
+    originalBranch: string;
+    originalHeadCommit: string;
+  } | null;
+  /** Visibility of WorktreeExitDialog (only shown when activeWorktree != null). */
+  showWorktreeExitDialog: boolean;
   sessionStats: SessionStatsState;
   terminalWidth: number;
   terminalHeight: number;

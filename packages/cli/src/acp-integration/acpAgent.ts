@@ -22,6 +22,7 @@ import {
   MCPDiscoveryState,
   MCPServerStatus,
   SessionEndReason,
+  restoreWorktreeContext,
 } from '@qwen-code/qwen-code-core';
 import type {
   ApprovalMode,
@@ -428,7 +429,12 @@ class QwenAgent implements Agent {
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
-    await this.createAndStoreSession(config, sessionData?.conversation);
+    const session = await this.createAndStoreSession(
+      config,
+      sessionData?.conversation,
+    );
+
+    await this.#restoreWorktreeOnResume(config, session);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -465,7 +471,9 @@ class QwenAgent implements Agent {
     await this.ensureAuthenticated(config);
     this.setupFileSystem(config);
 
-    await this.createAndStoreSession(config);
+    const session = await this.createAndStoreSession(config);
+
+    await this.#restoreWorktreeOnResume(config, session);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -476,6 +484,34 @@ class QwenAgent implements Agent {
       models: availableModels,
       configOptions,
     };
+  }
+
+  /**
+   * Shared worktree restore for both ACP entry points (`loadSession` and
+   * `unstable_resumeSession`). Reads the WorktreeSession sidecar, cleans
+   * up stale ones, and queues the context reminder on the Session so the
+   * next `#executePrompt` prepends it to the user's first prompt.
+   *
+   * Best-effort: failures don't block session load — worktree context
+   * is a hint to the model, not a load-time correctness requirement.
+   * (PR #4174 review #3259975... — parity between the two ACP entry
+   * points.)
+   */
+  async #restoreWorktreeOnResume(
+    config: Config,
+    session: Session,
+  ): Promise<void> {
+    try {
+      const sessionPath = config
+        .getSessionService()
+        .getWorktreeSessionPath(config.getSessionId());
+      const restored = await restoreWorktreeContext(sessionPath);
+      if (restored.contextMessage) {
+        session.pendingWorktreeNotice = restored.contextMessage;
+      }
+    } catch (error) {
+      debugLogger.warn(`ACP worktree restore failed: ${error}`);
+    }
   }
 
   async unstable_listSessions(
