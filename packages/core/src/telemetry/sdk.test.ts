@@ -209,17 +209,17 @@ describe('Telemetry SDK', () => {
           'ERROR',
           '{"message":"Error: PeriodicExportingMetricReader: metrics export failed (error Error: connect ECONNREFUSED)"}',
         ),
-        'utf8',
+        { encoding: 'utf8', flush: true },
       );
       expect(appendFileSpy).toHaveBeenCalledWith(
         expect.stringContaining('otel-diag-test-session'),
         expectOtelDebugLogLine('ERROR', 'A different OpenTelemetry diagnostic'),
-        'utf8',
+        { encoding: 'utf8', flush: true },
       );
       expect(appendFileSpy).toHaveBeenCalledWith(
         expect.stringContaining('otel-diag-test-session'),
         expectOtelDebugLogLine('WARN', 'An OpenTelemetry warning'),
-        'utf8',
+        { encoding: 'utf8', flush: true },
       );
     } finally {
       consoleErrorSpy.mockRestore();
