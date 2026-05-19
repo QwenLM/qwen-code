@@ -538,3 +538,78 @@ describe('getAllProviderBaseUrls', () => {
     expect(urls).toContain('https://coding-intl.dashscope.aliyuncs.com/v1');
   });
 });
+
+// The package-name imports above resolve to dist/, which lags the source on a
+// branch that hasn't been built yet. Re-import via the relative source path so
+// these new edge-case tests exercise the in-tree implementation.
+import {
+  resolveBaseUrl as resolveBaseUrlSrc,
+  providerMatchesCredentials as providerMatchesCredentialsSrc,
+} from '../provider-config.js';
+
+describe('resolveBaseUrl edge cases', () => {
+  it('does not crash on an empty baseUrl array — falls back to selected or ""', () => {
+    const config = makeConfig({ baseUrl: [] });
+    // Without selectedBaseUrl, return '' instead of throwing on [0].url
+    expect(resolveBaseUrlSrc(config)).toBe('');
+    // With selectedBaseUrl, return that instead
+    expect(resolveBaseUrlSrc(config, 'https://api.user.com/v1')).toBe(
+      'https://api.user.com/v1',
+    );
+  });
+});
+
+describe('providerMatchesCredentials with function envKey (custom provider)', () => {
+  // Custom provider derives envKey from (protocol, baseUrl) via a function.
+  // Treating non-string envKey as "no match" made custom providers invisible
+  // to findProviderByCredentials → /doctor and system-info diagnostics.
+  it('matches a custom-style provider whose envKey is a function deriving from baseUrl', () => {
+    const derivedFor = (_protocol: AuthType, baseUrl: string) =>
+      `QWEN_CUSTOM_${Buffer.from(baseUrl).toString('hex').slice(0, 8)}`;
+    const config = makeConfig({
+      id: 'custom-like',
+      envKey: derivedFor,
+      baseUrl: undefined, // user-picked
+      protocol: AuthType.USE_OPENAI,
+    });
+
+    const url = 'https://api.example.com/v1';
+    const expectedKey = derivedFor(AuthType.USE_OPENAI, url);
+    expect(providerMatchesCredentialsSrc(config, url, expectedKey)).toBe(true);
+  });
+
+  it('does not match when the derived key differs from the supplied envKey', () => {
+    const derivedFor = (_protocol: AuthType, baseUrl: string) =>
+      `QWEN_CUSTOM_${baseUrl.length}`;
+    const config = makeConfig({
+      id: 'custom-like',
+      envKey: derivedFor,
+      baseUrl: undefined,
+      protocol: AuthType.USE_OPENAI,
+    });
+    expect(
+      providerMatchesCredentialsSrc(
+        config,
+        'https://api.example.com/v1',
+        'WRONG_ENV_KEY',
+      ),
+    ).toBe(false);
+  });
+
+  it('returns false (not crash) when the function envKey itself throws', () => {
+    const config = makeConfig({
+      id: 'custom-like',
+      envKey: () => {
+        throw new Error('boom');
+      },
+      baseUrl: undefined,
+    });
+    expect(
+      providerMatchesCredentialsSrc(
+        config,
+        'https://api.example.com/v1',
+        'ANY',
+      ),
+    ).toBe(false);
+  });
+});

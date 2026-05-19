@@ -212,6 +212,7 @@ export function AuthDialog(): React.JSX.Element {
   // models[], so it can't be used to detect "Alibaba" specifically.)
   const defaultMainIndex = useMemo(() => {
     if (matchedProvider?.uiGroup === 'third-party') return 1;
+    if (matchedProvider?.uiGroup === 'custom') return 2;
     return 0;
   }, [matchedProvider]);
 

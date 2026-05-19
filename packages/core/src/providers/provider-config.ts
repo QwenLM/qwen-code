@@ -258,7 +258,11 @@ export function resolveBaseUrl(
   }
   if (Array.isArray(config.baseUrl)) {
     const match = config.baseUrl.find((opt) => opt.url === selectedBaseUrl);
-    return match?.url ?? config.baseUrl[0].url;
+    if (match) return match.url;
+    // Defensive: an empty baseUrl array would crash `config.baseUrl[0].url`
+    // and bring down the install flow. Fall back to the caller-supplied
+    // value (or empty string) instead.
+    return config.baseUrl[0]?.url ?? selectedBaseUrl ?? '';
   }
   return selectedBaseUrl ?? '';
 }
@@ -307,7 +311,21 @@ export function providerMatchesCredentials(
   baseUrl: string | undefined,
   envKey: string | undefined,
 ): boolean {
-  if (typeof config.envKey !== 'string' || config.envKey !== envKey) {
+  // Resolve envKey first: presets carry a string literal, but the custom
+  // provider carries a function that derives the key from (protocol, baseUrl).
+  // Treating "non-string" as no-match made custom providers invisible to
+  // findProviderByCredentials → /doctor and system-info diagnostics.
+  let configEnvKey: string | undefined;
+  if (typeof config.envKey === 'string') {
+    configEnvKey = config.envKey;
+  } else if (typeof config.envKey === 'function' && baseUrl) {
+    try {
+      configEnvKey = config.envKey(config.protocol, baseUrl);
+    } catch {
+      configEnvKey = undefined;
+    }
+  }
+  if (configEnvKey !== envKey) {
     return false;
   }
   if (typeof config.baseUrl === 'string') {
@@ -315,6 +333,12 @@ export function providerMatchesCredentials(
   }
   if (Array.isArray(config.baseUrl)) {
     return config.baseUrl.some((opt) => opt.url === baseUrl);
+  }
+  // Custom providers leave baseUrl `undefined` because every user picks
+  // their own — accept any non-empty baseUrl whose derived envKey already
+  // matched above.
+  if (config.baseUrl === undefined && configEnvKey !== undefined) {
+    return Boolean(baseUrl);
   }
   return false;
 }

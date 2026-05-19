@@ -177,12 +177,20 @@ export async function applyProviderInstallPlan(
         restoreErr,
       );
     }
-    for (const [key, prev] of previousEnvValues) {
-      if (prev === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = prev;
+    try {
+      for (const [key, prev] of previousEnvValues) {
+        if (prev === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = prev;
+        }
       }
+    } catch (envErr) {
+      // process.env writes can throw if a custom property descriptor on
+      // process.env has been installed (rare, but observed in some test
+      // harnesses). Don't let it skip the runtime-providers rollback below.
+      // eslint-disable-next-line no-console -- best-effort rollback path
+      console.error('[applyProviderInstallPlan] env rollback failed:', envErr);
     }
     // Restore in-memory runtime providers — reloadModelProviders may have run
     // before the failure (e.g. before a refreshAuth rejection).

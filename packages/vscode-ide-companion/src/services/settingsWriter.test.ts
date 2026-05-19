@@ -217,6 +217,35 @@ describe('settingsWriter', () => {
       expect(after.env.K).toBe('v');
     });
 
+    it('treats \\uXXXX as a 6-char escape (no parser differential / key injection)', async () => {
+      // If the JSONC string scanner stepped past the backslash with j+=2 for
+      // every escape, `"` would leave `0022` in the buffer and the next
+      // `"` would close the string early — letting an attacker inject extra
+      // top-level keys (e.g. env.NODE_OPTIONS) into settings.json.
+      // The corrected scanner consumes \uXXXX as 6 chars, so the value stays
+      // a single string with a literal `"` in the middle.
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      const jsonc = `{
+  // attempted injection
+  "API_KEY": "sk-abc\\u0022,\\n\\"INJECTED\\": \\"pwned",
+}`;
+      fs.writeFileSync(settingsPath, jsonc, 'utf-8');
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        env: { K: 'v' },
+      };
+
+      await applyProviderInstallPlanToFile(plan);
+
+      const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      // Value is preserved as a single string with the literal quote.
+      expect(after.API_KEY).toBe('sk-abc",\n"INJECTED": "pwned');
+      // No injected top-level key landed in the file.
+      expect(after.INJECTED).toBeUndefined();
+      expect(after.env.K).toBe('v');
+    });
+
     it('writes atomically — no .tmp residue on success', async () => {
       const plan: ProviderInstallPlan = {
         providerId: 'test',
