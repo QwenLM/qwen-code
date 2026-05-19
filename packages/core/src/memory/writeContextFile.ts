@@ -156,7 +156,14 @@ export async function writeWorkspaceContextFile(
   );
 
   // Ensure the local context file is gitignored before writing.
-  if (options.scope === 'local') {
+  // This covers both explicit `scope='local'` and `scope='auto'` that
+  // resolved to the local file path (e.g. no committed QWEN.md/AGENTS.md
+  // exists but .qwen/QWEN.local.md does).
+  if (
+    options.scope === 'local' ||
+    filePath ===
+      path.join(options.projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME)
+  ) {
     await ensureGitignoreEntry(options.projectRoot);
   }
 
