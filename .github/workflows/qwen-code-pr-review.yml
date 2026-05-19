@@ -358,14 +358,20 @@ jobs:
           restore-keys: |
             qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-
 
-      # Action SHA, input casing, settings_json and GITHUB_TOKEN are
-      # aligned with the currently-deployed (proven-working) review job
-      # on main. The previous config (old action SHA a08dc886, lowercase
-      # inputs, no settings_json, no token) hung for the full job timeout
-      # with zero output because the bundled /review skill had no shell /
-      # write tools and no gh auth, then waited on input with no TTY.
-      # The bundled `/review <url>` prompt (this PR's purpose) is kept;
-      # only the enabling configuration is corrected.
+      # Why this exact config (learned from dry-run testing):
+      # - action @5fd6818d + GITHUB_TOKEN + uppercase OPENAI_* inputs:
+      #   match main's deployed, proven-working review job.
+      # - settings_json must NOT restrict `coreTools`. main's job set
+      #   coreTools:[run_shell_command,write_file] and worked only
+      #   because its ad-hoc prompt used just those two. The bundled
+      #   `/review` skill needs read_file/glob/grep/task/etc.; with that
+      #   allowlist those tools fall outside it, require approval, and in
+      #   CI (non-interactive, no TTY) the run hangs to the job timeout
+      #   with zero output. Omitting `coreTools` exposes the full tool
+      #   set the skill needs.
+      # - approvalMode:yolo + folderTrust disabled belt-and-suspenders so
+      #   the action's `qwen --yolo` is not silently downgraded to
+      #   "default" by an untrusted-folder / version-specific path.
       - name: 'Run Qwen Code Review'
         id: 'review'
         if: |-
@@ -379,7 +385,8 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           settings_json: |-
             {
-              "coreTools": ["run_shell_command", "write_file"],
+              "security": { "folderTrust": { "enabled": false } },
+              "tools": { "approvalMode": "yolo" },
               "sandbox": false
             }
           prompt: '${{ steps.pr.outputs.review_prompt }}'
