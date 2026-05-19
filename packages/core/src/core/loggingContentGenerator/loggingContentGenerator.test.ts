@@ -1191,6 +1191,88 @@ describe('LoggingContentGenerator', () => {
     }
   });
 
+  it('skips api_error log when stream throws after idle timeout already closed the span (#4302)', async () => {
+    // Same gating as the success path: when the 5-min idle timeout already
+    // closed the LLM span as failed, a downstream throw must not emit an
+    // api_error log either, otherwise telemetry shows "span timed-out + log
+    // api_error" — the contradictory pair the timeout fix targets.
+    const STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
+    let idleCallback: (() => void) | undefined;
+    const realSetTimeout = global.setTimeout;
+    type SetTimeoutArgs = Parameters<typeof setTimeout>;
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout').mockImplementation(((
+      ...args: SetTimeoutArgs
+    ) => {
+      const [cb, ms] = args;
+      if (ms === STREAM_IDLE_TIMEOUT_MS) {
+        idleCallback = cb as () => void;
+        return { unref: () => {} } as unknown as ReturnType<typeof setTimeout>;
+      }
+      return realSetTimeout(...args);
+    }) as typeof setTimeout);
+
+    try {
+      let releaseStream: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const response1 = createResponse('resp-throw', 'model-stream', [
+        { text: 'partial' },
+      ]);
+      const downstreamError = new Error('upstream-fail');
+      const wrapped = createWrappedGenerator(
+        vi.fn(),
+        vi.fn().mockResolvedValue(
+          (async function* () {
+            yield response1;
+            await gate;
+            throw downstreamError;
+          })(),
+        ),
+      );
+      const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: true,
+      });
+      const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+        ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+
+      const request = {
+        model: 'test-model',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters;
+
+      const stream = await generator.generateContentStream(
+        request,
+        'prompt-throw-after-timeout',
+      );
+      const iterator = stream[Symbol.asyncIterator]();
+
+      const first = await iterator.next();
+      expect(first.done).toBe(false);
+      expect(idleCallback).toBeDefined();
+
+      // Fire idle timeout — span is now closed as timed-out.
+      idleCallback?.();
+
+      // Now release the stream and let it throw.
+      releaseStream?.();
+      await expect(iterator.next()).rejects.toThrow('upstream-fail');
+
+      const spanRecord = getStreamSpanRecord();
+      expect(spanRecord.endMetadata?.error).toBe(
+        'Stream span timed out (idle)',
+      );
+      // Neither error-flavored telemetry path should fire — the span's
+      // timeout state is the canonical signal.
+      expect(logApiError).not.toHaveBeenCalled();
+      expect(openaiLoggerInstance.logInteraction).not.toHaveBeenCalled();
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
   it('preserves stream errors when error logging fails', async () => {
     const response1 = createResponse('resp-1', 'model-stream', [
       { text: 'partial' },

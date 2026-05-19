@@ -550,24 +550,31 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
     } catch (error) {
       errorOccurred = true;
-      const durationMs = Date.now() - startTime;
-      runInSpan(() =>
-        this.safelyLogApiError(
-          firstResponseId,
-          durationMs,
-          error,
-          firstModelVersion || model,
-          userPromptId,
-        ),
-      );
-      await runInSpan(() =>
-        this.safelyLogOpenAIInteraction(
-          openaiRequest,
-          undefined,
-          error,
-          userPromptId,
-        ),
-      );
+      // Same gating as the success path above: if the idle timeout already
+      // closed the span as failed, do not emit a parallel api_error log
+      // (the span is the canonical signal). Otherwise we'd produce the
+      // exact contradictory pair the timeout fix targets — span timed-out
+      // + api_error log — just on the error branch (#4302 review).
+      if (!spanEndedByTimeout) {
+        const durationMs = Date.now() - startTime;
+        runInSpan(() =>
+          this.safelyLogApiError(
+            firstResponseId,
+            durationMs,
+            error,
+            firstModelVersion || model,
+            userPromptId,
+          ),
+        );
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(
+            openaiRequest,
+            undefined,
+            error,
+            userPromptId,
+          ),
+        );
+      }
       throw error;
     } finally {
       if (spanEndTimeout !== undefined) {

@@ -496,6 +496,45 @@ describe('session-tracing', () => {
       endToolExecutionSpan(execSpan, { success: true });
       expect(mockSpans[0]!.ended).toBe(true);
     });
+
+    it('cancelled: true keeps status UNSET while still recording attributes (#4302)', () => {
+      const execSpan = startToolExecutionSpan();
+      endToolExecutionSpan(execSpan, {
+        success: false,
+        error: 'Tool execution cancelled by user',
+        cancelled: true,
+      });
+
+      const record = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.execution',
+      );
+      expect(record?.ended).toBe(true);
+      // No setStatus call — status stays UNSET, matching setToolSpanCancelled
+      // on the parent tool span. Without this, success: false would set ERROR
+      // and trace backends filtering for errors would false-positive on
+      // user cancellations.
+      expect(record?.statuses).toHaveLength(0);
+      // Attributes still record the cancellation reason.
+      expect(record?.attributes['success']).toBe(false);
+      expect(record?.attributes['error']).toBe(
+        'Tool execution cancelled by user',
+      );
+    });
+
+    it('cancelled: false (default) still maps success: false to ERROR status', () => {
+      const execSpan = startToolExecutionSpan();
+      endToolExecutionSpan(execSpan, {
+        success: false,
+        error: 'Tool execution failed',
+      });
+
+      const record = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.execution',
+      );
+      expect(record?.statuses).toHaveLength(1);
+      expect(record?.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
+      expect(record?.statuses[0]!.message).toBe('Tool execution failed');
+    });
   });
 
   describe('toolContext ALS lifecycle', () => {

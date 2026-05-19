@@ -88,6 +88,10 @@ interface SpanContext {
  *  4. Active context as a no-op fallback.
  *
  * Mirrors `tracer.ts:getParentContext()` (#4126 review follow-up, #4212).
+ *
+ * SYNC: keep parent-resolution logic in step with getParentContext() in
+ * telemetry/tracer.ts — drift here re-introduces the trace-tree flattening
+ * issue #4212 set out to fix (#4302 review).
  */
 function resolveParentContext(parent: SpanContext | undefined): Context {
   if (parent) {
@@ -464,6 +468,14 @@ export function endToolExecutionSpan(
   metadata?: {
     success?: boolean;
     error?: string;
+    /**
+     * Mark the execution as user-cancelled: success/error attributes are
+     * still recorded but status stays UNSET, mirroring setToolSpanCancelled
+     * on the parent tool span. Without this, success: false unconditionally
+     * sets ERROR and trace backends filtering for errors false-positive on
+     * user cancels (#4302 review).
+     */
+    cancelled?: boolean;
   },
 ): void {
   const spanId = getSpanId(span);
@@ -486,8 +498,9 @@ export function endToolExecutionSpan(
 
     // No-metadata-no-status: matches endToolSpan. Callers that pre-set
     // status (e.g. via setToolSpanCancelled) and then call this without
-    // metadata get their pre-set status preserved.
-    if (metadata) {
+    // metadata get their pre-set status preserved. Cancellation also
+    // preserves UNSET so the child agrees with the cancelled parent.
+    if (metadata && !metadata.cancelled) {
       if (metadata.success !== false) {
         spanCtx.span.setStatus({ code: SpanStatusCode.OK });
       } else {

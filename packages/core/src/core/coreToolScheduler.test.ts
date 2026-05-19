@@ -64,9 +64,9 @@ type ToolSpanRecord = {
   ended: boolean;
   /**
    * Metadata passed to endToolSpan / endToolExecutionSpan — captured so
-   * tests can assert success/error values are forwarded correctly.
+   * tests can assert success/error/cancelled values are forwarded correctly.
    */
-  endMetadata?: { success?: boolean; error?: string };
+  endMetadata?: { success?: boolean; error?: string; cancelled?: boolean };
 };
 
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
@@ -154,7 +154,7 @@ vi.mock('../telemetry/session-tracing.js', () => ({
   endToolExecutionSpan: vi.fn(
     (
       span: ToolSpanRecord & ReturnType<typeof createMockToolSpan>,
-      metadata?: { success?: boolean; error?: string },
+      metadata?: { success?: boolean; error?: string; cancelled?: boolean },
     ) => {
       if (metadata) {
         span.endMetadata = metadata;
@@ -1995,6 +1995,9 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
     expect(execSpanRecord?.endMetadata?.error).toBe(
       'Tool execution cancelled by user',
     );
+    // #4302 review: cancelled: true so the exec sub-span ends UNSET (not
+    // ERROR) — matches setToolSpanCancelled on the parent tool span.
+    expect(execSpanRecord?.endMetadata?.cancelled).toBe(true);
   });
 });
 
@@ -3729,7 +3732,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     const exec = getExecutionSpan();
     expect(exec).toBeDefined();
     expect(exec!.ended).toBe(true);
-    expect(exec!.endMetadata).toEqual({ success: true });
+    // cancelled: false because signal is not aborted on the success path
+    // (#4302 review: cancelled flag now propagates through endToolExecutionSpan).
+    expect(exec!.endMetadata).toEqual({ success: true, cancelled: false });
   });
 
   it('execution sub-span: ended (success: false) when ToolResult.error is set', async () => {
@@ -3749,10 +3754,12 @@ describe('CoreToolScheduler telemetry spans', () => {
     // Since #4212 the success path also stamps a sanitized `error` reason on
     // the exec span when ToolResult.error is set, so trace backends can
     // distinguish a failed-result close from a cancelled one without
-    // cross-referencing the parent tool span.
+    // cross-referencing the parent tool span. cancelled: false since the
+    // signal isn't aborted (#4302 review).
     expect(exec!.endMetadata).toEqual({
       success: false,
       error: 'Tool execution failed',
+      cancelled: false,
     });
   });
 
@@ -3800,6 +3807,20 @@ describe('CoreToolScheduler telemetry spans', () => {
     // Operators filtering exec spans for errors should NOT see cancellation
     // messages here — only real exception messages.
     expect(exec!.endMetadata?.error).toBe('Tool execution cancelled by user');
+    // #4302 review: catch-path cancellation also threads cancelled: true so
+    // the exec sub-span lands UNSET, not ERROR.
+    expect(exec!.endMetadata?.cancelled).toBe(true);
+  });
+
+  it('execution sub-span: cancelled flag is NOT set on real exceptions (#4302)', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockRejectedValue(new Error('boom')),
+    });
+    const exec = getExecutionSpan();
+    expect(exec).toBeDefined();
+    // signal not aborted — this is a real exception, must surface as ERROR
+    // status. cancelled stays falsy.
+    expect(exec!.endMetadata?.cancelled).toBeFalsy();
   });
 });
 
