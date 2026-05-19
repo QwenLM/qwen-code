@@ -83,6 +83,6 @@
 
 ## 总结
 
-本设计在**评审深度**维度已经比所有同类工具更深（9 agent + reverse audit + 跨文件 + 多人格），但在**触发自动化**和**身份**两块落后于行业基线，这是 Phase 2 / Phase 7 要补齐的。
+本设计在**评审深度**维度已经比所有同类工具更深（9 agent + reverse audit + 跨文件 + 多人格）。**触发自动化**（push 自动评审 + 跨 run 增量 cache）由本 PR 的 Phase 1-2 补齐；**评审主体身份**（独立 `qwen-code-review[bot]`）仍落后于行业基线，由 Phase 7 的 GitHub App 集成补齐。
 
 真正独有的差异化在**preflight 文档锚定与方向控制**：现有 design 文档 + 历史 PR 数据作为 anchor，每条 direction 类 finding 强制 cite，并在进入实现层 `/review` 前完成判断。这一块直接对应"`Catch up with Claude Code` + 在 preflight 层校验对齐情况"的 roadmap 目标。
