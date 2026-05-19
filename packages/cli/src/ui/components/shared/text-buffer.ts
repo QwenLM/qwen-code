@@ -2644,20 +2644,14 @@ export interface TextBuffer {
     sequence: string;
   }) => void;
   /**
-   * Opens the current buffer contents in the user's preferred terminal text
-   * editor ($VISUAL or $EDITOR, falling back to "vi").  The method blocks
-   * until the editor exits, then reloads the file and replaces the in‑memory
-   * buffer with whatever the user saved.
+   * Opens the current buffer contents in an external editor.  Resolution
+   * order: `/editor` preference → `$VISUAL` → `$EDITOR` → `vi`.
    *
-   * The operation is treated as a single undoable edit – we snapshot the
-   * previous state *once* after reading back the edited file so one `undo()`
-   * will revert the entire change set.  No snapshot is created when the
-   * editor fails or the content is unchanged.
+   * The undo snapshot is created *after* the editor exits and only when
+   * the content actually changed, so one `undo()` reverts the entire edit.
    *
-   * Note: We purposefully rely on the *synchronous* spawn API so that the
-   * calling process genuinely waits for the editor to close before
-   * continuing.  This mirrors Git's behaviour and simplifies downstream
-   * control‑flow (callers can simply `await` the Promise).
+   * Uses the synchronous spawn API so the calling process blocks until the
+   * editor closes, mirroring Git's behaviour.
    */
   openInExternalEditor: (opts?: { editor?: string }) => Promise<void>;
 
