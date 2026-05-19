@@ -1849,6 +1849,18 @@ export class CoreToolScheduler {
         const modifyContext = waitingToolCall.tool.getModifyContext(signal);
         const editorType = this.getPreferredEditor();
         if (!editorType) {
+          // No editor configured: ModifyWithEditor cannot proceed. Log so
+          // the silent failure is at least visible in debug telemetry.
+          // Do NOT finalize spans here — the tool stays in awaiting_approval
+          // and the user can still recover with Cancel or Proceed; their
+          // eventual decision closes the spans correctly. Closing them
+          // here would make the user's eventual finalize a no-op (Map
+          // already cleared) and lose the actual decision/source — same
+          // pattern as the autoApprove catch (#4321 review codex P3).
+          // The 30-min TTL is the safety net if the user walks away.
+          debugLogger.warn(
+            `ModifyWithEditor requested for ${callId} but no editor available — tool stays in awaiting_approval; user can recover via Cancel/Proceed`,
+          );
           return;
         }
 

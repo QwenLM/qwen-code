@@ -564,6 +564,11 @@ export function startToolBlockedOnUserSpan(
   // If the tool span was already ended (defensive — shouldn't happen on the
   // happy path), fall back to the standard parent-resolution chain so we
   // still produce a span correlated with the session.
+  if (!parentSpanCtx) {
+    debugLogger.debug(
+      'startToolBlockedOnUserSpan: tool span not in activeSpans (already ended?) — using resolveParentContext fallback',
+    );
+  }
   const ctx = parentSpanCtx
     ? trace.setSpan(otelContext.active(), parentSpanCtx.span)
     : resolveParentContext(undefined);
