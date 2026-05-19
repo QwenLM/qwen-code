@@ -1004,6 +1004,139 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
     }
   });
 
+  it('does NOT attach late-poll observer when the provider beats the timeout (round-5 #1: pollTimedOut race)', async () => {
+    // PR #4291 follow-up review (deepseek-v4-pro, round-5 #1): the
+    // `pollTimedOut = true` flag was previously set unconditionally
+    // inside the timer callback. If the provider settled the wrapper
+    // first (e.g., at 29.9s), the timer callback could still fire
+    // afterwards in a tight race, mark the flag, and the late-observer
+    // would attach to an already-settled promise — emitting a
+    // spurious `lost_late_poll_after_timeout` for a flow that
+    // completed within the ceiling. Fix: set the flag in the catch
+    // block only when `err instanceof DeviceFlowPollTimeoutError`.
+    // Pin: provider responds with `pending` BEFORE the race timer
+    // fires; assert NO late audit.
+    const provider = new FakeProvider();
+    provider.pollScript = [{ kind: 'pending' }];
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      await registry.start({ providerId: 'qwen-oauth' });
+      // Drive the first poll. Provider returns synchronously; wrapper
+      // resolves, finally clears the timer.
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      expect(provider.pollCount).toBe(1);
+      // Tick well past POLL_TIMEOUT_MS to confirm the timer was
+      // properly cleared. If `pollTimedOut` had been set in the
+      // callback, this would attach a late observer + audit line.
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS * 2);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      const spuriousLate = auditLines.find((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'lost_late_poll_after_timeout',
+        ),
+      );
+      expect(spuriousLate).toBeUndefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('sanitizes hostile latePollResult.kind in late-observer audit (round-5 #3)', async () => {
+    // PR #4291 follow-up review (deepseek-v4-pro, round-5 #3): a
+    // non-conforming provider could return `{kind: '<hostile string
+    // with newlines/controls>'}`. The audit hint interpolates `kind`
+    // directly — without sanitization, that's a log-forging vector
+    // even though the typed shape is `'pending' | 'slow_down' | ...`.
+    const provider = new FakeProvider();
+    let resolveLate!: (r: DeviceFlowPollResult) => void;
+    const latePollPromise = new Promise<DeviceFlowPollResult>((resolve) => {
+      resolveLate = resolve;
+    });
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      return latePollPromise;
+    };
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Non-conforming late resolve with hostile `kind`. (Casting
+      // to `DeviceFlowPollResult` simulates a provider violating the
+      // typed contract at runtime.)
+      const hostile = 'pending\n[serve] FORGED LINE\x1b[31m';
+      resolveLate({ kind: hostile } as unknown as DeviceFlowPollResult);
+      await flushAsync();
+      const lateAudit = auditLines.find((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'lost_late_poll_after_timeout',
+        ),
+      );
+      expect(lateAudit).toBeDefined();
+      const hint = lateAudit?.['hint'] as string;
+      // The forged log line text MUST NOT lead a real newline.
+      expect(hint.split('\n').length).toBe(1);
+      expect(hint).not.toContain('\x1b[31m');
+      // Substantive parts preserved (`?`-replaced).
+      expect(hint).toContain('FORGED LINE');
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('sanitizes hostile lateErr.name in late-rejection observer audit (round-5 #2)', async () => {
+    // PR #4291 follow-up review (deepseek-v4-pro, round-5 #2): same
+    // log-injection vector via `Error.name` (freely assignable). The
+    // round-4 fix used name+length but didn't sanitize `name` itself.
+    const provider = new FakeProvider();
+    let rejectLate!: (e: Error) => void;
+    const latePollPromise = new Promise<DeviceFlowPollResult>(
+      (_resolve, reject) => {
+        rejectLate = reject;
+      },
+    );
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      return latePollPromise;
+    };
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      const hostileErr = new Error('upstream HTTP 502');
+      hostileErr.name = 'Hostile\n[serve] FORGED ERR LINE\x1b[31m';
+      rejectLate(hostileErr);
+      await flushAsync();
+      const lateAudit = auditLines.find((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'lost_late_poll_after_timeout',
+        ),
+      );
+      expect(lateAudit).toBeDefined();
+      const hint = lateAudit?.['hint'] as string;
+      expect(hint.split('\n').length).toBe(1);
+      expect(hint).not.toContain('\x1b[31m');
+      expect(hint).toContain('FORGED ERR LINE');
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('persist() that hangs past PERSIST_TIMEOUT_MS maps to persist_failed (#2)', async () => {
     const provider = new FakeProvider();
     // Single poll tick returns success whose persist() never resolves.

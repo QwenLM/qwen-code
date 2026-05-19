@@ -25,6 +25,50 @@
 
 import { randomUUID } from 'node:crypto';
 
+/**
+ * Strip / replace bytes that could forge log lines or inject terminal
+ * control sequences when interpolated into a stderr / audit breadcrumb.
+ *
+ * PR #4291 follow-up review (gpt-5.5, round-3 #2): originally lived in
+ * `qwenDeviceFlowProvider.ts` to sanitize the attacker-controlled
+ * `oauthError` field. PR #4291 follow-up review (deepseek-v4-pro,
+ * round-5 #2/#3): the registry's late-poll observer also interpolates
+ * provider-controlled values (`latePollResult.kind`, `lateErr.name`)
+ * into audit hints; same sanitization vector. Lifted to `deviceFlow.ts`
+ * so both layers share a single helper — without exporting it from a
+ * lower-level module, qwenDeviceFlowProvider couldn't import it
+ * (deviceFlow is the foundation; provider depends on deviceFlow, not
+ * the other way around).
+ *
+ * PR #4291 follow-up review (deepseek-v4-pro, round-5 #4): regex
+ * extended beyond ASCII C0/C1 + DEL to cover Unicode lookalike
+ * controls a malicious IdP could use to bypass the ASCII-only filter:
+ *   - U+200B–U+200F: zero-width characters + LRM/RLM (invisible but
+ *     can alter terminal rendering)
+ *   - U+2028–U+2029: LINE / PARAGRAPH SEPARATOR — rendered as newlines
+ *     in many Unicode-aware terminals; the most direct log-forging vector
+ *   - U+202A–U+202E: bidirectional control chars — can reverse text
+ *     rendering direction
+ *   - U+FEFF: BYTE ORDER MARK / zero-width no-break space
+ *
+ * Replaces each with `?` so the operator can still see SOMETHING was
+ * present at that index (length-preserving) instead of silently dropping.
+ */
+const SANITIZE_FOR_STDERR_RE = new RegExp(
+  // ASCII C0 (0x00–0x1f), DEL (0x7f), C1 (0x80–0x9f) — the original
+  // round-3 coverage. Plus Unicode lookalikes added in round-5:
+  //   \u200b–\u200f: zero-width chars + LRM/RLM
+  //   \u2028–\u2029: LINE / PARAGRAPH SEPARATOR (terminal newline equivalents)
+  //   \u202a–\u202e: bidirectional override controls
+  //   \ufeff:         BOM / ZWNBSP
+  String.raw`[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\ufeff]`,
+  'g',
+);
+
+export function sanitizeForStderr(value: string): string {
+  return value.replace(SANITIZE_FOR_STDERR_RE, '?');
+}
+
 export const DEVICE_FLOW_DEFAULT_INTERVAL_MS = 5_000;
 export const DEVICE_FLOW_TERMINAL_GRACE_MS = 5 * 60_000;
 export const DEVICE_FLOW_SWEEP_INTERVAL_MS = 30_000;
@@ -1104,7 +1148,6 @@ export class DeviceFlowRegistry {
     try {
       result = await new Promise<DeviceFlowPollResult>((resolve, reject) => {
         pollTimer = this.schedule(DEVICE_FLOW_POLL_TIMEOUT_MS, () => {
-          pollTimedOut = true;
           // PR #4291 follow-up review (qwen-latest, round-4 #3): build the
           // sentinel ONCE so `signal.reason.stack` and the caught
           // rejection's stack point to the same throw site (operators
@@ -1120,6 +1163,15 @@ export class DeviceFlowRegistry {
             // best-effort
           }
           reject(timeoutError);
+          // PR #4291 follow-up review (deepseek-v4-pro, round-5 #1): do
+          // NOT set `pollTimedOut = true` here. If the provider settled
+          // the wrapper at 29.9s, the `await` unblocks and `finally`
+          // calls `clearScheduled(pollTimer)` — but if the timer
+          // callback was already queued for execution before the clear
+          // landed, this branch can still run and incorrectly mark
+          // `pollTimedOut`. Move the flag to the catch block where the
+          // settled cause is unambiguous (`err instanceof
+          // DeviceFlowPollTimeoutError`).
         });
         providerPollPromise = provider.poll(
           {
@@ -1151,6 +1203,15 @@ export class DeviceFlowRegistry {
       // Branch on `DeviceFlowPollTimeoutError` to use a dedicated
       // hint + suppress the misleading "raw" audit path.
       if (err instanceof DeviceFlowPollTimeoutError) {
+        // PR #4291 follow-up review (deepseek-v4-pro, round-5 #1): the
+        // catch is the canonical place to confirm "the wrapper settled
+        // BECAUSE of our timer." The `instanceof` check is
+        // unambiguous: `DeviceFlowPollTimeoutError` is only thrown from
+        // the timer callback above (it's never thrown by providers
+        // directly; the type isn't exported as a public DeviceFlow
+        // contract). So setting the flag here proves the late-observer
+        // attaches only when the provider genuinely lost the race.
+        pollTimedOut = true;
         result = {
           kind: 'error',
           errorKind: 'upstream_error',
@@ -1214,10 +1275,18 @@ export class DeviceFlowRegistry {
             // slow" on the error kind: route operators correctly by
             // distinguishing "real late response" (pending / slow_down /
             // success) from "provider's abort cooperation" (error).
+            // PR #4291 follow-up review (deepseek-v4-pro, round-5 #3):
+            // `latePollResult.kind` is provider-controlled. The typed
+            // shape is `'pending' | 'slow_down' | 'success' | 'error'`,
+            // but a non-conforming provider could return an arbitrary
+            // string containing newlines / control characters. Same
+            // log-injection vector as `oauthError`. Route through
+            // `sanitizeForStderr` before interpolation; the kind=error
+            // branch is a static literal so it doesn't need the call.
             hint:
               latePollResult.kind === 'error'
                 ? `lost_late_poll_after_timeout: provider.poll() resolved kind=error after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — likely abort-driven cooperation; IdP responsiveness unknown`
-                : `lost_late_poll_after_timeout: provider.poll() resolved kind=${latePollResult.kind} after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — IdP is responsive but slow; consider raising the operator-side IdP latency alert threshold`,
+                : `lost_late_poll_after_timeout: provider.poll() resolved kind=${sanitizeForStderr(latePollResult.kind)} after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — IdP is responsive but slow; consider raising the operator-side IdP latency alert threshold`,
           });
         },
         (lateErr: unknown) => {
@@ -1235,9 +1304,16 @@ export class DeviceFlowRegistry {
           // settled late. The 256-byte truncation we used previously
           // was insufficient — the first 256 bytes of a WAF error
           // page can carry a full `device_code` value.
+          //
+          // PR #4291 follow-up review (deepseek-v4-pro, round-5 #2):
+          // `Error.name` is a freely assignable string property, same
+          // attacker-controlled vector closed at the provider layer
+          // for `err.name`. Route through `sanitizeForStderr` so a
+          // hostile `e.name = "X\n[serve] FAKE\x1b[31m"` can't forge
+          // log lines via this audit path either.
           const safeDetail =
             lateErr instanceof Error
-              ? `${lateErr.name} (message ${lateErr.message.length} bytes; raw suppressed)`
+              ? `${sanitizeForStderr(lateErr.name)} (message ${lateErr.message.length} bytes; raw suppressed)`
               : `<non-Error throw: ${typeof lateErr}>`;
           audit?.record({
             deviceFlowId: auditDeviceFlowId,

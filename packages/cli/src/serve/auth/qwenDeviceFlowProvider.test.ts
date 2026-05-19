@@ -379,4 +379,40 @@ describe('QwenOAuthDeviceFlowProvider.poll() — stderr audit branches', () => {
     // Length field is the message length, not name length.
     expect(line).toContain(`message ${err.message.length} bytes`);
   });
+
+  it('sanitizes Unicode lookalike controls (U+2028 LINE SEPARATOR, bidi, ZWNBSP) in oauthError (round-5 #4)', async () => {
+    // PR #4291 follow-up review (deepseek-v4-pro, round-5 #4): the
+    // round-3 sanitizer only stripped ASCII C0/C1 + DEL; a hostile
+    // IdP could bypass with U+2028 (LINE SEPARATOR — rendered as a
+    // newline in many Unicode-aware terminals) or zero-width / bidi
+    // controls. Pin the extended coverage with a payload that mixes
+    // U+2028, U+200E (LRM), and U+FEFF (BOM).
+    const malicious = 'slow_down [serve] FAKE LOG ‎RTL﻿';
+    const provider = new QwenOAuthDeviceFlowProvider(
+      fakeClient({
+        pollDeviceToken: async () => {
+          throw new QwenOAuthPollError({
+            oauthError: malicious,
+            description: 'attacker-supplied unicode',
+            status: 400,
+          });
+        },
+      }),
+    );
+    const result = await provider.poll(makeState(), {
+      signal: new AbortController().signal,
+    });
+    expect(result.kind).toBe('error');
+    expect(stderrLines).toHaveLength(1);
+    const line = stderrLines[0];
+    // None of the Unicode lookalikes survive into stderr.
+    expect(line).not.toContain(' ');
+    expect(line).not.toContain('‎');
+    expect(line).not.toContain('﻿');
+    // The forged log line text MUST NOT lead an actual newline.
+    expect(line.split('\n').length).toBe(2); // single content + trailing
+    // Substantive parts preserved (`?`-replaced, length-preserving).
+    expect(line).toContain('FAKE LOG');
+    expect(line).toContain('RTL');
+  });
 });
