@@ -24,6 +24,14 @@ import {
   getNestedProperty,
 } from '../utils/settingsUtils.js';
 
+/**
+ * Reserved object keys that would let a caller climb into the prototype chain
+ * when walking a dotted key path. Defense in depth — current install-plan keys
+ * are derived from static provider config, but the underlying setNestedProperty
+ * helper does not guard against them.
+ */
+const UNSAFE_KEY_PARTS = new Set(['__proto__', 'constructor', 'prototype']);
+
 export function createLoadedSettingsAdapter(
   settings: LoadedSettings,
   scope?: SettingScope,
@@ -40,6 +48,11 @@ export function createLoadedSettingsAdapter(
     },
 
     setValue(key: string, value: unknown): void {
+      if (key.split('.').some((p) => UNSAFE_KEY_PARTS.has(p))) {
+        throw new Error(
+          `Refusing to write settings key with reserved segment: ${key}`,
+        );
+      }
       settings.setValue(persistScope, key, value);
     },
 

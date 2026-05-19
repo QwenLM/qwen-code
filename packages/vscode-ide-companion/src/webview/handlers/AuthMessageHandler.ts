@@ -14,6 +14,7 @@ import {
   shouldShowStep,
   resolveBaseUrl,
   getDefaultModelIds,
+  type AuthType,
   type ProviderConfig,
   type ProviderSetupInputs,
   type BaseUrlOption,
@@ -101,9 +102,17 @@ export class AuthMessageHandler extends BaseMessageHandler {
   /**
    * Helper: show a QuickPick and return the selected item's `value`.
    * Returns undefined if the user cancels.
+   *
+   * Items with `kind: Separator` are rendered by VSCode as non-selectable
+   * group headers; they should be left in `items` to preserve grouping.
    */
   private async pick<T extends string>(
-    items: Array<{ label: string; description?: string; value: T }>,
+    items: Array<{
+      label: string;
+      description?: string;
+      value: T;
+      kind?: vscode.QuickPickItemKind;
+    }>,
     title: string,
     placeHolder: string,
   ): Promise<T | undefined> {
@@ -111,7 +120,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       title,
       placeHolder,
     });
-    if (!choice) {
+    if (!choice || choice.kind === vscode.QuickPickItemKind.Separator) {
       this.notifyAuthCancelled();
       return undefined;
     }
@@ -194,14 +203,10 @@ export class AuthMessageHandler extends BaseMessageHandler {
         addGroup('Custom', customProviders);
       }
 
+      // Pass items including separators; VSCode QuickPick renders separator
+      // entries as non-selectable group headers (mirrors the CLI grouping).
       const selectedId = await this.pick(
-        items.filter(
-          (i) => i.kind !== vscode.QuickPickItemKind.Separator,
-        ) as Array<{
-          label: string;
-          description?: string;
-          value: string;
-        }>,
+        items,
         'Qwen Code: Select Provider',
         'Choose how to connect',
       );
@@ -233,6 +238,25 @@ export class AuthMessageHandler extends BaseMessageHandler {
     const flowTitle =
       provider.uiLabels?.flowTitle ?? `Qwen Code: ${provider.label}`;
 
+    // Step 0: Protocol (only for providers offering multiple, e.g. custom)
+    let protocol: AuthType | undefined;
+    if (
+      shouldShowStep(provider, 'protocol') &&
+      provider.protocolOptions &&
+      provider.protocolOptions.length > 1
+    ) {
+      const selected = await this.pick(
+        provider.protocolOptions.map((p) => ({
+          label: String(p),
+          value: String(p),
+        })),
+        `${flowTitle}: Protocol`,
+        'Select API protocol',
+      );
+      if (!selected) return;
+      protocol = selected as AuthType;
+    }
+
     // Step 1: Base URL (if needed)
     let baseUrl: string;
     if (shouldShowStep(provider, 'baseUrl')) {
@@ -260,6 +284,16 @@ export class AuthMessageHandler extends BaseMessageHandler {
         });
         if (urlInput === undefined) return;
         baseUrl = urlInput;
+        if (!/^https?:\/\//i.test(baseUrl)) {
+          this.sendToWebView({
+            type: 'authError',
+            data: {
+              message: 'Base URL must start with http:// or https://.',
+            },
+          });
+          this.notifyAuthCancelled();
+          return;
+        }
       }
     } else {
       baseUrl = resolveBaseUrl(provider);
@@ -283,6 +317,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
           type: 'authError',
           data: { message: validationError },
         });
+        this.notifyAuthCancelled();
         return;
       }
     }
@@ -334,13 +369,26 @@ export class AuthMessageHandler extends BaseMessageHandler {
     }
 
     // Submit
-    if (this.authInteractiveHandler) {
-      await this.authInteractiveHandler(provider, {
-        baseUrl,
-        apiKey,
-        modelIds,
-        advancedConfig,
+    if (!this.authInteractiveHandler) {
+      console.error(
+        '[AuthMessageHandler] authInteractiveHandler not set; cannot apply provider config.',
+      );
+      this.sendToWebView({
+        type: 'authError',
+        data: {
+          message:
+            'Auth handler not initialized. Please reopen the panel and try again.',
+        },
       });
+      this.notifyAuthCancelled();
+      return;
     }
+    await this.authInteractiveHandler(provider, {
+      protocol,
+      baseUrl,
+      apiKey,
+      modelIds,
+      advancedConfig,
+    });
   }
 }

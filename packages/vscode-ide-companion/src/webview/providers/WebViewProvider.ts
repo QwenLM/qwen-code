@@ -28,11 +28,15 @@ import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
+  applyProviderInstallPlanToFile,
   writeCodingPlanConfig,
   readQwenSettingsForVSCode,
   clearPersistedAuth,
 } from '../../services/settingsWriter.js';
-import { parseInsightMessage } from '@qwen-code/qwen-code-core';
+import {
+  buildInstallPlan,
+  parseInsightMessage,
+} from '@qwen-code/qwen-code-core';
 
 /** Threshold (ms) before a completed task triggers a notification. */
 const LONG_TASK_THRESHOLD_MS = 20_000;
@@ -1315,10 +1319,6 @@ export class WebViewProvider {
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
-      const { buildInstallPlan } = await import('@qwen-code/qwen-code-core');
-      const { applyProviderInstallPlanToFile } = await import(
-        '../../services/settingsWriter.js'
-      );
       const plan = buildInstallPlan(providerConfig, inputs);
       await applyProviderInstallPlanToFile(plan);
 

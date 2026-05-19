@@ -24,7 +24,14 @@ export const openRouterProvider: ProviderConfig = {
   ],
   modelsEditable: true,
   modelNamePrefix: 'OpenRouter',
-  ownsModel: (model) => (model.baseUrl ?? '').includes('openrouter.ai'),
+  ownsModel: (model) => {
+    try {
+      const host = new URL(model.baseUrl ?? '').hostname;
+      return host === 'openrouter.ai' || host.endsWith('.openrouter.ai');
+    } catch {
+      return false;
+    }
+  },
   documentationUrl: 'https://openrouter.ai/docs',
   uiGroup: 'third-party',
 };

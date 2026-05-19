@@ -87,10 +87,13 @@ export async function applyProviderInstallPlan(
     doRefreshAuth = true,
   } = options;
 
-  settings.backup?.();
   const previousEnvValues = new Map<string, string | undefined>();
 
   try {
+    // backup() inside the try so a failure here (e.g. structuredClone on a
+    // non-serializable adapter) still triggers the catch + env rollback.
+    settings.backup?.();
+
     // Set environment variables (snapshot previous values for rollback)
     for (const [key, value] of Object.entries(plan.env ?? {})) {
       previousEnvValues.set(key, process.env[key]);

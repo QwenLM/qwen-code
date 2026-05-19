@@ -8,7 +8,8 @@ import process from 'node:process';
 import os from 'node:os';
 import { getNpmVersion, getGitVersion } from './systemInfo.js';
 import { validateAuthMethod } from '../config/auth.js';
-import { findProviderByCredentials ,
+import {
+  findProviderByCredentials,
   canUseRipgrep,
   getMCPServerStatus,
   MCPServerStatus,

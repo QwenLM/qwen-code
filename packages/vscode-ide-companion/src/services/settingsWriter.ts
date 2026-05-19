@@ -101,21 +101,49 @@ function stripJsonComments(text: string): string {
 }
 
 /**
- * Read ~/.qwen/settings.json. Returns {} if missing or invalid.
- * Handles JSONC (JSON with comments) which is common in hand-edited
- * settings files.
+ * Strip trailing commas inside arrays/objects (`,]` / `,}`) — VSCode's own
+ * settings.json allows them and they crash strict JSON.parse. Operates on the
+ * already-comment-stripped text, so a literal `,]` inside a string is safe
+ * (string-literal copy in stripJsonComments preserves contents).
+ */
+function stripTrailingCommas(text: string): string {
+  return text.replace(/,(\s*[}\]])/g, '$1');
+}
+
+/**
+ * Read ~/.qwen/settings.json. Returns {} if the file is missing.
+ * Parse errors are logged and re-thrown so callers don't silently destroy a
+ * malformed file by treating it as empty and then overwriting it.
+ * Handles JSONC (JSON with comments + trailing commas) for hand-edited files.
  */
 function readSettings(): Record<string, unknown> {
+  const settingsPath = Storage.getGlobalSettingsPath();
+  let content: string;
   try {
-    const content = fs.readFileSync(Storage.getGlobalSettingsPath(), 'utf-8');
-    return JSON.parse(stripJsonComments(content)) as Record<string, unknown>;
-  } catch {
-    return {};
+    content = fs.readFileSync(settingsPath, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return {};
+    }
+    throw err;
+  }
+  try {
+    return JSON.parse(
+      stripTrailingCommas(stripJsonComments(content)),
+    ) as Record<string, unknown>;
+  } catch (err) {
+    console.error(
+      `[settingsWriter] Failed to parse ${settingsPath}; refusing to overwrite a malformed file.`,
+      err,
+    );
+    throw err;
   }
 }
 
 /**
- * Write ~/.qwen/settings.json (creates dir if needed).
+ * Write ~/.qwen/settings.json atomically (temp file + rename), creating the
+ * directory if needed. Atomic rename prevents leaving a half-written file
+ * behind on EACCES / disk-full / process crash mid-write.
  */
 function writeSettings(settings: Record<string, unknown>): void {
   const settingsPath = Storage.getGlobalSettingsPath();
@@ -123,7 +151,9 @@ function writeSettings(settings: Record<string, unknown>): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+  const tmpPath = `${settingsPath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(settings, null, 2), 'utf-8');
+  fs.renameSync(tmpPath, settingsPath);
 }
 
 /**
@@ -326,12 +356,18 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
       let current = data;
       for (let i = 0; i < parts.length - 1; i++) {
         const part = parts[i]!;
-        if (
-          !Object.prototype.hasOwnProperty.call(current, part) ||
-          !current[part] ||
-          typeof current[part] !== 'object'
-        ) {
+        const existing = Object.prototype.hasOwnProperty.call(current, part)
+          ? current[part]
+          : undefined;
+        if (existing == null) {
           current[part] = {};
+        } else if (typeof existing !== 'object') {
+          // Refuse to silently overwrite a scalar at an intermediate segment —
+          // would destroy user data (e.g. {"env": "legacy-string"} losing the
+          // string when env.NEW_KEY is written).
+          throw new Error(
+            `Cannot write settings key "${key}": segment "${part}" is a ${typeof existing}, not an object`,
+          );
         }
         current = current[part] as Record<string, unknown>;
       }
