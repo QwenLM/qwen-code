@@ -48,9 +48,27 @@ describe('isDangerousBashRule', () => {
     'bun',
     'ruby',
     'perl',
+    // Modern package runners — `npx <pkg>` / `uvx <pkg>` / `pipx <pkg>`
+    // / `dlx <pkg>` / `go run` all fetch + execute arbitrary external
+    // code by name. `Bash(npx *)` was specifically called out as a
+    // common "always allow" pattern that previously slipped past the
+    // classifier in AUTO.
+    'npx',
+    'pnpx',
+    'uvx',
+    'pipx',
+    'dlx',
+    'go',
   ])('flags interpreter %s as bare name', (interp) => {
     expect(isDangerousBashRule(bashRule(interp))).toBe(true);
   });
+
+  it.each(['npx *', 'uvx *', 'pipx *', 'go run *', 'go install *'])(
+    'flags modern-runner wildcard %s — common attack pattern via fetch-and-execute',
+    (s) => {
+      expect(isDangerousBashRule(bashRule(s))).toBe(true);
+    },
+  );
 
   it.each(['python:*', 'node:*', 'bash:*'])(
     'flags interpreter prefix-form %s',

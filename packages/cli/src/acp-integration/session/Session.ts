@@ -1940,26 +1940,40 @@ export class Session implements SessionContext {
           skipClassifier: shouldFallback(denialState).fallback,
         });
 
-        if (decision.via === 'classifier' && decision.shouldBlock) {
-          this.config.setAutoModeDenialState(
-            decision.unavailable
-              ? recordUnavailable(denialState)
-              : recordBlock(denialState),
-          );
-          return earlyErrorResponse(
-            new Error(formatClassifierBlockMessage(decision)),
-            fc.name,
-          );
+        // Exhaustive switch (parallels coreToolScheduler.ts:1392). Using
+        // an `if/else if` here would silently fall through to "allow" if
+        // a new `via` variant were added to `AutoModeDecision` — fail-
+        // open. The `_exhaustive: never` arm makes that drift a
+        // compile-time error.
+        switch (decision.via) {
+          case 'fast-path:accept-edits':
+          case 'fast-path:allowlist':
+            this.config.setAutoModeDenialState(recordAllow(denialState));
+            autoModeAllowed = true;
+            break;
+          case 'classifier':
+            if (decision.shouldBlock) {
+              this.config.setAutoModeDenialState(
+                decision.unavailable
+                  ? recordUnavailable(denialState)
+                  : recordBlock(denialState),
+              );
+              return earlyErrorResponse(
+                new Error(formatClassifierBlockMessage(decision)),
+                fc.name,
+              );
+            }
+            this.config.setAutoModeDenialState(recordAllow(denialState));
+            autoModeAllowed = true;
+            break;
+          case 'fallback':
+            // Drop through to the manual-approval flow below.
+            break;
+          default: {
+            const _exhaustive: never = decision;
+            void _exhaustive;
+          }
         }
-
-        if (decision.via !== 'fallback') {
-          // Allow path: fast-path hit OR classifier returned !shouldBlock.
-          this.config.setAutoModeDenialState(recordAllow(denialState));
-          autoModeAllowed = true;
-        }
-        // decision.via === 'fallback' → drop through; the existing
-        // needsConfirmation flow will route through requestPermission as
-        // if the session were in DEFAULT mode.
       }
 
       let didRequestPermission = false;

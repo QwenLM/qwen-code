@@ -63,6 +63,16 @@ const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   'rake',
   'task',
   'just',
+  'go', // `go run` / `go install` execute arbitrary code
+  // Modern package runners that fetch + execute arbitrary external
+  // packages by name. `Bash(npx *)` is a common "always allow" pattern
+  // that without this list would be the cleanest way to bypass the
+  // classifier in AUTO mode.
+  'npx',
+  'pnpx',
+  'uvx',
+  'pipx',
+  'dlx',
   // Generic eval-y commands
   'eval',
   'exec',

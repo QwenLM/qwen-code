@@ -92,9 +92,11 @@ export function shouldRunAutoModeForCall(
  * Returns true when the pending action is a file edit / write targeting a
  * path that lies within the current workspace (cwd + additional directories).
  *
- * Symlinks are not resolved: the check is a simple prefix comparison against
- * workspace roots. Symlinked paths pointing outside the workspace fall
- * through to the classifier — fail-safe by design.
+ * Symlinks ARE resolved via `WorkspaceContext.isPathWithinWorkspace`, which
+ * internally calls `fs.realpathSync`. A symlink whose target is outside the
+ * workspace correctly fails this check and falls through to the classifier
+ * — fail-safe by implementation. (Earlier revisions of this comment
+ * claimed the opposite; the actual behavior has always been to resolve.)
  *
  * Caller should only consult this when L4 evaluation returned `'default'`.
  */
