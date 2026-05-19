@@ -4405,6 +4405,233 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(blockedSpan?.blockedMetadata?.decision).toBe('proceed_once');
     expect(blockedSpan?.blockedMetadata?.source).toBe('cli');
   });
+
+  it('handleConfirmationResponse outer catch finalizes spans + rethrows when originalOnConfirm throws (#4321)', async () => {
+    // Defensive error-recovery path added by this PR: if anything inside
+    // _handleConfirmationResponseInner throws (originalOnConfirm,
+    // modifyWithEditor, _applyInlineModify, attemptExecutionOfScheduledCalls),
+    // both spans must be finalized and the error rethrown — otherwise
+    // operators see a leak until the 30-min TTL.
+    toolSpanRecords.length = 0;
+    const { scheduler, onToolCallsUpdate } = buildApprovalScheduler({});
+    await scheduler.schedule(
+      [
+        {
+          callId: 'rethrow-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-rethrow',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    // Wait until the call is awaiting_approval — both blocked + tool spans
+    // are in the scheduler's Maps at this point.
+    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
+
+    // Call handleConfirmationResponse DIRECTLY with a throwing
+    // originalOnConfirm. The outer catch in handleConfirmationResponse
+    // is the only thing protecting both spans from leaking.
+    const boom = new Error('originalOnConfirm boom');
+    const throwingOnConfirm = async () => {
+      throw boom;
+    };
+    await expect(
+      scheduler.handleConfirmationResponse(
+        'rethrow-1',
+        throwingOnConfirm,
+        ToolConfirmationOutcome.ProceedOnce,
+        new AbortController().signal,
+      ),
+    ).rejects.toBe(boom);
+
+    // Blocked span finalized as 'error' / 'system'.
+    const blockedSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.blocked_on_user',
+    );
+    expect(blockedSpan?.ended).toBe(true);
+    expect(blockedSpan?.blockedMetadata?.decision).toBe('error');
+    expect(blockedSpan?.blockedMetadata?.source).toBe('system');
+
+    // Tool span finalized with TOOL_FAILURE_KIND_TOOL_EXCEPTION.
+    const toolSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.mockEditTool',
+    );
+    expect(toolSpan?.ended).toBe(true);
+    expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(
+      'tool_exception',
+    );
+  });
+
+  it('PM hard-deny path emits failure_kind=permission_denied (#4321)', async () => {
+    // _schedule line ~1444: finalPermission === 'deny' branch sets the
+    // span failure with the PERMISSION_DENIED kind. Without test
+    // coverage, dropping setToolSpanFailure on this branch would
+    // silently lose the failure_kind attribution.
+    toolSpanRecords.length = 0;
+    class HardDenyTool extends BaseDeclarativeTool<
+      Record<string, unknown>,
+      ToolResult
+    > {
+      constructor() {
+        super('hardDenyTool', 'hardDenyTool', 'Always deny', Kind.Other, {});
+      }
+      protected createInvocation(params: Record<string, unknown>) {
+        return new (class extends BaseToolInvocation<
+          Record<string, unknown>,
+          ToolResult
+        > {
+          getDescription() {
+            return 'deny';
+          }
+          override async getDefaultPermission(): Promise<PermissionDecision> {
+            return 'deny';
+          }
+          async execute(): Promise<ToolResult> {
+            return { llmContent: '', returnDisplay: '' };
+          }
+        })(params);
+      }
+    }
+    const tool = new HardDenyTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({}),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'deny-1',
+          name: 'hardDenyTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-deny',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const toolSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.hardDenyTool',
+    );
+    expect(toolSpan?.ended).toBe(true);
+    expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(
+      'permission_denied',
+    );
+  });
+
+  it('non-interactive deny path emits failure_kind=non_interactive_denied (#4321)', async () => {
+    // _schedule line ~1532: when the tool needs confirmation but
+    // isInteractive() is false (and not zed/streaming-json), the
+    // scheduler auto-denies and tags failure_kind=non_interactive_denied.
+    toolSpanRecords.length = 0;
+    const tool = new MockEditTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({}),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => false, // forces non-interactive deny path
+      getInputFormat: () => undefined,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'noninteractive-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-noninteractive',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const toolSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.mockEditTool',
+    );
+    expect(toolSpan?.ended).toBe(true);
+    expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(
+      'non_interactive_denied',
+    );
+  });
 });
 
 // Integration tests for the fire* functions
