@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { render, cleanup, waitFor } from '@testing-library/react';
+import { act, render, cleanup, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ModelDialog } from './ModelDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -302,7 +302,7 @@ describe('<ModelDialog />', () => {
     } as unknown as Partial<Config>);
 
     const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
-    keyPressHandler({
+    await keyPressHandler({
       name: 'd',
       ctrl: false,
       meta: false,
@@ -329,11 +329,11 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
-  it('blocks setting qwen-oauth as default with "d" (discontinued)', () => {
+  it('blocks setting qwen-oauth as default with "d" (discontinued)', async () => {
     const { props, mockConfig, mockSettings } = renderComponent();
 
     const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
-    keyPressHandler({
+    await keyPressHandler({
       name: 'd',
       ctrl: false,
       meta: false,
@@ -415,6 +415,78 @@ describe('<ModelDialog />', () => {
     expect(mockSettings.setValue).not.toHaveBeenCalled();
     expect(mockConfig.switchModel).not.toHaveBeenCalled();
     expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it('clears a stale default-model error before persisting a valid model', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+
+    const { mockSettings, queryByText } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType,
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: DEFAULT_QWEN_MODEL,
+          label: DEFAULT_QWEN_MODEL,
+          description: 'Qwen model',
+          authType: AuthType.QWEN_OAUTH,
+        },
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    await act(async () => {
+      mockedSelect.mock.calls[0][0].onHighlight?.(
+        `${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`,
+      );
+    });
+    await act(async () => {
+      await mockedUseKeypress.mock.calls.at(-1)?.[0]({
+        name: 'd',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: 'd',
+      });
+    });
+
+    expect(queryByText(/Qwen OAuth free tier was discontinued/)).not.toBeNull();
+
+    await act(async () => {
+      mockedSelect.mock.calls
+        .at(-1)?.[0]
+        .onHighlight?.(`${AuthType.USE_OPENAI}::gpt-4`);
+    });
+    await act(async () => {
+      await mockedUseKeypress.mock.calls.at(-1)?.[0]({
+        name: 'd',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: 'd',
+      });
+    });
+
+    await waitFor(() => {
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'gpt-4',
+      );
+      expect(queryByText(/Qwen OAuth free tier was discontinued/)).toBeNull();
+    });
   });
 
   it('stores authType-qualified selectors in fast model mode', async () => {
