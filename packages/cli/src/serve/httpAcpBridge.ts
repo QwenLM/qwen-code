@@ -3185,6 +3185,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // invariant for custom provider impls that may throw.
       let daemonCells: ServePreflightCell[];
       if (!opts.statusProvider) {
+        // Asymmetric vs `getWorkspaceEnvStatus` (which falls back to a
+        // full `createIdleEnvStatus` envelope): preflight is the union
+        // of daemon-locality + ACP-locality cells stitched below, so an
+        // empty daemon slice IS the right fallback — the ACP slice
+        // fills in independently from the live channel (or its
+        // `not_started` placeholders).
         daemonCells = [];
       } else {
         try {
