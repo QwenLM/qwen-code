@@ -10,11 +10,11 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
   ALL_PROVIDERS,
   ALIBABA_PROVIDERS,
+  AuthType,
   THIRD_PARTY_PROVIDERS,
   shouldShowStep,
   resolveBaseUrl,
   getDefaultModelIds,
-  type AuthType,
   type ProviderConfig,
   type ProviderSetupInputs,
   type BaseUrlOption,
