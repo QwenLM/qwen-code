@@ -634,14 +634,15 @@ export class SharedTokenManager {
     const credString = JSON.stringify(credentials, null, 2);
 
     try {
-      await this.withTimeout(
-        atomicWriteFile(filePath, credString, {
-          mode: 0o600,
-          forceMode: true,
-        }),
-        5000,
-        'File operation',
-      );
+      // Don't wrap atomicWriteFile in withTimeout: a timeout would reject
+      // our caller while the rename can still complete after the lock is
+      // released, potentially overwriting another process's newer
+      // credentials. Atomic write is durable by design — accept whatever
+      // latency the I/O takes. (See PR #4095 Phase 2 Codex review round 3.)
+      await atomicWriteFile(filePath, credString, {
+        mode: 0o600,
+        forceMode: true,
+      });
 
       // Update cached file modification time atomically after successful write
       const stats = await this.withTimeout(
