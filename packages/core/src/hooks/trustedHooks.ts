@@ -12,6 +12,7 @@ import {
   type HookDefinition,
   type HookEventName,
 } from './types.js';
+import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -50,7 +51,7 @@ export class TrustedHooksManager {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
-      fs.writeFileSync(
+      atomicWriteFileSync(
         this.configPath,
         JSON.stringify(this.trustedHooks, null, 2),
       );

@@ -14,6 +14,7 @@ import * as path from 'path';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { detectTodoChanges, HookPhase, type TodoItem } from '../hooks/types.js';
 export type { TodoItem } from '../hooks/types.js';
@@ -284,7 +285,9 @@ async function writeTodosToFile(
     sessionId: sessionId || 'default',
   };
 
-  await fs.writeFile(todoFilePath, JSON.stringify(data, null, 2), 'utf-8');
+  await atomicWriteFile(todoFilePath, JSON.stringify(data, null, 2), {
+    encoding: 'utf-8',
+  });
 }
 
 function createBlockedTodoResult(
