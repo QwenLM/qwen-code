@@ -33,6 +33,13 @@
 import { describe, expect, it } from 'vitest';
 import { scrubChildEnv } from './spawnChannel.js';
 
+// Decoupled canary: we deliberately hand-roll the test set instead of
+// importing `SCRUBBED_CHILD_ENV_KEYS` from `spawnChannel.ts` so the
+// helper's behavior (clone + scrub + override + denylist-wins ordering)
+// is tested as a pure function with parameterized input, independent
+// of any current production denylist. The multi-key test below
+// forward-guards expansion when a future sandboxed-agent mode grows
+// the production set per the WARNING on `SCRUBBED_CHILD_ENV_KEYS`.
 const SCRUBBED = new Set<string>(['QWEN_SERVER_TOKEN']);
 
 describe('scrubChildEnv (defaultSpawnChannelFactory env policy)', () => {

@@ -63,11 +63,14 @@ Lift history (#4175 Mode B daemon roadmap):
   impl in `cli/src/serve/daemonStatusProvider.ts`) and the F1
   `BridgeFileSystem` injection seam for the ACP fs proxy.
 - `spawnChannel` (F1) — `defaultSpawnChannelFactory` + `killChild` +
-  `SCRUBBED_CHILD_ENV_KEYS` denylist. Production spawn of the
-  `qwen --acp` child with stderr prefix-and-forward, kill cascade,
-  and env passthrough. Channels (`packages/channels/base/AcpBridge.ts`)
-  and the VSCode IDE companion consume this directly instead of each
-  reimplementing the child lifecycle.
+  `SCRUBBED_CHILD_ENV_KEYS` denylist + `scrubChildEnv` pure env-policy
+  helper (exported for adapter reuse + unit-test access; isolates the
+  scrub + override + defense-in-depth ordering invariant the security
+  argument relies on). Production spawn of the `qwen --acp` child
+  with stderr prefix-and-forward, kill cascade, and env passthrough.
+  Channels (`packages/channels/base/AcpBridge.ts`) and the VSCode IDE
+  companion consume this directly instead of each reimplementing the
+  child lifecycle.
 - `bridgeClient` (F1) — `BridgeClient` class implementing the ACP
   `Client` surface: first-responder permission flow, session-update
   fan-out into `EventBus`, child-side `extNotification` routing,

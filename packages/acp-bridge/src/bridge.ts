@@ -287,11 +287,6 @@ function writeServeDebugLine(message: string): void {
   writeStderrLine(`qwen serve debug: ${message}`);
 }
 
-// `InvalidPermissionOptionError` lifted to
-// `@qwen-code/acp-bridge/bridgeErrors` in #4175 PR 22b. Imported above
-// from `./bridgeErrors.js`; the package barrel (`./index.ts`) re-
-// exports it to outside callers.
-
 const MAX_DISPLAY_NAME_LENGTH = 256;
 
 function hasControlCharacter(value: string): boolean {
@@ -303,13 +298,6 @@ function hasControlCharacter(value: string): boolean {
   }
   return false;
 }
-
-// `InvalidSessionMetadataError`, `WorkspaceInitConflictError`,
-// `WorkspaceInitPathEscapeError`, `WorkspaceInitSymlinkError`,
-// `McpServerNotFoundError`, `McpServerRestartFailedError` lifted to
-// `@qwen-code/acp-bridge/bridgeErrors` in #4175 PR 22b. Imported above
-// from `./bridgeErrors.js`; the package barrel (`./index.ts`) re-
-// exports them to outside callers.
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 /**

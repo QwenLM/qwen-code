@@ -88,7 +88,7 @@ describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {
       expect(readText).not.toHaveBeenCalled();
     });
 
-    it('does NOT touch real fs when delegating — invalid path never reaches fs.realpath', async () => {
+    it('does NOT touch real fs when delegating — the mock is invoked without any disk touch', async () => {
       const writeText = vi
         .fn<(p: WriteTextFileRequest) => Promise<WriteTextFileResponse>>()
         .mockResolvedValue({});
@@ -98,11 +98,14 @@ describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {
       };
       const client = makeClient(fakeFs);
 
-      // A path the inline proxy would choke on (no parent, no read
-      // permission, no existing target). Delegation skips realpath,
-      // so the call succeeds purely on the mock's resolve.
+      // A path no real disk would ever resolve to. Delegation skips
+      // realpath / writeFile entirely, so the call succeeds purely
+      // on the mock's resolve. Cross-platform-safe (avoiding `/proc/`
+      // because macOS / Windows would treat that path differently
+      // than Linux — the inline proxy's dangling-symlink fallback
+      // would write through there on macOS).
       await client.writeTextFile({
-        path: '/proc/no-such-file',
+        path: '/this/dir/never/exists/file.txt',
         content: '',
         sessionId: 'sess:test',
       });
