@@ -1338,6 +1338,33 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         updateOutput(this.currentDisplay);
       }
 
+      // OR the tool parameter with the agent definition's background flag.
+      const shouldRunInBackground =
+        this.params.run_in_background === true ||
+        subagentConfig.background === true;
+
+      if (shouldRunInBackground) {
+        try {
+          this.config
+            .getBackgroundTaskRegistry()
+            .assertCanStartBackgroundAgent();
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          this.updateDisplay(
+            {
+              status: 'failed',
+              terminateReason: errorMessage,
+            },
+            updateOutput,
+          );
+          return {
+            llmContent: errorMessage,
+            returnDisplay: this.currentDisplay!,
+          };
+        }
+      }
+
       // ── Optional worktree isolation (Phase 1: provision) ──────────
       // Provision the worktree BEFORE creating the agent Config so the
       // override below can rebind `getTargetDir()` to the worktree path
@@ -1534,6 +1561,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         ov.getWorkspaceContext = () => wtWorkspace;
       }
 
+      // Date.now() alone collides when two parallel background agents of the
+      // same type land in the same ms; the registry is keyed by agentId.
+      const agentIdSuffix = this.callId ?? randomUUID().slice(0, 8);
+      const hookOpts = {
+        agentId: `${subagentConfig.name}-${agentIdSuffix}`,
+        agentType: this.params.subagent_type || subagentConfig.name,
+        resolvedMode,
+        signal,
+        updateOutput,
+      };
+
       // Create the subagent. Fork bypasses SubagentManager because its
       // runtime configs are synthesized from the parent's cache-safe params.
       let subagent: AgentHeadless;
@@ -1575,23 +1613,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const contextState = new ContextState();
       contextState.set('task_prompt', taskPrompt);
 
-      // Date.now() alone collides when two parallel background agents of the
-      // same type land in the same ms; the registry is keyed by agentId.
-      const agentIdSuffix = this.callId ?? randomUUID().slice(0, 8);
-      const hookOpts = {
-        agentId: `${subagentConfig.name}-${agentIdSuffix}`,
-        agentType: this.params.subagent_type || subagentConfig.name,
-        resolvedMode,
-        signal,
-        updateOutput,
-      };
-
       // ── Background (async) execution path ──────────────────────
-      // OR the tool parameter with the agent definition's background flag.
-      const shouldRunInBackground =
-        this.params.run_in_background === true ||
-        subagentConfig.background === true;
-
       if (shouldRunInBackground) {
         // Fire SubagentStart hook before background launch
         const hookSystem = this.config.getHookSystem();
@@ -1673,6 +1695,54 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           hookOpts.agentId,
         );
         const projectRoot = this.config.getProjectRoot();
+        try {
+          // Register before writing the meta sidecar — see the matching
+          // foreground call below for the full rationale. Keeping the
+          // order symmetric here guards the background path against the
+          // same orphaned-meta hazard if register() throws.
+          registry.register({
+            agentId: hookOpts.agentId,
+            description: this.params.description,
+            subagentType: subagentConfig.name,
+            isBackgrounded: true,
+            status: 'running',
+            startTime: Date.now(),
+            abortController: bgAbortController,
+            toolUseId: this.callId,
+            prompt: this.params.prompt,
+            outputFile: jsonlPath,
+            metaPath,
+          });
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          bgAbortController.abort();
+
+          let wtSuffix = '';
+          try {
+            wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
+          } catch (cleanupError) {
+            debugLogger.warn(
+              `[Agent] Worktree cleanup after background registration failure failed: ${cleanupError}`,
+            );
+          }
+
+          this.updateDisplay(
+            {
+              status: 'failed',
+              terminateReason: errorMessage,
+            },
+            updateOutput,
+          );
+          void agentConfig
+            .getToolRegistry()
+            .stop()
+            .catch(() => {});
+          return {
+            llmContent: `${errorMessage}${wtSuffix}`,
+            returnDisplay: this.currentDisplay!,
+          };
+        }
         const { cleanup: cleanupJsonl } = attachJsonlTranscriptWriter(
           bgEventEmitter,
           jsonlPath,
@@ -1697,23 +1767,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           },
         );
-        // Register before writing the meta sidecar — see the matching
-        // foreground call below for the full rationale. Keeping the
-        // order symmetric here guards the background path against the
-        // same orphaned-meta hazard if register() ever grows a throw.
-        registry.register({
-          agentId: hookOpts.agentId,
-          description: this.params.description,
-          subagentType: subagentConfig.name,
-          isBackgrounded: true,
-          status: 'running',
-          startTime: Date.now(),
-          abortController: bgAbortController,
-          toolUseId: this.callId,
-          prompt: this.params.prompt,
-          outputFile: jsonlPath,
-          metaPath,
-        });
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
           agentType: hookOpts.agentType,
