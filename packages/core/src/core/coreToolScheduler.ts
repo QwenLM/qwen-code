@@ -197,10 +197,11 @@ async function safelyFirePostToolUseFailureHook(
       permissionMode,
     );
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     debugLogger.warn(
-      `PostToolUseFailure hook failed for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+      `PostToolUseFailure hook failed for ${toolName}: ${message}`,
     );
-    return {};
+    return { hookError: message };
   }
 }
 
@@ -1412,9 +1413,13 @@ export class CoreToolScheduler {
         // success path in executeSingleToolCall — must call
         // finalizeToolSpan(callId, ...) to avoid leaking spans.
         // `tool.name` is set automatically by startToolSpan from the first
-        // arg; only namespaced extras go in attrs.
+        // arg; only namespaced extras go in attrs. `call_id` (non-namespaced)
+        // is dual-emitted for one release as a backwards-compat shim for
+        // pre-Phase-2 dashboards/alerts that grep the old key — drop after
+        // operators migrate (#4321 review).
         const toolSpan = startToolSpan(canonicalName, {
           'tool.call_id': reqInfo.callId,
+          call_id: reqInfo.callId,
         });
         this.toolSpans.set(reqInfo.callId, toolSpan);
 
@@ -2143,6 +2148,7 @@ export class CoreToolScheduler {
     if (!toolSpan) {
       toolSpan = startToolSpan(toolName, {
         'tool.call_id': callId,
+        call_id: callId, // legacy alias — see _schedule for context
       });
       this.toolSpans.set(callId, toolSpan);
     }
@@ -2208,14 +2214,17 @@ export class CoreToolScheduler {
             toolUseId,
             permissionMode,
           ),
-        (r) => ({
-          success: true,
-          shouldProceed: r.shouldProceed,
-          // Propagate the actual blockType ('denied' / 'ask' / 'stop')
-          // instead of collapsing every block to 'denied'.
-          blockType: r.shouldProceed ? undefined : r.blockType,
-          hasAdditionalContext: !!r.additionalContext,
-        }),
+        (r) =>
+          r.hookError
+            ? { success: false, error: r.hookError }
+            : {
+                success: true,
+                shouldProceed: r.shouldProceed,
+                // Propagate the actual blockType ('denied' / 'ask' / 'stop')
+                // instead of collapsing every block to 'denied'.
+                blockType: r.shouldProceed ? undefined : r.blockType,
+                hasAdditionalContext: !!r.additionalContext,
+              },
       );
       if (!preHookResult.shouldProceed) {
         // Hook blocked the execution
@@ -2352,10 +2361,13 @@ export class CoreToolScheduler {
                 true,
                 this.config.getApprovalMode(),
               ),
-            (r) => ({
-              success: true,
-              hasAdditionalContext: !!r.additionalContext,
-            }),
+            (r) =>
+              r.hookError
+                ? { success: false, error: r.hookError }
+                : {
+                    success: true,
+                    hasAdditionalContext: !!r.additionalContext,
+                  },
           );
 
           // Append additional context from hook if provided
@@ -2397,12 +2409,15 @@ export class CoreToolScheduler {
                 toolUseId,
                 permissionMode,
               ),
-            (r) => ({
-              success: true,
-              shouldStop: r.shouldStop,
-              hasAdditionalContext: !!r.additionalContext,
-              blockType: r.shouldStop ? 'stop' : undefined,
-            }),
+            (r) =>
+              r.hookError
+                ? { success: false, error: r.hookError }
+                : {
+                    success: true,
+                    shouldStop: r.shouldStop,
+                    hasAdditionalContext: !!r.additionalContext,
+                    blockType: r.shouldStop ? 'stop' : undefined,
+                  },
           );
 
           // Append additional context from hook if provided
@@ -2579,10 +2594,13 @@ export class CoreToolScheduler {
                 false,
                 this.config.getApprovalMode(),
               ),
-            (r) => ({
-              success: true,
-              hasAdditionalContext: !!r.additionalContext,
-            }),
+            (r) =>
+              r.hookError
+                ? { success: false, error: r.hookError }
+                : {
+                    success: true,
+                    hasAdditionalContext: !!r.additionalContext,
+                  },
           );
 
           // Append additional context from hook if provided
@@ -2651,10 +2669,13 @@ export class CoreToolScheduler {
                 true,
                 this.config.getApprovalMode(),
               ),
-            (r) => ({
-              success: true,
-              hasAdditionalContext: !!r.additionalContext,
-            }),
+            (r) =>
+              r.hookError
+                ? { success: false, error: r.hookError }
+                : {
+                    success: true,
+                    hasAdditionalContext: !!r.additionalContext,
+                  },
           );
 
           // Append additional context from hook if provided
@@ -2692,10 +2713,13 @@ export class CoreToolScheduler {
                 false,
                 this.config.getApprovalMode(),
               ),
-            (r) => ({
-              success: true,
-              hasAdditionalContext: !!r.additionalContext,
-            }),
+            (r) =>
+              r.hookError
+                ? { success: false, error: r.hookError }
+                : {
+                    success: true,
+                    hasAdditionalContext: !!r.additionalContext,
+                  },
           );
 
           // Append additional context from hook if provided

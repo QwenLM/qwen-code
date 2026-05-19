@@ -558,6 +558,10 @@ export function startToolBlockedOnUserSpan(
   if (!isTelemetrySdkInitialized()) {
     return NOOP_SPAN;
   }
+  // Idempotent — kick off the 30-min TTL cleanup in case this span is
+  // started in a code path where no interaction span has been created
+  // yet (sub-agent tool calls, side queries, future patterns).
+  ensureCleanupInterval();
 
   const parentSpanId = getSpanId(toolSpan);
   const parentSpanCtx = activeSpans.get(parentSpanId)?.deref();
@@ -667,6 +671,9 @@ export function startHookSpan(opts: StartHookSpanOptions): Span {
   if (!isTelemetrySdkInitialized()) {
     return NOOP_SPAN;
   }
+  // Same defensive cleanup-interval kick as startToolBlockedOnUserSpan —
+  // hook spans may run before any interaction span has been created.
+  ensureCleanupInterval();
 
   // Hooks fire from inside `runInToolSpanContext` so toolContext is the
   // natural parent. resolveParentContext also covers the rare case where a

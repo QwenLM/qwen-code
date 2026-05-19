@@ -215,7 +215,13 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
-      expect(result).toEqual({ shouldProceed: true });
+      // #4321 review: hookError surfaces the swallowed transport error so
+      // observers (telemetry spans, debug logs) can distinguish a failed
+      // hook from a successful "allow" decision.
+      expect(result).toEqual({
+        shouldProceed: true,
+        hookError: 'Network error',
+      });
     });
   });
 
@@ -338,7 +344,9 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
-      expect(result).toEqual({ shouldStop: false });
+      // #4321 review: hookError now surfaced to caller (see PreToolUse parallel test).
+      expect(result.shouldStop).toBe(false);
+      expect(result.hookError).toBeDefined();
     });
   });
 
@@ -429,7 +437,9 @@ describe('toolHookTriggers', () => {
         'error message',
       );
 
-      expect(result).toEqual({});
+      // #4321 review: hookError now surfaced to caller.
+      expect(result.hookError).toBeDefined();
+      expect(result.additionalContext).toBeUndefined();
     });
   });
 

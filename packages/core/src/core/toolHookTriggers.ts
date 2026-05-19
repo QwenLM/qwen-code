@@ -43,6 +43,14 @@ export interface PreToolUseHookResult {
   blockType?: 'denied' | 'ask' | 'stop';
   /** Additional context to add */
   additionalContext?: string;
+  /**
+   * Set when the hook helper caught and absorbed a transport / dispatch
+   * error. The tool execution still proceeds (existing non-blocking
+   * contract), but observers (telemetry spans, debug logs) can detect
+   * that the hook itself failed instead of treating the safe-default
+   * response as a successful "allow" decision (#4321 review).
+   */
+  hookError?: string;
 }
 
 /**
@@ -55,6 +63,8 @@ export interface PostToolUseHookResult {
   stopReason?: string;
   /** Additional context to append to tool response */
   additionalContext?: string;
+  /** See PreToolUseHookResult.hookError. */
+  hookError?: string;
 }
 
 /**
@@ -63,6 +73,8 @@ export interface PostToolUseHookResult {
 export interface PostToolUseFailureHookResult {
   /** Additional context about the failure */
   additionalContext?: string;
+  /** See PreToolUseHookResult.hookError. */
+  hookError?: string;
 }
 
 /**
@@ -155,10 +167,9 @@ export async function firePreToolUseHook(
     };
   } catch (error) {
     // Hook errors should not block tool execution
-    debugLogger.warn(
-      `PreToolUse hook error for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return { shouldProceed: true };
+    const message = error instanceof Error ? error.message : String(error);
+    debugLogger.warn(`PreToolUse hook error for ${toolName}: ${message}`);
+    return { shouldProceed: true, hookError: message };
   }
 }
 
@@ -232,10 +243,9 @@ export async function firePostToolUseHook(
     };
   } catch (error) {
     // Hook errors should not affect tool result
-    debugLogger.warn(
-      `PostToolUse hook error for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return { shouldStop: false };
+    const message = error instanceof Error ? error.message : String(error);
+    debugLogger.warn(`PostToolUse hook error for ${toolName}: ${message}`);
+    return { shouldStop: false, hookError: message };
   }
 }
 
@@ -301,10 +311,11 @@ export async function firePostToolUseFailureHook(
     };
   } catch (error) {
     // Hook errors should not affect error handling
+    const message = error instanceof Error ? error.message : String(error);
     debugLogger.warn(
-      `PostToolUseFailure hook error for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+      `PostToolUseFailure hook error for ${toolName}: ${message}`,
     );
-    return {};
+    return { hookError: message };
   }
 }
 
