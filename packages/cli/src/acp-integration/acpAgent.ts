@@ -1581,8 +1581,28 @@ class QwenAgent implements Agent {
               `tools may not take effect until daemon restart.\n`,
           );
         }
+        // #4297 fold-in 9 (gpt-5.5 critical, addresses #3263088414):
+        // route through `ToolRegistry.discoverToolsForServer` instead
+        // of calling `manager.discoverMcpToolsForServer` directly.
+        // The registry wrapper PURGES this server's existing
+        // `DiscoveredMCPTool` entries (and its `revealedDeferred`
+        // markers) plus its prompts before rediscovery, so a
+        // toggle-disable-then-restart workflow actually removes the
+        // newly-disabled tool from the live registry. Without the
+        // wrapper, `registerTool` would only consult the refreshed
+        // `disabledTools` set for newly-discovered tools — entries
+        // that were already in the registry from the prior boot
+        // would keep serving requests, silently breaking the
+        // documented "toggle + restart" promise.
         const start = Date.now();
-        await manager.discoverMcpToolsForServer(serverName, this.config);
+        const toolRegistry = this.config.getToolRegistry();
+        if (!toolRegistry) {
+          throw RequestError.internalError(
+            undefined,
+            'ToolRegistry unavailable on this Config',
+          );
+        }
+        await toolRegistry.discoverToolsForServer(serverName);
         // #4282 gpt-5.5 C4 fold-in: `discoverMcpToolsForServer`
         // catches reconnect/discovery errors internally (logs and
         // resolves void) so a broken MCP server would otherwise
