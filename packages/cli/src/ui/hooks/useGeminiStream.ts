@@ -26,6 +26,7 @@ import type {
   ToolCallRequestInfo,
   GeminiErrorEventValue,
   StopFailureErrorType,
+  ActiveGoal,
 } from '@qwen-code/qwen-code-core';
 import {
   GeminiEventType as ServerGeminiEventType,
@@ -52,6 +53,9 @@ import {
   getUnsupportedImageFormatWarning,
   generateToolUseSummary,
   getActiveGoal,
+  activeGoalEquals,
+  setActiveGoal,
+  clearActiveGoal,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -1339,6 +1343,25 @@ export const useGeminiStream = (
     [addItem, config, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
+  const handleActiveGoalEvent = useCallback(
+    (activeGoal: ActiveGoal | null) => {
+      const sessionId = config.getSessionId();
+      const currentActiveGoal = getActiveGoal(sessionId);
+      if (activeGoal) {
+        if (activeGoalEquals(currentActiveGoal, activeGoal)) {
+          return;
+        }
+        setActiveGoal(sessionId, activeGoal);
+        return;
+      }
+      if (!currentActiveGoal) {
+        return;
+      }
+      clearActiveGoal(sessionId);
+    },
+    [config],
+  );
+
   const processGeminiStreamEvents = useCallback(
     async (
       stream: AsyncIterable<GeminiEvent>,
@@ -1573,6 +1596,9 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
               break;
+            case ServerGeminiEventType.ActiveGoal:
+              handleActiveGoalEvent(event.value);
+              break;
             default: {
               // enforces exhaustive switch-case
               const unreachable: never = event;
@@ -1609,6 +1635,7 @@ export const useGeminiStream = (
       setPendingHistoryItem,
       handleUserPromptSubmitBlockedEvent,
       handleStopHookLoopEvent,
+      handleActiveGoalEvent,
       addItem,
       dualOutput,
     ],

@@ -20,6 +20,26 @@ export interface ActiveGoal {
 
 const store = new Map<string, ActiveGoal>();
 
+export function activeGoalEquals(
+  left: ActiveGoal | undefined,
+  right: ActiveGoal | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return stableActiveGoalKey(left) === stableActiveGoalKey(right);
+}
+
+function stableActiveGoalKey(goal: ActiveGoal): string {
+  const comparable: Record<string, unknown> = {};
+  for (const key of Object.keys(goal).sort() as Array<keyof ActiveGoal>) {
+    const value = goal[key];
+    if (value !== undefined) {
+      comparable[key] = value;
+    }
+  }
+  return JSON.stringify(comparable);
+}
+
 export function getActiveGoal(sessionId: string): ActiveGoal | undefined {
   return store.get(sessionId);
 }

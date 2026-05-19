@@ -18,7 +18,11 @@ import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
-import { getActiveGoal } from '../goals/activeGoalStore.js';
+import {
+  activeGoalEquals,
+  getActiveGoal,
+  type ActiveGoal,
+} from '../goals/activeGoalStore.js';
 import { abortGoalForStopHookCap } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 
@@ -1454,6 +1458,29 @@ export class GeminiClient {
         requestToSend = [...systemReminders, ...requestToSend];
       }
 
+      const activeGoalAtTurnStart = getActiveGoal(this.config.getSessionId());
+      if (activeGoalAtTurnStart) {
+        yield {
+          type: GeminiEventType.ActiveGoal,
+          value: activeGoalAtTurnStart,
+        };
+      }
+      let lastEmittedActiveGoal: ActiveGoal | undefined = activeGoalAtTurnStart;
+      // Tracks the last emitted goal value to suppress duplicate events.
+      // Mutates `lastEmittedActiveGoal` when an event is returned.
+      const maybeEmitActiveGoalChange = (
+        nextActiveGoal: ActiveGoal | undefined,
+      ): ServerGeminiStreamEvent | undefined => {
+        if (activeGoalEquals(lastEmittedActiveGoal, nextActiveGoal)) {
+          return undefined;
+        }
+        lastEmittedActiveGoal = nextActiveGoal;
+        return {
+          type: GeminiEventType.ActiveGoal,
+          value: nextActiveGoal ?? null,
+        };
+      };
+
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       for await (const event of resultStream) {
@@ -1570,8 +1597,20 @@ export class GeminiClient {
           MessageBusType.HOOK_EXECUTION_RESPONSE,
         );
 
+        // Stop hook callbacks can mutate active goal state during request().
+        // Capture it before cancellation returns so clear events are not lost.
+        const activeGoalAfterStopHook = getActiveGoal(
+          this.config.getSessionId(),
+        );
+
         // Check if aborted after hook execution
         if (signal.aborted) {
+          const activeGoalEvent = maybeEmitActiveGoalChange(
+            activeGoalAfterStopHook,
+          );
+          if (activeGoalEvent) {
+            yield activeGoalEvent;
+          }
           if (isTopLevelInteraction) endInteractionSpan('cancelled');
           return turn;
         }
@@ -1597,6 +1636,12 @@ export class GeminiClient {
         ) {
           // Check if aborted before continuing
           if (signal.aborted) {
+            const activeGoalEvent = maybeEmitActiveGoalChange(
+              activeGoalAfterStopHook,
+            );
+            if (activeGoalEvent) {
+              yield activeGoalEvent;
+            }
             if (isTopLevelInteraction) endInteractionSpan('cancelled');
             return turn;
           }
@@ -1626,6 +1671,14 @@ export class GeminiClient {
               this.config.getSessionId(),
               warning,
             );
+            const activeGoalAfterCap = getActiveGoal(
+              this.config.getSessionId(),
+            );
+            const activeGoalEvent =
+              maybeEmitActiveGoalChange(activeGoalAfterCap);
+            if (activeGoalEvent) {
+              yield activeGoalEvent;
+            }
             yield {
               type: GeminiEventType.HookSystemMessage,
               value: warning,
@@ -1633,6 +1686,13 @@ export class GeminiClient {
             debugLogger.warn(warning);
             if (isTopLevelInteraction) endInteractionSpan('ok');
             return turn;
+          }
+
+          const activeGoalEvent = maybeEmitActiveGoalChange(
+            activeGoalAfterStopHook,
+          );
+          if (activeGoalEvent) {
+            yield activeGoalEvent;
           }
 
           yield {
@@ -1664,6 +1724,13 @@ export class GeminiClient {
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           return hookTurn;
+        }
+
+        const activeGoalEvent = maybeEmitActiveGoalChange(
+          activeGoalAfterStopHook,
+        );
+        if (activeGoalEvent) {
+          yield activeGoalEvent;
         }
       }
 
