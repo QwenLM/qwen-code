@@ -440,11 +440,23 @@ When you encounter an obstacle, do not use destructive actions as a shortcut to 
 }
 
 /**
+ * Tag name of the XML envelope the compression model emits and that
+ * `ChatCompressionService` extracts as the persisted summary. Single
+ * source of truth — both the prompt template (this file) and the
+ * extraction regex (`chatCompressionService.ts`) reference this
+ * constant, so a rename is type-safe instead of a silent failure
+ * mode where the model still emits the old tag and the regex never
+ * matches. (review #4168 R9.3)
+ */
+export const COMPRESSION_SNAPSHOT_TAG = 'state_snapshot';
+
+/**
  * Provides the system prompt for the history compression process.
  * This prompt instructs the model to act as a specialized state manager,
  * think in a scratchpad, and produce a structured XML summary.
  */
 export function getCompressionPrompt(): string {
+  const T = COMPRESSION_SNAPSHOT_TAG;
   return `
 You are the component that summarizes internal chat history into a given structure.
 
@@ -452,11 +464,11 @@ When the conversation history grows too large, you will be invoked to distill th
 
 First, you will think through the entire history in a private <scratchpad>. Review the user's overall goal, the agent's actions, tool outputs, file modifications, and any unresolved questions. Identify every piece of information that is essential for future actions.
 
-After your reasoning is complete, generate the final <state_snapshot> XML object. Be incredibly dense with information. Omit any irrelevant conversational filler.
+After your reasoning is complete, generate the final <${T}> XML object. Be incredibly dense with information. Omit any irrelevant conversational filler.
 
 The structure MUST be as follows:
 
-<state_snapshot>
+<${T}>
     <overall_goal>
         <!-- A single, concise sentence describing the user's high-level objective. -->
         <!-- Example: "Refactor the authentication service to use a new JWT library." -->
@@ -468,7 +480,7 @@ The structure MUST be as follows:
          - Build Command: \`npm run build\`
          - Testing: Tests are run with \`npm test\`. Test files must end in \`.test.ts\`.
          - API Endpoint: The primary API endpoint is \`https://api.example.com/v2\`.
-         
+
         -->
     </key_knowledge>
 
@@ -500,7 +512,7 @@ The structure MUST be as follows:
          4. [TODO] Update tests to reflect the API change.
         -->
     </current_plan>
-</state_snapshot>
+</${T}>
 `.trim();
 }
 

@@ -444,6 +444,15 @@ describe('ChatCompressionService', () => {
     });
     expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
     expect(result.newHistory).toBeNull();
+    // R9.1: breaker NOOP echoes the caller's originalTokenCount — a
+    // regression to `0` would corrupt telemetry on trip events
+    // (dashboards would show 0-token sessions). (R7.6 contract pin.)
+    expect(result.info.originalTokenCount).toBe(
+      uiTelemetryService.getLastPromptTokenCount(),
+    );
+    expect(result.info.newTokenCount).toBe(
+      uiTelemetryService.getLastPromptTokenCount(),
+    );
   });
 
   it('falls through when consecutiveFailures is below the breaker threshold', async () => {
@@ -2120,23 +2129,18 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     expect(callArg.config?.maxOutputTokens).toBe(20_000);
   });
 
-  it('returns FAILED_OUTPUT_TRUNCATED when the summary output exceeds the COMPACT_MAX_OUTPUT_TOKENS cap (likely truncated)', async () => {
-    // Mock the side-query to return a non-empty summary that exceeds the
-    // 20K cap — the guard should drop the result and surface it as a
-    // failure with a status distinct from EMPTY_SUMMARY so telemetry can
-    // separate prompt-quality failures from capacity failures.
-    // (R1.1 made the breaker tick; R5.2 split the status; R7.8 reverted
-    // R6.2's `>` back to `>=` — the API hard-caps at 20K, so `>` was
-    // dead code that silently persisted truncated summaries. The
-    // separate `treats output at exactly COMPACT_MAX_OUTPUT_TOKENS as
-    // truncated` test below pins the exact-cap case the revert exists
-    // to catch.)
+  it('returns FAILED_OUTPUT_TRUNCATED when the summary output hits the cap with no complete snapshot envelope (likely mid-snapshot truncation)', async () => {
+    // R1.1 made the breaker tick; R5.2 split the status; R7.8 reverted
+    // R6.2's `>` back to `>=`; R9.7 gates the guard on `!snapshotMatch`
+    // so the cap-hit-but-envelope-complete case is preserved (scratchpad
+    // ate the budget, snapshot is still valid). For the guard to fire
+    // we need a raw output that hit the cap AND has no closing tag —
+    // the actual shape of mid-snapshot truncation.
     vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
-      text: '<state_snapshot>truncated...</state_snapshot>',
+      text: '<scratchpad>verbose reasoning</scratchpad>\n<state_snapshot>partial summary mid-content — no closing tag',
       usage: {
         promptTokenCount: 50_000,
-        // 1 token over the cap — only `>` triggers, not `>=`.
-        candidatesTokenCount: 20_001,
+        candidatesTokenCount: 20_001, // over the cap
         totalTokenCount: 70_001,
       },
     } as never);
@@ -2185,14 +2189,14 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     );
   });
 
-  it('treats output at exactly COMPACT_MAX_OUTPUT_TOKENS as truncated (R8.2 / R7.8 exact-cap boundary)', async () => {
-    // The whole point of R7.8 reverting `>` back to `>=`: a model whose
-    // tokenizer lands exactly at the cap is far more likely truncated
-    // than legitimately completing. This test would PASS under `>=` and
-    // FAIL under `>` — pinning the revert against accidental
-    // re-introduction.
+  it('treats output at exactly COMPACT_MAX_OUTPUT_TOKENS as truncated when the snapshot envelope is incomplete (R8.2 / R7.8 / R9.7 exact-cap boundary)', async () => {
+    // Combined R7.8 (revert `>` to `>=`) + R9.7 (gate on `!snapshotMatch`)
+    // semantics: at the cap AND with an incomplete snapshot envelope,
+    // we treat as truncated. This test pins R7.8 against future `>` and
+    // R9.7's no-closing-tag requirement against future "any cap-hit
+    // truncates" regressions.
     vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
-      text: '<state_snapshot>truncated...</state_snapshot>',
+      text: '<scratchpad>reasoning</scratchpad>\n<state_snapshot>partial content with no closing tag',
       usage: {
         promptTokenCount: 50_000,
         candidatesTokenCount: 20_000, // exactly at cap
@@ -2237,6 +2241,65 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     expect(result.info.compressionStatus).toBe(
       CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
     );
+  });
+
+  it('preserves the snapshot when output hits the cap but a complete envelope was extracted (R9.7)', async () => {
+    // R9.7: when the closing tag is present, the model finished its
+    // snapshot before the cap was reached — the scratchpad ate the
+    // budget, not the snapshot. Dropping the result would throw away a
+    // valid summary. R8.7's scaling keeps newTokenCount honest about
+    // what's actually persisted; the truncation guard only fires now
+    // when the snapshot envelope is incomplete (no closing tag).
+    const VERBOSE_SCRATCHPAD =
+      '<scratchpad>' + 'reasoning '.repeat(2000) + '</scratchpad>';
+    const COMPLETE_SNAPSHOT =
+      '<state_snapshot>Valid concise summary content</state_snapshot>';
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: `${VERBOSE_SCRATCHPAD}\n${COMPLETE_SNAPSHOT}`,
+      usage: {
+        promptTokenCount: 175_000,
+        candidatesTokenCount: 20_000, // at cap, but envelope is complete
+        totalTokenCount: 195_000,
+      },
+    } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    const mockChat = {
+      getHistory: vi.fn().mockReturnValue(history),
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+    } as unknown as Config;
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+    expect(result.newHistory![0].parts![0].text).toBe(COMPLETE_SNAPSHOT);
   });
 
   it('persists only the <state_snapshot> envelope, stripping pre/post scratchpad content (R8.3a / R7.1 data-retention)', async () => {

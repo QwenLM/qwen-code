@@ -852,6 +852,14 @@ export class GeminiChat {
             `hardRescueFailureCount ${this.hardRescueFailureCount} → ${this.hardRescueFailureCount + 1})`,
         );
         this.consecutiveFailures = 0;
+        // R9.4: clear the breaker warn-once flag whenever
+        // consecutiveFailures resets to 0 — otherwise a stale `true`
+        // from a previous trip silences the warn on subsequent trips
+        // in the same session ("breaker tripped → hard-rescue resets
+        // counter → flag stays true → next trip is silent"). Both
+        // resets (this one and the COMPRESSED success branch in
+        // `tryCompress`) must clear the flag.
+        this.breakerWarningEmitted = false;
         this.hardRescueFailureCount += 1;
       } else if (wantHardRescue && !this.budgetExhaustedWarningEmitted) {
         // Rescue suppressed because the budget is exhausted. R8.4:
@@ -878,11 +886,17 @@ export class GeminiChat {
         },
       );
 
-      // Post-call diagnostics only. Counter accounting is resolved by
-      // the pre-call pessimistic increment plus the COMPRESSED success
-      // path in `tryCompress` (which resets `hardRescueFailureCount` to
-      // 0 alongside `consecutiveFailures`). The branches below are
-      // observability — no further state mutation.
+      // Post-call accounting + diagnostics. The pre-call pessimistic
+      // increment makes every non-success shape (throw / failure /
+      // NOOP) cost a strike by default; the COMPRESSED success path in
+      // `tryCompress` refunds via `hardRescueFailureCount = 0`. The
+      // R9.2 refinement below additionally REFUNDS NOOPs here:
+      // force=true bypasses the cheap-gate, so a NOOP from this path
+      // means the history slice was too small to split this turn
+      // (curated empty / MIN_COMPRESSION_FRACTION / no compressible
+      // slice). That is not evidence the rescue mechanism is broken;
+      // it can become compressible again as the user continues. Keep
+      // the strike only for genuine failure statuses and throws.
       if (shouldForceFromHard) {
         if (isCompressionFailureStatus(compressionInfo.compressionStatus)) {
           debugLogger.warn(
@@ -892,12 +906,16 @@ export class GeminiChat {
         } else if (
           compressionInfo.compressionStatus === CompressionStatus.NOOP
         ) {
-          // force=true bypasses the cheap-gate breaker NOOP, so a NOOP
-          // here means history was too small to split (curated empty /
-          // MIN_COMPRESSION_FRACTION / no compressible slice). Log so
-          // the strike is attributable.
-          debugLogger.warn(
-            `[compaction] hard-tier rescue NOOP (history not compressible): ` +
+          // R9.2: refund — NOOP is a "nothing to do this turn", not a
+          // failure of the compression mechanism. Without the refund,
+          // a session whose first few turns happen to be too small to
+          // compress would permanently disable the rescue.
+          this.hardRescueFailureCount = Math.max(
+            0,
+            this.hardRescueFailureCount - 1,
+          );
+          debugLogger.debug(
+            `[compaction] hard-tier rescue NOOP (history not compressible) — strike refunded; ` +
               `hardRescueFailureCount=${this.hardRescueFailureCount}/${MAX_CONSECUTIVE_FAILURES}`,
           );
         }

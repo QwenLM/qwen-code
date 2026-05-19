@@ -49,8 +49,16 @@ export const tipRegistry: ContextualTip[] = [
     // Neutral, actionable wording is correct across all three.
     content: 'Context near hard limit. Run /compress or /clear to free space.',
     trigger: 'post-response',
+    // R9.5: gate on `hard > auto` mirroring `currentTier` in
+    // contextCommand.ts. On small windows (e.g. 32K) `computeThresholds`
+    // collapses `hard` to equal `auto`, leaving the critical band
+    // degenerate — without this guard the tip fires at the auto
+    // threshold while claiming "near hard limit" when there is no
+    // distinct hard limit. The `context-high` tip in the band
+    // `[auto, hard)` already covers small windows.
     isRelevant: (ctx) =>
       ctx.thresholds !== undefined &&
+      ctx.thresholds.hard > ctx.thresholds.auto &&
       ctx.lastPromptTokenCount >= ctx.thresholds.hard,
     cooldownPrompts: 3,
     priority: 100,

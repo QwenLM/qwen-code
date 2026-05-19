@@ -9,7 +9,10 @@ import type { Config } from '../config/config.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import { type ChatCompressionInfo, CompressionStatus } from '../core/turn.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
-import { getCompressionPrompt } from '../core/prompts.js';
+import {
+  COMPRESSION_SNAPSHOT_TAG,
+  getCompressionPrompt,
+} from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
@@ -501,7 +504,7 @@ export class ChatCompressionService {
           role: 'user',
           parts: [
             {
-              text: 'First, reason in your scratchpad. Then, generate the <state_snapshot>.',
+              text: `First, reason in your scratchpad. Then, generate the <${COMPRESSION_SNAPSHOT_TAG}>.`,
             },
           ],
         },
@@ -550,11 +553,17 @@ export class ChatCompressionService {
     // a greedy prefix `[\s\S]*<state_snapshot>` forces the regex
     // engine to find the LAST opening tag, then the non-greedy
     // `[\s\S]*?</state_snapshot>` captures the smallest valid envelope.
-    const snapshotMatch = rawSummaryText?.match(
-      /[\s\S]*<state_snapshot>([\s\S]*?)<\/state_snapshot>/,
+    // R9.3: build the regex from the shared `COMPRESSION_SNAPSHOT_TAG`
+    // constant so a rename in `prompts.ts` is type-safe rather than a
+    // silent failure mode (model emits old tag → regex never matches →
+    // every send EMPTY_SUMMARY → breaker trips after 3 sends → auto-
+    // compaction permanently disabled with no actionable signal).
+    const snapshotRegex = new RegExp(
+      `[\\s\\S]*<${COMPRESSION_SNAPSHOT_TAG}>([\\s\\S]*?)</${COMPRESSION_SNAPSHOT_TAG}>`,
     );
+    const snapshotMatch = rawSummaryText?.match(snapshotRegex);
     const summary = snapshotMatch
-      ? `<state_snapshot>${snapshotMatch[1]}</state_snapshot>`
+      ? `<${COMPRESSION_SNAPSHOT_TAG}>${snapshotMatch[1]}</${COMPRESSION_SNAPSHOT_TAG}>`
       : '';
     const isSummaryEmpty = summary.trim().length === 0;
     if (
@@ -624,8 +633,19 @@ export class ChatCompressionService {
     // per claude-code data — and the COMPRESSION_FAILED_OUTPUT_TRUNCATED
     // breaker bounds the worst case to 3 strikes before NOOP. The
     // proper fix lives in the TODO(finish_reason) plumbing above.
+    //
+    // R9.7: gate the truncation guard on `!snapshotMatch`. If the
+    // extraction succeeded (closing tag is present), the model finished
+    // its snapshot before the cap was reached — the cap was consumed
+    // by the scratchpad, which we discard anyway. Dropping the snapshot
+    // in that case would throw away a valid result. R8.7's scaling
+    // keeps newTokenCount honest when only the scratchpad inflates the
+    // raw output. The truncation guard now only fires when the model
+    // hit the cap AND didn't emit a complete envelope — strong evidence
+    // of mid-snapshot truncation.
     if (
       !isRawEmpty &&
+      !snapshotMatch &&
       typeof compressionOutputTokenCount === 'number' &&
       compressionOutputTokenCount >= COMPACT_MAX_OUTPUT_TOKENS
     ) {

@@ -62,6 +62,27 @@ describe('context-* tip thresholds align with computeThresholds', () => {
     );
   });
 
+  it('context-critical suppresses when hard === auto (R9.5 small-window collapse)', () => {
+    // On small windows (e.g. 32K) computeThresholds collapses
+    // hard to equal auto. The critical band [hard, ∞) starts at the
+    // auto threshold; firing the tip there would claim "near hard
+    // limit" when there is no distinct hard limit. R9.5: gate on
+    // `hard > auto` like `currentTier` does. The `context-high` tip
+    // in band `[auto, hard)` already covers small windows.
+    const t = tipById('context-critical');
+    const collapsedCtx = {
+      ...baseCtx,
+      thresholds: {
+        effectiveWindow: 32_000,
+        warn: 18_000,
+        auto: 22_400,
+        hard: 22_400, // collapsed to equal auto
+      },
+      lastPromptTokenCount: 25_000, // above the collapsed threshold
+    };
+    expect(t.isRelevant(collapsedCtx)).toBe(false);
+  });
+
   it('falls back gracefully when thresholds undefined (legacy callers)', () => {
     const ctx = { ...baseCtx, thresholds: undefined };
     // All three context-* tips return false when thresholds are missing

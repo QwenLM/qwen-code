@@ -2222,12 +2222,15 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[lastCallIdx][1].force).toBe(false);
     });
 
-    it('increments hardRescueFailureCount on a NOOP from the forced rescue (R7.11 / R7.3)', async () => {
-      // NOOP is what we get when force=true skips the cheap-gate but
-      // the history is too small to split (curated empty,
-      // MIN_COMPRESSION_FRACTION undercut, etc). Before R7.3 this case
-      // left the counter at 0 forever; now the pessimistic pre-call
-      // increment makes it tick uniformly with other failure shapes.
+    it('does NOT exhaust the rescue budget on NOOPs — the pessimistic strike is refunded (R9.2)', async () => {
+      // R9.2: NOOP from a forced rescue means the history slice was
+      // too small to split this turn — not evidence that the
+      // compression mechanism is broken. The pessimistic pre-call
+      // increment is refunded in the post-call NOOP branch so a
+      // session whose first few turns happen to be too small does NOT
+      // permanently disable hard-rescue. Verify by running MAX+2
+      // consecutive NOOPs and asserting force=true on every call
+      // (budget never exhausts).
       const compressSpy = vi
         .spyOn(ChatCompressionService.prototype, 'compress')
         .mockResolvedValue({
@@ -2243,9 +2246,12 @@ describe('GeminiChat', async () => {
       );
 
       chat.setLastPromptTokenCount(176_999);
-      // MAX rescue NOOPs must exhaust the budget; the next send must
-      // skip the force=true path.
-      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+      // MAX_CONSECUTIVE_FAILURES + 2 sends — far past the strike
+      // budget. With R9.2's refund, NONE of these should fall back to
+      // force=false; the rescue keeps firing because NOOPs cost nothing.
+      const TOTAL_SENDS = MAX_CONSECUTIVE_FAILURES + 2;
+      for (let i = 0; i < TOTAL_SENDS; i++) {
+        chat.setLastPromptTokenCount(176_999);
         const s = await chat.sendMessageStream(
           'test-model',
           { message: `noop-${i}` },
@@ -2256,17 +2262,6 @@ describe('GeminiChat', async () => {
         }
         expect(compressSpy.mock.calls[i][1].force).toBe(true);
       }
-      chat.setLastPromptTokenCount(176_999);
-      const s = await chat.sendMessageStream(
-        'test-model',
-        { message: 'after-noop-budget' },
-        'prompt-after-noop-budget',
-      );
-      for await (const _ of s) {
-        /* consume */
-      }
-      const lastCallIdx = compressSpy.mock.calls.length - 1;
-      expect(compressSpy.mock.calls[lastCallIdx][1].force).toBe(false);
     });
 
     it('counts a thrown exception from the forced rescue against the budget (R7.11 / R7.2)', async () => {
@@ -2406,6 +2401,68 @@ describe('GeminiChat', async () => {
       expect(
         compressSpy.mock.calls[0][1].consecutiveFailures,
       ).toBeGreaterThanOrEqual(1);
+    });
+
+    it('hard-rescue clears breakerWarningEmitted alongside consecutiveFailures reset (R9.4)', async () => {
+      // R9.4: when hard-rescue resets consecutiveFailures = 0, it must
+      // ALSO clear breakerWarningEmitted. Otherwise a sequence of
+      // "breaker trip → warn emitted → flag latched → hard-rescue
+      // resets counter → breaker trips again → silent (flag still
+      // true)" leaves the second trip undiagnosed.
+      //
+      // Direct field-peek regression test: drive the counter to MAX,
+      // call tryCompress with NOOP to force the breaker warn path,
+      // then trigger a hard-rescue (force=true at hard threshold) and
+      // assert the flag is cleared.
+      type ChatInternals = {
+        consecutiveFailures: number;
+        breakerWarningEmitted: boolean;
+        hardRescueFailureCount: number;
+      };
+      const internals = chat as unknown as ChatInternals;
+
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+
+      // 1. Pre-trip the breaker: counter = MAX, warn-flag latched.
+      internals.consecutiveFailures = MAX_CONSECUTIVE_FAILURES;
+      internals.breakerWarningEmitted = true;
+
+      // 2. Stage a hard-rescue scenario: lastPromptTokenCount >= hard,
+      //    rescue must fire. Mock returns COMPRESSED so we focus on
+      //    the pre-call reset path (R9.4 is the reset; COMPRESSED also
+      //    triggers the post-call reset, but R9.4's contract is the
+      //    PRE-call clear specifically).
+      compressSpy.mockResolvedValueOnce({
+        newHistory: [
+          { role: 'user', parts: [{ text: 'summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        info: {
+          originalTokenCount: 178_000,
+          newTokenCount: 40_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse(),
+      );
+      chat.setLastPromptTokenCount(176_999);
+      const s = await chat.sendMessageStream(
+        'test-model',
+        { message: 'cross-hard' },
+        'prompt-r9-4',
+      );
+      for await (const _ of s) {
+        /* consume */
+      }
+      // 3. Both counters cleared, flag cleared. (consecutiveFailures
+      //    reset in the pre-call hard-rescue path; flag reset there
+      //    too — that's the R9.4 fix.)
+      expect(internals.consecutiveFailures).toBe(0);
+      expect(internals.breakerWarningEmitted).toBe(false);
     });
 
     it('budget-exhausted warn fires once per exhaustion, not on every send (R8.4)', async () => {
