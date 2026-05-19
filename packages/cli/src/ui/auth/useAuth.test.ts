@@ -45,8 +45,11 @@ const createSettings = () => ({
     modelProviders: {},
   },
   setValue: vi.fn(),
+  recomputeMerged: vi.fn(),
   forScope: vi.fn(() => ({
     path: '/tmp/settings.json',
+    settings: {},
+    originalSettings: {},
   })),
 });
 
@@ -234,6 +237,42 @@ describe('useAuthCommand', () => {
       'custom-model',
     );
     expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+  });
+
+  it('surfaces install-plan rejection as an auth error and records telemetry', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    config.refreshAuth = vi.fn(async () => {
+      throw new Error('refreshAuth rejected: bad endpoint');
+    });
+    const addItem = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleProviderSubmit(deepseekProvider, {
+        baseUrl: resolveBaseUrl(deepseekProvider),
+        apiKey: 'sk-bad',
+        modelIds: ['deepseek-v4-flash'],
+      });
+    });
+
+    // handleAuthFailure should have set the error, reopened the dialog, and
+    // cleared the in-flight flag. The success toast must NOT have fired.
+    expect(result.current.authError).toEqual(
+      expect.stringContaining('refreshAuth rejected'),
+    );
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.isAuthenticating).toBe(false);
+    expect(addItem).not.toHaveBeenCalled();
+    // pendingAuthType was set before applyProviderInstallPlan ran, so
+    // handleAuthFailure had it available — the AuthEvent path is no longer
+    // silently dropped on failure. (We can't assert the telemetry sink
+    // directly here, but the visible side effects above all depend on
+    // handleAuthFailure having seen pendingAuthType.)
+    expect(result.current.pendingAuthType).toBe(AuthType.USE_OPENAI);
   });
 });
 

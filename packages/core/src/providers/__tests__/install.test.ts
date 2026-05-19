@@ -328,4 +328,132 @@ describe('applyProviderInstallPlan', () => {
 
     expect(process.env['BRAND_NEW_KEY']).toBeUndefined();
   });
+
+  // -- Rollback safety nets -------------------------------------------------
+  // The catch path in applyProviderInstallPlan has three deliberate
+  // safety nets that were previously untested. These tests pin them down so
+  // a future refactor that "simplifies" the catch can't silently regress.
+
+  it('restores runtime model providers when refreshAuth rejects after reloadModelProviders ran', async () => {
+    const previousProviders = {
+      [AuthType.USE_OPENAI]: [{ id: 'previous', envKey: 'OLD_KEY' }],
+    };
+    const adapter = createAdapter(previousProviders);
+    const reloadModelProviders = vi.fn();
+    const refreshAuth = vi.fn(async () => {
+      throw new Error('refreshAuth rejected');
+    });
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      env: { TEST_API_KEY: 'sk-new' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [{ id: 'new-model', envKey: 'TEST_API_KEY' }],
+          mergeStrategy: 'prepend-and-remove-owned',
+          ownsModel: (model) => model.envKey === 'TEST_API_KEY',
+        },
+      ],
+    };
+
+    await expect(
+      applyProviderInstallPlan(plan, {
+        settings: adapter,
+        reloadModelProviders,
+        refreshAuth,
+      }),
+    ).rejects.toThrow('refreshAuth rejected');
+
+    // Two reload calls: the success-path one with the patched providers,
+    // then a rollback one that hands back the snapshot we took *before*
+    // applying any patches.
+    expect(reloadModelProviders).toHaveBeenCalledTimes(2);
+    expect(reloadModelProviders).toHaveBeenLastCalledWith(previousProviders);
+  });
+
+  it('still rolls back env vars when backup() throws before persist', async () => {
+    process.env['TEST_API_KEY'] = 'old-value';
+    const adapter = createAdapter();
+    adapter.backup.mockImplementation(() => {
+      throw new Error('backup failed');
+    });
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      env: { TEST_API_KEY: 'new-value' },
+    };
+
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).rejects.toThrow('backup failed');
+
+    // backup() throwing inside the try must still hand control to the
+    // catch path so env vars are restored. (Before this commit's
+    // "backup inside try" fix the throw escaped uncaught and env vars
+    // leaked.)
+    expect(process.env['TEST_API_KEY']).toBe('old-value');
+  });
+
+  it('continues env rollback even when settings.restore itself throws', async () => {
+    process.env['TEST_API_KEY'] = 'before-install';
+    const adapter = createAdapter();
+    adapter.restore.mockImplementation(() => {
+      throw new Error('restore failed');
+    });
+    const refreshAuth = vi.fn(async () => {
+      throw new Error('original error');
+    });
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      env: { TEST_API_KEY: 'during-install' },
+    };
+
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter, refreshAuth }),
+    ).rejects.toThrow('original error');
+
+    // restore() throwing must not mask the original error and must not skip
+    // the env-var rollback loop that runs after it.
+    expect(adapter.restore).toHaveBeenCalled();
+    expect(process.env['TEST_API_KEY']).toBe('before-install');
+  });
+
+  it('continues throw + env rollback when reloadModelProviders rollback itself throws', async () => {
+    process.env['TEST_API_KEY'] = 'before';
+    const previousProviders = {
+      [AuthType.USE_OPENAI]: [{ id: 'previous', envKey: 'OLD' }],
+    };
+    const adapter = createAdapter(previousProviders);
+    let reloadCalls = 0;
+    const reloadModelProviders = vi.fn(() => {
+      reloadCalls += 1;
+      if (reloadCalls === 2) {
+        // The rollback-time reload (the second call) explodes.
+        throw new Error('reload restore failed');
+      }
+    });
+    const refreshAuth = vi.fn(async () => {
+      throw new Error('original error');
+    });
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      env: { TEST_API_KEY: 'during' },
+    };
+
+    await expect(
+      applyProviderInstallPlan(plan, {
+        settings: adapter,
+        reloadModelProviders,
+        refreshAuth,
+      }),
+    ).rejects.toThrow('original error');
+
+    // The rethrow must still carry the original error, env vars must still
+    // be rolled back, and the broken rollback reload must not mask anything.
+    expect(reloadModelProviders).toHaveBeenCalledTimes(2);
+    expect(process.env['TEST_API_KEY']).toBe('before');
+  });
 });
