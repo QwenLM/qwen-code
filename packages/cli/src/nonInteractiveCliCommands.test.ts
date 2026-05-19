@@ -302,6 +302,30 @@ describe('handleSlashCommand', () => {
     });
   });
 
+  it('should report cleared goal for ACP /goal clear', async () => {
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
+    mockGetCommands.mockReturnValue([goalCommand]);
+
+    await handleSlashCommand(
+      '/goal write a hello world script',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+    const result = await handleSlashCommand(
+      '/goal clear',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'Goal cleared: write a hello world script',
+    });
+  });
+
   it('should execute FILE commands in any mode without explicit supportedModes', async () => {
     const mockFileCommand = {
       name: 'custom',

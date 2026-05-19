@@ -273,6 +273,35 @@ describe('StreamJsonOutputAdapter', () => {
       expect(streamEventCall).toBeUndefined();
     });
 
+    it('should not emit active goal stream events', () => {
+      adapter.processEvent({
+        type: GeminiEventType.ActiveGoal,
+        value: {
+          condition: 'finish the refactor',
+          iterations: 0,
+          setAt: 123,
+          tokensAtStart: 456,
+          hookId: 'goal-hook-id',
+        },
+      });
+
+      const activeGoalEventCall = stdoutWriteSpy.mock.calls.find(
+        (call: unknown[]) => {
+          try {
+            const parsed = JSON.parse(call[0] as string);
+            return (
+              parsed.type === 'stream_event' &&
+              parsed.event?.type === 'active_goal'
+            );
+          } catch {
+            return false;
+          }
+        },
+      );
+
+      expect(activeGoalEventCall).toBeUndefined();
+    });
+
     it('should still emit final assistant message', () => {
       adapter.startAssistantMessage();
       adapter.processEvent({
