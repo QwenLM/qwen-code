@@ -358,6 +358,18 @@ jobs:
           restore-keys: |
             qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-
 
+      # qwen-code-action installs @qwen-code/qwen-code@latest, which
+      # requires Node >=22. The runner defaults to Node 20 (npm
+      # EBADENGINE in dry-run logs), and the action does not set up
+      # Node itself, so the bundled /review skill stalled. Pin Node 22
+      # before invoking the action.
+      - name: 'Set up Node.js'
+        if: |-
+          steps.size.outputs.should_review == 'true'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v4
+        with:
+          node-version: '22'
+
       # Why this exact config (learned from dry-run testing):
       # - action @5fd6818d + GITHUB_TOKEN + uppercase OPENAI_* inputs:
       #   match main's deployed, proven-working review job.
