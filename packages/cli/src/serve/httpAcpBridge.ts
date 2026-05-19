@@ -3846,19 +3846,40 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         try {
           fh = await fs.open(
             target,
-             
+
             fsConstants.O_WRONLY | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW,
           );
         } catch (err) {
           const code = (err as { code?: unknown } | null | undefined)?.code;
-          if (code === 'ELOOP' || code === 'ENOENT') {
+          // #4297 fold-in 8 (qwen-latest S1, addresses #3262861754):
+          // split ELOOP and ENOENT diagnostics so operators don't
+          // misdiagnose. ELOOP is the genuine `O_NOFOLLOW` rejection
+          // — a symlink at the final component, possibly an attack
+          // race. ENOENT here means the file was DELETED between
+          // the readFile content check and this open — a benign race
+          // with a concurrent writer (git checkout, editor save).
+          // Both still surface as `WorkspaceInitSymlinkError(kind:
+          // 'target')` so the route maps to a structured 400; the
+          // class doubles as the workspace-init race-condition
+          // bucket, but the message is now accurate per case.
+          if (code === 'ELOOP') {
             throw new WorkspaceInitSymlinkError(
               target,
               'target',
               `Workspace context file ${JSON.stringify(target)} could not ` +
-                `be opened with O_NOFOLLOW (${String(code)}); the path may ` +
-                `have been swapped to a symlink between the absence check ` +
-                `and the overwrite. Refusing to follow it.`,
+                `be opened with O_NOFOLLOW (ELOOP); the path may have been ` +
+                `swapped to a symlink between the content check and the ` +
+                `overwrite. Refusing to follow it.`,
+            );
+          }
+          if (code === 'ENOENT') {
+            throw new WorkspaceInitSymlinkError(
+              target,
+              'target',
+              `Workspace context file ${JSON.stringify(target)} was deleted ` +
+                `between the content check and the overwrite (likely a ` +
+                `concurrent writer — git checkout, editor save, etc.). ` +
+                `Refusing to recreate blindly; rerun init.`,
             );
           }
           throw err;

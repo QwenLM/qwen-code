@@ -5007,7 +5007,7 @@ describe('createHttpAcpBridge', () => {
           expect(err).toBeInstanceOf(WorkspaceInitSymlinkError);
           expect((err as WorkspaceInitSymlinkError).kind).toBe('target');
           expect((err as Error).message).toMatch(
-            /could not be opened with O_NOFOLLOW/,
+            /could not be opened with O_NOFOLLOW \(ELOOP\)/,
           );
           // External file untouched — the boundary held.
           expect(await fsp.readFile(externalFile, 'utf8')).toBe('# external');
@@ -5017,6 +5017,49 @@ describe('createHttpAcpBridge', () => {
         }
       } finally {
         await fsp.rm(escapeTarget, { recursive: true, force: true });
+      }
+    });
+
+    it('force:true overwrite distinguishes ENOENT race-delete from ELOOP symlink (#4297 fold-in 8)', async () => {
+      // Pin the diagnostic split. ENOENT in the overwrite open path
+      // means the file was DELETED between the readFile content
+      // check and the open (concurrent writer — git checkout,
+      // editor save) — NOT a symlink swap. The error message must
+      // not say "swapped to a symlink"; otherwise an operator
+      // diagnosing a benign race wastes time hunting a symlink
+      // attack that didn't happen.
+      // Pretend lstat says it's a regular file with content (so we
+      // land on the overwrote action), but the actual on-disk path
+      // doesn't exist when fs.open runs — forcing ENOENT.
+      const fakeStats = {
+        isSymbolicLink: () => false,
+        isFile: () => true,
+        isDirectory: () => false,
+        isCharacterDevice: () => false,
+        isBlockDevice: () => false,
+        isFIFO: () => false,
+        isSocket: () => false,
+      } as unknown as import('node:fs').Stats;
+      const lstatSpy = vi.spyOn(fsp, 'lstat').mockResolvedValueOnce(fakeStats);
+      const readFileSpy = vi
+        .spyOn(fsp, 'readFile')
+        .mockResolvedValueOnce('# Old content' as never);
+      try {
+        const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+        const err = await bridge
+          .initWorkspace({ force: true }, undefined)
+          .catch((e) => e);
+        expect(err).toBeInstanceOf(WorkspaceInitSymlinkError);
+        expect((err as WorkspaceInitSymlinkError).kind).toBe('target');
+        // Message must reference deletion / concurrent writer — NOT
+        // "swapped to a symlink" (which is only accurate for ELOOP).
+        expect((err as Error).message).toMatch(
+          /was deleted between the content check and the overwrite/,
+        );
+        expect((err as Error).message).not.toMatch(/swapped to a symlink/);
+      } finally {
+        lstatSpy.mockRestore();
+        readFileSpy.mockRestore();
       }
     });
 
