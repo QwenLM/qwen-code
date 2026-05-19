@@ -25,6 +25,11 @@ export const openRouterProvider: ProviderConfig = {
   modelsEditable: true,
   modelNamePrefix: 'OpenRouter',
   ownsModel: (model) => {
+    // A user who manually added an OpenRouter-routed model under a custom
+    // envKey (e.g. their own gateway) shouldn't have their entry silently
+    // removed on re-install — require BOTH the hostname *and* our envKey to
+    // claim ownership.
+    if (model.envKey !== OPENROUTER_ENV_KEY) return false;
     try {
       const host = new URL(model.baseUrl ?? '').hostname;
       return host === 'openrouter.ai' || host.endsWith('.openrouter.ai');
