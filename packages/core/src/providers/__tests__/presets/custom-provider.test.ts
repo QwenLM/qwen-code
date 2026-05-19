@@ -8,14 +8,16 @@ import { describe, expect, it } from 'vitest';
 import {
   AuthType,
   customProvider,
-  generateCustomEnvKey,
   CUSTOM_API_KEY_ENV_PREFIX,
   buildInstallPlan,
   shouldShowStep,
 } from '@qwen-code/qwen-code-core';
+// Re-import generateCustomEnvKey from the relative source path so the new
+// hash-suffix format is exercised even before dist/ is rebuilt.
+import { generateCustomEnvKey } from '../../presets/custom-provider.js';
 
 describe('generateCustomEnvKey', () => {
-  it('produces a deterministic URL-based key', () => {
+  it('produces a deterministic URL-based key with a stable hash suffix', () => {
     const key1 = generateCustomEnvKey(
       AuthType.USE_OPENAI,
       'https://api.example.com/v1',
@@ -25,8 +27,11 @@ describe('generateCustomEnvKey', () => {
       'https://api.example.com/v1',
     );
     expect(key1).toBe(key2);
-    expect(key1).toBe(
-      `${CUSTOM_API_KEY_ENV_PREFIX}OPENAI_HTTPS_API_EXAMPLE_COM_V1`,
+    // Readable prefix + 6-hex-char SHA-256 suffix.
+    expect(key1).toMatch(
+      new RegExp(
+        `^${CUSTOM_API_KEY_ENV_PREFIX}OPENAI_HTTPS_API_EXAMPLE_COM_V1_[0-9A-F]{6}$`,
+      ),
     );
   });
 
@@ -48,9 +53,35 @@ describe('generateCustomEnvKey', () => {
     expect(k1).not.toBe(k2);
   });
 
-  it('normalizes special characters to underscores', () => {
+  it('disambiguates structurally distinct URLs that normalize identically', () => {
+    // Pre-fix bug: `api.example.com`, `api-example.com`, `api_example.com`
+    // all collapsed to `API_EXAMPLE_COM`, so two different custom providers
+    // would overwrite each other's API key. The hash suffix prevents that.
+    const dotted = generateCustomEnvKey(
+      AuthType.USE_OPENAI,
+      'https://api.example.com',
+    );
+    const dashed = generateCustomEnvKey(
+      AuthType.USE_OPENAI,
+      'https://api-example.com',
+    );
+    const underscored = generateCustomEnvKey(
+      AuthType.USE_OPENAI,
+      'https://api_example.com',
+    );
+    expect(dotted).not.toBe(dashed);
+    expect(dotted).not.toBe(underscored);
+    expect(dashed).not.toBe(underscored);
+  });
+
+  it('normalizes special characters to underscores in the readable part', () => {
     const k1 = generateCustomEnvKey(AuthType.USE_OPENAI, 'http://api.a-b.com');
-    expect(k1).toBe(`${CUSTOM_API_KEY_ENV_PREFIX}OPENAI_HTTP_API_A_B_COM`);
+    // Readable prefix matches; trailing 6-hex suffix is separate.
+    expect(k1).toMatch(
+      new RegExp(
+        `^${CUSTOM_API_KEY_ENV_PREFIX}OPENAI_HTTP_API_A_B_COM_[0-9A-F]{6}$`,
+      ),
+    );
   });
 
   it('handles empty strings', () => {

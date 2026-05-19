@@ -436,11 +436,22 @@ describe('providerMatchesCredentials', () => {
     ).toBe(false);
   });
 
-  it('returns false for function-typed envKey', () => {
+  it('matches when function-typed envKey derives a matching key', () => {
+    // Previously asserted toBe(false) when envKey was non-string. The
+    // provider matcher now resolves function-typed envKey so custom
+    // providers stay visible to /doctor and AppHeader. Uses the relative
+    // source import (declared with the other dist-bypass aliases below)
+    // so the new behaviour is exercised before dist/ is rebuilt; see the
+    // 'providerMatchesCredentials with function envKey' suite below for
+    // protocol-iteration coverage.
     const config = makeConfig({ envKey: () => 'DYNAMIC' });
     expect(
-      providerMatchesCredentials(config, 'https://api.test.com/v1', 'DYNAMIC'),
-    ).toBe(false);
+      providerMatchesCredentialsSrc(
+        config,
+        'https://api.test.com/v1',
+        'DYNAMIC',
+      ),
+    ).toBe(true);
   });
 });
 
@@ -611,5 +622,36 @@ describe('providerMatchesCredentials with function envKey (custom provider)', ()
         'ANY',
       ),
     ).toBe(false);
+  });
+
+  it('iterates protocolOptions and matches when any one derives the env key', () => {
+    // buildInstallPlan derives the persisted env key from inputs.protocol
+    // (which may be USE_ANTHROPIC or USE_GEMINI for a custom provider), not
+    // from config.protocol. The matcher must try every protocolOption so a
+    // custom provider configured under Anthropic/Gemini still gets matched
+    // back from the on-disk envKey.
+    const derivedFor = (protocol: AuthType, baseUrl: string) =>
+      `QWEN_CUSTOM_${protocol.toUpperCase()}_${baseUrl.length}`;
+    const config = makeConfig({
+      id: 'custom-like',
+      envKey: derivedFor,
+      baseUrl: undefined,
+      protocol: AuthType.USE_OPENAI, // default
+      protocolOptions: [
+        AuthType.USE_OPENAI,
+        AuthType.USE_ANTHROPIC,
+        AuthType.USE_GEMINI,
+      ],
+    });
+
+    const url = 'https://api.example.com/v1';
+    // User picked Anthropic at install time, so the persisted key derives
+    // from USE_ANTHROPIC, not the default USE_OPENAI.
+    const anthropicKey = derivedFor(AuthType.USE_ANTHROPIC, url);
+    expect(providerMatchesCredentialsSrc(config, url, anthropicKey)).toBe(true);
+
+    // Gemini path also matches.
+    const geminiKey = derivedFor(AuthType.USE_GEMINI, url);
+    expect(providerMatchesCredentialsSrc(config, url, geminiKey)).toBe(true);
   });
 });

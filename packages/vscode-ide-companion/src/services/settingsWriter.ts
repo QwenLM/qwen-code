@@ -10,7 +10,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+  ALL_PROVIDERS,
   AuthType,
+  CUSTOM_API_KEY_ENV_PREFIX,
   Storage,
   applyProviderInstallPlan,
   type ProviderInstallPlan,
@@ -588,13 +590,33 @@ export function clearPersistedAuth(): void {
       delete (security.auth as Record<string, unknown>).selectedType;
     }
 
-    // Remove API keys
+    // Remove API keys: every preset's string envKey + any custom-provider
+    // env var (prefix-matched). Without this, third-party (DeepSeek /
+    // MiniMax / Z.AI / IdeaLab / ModelScope / OpenRouter) and custom
+    // (QWEN_CUSTOM_API_KEY_*) keys would linger on disk after the user
+    // clears authentication.
     const env = settings.env as Record<string, unknown> | undefined;
     if (env) {
+      // Subscription plan keys (kept explicit in case the provider list
+      // ever drifts from SUBSCRIPTION_PLAN_OPTIONS).
       for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
         delete env[plan.envKey];
       }
+      // Standard OpenAI bucket (legacy + the api-key flow's default).
       delete env['OPENAI_API_KEY'];
+      // Every preset provider with a static string envKey.
+      for (const p of ALL_PROVIDERS) {
+        if (typeof p.envKey === 'string') {
+          delete env[p.envKey];
+        }
+      }
+      // Custom-provider env keys are derived dynamically by
+      // generateCustomEnvKey — match the prefix instead of enumerating.
+      for (const key of Object.keys(env)) {
+        if (key.startsWith(CUSTOM_API_KEY_ENV_PREFIX)) {
+          delete env[key];
+        }
+      }
     }
 
     // Remove subscription plan metadata (legacy + new namespace)

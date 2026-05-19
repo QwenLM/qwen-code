@@ -319,10 +319,24 @@ export function providerMatchesCredentials(
   if (typeof config.envKey === 'string') {
     configEnvKey = config.envKey;
   } else if (typeof config.envKey === 'function' && baseUrl) {
-    try {
-      configEnvKey = config.envKey(config.protocol, baseUrl);
-    } catch {
-      configEnvKey = undefined;
+    // buildInstallPlan derives the persisted env key from `inputs.protocol`
+    // (which may be USE_ANTHROPIC / USE_GEMINI for a custom provider), not
+    // the config's default `config.protocol`. So when we don't know which
+    // protocol the user originally chose, try every option the provider
+    // offers and match if any of them derives `envKey`.
+    const protocols = config.protocolOptions?.length
+      ? config.protocolOptions
+      : [config.protocol];
+    for (const proto of protocols) {
+      try {
+        const derived = config.envKey(proto, baseUrl);
+        if (derived === envKey) {
+          configEnvKey = derived;
+          break;
+        }
+      } catch {
+        /* try next protocol */
+      }
     }
   }
   if (configEnvKey !== envKey) {
