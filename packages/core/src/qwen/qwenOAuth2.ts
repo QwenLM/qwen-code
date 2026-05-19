@@ -13,6 +13,7 @@ import { EventEmitter } from 'events';
 import type { Config } from '../config/config.js';
 import { randomUUID } from 'node:crypto';
 import { formatFetchErrorForUser } from '../utils/fetch.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   SharedTokenManager,
@@ -979,7 +980,10 @@ async function cacheQwenCredentials(credentials: QwenCredentials) {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
 
     const credString = JSON.stringify(credentials, null, 2);
-    await fs.writeFile(filePath, credString);
+    await atomicWriteFile(filePath, credString, {
+      mode: 0o600,
+      forceMode: true,
+    });
   } catch (error: unknown) {
     // Handle file system errors (e.g., EACCES permission denied)
     const errorMessage = error instanceof Error ? error.message : String(error);

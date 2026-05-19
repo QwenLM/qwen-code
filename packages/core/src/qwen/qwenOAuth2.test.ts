@@ -113,6 +113,10 @@ vi.mock('node:fs', () => ({
   },
 }));
 
+vi.mock('../utils/atomicFileWrite.js', () => ({
+  atomicWriteFile: vi.fn().mockResolvedValue(undefined),
+}));
+
 describe('PKCE Code Generation', () => {
   describe('generateCodeVerifier', () => {
     it('should generate a code verifier with correct length', () => {

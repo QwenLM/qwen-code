@@ -35,6 +35,10 @@ vi.mock('node:fs', () => ({
   unlinkSync: vi.fn(),
 }));
 
+vi.mock('../utils/atomicFileWrite.js', () => ({
+  atomicWriteFile: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('node:os', () => ({
   homedir: vi.fn(),
 }));

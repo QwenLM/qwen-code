@@ -9,6 +9,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { FileTokenStorage } from './file-token-storage.js';
 import type { OAuthCredentials } from './types.js';
+import { atomicWriteFile } from '../../utils/atomicFileWrite.js';
 
 vi.mock('node:fs', () => ({
   promises: {
@@ -17,6 +18,10 @@ vi.mock('node:fs', () => ({
     unlink: vi.fn(),
     mkdir: vi.fn(),
   },
+}));
+
+vi.mock('../../utils/atomicFileWrite.js', () => ({
+  atomicWriteFile: vi.fn(),
 }));
 
 vi.mock('node:os', () => ({
@@ -121,7 +126,7 @@ describe('FileTokenStorage', () => {
       );
       mockFs.readFile.mockResolvedValue(encryptedData);
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
       const credentials: OAuthCredentials = {
         serverName: 'test-server',
@@ -138,11 +143,11 @@ describe('FileTokenStorage', () => {
         path.join('/home/test', '.qwen'),
         { recursive: true, mode: 0o700 },
       );
-      expect(mockFs.writeFile).toHaveBeenCalled();
+      expect(atomicWriteFile).toHaveBeenCalled();
 
-      const writeCall = mockFs.writeFile.mock.calls[0];
+      const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
       expect(writeCall[1]).toMatch(/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
-      expect(writeCall[2]).toEqual({ mode: 0o600 });
+      expect(writeCall[2]).toEqual({ mode: 0o600, forceMode: true });
     });
 
     it('should update existing credentials', async () => {
@@ -150,7 +155,7 @@ describe('FileTokenStorage', () => {
         JSON.stringify({ 'existing-server': existingCredentials }),
       );
       mockFs.readFile.mockResolvedValue(encryptedData);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
       const newCredentials: OAuthCredentials = {
         serverName: 'test-server',
@@ -163,9 +168,9 @@ describe('FileTokenStorage', () => {
 
       await storage.setCredentials(newCredentials);
 
-      expect(mockFs.writeFile).toHaveBeenCalled();
-      const writeCall = mockFs.writeFile.mock.calls[0];
-      const decrypted = storage['decrypt'](writeCall[1]);
+      expect(atomicWriteFile).toHaveBeenCalled();
+      const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
+      const decrypted = storage['decrypt'](writeCall[1] as string);
       const saved = JSON.parse(decrypted);
 
       expect(saved['existing-server']).toEqual(existingCredentials);
@@ -228,15 +233,15 @@ describe('FileTokenStorage', () => {
         JSON.stringify({ server1: credentials1, server2: credentials2 }),
       );
       mockFs.readFile.mockResolvedValue(encryptedData);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
       await storage.deleteCredentials('server1');
 
-      expect(mockFs.writeFile).toHaveBeenCalled();
+      expect(atomicWriteFile).toHaveBeenCalled();
       expect(mockFs.unlink).not.toHaveBeenCalled();
 
-      const writeCall = mockFs.writeFile.mock.calls[0];
-      const decrypted = storage['decrypt'](writeCall[1]);
+      const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
+      const decrypted = storage['decrypt'](writeCall[1] as string);
       const saved = JSON.parse(decrypted);
 
       expect(saved['server1']).toBeUndefined();
