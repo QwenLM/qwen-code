@@ -5,11 +5,17 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import pathMod from 'node:path';
 import { useState, useCallback, useEffect, useMemo, useReducer } from 'react';
-import { createDebugLogger, unescapePath } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  unescapePath,
+  getExternalEditorCommand,
+  type EditorType,
+} from '@qwen-code/qwen-code-core';
 import {
   toCodePoints,
   cpLen,
@@ -804,6 +810,7 @@ interface UseTextBufferProps {
   onChange?: (text: string) => void; // Callback for when text changes
   isValidPath: (path: string) => boolean;
   shellModeActive?: boolean; // Whether the text buffer is in shell mode
+  preferredEditor?: EditorType;
 }
 
 interface UndoHistoryEntry {
@@ -1902,6 +1909,7 @@ export function useTextBuffer({
   onChange,
   isValidPath,
   shellModeActive = false,
+  preferredEditor,
 }: UseTextBufferProps): TextBuffer {
   const initialState = useMemo((): TextBufferState => {
     const lines = initialText.split('\n');
@@ -2210,22 +2218,47 @@ export function useTextBuffer({
 
   const openInExternalEditor = useCallback(
     async (opts: { editor?: string } = {}): Promise<void> => {
-      const editor =
-        opts.editor ??
-        process.env['VISUAL'] ??
-        process.env['EDITOR'] ??
-        (process.platform === 'win32' ? 'notepad' : 'vi');
-      const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
-      const filePath = pathMod.join(tmpDir, 'buffer.txt');
+      const filePath = pathMod.join(
+        os.tmpdir(),
+        `qwen-edit-${crypto.randomUUID()}.md`,
+      );
       fs.writeFileSync(filePath, text, 'utf8');
+
+      let editorCmd: string;
+      let editorArgs: string[];
+      let useShell = false;
+
+      const resolved = preferredEditor
+        ? getExternalEditorCommand(preferredEditor, filePath)
+        : null;
+
+      if (resolved) {
+        editorCmd = resolved.command;
+        editorArgs = resolved.args;
+        useShell = resolved.needsShell;
+      } else {
+        if (preferredEditor) {
+          debugLogger.warn(
+            `[useTextBuffer] preferred editor "${preferredEditor}" not found, falling back to env/default`,
+          );
+        }
+        editorCmd =
+          opts.editor ??
+          process.env['VISUAL'] ??
+          process.env['EDITOR'] ??
+          (process.platform === 'win32' ? 'notepad' : 'vi');
+        editorArgs = [filePath];
+      }
 
       dispatch({ type: 'create_undo_snapshot' });
 
       const wasRaw = stdin?.isRaw ?? false;
       try {
         setRawMode?.(false);
-        const { status, error } = spawnSync(editor, [filePath], {
+
+        const { status, error } = spawnSync(editorCmd, editorArgs, {
           stdio: 'inherit',
+          shell: useShell,
         });
         if (error) throw error;
         if (typeof status === 'number' && status !== 0)
@@ -2243,14 +2276,9 @@ export function useTextBuffer({
         } catch {
           /* ignore */
         }
-        try {
-          fs.rmdirSync(tmpDir);
-        } catch {
-          /* ignore */
-        }
       }
     },
-    [text, stdin, setRawMode],
+    [text, stdin, setRawMode, preferredEditor],
   );
 
   const handleInput = useCallback(

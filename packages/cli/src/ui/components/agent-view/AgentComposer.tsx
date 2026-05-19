@@ -24,7 +24,7 @@ import {
   isTerminalStatus,
   ApprovalMode,
   APPROVAL_MODES,
-} from '@qwen-code/qwen-code-core';
+ isValidEditorType } from '@qwen-code/qwen-code-core';
 import {
   useAgentViewState,
   useAgentViewActions,
@@ -43,6 +43,7 @@ import { QueuedMessageDisplay } from '../QueuedMessageDisplay.js';
 import { AgentFooter } from './AgentFooter.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { theme } from '../../semantic-colors.js';
+import { useSettings } from '../../contexts/SettingsContext.js';
 import { t } from '../../../i18n/index.js';
 
 // ─── Types ──────────────────────────────────────────────────
@@ -65,6 +66,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   const interactiveAgent = agent?.interactiveAgent;
 
   const config = useConfig();
+  const settings = useSettings();
   const { columns: terminalWidth } = useTerminalSize();
   const { inputWidth } = calculatePromptWidths(terminalWidth);
   const { stdin, setRawMode } = useStdin();
@@ -121,12 +123,18 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
 
   const isValidPath = useCallback((): boolean => false, []);
 
+  const prefEditorRaw = settings.merged.general?.preferredEditor ?? '';
+  const preferredEditor = isValidEditorType(prefEditorRaw)
+    ? prefEditorRaw
+    : undefined;
+
   const buffer = useTextBuffer({
     initialText: '',
     viewport: { height: 3, width: inputWidth },
     stdin,
     setRawMode,
     isValidPath,
+    preferredEditor,
   });
 
   // Sync agent buffer text to context so AgentTabBar can guard tab switching

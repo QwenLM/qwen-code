@@ -33,6 +33,7 @@ import type { RestoreOption } from './components/RewindSelector.js';
 import { MessageType, StreamingState } from './types.js';
 import {
   type EditorType,
+  isValidEditorType,
   type Config,
   type IdeInfo,
   type IdeContext,
@@ -779,6 +780,11 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, []);
 
+  const prefEditorRaw = settings.merged.general?.preferredEditor ?? '';
+  const preferredEditor = isValidEditorType(prefEditorRaw)
+    ? prefEditorRaw
+    : undefined;
+
   const buffer = useTextBuffer({
     initialText: '',
     viewport: { height: 10, width: inputWidth },
@@ -786,6 +792,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setRawMode,
     isValidPath,
     shellModeActive,
+    preferredEditor,
   });
 
   useEffect(() => {
