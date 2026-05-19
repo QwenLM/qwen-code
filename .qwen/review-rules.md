@@ -1,32 +1,29 @@
 # Qwen Code Review Rules
 
-These rules guide the current bundled `/review` behavior and the future
-preflight readiness checks. Apply them conservatively: the bot should reduce
-review noise and route unclear PRs to maintainers, not make final product
-decisions on weak evidence.
+These are the project-specific review criteria for Qwen Code. Bundled
+`/review` loads this file and applies the rules below to its review agents.
+Apply them conservatively: the goal is to reduce review noise and route
+unclear PRs to maintainers, not to make final product decisions on weak
+evidence.
 
-## Gate Behavior
+> Scope note: this file describes _what_ to evaluate and _how strong_ a
+> finding is. It does NOT describe workflow mechanics (when the CI gate
+> stops, when a process comment is posted, how to re-trigger). Those live in
+> `docs/design/code-review/code-review-design.md` and the workflow itself.
+> When `/review` runs locally on uncommitted changes there is no CI gate —
+> treat the rules below as review guidance, not as a process to enforce.
 
-- **Current workflow behavior**: Until the Design Gate preflight is enabled,
-  these rules are loaded by bundled `/review` as project review guidance.
-  A blocking gate should be treated as an actionable process finding, but the
-  workflow may still continue into detailed code review.
-- **Design Gate behavior**: Once the preflight gate is enabled, a blocking gate
-  failure stops before detailed code analysis. The bot posts a process comment
-  explaining which gate failed, why, and what the author should address (e.g.,
-  split the PR, provide design rationale, add validation evidence). The PR stays
-  open — the author can address the concern and re-trigger review with
-  `@qwen /review`.
-- **Advisory gates**: When an advisory gate has concerns, the bot flags them
-  in the review body but proceeds with code review.
+## Finding Severity
 
-### Gate Defaults
+How strongly to weight each gate's findings. "blocking" means a failure here
+is a high-priority, actionable finding the author should resolve before the
+change is mergeable; "advisory" means flag it but it does not by itself block.
 
-| Gate | Default | Override |
-|------|---------|----------|
-| Scope / PR Purity | blocking | `scope-gate: advisory` in this file |
-| Product Direction | blocking | `product-direction-gate: advisory` in this file |
-| Validation / Dogfooding | advisory | `validation-gate: blocking` in this file |
+| Gate                    | Default severity | Override token (in this file)      |
+| ----------------------- | ---------------- | ---------------------------------- |
+| Scope / PR Purity       | blocking         | `scope-gate: advisory`             |
+| Product Direction       | blocking         | `product-direction-gate: advisory` |
+| Validation / Dogfooding | advisory         | `validation-gate: blocking`        |
 
 ## Review Gates
 
