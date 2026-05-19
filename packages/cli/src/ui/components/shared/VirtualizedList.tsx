@@ -16,6 +16,7 @@ import {
 } from 'react';
 import type React from 'react';
 import { useBatchedScroll } from '../../hooks/useBatchedScroll.js';
+import { useAnimatedScrollbar } from '../../hooks/useAnimatedScrollbar.js';
 import { StaticRender } from './StaticRender.js';
 import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
@@ -697,6 +698,26 @@ function VirtualizedList<T>(
 
   const showScrollbar = (props.showScrollbar ?? true) && maxScroll > 0;
 
+  // Animated scrollbar: the thumb glyph pops bright on scroll, then
+  // fades back into the dim track after a short idle. The track column
+  // itself stays in the layout regardless, so the viewport width never
+  // reflows (which would force per-item re-measure + a visible jitter).
+  const { isVisible: scrollbarThumbActive, flashScrollbar } =
+    useAnimatedScrollbar();
+
+  // `clampedScrollTop` updates on every scroll-driven recompute, so a
+  // layout-effect keyed on it is the cheapest "the user just scrolled"
+  // signal we have. Skip the very first commit (no scroll happened) so
+  // we don't paint a flash on initial mount.
+  const isInitialScrollFlash = useRef(true);
+  useLayoutEffect(() => {
+    if (isInitialScrollFlash.current) {
+      isInitialScrollFlash.current = false;
+      return;
+    }
+    flashScrollbar();
+  }, [clampedScrollTop, flashScrollbar]);
+
   const scrollbarContent = useMemo(() => {
     if (!showScrollbar || scrollableContainerHeight <= 0) return null;
     const trackLen = scrollableContainerHeight;
@@ -711,9 +732,13 @@ function VirtualizedList<T>(
       <Box width={1} flexDirection="column" flexShrink={0}>
         {Array.from({ length: trackLen }, (_, i) => {
           const inThumb = i >= thumbTop && i < thumbTop + thumbLen;
+          // When the thumb is "active" (recent scroll), draw it bright
+          // (`█` without dimColor); otherwise collapse the thumb into a
+          // dim track glyph so the bar quietly disappears into the gutter.
+          const showActiveThumb = inThumb && scrollbarThumbActive;
           return (
-            <Text key={i} dimColor={!inThumb}>
-              {inThumb ? '█' : '│'}
+            <Text key={i} dimColor={!showActiveThumb}>
+              {showActiveThumb ? '█' : '│'}
             </Text>
           );
         })}
@@ -725,6 +750,7 @@ function VirtualizedList<T>(
     totalHeight,
     clampedScrollTop,
     maxScroll,
+    scrollbarThumbActive,
   ]);
 
   return (
