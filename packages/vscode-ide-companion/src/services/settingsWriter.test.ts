@@ -141,6 +141,20 @@ describe('settingsWriter', () => {
     expect(
       openaiModels.every((model) => model.envKey === TOKEN_PLAN_ENV_KEY),
     ).toBe(true);
+    // qwen3.6-plus must keep the CLI's image/video modalities so the
+    // VS Code-configured Token Plan advertises the same multimodal
+    // support as the CLI provider entry.
+    const qwen36 = openaiModels.find(
+      (model) => model.id === 'qwen3.6-plus',
+    ) as unknown as { generationConfig?: Record<string, unknown> };
+    expect(qwen36.generationConfig?.modalities).toEqual({
+      image: true,
+      video: true,
+    });
+    const deepseek = openaiModels.find(
+      (model) => model.id === 'deepseek-v3.2',
+    ) as unknown as { generationConfig?: Record<string, unknown> };
+    expect(deepseek.generationConfig?.modalities).toBeUndefined();
     expect(providerMetadata['token-plan']).toMatchObject({
       baseUrl: getSubscriptionPlanConfig('token').baseUrl,
       version: expect.any(String),
@@ -157,7 +171,7 @@ describe('settingsWriter', () => {
     });
   });
 
-  it('clears api-key credentials but preserves custom models when writing Token Plan', () => {
+  it('preserves api-key credentials and custom models when writing Token Plan', () => {
     writeModelProvidersConfig({
       apiKey: 'manual-key',
       modelProviders: {
@@ -177,7 +191,9 @@ describe('settingsWriter', () => {
       Record<string, string>
     >;
 
-    expect(env.OPENAI_API_KEY).toBeUndefined();
+    // The preserved custom model still references OPENAI_API_KEY, so the
+    // key must survive the plan switch (otherwise it breaks silently).
+    expect(env.OPENAI_API_KEY).toBe('manual-key');
     expect(env[TOKEN_PLAN_ENV_KEY]).toBe('token-plan-key');
     expect(openaiModels.map((model) => model.id)).toContain('gpt-4o');
     expect(openaiModels.find((model) => model.id === 'gpt-4o')).toMatchObject({

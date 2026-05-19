@@ -38,11 +38,25 @@ interface SubscriptionPlanRegionConfig<
   modelNamePrefix?: string;
 }
 
+/**
+ * Mirror of the core `InputModalities` shape (kept local so this package
+ * does not need a dependency on @qwen-code/qwen-code-core). These values
+ * are surfaced via `generationConfig.modalities` and tell the core runtime
+ * which non-text inputs a model accepts.
+ */
+export interface SubscriptionPlanModelModalities {
+  image?: boolean;
+  pdf?: boolean;
+  audio?: boolean;
+  video?: boolean;
+}
+
 interface SubscriptionPlanModelSpec {
   id: string;
   contextWindowSize: number;
   enableThinking?: boolean;
   description?: string;
+  modalities?: SubscriptionPlanModelModalities;
 }
 
 export interface SubscriptionPlanDefinition<
@@ -86,15 +100,26 @@ export interface SubscriptionPlanConfig {
 
 // keep in sync with packages/cli/src/auth/providers/alibaba/codingPlan.ts MODELSTUDIO_MODELS
 const ALIBABA_SUBSCRIPTION_MODELS = [
-  { id: 'qwen3.5-plus', contextWindowSize: 1000000, enableThinking: true },
+  {
+    id: 'qwen3.5-plus',
+    contextWindowSize: 1000000,
+    enableThinking: true,
+    modalities: { image: true, video: true },
+  },
   {
     id: 'qwen3.6-plus',
     description: 'Currently available to Pro subscribers only.',
     contextWindowSize: 1000000,
     enableThinking: true,
+    modalities: { image: true, video: true },
   },
   { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
-  { id: 'kimi-k2.5', contextWindowSize: 262144, enableThinking: true },
+  {
+    id: 'kimi-k2.5',
+    contextWindowSize: 262144,
+    enableThinking: true,
+    modalities: { image: true, video: true },
+  },
   { id: 'MiniMax-M2.5', contextWindowSize: 196608, enableThinking: true },
   { id: 'qwen3-coder-plus', contextWindowSize: 1000000 },
   { id: 'qwen3-coder-next', contextWindowSize: 262144 },
@@ -108,7 +133,12 @@ const ALIBABA_SUBSCRIPTION_MODELS = [
 
 // keep in sync with packages/cli/src/auth/providers/alibaba/tokenPlan.ts TOKEN_PLAN_MODELS
 const TOKEN_PLAN_MODELS = [
-  { id: 'qwen3.6-plus', contextWindowSize: 1000000, enableThinking: true },
+  {
+    id: 'qwen3.6-plus',
+    contextWindowSize: 1000000,
+    enableThinking: true,
+    modalities: { image: true, video: true },
+  },
   { id: 'deepseek-v3.2', contextWindowSize: 131072, enableThinking: true },
   { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
   { id: 'MiniMax-M2.5', contextWindowSize: 196608, enableThinking: true },
@@ -228,6 +258,12 @@ function buildSubscriptionPlanTemplate(
         ? { extra_body: { enable_thinking: true } }
         : {}),
       contextWindowSize: model.contextWindowSize,
+      // Carry input modalities so a model configured via the VS Code
+      // companion advertises the same image/video support as the CLI
+      // provider entry. Mirrors the CLI's buildGenerationConfig gating.
+      ...(model.modalities && Object.values(model.modalities).some(Boolean)
+        ? { modalities: model.modalities }
+        : {}),
     },
   }));
 }

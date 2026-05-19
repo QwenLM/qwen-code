@@ -320,7 +320,11 @@ function clearInactiveSubscriptionPlanState(
         delete env[plan.envKey];
       }
     }
-    delete env[API_KEY_ENV_KEY];
+    // Do not delete API_KEY_ENV_KEY. It belongs to the api-key auth path,
+    // not a subscription plan. writeSubscriptionPlanConfig preserves
+    // non-subscription (custom api-key) model entries, which still
+    // reference this env var — deleting it breaks them silently. The loop
+    // above already removes inactive subscription-plan env keys.
   }
 
   for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
