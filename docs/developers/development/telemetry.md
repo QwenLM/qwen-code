@@ -51,41 +51,63 @@ observability framework — Qwen Code's observability system provides:
 
 ## Configuration
 
-> [!note]
->
-> **⚠️ Special Note: This feature requires corresponding code changes. This documentation is provided in advance; please refer to future code updates for actual functionality.**
-
 All telemetry behavior is controlled through your `.qwen/settings.json` file.
 These settings can be overridden by environment variables or CLI flags.
 
-| Setting                          | Environment Variable                               | CLI Flag                                                 | Description                                              | Values            | Default                 |
-| -------------------------------- | -------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------- | ----------------- | ----------------------- |
-| `enabled`                        | `QWEN_TELEMETRY_ENABLED`                           | `--telemetry` / `--no-telemetry`                         | Enable or disable telemetry                              | `true`/`false`    | `false`                 |
-| `target`                         | `QWEN_TELEMETRY_TARGET`                            | `--telemetry-target <local\|gcp>`                        | Where to send telemetry data                             | `"gcp"`/`"local"` | `"local"`               |
-| `otlpEndpoint`                   | `QWEN_TELEMETRY_OTLP_ENDPOINT`                     | `--telemetry-otlp-endpoint <URL>`                        | OTLP collector endpoint                                  | URL string        | `http://localhost:4317` |
-| `otlpProtocol`                   | `QWEN_TELEMETRY_OTLP_PROTOCOL`                     | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP transport protocol                                  | `"grpc"`/`"http"` | `"grpc"`                |
-| `otlpTracesEndpoint`             | `QWEN_TELEMETRY_OTLP_TRACES_ENDPOINT`              | -                                                        | Per-signal endpoint override for traces (HTTP only)      | URL string        | -                       |
-| `otlpLogsEndpoint`               | `QWEN_TELEMETRY_OTLP_LOGS_ENDPOINT`                | -                                                        | Per-signal endpoint override for logs (HTTP only)        | URL string        | -                       |
-| `otlpMetricsEndpoint`            | `QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT`             | -                                                        | Per-signal endpoint override for metrics (HTTP only)     | URL string        | -                       |
-| `outfile`                        | `QWEN_TELEMETRY_OUTFILE`                           | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides `otlpEndpoint`)        | file path         | -                       |
-| `logPrompts`                     | `QWEN_TELEMETRY_LOG_PROMPTS`                       | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                        | `true`/`false`    | `true`                  |
-| `includeSensitiveSpanAttributes` | `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES` | -                                                        | Include sensitive attributes in log-to-span bridge spans | `true`/`false`    | `false`                 |
-| `useCollector`                   | `QWEN_TELEMETRY_USE_COLLECTOR`                     | -                                                        | Use external OTLP collector (advanced)                   | `true`/`false`    | `false`                 |
+| Setting                          | Environment Variable                               | CLI Flag                                                 | Description                                                                                                                          | Values            | Default                 |
+| -------------------------------- | -------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------- | ----------------------- |
+| `enabled`                        | `QWEN_TELEMETRY_ENABLED`                           | `--telemetry` / `--no-telemetry`                         | Enable or disable telemetry                                                                                                          | `true`/`false`    | `false`                 |
+| `target`                         | `QWEN_TELEMETRY_TARGET`                            | `--telemetry-target <local\|gcp>` _(deprecated)_         | Informational destination label; does not control exporter routing — set `otlpEndpoint` or `outfile` to configure where data is sent | `"gcp"`/`"local"` | `"local"`               |
+| `otlpEndpoint`                   | `QWEN_TELEMETRY_OTLP_ENDPOINT`                     | `--telemetry-otlp-endpoint <URL>`                        | OTLP collector endpoint                                                                                                              | URL string        | `http://localhost:4317` |
+| `otlpProtocol`                   | `QWEN_TELEMETRY_OTLP_PROTOCOL`                     | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP transport protocol                                                                                                              | `"grpc"`/`"http"` | `"grpc"`                |
+| `otlpTracesEndpoint`             | `QWEN_TELEMETRY_OTLP_TRACES_ENDPOINT`              | -                                                        | Per-signal endpoint override for traces (HTTP only)                                                                                  | URL string        | -                       |
+| `otlpLogsEndpoint`               | `QWEN_TELEMETRY_OTLP_LOGS_ENDPOINT`                | -                                                        | Per-signal endpoint override for logs (HTTP only)                                                                                    | URL string        | -                       |
+| `otlpMetricsEndpoint`            | `QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT`             | -                                                        | Per-signal endpoint override for metrics (HTTP only)                                                                                 | URL string        | -                       |
+| `outfile`                        | `QWEN_TELEMETRY_OUTFILE`                           | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides OTLP export)                                                                                       | file path         | -                       |
+| `logPrompts`                     | `QWEN_TELEMETRY_LOG_PROMPTS`                       | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                                                                                                    | `true`/`false`    | `true`                  |
+| `includeSensitiveSpanAttributes` | `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES` | -                                                        | Include user prompts, system prompts, tool I/O, and model output as native span attributes (in addition to log-to-span bridge spans) | `true`/`false`    | `false`                 |
 
 **Note on boolean environment variables:** For the boolean settings (`enabled`,
-`logPrompts`, `includeSensitiveSpanAttributes`, `useCollector`), setting the
+`logPrompts`, `includeSensitiveSpanAttributes`), setting the
 corresponding environment variable to `true` or `1` will enable the feature. Any
 other value will disable it.
 
-**Sensitive log-to-span attributes:** When Qwen Code exports HTTP traces but has
-no logs endpoint, log records are bridged into trace spans. By default, the
-bridge drops `prompt`, `function_args`, and `response_text` from span attributes.
-Set `includeSensitiveSpanAttributes` to `true` only when you explicitly want
-those fields in bridged spans. This setting only controls the log-to-span
-bridge. It does not disable sensitive data in OTel logs or other telemetry
-sinks; non-internal API response telemetry can populate `response_text`, so OTel
-logs, UI telemetry, and chat recording may receive response text independently
-of this bridge setting. QwenLogger does not include `response_text`.
+**Sensitive span attributes:** When `includeSensitiveSpanAttributes` is enabled,
+two things happen:
+
+1. **Native span attributes (`qwen-code.interaction`, `api.generateContent*`,
+   `tool.<name>`)** carry verbatim conversation content:
+   - User prompts (`new_context`)
+   - System prompts (`system_prompt` — full text once per session, deduped by
+     SHA-256 hash; subsequent spans only carry `system_prompt_hash` +
+     `system_prompt_preview` + `system_prompt_length`)
+   - Tool schemas (emitted as `tool_schema` events, also hash-deduped)
+   - Tool inputs (`tool_input`) and tool results (`tool_result`)
+   - Model output (`response.model_output`)
+
+   Each value is truncated at 60 KB; `*_truncated` and `*_original_length`
+   flags surface when truncation occurs.
+
+2. **Log-to-span bridge spans** (used when HTTP traces are exported without a
+   logs endpoint) keep their existing `prompt`, `function_args`, and
+   `response_text` fields, instead of being dropped.
+
+⚠️ **Security warning:** enabling this flag streams full conversation history,
+file contents read by `read_file`, shell commands and their output (including
+secrets in env vars or arguments), and model responses to the configured OTLP
+backend. Treat the backend as a privileged data sink. The flag defaults to
+`false`.
+
+**Cost / payload size:** A heavy turn (60 KB system prompt + 10 tool calls,
+each up to 60 KB input + 60 KB result, plus 60 KB model output) can produce up
+to ~1.5 MB of attribute payload before OTLP compression. When pointing tools
+that read large files (`read_file`, etc.) at long-running sessions, monitor
+exporter throughput.
+
+This setting does not disable sensitive data in OTel logs or other telemetry
+sinks; non-internal API response telemetry can populate `response_text`, so
+OTel logs, UI telemetry, and chat recording may receive response text
+independently of this setting. QwenLogger does not include `response_text`.
 
 **HTTP OTLP signal routing:** When using HTTP protocol (`otlpProtocol: "http"`),
 Qwen Code automatically appends signal-specific paths (`/v1/traces`, `/v1/logs`,
@@ -188,16 +210,20 @@ For local development and debugging, you can capture telemetry data locally:
 ### File-based Output (Recommended)
 
 1. Enable telemetry in your `.qwen/settings.json`:
+
    ```json
    {
      "telemetry": {
        "enabled": true,
-       "target": "local",
-       "otlpEndpoint": "",
        "outfile": ".qwen/telemetry.log"
      }
    }
    ```
+
+   > **Note:** When `outfile` is set, OTLP export is automatically disabled.
+   > The `target` and `otlpEndpoint` settings are not needed for file-only
+   > output and can be safely omitted from your config.
+
 2. Run Qwen Code and send prompts.
 3. View logs and metrics in the specified file (e.g., `.qwen/telemetry.log`).
 

@@ -638,7 +638,10 @@ export class SubagentManager {
     },
   ): Promise<AgentHeadless> {
     try {
-      const runtimeConfig = await this.convertToRuntimeConfig(config);
+      const runtimeConfig = await this.convertToRuntimeConfig(
+        config,
+        runtimeContext,
+      );
       const promptConfig: PromptConfig = {
         ...runtimeConfig.promptConfig,
         ...options?.promptConfigOverrides,
@@ -741,6 +744,20 @@ export class SubagentManager {
       return undefined;
     }
 
+    let resolvedModelId = selection.modelId;
+    if (selection.usesFastModel) {
+      // getFastModel() returns the fastModel id only when it's valid for
+      // the current authType; otherwise undefined. Treat undefined as
+      // inherit so an unset or invalid fastModel silently falls back to
+      // the parent session model — matching every other getFastModel()
+      // call site (ForkedAgent, sessionTitle, etc.).
+      const fast = base.getFastModel();
+      if (!fast) {
+        return undefined;
+      }
+      resolvedModelId = fast;
+    }
+
     const authType =
       selection.authType ?? base.getContentGeneratorConfig().authType;
     const authOverrides = {
@@ -750,7 +767,7 @@ export class SubagentManager {
     const view = await createRuntimeContentGeneratorView(
       base,
       base,
-      selection.modelId,
+      resolvedModelId,
       authOverrides,
     );
 
@@ -770,14 +787,22 @@ export class SubagentManager {
    */
   async convertToRuntimeConfig(
     config: SubagentConfig,
+    runtimeContext?: Config,
   ): Promise<SubagentRuntimeConfig> {
     const promptConfig: PromptConfig = {
       systemPrompt: config.systemPrompt,
     };
 
     const selection = parseSubagentModelSelection(config.model);
+    let resolvedModelId = selection.modelId;
+    if (selection.usesFastModel && runtimeContext) {
+      // Resolve `fast` to the configured fastModel. Undefined here means
+      // either unset or invalid for the current authType — leave modelConfig
+      // empty so the agent inherits the parent model (same as `inherit`).
+      resolvedModelId = runtimeContext.getFastModel();
+    }
     const modelConfig: ModelConfig = {
-      ...(selection.modelId ? { model: selection.modelId } : {}),
+      ...(resolvedModelId ? { model: resolvedModelId } : {}),
     };
 
     const runConfig: RunConfig = {

@@ -136,6 +136,31 @@ describe('ChatRecordingService', () => {
       expect(user2.uuid).toBe('00000000-0000-0000-0000-000000000003');
       expect(user2.parentUuid).toBe('00000000-0000-0000-0000-000000000002');
     });
+
+    it('should record mid-turn user messages with a mergeable subtype', async () => {
+      const modelFacingParts: Part[] = [
+        {
+          text: '\n[User message received during tool execution]: save logs',
+        },
+      ];
+
+      chatRecordingService.recordMidTurnUserMessage(
+        modelFacingParts,
+        'save logs',
+      );
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+
+      expect(record.type).toBe('user');
+      expect(record.subtype).toBe('mid_turn_user_message');
+      expect(record.message).toEqual({
+        role: 'user',
+        parts: modelFacingParts,
+      });
+      expect(record.systemPayload).toEqual({ displayText: 'save logs' });
+    });
   });
 
   describe('recordAtCommand', () => {

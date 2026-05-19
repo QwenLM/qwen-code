@@ -165,6 +165,49 @@ export interface FileReadResult {
   bom: boolean;
 }
 
+export function decodeBufferWithEncodingInfo(full: Buffer): FileReadResult {
+  if (full.length === 0) {
+    return { content: '', encoding: 'utf-8', bom: false };
+  }
+
+  const bomInfo = detectBOM(full);
+  if (bomInfo) {
+    return {
+      content: decodeBOMBuffer(full, bomInfo),
+      encoding: bomEncodingToName(bomInfo.encoding),
+      // Mark bom: true for all Unicode BOM variants (UTF-8/16/32) so that
+      // the BOM is re-written on save and the file's original format is preserved.
+      bom: true,
+    };
+  }
+
+  // No BOM — check if it's valid UTF-8 first (fast path for the common case)
+  if (isValidUtf8(full)) {
+    return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
+  }
+
+  // Not valid UTF-8 — try chardet statistical detection
+  const detected = detectEncodingFromBuffer(full);
+  if (detected && !isUtf8CompatibleEncoding(detected)) {
+    try {
+      if (iconvEncodingExists(detected)) {
+        return {
+          content: iconvDecode(full, detected),
+          encoding: detected,
+          bom: false,
+        };
+      }
+    } catch (e) {
+      debugLogger.warn(
+        `Failed to decode buffer as ${detected}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  // Final fallback: UTF-8 with replacement characters
+  return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
+}
+
 /**
  * Internal helper: decode a buffer given a BOMInfo.
  * Returns the decoded string for each supported BOM encoding.
@@ -222,44 +265,7 @@ export async function readFileWithEncodingInfo(
 ): Promise<FileReadResult> {
   // Read the file once; detect BOM and decode from the single buffer.
   const full = await fs.promises.readFile(filePath);
-  if (full.length === 0) return { content: '', encoding: 'utf-8', bom: false };
-
-  const bomInfo = detectBOM(full);
-  if (bomInfo) {
-    return {
-      content: decodeBOMBuffer(full, bomInfo),
-      encoding: bomEncodingToName(bomInfo.encoding),
-      // Mark bom: true for all Unicode BOM variants (UTF-8/16/32) so that
-      // the BOM is re-written on save and the file's original format is preserved.
-      bom: true,
-    };
-  }
-
-  // No BOM — check if it's valid UTF-8 first (fast path for the common case)
-  if (isValidUtf8(full)) {
-    return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
-  }
-
-  // Not valid UTF-8 — try chardet statistical detection
-  const detected = detectEncodingFromBuffer(full);
-  if (detected && !isUtf8CompatibleEncoding(detected)) {
-    try {
-      if (iconvEncodingExists(detected)) {
-        return {
-          content: iconvDecode(full, detected),
-          encoding: detected,
-          bom: false,
-        };
-      }
-    } catch (e) {
-      debugLogger.warn(
-        `Failed to decode file ${filePath} as ${detected}: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-  }
-
-  // Final fallback: UTF-8 with replacement characters
-  return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
+  return decodeBufferWithEncodingInfo(full);
 }
 
 /**

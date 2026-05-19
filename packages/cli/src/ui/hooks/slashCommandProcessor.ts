@@ -43,7 +43,6 @@ import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
-import { dynamicCommandLocalizationService } from '../../services/DynamicCommandLocalizationService.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
@@ -91,6 +90,7 @@ export interface SlashCommandProcessorActions {
   openEditorDialog: () => void;
   openMemoryDialog: () => void;
   openSettingsDialog: () => void;
+  openStatusLineDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
   openManageModelsDialog: () => void;
   openTrustDialog: () => void;
@@ -434,14 +434,6 @@ export const useSlashCommandProcessor = (
           controller.signal,
           disabled.length > 0 ? new Set(disabled) : undefined,
         );
-        const localizedCommandService = CommandService.fromCommands(
-          await dynamicCommandLocalizationService.localizeCommands(
-            config,
-            commandService.getCommands(),
-            controller.signal,
-            settings.merged?.general?.dynamicCommandTranslation === true,
-          ),
-        );
         // Avoid overwriting newer results from a subsequent effect run
         if (controller.signal.aborted) {
           return;
@@ -450,7 +442,7 @@ export const useSlashCommandProcessor = (
         // bundled skills, file commands, and MCP prompts in its description.
         if (config) {
           config.setModelInvocableCommandsProvider(() =>
-            localizedCommandService.getModelInvocableCommands().map((cmd) => ({
+            commandService.getModelInvocableCommands().map((cmd) => ({
               name: cmd.name,
               description: cmd.modelDescription ?? cmd.description,
             })),
@@ -459,8 +451,7 @@ export const useSlashCommandProcessor = (
           // commands (e.g. MCP prompts) that are not file-based skills.
           config.setModelInvocableCommandsExecutor(
             async (name: string, args: string = '') => {
-              const commands =
-                localizedCommandService.getModelInvocableCommands();
+              const commands = commandService.getModelInvocableCommands();
               const cmd = commands.find((c) => c.name === name);
               if (!cmd?.action) return null;
               // Build a minimal context; submit_prompt actions only need
@@ -491,7 +482,7 @@ export const useSlashCommandProcessor = (
             },
           );
         }
-        setCommands(localizedCommandService.getCommandsForMode('interactive'));
+        setCommands(commandService.getCommandsForMode('interactive'));
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);
       } finally {
@@ -649,6 +640,12 @@ export const useSlashCommandProcessor = (
                       content: result.content,
                       timestamp: new Date(),
                     });
+                  } else if (result.messageType === 'warning') {
+                    addMessage({
+                      type: MessageType.WARNING,
+                      content: result.content,
+                      timestamp: new Date(),
+                    });
                   } else {
                     addMessage({
                       type: MessageType.ERROR,
@@ -682,6 +679,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'settings':
                       actions.openSettingsDialog();
+                      return { type: 'handled' };
+                    case 'statusline':
+                      actions.openStatusLineDialog();
                       return { type: 'handled' };
                     case 'memory':
                       actions.openMemoryDialog();

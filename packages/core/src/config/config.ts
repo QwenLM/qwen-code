@@ -7,6 +7,7 @@
 // Node built-ins
 import type { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
@@ -37,21 +38,30 @@ import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { FileHistoryService } from '../services/fileHistoryService.js';
 import {
   type FileSystemService,
   StandardFileSystemService,
   type FileEncodingType,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
+import { GitWorktreeService } from '../services/gitWorktreeService.js';
+import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
-import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
+import {
+  MCPServerStatus,
+  getMCPServerStatus,
+  type SendSdkMcpMessage,
+} from '../tools/mcp-client.js';
 import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
+import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { LspClient } from '../lsp/types.js';
+import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -66,6 +76,7 @@ import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -146,6 +157,7 @@ import {
   type AvailableModel,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
+import { resolveModelId } from '../utils/modelId.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
 // Re-export types
@@ -163,6 +175,23 @@ export enum ApprovalMode {
 }
 
 export const APPROVAL_MODES = Object.values(ApprovalMode);
+
+/**
+ * Thrown by `Config.setApprovalMode` when the requested mode would grant
+ * privileged tool autonomy in a folder the user has not marked as trusted.
+ *
+ * Why: the daemon mutation route at `POST /session/:id/approval-mode` needs
+ * to recognize this specific class of rejection and translate it into a
+ * structured `errorKind: 'auth_env_error'` rather than a generic 500.
+ * Using a named subclass lets the bridge match by `err.name` without
+ * depending on the message text (which would drift across i18n).
+ */
+export class TrustGateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TrustGateError';
+  }
+}
 
 /**
  * Information about an approval mode including display name and description.
@@ -211,6 +240,14 @@ export interface BugCommandSettings {
 
 export interface ChatCompressionSettings {
   contextPercentageThreshold?: number;
+  /**
+   * Estimated tokens for a single inline image / document part when
+   * apportioning chars across history in `findCompressSplitPoint`.
+   * Also used as the placeholder budget when stripping inline media
+   * out of the side-query compaction prompt. Default 1600.
+   * Env override: `QWEN_IMAGE_TOKEN_ESTIMATE`.
+   */
+  imageTokenEstimate?: number;
 }
 
 /**
@@ -238,7 +275,6 @@ export interface TelemetrySettings {
   logPrompts?: boolean;
   includeSensitiveSpanAttributes?: boolean;
   outfile?: string;
-  useCollector?: boolean;
 }
 
 export interface OutputSettings {
@@ -362,6 +398,16 @@ export class MCPServerConfig {
     readonly targetServiceAccount?: string,
     // SDK MCP server type - 'sdk' indicates server runs in SDK process
     readonly type?: 'sdk',
+    /**
+     * Per-server cap on the discovery handshake (`connect` + `tools/list` +
+     * `prompts/list` + `resources/list`). Defaults: 30s for stdio servers,
+     * 5s for remote HTTP/SSE. Tool-call timeout (`timeout` above) is
+     * unaffected — a long-running tool invocation is not a startup
+     * pathology. Appended at the end of the parameter list to avoid
+     * shifting positional arguments at the many `new MCPServerConfig(...)`
+     * call sites.
+     */
+    readonly discoveryTimeoutMs?: number,
   ) {}
 }
 
@@ -425,6 +471,18 @@ export interface ConfigParameters {
    * the `QWEN_DISABLED_SLASH_COMMANDS` environment variable.
    */
   disabledSlashCommands?: string[];
+  /**
+   * Tool names hidden from the registry at construction time. Unlike
+   * `permissions.deny` (which keeps the tool registered and rejects
+   * invocation), tools listed here are not registered at all and never
+   * appear in `/tools`, `getAllTools()`, or function-call discovery.
+   * Sourced from `settings.tools.disabled` and the daemon mutation route
+   * `POST /workspace/tools/:name/enable {enabled:false}` (#4175 Wave 4 PR
+   * 17). Active sessions retain already-registered tools — the disabled
+   * set is consulted at register time, so toggling takes effect on the
+   * next ACP child spawn or `ToolRegistry.refresh()`.
+   */
+  disabledTools?: string[];
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -462,6 +520,9 @@ export interface ConfigParameters {
     enableFuzzySearch?: boolean;
   };
   checkpointing?: boolean;
+  fileCheckpointingEnabled?: boolean;
+  /** Directory where approved plan files are stored. Must resolve inside targetDir. */
+  plansDirectory?: string;
   proxy?: string;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
@@ -567,6 +628,11 @@ export interface ConfigParameters {
    */
   disableAllHooks?: boolean;
   /**
+   * Maximum consecutive blocking Stop/SubagentStop hook decisions before the
+   * runtime overrides the hook loop and allows the turn to end.
+   */
+  stopHookBlockingCap?: number;
+  /**
    * User-level hooks configuration (from user settings).
    * These hooks are always loaded regardless of folder trust status.
    */
@@ -629,6 +695,11 @@ export interface ConfigInitializeOptions {
    * Required for SDK MCP server support in SDK mode.
    */
   sendSdkMcpMessage?: SendSdkMcpMessage;
+  /**
+   * Skip Gemini client chat initialization. Useful for bootstrap paths that
+   * need config services (hooks, tools, MCP) before a real session exists.
+   */
+  skipGeminiInitialization?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
@@ -643,6 +714,17 @@ export class Config {
   private sessionData?: ResumedSessionData;
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
+  /**
+   * PR 14b fix #2 (codex review round 1): callback stashed BEFORE
+   * `initialize()` runs and applied as soon as `toolRegistry` is up,
+   * so the manager's `setOnBudgetEvent` is wired before
+   * `startMcpDiscoveryInBackground` (or legacy blocking discovery)
+   * fires the first pass. Pre-fix the acpAgent registered after
+   * `initialize()` returned, missing the first pass entirely under
+   * `QWEN_CODE_LEGACY_MCP_BLOCKING=1` and racing against background
+   * discovery completion under the default mode.
+   */
+  private pendingMcpBudgetCallback?: (event: McpBudgetEvent) => void;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
@@ -685,6 +767,7 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
+  private readonly disabledTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -694,6 +777,7 @@ export class Config {
   private mcpServers: Record<string, MCPServerConfig> | undefined;
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
+  private lspInitializationError?: string;
   private readonly allowedMcpServers?: string[];
   private excludedMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
@@ -723,6 +807,8 @@ export class Config {
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private readonly checkpointing: boolean;
+  private readonly fileCheckpointingEnabled: boolean;
+  private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
   private readonly explicitIncludeDirectories: string[];
@@ -782,12 +868,15 @@ export class Config {
   private readonly jsonFile: string | undefined;
   private readonly jsonSchema: Record<string, unknown> | undefined;
   private readonly inputFile: string | undefined;
+  private readonly plansDir: string;
+  private readonly plansDirectoryConfigured: boolean;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
   private readonly enableAutoSkill: boolean;
   private fastModel?: string;
   private readonly disableAllHooks: boolean;
+  private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
   private readonly userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
@@ -808,6 +897,8 @@ export class Config {
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.plansDirectoryConfigured = Boolean(params.plansDirectory?.trim());
+    this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
     this.explicitIncludeDirectories = Array.from(
       new Set(params.includeDirectories ?? []),
     );
@@ -831,6 +922,7 @@ export class Config {
     this.disabledSlashCommands = Object.freeze([
       ...(params.disabledSlashCommands ?? []),
     ]);
+    this.disabledTools = new Set(params.disabledTools ?? []);
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -861,7 +953,6 @@ export class Config {
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
       outfile: params.telemetry?.outfile,
-      useCollector: params.telemetry?.useCollector,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
@@ -880,6 +971,9 @@ export class Config {
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
     this.checkpointing = params.checkpointing ?? false;
+    this.fileCheckpointingEnabled =
+      params.fileCheckpointingEnabled ??
+      (!params.sdkMode && (params.interactive ?? false));
     this.proxy = params.proxy;
     this.cwd = params.cwd ?? process.cwd();
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
@@ -917,6 +1011,7 @@ export class Config {
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.warnings = params.warnings ?? [];
+    this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
@@ -991,6 +1086,9 @@ export class Config {
     this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
+    this.stopHookBlockingCap = resolveStopHookBlockingCap(
+      params.stopHookBlockingCap,
+    );
     // Store user and project hooks separately for proper source attribution
     this.userHooks = params.userHooks;
     this.projectHooks = params.projectHooks;
@@ -1219,16 +1317,35 @@ export class Config {
     await this.refreshHierarchicalMemory();
     this.debugLogger.debug('Hierarchical memory loaded');
 
+    // Progressive MCP availability: skip MCP discovery in the synchronous
+    // tool-registry construction path and kick it off in the background
+    // after the registry exists. This lets `Config.initialize()` (and the
+    // cli's `input_enabled` checkpoint) resolve without waiting on MCP
+    // server response time. Users can opt back into the legacy synchronous
+    // behavior with `QWEN_CODE_LEGACY_MCP_BLOCKING=1` — kept ≥ 1 release as
+    // an escape hatch.
+    const legacyBlockingMcp =
+      process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
+    const skipInlineMcpDiscovery = this.getBareMode() || !legacyBlockingMcp;
+
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
-      this.getBareMode() ? { skipDiscovery: true } : undefined,
+      skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
     );
+    recordStartupEvent('tool_registry_created', {
+      toolCount: this.toolRegistry.getAllToolNames().length,
+      mcpInline: !skipInlineMcpDiscovery,
+    });
     this.debugLogger.info(
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
     );
 
-    await this.geminiClient.initialize();
-    this.debugLogger.info('Gemini client initialized');
+    if (!options?.skipGeminiInitialization) {
+      await this.geminiClient.initialize();
+      this.debugLogger.info('Gemini client initialized');
+    } else {
+      this.debugLogger.info('Gemini client initialization skipped');
+    }
 
     // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
     this.modelsConfig.detectAndCaptureRuntimeModel();
@@ -1237,8 +1354,220 @@ export class Config {
     // Use strict mode so a broken built-in tool surfaces immediately at startup.
     await this.toolRegistry.warmAll({ strict: true });
 
+    // Fire-and-forget MCP discovery. Each server's tools land in the
+    // registry as it becomes ready; the cli's AppContainer debounces
+    // `setTools()` (~16ms / one frame) so the model sees the new tools
+    // shortly after each server settles. See `AppContainer.tsx`'s
+    // `mcp-client-update` subscriber.
+    if (skipInlineMcpDiscovery && !this.getBareMode()) {
+      this.startMcpDiscoveryInBackground();
+    }
+
     logStartSession(this, new StartSessionEvent(this));
     this.debugLogger.info('Config initialization completed');
+
+    // Fire-and-forget sweep of stale ephemeral worktrees left behind by
+    // earlier `agent` runs that exited before their cleanup helper ran
+    // (Ctrl-C, process crash, abrupt shutdown). The sweep only touches
+    // `agent-<7hex>` slugs, skips anything newer than 30 days, and
+    // is fail-closed against tracked changes or unpushed commits — so
+    // running it on every startup cannot destroy user work. We do not
+    // await this: it is a hygiene task that must never delay the
+    // first model turn.
+    //
+    // Anchor the sweep at the repo top-level so it scans the same
+    // directory the worktree creators (`enter_worktree` and
+    // `agent isolation:'worktree'`) write to. Using `this.targetDir`
+    // directly would cause launches from a monorepo subdirectory to
+    // scan `<subdir>/.qwen/worktrees/` — which never exists — and the
+    // sweep would silently be a no-op forever.
+    if (!this.getBareMode()) {
+      void (async () => {
+        try {
+          // Resolve the repo top-level FIRST. The previous code bailed
+          // on `fs.access(<targetDir>/.qwen/worktrees)` before resolving,
+          // so a monorepo subdir launch (where `targetDir` is the
+          // subdir, not the repo root) always early-returned and the
+          // sweep was permanently a no-op. Fast-bail still happens, just
+          // against the *correct* directory.
+          const probe = new GitWorktreeService(this.targetDir);
+          const root = (await probe.getRepoTopLevel()) ?? this.targetDir;
+          const worktreesDir = path.join(root, '.qwen', 'worktrees');
+          try {
+            await fsPromises.access(worktreesDir);
+          } catch {
+            // Skipped (no worktrees dir) is the common-case happy
+            // path on every CLI start for ~99% of users. `debug` so
+            // operators can opt in via `--debug` when they actually
+            // want to confirm the sweep is wired up — `info` would
+            // be log noise.
+            this.debugLogger.debug(
+              `Stale worktree sweep skipped: ${worktreesDir} does not exist`,
+            );
+            return;
+          }
+          const removed = await cleanupStaleAgentWorktrees(root);
+          if (removed > 0) {
+            // Only the "actually removed something" path warrants
+            // `info` — that's the signal an operator chasing a leak
+            // would grep for. The "ran, found nothing" path is
+            // reconstructable at `debug` and is otherwise noise:
+            // every CLI start that has any worktree dir would emit
+            // it, drowning the actually-actionable message.
+            this.debugLogger.info(
+              `Stale worktree sweep removed ${removed} ephemeral worktree(s) under ${root}`,
+            );
+          } else {
+            this.debugLogger.debug(
+              `Stale worktree sweep ran under ${root}: nothing to remove`,
+            );
+          }
+        } catch (error: unknown) {
+          // Promote sweep errors to `warn` for the same reason: a
+          // permission failure / disk full / repo-corruption case
+          // should leave a visible breadcrumb instead of being
+          // invisible at the default log level.
+          this.debugLogger.warn(
+            `Stale worktree sweep failed (non-fatal): ${error}`,
+          );
+        }
+      })();
+    }
+  }
+
+  /**
+   * In-flight background MCP discovery promise. Captured so non-interactive
+   * code paths can await it before invoking the model (see
+   * {@link waitForMcpReady}). Undefined when MCP discovery was skipped
+   * entirely (bare mode, legacy blocking mode, or no MCP servers).
+   */
+  private mcpDiscoveryPromise?: Promise<void>;
+
+  /**
+   * Kicks off MCP server discovery in the background after the synchronous
+   * portion of {@link initialize} returns. Errors are logged, never thrown:
+   * a broken MCP server must not bring down the cli, and per-server
+   * connect/discover failures are already surfaced through the
+   * `mcp-client-update` event stream the UI subscribes to.
+   *
+   * Defensive against partially-stubbed `ToolRegistry` in some tests, where
+   * the manager getter is unavailable — we'd rather log-and-skip than crash
+   * the init path in tests that don't exercise MCP at all.
+   */
+  private startMcpDiscoveryInBackground(): void {
+    // `getMcpClientManager` is a public method on `ToolRegistry`. The
+    // cast below is NOT defensive against the production type — it
+    // exists only because some tests (e.g. those using
+    // `createMockToolRegistry`) stub `ToolRegistry` as a plain object
+    // that doesn't implement the method. The optional-chaining call
+    // (`?.()`) means the stubbed path resolves to `undefined` instead
+    // of crashing `initialize()` for tests that never exercise MCP.
+    //
+    // Crucially, the inner shape is `ReturnType<ToolRegistry['getMcpClientManager']>`
+    // — not a hand-rolled `{ discoverAllMcpToolsIncremental: ... }` — so
+    // a future rename of `getMcpClientManager` on `ToolRegistry` still
+    // surfaces here as a type error rather than silently falling
+    // through to the `if (!manager) return` branch.
+    const manager = (
+      this.toolRegistry as ToolRegistry & {
+        getMcpClientManager?: () => ReturnType<
+          ToolRegistry['getMcpClientManager']
+        >;
+      }
+    ).getMcpClientManager?.();
+    if (!manager) {
+      this.debugLogger.debug(
+        'Skipping background MCP discovery: ToolRegistry has no MCP client manager',
+      );
+      return;
+    }
+    this.mcpDiscoveryPromise = manager
+      .discoverAllMcpToolsIncremental(this)
+      .then(async () => {
+        // After background discovery completes, push the newly-registered
+        // MCP tools into the active GeminiChat so the next model request
+        // sees them. Interactive mode also calls setTools() via
+        // AppContainer's batch-flush effect — this trailing call is
+        // idempotent there, but it's the ONLY path that updates
+        // `chat.tools` for non-interactive runs (no AppContainer).
+        // Without this, `chat.tools` would be frozen at the built-in-only
+        // snapshot taken inside `geminiClient.initialize()` → `startChat()`,
+        // and `runNonInteractive` / stream-json / ACP would silently lose
+        // every MCP tool — a regression vs the legacy synchronous path.
+        try {
+          await this.geminiClient?.setTools();
+        } catch (err) {
+          this.debugLogger.error(
+            `setTools() after background MCP discovery failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      })
+      .catch((err: unknown) => {
+        this.debugLogger.error(
+          `Background MCP discovery failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+  }
+
+  /**
+   * Resolves when background MCP discovery has settled (all servers ready,
+   * failed, or timed out). Non-interactive code paths (`runNonInteractive`,
+   * stream-json, ACP) MUST await this before invoking the model so the
+   * first model request sees the same tool surface the legacy
+   * synchronous-MCP path produced.
+   *
+   * Interactive code paths should NOT call this — `AppContainer`'s
+   * `mcp-client-update` subscriber handles `setTools()` refreshes
+   * progressively without blocking the UI.
+   *
+   * Resolves immediately when:
+   * - bare mode is on (no MCP discovery is started),
+   * - `QWEN_CODE_LEGACY_MCP_BLOCKING=1` is set (MCP already discovered
+   *   synchronously inside {@link initialize}), or
+   * - no MCP servers are configured.
+   */
+  async waitForMcpReady(): Promise<void> {
+    if (this.mcpDiscoveryPromise) {
+      await this.mcpDiscoveryPromise;
+    }
+  }
+
+  /**
+   * Returns the names of configured (non-disabled) MCP servers whose
+   * discovery did NOT end in a CONNECTED state. Intended to be called by
+   * non-interactive entry points AFTER {@link waitForMcpReady} resolves,
+   * so they can surface a single user-visible warning summarizing which
+   * servers failed.
+   *
+   * The legacy synchronous MCP path surfaced these failures visibly
+   * during `config.initialize()` (because they happened on the main
+   * thread and per-server errors logged to stderr). Under PR-A's
+   * progressive discovery, per-server errors are caught inside
+   * `McpClientManager.discoverAllMcpToolsIncremental` and routed to
+   * profiler events + `mcp-client-update` notifications — both of which
+   * are invisible to a non-interactive run with only built-in stderr.
+   * This helper closes that gap WITHOUT re-introducing the blocking
+   * behavior.
+   *
+   * Returns an empty array when MCP discovery was skipped (bare mode /
+   * legacy blocking / no servers configured) or when every configured
+   * server settled successfully.
+   */
+  getFailedMcpServerNames(): string[] {
+    const servers = this.getMcpServers();
+    if (!servers) {
+      return [];
+    }
+    const failed: string[] = [];
+    for (const name of Object.keys(servers)) {
+      if (this.isMcpServerDisabled(name)) {
+        continue;
+      }
+      if (getMCPServerStatus(name) !== MCPServerStatus.CONNECTED) {
+        failed.push(name);
+      }
+    }
+    return failed;
   }
 
   async refreshHierarchicalMemory(): Promise<void> {
@@ -1467,6 +1796,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
     // and a session-scoped prompt counter — both stop being meaningful
@@ -1582,18 +1912,55 @@ export class Config {
   }
 
   /**
-   * Returns the fast model if one is configured and valid for the current auth type,
-   * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
-   * use this as a cheaper alternative to the main session model.
+   * Returns the fast model if one is configured and valid for the current auth
+   * type, otherwise returns undefined. Direct runtime paths use this as a
+   * cheaper alternative to the main session model, so it intentionally stays
+   * current-auth-only.
    */
   getFastModel(): string | undefined {
-    if (!this.fastModel) return undefined;
-    const authType = this.contentGeneratorConfig?.authType;
+    const authType =
+      this.contentGeneratorConfig?.authType ??
+      this.modelsConfig.getCurrentAuthType();
     if (!authType) return undefined;
-    const available = this.getAvailableModelsForAuthType(authType);
-    return available.some((m) => m.id === this.fastModel)
-      ? this.fastModel
+    const selector = this.resolveFastModelSelector();
+    if (!selector) return undefined;
+    if (selector.authType && selector.authType !== authType) return undefined;
+
+    const available = this.getAllConfiguredModels([authType]);
+    return available.some((m) => m.id === selector.modelId)
+      ? selector.modelId
       : undefined;
+  }
+
+  /**
+   * Returns the fast model for side-query paths. Unlike {@link getFastModel},
+   * this can return an authType-qualified selector because BaseLlmClient can
+   * route a single request through a provider different from the main session.
+   */
+  getFastModelForSideQuery(): string | undefined {
+    const selector = this.resolveFastModelSelector();
+    if (!selector) return undefined;
+
+    if (selector.authType) {
+      const available = this.getAllConfiguredModels([selector.authType]);
+      return available.some((m) => m.id === selector.modelId)
+        ? `${selector.authType}:${selector.modelId}`
+        : undefined;
+    }
+
+    const available = this.getAllConfiguredModels();
+    return available.some((m) => m.id === selector.modelId)
+      ? selector.modelId
+      : undefined;
+  }
+
+  private resolveFastModelSelector() {
+    if (!this.fastModel) return undefined;
+    try {
+      return resolveModelId(this.fastModel);
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -1927,6 +2294,17 @@ export class Config {
     return this.disabledSlashCommands;
   }
 
+  /**
+   * Returns the read-only set of tool names hidden from this Config's
+   * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
+   * `ToolRegistry.registerFactory` to skip registration. Toggling at
+   * runtime requires re-spawning the ACP child (the set is frozen at
+   * construction time). See `disabledTools` in ConfigParameters.
+   */
+  getDisabledTools(): ReadonlySet<string> {
+    return this.disabledTools;
+  }
+
   getToolCallCommand(): string | undefined {
     return this.toolCallCommand;
   }
@@ -1992,6 +2370,50 @@ export class Config {
     return this.lspClient;
   }
 
+  getLspStatusSnapshot(): LspStatusSnapshot {
+    if (!this.isLspEnabled()) {
+      return this.createLspStatusSnapshot(false);
+    }
+
+    const clientSnapshot = this.lspClient?.getStatusSnapshot?.();
+    if (clientSnapshot) {
+      return {
+        ...clientSnapshot,
+        enabled: true,
+        initializationError:
+          this.lspInitializationError ?? clientSnapshot.initializationError,
+      };
+    }
+
+    if (this.lspClient) {
+      return {
+        ...this.createLspStatusSnapshot(true),
+        statusUnavailable: true,
+      };
+    }
+
+    return this.createLspStatusSnapshot(
+      true,
+      this.lspInitializationError ?? 'LSP client is not initialized',
+    );
+  }
+
+  private createLspStatusSnapshot(
+    enabled: boolean,
+    initializationError?: string,
+  ): LspStatusSnapshot {
+    return {
+      enabled,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+      ...(initializationError ? { initializationError } : {}),
+    };
+  }
+
   /**
    * Allows wiring an LSP client after Config construction but before initialize().
    */
@@ -2000,6 +2422,14 @@ export class Config {
       throw new Error('Cannot set LSP client after initialization');
     }
     this.lspClient = client;
+  }
+
+  setLspInitializationError(error: Error | string | undefined): void {
+    if (this.initialized) {
+      throw new Error('Cannot set LSP status after initialization');
+    }
+    this.lspInitializationError =
+      error instanceof Error ? error.message : error;
   }
 
   getSessionSubagents(): SubagentConfig[] {
@@ -2099,7 +2529,7 @@ export class Config {
       mode !== ApprovalMode.DEFAULT &&
       mode !== ApprovalMode.PLAN
     ) {
-      throw new Error(
+      throw new TrustGateError(
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
@@ -2116,27 +2546,142 @@ export class Config {
   }
 
   /**
+   * Returns the directory where this session's plan file is stored.
+   */
+  getPlansDir(): string {
+    return this.plansDir;
+  }
+
+  private assertPlansDirWithinTargetDir(): void {
+    if (!this.plansDirectoryConfigured) {
+      return;
+    }
+
+    Storage.assertPathWithinDirectory(
+      this.plansDir,
+      this.targetDir,
+      `plansDirectory must resolve within the project root.`,
+    );
+  }
+
+  private assertPlanFilePathWithinTargetDir(filePath: string): void {
+    if (!this.plansDirectoryConfigured) {
+      return;
+    }
+
+    Storage.assertPathWithinDirectory(
+      filePath,
+      this.targetDir,
+      `plansDirectory must resolve within the project root.`,
+    );
+  }
+
+  private addLegacyPlanLocationWarning(): void {
+    try {
+      if (!this.plansDirectoryConfigured) {
+        return;
+      }
+
+      const legacyPlansDir = Storage.getPlansDir();
+      const legacyPlanFiles = this.getPlanFileNames(legacyPlansDir);
+      if (legacyPlanFiles.length === 0) {
+        return;
+      }
+
+      const configuredPlanFiles = new Set(this.getPlanFileNames(this.plansDir));
+      const hiddenLegacyPlanFiles = legacyPlanFiles.filter(
+        (fileName) => !configuredPlanFiles.has(fileName),
+      );
+      if (hiddenLegacyPlanFiles.length === 0) {
+        return;
+      }
+
+      this.warnings.push(
+        `Warning: Saved plan files exist at ${legacyPlansDir}, but ` +
+          `plansDirectory is configured to use ${this.plansDir}. Move ` +
+          `existing plan files to ${this.plansDir} if you want to keep ` +
+          `using them.`,
+      );
+    } catch (err: unknown) {
+      const message = `Failed to check legacy plan directory migration warning: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      this.warnings.push(message);
+      this.debugLogger.warn(message, err);
+    }
+  }
+
+  private getPlanFileNames(plansDir: string): string[] {
+    try {
+      return fs.readdirSync(plansDir).filter((entry) => entry.endsWith('.md'));
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        return [];
+      }
+      if (code === 'EACCES' || code === 'EPERM') {
+        const message = `Failed to read plan directory ${plansDir}: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        this.warnings.push(message);
+        this.debugLogger.warn(message, err);
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Returns the file path for this session's plan file.
    */
   getPlanFilePath(): string {
-    return Storage.getPlanFilePath(this.sessionId);
+    return path.join(
+      this.plansDir,
+      `${Storage.sanitizePlanSessionId(this.sessionId)}.md`,
+    );
   }
 
   /**
    * Saves a plan to disk for the current session.
    */
   savePlan(plan: string): void {
+    this.assertPlansDirWithinTargetDir();
     const filePath = this.getPlanFilePath();
     const dir = path.dirname(filePath);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(filePath, plan, 'utf-8');
+    // Write to a temp file first, then atomically rename to avoid
+    // leaving a corrupted file if the process crashes mid-write.
+    const tmpPath = filePath + '.tmp';
+    fs.writeFileSync(tmpPath, plan, 'utf-8');
+    try {
+      fs.renameSync(tmpPath, filePath);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV') {
+        throw err;
+      }
+
+      fs.copyFileSync(tmpPath, filePath);
+      fs.unlinkSync(tmpPath);
+    }
+    try {
+      this.assertPlanFilePathWithinTargetDir(filePath);
+    } catch (err) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // Ignore rollback errors; the containment check already failed.
+      }
+      throw err;
+    }
   }
 
   /**
    * Loads the plan for the current session, or returns undefined if none exists.
    */
   loadPlan(): string | undefined {
+    this.assertPlansDirWithinTargetDir();
     const filePath = this.getPlanFilePath();
+    this.assertPlanFilePathWithinTargetDir(filePath);
     try {
       return fs.readFileSync(filePath, 'utf-8');
     } catch (error: unknown) {
@@ -2206,10 +2751,6 @@ export class Config {
 
   getGitCoAuthor(): GitCoAuthorSettings {
     return this.gitCoAuthor;
-  }
-
-  getTelemetryUseCollector(): boolean {
-    return this.telemetrySettings.useCollector ?? false;
   }
 
   getGeminiClient(): GeminiClient {
@@ -2286,6 +2827,21 @@ export class Config {
     return this.checkpointing;
   }
 
+  getFileCheckpointingEnabled(): boolean {
+    return this.fileCheckpointingEnabled;
+  }
+
+  getFileHistoryService(): FileHistoryService {
+    if (!this.fileHistoryService) {
+      this.fileHistoryService = new FileHistoryService(
+        this.sessionId,
+        this.fileCheckpointingEnabled,
+        this.cwd,
+      );
+    }
+    return this.fileHistoryService;
+  }
+
   getProxy(): string | undefined {
     return normalizeProxyUrl(this.proxy);
   }
@@ -2344,8 +2900,13 @@ export class Config {
    * registered hooks for the given event name.  Callers can use this to skip
    * expensive MessageBus round-trips when no hooks are configured.
    */
-  hasHooksForEvent(eventName: string): boolean {
-    return this.hookSystem?.hasHooksForEvent(eventName) ?? false;
+  hasHooksForEvent(eventName: string, sessionId?: string): boolean {
+    return (
+      this.hookSystem?.hasHooksForEvent(
+        eventName,
+        sessionId ?? this.getSessionId(),
+      ) ?? false
+    );
   }
 
   /**
@@ -2353,6 +2914,10 @@ export class Config {
    */
   getDisableAllHooks(): boolean {
     return this.disableAllHooks || this.getBareMode();
+  }
+
+  getStopHookBlockingCap(): number {
+    return this.stopHookBlockingCap;
   }
 
   getManagedAutoMemoryEnabled(): boolean {
@@ -2750,9 +3315,7 @@ export class Config {
 
   async loadPausedBackgroundAgents(
     sessionId: string = this.getSessionId(),
-  ): Promise<
-    ReadonlyArray<import('../agents/background-tasks.js').BackgroundTaskEntry>
-  > {
+  ): Promise<ReadonlyArray<import('../agents/background-tasks.js').AgentTask>> {
     return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
       sessionId,
     );
@@ -2761,9 +3324,7 @@ export class Config {
   async resumeBackgroundAgent(
     agentId: string,
     initialMessage?: string,
-  ): Promise<
-    import('../agents/background-tasks.js').BackgroundTaskEntry | undefined
-  > {
+  ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
       agentId,
       initialMessage,
@@ -3087,6 +3648,14 @@ export class Config {
         return new ExitPlanModeTool(this);
       });
     }
+    await registerLazy(ToolNames.ENTER_WORKTREE, async () => {
+      const { EnterWorktreeTool } = await import('../tools/enter-worktree.js');
+      return new EnterWorktreeTool(this);
+    });
+    await registerLazy(ToolNames.EXIT_WORKTREE, async () => {
+      const { ExitWorktreeTool } = await import('../tools/exit-worktree.js');
+      return new ExitWorktreeTool(this);
+    });
     await registerLazy(ToolNames.WEB_FETCH, async () => {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
@@ -3127,6 +3696,34 @@ export class Config {
       return new MonitorTool(this);
     });
 
+    // PR 14b fix #2 (codex review round 1): apply any pending MCP
+    // budget-event callback BEFORE `discoverAllTools` (legacy blocking
+    // mode runs MCP discovery synchronously in there) and BEFORE the
+    // post-`createToolRegistry` `startMcpDiscoveryInBackground` (default
+    // mode). Either way the manager has its callback wired at the
+    // moment the first discovery pass fires, so end-of-pass events
+    // for that pass are routed through the SDK push channel.
+    if (this.pendingMcpBudgetCallback) {
+      const mgr = registry.getMcpClientManager();
+      if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
+        mgr.setOnBudgetEvent(this.pendingMcpBudgetCallback);
+      }
+      // PR 14b fix (codex round 6): clear after consumption so a
+      // subsequent `createToolRegistry` call (e.g. subagent override
+      // via `createApprovalModeOverride` /
+      // `buildSubagentContextOverride`) doesn't re-apply the parent
+      // session's callback to a fresh manager. Subagent contexts run
+      // their own MCP clients but should NOT push budget events
+      // through the parent's ACP session — that would route subagent
+      // telemetry to the wrong subscriber.
+      //
+      // Late-call setter (`setMcpBudgetEventCallback` after
+      // `initialize()`) is unaffected: it dispatches directly to the
+      // existing manager via the `if (this.toolRegistry)` branch,
+      // not through `pendingMcpBudgetCallback`.
+      this.pendingMcpBudgetCallback = undefined;
+    }
+
     if (!options?.skipDiscovery) {
       await registry.discoverAllTools();
     }
@@ -3134,5 +3731,46 @@ export class Config {
       `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
     );
     return registry;
+  }
+
+  /**
+   * PR 14b fix #2 (codex review round 1): register the MCP guardrail
+   * push-event callback. Acceptable to call at any point in the
+   * Config lifecycle — before, during, or after `initialize()`.
+   *
+   * Two paths:
+   * - **Pre-init** (no `toolRegistry` yet): stash on
+   *   `pendingMcpBudgetCallback`. `createToolRegistry` will apply it
+   *   to the freshly-constructed manager and clear the stash (round
+   *   6 fix). The stash is the ONLY way to reach a manager that
+   *   doesn't exist yet.
+   * - **Late** (`toolRegistry` already exists): dispatch directly to
+   *   the existing manager. **DO NOT** also stash — that's the
+   *   round-7 fix. Pre-fix, both paths assigned to
+   *   `pendingMcpBudgetCallback` regardless, so a subsequent
+   *   `createToolRegistry` (subagent override via
+   *   `createApprovalModeOverride` /
+   *   `buildSubagentContextOverride`) would re-apply the parent
+   *   session's callback to the subagent's fresh manager — routing
+   *   subagent telemetry through the wrong ACP session.
+   *
+   * `cb: undefined` clears the registration. `off`-mode managers
+   * silently drop the callback (their state machine never runs).
+   */
+  setMcpBudgetEventCallback(
+    cb: ((event: McpBudgetEvent) => void) | undefined,
+  ): void {
+    if (this.toolRegistry) {
+      // Late-call path: apply directly. Do NOT stash — see comment
+      // above for the subagent isolation rationale.
+      const mgr = this.toolRegistry.getMcpClientManager?.();
+      if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
+        mgr.setOnBudgetEvent(cb);
+      }
+      this.pendingMcpBudgetCallback = undefined;
+      return;
+    }
+    // Pre-init path: stash for `createToolRegistry` to consume.
+    this.pendingMcpBudgetCallback = cb;
   }
 }

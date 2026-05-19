@@ -107,6 +107,45 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
+  it('restores mid-turn user messages from display text', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'tool_result',
+          toolCallResult: {
+            callId: 'call-1',
+            resultDisplay: 'All set',
+            status: 'success',
+          },
+        },
+        {
+          type: 'user',
+          subtype: 'mid_turn_user_message',
+          message: {
+            parts: [
+              {
+                text: '\n[User message received during tool execution]: save logs',
+              } as Part,
+            ],
+          },
+          systemPayload: { displayText: 'save logs' },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(
+      session,
+      makeConfig({ replace: mockTool }),
+      20,
+    );
+
+    expect(items).toContainEqual({ id: 21, type: 'user', text: 'save logs' });
+  });
+
   it('marks tool results as error, captures thought text, and falls back when tool is missing', () => {
     const conversation = {
       messages: [

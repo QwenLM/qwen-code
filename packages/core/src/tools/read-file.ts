@@ -185,6 +185,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         status.entry.lastReadAt !== undefined &&
         status.entry.lastReadWasFull &&
         status.entry.lastReadCacheable &&
+        // Only quote-back if that read is still in history (issue
+        // #4239: idle microcompaction flips this off when it blanks it).
+        status.entry.readResidentInHistory &&
         (status.entry.lastWriteAt === undefined ||
           status.entry.lastReadAt > status.entry.lastWriteAt)
       ) {

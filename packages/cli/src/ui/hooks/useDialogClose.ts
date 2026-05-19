@@ -43,6 +43,10 @@ export interface DialogCloseOptions {
   isSettingsDialogOpen: boolean;
   closeSettingsDialog: () => void;
 
+  // Status line dialog
+  isStatusLineDialogOpen: boolean;
+  closeStatusLineDialog: () => void;
+
   // Memory dialog
   isMemoryDialogOpen: boolean;
   closeMemoryDialog: () => void;
@@ -65,6 +69,10 @@ export interface DialogCloseOptions {
   // Background tasks dialog
   isBackgroundTasksDialogOpen: boolean;
   closeBackgroundTasksDialog: () => void;
+
+  // Worktree exit dialog (Phase C)
+  showWorktreeExitDialog?: boolean;
+  closeWorktreeExitDialog?: () => void;
 }
 
 /**
@@ -100,6 +108,11 @@ export function useDialogClose(options: DialogCloseOptions) {
       return true;
     }
 
+    if (options.isStatusLineDialogOpen) {
+      options.closeStatusLineDialog();
+      return true;
+    }
+
     if (options.isHelpDialogOpen && options.closeHelpDialog) {
       options.closeHelpDialog();
       return true;
@@ -132,6 +145,15 @@ export function useDialogClose(options: DialogCloseOptions) {
       // Ctrl+C and the global escape path dismiss it without escalating
       // to exit prompts.
       options.closeBackgroundTasksDialog();
+      return true;
+    }
+
+    if (options.showWorktreeExitDialog && options.closeWorktreeExitDialog) {
+      // WorktreeExitDialog: Ctrl+C / global escape dismisses it (same
+      // semantics as picking Cancel in the dialog). Without this entry
+      // the dialog was only escapable via the Escape key, inconsistent
+      // with the rest of the dialog surface. (PR #4174 review.)
+      options.closeWorktreeExitDialog();
       return true;
     }
 

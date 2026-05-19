@@ -16,6 +16,7 @@ import { SettingInputPrompt } from './SettingInputPrompt.js';
 import { PluginChoicePrompt } from './PluginChoicePrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
+import { StatusLineDialog } from './StatusLineDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { ExternalAuthProgress } from './ExternalAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
@@ -40,6 +41,7 @@ import process from 'node:process';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { IdeTrustChangeDialog } from './IdeTrustChangeDialog.js';
 import { WelcomeBackDialog } from './WelcomeBackDialog.js';
+import { WorktreeExitDialog } from './WorktreeExitDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
 import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js';
@@ -78,6 +80,19 @@ export const DialogManager = ({
         welcomeBackInfo={uiState.welcomeBackInfo}
         onSelect={uiActions.handleWelcomeBackSelection}
         onClose={uiActions.handleWelcomeBackClose}
+      />
+    );
+  }
+  if (uiState.showWorktreeExitDialog && uiState.activeWorktree) {
+    return (
+      <WorktreeExitDialog
+        slug={uiState.activeWorktree.slug}
+        branch={uiState.activeWorktree.branch}
+        worktreePath={uiState.activeWorktree.path}
+        originalHeadCommit={uiState.activeWorktree.originalHeadCommit}
+        onKeep={() => void uiActions.handleWorktreeExit('keep')}
+        onRemove={() => void uiActions.handleWorktreeExit('remove')}
+        onCancel={() => void uiActions.handleWorktreeExit('cancel')}
       />
     );
   }
@@ -252,6 +267,19 @@ export const DialogManager = ({
           config={config}
         />
       </Box>
+    );
+  }
+  if (uiState.isStatusLineDialogOpen) {
+    return (
+      <StatusLineDialog
+        settings={settings}
+        config={config}
+        uiState={uiState}
+        addItem={addItem}
+        onSaved={uiActions.notifyStatusLineSettingsChanged}
+        onClose={uiActions.closeStatusLineDialog}
+        availableTerminalHeight={terminalHeight - staticExtraHeight}
+      />
     );
   }
   if (uiState.isMemoryDialogOpen) {
@@ -431,6 +459,7 @@ export const DialogManager = ({
   }
 
   if (uiState.isDeleteDialogOpen) {
+    const currentSessionId = config.getSessionId();
     return (
       <SessionPicker
         sessionService={config.getSessionService()}
@@ -438,6 +467,9 @@ export const DialogManager = ({
         onSelect={uiActions.handleDelete}
         onCancel={uiActions.closeDeleteDialog}
         title={t('Delete Session')}
+        enableMultiSelect
+        onConfirmMulti={uiActions.handleDeleteMany}
+        disabledIds={currentSessionId ? [currentSessionId] : undefined}
       />
     );
   }
@@ -448,6 +480,8 @@ export const DialogManager = ({
         history={uiState.history}
         onRewind={uiActions.handleRewindConfirm}
         onCancel={uiActions.closeRewindSelector}
+        fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
+        fileHistoryService={config.getFileHistoryService()}
       />
     );
   }
