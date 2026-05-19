@@ -30,6 +30,15 @@ on:
 
 jobs:
   review-pr:
+    # NOTE (intentional, current-phase safeguard): auto-triggers and the
+    # @qwen /review comment trigger are gated to OWNER/MEMBER/COLLABORATOR
+    # on purpose. This workflow runs under pull_request_target with
+    # repository secrets and a 5-30 min LLM deep review, so an open
+    # trigger would be a denial-of-wallet / abuse surface. External
+    # contributor PRs are still reviewable today — a maintainer comments
+    # `@qwen /review` on the PR. Broadening auto-trigger for community
+    # PRs (with per-author rate limiting) is deferred to a later phase,
+    # not dropped here. See docs/design/code-review/code-review-design.md.
     if: |-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_target' &&

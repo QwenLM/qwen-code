@@ -53,7 +53,7 @@ bundled `/review` skill 跑完一次就退出，不维护跨 run 状态。所有
 
 ### 权限与 fork 处理
 
-- 所有触发都要求 actor 是 `OWNER / MEMBER / COLLABORATOR`，在 workflow `if:` 表达式实现。
+- 所有触发都要求 actor 是 `OWNER / MEMBER / COLLABORATOR`，在 workflow `if:` 表达式实现。**这是当前阶段有意保留的安全闸**：本 workflow 在 `pull_request_target` 下带 secrets 运行且深审耗时长，开放触发等于 denial-of-wallet / 滥用面。外部贡献者的 PR 当前仍可评审 —— 由 maintainer 在 PR 下评论 `@qwen /review`。面向社区 PR 的更宽自动触发（配合按作者限流）推后到后续 Phase，本 PR 暂不放开。
 - **不设跨仓 (fork) 拒评 gate**：fork PR 同样进入评审流程。安全边界由 `pull_request_target` 的检出策略保证 —— 自动触发时 workflow 检出可信的 base（`main`）代码、不检出 PR head；只有 maintainer 手动 `workflow_dispatch` 才检出被 dispatch 的 ref。
 - fork PR 的 merge-base 可能无法由 compare 端点解析；该计算是**尽力而为、非致命**：解析失败只是这一轮无法增量、退回全量评审，不阻塞、不报错。
 
