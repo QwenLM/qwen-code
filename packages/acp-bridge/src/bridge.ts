@@ -2114,7 +2114,20 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             : ''),
       );
       if (defaultEntry === entry) defaultEntry = undefined;
-      const ci = channelInfo;
+      // #4325 fix: resolve the channel via `channelInfoForEntry(entry)`
+      // (search `aliveChannels` for the entry's actual channel) instead
+      // of the module-scoped `channelInfo` (the CURRENT attach target).
+      // The two diverge during the channel-overlap window — A dying,
+      // B freshly spawned as `channelInfo` — where capturing
+      // `channelInfo` would (1) skip the `sessionIds.delete()` since
+      // `B.channel !== entry.channel`, leaving A's `sessionIds` set
+      // pinned past the close, and (2) call `markSessionClosed` on
+      // **B**'s client instead of **A**'s, evaluating B's kill
+      // condition with stale assumptions about its session count.
+      // Other session methods in this file already use the helper
+      // (`setSessionApprovalMode`, `requestSessionStatus`); this
+      // brings closeSession in line.
+      const ci = channelInfoForEntry(entry);
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
@@ -3159,7 +3172,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Detach from the channel. The channel dies only when its LAST
       // session leaves — other sessions on the same channel keep
       // running.
-      const ci = channelInfo;
+      //
+      // #4325 fix: same channel-overlap fix as in `closeSession` above.
+      // `channelInfoForEntry(entry)` returns the entry's actual
+      // channel rather than the module-scoped `channelInfo` (current
+      // attach target), preventing the "kill operates on the freshly-
+      // spawned channel B instead of the dying channel A" cascade
+      // during the overlap window.
+      const ci = channelInfoForEntry(entry);
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
