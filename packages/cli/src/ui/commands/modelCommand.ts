@@ -346,7 +346,11 @@ export const modelCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: `Current model: ${currentModel}\nUse "/model <model-id>" to switch models or "/model --fast <model-id>" to set the fast model.`,
+        content:
+          `Current model: ${currentModel}\n` +
+          'Use "/model <model-id>" to switch models (session only), ' +
+          '"/model --default <model-id>" to persist, or ' +
+          '"/model --fast <model-id>" to set the fast model.',
       };
     }
 

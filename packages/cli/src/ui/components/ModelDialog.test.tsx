@@ -325,6 +325,24 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
+  it('blocks setting qwen-oauth as default with "d" (discontinued)', () => {
+    const { props, mockConfig, mockSettings } = renderComponent();
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'd',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: 'd',
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(mockConfig.switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
   it('stores authType-qualified selectors in fast model mode', async () => {
     const setFastModel = vi.fn();
     const { props, mockSettings } = renderComponent({ isFastModelMode: true }, {

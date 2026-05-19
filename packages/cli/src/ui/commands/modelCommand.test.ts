@@ -233,6 +233,38 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should return usage when --default is missing a model id', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --default',
+        name: 'model',
+        args: '--default',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--default');
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Usage: /model --default <model-id>',
+    });
+  });
+
   it('should not persist the model when direct model validation fails', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn();
@@ -634,7 +666,11 @@ describe('modelCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringContaining('qwen-max'),
+        content:
+          'Current model: qwen-max\n' +
+          'Use "/model <model-id>" to switch models (session only), ' +
+          '"/model --default <model-id>" to persist, or ' +
+          '"/model --fast <model-id>" to set the fast model.',
       });
       expect((result as { type: string }).type).toBe('message');
     });
