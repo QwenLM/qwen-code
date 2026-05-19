@@ -318,11 +318,14 @@ interface EndpointReadOk {
  * Read one endpoint of a turn diff (either a snapshot backup or, when the
  * "after" endpoint is the live worktree, the file on disk).
  *
- * Returns `'unreadable'` when the backup metadata claims a real file but
- * `readFile` fails (deleted out from under us, permission flip, corrupt).
- * `getTurnDiff` skips rows for which either endpoint is unreadable, so the
- * dialog never fabricates phantom hunks against an empty string we never
- * actually had.
+ * Returns `'unreadable'` when the underlying file exists but cannot be
+ * read (permission flip, EBUSY, decoding failure, etc.). `getTurnDiff`
+ * skips rows for which either endpoint is unreadable, so the dialog
+ * never fabricates phantom hunks against an empty string we never
+ * actually had. ENOENT is treated as a genuine absence — for the live
+ * worktree that means the file was deleted; for a backup with a real
+ * `backupFileName` it means the snapshot is corrupt and is reported
+ * as unreadable.
  */
 async function readEndpointContent(
   backup: FileHistoryBackup | undefined,
@@ -330,8 +333,22 @@ async function readEndpointContent(
   sessionId: string,
 ): Promise<EndpointReadOk | 'unreadable'> {
   if (worktreePath !== undefined) {
-    const live = await readFileOrNull(worktreePath);
-    return { content: live ?? '', exists: live !== null };
+    try {
+      const text = await readFile(worktreePath, 'utf-8');
+      return { content: text, exists: true };
+    } catch (e: unknown) {
+      if (isENOENT(e)) {
+        // Genuine absence: file was deleted from the worktree.
+        return { content: '', exists: false };
+      }
+      // Permission/IO/decode failure — the file IS there but unreadable.
+      // Collapsing this to "deleted" would synthesize a bogus removal hunk
+      // every time the dialog opens against a file with bad perms.
+      debugLogger.error(
+        `FileHistory: live worktree read failed for ${worktreePath}: ${e}`,
+      );
+      return 'unreadable';
+    }
   }
   if (!backup) return { content: '', exists: false };
   if (backup.backupFileName === null) return { content: '', exists: false };
@@ -343,15 +360,25 @@ async function readEndpointContent(
 }
 
 /**
- * Cheap binary sniff: scan the first `BINARY_SNIFF_BYTES` characters for
- * a NUL byte. Matches git's heuristic and keeps the dialog from feeding
- * raw binary to the diff library / terminal renderer (which can produce
- * garbage or freeze on certain payloads).
+ * Binary sniff. Scans both the head and the tail of the string so a long
+ * text prefix can't bury a binary payload past the head window — git's
+ * heuristic only looks at the head, which is sufficient when invoked on
+ * file open but not when an attacker / faulty generator can craft mixed
+ * inputs. Content past MAX_DIFF_SIZE_BYTES is already short-circuited as
+ * `oversized` upstream, so this stays cheap.
  */
 function looksBinary(content: string): boolean {
-  const limit = Math.min(content.length, BINARY_SNIFF_BYTES);
-  for (let i = 0; i < limit; i++) {
+  const len = content.length;
+  if (len === 0) return false;
+  const headEnd = Math.min(len, BINARY_SNIFF_BYTES);
+  for (let i = 0; i < headEnd; i++) {
     if (content.charCodeAt(i) === 0) return true;
+  }
+  if (len > BINARY_SNIFF_BYTES) {
+    const tailStart = Math.max(headEnd, len - BINARY_SNIFF_BYTES);
+    for (let i = tailStart; i < len; i++) {
+      if (content.charCodeAt(i) === 0) return true;
+    }
   }
   return false;
 }
@@ -678,17 +705,11 @@ export class FileHistoryService {
   async getTurnDiff(promptId: string): Promise<TurnDiff | undefined> {
     if (!this.enabled) return undefined;
 
-    // Match `findSnapshot` semantics (last-occurrence wins) so `/rewind`
-    // and `/diff` agree if a promptId is ever reused. In normal sessions
-    // promptIds are unique per submission, so this is a defensive tie-break,
-    // not a behavioral change.
-    let targetIdx = -1;
-    for (let i = this.state.snapshots.length - 1; i >= 0; i--) {
-      if (this.state.snapshots[i]!.promptId === promptId) {
-        targetIdx = i;
-        break;
-      }
-    }
+    // `findSnapshotIndex` mirrors `findSnapshot`'s last-occurrence-wins
+    // tie-break so `/rewind` and `/diff` agree on which snapshot a reused
+    // promptId resolves to. In normal sessions promptIds are unique per
+    // submission, so this is defensive.
+    const targetIdx = this.findSnapshotIndex(promptId);
     if (targetIdx < 0) return undefined;
 
     const target = this.state.snapshots[targetIdx]!;
@@ -744,6 +765,25 @@ export class FileHistoryService {
   }
 
   private async computeTurnFileDiff(
+    trackingPath: string,
+    before: FileHistorySnapshot,
+    after: FileHistorySnapshot | undefined,
+  ): Promise<TurnFileDiff | null> {
+    try {
+      return await this.computeTurnFileDiffUnsafe(trackingPath, before, after);
+    } catch (e) {
+      // Per-file isolation: a structuredPatch crash, a transient read
+      // error, anything thrown from a single candidate must not poison
+      // the whole turn's Promise.all and silently erase every row.
+      // Log + drop the row, surface the rest.
+      debugLogger.error(
+        `FileHistory: computeTurnFileDiff failed for ${trackingPath}: ${e}`,
+      );
+      return null;
+    }
+  }
+
+  private async computeTurnFileDiffUnsafe(
     trackingPath: string,
     before: FileHistorySnapshot,
     after: FileHistorySnapshot | undefined,
@@ -887,12 +927,19 @@ export class FileHistoryService {
   }
 
   private findSnapshot(promptId: string): FileHistorySnapshot | undefined {
+    return this.state.snapshots[this.findSnapshotIndex(promptId)];
+  }
+
+  /** Same matching rule as `findSnapshot` (last occurrence wins) but
+   *  returns the slot index so callers that need the neighbour snapshot
+   *  (e.g. `getTurnDiff`) don't have to re-scan. Returns -1 on miss. */
+  private findSnapshotIndex(promptId: string): number {
     for (let i = this.state.snapshots.length - 1; i >= 0; i--) {
       if (this.state.snapshots[i]!.promptId === promptId) {
-        return this.state.snapshots[i];
+        return i;
       }
     }
-    return undefined;
+    return -1;
   }
 
   private async applySnapshot(

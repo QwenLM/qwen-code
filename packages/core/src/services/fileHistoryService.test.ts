@@ -835,6 +835,32 @@ describe('FileHistoryService', () => {
       expect(paths).not.toContain(fileB);
     });
 
+    // Regression for the live-worktree read-failure collapse: if a file
+    // becomes unreadable in the worktree (EACCES, EBUSY, …) we used to
+    // treat it as deleted and synthesize a phantom delete hunk. Now we
+    // drop the row so the dialog never lies about removals that didn't
+    // actually happen.
+    it('does not synthesize a delete hunk when the live worktree read fails', async () => {
+      const file = join(projectDir, 'flaky.txt');
+      await writeFile(file, 'still here\n');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'changed\n');
+
+      // Replace the file with a directory so readFile rejects with EISDIR
+      // (a non-ENOENT failure that previously masqueraded as deletion).
+      await rm(file);
+      await mkdir(file);
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === file);
+      // Row dropped because the live endpoint is unreadable, not because
+      // the file is gone.
+      expect(entry).toBeUndefined();
+    });
+
     it('flags oversized files instead of allocating large hunks', async () => {
       const file = join(projectDir, 'big.txt');
       // 1.5 MB > MAX_DIFF_SIZE_BYTES (1 MB)

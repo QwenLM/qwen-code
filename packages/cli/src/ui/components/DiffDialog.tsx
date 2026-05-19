@@ -14,7 +14,6 @@ import type {
   TurnDiff,
   TurnFileDiff,
 } from '@qwen-code/qwen-code-core';
-import { MAX_LINES_PER_FILE } from '@qwen-code/qwen-code-core';
 import type { HistoryItem } from '../types.js';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -51,6 +50,12 @@ type UnifiedFile = {
   isNewFile: boolean;
   truncated: boolean;
   oversized: boolean;
+  /** Whether the source actually has hunks for this file. Untracked
+   *  files don't appear in `git diff HEAD` output, capped/oversized
+   *  turn entries have empty hunks — pressing Enter on those would land
+   *  the user on a dead-end "No hunks available" screen, so we block
+   *  Enter in the keypress handler when this is false. */
+  hasHunks: boolean;
 };
 
 type Source =
@@ -112,9 +117,9 @@ export function DiffDialog({
   const files = useMemo<UnifiedFile[]>(() => {
     if (!activeSource) return [];
     return activeSource.kind === 'current'
-      ? currentToFiles(current.result)
+      ? currentToFiles(current.result, current.hunks)
       : turnToFiles(activeSource.entry.diff);
-  }, [activeSource, current.result]);
+  }, [activeSource, current.result, current.hunks]);
 
   const safeFileIndex = Math.min(fileIndex, Math.max(0, files.length - 1));
   const selectedFile = files[safeFileIndex];
@@ -192,7 +197,11 @@ export function DiffDialog({
     }
     if (name === 'return') {
       const sel = selectedFileRef.current;
-      if (sel && !sel.isBinary && !sel.oversized) {
+      // Refuse Enter when the detail view would have nothing to show:
+      // binary / oversized rows are presented with explicit notes in
+      // the list, and rows with no hunks (untracked files, capped
+      // entries) would otherwise land users on a dead-end screen.
+      if (sel && !sel.isBinary && !sel.oversized && sel.hasHunks) {
         setViewMode('detail');
       }
       return;
@@ -540,21 +549,34 @@ function useVisibleWindow(
   return { startIndex: start, endIndex: end };
 }
 
-function currentToFiles(result: GitDiffResult | null): UnifiedFile[] {
+function currentToFiles(
+  result: GitDiffResult | null,
+  hunks: Map<string, Hunk[]>,
+): UnifiedFile[] {
   if (!result) return [];
   // `result.perFileStats` is already bounded by `fetchGitDiff` (MAX_FILES=50)
   // and the whole map is empty when the diff exceeds MAX_FILES_FOR_DETAILS
   // upstream, so no additional cap is necessary here.
   const out: UnifiedFile[] = [];
   for (const [path, s] of result.perFileStats) {
-    out.push(perFileToUnified(path, s));
+    out.push(perFileToUnified(path, s, hunks));
   }
   out.sort((a, b) => a.path.localeCompare(b.path));
   return out;
 }
 
-function perFileToUnified(path: string, s: PerFileStats): UnifiedFile {
-  const total = (s.added ?? 0) + (s.removed ?? 0);
+function perFileToUnified(
+  path: string,
+  s: PerFileStats,
+  hunks: Map<string, Hunk[]>,
+): UnifiedFile {
+  const fileHunks = hunks.get(path);
+  // `s.truncated` from `parseGitNumstat` already means "untracked file
+  // exceeded the line-counting read cap". The earlier `total >
+  // MAX_LINES_PER_FILE` OR was conflating it with `parseGitDiff`'s
+  // hunk-line cap (which is a separate, on-the-hunk-side cap that
+  // doesn't lose the stats). A 500-line tracked file with accurate
+  // numstat counts should NOT be flagged as truncated.
   return {
     path,
     displayPath: sanitizeFilenameForDisplay(path),
@@ -569,8 +591,13 @@ function perFileToUnified(path: string, s: PerFileStats): UnifiedFile {
     // would mislead users about what `/rewind` can recover, since
     // untracked files are not under file-history protection.
     isNewFile: false,
-    truncated: !!s.truncated || (!s.isBinary && total > MAX_LINES_PER_FILE),
+    truncated: !!s.truncated,
     oversized: false,
+    // `git diff HEAD` skips untracked files entirely and capped/skipped
+    // entries can lack hunks even when present in perFileStats — gate
+    // Enter on the actual presence of hunks rather than the row's
+    // existence.
+    hasHunks: !!fileHunks && fileHunks.length > 0,
   };
 }
 
@@ -593,6 +620,7 @@ function turnFileToUnified(f: TurnFileDiff): UnifiedFile {
     isNewFile: f.isNewFile,
     truncated: false,
     oversized: f.oversized,
+    hasHunks: f.hunks.length > 0,
   };
 }
 
