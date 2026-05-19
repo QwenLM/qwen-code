@@ -370,38 +370,66 @@ jobs:
         with:
           node-version: '22'
 
-      # Why this exact config (learned from dry-run testing):
-      # - action @5fd6818d + GITHUB_TOKEN + uppercase OPENAI_* inputs:
-      #   match main's deployed, proven-working review job.
-      # - settings_json must NOT restrict `coreTools`. main's job set
-      #   coreTools:[run_shell_command,write_file] and worked only
-      #   because its ad-hoc prompt used just those two. The bundled
-      #   `/review` skill needs read_file/glob/grep/task/etc.; with that
-      #   allowlist those tools fall outside it, require approval, and in
-      #   CI (non-interactive, no TTY) the run hangs to the job timeout
-      #   with zero output. Omitting `coreTools` exposes the full tool
-      #   set the skill needs.
-      # - approvalMode:yolo + folderTrust disabled belt-and-suspenders so
-      #   the action's `qwen --yolo` is not silently downgraded to
-      #   "default" by an untrusted-folder / version-specific path.
+      # Direct invocation instead of QwenLM/qwen-code-action.
+      # The action wraps the CLI in `QWEN_RESPONSE=$(qwen ...)` command
+      # substitution, which buffers ALL stdout until the process exits —
+      # so a slow or stuck bundled /review produced zero observable
+      # output for the whole job and could not be diagnosed. Calling
+      # qwen ourselves and piping through `tee` streams progress to the
+      # live job log in real time, and an explicit `timeout` makes a
+      # stall fail fast with a clear error instead of a silent job kill.
+      # settings.json mirrors what the action wrote (folder trust off +
+      # yolo + sandbox off) so the bundled /review skill's full tool set
+      # runs non-interactively.
       - name: 'Run Qwen Code Review'
         id: 'review'
         if: |-
           steps.size.outputs.should_review == 'true'
-        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2' # matches main's deployed working pin
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-        with:
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          settings_json: |-
-            {
-              "security": { "folderTrust": { "enabled": false } },
-              "tools": { "approvalMode": "yolo" },
-              "sandbox": false
-            }
-          prompt: '${{ steps.pr.outputs.review_prompt }}'
+          REVIEW_PROMPT: '${{ steps.pr.outputs.review_prompt }}'
+        run: |-
+          set -euo pipefail
+
+          mkdir -p .qwen
+          cat > .qwen/settings.json <<'EOF'
+          {
+            "security": { "folderTrust": { "enabled": false } },
+            "tools": { "approvalMode": "yolo" },
+            "sandbox": false
+          }
+          EOF
+
+          echo "::group::Install qwen-code"
+          npm install -g @qwen-code/qwen-code@latest
+          qwen --version
+          echo "::endgroup::"
+
+          out=qwen-review-output.txt
+          # tee -> output streams to the live job log in real time AND is
+          # captured for the summary. No $(...) buffering. `timeout`
+          # bounds it below the job timeout so a stall exits visibly.
+          set +e
+          timeout 50m qwen --yolo --prompt "$REVIEW_PROMPT" 2>&1 | tee "$out"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          delimiter="QWEN_REVIEW_SUMMARY_$(openssl rand -hex 8)"
+          {
+            echo "summary<<$delimiter"
+            cat "$out"
+            echo ""
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$status" -eq 124 ]; then
+            echo "::error::qwen /review exceeded the 50m step timeout."
+            exit 1
+          fi
+          exit "$status"
 
       - name: 'Post dry-run summary'
         if: |-
