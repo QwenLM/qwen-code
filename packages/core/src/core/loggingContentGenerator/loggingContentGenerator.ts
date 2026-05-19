@@ -75,6 +75,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   private openaiLogger?: OpenAILogger;
   private schemaCompliance?: 'auto' | 'openapi_30';
   private modalities?: InputModalities;
+  private readonly generatorAuthType: ContentGeneratorConfig['authType'];
 
   constructor(
     private readonly wrapped: ContentGenerator,
@@ -82,6 +83,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     generatorConfig: ContentGeneratorConfig,
   ) {
     this.modalities = generatorConfig.modalities;
+    this.generatorAuthType = generatorConfig.authType;
 
     // Extract fields needed for initialization from passed config
     // (config.getContentGeneratorConfig() may not be available yet during refreshAuth)
@@ -130,7 +132,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         model,
         durationMs,
         prompt_id,
-        this.config.getAuthType(),
+        this.generatorAuthType,
         usageMetadata,
         responseText,
         subagentNameContext.getStore(),
@@ -160,7 +162,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         model,
         durationMs,
         promptId: prompt_id,
-        authType: this.config.getAuthType(),
+        authType: this.generatorAuthType,
         errorMessage,
         errorType,
         statusCode: errorStatus,

@@ -2079,10 +2079,8 @@ export const AppContainer = (props: AppContainerProps) => {
       const fullHistory = geminiClient.getChat().getHistory(true);
       const conversationHistory =
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
-      const fastModel = config.getFastModel();
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
-        model: fastModel,
       })
         .then((result) => {
           if (ac.signal.aborted) return;
@@ -2090,9 +2088,7 @@ export const AppContainer = (props: AppContainerProps) => {
             setPromptSuggestion(result.suggestion);
             // Start speculation if enabled (runs in background)
             if (settings.merged.ui?.enableSpeculation) {
-              startSpeculation(config, result.suggestion, ac.signal, {
-                model: fastModel,
-              })
+              startSpeculation(config, result.suggestion, ac.signal)
                 .then((state) => {
                   speculationRef.current = state;
                 })

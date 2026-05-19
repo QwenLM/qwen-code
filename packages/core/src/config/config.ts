@@ -1911,52 +1911,35 @@ export class Config {
   }
 
   /**
-   * Returns the fast model if one is configured and valid for the current auth
-   * type, otherwise returns undefined. Direct runtime paths use this as a
-   * cheaper alternative to the main session model, so it intentionally stays
-   * current-auth-only.
+   * Returns the configured fast model selector when it resolves to an available
+   * model. Bare selectors stay bare and authType-qualified selectors keep their
+   * authType prefix so selector-aware runtime paths can route cross-auth calls.
    */
   getFastModel(): string | undefined {
-    const authType =
-      this.contentGeneratorConfig?.authType ??
-      this.modelsConfig.getCurrentAuthType();
-    if (!authType) return undefined;
-    const selector = this.resolveFastModelSelector();
-    if (!selector) return undefined;
-    if (selector.authType && selector.authType !== authType) return undefined;
-
-    const available = this.getAllConfiguredModels([authType]);
-    return available.some((m) => m.id === selector.modelId)
-      ? selector.modelId
-      : undefined;
-  }
-
-  /**
-   * Returns the fast model for side-query paths. Unlike {@link getFastModel},
-   * this can return an authType-qualified selector because BaseLlmClient can
-   * route a single request through a provider different from the main session.
-   */
-  getFastModelForSideQuery(): string | undefined {
     const selector = this.resolveFastModelSelector();
     if (!selector) return undefined;
 
-    if (selector.authType) {
-      const available = this.getAllConfiguredModels([selector.authType]);
-      return available.some((m) => m.id === selector.modelId)
-        ? `${selector.authType}:${selector.modelId}`
-        : undefined;
+    const available = selector.authType
+      ? this.getAllConfiguredModels([selector.authType])
+      : this.getAllConfiguredModels();
+    if (!available.some((m) => m.id === selector.modelId)) {
+      return undefined;
     }
 
-    const available = this.getAllConfiguredModels();
-    return available.some((m) => m.id === selector.modelId)
-      ? selector.modelId
-      : undefined;
+    const rawSelector = resolveModelId(this.fastModel);
+    return rawSelector?.authType
+      ? `${rawSelector.authType}:${selector.modelId}`
+      : selector.modelId;
   }
 
   private resolveFastModelSelector() {
     if (!this.fastModel) return undefined;
     try {
-      return resolveModelId(this.fastModel);
+      return resolveModelId(this.fastModel, {
+        currentAuthType: this.getContentGeneratorConfig()?.authType,
+        getAvailableModels: (authTypes) =>
+          this.getAllConfiguredModels(authTypes),
+      });
     } catch {
       return undefined;
     }

@@ -349,7 +349,7 @@ describe('LoggingContentGenerator', () => {
     };
     const generator = new LoggingContentGenerator(
       wrapped,
-      createConfig(),
+      createConfig({ authType: AuthType.USE_ANTHROPIC }),
       generatorConfig,
     );
 
@@ -402,6 +402,7 @@ describe('LoggingContentGenerator', () => {
     expect(responseEvent.response_id).toBe('resp-1');
     expect(responseEvent.model).toBe('model-v2');
     expect(responseEvent.prompt_id).toBe('prompt-1');
+    expect(responseEvent.auth_type).toBe(AuthType.USE_OPENAI);
     expect(responseEvent.input_token_count).toBe(3);
     expect(responseEvent.response_text).toBe('ok');
 
