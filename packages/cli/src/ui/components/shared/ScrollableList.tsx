@@ -11,9 +11,10 @@ import {
   type VirtualizedListRef,
   type VirtualizedListProps,
 } from './VirtualizedList.js';
-import { Box, type DOMElement } from 'ink';
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
+import { useMouseEvents } from '../../hooks/useMouseEvents.js';
+import type { MouseEvent } from '../../utils/mouse.js';
 
 export { SCROLL_TO_ITEM_END } from './VirtualizedList.js';
 
@@ -30,9 +31,8 @@ function ScrollableList<T>(
   props: ScrollableListProps<T>,
   ref: React.Ref<ScrollableListRef<T>>,
 ) {
-  const { hasFocus, width } = props;
+  const { hasFocus } = props;
   const virtualizedListRef = useRef<VirtualizedListRef<T>>(null);
-  const containerRef = useRef<DOMElement>(null);
 
   useImperativeHandle(
     ref,
@@ -91,14 +91,40 @@ function ScrollableList<T>(
     { isActive: hasFocus },
   );
 
-  return (
-    <Box ref={containerRef} flexGrow={1} flexDirection="column" width={width}>
-      <VirtualizedList ref={virtualizedListRef} {...props} />
-    </Box>
-  );
+  // Mouse wheel scrolling. Legacy `<Static>` mode let the host terminal
+  // handle wheel events (they scrolled the native scrollback); in VP mode
+  // we own the visible region, so the terminal hands wheel events to us
+  // via SGR mouse protocol. Without this, opening the VP gate would cost
+  // users the most-felt mouse interaction.
+  //
+  // Hit-testing is intentionally absent: the ScrollableList occupies the
+  // conversation pane between the (small) pinned header and the (small)
+  // input prompt, so any wheel event the terminal forwards is overwhelm-
+  // ingly aimed at scrolling history. Precise per-pane hit-testing (and
+  // scrollbar drag) needs screen-absolute element coordinates which the
+  // stock ink 7 `useBoxMetrics` hook reports relative to the parent — see
+  // V.4 follow-up.
+  const WHEEL_LINES_PER_TICK = 3;
+  const handleMouseEvent = useCallback((event: MouseEvent) => {
+    if (!virtualizedListRef.current) return;
+    if (event.name === 'scroll-up') {
+      virtualizedListRef.current.scrollBy(-WHEEL_LINES_PER_TICK);
+    } else if (event.name === 'scroll-down') {
+      virtualizedListRef.current.scrollBy(WHEEL_LINES_PER_TICK);
+    }
+  }, []);
+
+  useMouseEvents(handleMouseEvent, { isActive: hasFocus });
+
+  // ScrollableList is a thin keyboard / mouse wrapper around VirtualizedList.
+  // The previous outer <Box flexGrow={1}> wrapper carried a never-read
+  // containerRef and collapsed to zero height in test renderers (no flex
+  // parent). MainContent passes an explicit `containerHeight`, which
+  // VirtualizedList's outermost Box honours, so the wrapper added nothing
+  // beyond the dead ref.
+  return <VirtualizedList ref={virtualizedListRef} {...props} />;
 }
 
- 
 const ScrollableListWithForwardRef = forwardRef(ScrollableList) as <T>(
   props: ScrollableListProps<T> & { ref?: React.Ref<ScrollableListRef<T>> },
 ) => React.ReactElement;
