@@ -219,13 +219,25 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         strategy,
       };
     } catch (error) {
-      // Distinguish caller-driven aborts (user signal / new UserQuery /
-      // session cleanup / 30 s safety timeout) from real model errors so
-      // oncall debugging is not misled by the fallback log.
+      // Distinguish three cases so oncall debugging isn't misled:
+      //   - caller-driven abort (user signal / new UserQuery / session
+      //     cleanup): caller signal is aborted → heuristic fallback is
+      //     skipped below at `options.abortSignal?.aborted`, so the
+      //     result really is discarded.
+      //   - 30 s safety-net timeout in relevanceSelector: only the inner
+      //     combined signal aborts; the caller's signal is NOT aborted,
+      //     so the heuristic fallback below DOES run.
+      //   - real model error: warn at the higher level.
       if (error instanceof DOMException && error.name === 'AbortError') {
-        debugLogger.debug(
-          'Model-driven auto-memory recall aborted; heuristic result discarded.',
-        );
+        if (options.abortSignal?.aborted) {
+          debugLogger.debug(
+            'Model-driven auto-memory recall aborted by caller; heuristic result discarded.',
+          );
+        } else {
+          debugLogger.debug(
+            'Model-driven auto-memory recall timed out (30 s safety net); heuristic fallback will run.',
+          );
+        }
       } else {
         debugLogger.warn(
           'Model-driven auto-memory recall failed; falling back to heuristic selection.',

@@ -1794,6 +1794,10 @@ export class GeminiClient {
           );
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+          // Preserve the pending prefetch: the inner Hook turn we just
+          // yielded may have produced tool calls, and the caller's next
+          // ToolResult turn still needs to consume the recall result.
+          normalCompletion = true;
           return hookTurn;
         }
 
@@ -1860,6 +1864,11 @@ export class GeminiClient {
           );
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+          // Preserve the pending prefetch: same reasoning as the
+          // `return hookTurn` site above — the recursive Hook turn may
+          // have produced tool calls whose ToolResult turn still needs
+          // the recall result.
+          normalCompletion = true;
           return continueTurn;
         }
 

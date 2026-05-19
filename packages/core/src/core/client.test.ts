@@ -39,7 +39,12 @@ import {
 import type { ModelsConfig } from '../models/modelsConfig.js';
 import { UnauthorizedError } from '../utils/errors.js';
 import { retryWithBackoff } from '../utils/retry.js';
-import { CompressionStatus, GeminiEventType, Turn } from './turn.js';
+import {
+  CompressionStatus,
+  GeminiEventType,
+  Turn,
+  type ServerGeminiStreamEvent,
+} from './turn.js';
 
 vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
@@ -3023,6 +3028,67 @@ hello
       );
       expect(abortHandlerInvoked).toBe(true);
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
+    it('should PRESERVE the pending prefetch when next-speaker continueTurn returns', async () => {
+      // Self-inflicted-regression guard for the round-4 finding:
+      // the bottom-of-try `normalCompletion = true` doesn't cover the
+      // `return continueTurn;` path, so the outer's finally used to cancel
+      // the still-pending prefetch — meaning a subsequent ToolResult turn
+      // would have no memory to consume.
+      let abortHandlerInvoked = false;
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          abortHandlerInvoked = true;
+        });
+        return new Promise(() => {}); // never settles
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'outer reply' };
+        })(),
+      );
+
+      // Force the next-speaker check to recurse so we hit `return continueTurn`.
+      // The recursion call passes through this same mock stream and returns.
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
+      const mockedCheckNextSpeaker = vi.mocked(checkNextSpeaker);
+      mockedCheckNextSpeaker
+        .mockResolvedValueOnce({
+          reasoning: 'forced',
+          next_speaker: 'model',
+        })
+        .mockResolvedValue(null); // inner recursion: stop
+      // Each recursive sendMessageStream call asks turn.run() for a new stream.
+      mockTurnRunFn.mockImplementation(
+        () =>
+          (async function* () {
+            yield { type: 'content', value: 'reply' };
+          })() as unknown as AsyncGenerator<ServerGeminiStreamEvent>,
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hello' }],
+        new AbortController().signal,
+        'prompt-id-continueturn',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      // The prefetch must survive the continueTurn return so a follow-up
+      // ToolResult turn can consume it.
+      expect(abortHandlerInvoked).toBe(false);
+      expect(client['pendingMemoryPrefetch']).not.toBeUndefined();
     });
 
     it('should proceed without auto-memory when managed auto-memory is disabled', async () => {
