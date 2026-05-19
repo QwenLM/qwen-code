@@ -3025,18 +3025,35 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // there — Windows daemon support is best-effort.)
         let fh: import('node:fs/promises').FileHandle;
         try {
+          // #4297 post-merge wenshao Critical fold-in (folded into F1
+          // #4319): drop `O_TRUNC` from the open flags. The kernel
+          // applies O_TRUNC AT `open(2)` SYSCALL TIME — before
+          // `verifyParentWithinWorkspace` (below) gets a chance to
+          // detect a parent-symlink race. With O_TRUNC, a local user
+          // who wins the TOCTOU between `canonicalizeExistingAncestor`
+          // and this `open()` zeros the file at the attacker-
+          // redirected location (arbitrary-file-truncation primitive
+          // against any file the daemon UID can open). The pre-fix
+          // code's own comment on `verifyParentWithinWorkspace`
+          // acknowledged this as "documented residual risk"; wenshao
+          // pushed back that this exceeds the Stage-1 trust model.
+          //
+          // Truncation now happens AFTER `verifyParentWithinWorkspace`
+          // succeeds, via `fh.truncate(0)` on the fd we already hold.
+          // fd-based truncate does NOT re-resolve the path, so an
+          // attacker swapping the parent symlink after we open can't
+          // redirect the truncation.
+          //
+          // #4297 fold-in 10 (qwen-latest S3, addresses #3263954697):
+          // `O_NOFOLLOW ?? 0` matches the defensive pattern in
+          // `core/src/utils/{sessionStorageUtils,gitDiff}.ts` and
+          // `cli/src/ui/utils/customBanner.ts` for platforms that
+          // don't expose the constant. Functionally a no-op (JS
+          // bitwise coerces `undefined` to 0) but keeps the codebase
+          // consistent for the next greppy refactor.
           fh = await fs.open(
             target,
-            // #4297 fold-in 10 (qwen-latest S3, addresses #3263954697):
-            // `O_NOFOLLOW ?? 0` matches the defensive pattern in
-            // `core/src/utils/{sessionStorageUtils,gitDiff}.ts` and
-            // `cli/src/ui/utils/customBanner.ts` for platforms that
-            // don't expose the constant. Functionally a no-op (JS
-            // bitwise coerces `undefined` to 0) but keeps the codebase
-            // consistent for the next greppy refactor.
-            fsConstants.O_WRONLY |
-              fsConstants.O_TRUNC |
-              (fsConstants.O_NOFOLLOW ?? 0),
+            fsConstants.O_WRONLY | (fsConstants.O_NOFOLLOW ?? 0),
           );
         } catch (err) {
           const code = (err as { code?: unknown } | null | undefined)?.code;
@@ -3092,6 +3109,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             'overwrite',
             fh,
           );
+          // #4297 post-merge wenshao Critical fold-in (folded into F1
+          // #4319): truncate AFTER verify, using the fd we already
+          // hold. fd-based truncate doesn't re-resolve the path, so
+          // an attacker who swaps the parent symlink between
+          // verifyParentWithinWorkspace and here can't redirect the
+          // truncation to an external file. See the open-flags
+          // comment above for the full O_TRUNC race analysis.
+          await fh.truncate(0);
           await fh.writeFile('', 'utf8');
         } finally {
           await fh.close();
@@ -3370,7 +3395,18 @@ async function canonicalizeExistingAncestor(
       return await fs.realpath(current);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException | null | undefined)?.code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+      // #4297 post-merge wenshao S2 fold-in (folded into F1 #4319):
+      // also catch ELOOP — a circular symlink in the parent path
+      // (e.g., `a -> b`, `b -> a`) makes `fs.realpath` fail with
+      // ELOOP. Without this, that bubbles up as an unstructured
+      // HTTP 500 instead of the typed `WorkspaceInitSymlinkError`
+      // (400) the route handler expects from the workspace-init
+      // race detection family. Walking up the parent chain when
+      // ELOOP hits at a sub-component preserves the existing
+      // "walk to the deepest extant ancestor" contract.
+      if (code !== 'ENOENT' && code !== 'ENOTDIR' && code !== 'ELOOP') {
+        throw err;
+      }
       const parent = path.dirname(current);
       if (parent === current) throw err;
       current = parent;
@@ -3429,9 +3465,20 @@ async function verifyParentWithinWorkspace(
   // Best-effort cleanup before throwing. We're already in a failure
   // path; ignore secondary errors so the original race-detection
   // throw isn't shadowed.
+  //
+  // #4297 post-merge wenshao Critical fold-in (folded into F1 #4319):
+  // do NOT `fs.unlink(target)`. After a parent-directory race the
+  // textual `target` path now resolves through the attacker's freshly-
+  // planted parent symlink to an external location — `fs.unlink`
+  // would happily delete whatever file exists at the attacker's
+  // chosen path, giving any local user with workspace write access
+  // an arbitrary-file-deletion primitive against the daemon's UID.
+  // The empty file we created at the pre-race location is harmless
+  // (0 bytes, inside the workspace we'd just verified). Leaving it
+  // there over deleting an arbitrary external file is the right
+  // safety trade.
   if (cleanup === 'create') {
     await fh.close().catch(() => {});
-    await fs.unlink(target).catch(() => {});
   }
   throw new WorkspaceInitSymlinkError(
     target,
