@@ -544,6 +544,48 @@ describe('openInExternalEditor', () => {
     expect(fs.unlinkSync).toHaveBeenCalled();
   });
 
+  it('should still rmdirSync when unlinkSync throws', async () => {
+    (fs.unlinkSync as Mock).mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(fs.rmdirSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock');
+  });
+
+  it('should abort gracefully when mkdtempSync fails', async () => {
+    (fs.mkdtempSync as Mock).mockImplementation(() => {
+      throw new Error('ENOSPC');
+    });
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'original',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(mockSpawnSync).not.toHaveBeenCalled();
+    expect(fs.writeFileSync).not.toHaveBeenCalled();
+    expect(result.current.text).toBe('original');
+  });
+
   it('should quote editorCmd when shell mode is enabled', async () => {
     const origPlatform = process.platform;
     const origVISUAL = process.env['VISUAL'];

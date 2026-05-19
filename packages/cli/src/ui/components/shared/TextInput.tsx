@@ -5,7 +5,7 @@
  */
 
 // no hooks needed beyond keypress handled inside
-import { Box, Text } from 'ink';
+import { Box, Text, useStdin } from 'ink';
 import chalk from 'chalk';
 import stringWidth from 'string-width';
 import { useTextBuffer } from './text-buffer.js';
@@ -78,11 +78,14 @@ export function TextInput({
   }, []);
 
   const preferredEditor = usePreferredEditor();
+  const { stdin, setRawMode } = useStdin();
 
   const buffer = useTextBuffer({
     initialText: value || '',
     initialCursorOffset,
     viewport: { height, width: inputWidth },
+    stdin,
+    setRawMode,
     isValidPath: () => false,
     onChange: stableOnChange,
     preferredEditor,

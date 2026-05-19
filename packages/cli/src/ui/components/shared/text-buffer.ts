@@ -2217,8 +2217,18 @@ export function useTextBuffer({
 
   const openInExternalEditor = useCallback(
     async (opts: { editor?: string } = {}): Promise<void> => {
-      const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
-      const filePath = pathMod.join(tmpDir, 'buffer.txt');
+      let tmpDir: string;
+      let filePath: string;
+      try {
+        tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
+        filePath = pathMod.join(tmpDir, 'buffer.txt');
+      } catch (err) {
+        debugLogger.error(
+          '[useTextBuffer] failed to create temp directory',
+          err,
+        );
+        return;
+      }
 
       let editorCmd: string;
       let editorArgs: string[];
@@ -2293,6 +2303,10 @@ export function useTextBuffer({
         }
         try {
           fs.unlinkSync(filePath);
+        } catch {
+          /* ignore */
+        }
+        try {
           fs.rmdirSync(tmpDir);
         } catch {
           /* ignore */
