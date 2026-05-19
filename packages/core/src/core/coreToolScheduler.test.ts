@@ -2380,6 +2380,13 @@ describe('CoreToolScheduler request queueing', () => {
 
     const abortController = new AbortController();
 
+    // toolSpanRecords accumulates across tests in this describe block.
+    // Snapshot before schedule() so the assertions below see only this
+    // test's records.
+    const blockedSpansBefore = toolSpanRecords.filter(
+      (r) => r.name === 'tool.blocked_on_user',
+    ).length;
+
     // Schedule multiple tools that need confirmation
     const requests = [
       {
@@ -2436,6 +2443,26 @@ describe('CoreToolScheduler request queueing', () => {
 
     // Verify approval mode was changed
     expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
+
+    // #3731 Phase 2 / #4321 review: the first tool's blocked span ends as
+    // 'proceed_always' / cli; the two siblings auto-approved by
+    // autoApproveCompatiblePendingTools must end as
+    // 'auto_approved' / 'auto'. Slice from blockedSpansBefore so we see
+    // only the spans this test produced.
+    const blockedRecords = toolSpanRecords
+      .filter((r) => r.name === 'tool.blocked_on_user')
+      .slice(blockedSpansBefore);
+    expect(blockedRecords).toHaveLength(3);
+    const decisions = blockedRecords
+      .map((r) => r.blockedMetadata?.decision)
+      .sort();
+    const sources = blockedRecords.map((r) => r.blockedMetadata?.source).sort();
+    expect(decisions).toEqual([
+      'auto_approved',
+      'auto_approved',
+      'proceed_always',
+    ]);
+    expect(sources).toEqual(['auto', 'auto', 'cli']);
   });
 });
 
@@ -4010,6 +4037,13 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
     expect(toolSpans).toHaveLength(1);
     expect(toolSpans[0].ended).toBe(true);
+
+    // #4321 review: the awaiting_approval phase produces exactly one
+    // blocked_on_user span across the lifecycle. ModifyWithEditor's
+    // intentional invariant is the same — re-entering awaiting_approval
+    // must NOT spawn a second span. This assertion guards against a
+    // future refactor that re-starts the blocked span on each transition.
+    expect(blockedSpans).toHaveLength(1);
   });
 
   it('hook span records shouldProceed=false / blockType=denied when pre-hook blocks (#3731 Phase 2)', async () => {

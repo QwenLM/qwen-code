@@ -536,7 +536,10 @@ export type ToolBlockedDecision =
   | 'proceed_always'
   | 'cancel'
   | 'aborted'
-  | 'auto_approved';
+  | 'auto_approved'
+  // System-error close — distinct from user 'cancel' so dashboards counting
+  // user cancels don't double-count thrown exceptions in the approval path.
+  | 'error';
 
 export type ToolBlockedSource = 'cli' | 'ide' | 'hook' | 'auto' | 'system';
 
