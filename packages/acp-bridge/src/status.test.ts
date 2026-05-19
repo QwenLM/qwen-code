@@ -63,9 +63,9 @@ describe('BridgeChannelClosedError', () => {
     expect(
       new BridgeChannelClosedError('mid-request (workspace status)').message,
     ).toBe('agent channel closed mid-request (workspace status)');
-    expect(
-      new BridgeChannelClosedError('during session/load').message,
-    ).toBe('agent channel closed during session/load');
+    expect(new BridgeChannelClosedError('during session/load').message).toBe(
+      'agent channel closed during session/load',
+    );
   });
 });
 
@@ -129,6 +129,35 @@ describe('mapDomainErrorToErrorKind', () => {
       name: 'TrustGateError',
     });
     expect(mapDomainErrorToErrorKind(synthetic)).toBe('auth_env_error');
+  });
+
+  it('classifies SkillError via .name fallback when instanceof breaks across package boundaries (#4298 follow-up)', () => {
+    // Wenshao review fold-in (#4298 thread r3262781757): the same
+    // cross-package bundling concern that drives the TrustGateError
+    // `.name` matcher applies to `SkillError`. Synthesize a foreign
+    // copy of the class (carrying the right `.name` + `.code` but
+    // failing `instanceof SkillError`) and assert classification still
+    // works.
+    const parseSynthetic = Object.assign(new Error('foreign-bundled'), {
+      name: 'SkillError',
+      code: 'PARSE_ERROR',
+    });
+    expect(mapDomainErrorToErrorKind(parseSynthetic)).toBe('parse_error');
+
+    const fileSynthetic = Object.assign(new Error('foreign-bundled'), {
+      name: 'SkillError',
+      code: 'FILE_ERROR',
+    });
+    expect(mapDomainErrorToErrorKind(fileSynthetic)).toBe('missing_file');
+
+    // Unknown skill code on a cross-bundle SkillError still degrades
+    // to undefined rather than a misleading category — same behavior
+    // as the genuine `instanceof` path.
+    const unknownSynthetic = Object.assign(new Error('foreign-bundled'), {
+      name: 'SkillError',
+      code: 'NOT_A_REAL_CODE',
+    });
+    expect(mapDomainErrorToErrorKind(unknownSynthetic)).toBeUndefined();
   });
 
   it('classifies ModelConfigError subclasses (recognized via .name) as auth_env_error', () => {

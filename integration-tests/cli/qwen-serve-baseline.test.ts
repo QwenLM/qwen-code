@@ -464,27 +464,40 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
       }, 120_000);
 
       // PR 14b cross-check: validate the daemon's in-process MCP
-      // accounting against external `pgrep -P` measurement. The
-      // snapshot at `GET /workspace/mcp` exposes `clientCount`
-      // (live CONNECTED clients, `getMcpClientAccounting().total`)
-      // — that's the field SDK consumers and dashboards actually
-      // see, and it's the same source the push-event channel
-      // (`mcp_budget_warning` / `mcp_child_refused_batch`) reads.
-      // If `clientCount` diverges from what `pgrep -P` observes for
-      // the daemon's MCP grandchildren, the events lie.
+      // accounting on `GET /workspace/mcp` (`clientCount`, the field
+      // SDK consumers and dashboards see, and the same source the
+      // push-event channel — `mcp_budget_warning` /
+      // `mcp_child_refused_batch` — reads) against external `pgrep -P`
+      // measurement.
       //
-      // (Codex round 3 doc fix — codex/copilot finding: this test
-      // was named "in-process subprocessCount matches external pgrep"
-      // but actually asserts on `clientCount`. The snapshot's
-      // `clientCount` and the manager-internal `subprocessCount`
-      // (`stdio + websocket`) match for stdio-only fixtures, so the
-      // assertion is numerically correct — but the test name now
-      // matches the field it actually validates.)
+      // Architectural note (PR 22a): a `qwen serve` ACP child runs
+      // two `Config` objects, each carrying its own
+      // `McpClientManager`. The bootstrap Config (`runAcpAgent` →
+      // `config.initialize`) discovers MCP servers when the child
+      // starts, and `/workspace/mcp` reads its manager via
+      // `buildWorkspaceMcpStatus(this.config)` (`acpAgent.ts:1399`).
+      // The per-session Config (`newSessionConfig` →
+      // `config.initialize`) spawns a SECOND set of MCP children for
+      // the SAME servers — its accounting is NOT what the
+      // workspace-level snapshot reflects. So pgrep observes
+      // `(1 + sessionCount) * MCP_SERVERS_CONFIGURED` grandchildren
+      // while `clientCount` stays at `MCP_SERVERS_CONFIGURED`.
+      //
+      // What this test validates:
+      // 1. `clientCount` is exactly the configured server count
+      //    (bootstrap manager accounting is honest).
+      // 2. pgrep observes the architectural 2×N grandchildren after
+      //    one session is created — encoded literally so a future
+      //    refactor that unifies bootstrap + session managers (#4175
+      //    follow-up to drop the duplicate discovery) fails this
+      //    assertion and forces a deliberate test update.
+      // 3. `clientCount` NEVER exceeds the observed pgrep count —
+      //    the original "snapshot must never over-report" guard.
       //
       // Skip-gated like the parent describe (POSIX, non-sandbox);
-      // idle MCP fixtures are stdio-only so `clientCount` should
-      // equal `mcpGrandchildren.length` exactly (no amplification
-      // slack required).
+      // idle MCP fixtures are stdio-only so the relationship between
+      // `clientCount` and pgrep is exact (no amplification slack
+      // required at idle).
       it('clientCount matches external pgrep observation', async () => {
         const ws = makeTempWorkspace('mcp-counter');
         let daemon: SpawnedDaemon | undefined;
@@ -498,34 +511,28 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
           daemon = await spawnDaemon({ workspaceCwd: ws });
           await daemon.client.createOrAttachSession({ workspaceCwd: ws });
 
-          // Wait for MCP grandchildren to be observable via pgrep,
-          // then read both numbers atomically (pgrep first to lock
-          // the comparison floor, snapshot second so the daemon
-          // can't sneak in a new connect between the two reads).
+          // Wait until the OS sees the FULL post-session set
+          // (`MCP_SERVERS_CONFIGURED * 2` grandchildren — see the
+          // architectural note above), then read the snapshot.
+          // pgrep first to lock the comparison floor; snapshot
+          // second so the daemon can't sneak in a new connect
+          // between the two reads.
+          const expectedGrandchildren = MCP_SERVERS_CONFIGURED * 2;
           const observed = await waitForMcpGrandchildren(
             daemon.daemon.pid!,
-            MCP_SERVERS_CONFIGURED,
+            expectedGrandchildren,
           );
           const snapshot = await daemon.client.workspaceMcp();
 
-          // PR 14b invariant: stdio-only fixtures →
-          // `clientCount === mcpGrandchildren.length`. The PR 14
-          // amplification slack
-          // (`MCP_SERVERS_CONFIGURED * mcpAmplificationFactor`) is
-          // for connect-storm transient overhead, not steady-state
-          // counter drift. At idle the daemon's accounting MUST
-          // match `pgrep -P` exactly (no zombies, no orphans).
-          //
-          // `clientCount` is the snapshot's authoritative live
-          // count; validating it against pgrep closes the loop on
-          // PR 14b's event-source assumption (the push events read
-          // the same accounting).
+          // (1) Bootstrap manager accounting is honest.
           expect(snapshot.clientCount).toBe(MCP_SERVERS_CONFIGURED);
-          expect(observed.mcpGrandchildren.length).toBe(MCP_SERVERS_CONFIGURED);
-          // Defense-in-depth: even if a future race lets the OS
-          // observe a process the daemon already considers
-          // disconnected, `clientCount` must NEVER exceed the
-          // observed pgrep count. Equality at idle, `<=` always.
+          // (2) pgrep observes both managers' children. If a future
+          // refactor unifies them, change this to
+          // `MCP_SERVERS_CONFIGURED` (and update the architectural
+          // note above).
+          expect(observed.mcpGrandchildren.length).toBe(expectedGrandchildren);
+          // (3) Snapshot never over-reports OS reality. Holds under
+          // both the current 2× regime and the unified 1× future.
           expect(snapshot.clientCount).toBeLessThanOrEqual(
             observed.mcpGrandchildren.length,
           );

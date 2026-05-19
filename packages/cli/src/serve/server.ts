@@ -28,6 +28,7 @@ import {
   type DeviceFlowPublicView,
 } from './auth/deviceFlow.js';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
+import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
@@ -248,6 +249,14 @@ export function createServeApp(
         ? { eventRingSize: opts.eventRingSize }
         : {}),
       boundWorkspace,
+      // PR 22b/2 (wenshao/gpt-5.5 review fold-in #4304): symmetric
+      // with `runQwenServe.ts` — direct embeds / tests that don't
+      // inject `deps.bridge` would otherwise silently lose the
+      // daemon env + preflight cells the default server app
+      // reported pre-injection. Wiring the production status provider
+      // here preserves byte-for-byte route output on the default
+      // bridge construction path.
+      statusProvider: createDaemonStatusProvider(),
     });
 
   // Allow same-origin requests from the demo page. Browsers send an

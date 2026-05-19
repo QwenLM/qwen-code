@@ -52,6 +52,11 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import {
+  __resetActiveGoalStoreForTests,
+  clearActiveGoal,
+  setActiveGoal,
+} from '../goals/activeGoalStore.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -514,6 +519,7 @@ describe('Gemini Client (client.ts)', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    __resetActiveGoalStoreForTests();
   });
 
   describe('initialize', () => {
@@ -4501,6 +4507,245 @@ Other open files:
         client['chat'] = mockChat as GeminiChat;
       });
 
+      it('emits active_goal when a goal is active for the turn', async () => {
+        setActiveGoal('test-session-id', {
+          condition: 'finish the refactor',
+          iterations: 2,
+          setAt: 123,
+          tokensAtStart: 456,
+          hookId: 'goal-hook-id',
+          lastReason: 'still missing verification',
+        });
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-active-goal',
+          ),
+        );
+
+        expect(events[0]).toEqual({
+          type: GeminiEventType.ActiveGoal,
+          value: {
+            condition: 'finish the refactor',
+            iterations: 2,
+            setAt: 123,
+            tokensAtStart: 456,
+            hookId: 'goal-hook-id',
+            lastReason: 'still missing verification',
+          },
+        });
+      });
+
+      it('emits active_goal null when the Stop hook clears the goal', async () => {
+        setActiveGoal('test-session-id', {
+          condition: 'finish the refactor',
+          iterations: 2,
+          setAt: 123,
+          tokensAtStart: 456,
+          hookId: 'goal-hook-id',
+          lastReason: 'still missing verification',
+        });
+        const mockMessageBus = {
+          request: vi.fn().mockImplementation(async () => {
+            clearActiveGoal('test-session-id');
+            return {};
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            {
+              role: 'model',
+              parts: [{ text: 'done' }],
+            },
+          ]),
+        } as unknown as GeminiChat;
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'done' };
+          })(),
+        );
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-cleared-active-goal',
+          ),
+        );
+
+        expect(events).toContainEqual({
+          type: GeminiEventType.ActiveGoal,
+          value: null,
+        });
+      });
+
+      it('emits active_goal null when the Stop hook clears the goal before aborting', async () => {
+        setActiveGoal('test-session-id', {
+          condition: 'finish the refactor',
+          iterations: 2,
+          setAt: 123,
+          tokensAtStart: 456,
+          hookId: 'goal-hook-id',
+          lastReason: 'still missing verification',
+        });
+        const abortController = new AbortController();
+        const mockMessageBus = {
+          request: vi.fn().mockImplementation(async () => {
+            clearActiveGoal('test-session-id');
+            abortController.abort();
+            return {};
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            {
+              role: 'model',
+              parts: [{ text: 'done' }],
+            },
+          ]),
+        } as unknown as GeminiChat;
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'done' };
+          })(),
+        );
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            abortController.signal,
+            'prompt-cleared-active-goal-then-aborted',
+          ),
+        );
+
+        const activeGoalEvents = events.filter(
+          (event) => event.type === GeminiEventType.ActiveGoal,
+        );
+
+        expect(activeGoalEvents).toEqual([
+          {
+            type: GeminiEventType.ActiveGoal,
+            value: expect.objectContaining({
+              condition: 'finish the refactor',
+            }),
+          },
+          {
+            type: GeminiEventType.ActiveGoal,
+            value: null,
+          },
+        ]);
+      });
+
+      it('emits active_goal changes when aborting before Stop hook continuation', async () => {
+        setActiveGoal('test-session-id', {
+          condition: 'finish the refactor',
+          iterations: 2,
+          setAt: 123,
+          tokensAtStart: 456,
+          hookId: 'goal-hook-id',
+          lastReason: 'still missing verification',
+        });
+        const abortController = new AbortController();
+        const mockMessageBus = {
+          request: vi.fn().mockImplementation(async () => {
+            setActiveGoal('test-session-id', {
+              condition: 'finish the refactor',
+              iterations: 3,
+              setAt: 123,
+              tokensAtStart: 456,
+              hookId: 'goal-hook-id',
+              lastReason: 'still missing validation',
+            });
+            return {
+              output: {
+                get decision() {
+                  abortController.abort();
+                  return 'block';
+                },
+                reason: 'Keep working',
+              },
+              stopHookCount: 1,
+            };
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            {
+              role: 'model',
+              parts: [{ text: 'done' }],
+            },
+          ]),
+        } as unknown as GeminiChat;
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'done' };
+          })(),
+        );
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            abortController.signal,
+            'prompt-stop-hook-continuation-aborted',
+          ),
+        );
+        const activeGoalEvents = events.filter(
+          (event) => event.type === GeminiEventType.ActiveGoal,
+        );
+
+        expect(activeGoalEvents).toEqual([
+          {
+            type: GeminiEventType.ActiveGoal,
+            value: expect.objectContaining({
+              condition: 'finish the refactor',
+              iterations: 2,
+            }),
+          },
+          {
+            type: GeminiEventType.ActiveGoal,
+            value: expect.objectContaining({
+              condition: 'finish the refactor',
+              iterations: 3,
+              lastReason: 'still missing validation',
+            }),
+          },
+        ]);
+        expect(events).not.toContainEqual(
+          expect.objectContaining({
+            type: GeminiEventType.StopHookLoop,
+          }),
+        );
+      });
+
       it('should skip messageBus.request for UserPromptSubmit when hasHooksForEvent returns false', async () => {
         // Enable hooks and provide messageBus
         const mockMessageBus = {
@@ -4604,6 +4849,74 @@ Other open files:
           value:
             'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
         });
+      });
+
+      it('emits one active_goal null when the blocking cap aborts an active goal', async () => {
+        setActiveGoal('test-session-id', {
+          condition: 'finish the refactor',
+          iterations: 2,
+          setAt: 123,
+          tokensAtStart: 456,
+          hookId: 'goal-hook-id',
+          lastReason: 'still missing verification',
+        });
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: {
+              decision: 'block',
+              reason: 'Keep working',
+            },
+            stopHookCount: 1,
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(1);
+
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            {
+              role: 'model',
+              parts: [{ text: 'not done' }],
+            },
+          ]),
+        } as unknown as GeminiChat;
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-stop-cap-active-goal',
+          ),
+        );
+        const activeGoalEvents = events.filter(
+          (event) => event.type === GeminiEventType.ActiveGoal,
+        );
+
+        expect(activeGoalEvents).toEqual([
+          {
+            type: GeminiEventType.ActiveGoal,
+            value: expect.objectContaining({
+              condition: 'finish the refactor',
+            }),
+          },
+          {
+            type: GeminiEventType.ActiveGoal,
+            value: null,
+          },
+        ]);
       });
 
       it('should not skip hooks when hasHooksForEvent returns true', async () => {

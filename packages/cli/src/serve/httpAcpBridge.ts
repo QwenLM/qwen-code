@@ -25,22 +25,19 @@ import {
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
   createIdleAcpPreflightCells,
+  createIdleEnvStatus,
   createIdleWorkspaceMcpStatus,
   createIdleWorkspaceProvidersStatus,
   createIdleWorkspaceSkillsStatus,
   mapDomainErrorToErrorKind,
   type ServePreflightCell,
-  type ServePreflightKind,
   type ServeStatusCell,
 } from './status.js';
-import { buildEnvStatusFromProcess } from './envSnapshot.js';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
   TrustGateError,
-  canUseRipgrep,
   getCurrentGeminiMdFilename,
 } from '@qwen-code/qwen-code-core';
-import { getGitVersion, getNpmVersion } from '../utils/systemInfo.js';
 import type {
   CancelNotification,
   Client,
@@ -188,143 +185,20 @@ export type { AcpChannel, AcpChannelExitInfo, ChannelFactory };
 // semantics today instead of a wire-level break at Stage 2. Tracked
 // under #3803. Reference:
 // https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
-export interface BridgeOptions {
-  /**
-   * §03 decision §1. `single` shares one session per workspace across HTTP
-   * clients (live-collaboration default); `thread` gives each `spawnOrAttach`
-   * call its own session for strict isolation.
-   *
-   * Daemon-wide default. Per-request callers can override via
-   * `BridgeSpawnRequest.sessionScope` — the override wins and the
-   * daemon-wide value acts only as the fallback when the request
-   * omits the field. See the `session_scope_override` capability on
-   * `/capabilities.features` for negotiation.
-   * Reference:
-   * https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427875644
-   */
-  sessionScope?: 'single' | 'thread';
-  /** Channel factory; defaults to spawning `qwen --acp` as a child process. */
-  channelFactory?: ChannelFactory;
-  /** How long to wait for the child's `initialize` reply before giving up. */
-  initializeTimeoutMs?: number;
-  /**
-   * Cap on concurrent live sessions. `spawnOrAttach` calls that would
-   * cross this throw `SessionLimitExceededError`; attaches to an
-   * existing session (same workspace under `single` scope) are not
-   * counted. `0` / `Infinity` disable the cap. Defaults to 20 — see
-   * `ServeOptions.maxSessions` for the rationale.
-   */
-  maxSessions?: number;
-  /**
-   * Per-session SSE replay ring depth. Sets `ringSize` on every
-   * `new EventBus(...)` the bridge constructs (both fresh sessions
-   * and restored sessions). Defaults to `DEFAULT_RING_SIZE` (8000,
-   * #3803 §02 target). Must be a positive finite integer; `0` /
-   * `NaN` / negative throw at boot (fail-CLOSED — same posture as
-   * `maxSessions`, where silently disabling a backpressure knob on a
-   * config typo is worse than failing to start).
-   *
-   * Operators tune via `qwen serve --event-ring-size <n>`. Cost
-   * scales linearly with `ringSize`; each retained `BridgeEvent` is
-   * an object reference plus its serialized payload (text chunks /
-   * tool-call args / etc.), so the per-session memory ceiling is
-   * `ringSize × average-event-size` held until the session ends.
-   */
-  eventRingSize?: number;
-  /**
-   * Bd1yh: per-`requestPermission` wall clock. After this many ms with
-   * no client vote, the agent's permission promise resolves as
-   * cancelled — the per-session FIFO can drain instead of poisoning
-   * forever on a missing SSE subscriber. Defaults to 5 minutes.
-   * `0` / `Infinity` / non-finite disable the timeout (matches
-   * legacy behavior, NOT recommended).
-   */
-  permissionResponseTimeoutMs?: number;
-  /**
-   * Bd1z5: per-session cap on pending permissions in flight. New
-   * `requestPermission` calls past this cap resolve as cancelled with
-   * a stderr warning. Defaults to 64. `0` / `Infinity` disable the
-   * cap.
-   */
-  maxPendingPermissionsPerSession?: number;
-  /**
-   * Absolute, **already-canonical** path this daemon is bound to (per
-   * #3803 §02: 1 daemon = 1 workspace). `spawnOrAttach` calls whose
-   * `workspaceCwd` doesn't canonicalize to this same value throw
-   * `WorkspaceMismatchError` (route → 400 with code `workspace_mismatch`).
-   *
-   * **Caller contract**: pass the result of
-   * `canonicalizeWorkspace(path)`. `runQwenServe` does this at boot
-   * and threads the same canonical value into the bridge AND
-   * `createServeApp` (via `deps.boundWorkspace`) so all three —
-   * `/capabilities.workspaceCwd`, the `POST /session` cwd fallback,
-   * and this bridge's mismatch check — share one canonical form. The
-   * constructor only checks `path.isAbsolute`; it does NOT
-   * re-canonicalize (a redundant `realpathSync.native` could
-   * theoretically diverge from the runQwenServe canonicalize on
-   * NFS-transient / mid-rename filesystems, landing the bridge with
-   * one canonical form while `/capabilities` advertises another).
-   * Direct embeds / tests calling `createHttpAcpBridge` themselves
-   * MUST canonicalize before passing.
-   */
-  boundWorkspace: string;
-  /**
-   * PR 14 fix (review #4247 wenshao R5 runQwenServe.ts:216): per-
-   * handle env overrides forwarded to `defaultSpawnChannelFactory`
-   * at spawn time. Replaces the prior `process.env` mutation in
-   * `runQwenServe` so concurrent embedded daemons in the same
-   * process don't cross-contaminate each other's MCP budget /
-   * mode env (the `defaultSpawnChannelFactory` snapshots
-   * `process.env` AT SPAWN TIME, not at `runQwenServe()` call
-   * time — so the last `runQwenServe()` to set the global env
-   * would win for all subsequent spawns across all daemon
-   * handles, breaking the documented per-daemon policy).
-   *
-   * Shape: `Record<string, string | undefined>`. A `string` value
-   * sets the env var for the child; `undefined` explicitly
-   * REMOVES the var from the child env (useful for "this daemon
-   * has no MCP budget" embedded callers that need to scrub a
-   * stale global). Keys NOT present in this record are inherited
-   * from `process.env` as before.
-   *
-   * Custom `channelFactory` callers receive this through the
-   * factory's second arg and decide what to do with it (tests
-   * typically ignore it; the production factory merges it).
-   */
-  childEnvOverrides?: Readonly<Record<string, string | undefined>>;
-  /**
-   * #4175 Wave 4 PR 17 — optional callback for persisting `tools.
-   * approvalMode` to the workspace settings file. Invoked by
-   * `setSessionApprovalMode` ONLY when the route caller passes
-   * `{persist: true}`. The default `runQwenServe` wires this to
-   * `loadSettings(boundWorkspace).setValue(SettingScope.Workspace,
-   * 'tools.approvalMode', mode)`. Bridge tests and embedded callers
-   * may omit it; when omitted, `setSessionApprovalMode` still applies
-   * the in-process change and returns `persisted: false` regardless
-   * of the request flag.
-   */
-  persistApprovalMode?: (
-    boundWorkspace: string,
-    mode: ApprovalMode,
-  ) => Promise<void>;
-  /**
-   * #4175 Wave 4 PR 17 — optional callback for mutating
-   * `tools.disabled` in workspace settings. Invoked by
-   * `setWorkspaceToolEnabled` to add (`enabled: false`) or remove
-   * (`enabled: true`) `toolName` from the persisted disabled set.
-   * The default `runQwenServe` wires this to a fresh
-   * `loadSettings(boundWorkspace)` per call so concurrent edits from
-   * other writers (CLI, another daemon, an editor) are picked up.
-   * Bridge tests / embedded callers may omit it; without the hook
-   * `setWorkspaceToolEnabled` throws a clear error rather than
-   * silently dropping the write.
-   */
-  persistDisabledTools?: (
-    boundWorkspace: string,
-    toolName: string,
-    enabled: boolean,
-  ) => Promise<void>;
-}
+
+// `BridgeOptions` + `DaemonStatusProvider` lifted to
+// `@qwen-code/acp-bridge/bridgeOptions` in #4175 PR 22b/2 — the
+// daemon-host injection seam (`statusProvider`) is now part of the
+// bridge package's public construction contract. `runQwenServe` wires
+// `createDaemonStatusProvider()` (production impl in
+// `cli/src/serve/daemonStatusProvider.ts`) when the bridge is built;
+// embedded callers that don't need daemon-host cells may omit it,
+// in which case the factory returns idle placeholders.
+import type {
+  BridgeOptions,
+  DaemonStatusProvider,
+} from '@qwen-code/acp-bridge/bridgeOptions';
+export type { BridgeOptions, DaemonStatusProvider };
 
 /**
  * The single `qwen --acp` child + the ACP connection on top of it,
@@ -3263,11 +3137,74 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     async getWorkspaceEnvStatus() {
-      return buildEnvStatusFromProcess(boundWorkspace, !!liveChannelInfo());
+      const acpChannelLive = !!liveChannelInfo();
+      // PR 22b/2: daemon-host env snapshot delegated to
+      // `BridgeOptions.statusProvider`. When omitted (Mode A in-process
+      // consumers, tests) the bridge returns an idle envelope —
+      // matches the "queryable but empty" pattern PR 12 / 13
+      // established for diagnostic routes.
+      //
+      // Wenshao review fold-in (#4304): a custom provider that throws
+      // would otherwise propagate past the bridge into `/workspace/env`
+      // as a 500. Catch + log + fall back to the idle envelope so the
+      // route still responds — the `daemon cells always answerable`
+      // invariant the pre-injection `buildEnvStatusFromProcess` carried
+      // (it never threw because it was synchronous and self-contained)
+      // is preserved structurally.
+      if (!opts.statusProvider) {
+        return createIdleEnvStatus(boundWorkspace, acpChannelLive);
+      }
+      try {
+        return await opts.statusProvider.getEnvStatus(
+          boundWorkspace,
+          acpChannelLive,
+        );
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: statusProvider.getEnvStatus failed; ` +
+            `falling back to idle envelope: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+        return createIdleEnvStatus(boundWorkspace, acpChannelLive);
+      }
     },
 
     async getWorkspacePreflightStatus() {
-      const daemonCells = await buildDaemonPreflightCells(boundWorkspace);
+      // PR 22b/2: daemon-host preflight cells delegated to
+      // `BridgeOptions.statusProvider`. Without a provider the daemon
+      // half is empty `[]`; ACP-side cells are still fetched normally
+      // when a child is live.
+      //
+      // Wenshao review fold-in (#4304): a throwing provider would
+      // otherwise propagate past the bridge and turn the entire
+      // preflight envelope into a 500 — losing both daemon cells AND
+      // the ACP-side cells fetched below. Catch + log + fall back to
+      // empty so ACP cells still render. Pre-injection
+      // `buildDaemonPreflightCells` used `Promise.allSettled` and was
+      // effectively unthrowable; this preserves that route-level
+      // invariant for custom provider impls that may throw.
+      let daemonCells: ServePreflightCell[];
+      if (!opts.statusProvider) {
+        // Asymmetric vs `getWorkspaceEnvStatus` (which falls back to a
+        // full `createIdleEnvStatus` envelope): preflight is the union
+        // of daemon-locality + ACP-locality cells stitched below, so an
+        // empty daemon slice IS the right fallback — the ACP slice
+        // fills in independently from the live channel (or its
+        // `not_started` placeholders).
+        daemonCells = [];
+      } else {
+        try {
+          daemonCells =
+            await opts.statusProvider.getDaemonPreflightCells(boundWorkspace);
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: statusProvider.getDaemonPreflightCells failed; ` +
+              `falling back to empty daemon cells: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+          daemonCells = [];
+        }
+      }
       const acpChannelLive = !!liveChannelInfo();
 
       let acpResponse:
@@ -4094,227 +4031,6 @@ async function withTimeout<T>(
     return await Promise.race([p, timeoutP]);
   } finally {
     if (timer) clearTimeout(timer);
-  }
-}
-
-/**
- * Daemon-side preflight cells. Always-answerable from the bridge process
- * without consulting ACP; the corresponding ACP-side cells (auth, MCP, skills,
- * providers, tool_registry, egress) are stitched in by `requestWorkspaceStatus`
- * when a child is live, or fall back to `not_started` placeholders when idle.
- */
-async function buildDaemonPreflightCells(
-  boundWorkspace: string,
-): Promise<ServePreflightCell[]> {
-  const REQUIRED_NODE_MAJOR = 22;
-
-  // Each builder returns (or eventually returns) one cell. We run them via
-  // `Promise.allSettled` after wrapping every call in `Promise.resolve().then`
-  // so that synchronous throws from any builder become rejected promises
-  // instead of escaping out of `Promise.all`'s array construction. A throw
-  // there would propagate up to the route handler and turn the whole
-  // `/workspace/preflight` envelope into a 500 — directly contradicting the
-  // design promise that "daemon cells always render even when ACP is sick"
-  // (see the route handler's catch ladder).
-  //
-  // For any rejected slot we synthesize an `error` cell with the slot's
-  // expected `kind` so the response shape (length, ordering, locality) is
-  // bit-for-bit the same regardless of failure modes.
-  const nodeVersionCell = (): ServePreflightCell => {
-    try {
-      const nodeVersion = process.versions.node;
-      const major = Number.parseInt(nodeVersion.split('.')[0] ?? '0', 10);
-      if (Number.isFinite(major) && major >= REQUIRED_NODE_MAJOR) {
-        return {
-          kind: 'node_version',
-          status: 'ok',
-          locality: 'daemon',
-          detail: {
-            version: nodeVersion,
-            required: `>=${REQUIRED_NODE_MAJOR}`,
-          },
-        };
-      }
-      return {
-        kind: 'node_version',
-        status: 'error',
-        errorKind: 'missing_binary',
-        error: `Node ${nodeVersion} is below the required >=${REQUIRED_NODE_MAJOR}.`,
-        hint: `Upgrade Node to v${REQUIRED_NODE_MAJOR} or newer.`,
-        locality: 'daemon',
-        detail: { version: nodeVersion, required: `>=${REQUIRED_NODE_MAJOR}` },
-      };
-    } catch (err) {
-      return {
-        kind: 'node_version',
-        status: 'error',
-        error: err instanceof Error ? err.message : String(err),
-        locality: 'daemon',
-      };
-    }
-  };
-
-  // Mirrors `defaultSpawnChannelFactory`'s lookup so the preflight cell
-  // reflects the path the child would actually be spawned from.
-  const cliEntryCell = (): ServePreflightCell => {
-    const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1] || '';
-    if (cliEntry) {
-      return {
-        kind: 'cli_entry',
-        status: 'ok',
-        locality: 'daemon',
-        detail: {
-          path: cliEntry,
-          source: process.env['QWEN_CLI_ENTRY']
-            ? 'QWEN_CLI_ENTRY'
-            : 'process.argv[1]',
-        },
-      };
-    }
-    return {
-      kind: 'cli_entry',
-      status: 'error',
-      errorKind: 'missing_binary',
-      error: 'Cannot determine CLI entry path for spawning the ACP child.',
-      hint: 'Set QWEN_CLI_ENTRY to the absolute path of the qwen entry script.',
-      locality: 'daemon',
-    };
-  };
-
-  const workspaceDirCell = async (): Promise<ServePreflightCell> => {
-    try {
-      const stat = await fs.stat(boundWorkspace);
-      if (stat.isDirectory()) {
-        return {
-          kind: 'workspace_dir',
-          status: 'ok',
-          locality: 'daemon',
-          detail: { path: boundWorkspace },
-        };
-      }
-      return {
-        kind: 'workspace_dir',
-        status: 'error',
-        errorKind: 'missing_file',
-        error: `Bound workspace path is not a directory: ${boundWorkspace}`,
-        locality: 'daemon',
-        detail: { path: boundWorkspace },
-      };
-    } catch (err) {
-      const errorKind = mapDomainErrorToErrorKind(err);
-      return {
-        kind: 'workspace_dir',
-        status: 'error',
-        error: err instanceof Error ? err.message : String(err),
-        ...(errorKind ? { errorKind } : {}),
-        locality: 'daemon',
-        detail: { path: boundWorkspace },
-      };
-    }
-  };
-
-  type Slot = {
-    kind: ServePreflightKind;
-    run: () => ServePreflightCell | Promise<ServePreflightCell>;
-  };
-  const slots: Slot[] = [
-    { kind: 'node_version', run: nodeVersionCell },
-    { kind: 'cli_entry', run: cliEntryCell },
-    { kind: 'workspace_dir', run: workspaceDirCell },
-    {
-      kind: 'ripgrep',
-      run: () =>
-        safeCheck('ripgrep', async () => {
-          // Mirror runtime behavior: `Config.useBuiltinRipgrep` defaults to
-          // `true`, so `canUseRipgrep(true)` reports the *bundled* binary
-          // when no system `rg` is installed. Passing `false` here would
-          // tell users "ripgrep missing" while the runtime can still use
-          // the bundled one — a misleading warning.
-          const ok = await canUseRipgrep(true);
-          return ok
-            ? { status: 'ok' as const }
-            : {
-                status: 'warning' as const,
-                hint: 'Install ripgrep for faster grep tool execution.',
-              };
-        }),
-    },
-    {
-      kind: 'git',
-      run: () =>
-        safeCheck('git', async () => {
-          const v = await getGitVersion();
-          return v && v !== 'unknown'
-            ? { status: 'ok' as const, detail: { version: v } }
-            : { status: 'warning' as const, hint: 'git not found on PATH.' };
-        }),
-    },
-    {
-      kind: 'npm',
-      run: () =>
-        safeCheck('npm', async () => {
-          const v = await getNpmVersion();
-          return v && v !== 'unknown'
-            ? { status: 'ok' as const, detail: { version: v } }
-            : { status: 'warning' as const, hint: 'npm not found on PATH.' };
-        }),
-    },
-  ];
-
-  // `Promise.resolve().then(run)` coerces sync throws into rejected
-  // promises so `Promise.allSettled` can absorb them as `error` cells
-  // rather than letting them escape the route.
-  const settled = await Promise.allSettled(
-    slots.map((s) => Promise.resolve().then(s.run)),
-  );
-  return settled.map((result, i) => {
-    if (result.status === 'fulfilled') return result.value;
-    const err = result.reason;
-    const errorKind = mapDomainErrorToErrorKind(err);
-    return {
-      kind: slots[i]!.kind,
-      status: 'error' as const,
-      locality: 'daemon' as const,
-      error: err instanceof Error ? err.message : String(err),
-      ...(errorKind ? { errorKind } : {}),
-    };
-  });
-}
-
-async function safeCheck(
-  kind: 'ripgrep' | 'git' | 'npm',
-  body: () => Promise<{
-    status: 'ok' | 'warning';
-    detail?: Record<string, unknown>;
-    hint?: string;
-  }>,
-): Promise<ServePreflightCell> {
-  try {
-    const r = await body();
-    return {
-      kind,
-      status: r.status,
-      locality: 'daemon',
-      ...(r.detail ? { detail: r.detail } : {}),
-      ...(r.hint ? { hint: r.hint } : {}),
-    };
-  } catch (err) {
-    // Classify so SDK consumers can render structured remediation
-    // (`missing_binary` for ENOENT, `missing_file` for EACCES, etc.).
-    // Without this tag, the rg/git/npm catch path differs from the
-    // sync-builder catch paths above, which all classify their own
-    // errors. The outer `Promise.allSettled` catch in
-    // `buildDaemonPreflightCells` is unreachable for slots whose `run`
-    // is `() => safeCheck(...)`, because `safeCheck` always resolves
-    // (its own try/catch swallows). So this is the only place to tag.
-    const errorKind = mapDomainErrorToErrorKind(err);
-    return {
-      kind,
-      status: 'error',
-      error: err instanceof Error ? err.message : String(err),
-      locality: 'daemon',
-      ...(errorKind ? { errorKind } : {}),
-    };
   }
 }
 

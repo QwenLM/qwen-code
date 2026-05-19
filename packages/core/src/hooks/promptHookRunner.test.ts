@@ -472,6 +472,9 @@ describe('PromptHookRunner', () => {
     });
 
     it('should track duration correctly', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+
       const mockResponse = createMockResponse('{"ok": true}');
       mockGenerateContent.mockImplementation(
         () =>
@@ -483,13 +486,20 @@ describe('PromptHookRunner', () => {
       const config = createMockConfig();
       const input = createMockInput();
 
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
+      try {
+        const execution = promptRunner.execute(
+          config,
+          HookEventName.PreToolUse,
+          input,
+        );
 
-      expect(result.duration).toBeGreaterThanOrEqual(50);
+        await vi.advanceTimersByTimeAsync(50);
+        const result = await execution;
+
+        expect(result.duration).toBe(50);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should handle multiple $ARGUMENTS placeholders', async () => {

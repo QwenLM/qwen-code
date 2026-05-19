@@ -31,8 +31,11 @@ describe('goalCommand', () => {
   beforeEach(() => __resetActiveGoalStoreForTests());
   afterEach(() => __resetActiveGoalStoreForTests());
 
-  it('is currently limited to interactive mode', () => {
-    expect(goalCommand.supportedModes).toEqual(['interactive']);
+  it('is available in interactive and non-interactive modes', () => {
+    expect(goalCommand.supportedModes).toEqual([
+      'interactive',
+      'non_interactive',
+    ]);
   });
 
   it('rejects when config is missing', async () => {

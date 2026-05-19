@@ -47,6 +47,10 @@
       "types": "./dist/bridgeTypes.d.ts",
       "import": "./dist/bridgeTypes.js"
     },
+    "./bridgeOptions": {
+      "types": "./dist/bridgeOptions.d.ts",
+      "import": "./dist/bridgeOptions.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

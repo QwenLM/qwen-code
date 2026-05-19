@@ -30,6 +30,35 @@ extraction is split:
   `cli/src/serve/httpAcpBridge.ts BridgeClient.requestPermission`.
   PR 24 will move that and add the other three policies behind this
   interface.
+- `status` (PR 22b/1) — wire-contract status types for
+  `/workspace/{mcp,skills,providers,env,preflight}` and
+  `/session/:id/{context,supported-commands}` routes, the
+  `STATUS_SCHEMA_VERSION` / `SERVE_*_EXT_METHODS` constants,
+  `BridgeTimeoutError` / `MissingCliEntryError` /
+  `BridgeChannelClosedError` typed exceptions, and the
+  `mapDomainErrorToErrorKind` classifier (regex → `instanceof` after
+  #4299 / #4300). The 27-symbol contract `acp-integration/acpAgent.ts`
+  consumes lives here.
+- `workspacePaths` (PR 22b/1) — `canonicalizeWorkspace` (the
+  cross-module BX9_q contract used by `config.ts` / `settings.ts` /
+  `sandbox.ts` / bridge to collapse boot-time + per-request workspace
+  paths to one canonical key) plus `MAX_WORKSPACE_PATH_LENGTH`.
+- `bridgeErrors` (PR 22b/1) — 11 typed `Error` subclasses the bridge
+  throws (`SessionNotFoundError`, `WorkspaceMismatchError`,
+  `RestoreInProgressError`, etc.); HTTP route layer
+  `instanceof`-branches on these to map to specific status codes.
+- `bridgeTypes` (PR 22b/1) — public bridge contract types:
+  `BridgeSpawnRequest`, `BridgeSession`, `BridgeRestoreSessionRequest`,
+  `BridgeSessionState`, `BridgeRestoredSession`, `BridgeSessionSummary`,
+  `SessionMetadataUpdate`, `BridgeClientRequestContext`,
+  `BridgeHeartbeatResult`, `BridgeHeartbeatState`, plus the
+  `HttpAcpBridge` interface itself (~30-method facade).
+- `bridgeOptions` (PR 22b/2) — `BridgeOptions` interface (factory
+  construction contract: `boundWorkspace`, `channelFactory`,
+  `maxSessions`, `eventRingSize`, `permissionResponseTimeoutMs`,
+  persistence callbacks, etc.) and the new `DaemonStatusProvider`
+  injection seam for daemon-host env / preflight cells (production
+  impl in `cli/src/serve/daemonStatusProvider.ts`).
 
 ## What's not here yet
 

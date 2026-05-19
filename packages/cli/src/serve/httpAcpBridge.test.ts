@@ -35,6 +35,7 @@ import type {
   SetSessionModeRequest,
   SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
+import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import {
   createHttpAcpBridge,
   InvalidClientIdError,
@@ -71,9 +72,19 @@ const SESS_A = `sess:${WS_A}`;
  * `WS_A` would otherwise repeat `boundWorkspace: WS_A` everywhere; this
  * helper defaults it. Tests that need a different bind path (e.g. the
  * mismatch test) pass `boundWorkspace` explicitly.
+ *
+ * #4175 PR 22b/2: also defaults `statusProvider` to the production daemon
+ * impl so existing env / preflight tests (which exercise the bridge's
+ * delegation path) keep seeing populated cells. Tests that want to
+ * exercise the no-provider idle fallback can override with
+ * `{ statusProvider: undefined }`.
  */
 function makeBridge(opts: Partial<BridgeOptions> = {}): HttpAcpBridge {
-  return createHttpAcpBridge({ boundWorkspace: WS_A, ...opts });
+  return createHttpAcpBridge({
+    boundWorkspace: WS_A,
+    statusProvider: createDaemonStatusProvider(),
+    ...opts,
+  });
 }
 
 interface FakeAgentOpts {
@@ -539,6 +550,110 @@ describe('createHttpAcpBridge', () => {
         c.method.includes('/workspace/env'),
       ),
     ).toBe(false);
+
+    await bridge.shutdown();
+  });
+
+  it('returns idle env envelope when statusProvider is omitted (Mode A fallback)', async () => {
+    // PR 22b/2 fold-in: covers the no-provider branch in
+    // `getWorkspaceEnvStatus`. Production `runQwenServe` and
+    // `createServeApp` both wire `createDaemonStatusProvider()`, but
+    // direct embeds (Mode A in-process consumers, future) may omit it.
+    // The bridge must still answer the route — falling back to the
+    // shared `createIdleEnvStatus` helper rather than throwing.
+    const bridge = makeBridge({ statusProvider: undefined });
+
+    const idle = await bridge.getWorkspaceEnvStatus();
+    expect(idle).toMatchObject({
+      v: 1,
+      workspaceCwd: WS_A,
+      initialized: true,
+      acpChannelLive: false,
+      cells: [],
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('returns empty daemon preflight cells when statusProvider is omitted (Mode A fallback)', async () => {
+    // PR 22b/2 fold-in: covers the no-provider branch in
+    // `getWorkspacePreflightStatus`. ACP-side cells still render
+    // (idle `not_started` placeholders here since no channel is up);
+    // only the daemon-host half is empty.
+    const bridge = makeBridge({ statusProvider: undefined });
+
+    const status = await bridge.getWorkspacePreflightStatus();
+    expect(status).toMatchObject({
+      v: 1,
+      workspaceCwd: WS_A,
+      initialized: true,
+      acpChannelLive: false,
+    });
+
+    // No daemon cells; only ACP-side `not_started` placeholders.
+    const daemonCells = status.cells.filter((c) => c.locality === 'daemon');
+    const acpCells = status.cells.filter((c) => c.locality === 'acp');
+    expect(daemonCells).toHaveLength(0);
+    expect(acpCells.length).toBeGreaterThan(0);
+    expect(acpCells.every((c) => c.status === 'not_started')).toBe(true);
+
+    await bridge.shutdown();
+  });
+
+  it('falls back to idle env envelope when statusProvider.getEnvStatus throws', async () => {
+    // PR 22b/2 wenshao [Critical] fold-in: a custom provider that
+    // throws would otherwise propagate past the bridge into the route
+    // handler as a 500. The catch-and-log preserves the
+    // pre-injection invariant that `/workspace/env` always answers,
+    // even when the daemon-host helper is sick.
+    const throwingProvider = {
+      async getEnvStatus(): Promise<never> {
+        throw new Error('boom — env collector crashed');
+      },
+      async getDaemonPreflightCells(): Promise<never[]> {
+        return [];
+      },
+    };
+    const bridge = makeBridge({ statusProvider: throwingProvider });
+
+    const env = await bridge.getWorkspaceEnvStatus();
+    expect(env).toMatchObject({
+      v: 1,
+      workspaceCwd: WS_A,
+      initialized: true,
+      acpChannelLive: false,
+      cells: [],
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('falls back to empty daemon cells when statusProvider.getDaemonPreflightCells throws', async () => {
+    // PR 22b/2 wenshao [Critical] fold-in: parallel to env — a
+    // throwing preflight provider must NOT take down the route, so
+    // the ACP-side cells still render even when the daemon-side
+    // collector is sick.
+    const throwingProvider = {
+      async getEnvStatus(): Promise<never> {
+        throw new Error('unused');
+      },
+      async getDaemonPreflightCells(): Promise<never[]> {
+        throw new Error('boom — preflight collector crashed');
+      },
+    };
+    const bridge = makeBridge({ statusProvider: throwingProvider });
+
+    const status = await bridge.getWorkspacePreflightStatus();
+    expect(status).toMatchObject({
+      v: 1,
+      workspaceCwd: WS_A,
+      initialized: true,
+      acpChannelLive: false,
+    });
+    const daemonCells = status.cells.filter((c) => c.locality === 'daemon');
+    const acpCells = status.cells.filter((c) => c.locality === 'acp');
+    expect(daemonCells).toHaveLength(0);
+    expect(acpCells.length).toBeGreaterThan(0);
 
     await bridge.shutdown();
   });
