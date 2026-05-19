@@ -358,17 +358,27 @@ jobs:
           restore-keys: |
             qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-
 
-      # qwen-code-action installs @qwen-code/qwen-code@latest, which
-      # requires Node >=22. The runner defaults to Node 20 (npm
-      # EBADENGINE in dry-run logs), and the action does not set up
-      # Node itself, so the bundled /review skill stalled. Pin Node 22
-      # before invoking the action.
+      # @qwen-code/qwen-code requires Node >=22; runner default is 20
+      # (npm EBADENGINE). Pin Node 22 before installing/invoking qwen.
       - name: 'Set up Node.js'
         if: |-
           steps.size.outputs.should_review == 'true'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v4
         with:
           node-version: '22'
+
+      # Cache the npm download cache so the global qwen-code install is
+      # offline-fast on subsequent runs (content-addressed; a stale key
+      # only misses the newest tarball, never serves wrong content).
+      - name: 'Cache npm for qwen-code install'
+        if: |-
+          steps.size.outputs.should_review == 'true'
+        uses: 'actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '~/.npm'
+          key: 'qwen-npm-global-${{ runner.os }}-v1'
+          restore-keys: |
+            qwen-npm-global-${{ runner.os }}-
 
       # Direct invocation instead of QwenLM/qwen-code-action.
       # The action wraps the CLI in `QWEN_RESPONSE=$(qwen ...)` command
@@ -391,6 +401,7 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           REVIEW_PROMPT: '${{ steps.pr.outputs.review_prompt }}'
+          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
         run: |-
           set -euo pipefail
 
@@ -408,12 +419,24 @@ jobs:
           qwen --version
           echo "::endgroup::"
 
+          # Dry run: we still want the FULL review the model produces,
+          # streamed into this job log, but nothing posted to GitHub.
+          prompt="$REVIEW_PROMPT"
+          if [ "${SHOULD_COMMENT:-}" != "true" ]; then
+            prompt="${prompt}
+
+          DRY RUN MODE: Produce the complete code review and print it in
+          full to stdout. Do NOT post anything to GitHub — no gh pr
+          comment, no gh pr review, no GitHub API writes, no inline
+          comments. Output only; the maintainer reads it from the CI log."
+          fi
+
           out=qwen-review-output.txt
           # tee -> output streams to the live job log in real time AND is
           # captured for the summary. No $(...) buffering. `timeout`
           # bounds it below the job timeout so a stall exits visibly.
           set +e
-          timeout 50m qwen --yolo --prompt "$REVIEW_PROMPT" 2>&1 | tee "$out"
+          timeout 50m qwen --yolo --prompt "$prompt" 2>&1 | tee "$out"
           status=${PIPESTATUS[0]}
           set -e
 
