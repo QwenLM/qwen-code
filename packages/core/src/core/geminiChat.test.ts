@@ -1400,11 +1400,8 @@ describe('GeminiChat', async () => {
 
       expect(compressSpy).toHaveBeenCalledTimes(1);
       const passedOpts = compressSpy.mock.calls[0][1];
-      // R7.5: the `pendingUserMessage` field was removed from
-      // CompressOptions / TryCompressOptions — it was dead code since
-      // R6.14 removed its only consumer. The real contract sendMessageStream
-      // upholds is "compute effectiveTokens upstream and forward via
-      // precomputedEffectiveTokens", which we pin below.
+      // sendMessageStream's contract: compute effectiveTokens upstream
+      // and forward via precomputedEffectiveTokens.
       expect(passedOpts.precomputedEffectiveTokens).toBeTypeOf('number');
     });
 
@@ -2057,12 +2054,10 @@ describe('GeminiChat', async () => {
       expect(compressSpy).toHaveBeenCalledTimes(1);
       const passedOpts = compressSpy.mock.calls[0][1];
       expect(passedOpts.force).toBe(true);
-      // R6.15: pin the estimation-reuse perf optimization. sendMessageStream
-      // computes effectiveTokens once and passes it through so the service
-      // doesn't redo the work. Catching a regression that drops this field
-      // back to undefined would be otherwise invisible. (R7.5 removed
-      // the now-dead pendingUserMessage forwarding assertions; the real
-      // contract is that the precomputed value lands in opts.)
+      // Pin the estimation-reuse perf optimization: sendMessageStream
+      // computes effectiveTokens once and forwards via
+      // precomputedEffectiveTokens. A regression that drops this field
+      // back to undefined would be otherwise invisible.
       expect(passedOpts.precomputedEffectiveTokens).toBeTypeOf('number');
       expect(passedOpts.precomputedEffectiveTokens).toBeGreaterThanOrEqual(
         177_000,

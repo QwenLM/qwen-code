@@ -480,14 +480,13 @@ export class GeminiChat {
    * and lets reactive overflow take over as the next layer of defence.
    * Any successful compression (rescue or otherwise) resets it to 0.
    *
-   * Accounting (R6.3 / R7.2 / R7.3): incremented **pessimistically** —
-   * before calling `tryCompress` from the hard-rescue path — and only
-   * refunded on a `COMPRESSED` outcome (handled inside `tryCompress`
-   * alongside the `consecutiveFailures` reset). This guarantees the
-   * strike sticks for every non-success shape uniformly, including
-   * thrown exceptions (post-call site unreachable), NOOP returns
-   * (history not compressible), and failure statuses. The earlier
-   * post-call-only pattern silently leaked thrown / NOOP outcomes.
+   * Accounting: incremented **pessimistically** — before calling
+   * `tryCompress` from the hard-rescue path — and only refunded on a
+   * `COMPRESSED` outcome (handled inside `tryCompress` alongside the
+   * `consecutiveFailures` reset). This guarantees the strike sticks for
+   * every non-success shape uniformly: thrown exceptions (post-call
+   * site unreachable), NOOP returns (history not compressible), and
+   * failure statuses.
    */
   private hardRescueFailureCount = 0;
 
@@ -814,30 +813,28 @@ export class GeminiChat {
         this.lastPromptTokenCount,
         imageTokenEstimate,
       );
-      // R6.3 / R7.2 / R7.3: bound hard-rescue retries with pessimistic
-      // accounting. Without a bound, a chat whose history can't shrink
-      // (model consistently produces unusable summaries, network broken,
-      // history too small to split, etc.) would fire hard-rescue on every
-      // send forever — force=true skips the regular consecutiveFailures
-      // increment, and the rescue's own pre-call reset wipes any state
-      // proactive compaction may have accumulated.
+      // Bound hard-rescue retries with pessimistic accounting. Without
+      // a bound, a chat whose history can't shrink (model consistently
+      // produces unusable summaries, network broken, history too small
+      // to split, etc.) would fire hard-rescue on every send forever —
+      // force=true skips the regular consecutiveFailures increment,
+      // and the rescue's own pre-call reset wipes any state proactive
+      // compaction may have accumulated.
       //
       // Pessimistic pattern: increment the rescue strike BEFORE calling
-      // tryCompress, and only reset on COMPRESSED success. This covers
+      // tryCompress, and only refund on COMPRESSED success. Covers
       // every failure-shape uniformly:
-      //   - throw  (provider 5xx / abort)      → strike kept (post-call unreachable)
-      //   - NOOP   (history too small to split) → strike kept (neither branch matched before)
+      //   - throw  (provider 5xx / abort)       → strike kept (post-call unreachable)
+      //   - NOOP   (history too small to split) → strike kept
       //   - failure status                      → strike kept
       //   - COMPRESSED                          → strike refunded
-      // Without the pessimistic increment, throws and NOOPs would silently
-      // leave the counter untouched and the rescue could loop indefinitely.
       const wantHardRescue = effectiveTokens >= hard;
       const shouldForceFromHard =
         wantHardRescue &&
         this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
       if (shouldForceFromHard) {
-        // R6.6 + R7.2 + R7.3: log trigger AND mutate counters before the
-        // call so unreachable post-call paths can't desync state.
+        // Mutate counters BEFORE the call so unreachable post-call
+        // paths can't desync state.
         debugLogger.info(
           `[compaction] hard-tier rescue: effectiveTokens=${effectiveTokens} >= hard=${hard}, ` +
             `forcing compaction (consecutiveFailures ${this.consecutiveFailures} → 0, ` +
@@ -846,9 +843,9 @@ export class GeminiChat {
         this.consecutiveFailures = 0;
         this.hardRescueFailureCount += 1;
       } else if (wantHardRescue) {
-        // R7.7: rescue suppressed because the budget is exhausted. Log
-        // so an oncall debugging "why isn't hard-rescue firing" doesn't
-        // have to reverse-engineer two counters from source. Reactive
+        // Rescue suppressed because the budget is exhausted. Log so an
+        // oncall debugging "why isn't hard-rescue firing" doesn't have
+        // to reverse-engineer two counters from source. Reactive
         // overflow is now the only remaining defence layer.
         debugLogger.warn(
           `[compaction] hard-tier rescue skipped: budget exhausted ` +
@@ -867,11 +864,11 @@ export class GeminiChat {
         },
       );
 
-      // R7.2 / R7.3: post-call diagnostics only. Counter accounting was
-      // resolved by the pre-call pessimistic increment plus the
-      // COMPRESSED success path in `tryCompress` (which resets
-      // `hardRescueFailureCount` to 0 alongside `consecutiveFailures`).
-      // The branches below are observability — no further state mutation.
+      // Post-call diagnostics only. Counter accounting is resolved by
+      // the pre-call pessimistic increment plus the COMPRESSED success
+      // path in `tryCompress` (which resets `hardRescueFailureCount` to
+      // 0 alongside `consecutiveFailures`). The branches below are
+      // observability — no further state mutation.
       if (shouldForceFromHard) {
         if (isCompressionFailureStatus(compressionInfo.compressionStatus)) {
           debugLogger.warn(

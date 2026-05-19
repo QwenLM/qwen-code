@@ -536,12 +536,9 @@ export class ChatCompressionService {
     // violation), the regex returns no match and we fall through to the
     // empty-summary branch — `COMPRESSION_FAILED_EMPTY_SUMMARY` ticks
     // the breaker, the right signal for "model didn't follow format".
-    //
-    // The truncation guard below operates on `isRawEmpty` (not
-    // `isSummaryEmpty`) so the TRUNCATED status remains distinguishable
-    // from EMPTY_SUMMARY in telemetry: a cap-hit with non-empty raw
-    // output (even if the snapshot's closing tag was cut) is a capacity
-    // failure, not a prompt-format failure.
+    // The truncation guard below operates on the raw text (not the
+    // extracted summary) so its TRUNCATED telemetry stays distinct from
+    // EMPTY_SUMMARY when the cap is hit mid-snapshot.
     const rawSummaryText = summaryResult.text;
     const isRawEmpty = !rawSummaryText || rawSummaryText.trim().length === 0;
     const snapshotMatch = rawSummaryText?.match(
@@ -590,22 +587,14 @@ export class ChatCompressionService {
     // (Gemini), but `runSideQuery` doesn't surface it today. Plumb it
     // through and tighten this guard when that's available.
     //
-    // R7.8: reverted R6.2's `>` back to `>=`. With the API hard-capping
-    // output at `COMPACT_MAX_OUTPUT_TOKENS`, the `>` form could never
-    // fire — making the entire guard dead code that silently persisted
-    // truncated summaries as successful compressions. `>=` catches
-    // exactly the case that matters (output landed at the cap, almost
-    // certainly truncated). False-positive risk: a legitimate summary
-    // that hits exactly 20K tokens is conflated with a truncated one.
-    // Per the claude-code reference data the p99 summary is ~17K, so
-    // the false-positive window is extraordinarily narrow; the
-    // COMPRESSION_FAILED_OUTPUT_TRUNCATED breaker bounds the worst
-    // case to 3 strikes before NOOP. The proper fix lives in the
-    // TODO(finish_reason) plumbing above; this is the right interim.
-    // We declined the alternative `>= cap * 0.95` heuristic (R7.8
-    // reviewer suggestion) because it broadens the false-positive
-    // window into the p99-realistic range (~19K) without solving the
-    // root cause — finish_reason is the right signal.
+    // `>=` (not `>`): the API hard-caps output at `COMPACT_MAX_OUTPUT_TOKENS`,
+    // so `>` could never fire. `>=` catches the case that matters
+    // (output landed at the cap → almost certainly truncated). The
+    // false-positive window (a legitimate summary that hits exactly
+    // 20K) is extraordinarily narrow — p99 of real summaries is ~17K
+    // per claude-code data — and the COMPRESSION_FAILED_OUTPUT_TRUNCATED
+    // breaker bounds the worst case to 3 strikes before NOOP. The
+    // proper fix lives in the TODO(finish_reason) plumbing above.
     if (
       !isRawEmpty &&
       typeof compressionOutputTokenCount === 'number' &&
