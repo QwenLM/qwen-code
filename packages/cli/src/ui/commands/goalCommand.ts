@@ -100,7 +100,7 @@ export const goalCommand: SlashCommand = {
   },
   argumentHint: '[<condition> | clear]',
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive'] as const,
+  supportedModes: ['interactive', 'non_interactive'] as const,
   action: async (
     context: CommandContext,
     args: string,

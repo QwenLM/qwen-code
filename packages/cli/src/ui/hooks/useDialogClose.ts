@@ -73,6 +73,10 @@ export interface DialogCloseOptions {
   // Diff dialog
   isDiffDialogOpen?: boolean;
   closeDiffDialog?: () => void;
+
+  // Worktree exit dialog (Phase C)
+  showWorktreeExitDialog?: boolean;
+  closeWorktreeExitDialog?: () => void;
 }
 
 /**
@@ -153,6 +157,15 @@ export function useDialogClose(options: DialogCloseOptions) {
       // Ctrl+C should dismiss the dialog rather than fall through to the
       // exit-prompt path or cancel the (non-existent) request.
       options.closeDiffDialog();
+      return true;
+    }
+
+    if (options.showWorktreeExitDialog && options.closeWorktreeExitDialog) {
+      // WorktreeExitDialog: Ctrl+C / global escape dismisses it (same
+      // semantics as picking Cancel in the dialog). Without this entry
+      // the dialog was only escapable via the Escape key, inconsistent
+      // with the rest of the dialog surface. (PR #4174 review.)
+      options.closeWorktreeExitDialog();
       return true;
     }
 

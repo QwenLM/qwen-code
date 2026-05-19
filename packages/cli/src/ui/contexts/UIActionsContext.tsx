@@ -68,6 +68,10 @@ export interface UIActions {
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;
+  // Worktree exit dialog
+  handleWorktreeExit: (
+    choice: 'keep' | 'remove' | 'cancel',
+  ) => void | Promise<void>;
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;

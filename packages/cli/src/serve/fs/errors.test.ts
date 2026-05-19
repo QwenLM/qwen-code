@@ -20,8 +20,14 @@ describe('FsError', () => {
       ['path_not_found', 404],
       ['binary_file', 422],
       ['file_too_large', 413],
+      ['hash_mismatch', 409],
+      ['file_already_exists', 409],
+      ['text_not_found', 422],
+      ['ambiguous_text_match', 422],
       ['untrusted_workspace', 403],
       ['permission_denied', 403],
+      ['io_error', 503],
+      ['internal_error', 500],
       ['parse_error', 400],
     ];
     for (const [kind, status] of cases) {

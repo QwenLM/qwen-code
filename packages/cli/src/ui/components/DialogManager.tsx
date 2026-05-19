@@ -41,6 +41,7 @@ import process from 'node:process';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { IdeTrustChangeDialog } from './IdeTrustChangeDialog.js';
 import { WelcomeBackDialog } from './WelcomeBackDialog.js';
+import { WorktreeExitDialog } from './WorktreeExitDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
 import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js';
@@ -80,6 +81,19 @@ export const DialogManager = ({
         welcomeBackInfo={uiState.welcomeBackInfo}
         onSelect={uiActions.handleWelcomeBackSelection}
         onClose={uiActions.handleWelcomeBackClose}
+      />
+    );
+  }
+  if (uiState.showWorktreeExitDialog && uiState.activeWorktree) {
+    return (
+      <WorktreeExitDialog
+        slug={uiState.activeWorktree.slug}
+        branch={uiState.activeWorktree.branch}
+        worktreePath={uiState.activeWorktree.path}
+        originalHeadCommit={uiState.activeWorktree.originalHeadCommit}
+        onKeep={() => void uiActions.handleWorktreeExit('keep')}
+        onRemove={() => void uiActions.handleWorktreeExit('remove')}
+        onCancel={() => void uiActions.handleWorktreeExit('cancel')}
       />
     );
   }

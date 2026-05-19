@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { Ignore } from '@qwen-code/qwen-code-core';
 import {
   FS_ACCESS_EVENT_TYPE,
@@ -33,6 +33,7 @@ interface Harness {
 async function makeHarness(opts?: {
   trusted?: boolean;
   ignore?: Ignore;
+  includeRawPaths?: boolean;
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
@@ -46,6 +47,7 @@ async function makeHarness(opts?: {
     trusted: opts?.trusted ?? true,
     emit: (e) => events.push(e),
     ignore: opts?.ignore,
+    includeRawPaths: opts?.includeRawPaths,
   });
   const fs = factory.forRequest({
     originatorClientId: 'client-x',
@@ -57,6 +59,10 @@ async function makeHarness(opts?: {
 
 async function teardown(h: Harness): Promise<void> {
   await fsp.rm(h.scratch, { recursive: true, force: true });
+}
+
+function rawHash(data: string | Buffer): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(data).digest('hex')}`;
 }
 
 describe('WorkspaceFileSystem - resolve and stat', () => {
@@ -113,6 +119,8 @@ describe('WorkspaceFileSystem - readText', () => {
     const out = await h.fs.readText(r);
     expect(out.content).toBe('hello\nworld\n');
     expect(out.meta.lineEnding).toBe('lf');
+    expect(out.meta.sizeBytes).toBe(12);
+    expect(out.meta.hash).toBe(rawHash('hello\nworld\n'));
     expect(out.meta.truncated).toBeUndefined();
   });
 
@@ -197,33 +205,27 @@ describe('WorkspaceFileSystem - readBytes', () => {
     expect(buf[0]).toBe(0xab);
   });
 
-  it('throws file_too_large when file size exceeds the hard MAX_READ_BYTES cap regardless of maxBytes', async () => {
+  it('reads a bounded window from a file larger than MAX_READ_BYTES', async () => {
     const policy = await import('./policy.js');
     const target = path.join(h.workspace, 'huge.bin');
     await fsp.writeFile(target, Buffer.alloc(policy.MAX_READ_BYTES + 1));
     const r = await h.fs.resolve('huge.bin', 'read');
-    const err = await h.fs.readBytes(r).catch((e) => e);
-    expect(isFsError(err)).toBe(true);
-    expect((err as { kind: string }).kind).toBe('file_too_large');
+    const out = await h.fs.readBytesWindow(r, { maxBytes: 16 });
+    expect(out.sizeBytes).toBe(policy.MAX_READ_BYTES + 1);
+    expect(out.returnedBytes).toBe(16);
+    expect(out.truncated).toBe(true);
+    expect(out.hash).toBeUndefined();
   });
 
-  it('readBytes catches concurrent post-stat growth via post-read size check', async () => {
-    // Pre-stat OOM gate sees a small file; post-read buf.length
-    // check catches the same-inode growth case (concurrent
-    // appender keeps the inode but extends past the cap). Test
-    // simulates by overwriting the file AFTER `resolve()` with a
-    // buffer larger than `MAX_READ_BYTES` — the readBytes call's
-    // pre-stat sees the large size and trips the hard cap; the
-    // post-read check is the defense-in-depth path for the case
-    // where stat passed but read picked up more bytes.
-    const policy = await import('./policy.js');
-    const small = path.join(h.workspace, 'grew.bin');
-    await fsp.writeFile(small, Buffer.alloc(64));
-    const r = await h.fs.resolve('grew.bin', 'read');
-    await fsp.writeFile(small, Buffer.alloc(policy.MAX_READ_BYTES + 1));
-    const err = await h.fs.readBytes(r).catch((e) => e);
-    expect(isFsError(err)).toBe(true);
-    expect((err as { kind: string }).kind).toBe('file_too_large');
+  it('readBytesWindow honors byte offsets', async () => {
+    const target = path.join(h.workspace, 'offset.bin');
+    await fsp.writeFile(target, Buffer.from([1, 2, 3, 4, 5, 6]));
+    const r = await h.fs.resolve('offset.bin', 'read');
+    const out = await h.fs.readBytesWindow(r, { offset: 2, maxBytes: 3 });
+    expect(Array.from(out.buffer)).toEqual([3, 4, 5]);
+    expect(out.offset).toBe(2);
+    expect(out.returnedBytes).toBe(3);
+    expect(out.truncated).toBe(true);
   });
 });
 
@@ -250,6 +252,15 @@ describe('WorkspaceFileSystem - list', () => {
     const entries = await h.fs.list(r, { includeIgnored: true });
     const log = entries.find((e) => e.name === 'b.log');
     expect(log?.ignored).toBe(true);
+  });
+
+  it('stops collecting entries once maxEntries is reached', async () => {
+    const r = await h.fs.resolve('.', 'list');
+    const entries = await h.fs.list(r, {
+      includeIgnored: true,
+      maxEntries: 2,
+    });
+    expect(entries).toHaveLength(2);
   });
 });
 
@@ -374,6 +385,52 @@ describe('WorkspaceFileSystem - write/edit', () => {
         (e.data as { intent: string }).intent === 'write',
     );
     expect(access).toBeDefined();
+  });
+
+  it('writeTextAtomic creates a new file and returns a raw-byte hash', async () => {
+    const r = await h.fs.resolve('atomic-new.txt', 'write');
+    const out = await h.fs.writeTextAtomic(r, 'hello\n', {
+      mode: 'create',
+    });
+    expect(out.created).toBe(true);
+    expect(out.sizeBytes).toBe(6);
+    expect(out.hash).toBe(rawHash('hello\n'));
+    expect(await fsp.readFile(r as string, 'utf-8')).toBe('hello\n');
+  });
+
+  it('writeTextAtomic create rejects existing files', async () => {
+    const target = path.join(h.workspace, 'exists.txt');
+    await fsp.writeFile(target, 'old');
+    const r = await h.fs.resolve('exists.txt', 'write');
+    const err = await h.fs
+      .writeTextAtomic(r, 'new', { mode: 'create' })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_already_exists');
+    expect(await fsp.readFile(target, 'utf-8')).toBe('old');
+  });
+
+  it('writeTextAtomic replace requires the current expectedHash', async () => {
+    const target = path.join(h.workspace, 'replace.txt');
+    await fsp.writeFile(target, 'old\n');
+    const r = await h.fs.resolve('replace.txt', 'write');
+    const err = await h.fs
+      .writeTextAtomic(r, 'new\n', {
+        mode: 'replace',
+        expectedHash: rawHash('not current'),
+      })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('hash_mismatch');
+    expect(await fsp.readFile(target, 'utf-8')).toBe('old\n');
+
+    const out = await h.fs.writeTextAtomic(r, 'new\n', {
+      mode: 'replace',
+      expectedHash: rawHash('old\n'),
+    });
+    expect(out.created).toBe(false);
+    expect(out.hash).toBe(rawHash('new\n'));
+    expect(await fsp.readFile(target, 'utf-8')).toBe('new\n');
   });
 
   it('rejects oversize writes with file_too_large', async () => {
@@ -525,6 +582,48 @@ describe('WorkspaceFileSystem - write/edit', () => {
       'file',
     );
   });
+
+  it('editAtomic applies exactly one replacement and returns the new hash', async () => {
+    const target = path.join(h.workspace, 'atomic-edit.txt');
+    await fsp.writeFile(target, 'foo=1\nbar=2\n');
+    const r = await h.fs.resolve('atomic-edit.txt', 'edit');
+    const out = await h.fs.editAtomic(r, 'foo=1', 'foo=42', {
+      expectedHash: rawHash('foo=1\nbar=2\n'),
+    });
+    expect(out.writtenBytes).toBe(Buffer.byteLength('foo=42\nbar=2\n'));
+    expect(out.hash).toBe(rawHash('foo=42\nbar=2\n'));
+    expect(await fsp.readFile(target, 'utf-8')).toBe('foo=42\nbar=2\n');
+  });
+
+  it('editAtomic validates expectedHash against the edited snapshot first', async () => {
+    const target = path.join(h.workspace, 'atomic-edit-stale.txt');
+    await fsp.writeFile(target, 'foo=1\n');
+    const r = await h.fs.resolve('atomic-edit-stale.txt', 'edit');
+    const err = await h.fs
+      .editAtomic(r, 'missing', 'foo=2', {
+        expectedHash: rawHash('different\n'),
+      })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('hash_mismatch');
+    expect(await fsp.readFile(target, 'utf-8')).toBe('foo=1\n');
+  });
+
+  it('editAtomic rejects absent and ambiguous matches with typed errors', async () => {
+    const target = path.join(h.workspace, 'atomic-ambiguous.txt');
+    await fsp.writeFile(target, 'x\nx\n');
+    const r = await h.fs.resolve('atomic-ambiguous.txt', 'edit');
+    const missing = await h.fs
+      .editAtomic(r, 'y', 'z', { expectedHash: rawHash('x\nx\n') })
+      .catch((e: unknown) => e);
+    expect(isFsError(missing)).toBe(true);
+    expect((missing as { kind: string }).kind).toBe('text_not_found');
+    const ambiguous = await h.fs
+      .editAtomic(r, 'x', 'z', { expectedHash: rawHash('x\nx\n') })
+      .catch((e: unknown) => e);
+    expect(isFsError(ambiguous)).toBe(true);
+    expect((ambiguous as { kind: string }).kind).toBe('ambiguous_text_match');
+  });
 });
 
 describe('WorkspaceFileSystem - trust gate', () => {
@@ -670,17 +769,53 @@ describe('WorkspaceFileSystem - TOCTOU + UTF-8 + cwd hardening', () => {
     expect(outsideContent).toBe('foo=1\n');
   });
 
-  it('readBytes opts.maxBytes is clamped to MAX_READ_BYTES (cannot widen past hard cap)', async () => {
+  it('writeTextAtomic does not write through a swapped temporary symlink', async () => {
+    const outside = path.join(h.scratch, 'temp-race-outside.txt');
+    await fsp.writeFile(outside, 'outside\n');
+    const originalOpen = fsp.open.bind(fsp);
+    const openSpy = vi
+      .spyOn(fsp, 'open')
+      .mockImplementation(async (...args) => {
+        const fh = await originalOpen(...args);
+        const candidate = String(args[0]);
+        if (
+          candidate.includes('.temp-race.txt.') &&
+          candidate.endsWith('.tmp') &&
+          args[1] === 'wx'
+        ) {
+          const originalWriteFile = fh.writeFile.bind(fh);
+          vi.spyOn(fh, 'writeFile').mockImplementation(async (...writeArgs) => {
+            await fsp.unlink(candidate);
+            await fsp.symlink(outside, candidate, 'file');
+            return originalWriteFile(...writeArgs);
+          });
+        }
+        return fh;
+      });
+
+    try {
+      const r = await h.fs.resolve('temp-race.txt', 'write');
+      const err = await h.fs
+        .writeTextAtomic(r, 'secret\n', { mode: 'create' })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('symlink_escape');
+      expect(await fsp.readFile(outside, 'utf-8')).toBe('outside\n');
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('readBytes rejects opts.maxBytes above MAX_READ_BYTES', async () => {
     const policy = await import('./policy.js');
     const big = path.join(h.workspace, 'overrun.bin');
     await fsp.writeFile(big, Buffer.alloc(policy.MAX_READ_BYTES + 1));
     const r = await h.fs.resolve('overrun.bin', 'read');
-    // Caller tries to widen past the hard cap.
     const err = await h.fs
       .readBytes(r, { maxBytes: policy.MAX_READ_BYTES * 10 })
       .catch((e: unknown) => e);
     expect(isFsError(err)).toBe(true);
-    expect((err as { kind: string }).kind).toBe('file_too_large');
+    expect((err as { kind: string }).kind).toBe('parse_error');
   });
 });
 
@@ -758,9 +893,12 @@ describe('WorkspaceFileSystem - audit always emits on body errors', () => {
 });
 
 describe('WorkspaceFileSystem - glob escape audit', () => {
+  // `pattern` rides on the same privacy gate as `relPath` /
+  // `message`. Use `includeRawPaths: true` so the orchestrator's
+  // pattern wiring is observable in the test harness.
   let h: Harness;
   beforeEach(async () => {
-    h = await makeHarness();
+    h = await makeHarness({ includeRawPaths: true });
   });
   afterEach(async () => teardown(h));
 
@@ -786,6 +924,77 @@ describe('WorkspaceFileSystem - glob escape audit', () => {
     expect((denied!.data as { hint?: string }).hint).toMatch(
       /\d+ hit\(s\) that resolved outside workspace/,
     );
+    expect((denied!.data as { pattern?: string }).pattern).toBe('*.ts');
+  });
+
+  it('records fs.access with workspace-hashed pathHash and pattern field on glob success (raw-paths mode)', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'one.ts'), 'a');
+    await h.fs.glob('*.ts');
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'glob',
+    );
+    expect(access).toBeDefined();
+    const data = access!.data as { pathHash: string; pattern?: string };
+    expect(data.pattern).toBe('*.ts');
+    // Hash equals sha256(boundWorkspace) sliced to 16 hex chars —
+    // every glob audit row in this workspace shares the same
+    // pathHash, and `pattern` is the per-call signal.
+    const expectedHash = createHash('sha256')
+      .update(h.workspace)
+      .digest('hex')
+      .slice(0, 16);
+    expect(data.pathHash).toBe(expectedHash);
+  });
+
+  it('emits fs.denied with pattern when glob pattern is rejected as parse_error (raw-paths mode)', async () => {
+    await expect(h.fs.glob('../../**')).rejects.toThrow(/'..' segments/);
+    const denied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'glob' &&
+        (e.data as { errorKind: string }).errorKind === 'parse_error',
+    );
+    expect(denied).toBeDefined();
+    expect((denied!.data as { pattern?: string }).pattern).toBe('../../**');
+  });
+});
+
+describe('WorkspaceFileSystem - glob audit privacy default', () => {
+  // Default factory has `includeRawPaths: false`. The orchestrator
+  // still passes the pattern, but the audit publisher must strip it
+  // — same gate as `relPath` / `message`. Locks the privacy regression
+  // surfaced by the round-1 review on PR #4269.
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => teardown(h));
+
+  it('strips pattern from fs.access in privacy default', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'one.ts'), 'a');
+    await h.fs.glob('*.ts');
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'glob',
+    );
+    expect(access).toBeDefined();
+    expect(access!.data).not.toHaveProperty('pattern');
+    expect(access!.data).not.toHaveProperty('relPath');
+  });
+
+  it('strips pattern from fs.denied in privacy default', async () => {
+    await expect(h.fs.glob('../../**')).rejects.toThrow();
+    const denied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'glob' &&
+        (e.data as { errorKind: string }).errorKind === 'parse_error',
+    );
+    expect(denied).toBeDefined();
+    expect(denied!.data).not.toHaveProperty('pattern');
   });
 });
 

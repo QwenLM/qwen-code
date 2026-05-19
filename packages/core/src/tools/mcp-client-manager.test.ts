@@ -2028,3 +2028,558 @@ describe('McpClientManager — PR 14 guardrails', () => {
     expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
   });
 });
+
+// Issue #4175 PR 14b: push events + hysteresis state machine. Kept in
+// its own describe so a future revert of PR 14b drops a single
+// contiguous block. Mirrors PR 14's testing style (mock `McpClient`,
+// fluent `configWithServers` helper). Imports are dynamic to keep
+// the spy on `McpClient` cleanly bound per test (vi.mocked module
+// already mocked at file top).
+describe('McpClientManager — PR 14b push events + hysteresis', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+    delete process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
+  });
+
+  function makeConnectedMcpClientMock() {
+    const state = { status: undefined as unknown };
+    return {
+      connect: vi.fn().mockImplementation(async () => {
+        const { MCPServerStatus } = await import('./mcp-client.js');
+        state.status = MCPServerStatus.CONNECTED;
+      }),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(() => state.status),
+      readResource: vi.fn().mockResolvedValue({ contents: [] }),
+    };
+  }
+
+  function configWithServers(
+    servers: Record<string, unknown>,
+    overrides: Partial<Config> = {},
+  ): Config {
+    return {
+      isTrustedFolder: () => true,
+      getMcpServers: () => servers,
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+      ...overrides,
+    } as unknown as Config;
+  }
+
+  it('exports MCP_BUDGET_REARM_FRACTION = 0.375', async () => {
+    const { MCP_BUDGET_REARM_FRACTION } = await import(
+      './mcp-client-manager.js'
+    );
+    expect(MCP_BUDGET_REARM_FRACTION).toBe(0.375);
+  });
+
+  it('budget_warning fires once on first 75% upward crossing', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    // 4-server config, budget 4, ratio after pass = 4/4 = 1.0 ≥ 0.75
+    // → exactly one warning fires.
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+      c: { command: 'node' },
+      d: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      {
+        clientBudget: 4,
+        budgetMode: 'warn',
+        onBudgetEvent: (e) => events.push(e),
+      },
+    );
+    await manager.discoverAllMcpTools(config);
+    const warnings = events.filter(
+      (e) => (e as { kind: string }).kind === 'budget_warning',
+    );
+    expect(warnings).toHaveLength(1);
+    // PR 14b fix #4 (codex review round 1): hysteresis fires inline on
+    // the upward crossing, so the payload reflects the moment ratio
+    // first hits 0.75 — `reservedCount: 3` (3 of 4 reserved). Pre-fix
+    // the test saw the post-stabilization `reservedCount: 4` because
+    // the standalone end-of-pass `evaluateBudgetState` ran after every
+    // reservation completed.
+    expect(warnings[0]).toMatchObject({
+      kind: 'budget_warning',
+      reservedCount: 3,
+      budget: 4,
+      thresholdRatio: 0.75,
+      mode: 'warn',
+    });
+  });
+
+  it('budget_warning does NOT fire when ratio stays below 75%', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    // 2 of 4 → 0.5 < 0.75 → no fire.
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      {
+        clientBudget: 4,
+        budgetMode: 'warn',
+        onBudgetEvent: (e) => events.push(e),
+      },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(
+      events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
+    ).toEqual([]);
+  });
+
+  it('budget_warning hysteresis re-arms only after dropping below 37.5%', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    // Budget 4. Pass 1: 4/4 = 1.0 fires. Pass 2 after disconnecting
+    // 2 (-> 2/4=0.5, above 37.5%) does NOT re-arm. Pass 3 after
+    // disconnecting one more (-> 1/4=0.25 below 37.5%) re-arms.
+    // Re-arming alone doesn't fire — the next upward crossing fires.
+    let servers: Record<string, unknown> = {
+      a: { command: 'node' },
+      b: { command: 'node' },
+      c: { command: 'node' },
+      d: { command: 'node' },
+    };
+    const cfgGetter = () => servers;
+    const config = configWithServers({}, {
+      getMcpServers: cfgGetter,
+    } as Partial<Config>);
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      {
+        clientBudget: 4,
+        budgetMode: 'warn',
+        onBudgetEvent: (e) => events.push(e),
+      },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(
+      events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
+    ).toHaveLength(1);
+
+    // Drop to 50% via disconnect: 2/4 = 0.5 — above 37.5%, NO re-arm
+    // (warning stays disabled).
+    await manager.disconnectServer('c');
+    await manager.disconnectServer('d');
+    // Force a state evaluation: a successful per-server reconnect path
+    // is the cleanest in-band trigger; emulate one by re-discovering
+    // 'a'. (`evaluateBudgetState` is private — we exercise it via the
+    // public path instead.)
+    await manager.discoverMcpToolsForServer('a', config);
+    expect(
+      events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
+    ).toHaveLength(1); // still 1 — not re-fired
+
+    // Drop to 25% via disconnect — below 37.5% — should re-arm but
+    // not fire yet (re-arming alone doesn't trigger an event).
+    await manager.disconnectServer('b');
+    await manager.discoverMcpToolsForServer('a', config);
+    expect(
+      events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
+    ).toHaveLength(1);
+
+    // Now refill back to 4/4 — re-armed state plus upward crossing
+    // fires the second warning.
+    servers = {
+      a: { command: 'node' },
+      b: { command: 'node' },
+      c: { command: 'node' },
+      d: { command: 'node' },
+    };
+    await manager.discoverAllMcpToolsIncremental(config);
+    expect(
+      events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
+    ).toHaveLength(2);
+  });
+
+  it('off mode never fires budget_warning', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { budgetMode: 'off', onBudgetEvent: (e) => events.push(e) },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(events).toEqual([]);
+  });
+
+  it('refused_batch coalesces multi-refusal into one event per pass', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    // budget 1, 3 servers → a connects, b+c refused.
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { httpUrl: 'http://b' },
+      c: { url: 'http://c' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      {
+        clientBudget: 1,
+        budgetMode: 'enforce',
+        onBudgetEvent: (e) => events.push(e),
+      },
+    );
+    await manager.discoverAllMcpTools(config);
+    const batches = events.filter(
+      (e) => (e as { kind: string }).kind === 'refused_batch',
+    );
+    expect(batches).toHaveLength(1);
+    expect(batches[0]).toMatchObject({
+      kind: 'refused_batch',
+      budget: 1,
+      mode: 'enforce',
+      refusedServers: [
+        { name: 'b', transport: 'http', reason: 'budget_exhausted' },
+        { name: 'c', transport: 'sse', reason: 'budget_exhausted' },
+      ],
+    });
+  });
+
+  it('refused_batch does NOT fire when no servers are refused', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      {
+        clientBudget: 5,
+        budgetMode: 'enforce',
+        onBudgetEvent: (e) => events.push(e),
+      },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(
+      events.filter((e) => (e as { kind: string }).kind === 'refused_batch'),
+    ).toEqual([]);
+  });
+
+  it('readResource refusal emits a length-1 refused_batch then throws', async () => {
+    const { BudgetExhaustedError } = await import('./mcp-client-manager.js');
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      {
+        clientBudget: 1,
+        budgetMode: 'enforce',
+        onBudgetEvent: (e) => events.push(e),
+      },
+    );
+    // First pass fills the budget with `a`. `b` is refused — that's
+    // the bulk refusal (length-1 batch).
+    await manager.discoverAllMcpTools(config);
+    // Clear bulk events so the assertion below tracks only the
+    // readResource path.
+    events.length = 0;
+    // Now lazy-spawn against b — slot full, throws + emits a
+    // length-1 batch.
+    await expect(manager.readResource('b', 'mcp://b/resource')).rejects.toThrow(
+      BudgetExhaustedError,
+    );
+    const batches = events.filter(
+      (e) => (e as { kind: string }).kind === 'refused_batch',
+    );
+    expect(batches).toHaveLength(1);
+    expect(batches[0]).toMatchObject({
+      kind: 'refused_batch',
+      mode: 'enforce',
+      refusedServers: [
+        { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+      ],
+    });
+  });
+
+  it('off-mode constructor strips onBudgetEvent (defense in depth)', async () => {
+    // Off-mode never runs the state machine; the constructor stashes
+    // `undefined` for `onBudgetEvent` so even a stray internal call
+    // can't fire. Verified externally by observing that no events
+    // arrive.
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { budgetMode: 'off', onBudgetEvent: (e) => events.push(e) },
+    );
+    await manager.discoverAllMcpTools(config);
+    // Force discovery refusal would be impossible in off mode (no
+    // budget). Disconnect-then-rediscover also no-ops the state
+    // machine. End-to-end no events.
+    await manager.disconnectServer('a');
+    await manager.discoverMcpToolsForServer('a', config);
+    expect(events).toEqual([]);
+  });
+
+  it('refused_batch transports preserve the per-server family at refusal time', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    // Mixed transports refused; budget 1 admits the first only.
+    const config = configWithServers({
+      a: { command: 'node' }, // stdio (admitted)
+      b: { httpUrl: 'http://b' }, // http (refused)
+      c: { url: 'http://c' }, // sse (refused)
+      d: { tcp: 'ws://d' }, // websocket (refused)
+      e: { type: 'sdk', command: 'sdk' }, // sdk (refused)
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      {
+        clientBudget: 1,
+        budgetMode: 'enforce',
+        onBudgetEvent: (e) => events.push(e),
+      },
+    );
+    await manager.discoverAllMcpTools(config);
+    const batches = events.filter(
+      (e) => (e as { kind: string }).kind === 'refused_batch',
+    ) as Array<{ refusedServers: Array<{ name: string; transport: string }> }>;
+    expect(batches).toHaveLength(1);
+    expect(
+      batches[0].refusedServers.map((r) => `${r.name}:${r.transport}`),
+    ).toEqual(['b:http', 'c:sse', 'd:websocket', 'e:sdk']);
+  });
+
+  it('warn mode never emits refused_batch (only enforce refuses)', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+      c: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      {
+        clientBudget: 1,
+        budgetMode: 'warn',
+        onBudgetEvent: (e) => events.push(e),
+      },
+    );
+    await manager.discoverAllMcpTools(config);
+    // warn mode: no refusals, but the warning may fire (3/1 ratio crosses 0.75).
+    expect(
+      events.filter((e) => (e as { kind: string }).kind === 'refused_batch'),
+    ).toEqual([]);
+  });
+
+  it('stop() re-arms the warning state machine for the next session', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+      c: { command: 'node' },
+      d: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      {
+        clientBudget: 4,
+        budgetMode: 'warn',
+        onBudgetEvent: (e) => events.push(e),
+      },
+    );
+    await manager.discoverAllMcpTools(config);
+    // First crossing fired one warning.
+    expect(
+      events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
+    ).toHaveLength(1);
+    // stop() resets state. Next discovery pass that crosses 75%
+    // fires anew. discoverAllMcpTools internally calls stop() at
+    // the top, so calling it again is sufficient.
+    await manager.discoverAllMcpTools(config);
+    expect(
+      events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
+    ).toHaveLength(2);
+  });
+
+  it('discoverAllMcpToolsIncremental coalesces multi-server refusals into ONE batch (codex review fix #3)', async () => {
+    // Codex review round 1, finding #3: pre-fix, when
+    // `discoverAllMcpToolsIncremental` walked N new servers and the
+    // budget was full, each per-server refusal called
+    // `emitRefusedBatchIfAny` inline → N length-1 batch events
+    // instead of 1 length-N batch. This test pins the documented
+    // "one batch per pass" contract via the `bulkPassDepth` guard.
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    // Budget 1, 4 servers — 1 admitted, 3 refused. Pre-fix this
+    // produced 3 length-1 batches via `discoverMcpToolsForServer` →
+    // `discoverMcpToolsForServerInternal`. Post-fix: 1 length-3 batch.
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+      c: { command: 'node' },
+      d: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      {
+        clientBudget: 1,
+        budgetMode: 'enforce',
+        onBudgetEvent: (e) => events.push(e),
+      },
+    );
+    await manager.discoverAllMcpToolsIncremental(config);
+    const batches = events.filter(
+      (e) => (e as { kind: string }).kind === 'refused_batch',
+    ) as Array<{ refusedServers: Array<{ name: string }> }>;
+    // Strict invariant: ONE batch event, not N.
+    expect(batches).toHaveLength(1);
+    expect(batches[0].refusedServers.map((r) => r.name)).toEqual([
+      'b',
+      'c',
+      'd',
+    ]);
+  });
+
+  it('disconnectServer drives the hysteresis re-arm path (codex review fix #4)', async () => {
+    // Codex review round 1, finding #4: pre-fix `disconnectServer` /
+    // `removeServer` deleted from `reservedSlots` without invoking
+    // `evaluateBudgetState`, so `warnArmed` stayed `false` after a
+    // 75% fire even though the ratio dropped below 37.5%. This test
+    // exercises the operator-driven release path: 4/4 → fire #1 →
+    // disconnect 3 servers (1/4, below re-arm) → reconnect 3 → 4/4
+    // → fire #2. Pre-fix: only one fire. Post-fix: two fires.
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const events: unknown[] = [];
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+      c: { command: 'node' },
+      d: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      {
+        clientBudget: 4,
+        budgetMode: 'warn',
+        onBudgetEvent: (e) => events.push(e),
+      },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(
+      events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
+    ).toHaveLength(1);
+    // Drop to 1/4 via operator disconnects — each release crosses
+    // through 0.75 → 0.5 → 0.25, the last one crossing 37.5% inline
+    // re-arms `warnArmed` via `releaseSlotName`'s evaluate.
+    await manager.disconnectServer('b');
+    await manager.disconnectServer('c');
+    await manager.disconnectServer('d');
+    // Reconnect via direct discoverMcpToolsForServer (bypasses
+    // discoverAllMcpTools' bulk-pass reset, exercises the re-armed
+    // state through inline `tryReserveSlot` evaluate calls).
+    await manager.discoverMcpToolsForServer('b', config);
+    await manager.discoverMcpToolsForServer('c', config);
+    // 3/4 = 0.75 — fire #2.
+    expect(
+      events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
+    ).toHaveLength(2);
+  });
+});

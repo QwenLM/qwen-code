@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "baseUrl": ".",
+    "lib": ["ES2023"],
+    "composite": true,
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@qwen-code/qwen-code-core": ["../core/src/index.ts"],
+      "@qwen-code/qwen-code-core/*": ["../core/src/*"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"],
+  "references": [{ "path": "../core" }]
+}

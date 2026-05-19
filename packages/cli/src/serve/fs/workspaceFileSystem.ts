@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash, randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
 import { glob as globAsync } from 'glob';
@@ -18,6 +19,9 @@ import { glob as globAsync } from 'glob';
 
 import {
   StandardFileSystemService,
+  decodeBufferWithEncodingInfo,
+  detectLineEnding,
+  encodeTextFileContent,
   loadIgnoreRules,
   isWithinRoot,
   type Ignore,
@@ -40,7 +44,6 @@ import {
   MAX_READ_BYTES,
   assertTrustedForIntent,
   detectBinary,
-  enforceReadBytesSize,
   enforceReadSize,
   enforceWriteSize,
   shouldIgnore,
@@ -71,6 +74,8 @@ export interface ReadMeta {
   encoding?: string;
   bom?: boolean;
   lineEnding: 'crlf' | 'lf';
+  sizeBytes?: number;
+  hash?: ContentHash;
   truncated?: boolean;
   matchedIgnore?: 'file' | 'directory';
   originalLineCount?: number;
@@ -94,6 +99,8 @@ export interface ReadTextOptions {
 export interface ListOptions {
   /** When true, ignored entries are returned with `ignored: true` rather than dropped. */
   includeIgnored?: boolean;
+  /** Stop after this many returned entries have been collected. */
+  maxEntries?: number;
 }
 
 export interface GlobOptions {
@@ -102,8 +109,44 @@ export interface GlobOptions {
   maxResults?: number;
 }
 
+export type ContentHash = `sha256:${string}`;
+
+export interface ReadBytesOptions {
+  /** Zero-based byte offset. */
+  offset?: number;
+  /** Maximum bytes to return; defaults to MAX_READ_BYTES. */
+  maxBytes?: number;
+}
+
+export interface ReadBytesOutcome {
+  buffer: Buffer;
+  sizeBytes: number;
+  returnedBytes: number;
+  offset: number;
+  truncated: boolean;
+  /** Present only when the returned window covers the whole file. */
+  hash?: ContentHash;
+}
+
+export type WriteMode = 'create' | 'replace';
+
+export interface WriteTextAtomicOptions extends WriteTextFileOptions {
+  mode: WriteMode;
+  expectedHash?: ContentHash;
+  lineEnding?: 'crlf' | 'lf';
+}
+
+export interface WriteTextAtomicOutcome {
+  created: boolean;
+  sizeBytes: number;
+  hash: ContentHash;
+  meta: ReadMeta;
+}
+
 export interface WriteOutcome {
   writtenBytes: number;
+  hash?: ContentHash;
+  meta?: ReadMeta;
 }
 
 export interface RequestContext extends AuditContext {
@@ -123,9 +166,18 @@ export interface WorkspaceFileSystem {
     p: ResolvedPath,
     opts?: ReadTextOptions,
   ): Promise<{ content: string; meta: ReadMeta }>;
-  readBytes(p: ResolvedPath, opts?: { maxBytes?: number }): Promise<Buffer>;
+  readBytes(p: ResolvedPath, opts?: ReadBytesOptions): Promise<Buffer>;
+  readBytesWindow(
+    p: ResolvedPath,
+    opts?: ReadBytesOptions,
+  ): Promise<ReadBytesOutcome>;
   list(p: ResolvedPath, opts?: ListOptions): Promise<FsEntry[]>;
   glob(pattern: string, opts?: GlobOptions): Promise<ResolvedPath[]>;
+  writeTextAtomic(
+    p: ResolvedPath,
+    content: string,
+    opts: WriteTextAtomicOptions,
+  ): Promise<WriteTextAtomicOutcome>;
   writeText(
     p: ResolvedPath,
     content: string,
@@ -135,6 +187,13 @@ export interface WorkspaceFileSystem {
     p: ResolvedPath,
     oldText: string,
     newText: string,
+    opts?: { expectedHash?: ContentHash },
+  ): Promise<WriteOutcome>;
+  editAtomic(
+    p: ResolvedPath,
+    oldText: string,
+    newText: string,
+    opts: { expectedHash: ContentHash },
   ): Promise<WriteOutcome>;
 }
 
@@ -200,6 +259,7 @@ export function createWorkspaceFileSystemFactory(
     includeRawPaths: deps.includeRawPaths,
   });
   const lowFs = new StandardFileSystemService();
+  const pathLocks = new PathMutexRegistry();
 
   return {
     forRequest(ctx) {
@@ -210,6 +270,7 @@ export function createWorkspaceFileSystemFactory(
         audit,
         ctx,
         lowFs,
+        pathLocks,
       });
     },
   };
@@ -222,6 +283,7 @@ interface ImplDeps {
   audit: AuditPublisher;
   ctx: RequestContext;
   lowFs: StandardFileSystemService;
+  pathLocks: PathMutexRegistry;
 }
 
 class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
@@ -268,35 +330,6 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'read');
-      const st = await fsp.stat(p as string);
-      // Hard size gate before we delegate to lowFs.readTextFile —
-      // that helper's underlying `readFileWithLineAndLimit` slurps
-      // the whole file into memory before slicing lines, so an
-      // unbounded request against a 5 GB text file would OOM the
-      // daemon (or, on a healthy host, flood the SSE replay ring
-      // with a 5 GB string). `MAX_READ_BYTES` is the hard cap and
-      // is independent of the caller's `opts.maxBytes` (which is a
-      // *softer* post-read truncation target — the boundary still
-      // honors it via `enforceReadSize` below). A future streaming
-      // read path can lift this hard cap by reading only the first
-      // N bytes; for now files above the cap throw and the SDK
-      // consumer can fall back to `readBytes` with an explicit
-      // length window.
-      if (st.size > MAX_READ_BYTES) {
-        throw new FsError(
-          'file_too_large',
-          `file of ${st.size} bytes exceeds read cap of ${MAX_READ_BYTES} bytes`,
-          {
-            hint: 'use readBytes for explicit byte-windowed access on large files',
-          },
-        );
-      }
-      if (await detectBinary(p)) {
-        throw new FsError('binary_file', `binary file: ${p}`, {
-          hint: 'use readBytes for binary content',
-        });
-      }
-      const sizeOutcome = enforceReadSize(st.size, opts.maxBytes);
       // Reject `opts.line` values that the docstring forbids
       // (positive integer required). Without this guard `Infinity`
       // (`Infinity > 1` is true; `Infinity - 1` is still
@@ -314,97 +347,24 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           `line must be a positive integer, got ${opts.line}`,
         );
       }
-      // Delegate encoding-aware read to the existing core service so
-      // BOM, CRLF, and iconv-supported codepages remain consistent
-      // with what the tools layer already does. The core service's
-      // `line` parameter is a 0-based slice index whereas the
-      // boundary's public `ReadTextOptions.line` is 1-based (the
-      // convention SDK consumers expect from line-numbered errors,
-      // editor jump-to-line, etc.). Convert here so the public
-      // contract isn't tied to the internal helper's indexing.
-      const startLineIndex = opts.line !== undefined ? opts.line - 1 : 0;
-      const result = await this.deps.lowFs.readTextFile({
-        path: p as string,
-        limit: opts.limit ?? Number.POSITIVE_INFINITY,
-        line: startLineIndex,
-      });
-      // Post-read size sanity check. The pre-stat `MAX_READ_BYTES`
-      // gate above sees the file's size at stat time; a concurrent
-      // writer can grow the file from sub-cap to multi-GB between
-      // `fsp.stat` and `lowFs.readTextFile`'s underlying
-      // `fs.promises.readFile`. `readFileWithLineAndLimit` slurps
-      // the whole file into memory before slicing, so the stat
-      // gate alone is bypassable. Reject post-read if the
-      // returned content exceeds the cap. The proper fix is
-      // fd-based reading (open + stat + read tied to the same fd)
-      // — tracked as a hardening follow-up; this byte-length
-      // check is the defense-in-depth layer.
-      const decodedBytes = Buffer.byteLength(result.content, 'utf-8');
-      if (decodedBytes > MAX_READ_BYTES) {
-        throw new FsError(
-          'file_too_large',
-          `file grew during read to ${decodedBytes} bytes (cap ${MAX_READ_BYTES})`,
-          {
-            hint: 'concurrent writer detected via post-read size; retry or readBytes with explicit window',
-          },
-        );
-      }
+      const snapshot = await readTextSnapshotFromResolvedFile(p, opts);
       const ignoreVerdict = shouldIgnore(
         p,
         this.deps.boundWorkspace,
         this.deps.ignore,
         'file',
       );
-      const meta: ReadMeta = {
-        encoding: result._meta?.encoding,
-        bom: result._meta?.bom,
-        lineEnding: (result._meta?.lineEnding ?? 'lf') as 'crlf' | 'lf',
-        originalLineCount: result._meta?.originalLineCount,
-      };
-      let truncatedContent = result.content;
-      if (sizeOutcome.truncated) {
-        // Use `safeUtf8Truncate` instead of `subarray(0,n).toString('utf-8')`
-        // so the slice never splits a multi-byte codepoint (CJK,
-        // emoji). The plain `subarray + toString` approach silently
-        // emits U+FFFD at the boundary and breaks downstream JSON /
-        // source-code parsing of the truncated prefix.
-        const buf = Buffer.from(result.content, 'utf-8');
-        if (buf.length > sizeOutcome.bytesToRead) {
-          truncatedContent = safeUtf8Truncate(
-            buf,
-            sizeOutcome.bytesToRead,
-          ).toString('utf-8');
-        }
-        meta.truncated = true;
-      }
-      // Surface truncation whenever lowFs's own `limit` clipped the
-      // content too — without this the audit row + meta.truncated
-      // would silently disagree on whether the SDK consumer received
-      // the full file.
-      if (
-        opts.limit !== undefined &&
-        Number.isFinite(opts.limit) &&
-        result._meta?.originalLineCount !== undefined &&
-        result._meta.originalLineCount > opts.limit + startLineIndex
-      ) {
-        meta.truncated = true;
-      }
+      const meta = snapshot.meta;
       if (ignoreVerdict.ignored) meta.matchedIgnore = ignoreVerdict.category;
-      // Post-read TOCTOU check: confirm the path's inode hasn't
-      // changed and it isn't now a symlink. Catches the
-      // swap-during-read attack where the file is replaced
-      // mid-operation with a symlink pointing outside the
-      // workspace.
-      await assertInodeStableAfterRead(p as string, st.ino);
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'read',
         absolute: p,
         durationMs: performance.now() - start,
-        sizeBytes: st.size,
+        sizeBytes: meta.sizeBytes,
         truncated: meta.truncated,
         matchedIgnore: meta.matchedIgnore,
       });
-      return { content: truncatedContent, meta };
+      return { content: snapshot.content, meta };
     } catch (err) {
       throw this.recordAndWrap(err, 'read', p as string);
     }
@@ -412,56 +372,92 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
 
   async readBytes(
     p: ResolvedPath,
-    opts: { maxBytes?: number } = {},
+    opts: ReadBytesOptions = {},
   ): Promise<Buffer> {
+    const out = await this.readBytesWindow(p, opts);
+    return out.buffer;
+  }
+
+  async readBytesWindow(
+    p: ResolvedPath,
+    opts: ReadBytesOptions = {},
+  ): Promise<ReadBytesOutcome> {
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'read');
-      const st = await fsp.stat(p as string);
-      // Hard cap (file size > MAX_READ_BYTES) always throws; this
-      // is the OOM defense that's independent of caller-supplied
-      // `maxBytes`.
-      enforceReadBytesSize(st.size);
-      let buf = await fsp.readFile(p as string);
-      // Post-read size sanity check — same TOCTOU window as
-      // `readText` (concurrent appender keeps the same inode, so
-      // `assertInodeStableAfterRead` doesn't catch *growth*).
-      // The pre-stat gate sees the size at stat time; an attacker
-      // can grow the file from sub-cap to multi-GB between
-      // `fsp.stat` and `fsp.readFile`, OOMing the daemon. Reject
-      // post-read if the buffer ended up over the hard cap. The
-      // proper fix (fd-based read with `fileHandle.stat` +
-      // bounded `fileHandle.read`) is a hardening follow-up.
-      if (buf.length > MAX_READ_BYTES) {
+      const offset = opts.offset ?? 0;
+      const maxBytes = opts.maxBytes ?? MAX_READ_BYTES;
+      if (!Number.isSafeInteger(offset) || offset < 0) {
         throw new FsError(
-          'file_too_large',
-          `file grew during read to ${buf.length} bytes (cap ${MAX_READ_BYTES})`,
-          {
-            hint: 'concurrent writer detected via post-read size; retry or readText for capped truncation',
-          },
+          'parse_error',
+          `offset must be a non-negative integer, got ${offset}`,
         );
       }
-      // Soft cap: caller's `opts.maxBytes` is a window cap matching
-      // the parameter name's promise. Earlier semantics treated
-      // it as a "reject if file > maxBytes" gate, which violated
-      // the API contract — a caller asking for `maxBytes: 1024`
-      // on a 200 KB file expected to receive 1 KB, not an
-      // exception. We now truncate post-read so the returned
-      // buffer never exceeds `opts.maxBytes`. The hard
-      // `MAX_READ_BYTES` cap above ensures the underlying
-      // `fsp.readFile` allocation is bounded regardless.
-      if (opts.maxBytes !== undefined && opts.maxBytes < buf.length) {
-        buf = buf.subarray(0, opts.maxBytes);
+      if (
+        !Number.isSafeInteger(maxBytes) ||
+        maxBytes < 1 ||
+        maxBytes > MAX_READ_BYTES
+      ) {
+        throw new FsError(
+          'parse_error',
+          `maxBytes must be a positive integer in [1, ${MAX_READ_BYTES}], got ${maxBytes}`,
+        );
       }
-      // Post-read TOCTOU guard — same shape as `readText`.
+      const pre = await fsp.lstat(p as string);
+      if (!pre.isFile()) {
+        throw new FsError('parse_error', `path is not a regular file: ${p}`);
+      }
+      const fh = await fsp.open(p as string, 'r');
+      let st: Awaited<ReturnType<typeof fh.stat>>;
+      let buf: Buffer;
+      try {
+        st = await fh.stat();
+        assertSameFile(pre, st, p as string, 'read');
+        const available = Math.max(0, st.size - offset);
+        const toRead = Math.min(maxBytes, available);
+        buf = Buffer.allocUnsafe(toRead);
+        if (toRead > 0) {
+          const read = await fh.read(buf, 0, toRead, offset);
+          buf =
+            read.bytesRead === toRead ? buf : buf.subarray(0, read.bytesRead);
+        }
+        // Bind the returned bytes to a stable on-disk snapshot: an
+        // in-place rewrite (size unchanged, content changed) or
+        // append/truncate between the pre-stat and read would
+        // otherwise leave us with a buffer that no longer matches
+        // the file. Mirror `readStableRegularFileBuffer` and require
+        // ino+size+mtime to be unchanged on the same fd before
+        // emitting the response — clients use the full-window hash
+        // as an optimistic-concurrency token, so a stale snapshot
+        // must surface as a retryable `hash_mismatch`.
+        const afterRead = await fh.stat();
+        assertSameFile(st, afterRead, p as string, 'read');
+        if (afterRead.size !== st.size || afterRead.mtimeMs !== st.mtimeMs) {
+          throw new FsError('hash_mismatch', `file changed during read: ${p}`, {
+            hint: 'retry after re-reading the latest file hash',
+          });
+        }
+      } finally {
+        await fh.close();
+      }
       await assertInodeStableAfterRead(p as string, st.ino);
+      const fullWindow = offset === 0 && buf.length === st.size;
+      const out: ReadBytesOutcome = {
+        buffer: buf,
+        sizeBytes: st.size,
+        returnedBytes: buf.length,
+        offset,
+        truncated: !fullWindow,
+        ...(fullWindow ? { hash: hashBuffer(buf) } : {}),
+      };
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'read',
         absolute: p,
         durationMs: performance.now() - start,
         sizeBytes: buf.length,
+        truncated: out.truncated,
       });
-      return buf;
+      return out;
     } catch (err) {
       throw this.recordAndWrap(err, 'read', p as string);
     }
@@ -471,9 +467,9 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'list');
-      const dirents = await fsp.readdir(p as string, { withFileTypes: true });
       const entries: FsEntry[] = [];
-      for (const d of dirents) {
+      const dir = await fsp.opendir(p as string);
+      for await (const d of dir) {
         // `path.join(p, d.name)` is a shallow extension of an
         // already-canonical workspace path. Symlinked dirents are
         // tagged as `kind: 'symlink'` rather than auto-followed —
@@ -490,12 +486,20 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         );
         if (verdict.ignored && !opts.includeIgnored) continue;
         entries.push({ name: d.name, kind, ignored: verdict.ignored });
+        if (
+          opts.maxEntries !== undefined &&
+          entries.length >= opts.maxEntries
+        ) {
+          break;
+        }
       }
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'list',
         absolute: p,
         durationMs: performance.now() - start,
         sizeBytes: entries.length,
+        truncated:
+          opts.maxEntries !== undefined && entries.length >= opts.maxEntries,
       });
       return entries;
     } catch (err) {
@@ -681,6 +685,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           input: pattern,
           errorKind: 'symlink_escape',
           hint: `glob filtered ${escapedCount} hit(s) that resolved outside workspace`,
+          pattern,
         });
       }
       if (permissionErrorCount > 0) {
@@ -689,6 +694,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           input: pattern,
           errorKind: 'permission_denied',
           hint: `glob skipped ${permissionErrorCount} hit(s) due to EACCES/EPERM`,
+          pattern,
         });
       }
       if (transientErrorCount > 0) {
@@ -704,17 +710,86 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           // mappings).
           errorKind: 'io_error',
           hint: `glob skipped ${transientErrorCount} hit(s) due to transient I/O errors (EIO/EBUSY/ENAMETOOLONG/EMFILE)`,
+          pattern,
         });
       }
+      // `absolute: boundWorkspace` (rather than `cwd`) ties every
+      // glob audit row's `pathHash` to the workspace itself.
+      // Hashing `cwd` made each per-subdirectory glob produce a
+      // distinct hash with no operator-actionable difference (the
+      // raw path is privacy-gated). The literal `pattern` field is
+      // the per-call signal; `pathHash` is the workspace marker
+      // operators correlate across audit rows. Follow-up #4 from
+      // PR #4250.
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'glob',
-        absolute: cwd as ResolvedPath,
+        absolute: this.deps.boundWorkspace,
         durationMs: performance.now() - start,
         sizeBytes: out.length,
+        pattern,
       });
       return out;
     } catch (err) {
       throw this.recordAndWrap(err, 'glob', pattern);
+    }
+  }
+
+  async writeTextAtomic(
+    p: ResolvedPath,
+    content: string,
+    opts: WriteTextAtomicOptions,
+  ): Promise<WriteTextAtomicOutcome> {
+    const start = performance.now();
+    try {
+      assertTrustedForIntent(this.deps.trusted, 'write');
+      validateWriteTextAtomicOptions(opts);
+      const decodedSizeBytes = Buffer.byteLength(content, 'utf-8');
+      enforceWriteSize(decodedSizeBytes);
+      const out = await this.deps.pathLocks.runExclusive(
+        p as string,
+        async () => {
+          const existingMeta =
+            opts.mode === 'replace'
+              ? await readExistingTextMeta(p, opts.expectedHash)
+              : undefined;
+          if (opts.mode === 'create') {
+            await assertCreateTargetAbsent(p as string);
+          }
+          const meta = mergeWriteMeta(existingMeta, opts);
+          const result = await atomicWriteTextResolvedFile({
+            target: p,
+            content,
+            mode: opts.mode,
+            expectedHash: opts.expectedHash,
+            meta,
+          });
+          const verdict = shouldIgnore(
+            p,
+            this.deps.boundWorkspace,
+            this.deps.ignore,
+            'file',
+          );
+          if (verdict.ignored) meta.matchedIgnore = verdict.category;
+          meta.sizeBytes = result.sizeBytes;
+          meta.hash = result.hash;
+          this.deps.audit.recordAccess(this.deps.ctx, {
+            intent: 'write',
+            absolute: p,
+            durationMs: performance.now() - start,
+            sizeBytes: result.sizeBytes,
+            matchedIgnore: meta.matchedIgnore,
+          });
+          return {
+            created: opts.mode === 'create',
+            sizeBytes: result.sizeBytes,
+            hash: result.hash,
+            meta,
+          };
+        },
+      );
+      return out;
+    } catch (err) {
+      throw this.recordAndWrap(err, 'write', p as string);
     }
   }
 
@@ -763,11 +838,113 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     }
   }
 
+  async editAtomic(
+    p: ResolvedPath,
+    oldText: string,
+    newText: string,
+    opts: { expectedHash: ContentHash },
+  ): Promise<WriteOutcome> {
+    const start = performance.now();
+    try {
+      assertTrustedForIntent(this.deps.trusted, 'edit');
+      if (!isContentHash(opts.expectedHash)) {
+        throw new FsError(
+          'parse_error',
+          'expectedHash must match sha256:<64 lowercase hex chars>',
+        );
+      }
+      if (typeof oldText !== 'string' || oldText.length === 0) {
+        throw new FsError(
+          'parse_error',
+          `oldText must be a non-empty string for edit on ${p}`,
+        );
+      }
+      if (typeof newText !== 'string') {
+        throw new FsError('parse_error', 'newText must be a string');
+      }
+      const out = await this.deps.pathLocks.runExclusive(
+        p as string,
+        async () => {
+          const snapshot = await readTextSnapshotFromResolvedFile(p);
+          if (snapshot.meta.hash !== opts.expectedHash) {
+            throw new FsError(
+              'hash_mismatch',
+              `expected ${opts.expectedHash}, found ${snapshot.meta.hash}`,
+              { hint: 're-read the file and retry with the latest hash' },
+            );
+          }
+          const current = snapshot.content;
+          const occurrences = countOccurrences(current, oldText);
+          if (occurrences === 0) {
+            const snippet =
+              oldText.length > 80 ? oldText.slice(0, 80) + '...' : oldText;
+            throw new FsError('text_not_found', `oldText not found in ${p}`, {
+              hint: `searched for: ${JSON.stringify(snippet)}`,
+            });
+          }
+          if (occurrences > 1) {
+            throw new FsError(
+              'ambiguous_text_match',
+              `oldText appears ${occurrences} times in ${p}`,
+              {
+                hint: 'pass a larger oldText span that occurs exactly once',
+              },
+            );
+          }
+          const idx = current.indexOf(oldText);
+          const next =
+            current.slice(0, idx) +
+            newText +
+            current.slice(idx + oldText.length);
+          enforceWriteSize(Buffer.byteLength(next, 'utf-8'));
+          const meta = mergeWriteMeta(snapshot.meta, {});
+          const result = await atomicWriteTextResolvedFile({
+            target: p,
+            content: next,
+            mode: 'replace',
+            expectedHash: opts.expectedHash,
+            meta,
+          });
+          const verdict = shouldIgnore(
+            p,
+            this.deps.boundWorkspace,
+            this.deps.ignore,
+            'file',
+          );
+          if (verdict.ignored) meta.matchedIgnore = verdict.category;
+          meta.sizeBytes = result.sizeBytes;
+          meta.hash = result.hash;
+          this.deps.audit.recordAccess(this.deps.ctx, {
+            intent: 'edit',
+            absolute: p,
+            durationMs: performance.now() - start,
+            sizeBytes: result.sizeBytes,
+            matchedIgnore: meta.matchedIgnore,
+          });
+          return {
+            writtenBytes: result.sizeBytes,
+            hash: result.hash,
+            meta,
+          };
+        },
+      );
+      return out;
+    } catch (err) {
+      throw this.recordAndWrap(err, 'edit', p as string);
+    }
+  }
+
   async edit(
     p: ResolvedPath,
     oldText: string,
     newText: string,
+    opts?: { expectedHash?: ContentHash },
   ): Promise<WriteOutcome> {
+    if (opts?.expectedHash !== undefined) {
+      return this.editAtomic(p, oldText, newText, {
+        expectedHash: opts.expectedHash,
+      });
+    }
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'edit');
@@ -920,8 +1097,644 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // actual cause (errno text, byte counts, glob pattern,
       // etc.) rather than just `errorKind` + `hint`.
       message: fs.message,
+      // For glob denials (parse_error pattern rejection,
+      // catastrophic walk failures) the input IS the pattern
+      // already; surfacing it on the dedicated `pattern` field
+      // keeps the schema parallel with successful `recordAccess`
+      // glob rows so consumers can `data.pattern` without
+      // branching on intent.
+      pattern: intent === 'glob' ? input : undefined,
     });
     return fs;
+  }
+}
+
+const CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
+
+export function isContentHash(value: unknown): value is ContentHash {
+  return typeof value === 'string' && CONTENT_HASH_RE.test(value);
+}
+
+class PathMutexRegistry {
+  private readonly tails = new Map<string, Promise<void>>();
+
+  async runExclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.catch(() => undefined).then(() => current);
+    this.tails.set(key, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    }
+  }
+}
+
+interface AtomicWriteTextInput {
+  target: ResolvedPath;
+  content: string;
+  mode: WriteMode;
+  expectedHash?: ContentHash;
+  meta: ReadMeta;
+}
+
+interface AtomicWriteTextOutcome {
+  sizeBytes: number;
+  hash: ContentHash;
+  stat: Awaited<ReturnType<typeof fsp.lstat>>;
+}
+
+function validateWriteTextAtomicOptions(opts: WriteTextAtomicOptions): void {
+  if (opts.mode !== 'create' && opts.mode !== 'replace') {
+    throw new FsError(
+      'parse_error',
+      'mode must be either "create" or "replace"',
+    );
+  }
+  if (opts.expectedHash !== undefined && !isContentHash(opts.expectedHash)) {
+    throw new FsError(
+      'parse_error',
+      'expectedHash must match sha256:<64 lowercase hex chars>',
+    );
+  }
+  if (opts.mode === 'replace' && opts.expectedHash === undefined) {
+    throw new FsError(
+      'parse_error',
+      'expectedHash is required when mode is "replace"',
+    );
+  }
+  if (
+    opts.lineEnding !== undefined &&
+    opts.lineEnding !== 'lf' &&
+    opts.lineEnding !== 'crlf'
+  ) {
+    throw new FsError('parse_error', 'lineEnding must be "lf" or "crlf"');
+  }
+}
+
+interface TextSnapshot {
+  content: string;
+  meta: ReadMeta & { hash: ContentHash; sizeBytes: number };
+}
+
+async function readTextSnapshotFromResolvedFile(
+  p: ResolvedPath,
+  opts: ReadTextOptions = {},
+): Promise<TextSnapshot> {
+  const pre = await fsp.lstat(p as string);
+  if (pre.isSymbolicLink()) {
+    throw new FsError('symlink_escape', `path is a symlink: ${p}`, {
+      hint: 're-resolve the target file instead of reading through a link',
+    });
+  }
+  if (!pre.isFile()) {
+    throw new FsError('parse_error', `path is not a regular file: ${p}`);
+  }
+  // Hard size gate before reading the full raw snapshot. Files above
+  // this cap should use `readBytesWindow()` with an explicit byte
+  // window instead of allocating a full decoded text snapshot.
+  if (pre.size > MAX_READ_BYTES) {
+    throw new FsError(
+      'file_too_large',
+      `file of ${pre.size} bytes exceeds read cap of ${MAX_READ_BYTES} bytes`,
+      {
+        hint: 'use readBytes for explicit byte-windowed access on large files',
+      },
+    );
+  }
+
+  const raw = await readStableRegularFileBuffer(p as string, pre);
+  if (looksBinary(raw)) {
+    throw new FsError('binary_file', `binary file: ${p}`, {
+      hint: 'use readBytes for binary content',
+    });
+  }
+
+  const decoded = decodeBufferWithEncodingInfo(raw);
+  const startLineIndex = opts.line !== undefined ? opts.line - 1 : 0;
+  const sliced = sliceDecodedText(
+    decoded.content,
+    startLineIndex,
+    opts.limit ?? Number.POSITIVE_INFINITY,
+  );
+  const sizeOutcome = enforceReadSize(raw.length, opts.maxBytes);
+  let content = sliced.content;
+  const meta: TextSnapshot['meta'] = {
+    encoding: decoded.encoding,
+    bom: decoded.bom,
+    lineEnding: detectLineEnding(content),
+    sizeBytes: raw.length,
+    originalLineCount: sliced.originalLineCount,
+    hash: hashBuffer(raw),
+  };
+
+  if (sizeOutcome.truncated) {
+    const buf = Buffer.from(content, 'utf-8');
+    if (buf.length > sizeOutcome.bytesToRead) {
+      content = safeUtf8Truncate(buf, sizeOutcome.bytesToRead).toString(
+        'utf-8',
+      );
+      meta.lineEnding = detectLineEnding(content);
+    }
+    meta.truncated = true;
+  }
+
+  if (
+    opts.limit !== undefined &&
+    Number.isFinite(opts.limit) &&
+    sliced.originalLineCount > opts.limit + startLineIndex
+  ) {
+    meta.truncated = true;
+  }
+
+  return { content, meta };
+}
+
+async function readStableRegularFileBuffer(
+  p: string,
+  pre: Awaited<ReturnType<typeof fsp.lstat>>,
+): Promise<Buffer> {
+  const fh = await fsp.open(p, 'r');
+  let opened: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  try {
+    opened = await fh.stat();
+    assertSameFile(pre, opened, p, 'read');
+    if (opened.size > MAX_READ_BYTES) {
+      throw new FsError(
+        'file_too_large',
+        `file of ${opened.size} bytes exceeds read cap of ${MAX_READ_BYTES} bytes`,
+        {
+          hint: 'use readBytes for explicit byte-windowed access on large files',
+        },
+      );
+    }
+    const out = Buffer.alloc(opened.size);
+    let offset = 0;
+    while (offset < opened.size) {
+      const read = await fh.read(out, offset, opened.size - offset, offset);
+      if (read.bytesRead === 0) break;
+      offset += read.bytesRead;
+    }
+    const afterRead = await fh.stat();
+    assertSameFile(opened, afterRead, p, 'read');
+    if (
+      afterRead.size !== opened.size ||
+      afterRead.mtimeMs !== opened.mtimeMs
+    ) {
+      throw new FsError('hash_mismatch', `file changed during read: ${p}`, {
+        hint: 'retry after re-reading the latest file hash',
+      });
+    }
+    const post = await fsp.lstat(p);
+    assertSameFile(pre, post, p, 'read');
+    if (post.size !== opened.size || post.mtimeMs !== opened.mtimeMs) {
+      throw new FsError('hash_mismatch', `file changed during read: ${p}`, {
+        hint: 'retry after re-reading the latest file hash',
+      });
+    }
+    return offset === out.length ? out : out.subarray(0, offset);
+  } finally {
+    await fh.close();
+  }
+}
+
+function sliceDecodedText(
+  content: string,
+  startLine: number,
+  limit: number,
+): { content: string; originalLineCount: number } {
+  const lines = content.split('\n');
+  const originalLineCount = lines.length;
+  const endLine = Math.min(startLine + limit, originalLineCount);
+  const actualStartLine = Math.min(startLine, originalLineCount);
+  return {
+    content: lines.slice(actualStartLine, endLine).join('\n'),
+    originalLineCount,
+  };
+}
+
+function looksBinary(buf: Buffer): boolean {
+  if (buf.length === 0) return false;
+  const bomProbe = buf.subarray(0, Math.min(4, buf.length));
+  const hasUnicodeBom =
+    (bomProbe.length >= 4 &&
+      ((bomProbe[0] === 0xff &&
+        bomProbe[1] === 0xfe &&
+        bomProbe[2] === 0x00 &&
+        bomProbe[3] === 0x00) ||
+        (bomProbe[0] === 0x00 &&
+          bomProbe[1] === 0x00 &&
+          bomProbe[2] === 0xfe &&
+          bomProbe[3] === 0xff))) ||
+    (bomProbe.length >= 3 &&
+      bomProbe[0] === 0xef &&
+      bomProbe[1] === 0xbb &&
+      bomProbe[2] === 0xbf) ||
+    (bomProbe.length >= 2 &&
+      ((bomProbe[0] === 0xff && bomProbe[1] === 0xfe) ||
+        (bomProbe[0] === 0xfe && bomProbe[1] === 0xff)));
+  if (hasUnicodeBom) return false;
+
+  const sampleLength = Math.min(4096, buf.length);
+  let nonPrintableCount = 0;
+  for (let i = 0; i < sampleLength; i++) {
+    if (buf[i] === 0) return true;
+    if (buf[i] < 9 || (buf[i] > 13 && buf[i] < 32)) {
+      nonPrintableCount++;
+    }
+  }
+  return nonPrintableCount / sampleLength > 0.3;
+}
+
+async function readExistingTextMeta(
+  p: ResolvedPath,
+  expectedHash?: ContentHash,
+): Promise<ReadMeta> {
+  const snapshot = await readTextSnapshotFromResolvedFile(p);
+  if (expectedHash !== undefined && snapshot.meta.hash !== expectedHash) {
+    throw new FsError(
+      'hash_mismatch',
+      `expected ${expectedHash}, found ${snapshot.meta.hash}`,
+      { hint: 're-read the file and retry with the latest hash' },
+    );
+  }
+  return snapshot.meta;
+}
+
+function mergeWriteMeta(
+  existing: Partial<ReadMeta> | undefined,
+  opts: Partial<WriteTextAtomicOptions>,
+): ReadMeta {
+  return {
+    encoding: opts.encoding ?? existing?.encoding ?? 'utf-8',
+    bom: opts.bom ?? existing?.bom ?? false,
+    lineEnding: opts.lineEnding ?? existing?.lineEnding ?? 'lf',
+  };
+}
+
+async function atomicWriteTextResolvedFile(
+  input: AtomicWriteTextInput,
+): Promise<AtomicWriteTextOutcome> {
+  const target = input.target as string;
+  const parent = path.dirname(target);
+  const parentStat = await fsp.lstat(parent);
+  // Defense-in-depth against a parent-symlink swap. A full fix
+  // requires parent-fd / `openat`-style publish (Node stdlib does
+  // not expose this) — tracked alongside the fd-based read
+  // follow-up referenced by `assertInodeStableAfterRead`. This
+  // guard at least surfaces an obviously-swapped parent before
+  // we open the temp file or rename through it.
+  if (parentStat.isSymbolicLink()) {
+    throw new FsError('symlink_escape', `parent path is a symlink: ${parent}`, {
+      hint: 're-resolve the target after detecting parent-symlink swaps',
+    });
+  }
+  if (!parentStat.isDirectory()) {
+    throw new FsError(
+      'parse_error',
+      `parent path is not a directory: ${parent}`,
+    );
+  }
+  const tmpPath = path.join(
+    parent,
+    `.${path.basename(target)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`,
+  );
+  let tempLive = false;
+  let tempHandle: Awaited<ReturnType<typeof fsp.open>> | undefined;
+  let tempStat: Awaited<ReturnType<typeof fsp.lstat>> | undefined;
+  try {
+    tempHandle = await reserveTempFile(tmpPath);
+    tempLive = true;
+    const encoded = await writeEncodedTextTemp({
+      targetPath: target,
+      tmpPath,
+      content: input.content,
+      meta: input.meta,
+      handle: tempHandle,
+    });
+    tempStat = encoded.stat;
+    const targetState = await assertAtomicTargetPrecondition({
+      target,
+      mode: input.mode,
+      expectedHash: input.expectedHash,
+    });
+    await chmodHandleBestEffort(tempHandle, targetState.mode ?? 0o600);
+    await assertTempPathMatchesStat(tmpPath, tempStat);
+    await tempHandle.close();
+    tempHandle = undefined;
+    await assertTempPathMatchesStat(tmpPath, tempStat);
+    if (input.mode === 'create') {
+      await publishCreateNoClobber(tmpPath, target);
+    } else {
+      await renameWithRetryLocal(tmpPath, target, 3, 50);
+    }
+    tempLive = false;
+    await fsyncParentDirBestEffort(parent);
+    return encoded;
+  } catch (err) {
+    await tempHandle?.close().catch(() => undefined);
+    if (tempLive) {
+      try {
+        await fsp.unlink(tmpPath);
+      } catch {
+        // Best-effort cleanup; preserve the original failure.
+      }
+    }
+    throw err;
+  }
+}
+
+async function reserveTempFile(
+  tmpPath: string,
+): Promise<Awaited<ReturnType<typeof fsp.open>>> {
+  return fsp.open(tmpPath, 'wx', 0o600);
+}
+
+async function writeEncodedTextTemp(input: {
+  targetPath: string;
+  tmpPath: string;
+  content: string;
+  meta: ReadMeta;
+  handle: Awaited<ReturnType<typeof fsp.open>>;
+}): Promise<AtomicWriteTextOutcome> {
+  const buf = encodeTextFileContent(
+    input.targetPath,
+    input.content,
+    buildWriteMeta(input.meta),
+  );
+  enforceWriteSize(buf.length);
+  await input.handle.writeFile(buf);
+  await syncHandleBestEffort(input.handle);
+  const st = await fsp.lstat(input.tmpPath);
+  const opened = await input.handle.stat();
+  assertSameFile(opened, st, input.tmpPath, 'write');
+  if (st.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `temporary path became a symlink: ${input.tmpPath}`,
+      { hint: 'temp-file race detected before final rename' },
+    );
+  }
+  if (!st.isFile()) {
+    throw new FsError(
+      'parse_error',
+      `temporary path is not a regular file: ${input.tmpPath}`,
+    );
+  }
+  return { sizeBytes: buf.length, hash: hashBuffer(buf), stat: st };
+}
+
+async function assertCreateTargetAbsent(target: string): Promise<void> {
+  try {
+    const st = await fsp.lstat(target);
+    if (st.isSymbolicLink()) {
+      throw new FsError(
+        'symlink_escape',
+        `path is a symlink and cannot be created over: ${target}`,
+        { hint: 'remove the symlink or resolve the target explicitly' },
+      );
+    }
+    throw new FsError('file_already_exists', `file already exists: ${target}`);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') return;
+    throw err;
+  }
+}
+
+async function assertAtomicTargetPrecondition(input: {
+  target: string;
+  mode: WriteMode;
+  expectedHash?: ContentHash;
+}): Promise<{ mode?: number }> {
+  if (input.mode === 'create') {
+    await assertCreateTargetAbsent(input.target);
+    return {};
+  }
+  if (!isContentHash(input.expectedHash)) {
+    throw new FsError(
+      'parse_error',
+      'expectedHash is required when mode is "replace"',
+    );
+  }
+  const pre = await fsp.lstat(input.target);
+  if (pre.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path is a symlink and cannot be replaced atomically: ${input.target}`,
+      { hint: 're-resolve the target file instead of writing through a link' },
+    );
+  }
+  if (!pre.isFile()) {
+    throw new FsError(
+      'parse_error',
+      `path is not a regular file: ${input.target}`,
+    );
+  }
+  const actual = await hashRegularFileAtPath(input.target, pre);
+  if (actual !== input.expectedHash) {
+    throw new FsError(
+      'hash_mismatch',
+      `expected ${input.expectedHash}, found ${actual}`,
+      { hint: 're-read the file and retry with the latest hash' },
+    );
+  }
+  return { mode: pre.mode & 0o7777 };
+}
+
+async function hashRegularFileAtPath(
+  p: string,
+  pre: Awaited<ReturnType<typeof fsp.lstat>>,
+): Promise<ContentHash> {
+  const fh = await fsp.open(p, 'r');
+  const hash = createHash('sha256');
+  let opened: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  try {
+    opened = await fh.stat();
+    assertSameFile(pre, opened, p, 'read');
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    let offset = 0;
+    while (offset < opened.size) {
+      const read = await fh.read(
+        buf,
+        0,
+        Math.min(buf.length, opened.size - offset),
+        offset,
+      );
+      if (read.bytesRead === 0) break;
+      hash.update(buf.subarray(0, read.bytesRead));
+      offset += read.bytesRead;
+    }
+  } finally {
+    await fh.close();
+  }
+  if (opened === undefined) {
+    throw new FsError('internal_error', `failed to stat opened file: ${p}`);
+  }
+  const post = await fsp.lstat(p);
+  assertSameFile(pre, post, p, 'read');
+  if (post.size !== opened.size || post.mtimeMs !== opened.mtimeMs) {
+    throw new FsError('hash_mismatch', `file changed during hash: ${p}`, {
+      hint: 'retry after re-reading the latest file hash',
+    });
+  }
+  return `sha256:${hash.digest('hex')}`;
+}
+
+function hashBuffer(buf: Buffer): ContentHash {
+  return `sha256:${createHash('sha256').update(buf).digest('hex')}`;
+}
+
+function assertSameFile(
+  pre: { dev: number | bigint; ino: number | bigint },
+  post: { dev: number | bigint; ino: number | bigint },
+  p: string,
+  intent: Intent,
+): void {
+  const preDev = toBigInt(pre.dev);
+  const postDev = toBigInt(post.dev);
+  const preIno = toBigInt(pre.ino);
+  const postIno = toBigInt(post.ino);
+  if (
+    preDev !== 0n &&
+    postDev !== 0n &&
+    preIno !== 0n &&
+    postIno !== 0n &&
+    (preDev !== postDev || preIno !== postIno)
+  ) {
+    throw new FsError('symlink_escape', `path changed during ${intent}: ${p}`, {
+      hint: 'TOCTOU swap detected via device/inode comparison',
+    });
+  }
+}
+
+function toBigInt(value: number | bigint): bigint {
+  return typeof value === 'bigint' ? value : BigInt(value);
+}
+
+async function syncHandleBestEffort(
+  fh: Awaited<ReturnType<typeof fsp.open>>,
+): Promise<void> {
+  try {
+    await fh.sync();
+  } catch {
+    // Some platforms/filesystems reject fsync on temporary files.
+  }
+}
+
+async function fsyncParentDirBestEffort(parent: string): Promise<void> {
+  let fh: Awaited<ReturnType<typeof fsp.open>> | undefined;
+  try {
+    fh = await fsp.open(parent, 'r');
+    await fh.sync();
+  } catch {
+    // Windows and some filesystems do not support directory fsync.
+  } finally {
+    await fh?.close().catch(() => undefined);
+  }
+}
+
+async function chmodHandleBestEffort(
+  fh: Awaited<ReturnType<typeof fsp.open>>,
+  mode: number,
+): Promise<void> {
+  try {
+    await fh.chmod(mode);
+  } catch {
+    // Not all filesystems support POSIX permission bits.
+  }
+}
+
+async function assertTempPathMatchesStat(
+  tmpPath: string,
+  expected: Awaited<ReturnType<typeof fsp.lstat>>,
+): Promise<void> {
+  const st = await fsp.lstat(tmpPath);
+  if (st.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `temporary path is a symlink: ${tmpPath}`,
+      {
+        hint: 'temp-file race detected before final rename',
+      },
+    );
+  }
+  if (!st.isFile()) {
+    throw new FsError(
+      'parse_error',
+      `temporary path is not a regular file: ${tmpPath}`,
+    );
+  }
+  assertSameFile(expected, st, tmpPath, 'write');
+}
+
+// POSIX `rename(src, dest)` overwrites an existing regular file,
+// which would silently break the public `mode: 'create'` contract
+// if an external process raced us between the absence check and
+// the publish. `link()` is the portable no-clobber publish: it
+// returns `EEXIST` atomically when `dest` already exists, on both
+// POSIX filesystems and NTFS. The early `assertCreateTargetAbsent`
+// stays in place to give friendlier `symlink_escape` /
+// `file_already_exists` errors on the non-racing path; this is the
+// hard guarantee that closes the race window.
+async function publishCreateNoClobber(
+  tmpPath: string,
+  target: string,
+): Promise<void> {
+  try {
+    await fsp.link(tmpPath, target);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'EEXIST') {
+      throw new FsError(
+        'file_already_exists',
+        `file already exists: ${target}`,
+      );
+    }
+    throw err;
+  }
+  // After link(), tmp and target name the same inode. Drop the
+  // tmp name best-effort — if unlink fails the publish has still
+  // succeeded, so we must not bubble the error and confuse the
+  // caller into thinking the create failed.
+  await fsp.unlink(tmpPath).catch(() => undefined);
+}
+
+async function renameWithRetryLocal(
+  src: string,
+  dest: string,
+  retries: number,
+  delayMs: number,
+): Promise<void> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      await fsp.rename(src, dest);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      const retryable = code === 'EPERM' || code === 'EACCES';
+      if (!retryable || attempt === retries) throw err;
+      await new Promise((resolve) =>
+        setTimeout(resolve, delayMs * 2 ** attempt),
+      );
+    }
+  }
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0;
+  let index = 0;
+  while (true) {
+    const found = haystack.indexOf(needle, index);
+    if (found === -1) return count;
+    count += 1;
+    index = found + needle.length;
   }
 }
 
@@ -1074,11 +1887,12 @@ function kindFromStatLike(s: {
 }
 
 function buildWriteMeta(
-  opts: WriteTextFileOptions,
+  opts: WriteTextFileOptions & { lineEnding?: 'crlf' | 'lf' },
 ): Record<string, unknown> | undefined {
   const meta: Record<string, unknown> = {};
-  if (opts.bom) meta['bom'] = true;
+  if (opts.bom !== undefined) meta['bom'] = opts.bom;
   if (opts.encoding) meta['encoding'] = opts.encoding;
+  if (opts.lineEnding) meta['lineEnding'] = opts.lineEnding;
   return Object.keys(meta).length > 0 ? meta : undefined;
 }
 
