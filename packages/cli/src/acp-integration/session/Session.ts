@@ -64,6 +64,7 @@ import {
   evaluateAutoMode,
   isApproveOutcome,
   MAX_TRANSCRIPT_MESSAGES,
+  recordAllow,
   recordFallbackApprove,
   shouldFallback,
   shouldRunAutoModeForCall,
