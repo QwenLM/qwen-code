@@ -910,6 +910,28 @@ describe('modelConfigResolver', () => {
       expect(result.sources['modalities'].kind).toBe('computed');
     });
 
+    it('Qwen OAuth path: modalities auto-detected for default coder-model', () => {
+      // resolveGenerationConfig is shared by both the OpenAI and Qwen OAuth
+      // paths; the latter (resolveQwenOAuthConfig) passes the resolved Qwen
+      // OAuth model name (defaults to DEFAULT_QWEN_MODEL = 'coder-model') as
+      // modelId, so the new modalities fallback also fires here.
+      //
+      // modalityDefaults.ts maps /^coder-model$/ to { image: true, video: true }
+      // because the Qwen OAuth coder-model now supports vision (see warning
+      // text at modelConfigResolver.ts ~L330). This test pins that down so a
+      // future edit to MODALITY_PATTERNS doesn't silently regress OAuth.
+      const result = resolveModelConfig({
+        authType: AuthType.QWEN_OAUTH,
+        cli: {},
+        settings: {},
+        env: {},
+      });
+
+      expect(result.config.model).toBe(DEFAULT_QWEN_MODEL);
+      expect(result.config.modalities).toEqual({ image: true, video: true });
+      expect(result.sources['modalities'].kind).toBe('computed');
+    });
+
     it('env-var-only path: explicit settings.generationConfig.modalities is not overridden by fallback', () => {
       // Locks the `=== undefined` guard: when user explicitly configures
       // modalities in settings, the fallback must not clobber them with
