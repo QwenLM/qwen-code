@@ -176,21 +176,52 @@ export class McpClient {
    * and logs; we just need the status registry to reflect reality.
    */
   async discover(cliConfig: Config): Promise<void> {
+    const { tools, prompts } = await this.discoverAndReturn(cliConfig);
+    for (const tool of tools) {
+      this.toolRegistry.registerTool(tool);
+    }
+    for (const prompt of prompts) {
+      this.promptRegistry.registerPrompt(prompt);
+    }
+  }
+
+  /**
+   * Pure discovery — returns tools and prompts WITHOUT registering them.
+   *
+   * F2 (#4175) pool path: a single shared `McpClient` produces this
+   * snapshot once; per-session `SessionMcpView` instances each
+   * register a filtered/decorated copy into their own registries.
+   *
+   * Behavior mirrors `discover()` for error handling: status flips to
+   * DISCONNECTED on any failure (so the global status registry +
+   * `getFailedMcpServerNames()` reflect reality), then re-throws.
+   *
+   * Returns the same combined "no prompts or tools" error that `discover()`
+   * raised pre-F2, so callers that distinguish "server up but empty" from
+   * "server down" still get the right signal.
+   */
+  async discoverAndReturn(cliConfig: Config): Promise<{
+    tools: DiscoveredMCPTool[];
+    prompts: DiscoveredMCPPrompt[];
+  }> {
     if (this.status !== MCPServerStatus.CONNECTED) {
       throw new Error('Client is not connected.');
     }
 
     try {
-      const prompts = await this.discoverPrompts();
-      const tools = await this.discoverTools(cliConfig);
+      const prompts = await listMcpPrompts(this.serverName, this.client);
+      const tools = await discoverTools(
+        this.serverName,
+        this.serverConfig,
+        this.client,
+        cliConfig,
+      );
 
       if (prompts.length === 0 && tools.length === 0) {
         throw new Error('No prompts or tools found on the server.');
       }
 
-      for (const tool of tools) {
-        this.toolRegistry.registerTool(tool);
-      }
+      return { tools, prompts };
     } catch (error) {
       this.updateStatus(MCPServerStatus.DISCONNECTED);
       throw error;
@@ -270,19 +301,6 @@ export class McpClient {
       this.debugMode,
       this.sendSdkMcpMessage,
     );
-  }
-
-  private async discoverTools(cliConfig: Config): Promise<DiscoveredMCPTool[]> {
-    return discoverTools(
-      this.serverName,
-      this.serverConfig,
-      this.client,
-      cliConfig,
-    );
-  }
-
-  private async discoverPrompts(): Promise<Prompt[]> {
-    return discoverPrompts(this.serverName, this.client, this.promptRegistry);
   }
 }
 
@@ -762,17 +780,19 @@ export async function discoverTools(
 }
 
 /**
- * Discovers and logs prompts from a connected MCP client.
- * It retrieves prompt declarations from the client and logs their names.
+ * Pure prompt listing. Asks the MCP server for its prompts and returns
+ * enriched `DiscoveredMCPPrompt[]` (with `serverName` + bound `invoke`)
+ * WITHOUT registering them anywhere. F2 pool uses this so a single
+ * shared transport can produce the snapshot once and let each session's
+ * `SessionMcpView` register into its own registry.
  *
- * @param mcpServerName The name of the MCP server.
- * @param mcpClient The active MCP client instance.
+ * Returns `[]` on protocol errors or when the server lacks `prompts`
+ * capability — matches `discoverPrompts` swallow-and-continue behavior.
  */
-export async function discoverPrompts(
+export async function listMcpPrompts(
   mcpServerName: string,
   mcpClient: Client,
-  promptRegistry: PromptRegistry,
-): Promise<Prompt[]> {
+): Promise<DiscoveredMCPPrompt[]> {
   try {
     // Only request prompts if the server supports them.
     if (mcpClient.getServerCapabilities()?.prompts == null) return [];
@@ -782,15 +802,12 @@ export async function discoverPrompts(
       ListPromptsResultSchema,
     );
 
-    for (const prompt of response.prompts) {
-      promptRegistry.registerPrompt({
-        ...prompt,
-        serverName: mcpServerName,
-        invoke: (params: Record<string, unknown>) =>
-          invokeMcpPrompt(mcpServerName, mcpClient, prompt.name, params),
-      });
-    }
-    return response.prompts;
+    return response.prompts.map((prompt) => ({
+      ...prompt,
+      serverName: mcpServerName,
+      invoke: (params: Record<string, unknown>) =>
+        invokeMcpPrompt(mcpServerName, mcpClient, prompt.name, params),
+    }));
   } catch (error) {
     // It's okay if this fails, not all servers will have prompts.
     // Don't log an error if the method is not found, which is a common case.
@@ -806,6 +823,31 @@ export async function discoverPrompts(
     }
     return [];
   }
+}
+
+/**
+ * Discovers prompts AND registers them into the supplied PromptRegistry.
+ * Thin wrapper over `listMcpPrompts` that preserves the historical
+ * `Promise<Prompt[]>` signature (used by `connectAndDiscover`, standalone
+ * qwen, and existing tests). New code should prefer `listMcpPrompts`
+ * for testability.
+ *
+ * @param mcpServerName The name of the MCP server.
+ * @param mcpClient The active MCP client instance.
+ * @param promptRegistry The registry to register discovered prompts into.
+ */
+export async function discoverPrompts(
+  mcpServerName: string,
+  mcpClient: Client,
+  promptRegistry: PromptRegistry,
+): Promise<Prompt[]> {
+  const enriched = await listMcpPrompts(mcpServerName, mcpClient);
+  for (const prompt of enriched) {
+    promptRegistry.registerPrompt(prompt);
+  }
+  // Preserve historical return type: raw Prompt (without serverName/invoke).
+  // Callers only ever inspected `length`, but the type contract is preserved.
+  return enriched.map(({ serverName: _s, invoke: _i, ...rest }) => rest);
 }
 
 /**
