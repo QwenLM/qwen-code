@@ -258,10 +258,10 @@ describe('SharedTokenManager', () => {
         .fn()
         .mockResolvedValue(refreshResponse);
 
-      // Mock file operations
+      // Mock file operations (writeFile still needed for the wx lock path;
+      // credential save now routes through the mocked atomicWriteFile).
       mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
       mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.rename.mockResolvedValue(undefined);
       mockFs.mkdir.mockResolvedValue(undefined);
 
       const result = await tokenManager.getValidCredentials(mockClient);
@@ -282,7 +282,6 @@ describe('SharedTokenManager', () => {
       // Mock file operations
       mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
       mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.rename.mockResolvedValue(undefined);
       mockFs.mkdir.mockResolvedValue(undefined);
 
       const result = await tokenManager.getValidCredentials(mockClient, true);
@@ -452,9 +451,9 @@ describe('SharedTokenManager', () => {
 
       mockClient.refreshAccessToken = vi.fn().mockReturnValue(refreshPromise);
 
-      // Mock file operations for lock and save
+      // Mock file operations for lock and save (credential save now goes
+      // through atomicWriteFile mock; writeFile mock kept for the wx lock).
       mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.rename.mockResolvedValue(undefined);
       mockFs.mkdir.mockResolvedValue(undefined);
 
       // Start refresh

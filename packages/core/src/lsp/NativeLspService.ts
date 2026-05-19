@@ -45,6 +45,7 @@ import type {
 import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as fs from 'node:fs';
+import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { globSync } from 'glob';
 
@@ -1347,8 +1348,8 @@ export class NativeLspService {
       lines.splice(startLine, endLine - startLine + 1, ...newLines);
     }
 
-    // Write back to file
-    fs.writeFileSync(filePath, lines.join('\n'), 'utf-8');
+    // Atomic write so a crash mid-edit can't leave the user file half-written.
+    atomicWriteFileSync(filePath, lines.join('\n'), { encoding: 'utf-8' });
   }
 
   /**
