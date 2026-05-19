@@ -37,16 +37,22 @@ export interface AtomicWriteFileOptions extends AtomicWriteOptions {
 /**
  * Rename a file with retry on EPERM/EACCES (common on Windows under
  * concurrent access). Uses exponential backoff.
+ *
+ * @param _renameImpl Internal test seam — defaults to `fs.rename`. Tests
+ *   inject a mock to exercise retry, give-up, and non-retryable paths
+ *   that vitest cannot otherwise spy on (ESM exports of `node:fs` are
+ *   non-configurable).
  */
 export async function renameWithRetry(
   src: string,
   dest: string,
   retries: number,
   delayMs: number,
+  _renameImpl: (s: string, d: string) => Promise<void> = fs.rename,
 ): Promise<void> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      await fs.rename(src, dest);
+      await _renameImpl(src, dest);
       return;
     } catch (error: unknown) {
       const isRetryable =
@@ -123,11 +129,23 @@ export async function atomicWriteFile(
   filePath: string,
   data: string | Buffer,
   options?: AtomicWriteFileOptions,
+  /**
+   * Internal test seam — defaults to real `fs.rename` / `fs.writeFile`.
+   * Tests inject overrides to exercise EXDEV fallback and rename-retry
+   * paths that vitest cannot spy on (ESM exports of `node:fs` are
+   * non-configurable). Production callers never pass this.
+   */
+  _testFs?: {
+    rename?: (s: string, d: string) => Promise<void>;
+    writeFile?: typeof fs.writeFile;
+  },
 ): Promise<void> {
   const retries = options?.retries ?? 3;
   const delayMs = options?.delayMs ?? 50;
   const flush = options?.flush ?? true;
   const encoding = options?.encoding ?? 'utf-8';
+  const renameImpl = _testFs?.rename ?? fs.rename;
+  const writeFileImpl = _testFs?.writeFile ?? fs.writeFile;
 
   const targetPath = await resolveSymlinkChain(filePath);
 
@@ -170,9 +188,9 @@ export async function atomicWriteFile(
   };
 
   try {
-    await fs.writeFile(tmpPath, data, writeOptions);
+    await writeFileImpl(tmpPath, data, writeOptions);
     await tryChmod(tmpPath);
-    await renameWithRetry(tmpPath, targetPath, retries, delayMs);
+    await renameWithRetry(tmpPath, targetPath, retries, delayMs, renameImpl);
   } catch (error) {
     // Clean up temp file.
     try {
@@ -183,7 +201,7 @@ export async function atomicWriteFile(
 
     // EXDEV: cross-device rename not supported — fall back to direct write.
     if (isNodeError(error) && error.code === 'EXDEV') {
-      await fs.writeFile(targetPath, data, writeOptions);
+      await writeFileImpl(targetPath, data, writeOptions);
       await tryChmod(targetPath);
       return;
     }
@@ -230,16 +248,19 @@ function blockingSleep(ms: number): void {
 /**
  * Sync mirror of {@link renameWithRetry}. Retries on EPERM/EACCES with
  * exponential backoff (common on Windows under concurrent AV scans).
+ *
+ * @param _renameImpl Internal test seam — see {@link renameWithRetry}.
  */
 export function renameWithRetrySync(
   src: string,
   dest: string,
   retries: number,
   delayMs: number,
+  _renameImpl: (s: string, d: string) => void = fsSync.renameSync,
 ): void {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      fsSync.renameSync(src, dest);
+      _renameImpl(src, dest);
       return;
     } catch (error: unknown) {
       const isRetryable =
@@ -301,11 +322,18 @@ export function atomicWriteFileSync(
   filePath: string,
   data: string | Buffer,
   options?: AtomicWriteFileOptions,
+  /** Internal test seam — see {@link atomicWriteFile}. */
+  _testFs?: {
+    rename?: (s: string, d: string) => void;
+    writeFile?: typeof fsSync.writeFileSync;
+  },
 ): void {
   const retries = options?.retries ?? 3;
   const delayMs = options?.delayMs ?? 50;
   const flush = options?.flush ?? true;
   const encoding = options?.encoding ?? 'utf-8';
+  const renameImpl = _testFs?.rename ?? fsSync.renameSync;
+  const writeFileImpl = _testFs?.writeFile ?? fsSync.writeFileSync;
 
   const targetPath = resolveSymlinkChainSync(filePath);
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
@@ -345,9 +373,9 @@ export function atomicWriteFileSync(
   };
 
   try {
-    fsSync.writeFileSync(tmpPath, data, writeOptions);
+    writeFileImpl(tmpPath, data, writeOptions);
     tryChmodSync(tmpPath);
-    renameWithRetrySync(tmpPath, targetPath, retries, delayMs);
+    renameWithRetrySync(tmpPath, targetPath, retries, delayMs, renameImpl);
   } catch (error) {
     try {
       fsSync.unlinkSync(tmpPath);
@@ -356,7 +384,7 @@ export function atomicWriteFileSync(
     }
 
     if (isNodeError(error) && error.code === 'EXDEV') {
-      fsSync.writeFileSync(targetPath, data, writeOptions);
+      writeFileImpl(targetPath, data, writeOptions);
       tryChmodSync(targetPath);
       return;
     }

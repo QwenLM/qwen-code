@@ -13,6 +13,8 @@ import {
   atomicWriteFile,
   atomicWriteFileSync,
   atomicWriteJSON,
+  renameWithRetry,
+  renameWithRetrySync,
 } from './atomicFileWrite.js';
 
 describe('atomicWriteJSON', () => {
@@ -493,4 +495,186 @@ describe('forceMode option', () => {
       expect(fsSync.statSync(filePath).mode & 0o777).toBe(0o600);
     },
   );
+});
+
+// PR #4333 review fold-in: cover rename-retry + EXDEV-fallback paths the
+// existing behavior tests can't exercise (vitest can't spy on ESM exports
+// of node:fs). Uses the `_testFs` / `_renameImpl` seams added to the
+// production helpers.
+describe('renameWithRetry (async, dependency-injected rename)', () => {
+  let tmpDir: string;
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rename-retry-async-'));
+  });
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('retries on EPERM and eventually succeeds', async () => {
+    const src = path.join(tmpDir, 'src.txt');
+    const dest = path.join(tmpDir, 'dest.txt');
+    await fs.writeFile(src, 'data');
+
+    let attempts = 0;
+    const mockRename = async (s: string, d: string) => {
+      attempts++;
+      if (attempts < 3) {
+        const e: NodeJS.ErrnoException = new Error('EPERM');
+        e.code = 'EPERM';
+        throw e;
+      }
+      await fs.rename(s, d);
+    };
+
+    await renameWithRetry(src, dest, 3, 1, mockRename);
+    expect(attempts).toBe(3);
+    expect(fsSync.existsSync(dest)).toBe(true);
+  });
+
+  it('gives up after retries exhausted', async () => {
+    let attempts = 0;
+    const mockRename = async () => {
+      attempts++;
+      const e: NodeJS.ErrnoException = new Error('EPERM');
+      e.code = 'EPERM';
+      throw e;
+    };
+    await expect(renameWithRetry('s', 'd', 2, 1, mockRename)).rejects.toThrow(
+      /EPERM/,
+    );
+    expect(attempts).toBe(3); // initial attempt + 2 retries
+  });
+
+  it('does not retry on non-retryable errors (ENOSPC)', async () => {
+    let attempts = 0;
+    const mockRename = async () => {
+      attempts++;
+      const e: NodeJS.ErrnoException = new Error('ENOSPC');
+      e.code = 'ENOSPC';
+      throw e;
+    };
+    await expect(renameWithRetry('s', 'd', 3, 1, mockRename)).rejects.toThrow(
+      /ENOSPC/,
+    );
+    expect(attempts).toBe(1);
+  });
+});
+
+describe('renameWithRetrySync (dependency-injected rename)', () => {
+  let tmpDir: string;
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rename-retry-sync-'));
+  });
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('retries on EACCES and succeeds', () => {
+    const src = path.join(tmpDir, 'src.txt');
+    const dest = path.join(tmpDir, 'dest.txt');
+    fsSync.writeFileSync(src, 'data');
+
+    let attempts = 0;
+    const mockRename = (s: string, d: string) => {
+      attempts++;
+      if (attempts < 3) {
+        const e: NodeJS.ErrnoException = new Error('EACCES');
+        e.code = 'EACCES';
+        throw e;
+      }
+      fsSync.renameSync(s, d);
+    };
+
+    renameWithRetrySync(src, dest, 3, 1, mockRename);
+    expect(attempts).toBe(3);
+    expect(fsSync.existsSync(dest)).toBe(true);
+  });
+
+  it('gives up after retries exhausted', () => {
+    let attempts = 0;
+    const mockRename = () => {
+      attempts++;
+      const e: NodeJS.ErrnoException = new Error('EPERM');
+      e.code = 'EPERM';
+      throw e;
+    };
+    expect(() => renameWithRetrySync('s', 'd', 2, 1, mockRename)).toThrow(
+      /EPERM/,
+    );
+    expect(attempts).toBe(3);
+  });
+
+  it('does not retry on non-retryable errors (EINVAL)', () => {
+    let attempts = 0;
+    const mockRename = () => {
+      attempts++;
+      const e: NodeJS.ErrnoException = new Error('EINVAL');
+      e.code = 'EINVAL';
+      throw e;
+    };
+    expect(() => renameWithRetrySync('s', 'd', 3, 1, mockRename)).toThrow(
+      /EINVAL/,
+    );
+    expect(attempts).toBe(1);
+  });
+});
+
+describe('EXDEV fallback (async + sync)', () => {
+  let tmpDir: string;
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'exdev-fallback-'));
+  });
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('atomicWriteFile: falls back to direct write on EXDEV, cleans up tmp', async () => {
+    const filePath = path.join(tmpDir, 'exdev.txt');
+    const exdevRename = async () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+
+    await atomicWriteFile(filePath, 'fallback-payload', undefined, {
+      rename: exdevRename,
+    });
+
+    expect(await fs.readFile(filePath, 'utf-8')).toBe('fallback-payload');
+    // No tmp residue
+    expect(await fs.readdir(tmpDir)).toEqual(['exdev.txt']);
+  });
+
+  it('atomicWriteFileSync: falls back to direct write on EXDEV, cleans up tmp', () => {
+    const filePath = path.join(tmpDir, 'exdev-sync.txt');
+    const exdevRename = () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+
+    atomicWriteFileSync(filePath, 'sync-fallback-payload', undefined, {
+      rename: exdevRename,
+    });
+
+    expect(fsSync.readFileSync(filePath, 'utf-8')).toBe(
+      'sync-fallback-payload',
+    );
+    expect(fsSync.readdirSync(tmpDir)).toEqual(['exdev-sync.txt']);
+  });
+
+  it('atomicWriteFile: non-EXDEV rename failure propagates (no fallback)', async () => {
+    const filePath = path.join(tmpDir, 'eio.txt');
+    const eioRename = async () => {
+      const e: NodeJS.ErrnoException = new Error('EIO');
+      e.code = 'EIO';
+      throw e;
+    };
+
+    await expect(
+      atomicWriteFile(filePath, 'data', undefined, { rename: eioRename }),
+    ).rejects.toThrow(/EIO/);
+    // Tmp cleaned up even though rename failed
+    expect(await fs.readdir(tmpDir)).toEqual([]);
+  });
 });
