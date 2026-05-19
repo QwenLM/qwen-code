@@ -959,13 +959,26 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
     }
   });
 
-  it("does NOT double-audit when late rejection is the registry's own DeviceFlowPollTimeoutError (qwen-latest review N2 guard)", async () => {
-    // PR #4291 follow-up review (qwen-latest, N2): the late-rejection
-    // observer must filter out our own timer rejection — otherwise a
-    // single timeout would produce two audit lines (one from the
-    // wrapper catch, one from the late-rejection observer). The
-    // guard is `if (lateErr instanceof DeviceFlowPollTimeoutError)
-    // return;`. Pin it.
+  it('audits a provider-thrown DeviceFlowPollTimeoutError as a real failure (round-6 #4: brand-aware self-filter)', async () => {
+    // Round-6 review (qwen-latest, #4): the self-filter guard in the
+    // late-rejection observer must check the runtime brand
+    // (`_isRegistryTimeout === true`), NOT bare `instanceof`. Reason:
+    // `DeviceFlowPollTimeoutError` is `export class` (the test file
+    // needs the constructor for fixture purposes), so a non-conforming
+    // provider that imported and threw `new DeviceFlowPollTimeoutError(...)`
+    // would otherwise spoof "I caused the timeout" — silently swallowed
+    // by the filter and never audited. Pin the inverted scenario:
+    // brand-false provider throw IS audited as `lost_late_poll_after_timeout`.
+    //
+    // Note: this test'\''s setup mirrors the natural late-rejection path
+    // (registry race timer fires first, then the provider'\''s promise
+    // settles late with the rejection). The late-observer'\''s filter is
+    // exercised in two ways across this and the next test:
+    //   - here: brand-FALSE → late audit DOES appear (this test)
+    //   - elsewhere: brand-TRUE registry timeout → no late audit (the
+    //     hanging-provider test below covers the natural happy-path
+    //     since the registry'\''s real timeout is brand-true and the
+    //     promise never settles late)
     const provider = new FakeProvider();
     let rejectLate!: (e: Error) => void;
     const latePollPromise = new Promise<DeviceFlowPollResult>(
@@ -987,22 +1000,38 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
       env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
       env.scheduler.flushDue(env.clock.now);
       await flushAsync();
-      // Reject with the SAME sentinel the registry uses internally.
-      // The original wrapper catch already recorded a failed audit
-      // (the "real" failure for this entry). The late observer must
-      // NOT add a `lost_late_poll_after_timeout` line.
-      rejectLate(new DeviceFlowPollTimeoutError(DEVICE_FLOW_POLL_TIMEOUT_MS));
+      // Provider throws the EXPORTED class directly (brand-false). The
+      // round-5 shape would have silently filtered this; round-6 audits
+      // it correctly as a real failure.
+      const providerThrown = new DeviceFlowPollTimeoutError(
+        DEVICE_FLOW_POLL_TIMEOUT_MS,
+      );
+      expect(providerThrown._isRegistryTimeout).toBe(false);
+      rejectLate(providerThrown);
       await flushAsync();
       const lateAudits = auditLines.filter((line) =>
         (line['hint'] as string | undefined)?.includes(
           'lost_late_poll_after_timeout',
         ),
       );
-      expect(lateAudits).toHaveLength(0);
+      // Brand-false → NOT filtered, audited as a real late rejection.
+      expect(lateAudits.length).toBeGreaterThanOrEqual(1);
+      expect(lateAudits[0]?.['errorKind']).toBe('upstream_error');
+      expect(lateAudits[0]?.['hint']).toContain('rejected after');
     } finally {
       registry.dispose();
     }
   });
+
+  // (Round-5 N2's "filter out registry's own timeout" guard is now
+  //  brand-aware — see round-6 #4 above. The natural happy-path "no
+  //  double-audit when the registry's own race timer settles the
+  //  wrapper" is implicitly covered by the hanging-provider test
+  //  earlier, which exercises a brand-true `makeRegistryPollTimeoutError`
+  //  via the actual race-timer path; the provider's promise never
+  //  settles late, so the late-observer's brand-true filter is the only
+  //  thing keeping a phantom `lost_late_poll_after_timeout` from
+  //  appearing alongside the wrapper-catch audit.)
 
   it('does NOT attach late-poll observer when the provider beats the timeout (round-5 #1: pollTimedOut race)', async () => {
     // PR #4291 follow-up review (deepseek-v4-pro, round-5 #1): the
@@ -1132,6 +1161,114 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
       expect(hint.split('\n').length).toBe(1);
       expect(hint).not.toContain('\x1b[31m');
       expect(hint).toContain('FORGED ERR LINE');
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('survives a throwing audit sink in the late-poll observer (round-6 #2: terminal .catch())', async () => {
+    // PR #4291 follow-up review (qwen-latest, round-6 #2): the late-poll
+    // `void tracked.then(...)` was missing a terminal `.catch(() => {})`.
+    // If `audit.record` throws synchronously inside either handler (a
+    // misbehaving sink: throwing on backpressure, on a malformed
+    // payload, on out-of-disk for a file sink), the resulting promise
+    // rejects unhandled. Node 22's default
+    // `--unhandled-rejections=throw` would crash the daemon. Pin the
+    // resilience: a poison audit sink in the late-resolve path must
+    // NOT throw out of `flushAsync()`.
+    const provider = new FakeProvider();
+    let resolveLate!: (r: DeviceFlowPollResult) => void;
+    const latePollPromise = new Promise<DeviceFlowPollResult>((resolve) => {
+      resolveLate = resolve;
+    });
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      return latePollPromise;
+    };
+    const env = makeClockAndScheduler();
+    const events = makeEventSink();
+    const allRecords: Array<Record<string, unknown>> = [];
+    const registry = new DeviceFlowRegistry({
+      events: events.sink,
+      audit: {
+        // Throw ONLY for the late-observer's audit call (identified by
+        // its `lost_late_poll_after_timeout` hint). Earlier audit calls
+        // (start, in-flight poll-timeout failure) record normally so
+        // we exercise the specific code path the round-6 #2 fix targets.
+        record: (line) => {
+          allRecords.push({ ...line });
+          if (
+            typeof line.hint === 'string' &&
+            line.hint.includes('lost_late_poll_after_timeout')
+          ) {
+            throw new Error('audit sink crashed during late-observer call');
+          }
+        },
+      },
+      resolveProvider: (id) => (id === 'qwen-oauth' ? provider : undefined),
+      now: env.now,
+      schedule: env.schedule as never,
+      scheduleInterval: env.scheduleInterval as never,
+      clearScheduled: env.clearScheduled as never,
+      clearScheduledInterval: env.clearScheduledInterval as never,
+    });
+    try {
+      await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Resolve late — the late-resolve handler will call audit.record
+      // which throws. The terminal `.catch(() => {})` swallows it.
+      resolveLate({ kind: 'pending' });
+      // If the chain were unhandled, this `flushAsync()` would surface
+      // an unhandled-rejection warning on Node 22. With `.catch()`
+      // attached, it completes cleanly.
+      await expect(flushAsync()).resolves.toBeUndefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('sanitizes rawProviderError before interpolating into the audit hint (round-6 #3)', async () => {
+    // PR #4291 follow-up review (qwen-latest, round-6 #3): the
+    // `case 'error'` audit branch interpolates the captured
+    // `rawProviderError` (raw `err.message`) into the hint. Per ES2019+
+    // `JSON.stringify` no longer escapes U+2028 / U+2029 (they're
+    // valid JSON), so a hostile provider throw with those characters
+    // in `err.message` would otherwise forge log lines downstream.
+    // Apply `sanitizeForStderr` before interpolation; pin via a
+    // hostile message containing U+2028 + ANSI escape.
+    const U_2028 = ' ';
+    const provider = new FakeProvider();
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      throw new Error(
+        `upstream${U_2028}[serve] FORGED PROVIDER LINE\x1b[31mRED`,
+      );
+    };
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      const auditLine = auditLines.find((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'provider.poll() threw (raw)',
+        ),
+      );
+      expect(auditLine).toBeDefined();
+      const hint = auditLine?.['hint'] as string;
+      // U+2028 is replaced with `?`. ANSI escape replaced too.
+      expect(hint).not.toContain(U_2028);
+      expect(hint).not.toContain('\x1b[31m');
+      // Substantive parts preserved.
+      expect(hint).toContain('FORGED PROVIDER LINE');
+      expect(hint).toContain('RED');
     } finally {
       registry.dispose();
     }
