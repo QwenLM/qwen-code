@@ -59,7 +59,7 @@ export interface ProviderConfig {
   /**
    * Whether the user can add/remove models in the setup UI.
    * - `true`  → show model editing step; known IDs inherit their ModelSpec metadata
-   * - `false` → skip model step; use models as-is (e.g. Coding Plan)
+   * - `false` → skip model step; use models as-is
    * Defaults to `false` when `models` is set, ignored when `models` is `undefined`.
    */
   modelsEditable?: boolean;

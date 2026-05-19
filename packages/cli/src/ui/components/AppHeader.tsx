@@ -6,7 +6,8 @@
 
 import { useMemo } from 'react';
 import { Box } from 'ink';
-import { AuthType ,
+import {
+  AuthType,
   findProviderByCredentials,
   resolveMetadataKey,
 } from '@qwen-code/qwen-code-core';

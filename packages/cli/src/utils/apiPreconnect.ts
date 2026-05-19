@@ -23,7 +23,6 @@ import {
   redactProxyCredentials,
 } from '@qwen-code/qwen-code-core';
 
-
 const debugLogger = createDebugLogger('PRECONNECT');
 
 let preconnectFired = false;

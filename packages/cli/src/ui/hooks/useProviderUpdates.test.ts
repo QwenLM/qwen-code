@@ -6,7 +6,8 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
-import { AuthType ,
+import {
+  AuthType,
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_ENV_KEY,
   codingPlanProvider,
