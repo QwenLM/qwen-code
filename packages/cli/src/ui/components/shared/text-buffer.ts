@@ -2253,6 +2253,10 @@ export function useTextBuffer({
       }
 
       if (useShell) {
+        // .cmd/.bat launch through cmd.exe on Windows. These args are
+        // process-generated temp-file paths, so quoting handles spaces and
+        // command separators. Do not reuse for user-controlled arguments;
+        // avoid shell execution instead of extending ad-hoc escaping.
         editorArgs = editorArgs.map((a) => `"${a}"`);
       }
 
