@@ -1940,11 +1940,12 @@ export class Session implements SessionContext {
           skipClassifier: shouldFallback(denialState).fallback,
         });
 
-        // Exhaustive switch (parallels coreToolScheduler.ts:1392). Using
-        // an `if/else if` here would silently fall through to "allow" if
-        // a new `via` variant were added to `AutoModeDecision` — fail-
-        // open. The `_exhaustive: never` arm makes that drift a
-        // compile-time error.
+        // Exhaustive switch (parallels the switch(decision.via) block in
+        // coreToolScheduler.ts, inside the evaluateAutoMode result
+        // handling). Using an `if/else if` here would silently fall
+        // through to "allow" if a new `via` variant were added to
+        // `AutoModeDecision` — fail-open. The `_exhaustive: never` arm
+        // makes that drift a compile-time error.
         switch (decision.via) {
           case 'fast-path:accept-edits':
           case 'fast-path:allowlist':
@@ -1971,6 +1972,13 @@ export class Session implements SessionContext {
             break;
           default: {
             const _exhaustive: never = decision;
+            // Surface drift at runtime, not just compile-time. The TS
+            // exhaustiveness check is bypassable (`as` cast, JS interop,
+            // partial build), and without this log every tool call would
+            // silently degrade with zero operator-visible signal.
+            debugLogger.error(
+              `Auto mode: unrecognised decision.via "${(decision as { via: string }).via}" — falling through to manual approval`,
+            );
             void _exhaustive;
           }
         }

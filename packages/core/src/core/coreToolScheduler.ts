@@ -1443,6 +1443,14 @@ export class CoreToolScheduler {
                 break;
               default: {
                 const _exhaustive: never = decision;
+                // Surface drift at runtime, not just compile-time. The TS
+                // exhaustiveness check is bypassable (`as` cast, JS
+                // interop, partial build), and without this log every
+                // tool call would silently degrade with zero operator-
+                // visible signal.
+                debugLogger.error(
+                  `Auto mode: unrecognised decision.via "${(decision as { via: string }).via}" — falling through to manual approval`,
+                );
                 void _exhaustive;
               }
             }
