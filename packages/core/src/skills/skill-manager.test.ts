@@ -735,7 +735,7 @@ Skill 3 content`);
       expect(projectSkills.every((s) => s.level === 'project')).toBe(true);
     });
 
-    it('should sort by priority descending, then name with unset treated as 0', async () => {
+    it('should return a stable alphabetical order regardless of priority (priority only affects the /skills display layer)', async () => {
       vi.mocked(fs.readdir).mockReset();
       mockParseYaml.mockImplementation((yamlString: string) =>
         yaml.parse(yamlString),
@@ -782,13 +782,13 @@ Body`);
 
       expect(skills.map((skill) => skill.name)).toEqual([
         'high',
+        'negative',
         'unset-alpha',
         'unset-beta',
-        'negative',
       ]);
     });
 
-    it('should normalize non-number extension priorities during sorting', async () => {
+    it('should normalize non-number extension priorities and stay alphabetical', async () => {
       vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
         {
           id: 'test-extension',
@@ -825,11 +825,12 @@ Body`);
       });
 
       expect(skills.map((skill) => skill.name)).toEqual([
-        'high-priority',
         'bad-priority',
+        'high-priority',
       ]);
-      // The non-number priority should also be normalized on the skill itself,
-      // not just at sort time, so downstream consumers see a clean value.
+      // The non-number priority should still be normalized on the skill
+      // itself so downstream consumers (the /skills display sort) see a
+      // clean value.
       const badSkill = skills.find((s) => s.name === 'bad-priority');
       expect(badSkill?.priority).toBe(0);
     });

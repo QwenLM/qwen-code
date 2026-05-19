@@ -27,11 +27,7 @@ import {
   validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
-import {
-  normalizeSkillPriority,
-  parsePriorityField,
-  validateConfig,
-} from './skill-load.js';
+import { parsePriorityField, validateConfig } from './skill-load.js';
 import { validateSymlinkTarget } from './symlinkScope.js';
 import {
   SkillActivationRegistry,
@@ -234,12 +230,12 @@ export class SkillManager {
       }
     }
 
-    // Sort by priority desc (unspecified treated as 0), then by name.
-    skills.sort(
-      (a, b) =>
-        normalizeSkillPriority(b.priority) -
-          normalizeSkillPriority(a.priority) || a.name.localeCompare(b.name),
-    );
+    // Always return a stable alphabetical order. `priority:` only affects the
+    // `/skills` listing, which applies its own priority sort at the display
+    // layer (skillsCommand). Keeping listSkills() name-sorted means
+    // programmatic consumers — notably SkillTool's model-facing
+    // `<available_skills>` description — are not reordered by priority.
+    skills.sort((a, b) => a.name.localeCompare(b.name));
 
     debugLogger.info(`Listed ${skills.length} unique skills`);
     return skills;
@@ -900,9 +896,9 @@ export class SkillManager {
       for (const extension of extensions) {
         extension.skills?.forEach((skill) => {
           // Extension skills bypass parseSkillContent / validateConfig, so a
-          // non-number `priority` would silently sort at the bottom (via
-          // normalizeSkillPriority) with no diagnostic. Warn here so the
-          // extension author sees the same signal a SKILL.md author would.
+          // non-number `priority` would silently sort at the bottom of the
+          // `/skills` listing with no diagnostic. Warn here so the extension
+          // author sees the same signal a SKILL.md author would.
           const hasInvalidPriority =
             skill.priority !== undefined &&
             (typeof skill.priority !== 'number' ||
@@ -916,8 +912,8 @@ export class SkillManager {
             ...skill,
             extensionName: extension.name,
             // Normalize so downstream consumers reading `skill.priority`
-            // observe the same value reflected by the warning above and by
-            // sort-time normalization.
+            // (e.g. the `/skills` display sort) observe the same value
+            // reflected by the warning above.
             priority: hasInvalidPriority
               ? 0
               : (skill.priority as number | undefined),

@@ -14,7 +14,10 @@ import { MessageType, type HistoryItemSkillsList } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { AsyncFzf } from 'fzf';
 import type { SkillConfig } from '@qwen-code/qwen-code-core';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  normalizeSkillPriority,
+} from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('SKILLS_COMMAND');
 
@@ -54,10 +57,18 @@ export const skillsCommand: SlashCommand = {
     }
 
     if (!skillName) {
-      // listSkills() already returns priority-desc, name-asc; preserve that.
+      // listSkills() returns a stable name-asc order. `priority:` only
+      // reorders the `/skills` listing, so apply the priority-desc,
+      // name-asc sort here at the display layer (unset/invalid → 0).
+      const sortedSkills = [...skills].sort(
+        (a, b) =>
+          normalizeSkillPriority(b.priority) -
+            normalizeSkillPriority(a.priority) ||
+          a.name.localeCompare(b.name),
+      );
       const skillsListItem: HistoryItemSkillsList = {
         type: MessageType.SKILLS_LIST,
-        skills: skills.map((skill) => ({ name: skill.name })),
+        skills: sortedSkills.map((skill) => ({ name: skill.name })),
       };
       context.ui.addItem(skillsListItem, Date.now());
       return;
