@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { getAutoMemoryIndexPath, getAutoMemoryMetadataPath } from './paths.js';
 import {
   scanAutoMemoryTopicDocuments,
@@ -78,6 +79,8 @@ export async function rebuildManagedAutoMemoryIndex(
     readAutoMemoryMetadata(projectRoot),
   ]);
   const content = buildManagedAutoMemoryIndex(docs, metadata);
-  await fs.writeFile(getAutoMemoryIndexPath(projectRoot), content, 'utf-8');
+  await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
+    encoding: 'utf-8',
+  });
   return content;
 }

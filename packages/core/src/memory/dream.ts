@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { getAutoMemoryMetadataPath } from './paths.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
@@ -122,10 +123,10 @@ async function updateDreamMetadataResult(
       metadata.lastDreamSessionId = sessionId;
       metadata.recentSessionIdsSinceDream = [];
     }
-    await fs.writeFile(
+    await atomicWriteFile(
       metadataPath,
       `${JSON.stringify(metadata, null, 2)}\n`,
-      'utf-8',
+      { encoding: 'utf-8' },
     );
   } catch {
     // Best-effort metadata bump.
