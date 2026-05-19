@@ -260,11 +260,13 @@ export interface BridgeOptions {
    * implementation instead of using BridgeClient's inline
    * `fs.realpath` / `fs.writeFile` / `fs.readFile` proxy.
    *
-   * Production `qwen serve` wires this to a serve-side adapter that
-   * wraps PR 18's `WorkspaceFileSystem` so writes pick up its TOCTOU
-   * + symlink-substitution + trust-gate + `.gitignore` + audit
+   * The immediate F1 follow-up will land a serve-side adapter that
+   * wraps PR 18's `WorkspaceFileSystem` and a `runQwenServe` wiring
+   * patch so production `qwen serve` writes pick up its TOCTOU +
+   * symlink-substitution + trust-gate + `.gitignore` + audit
    * machinery — closing the `ws.ts:613` follow-up thread tracked
-   * since PR 18 landed.
+   * since PR 18 landed. Until that lands, BridgeClient's inline
+   * proxy continues to handle writes (current behavior preserved).
    *
    * When omitted (tests, Mode A in-process consumers, channels /
    * IDE companion using the bridge directly), BridgeClient's inline

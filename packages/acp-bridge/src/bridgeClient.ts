@@ -753,8 +753,11 @@ export class BridgeClient implements Client {
     // where possible) so editing a `0600` secret doesn't downgrade
     // it to `0644` via the process umask, and an executable file
     // doesn't lose its `+x` bit. Snapshot before write — if the
-    // target doesn't exist yet, fall through to umask defaults
-    // (which is correct for a new file).
+    // target doesn't exist yet, `preserveMode` stays undefined and
+    // the new file gets the `0o600` default applied at the
+    // `fs.writeFile` call below (NOT umask defaults — the explicit
+    // `mode` argument bypasses umask for atomicity, see the `Blehd`
+    // comment on `writeFile` for why).
     let preserveMode: { mode: number; uid: number; gid: number } | undefined;
     try {
       const targetStat = await fs.stat(realTarget);
@@ -769,7 +772,8 @@ export class BridgeClient implements Client {
           ? (err as { code?: unknown }).code
           : undefined;
       if (code !== 'ENOENT') throw err;
-      // New file — accept umask defaults.
+      // New file — leave `preserveMode` undefined; the writeFile call
+      // below substitutes the `0o600` default via `?? 0o600`.
     }
     try {
       // Blehd: pass `mode` to `writeFile` so the temp file is

@@ -13,12 +13,14 @@ import type {
 
 /**
  * Injection seam for the ACP fs proxy on `BridgeClient.readTextFile` /
- * `BridgeClient.writeTextFile`. Production `qwen serve` wraps PR 18's
- * `WorkspaceFileSystem` through a serve-side adapter
- * (`cli/src/serve/bridgeFileSystemAdapter.ts`) so writes get the
- * TOCTOU + symlink + trust-gate + audit machinery PR 18 introduced
- * — closing the `ws.ts:613` follow-up thread that has been tracked
- * since PR 18 landed.
+ * `BridgeClient.writeTextFile`. The immediate follow-up PR will land
+ * a serve-side adapter that wraps PR 18's `WorkspaceFileSystem` so
+ * production `qwen serve` writes pick up the TOCTOU + symlink +
+ * trust-gate + audit machinery PR 18 introduced — closing the
+ * `ws.ts:613` follow-up thread that has been tracked since PR 18
+ * landed. Until that adapter ships and `runQwenServe` wires it
+ * through `BridgeOptions.fileSystem`, BridgeClient continues to use
+ * its inline fs proxy (preserving pre-F1 behavior).
  *
  * Lifted from the inline `fs.writeFile` / `fs.readFile` implementations
  * BridgeClient carried before #4175 PR F1 (step 5, originally the
