@@ -1,8 +1,8 @@
 # Virtual viewport for long conversations on ink 7
 
 Status: **implemented**, PR #4146 ships:
-core viewport, ASCII scrollbar, SGR mouse-wheel, `ui.useTerminalBuffer` gate, keyboard scroll keys.
-Scrollbar drag / in-app search / animated scrollbar / alt-buffer mode / dual-write to host scrollback are scoped out to V.3+ (see §7).
+core viewport, ASCII scrollbar with auto-hide animation, SGR mouse-wheel, `ui.useTerminalBuffer` gate, keyboard scroll keys.
+Scrollbar drag / in-app search / alt-buffer mode / dual-write to host scrollback are scoped out to V.3+ (see §7).
 Author: 秦奇
 Tracking branch: `feat/virtual-viewport-on-ink7` (base: `main`)
 
@@ -110,7 +110,8 @@ packages/cli/src/ui/
 │   └── StaticRender.tsx             [NEW] React.memo wrapper (replaces gemini-cli's ink fork export)
 ├── hooks/
 │   ├── useBatchedScroll.ts          [NEW] coalesce same-tick scroll updates
-│   └── useMouseEvents.ts            [NEW] enable SGR mouse mode + parse stdin events
+│   ├── useMouseEvents.ts            [NEW] enable SGR mouse mode + parse stdin events
+│   └── useAnimatedScrollbar.ts      [NEW] thumb flash on scroll + idle auto-hide
 ├── utils/
 │   └── mouse.ts                     [NEW] SGR + X11 mouse-event parser (port from gemini-cli)
 ├── components/MainContent.tsx       [MOD] add virtualized branch + stability refs
@@ -121,7 +122,6 @@ Deferred to follow-up PRs:
 
 - **Scrollbar drag + click-to-position** — needs screen-absolute element coords, blocked on a stock-ink-7 limitation (see V.4 / V.7).
 - **In-app `/` search** — claude-code's `TranscriptSearchBar` pattern (V.5).
-- **Animated scrollbar fade** — `hooks/useAnimatedScrollbar.ts` (V.4 nice-to-have).
 - **Alternate-buffer mode** — `contexts/ScrollProvider.tsx`-style focus / lock, with full alt-screen takeover (V.6).
 
 ### Setting (V.2)
@@ -310,14 +310,14 @@ Same pattern in qwen-code. Required for virtualization to actually skip re-rende
 
 ## 7. PR sequence
 
-| PR        | Title (draft)                                                               | Scope                                                                                                                                | Lines             | Dependencies | Risk                                           |
-| --------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------- | ------------ | ---------------------------------------------- |
-| **#4146** | feat(cli): virtual viewport for long conversations on ink 7                 | core primitives + ASCII scrollbar + SGR **mouse-wheel** + `ui.useTerminalBuffer` gate + `MainContent`/`AppContainer` wiring + tests  | ~2700 LoC         | `main`       | ✅ **shipped** — typecheck clean, vitest green |
-| **V.3**   | test(integration): capture-suite regressions for streaming / resize / shell | port 3 capture scripts from PR #3663                                                                                                 | ~2000 (test-only) | #4146        | pending                                        |
-| **V.4**   | feat(cli): scrollbar drag + click-to-position + animated scrollbar          | SGR mouse hit-test on scrollbar column (needs screen-absolute coords — either upstream `getBoundingBox` to ink 7 or own yoga walker) | ~500              | #4146        | deferred                                       |
-| **V.5**   | feat(cli): in-app `/` search                                                | viewport-bound highlight + n/N navigation (claude-code's `TranscriptSearchBar` pattern)                                              | ~300              | #4146        | deferred                                       |
-| **V.6**   | feat(cli): alternate-buffer mode (full alt-screen takeover)                 | additional setting `ui.useAlternateBuffer`                                                                                           | ~500              | #4146        | deferred — separate UX decision required       |
-| **V.7**   | research: preserve host terminal scrollback (dual-write)                    | `@jrichman/ink`'s `overflowToBackbuffer` is fork-only. Options: upstream PR to ink 7, own dual-write, or accept loss. Investigation. | —                 | #4146        | structurally blocked on stock ink 7            |
+| PR        | Title (draft)                                                               | Scope                                                                                                                                                                              | Lines             | Dependencies | Risk                                           |
+| --------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ------------ | ---------------------------------------------- |
+| **#4146** | feat(cli): virtual viewport for long conversations on ink 7                 | core primitives + ASCII scrollbar with **auto-hide animation** + SGR **mouse-wheel** + `ui.useTerminalBuffer` gate + `MainContent`/`AppContainer` wiring + tests                   | ~2800 LoC         | `main`       | ✅ **shipped** — typecheck clean, vitest green |
+| **V.3**   | test(integration): capture-suite regressions for streaming / resize / shell | port 3 capture scripts from PR #3663                                                                                                                                               | ~2000 (test-only) | #4146        | pending                                        |
+| **V.4**   | feat(cli): scrollbar drag + click-to-position                               | SGR mouse hit-test on scrollbar column. Needs screen-absolute coords — either upstream `getBoundingBox` to ink 7 or own yoga walker. Auto-hide animation already shipped in #4146. | ~400              | #4146        | deferred — coord blocker                       |
+| **V.5**   | feat(cli): in-app `/` search                                                | viewport-bound highlight + n/N navigation (claude-code's `TranscriptSearchBar` pattern)                                                                                            | ~300              | #4146        | deferred                                       |
+| **V.6**   | feat(cli): alternate-buffer mode (full alt-screen takeover)                 | additional setting `ui.useAlternateBuffer`                                                                                                                                         | ~500              | #4146        | deferred — separate UX decision required       |
+| **V.7**   | research: preserve host terminal scrollback (dual-write)                    | `@jrichman/ink`'s `overflowToBackbuffer` is fork-only. Options: upstream PR to ink 7, own dual-write, or accept loss. Investigation.                                               | —                 | #4146        | structurally blocked on stock ink 7            |
 
 V.3 (integration tests) is the remaining critical-path item before flipping the default. V.4–V.6 close the remaining gemini-cli-parity gaps; V.7 is open research because the underlying ink prop we'd need (`overflowToBackbuffer`) only exists in gemini-cli's `@jrichman/ink` fork.
 
