@@ -91,30 +91,11 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 
 > Tier 名称是稳定 contract，对外（CI summary、`@qwen /review --tier=...`）都用这些字符串。
 
-### 反例：纯 size 路由会错判什么
+### 执行路径要点
 
-| PR 描述 | 纯 size 路由会判 | 真实 blast radius | 正确 tier |
-| --- | --- | --- | --- |
-| 1000 行新增 `docs/users/*.md` | DEEP（>500） | 0 | ULTRA_LIGHT |
-| 800 行 `package-lock.json` 更新 | DEEP | 0 | ULTRA_LIGHT |
-| 100 行 refactor `packages/core/src/auth/oauth.ts` | LIGHT | 极高（security）| DEEP |
-| 30 行改 `.github/workflows/release.yml` | ULTRA_LIGHT | 高（CI/CD）| STANDARD 或 DEEP（看是否触及 secrets / 发布逻辑）|
-| 200 行改 `packages/cli/src/commands/foo.ts` 一个内部模块 | LIGHT | 中等 | STANDARD |
-
-这就是为什么 preflight **必须用 LLM 而不是纯 shell** —— LLM 看 diff 内容能判别这些区别，shell 看 size 不行。
-
-### 设计要点（与上一版的差别）
-
-旧版把 STANDARD 设计成"bundled `/review` + 子集 agents + 跳 reverse audit" —— 即通过 prompt steering 让 bundled skill 跑半套。实测表明这个方案有两个问题：
-
-1. **不可控的长尾**：bundled skill 内部的 agent fan-out 即使配 steering 也可能跑 50 min（见 §问题陈述 #4110 实测）。STANDARD 必须有**结构化的耗时上限**，靠 prompt steering 做不到。
-2. **prompt steering 是 best-effort**：bundled skill 仍可能拉起 reverse audit / 多 persona / 全 worktree 探查 —— P1 原则"不修改 bundled skill"的代价。
-
-新版改成：
-
-- **ULTRA_LIGHT / LIGHT / STANDARD 三档全部走单发 qwen 调用**（绕开 bundled skill），耗时由 model 的 max_tokens × 生成速率天然封顶
+- **ULTRA_LIGHT / LIGHT / STANDARD** 三档全部走单发 qwen 调用（绕开 bundled skill），耗时由 model 的 max_tokens × 生成速率天然封顶
 - **只有 DEEP 调 bundled skill**，沿用 Phase 1-3 的 CI-lightweight steering（不动）
-- 单发调用的 prompt 复杂度按 tier 递增：LIGHT 是简单 markdown、STANDARD 带 P0–P3 结构化清单 + cross-file 提示
+- 单发调用的 prompt 复杂度按 tier 递增：LIGHT 简洁 markdown、STANDARD 带 P0–P3 结构化清单 + cross-file 提示
 - bundled skill 9-agent 的价值仅在 DEEP 保留 —— 它本来就是为高风险 PR 准备的
 
 ## Tier 实现机制
@@ -265,16 +246,7 @@ shell-only   单发 qwen   单发 qwen   bundled /review
 - shell 层用 `jq` 验证 schema：缺字段 / tier 非法 / blast_radius 不完整 → 视作 preflight 失败，走兜底（见 Failure modes）
 - `focus_areas`、`agents_to_run` 仅 STANDARD/DEEP 使用
 
-## 不引入 path-glob hard rule
-
-早期草稿设计过 `.qwen/review-tier-rules.yml`，靠路径 + 关键字强制升档。**最终不做**。理由：
-
-- preflight LLM 拿到的就是 PR diff 内容 —— blast radius 判断本就该从内容来，path 是机械启发式
-- 跟"size 暴力不科学"是同一个毛病：`packages/core/src/auth/oauth.ts` 里改个注释也强制 STANDARD？显然不该
-- path 列表会随项目演进腐败，维护成本随时间增长
-- LLM 判错由 maintainer 用 `@qwen /review --tier=deep` 显式纠正即可
-
-唯一保留：现有 `size > 1500` 拒评（防止 PR 失控大到根本没法 review）。这与 tier 路由无关，是输入层防御。
+> tier 决策**完全由 preflight LLM 看 diff 内容判定**，没有 path-glob 或 keyword 启发式安全网。LLM 判错由 maintainer 用 `@qwen /review --tier=deep` 显式纠正。唯一例外：`size > 1500` 由 `pr-gate.yml` 拒评（与 tier 路由正交，详见 [`../pr-gate-plan.md`](../pr-gate-plan.md)）。
 
 ## Failure modes
 

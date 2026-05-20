@@ -23,7 +23,7 @@ on:
 
 permissions:
   contents: 'read'
-  pull-requests: 'write'   # write so pr-size can manage size/* labels
+  pull-requests: 'read'    # read-only: pr-title/pr-template use event payload; pr-size calls listFiles
 
 # Cancel earlier in-flight runs on the same PR when a new event arrives.
 # 'edited' events can fire frequently while the contributor iterates on
@@ -166,7 +166,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 3
     steps:
-      - name: 'Compute size and label'
+      - name: 'Compute size and block XL'
         uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea' # v7.0.1
         with:
           script: |
@@ -207,57 +207,18 @@ jobs:
             );
             const totalFiles = meaningful.length;
 
-            // Tier mapping. XL is the blocking tier.
-            const tier =
-              totalChanges <= 10 ? 'XS'
-              : totalChanges <= 100 ? 'S'
-              : totalChanges <= 500 ? 'M'
-              : totalChanges <= 1500 ? 'L'
-              : 'XL';
+            const BLOCK_THRESHOLD = 1500;
+            const WARN_THRESHOLD = 1000;
 
             core.info(
-              `PR size: ${totalChanges} meaningful lines across ${totalFiles} files → size/${tier}`
+              `PR size: ${totalChanges} meaningful lines across ${totalFiles} files ` +
+              `(block at ${BLOCK_THRESHOLD}, warn at ${WARN_THRESHOLD}; lockfile/docs/snapshot/generated excluded).`
             );
 
-            // Manage labels: remove any stale size/* label, add the new one.
-            const existingLabels =
-              (context.payload.pull_request.labels || []).map((l) => l.name);
-            const desired = `size/${tier}`;
-            for (const old of existingLabels.filter((n) => /^size\//.test(n))) {
-              if (old !== desired) {
-                await github.rest.issues
-                  .removeLabel({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: context.issue.number,
-                    name: old,
-                  })
-                  .catch(() => { /* label may already be gone */ });
-              }
-            }
-            if (!existingLabels.includes(desired)) {
-              await github.rest.issues
-                .addLabels({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: context.issue.number,
-                  labels: [desired],
-                })
-                .catch((err) => {
-                  // Adding a non-existent label fails; this is non-fatal,
-                  // the maintainer just needs to pre-create the label set.
-                  core.warning(
-                    `Could not add label '${desired}': ${err.message}. ` +
-                    'Create the size/{XS,S,M,L,XL} labels in the repo to enable.'
-                  );
-                });
-            }
-
-            // Block merge when XL.
-            if (tier === 'XL') {
+            if (totalChanges > BLOCK_THRESHOLD) {
               core.setFailed(
                 `PR is too large: ${totalChanges} meaningful lines across ${totalFiles} files ` +
-                '(threshold: 1500).\n\n' +
+                `(threshold: ${BLOCK_THRESHOLD}).\n\n` +
                 'Please split this PR into smaller, independently reviewable PRs. ' +
                 'Suggestions:\n' +
                 '  • Separate refactors from feature changes.\n' +
@@ -267,7 +228,7 @@ jobs:
                 'from this count. If the count still seems off, check ' +
                 '`.github/workflows/pr-gate.yml` for the exclusion list.'
               );
-            } else if (tier === 'L') {
+            } else if (totalChanges > WARN_THRESHOLD) {
               core.warning(
                 `PR is large (${totalChanges} lines). Merge is allowed, but consider splitting ` +
                 'next time for easier review.'

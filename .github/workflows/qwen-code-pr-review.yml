@@ -702,26 +702,37 @@ jobs:
           status_label="complete"
           if [ "$status" -eq 124 ]; then
             status_label="timeout"
-            echo "::warning::LIGHT review timed out at 3m; will be retried as STANDARD."
-            echo "needs_upgrade=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::warning::LIGHT review timed out at 3m; flushing partial output via accumulator."
           fi
 
           node scripts/parse-review-stream.js "$out" qwen-review-summary.md LIGHT "$status_label"
-          # Empty review → escalate to STANDARD rather than posting empty.
-          if [ "$(wc -c < qwen-review-summary.md)" -lt 80 ]; then
-            echo "::warning::LIGHT review produced empty output; will be retried as STANDARD."
-            echo "needs_upgrade=true" >> "$GITHUB_OUTPUT"
-            exit 0
+
+          if [ "$status_label" = "timeout" ]; then
+            # Prepend warning so maintainer sees the review was capped.
+            {
+              printf '## ⚠️ LIGHT review was time-capped at 3 min — partial output below\n\n'
+              cat qwen-review-summary.md
+            } > /tmp/qwen-review-summary-with-warning.md
+            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
           fi
 
-      # ─── STANDARD: single-shot qwen with structured prompt + LIGHT upgrade ─
+          # If the accumulator only wrote its "no assistant text parsed"
+          # placeholder, delete the file so the post-summary step skips and
+          # the fallback comment fires instead of posting a useless stub.
+          # 200-char threshold leaves room for the metadata header + small
+          # actual reviews (a one-liner finding is still ≥ 200 chars when
+          # wrapped in the markdown skeleton).
+          if [ "$(wc -c < qwen-review-summary.md)" -lt 200 ]; then
+            echo "::warning::LIGHT review produced near-empty output; removing summary file so fallback comment fires."
+            rm -f qwen-review-summary.md
+          fi
+
+      # ─── STANDARD: single-shot qwen with structured prompt ─────────────────
       - name: 'Run STANDARD review'
         id: 'standard'
         if: |-
           steps.size.outputs.should_review == 'true' &&
-          (steps.tier.outputs.tier == 'STANDARD' ||
-           steps.light.outputs.needs_upgrade == 'true')
+          steps.tier.outputs.tier == 'STANDARD'
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
