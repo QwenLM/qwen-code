@@ -677,4 +677,22 @@ describe('EXDEV fallback (async + sync)', () => {
     // Tmp cleaned up even though rename failed
     expect(await fs.readdir(tmpDir)).toEqual([]);
   });
+
+  it('atomicWriteFileSync: non-EXDEV rename failure propagates and cleans up tmp', () => {
+    // Mirror of the async EIO test above — review fold-in: sync variant
+    // had the same `unlinkSync + re-throw` path but no test exercising
+    // it (the previous "should clean up temp file when write fails"
+    // test only covered writeFileSync failure before rename).
+    const filePath = path.join(tmpDir, 'eio-sync.txt');
+    const eioRename = () => {
+      const e: NodeJS.ErrnoException = new Error('EIO');
+      e.code = 'EIO';
+      throw e;
+    };
+
+    expect(() =>
+      atomicWriteFileSync(filePath, 'data', undefined, { rename: eioRename }),
+    ).toThrow(/EIO/);
+    expect(fsSync.readdirSync(tmpDir)).toEqual([]);
+  });
 });
