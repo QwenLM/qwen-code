@@ -126,7 +126,7 @@ export function normalizeDaemonEvent(
         {
           ...base,
           type: 'debug',
-          text: `${event.type}: ${stringifyJson(event.data)}`,
+          text: `${event.type}: ${stringifyRedactedJson(event.data)}`,
         },
       ];
   }
@@ -156,7 +156,7 @@ function normalizeSessionUpdate(
       {
         ...base,
         type: 'debug',
-        text: `session_update: ${stringifyJson(event.data)}`,
+        text: `session_update: ${stringifyRedactedJson(event.data)}`,
       },
     ];
   }
@@ -212,12 +212,14 @@ function normalizeSessionUpdate(
         },
       ];
     }
+    case 'plan':
+      return [normalizePlanUpdate(update, base)];
     default:
       return [
         {
           ...base,
           type: 'debug',
-          text: `${kind ?? 'session_update'}: ${stringifyJson(update)}`,
+          text: `${kind ?? 'session_update'}: ${stringifyRedactedJson(update)}`,
         },
       ];
   }
@@ -237,6 +239,8 @@ function normalizeToolUpdate(
   const title = getString(update, 'title') ?? toolName ?? toolKind;
   const rawInput = update['rawInput'] ?? update['input'] ?? update['args'];
   const rawOutput = update['rawOutput'] ?? update['output'] ?? update['result'];
+  const content = update['content'];
+  const locations = update['locations'];
   const toolCallId = getString(update, 'toolCallId');
   const status = getString(update, 'status');
   if (!toolCallId) {
@@ -255,6 +259,8 @@ function normalizeToolUpdate(
     ...(title ? { title } : {}),
     ...(toolName ? { toolName } : {}),
     ...(toolKind ? { toolKind } : {}),
+    ...(content !== undefined ? { content } : {}),
+    ...(locations !== undefined ? { locations } : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(rawInput !== undefined
@@ -263,6 +269,53 @@ function normalizeToolUpdate(
         ? { details: capDetails(getOutputText(rawOutput)) }
         : {}),
   };
+}
+
+function normalizePlanUpdate(
+  update: Record<string, unknown>,
+  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+): DaemonUiEvent {
+  const entries = Array.isArray(update['entries']) ? update['entries'] : [];
+  const contentText = formatPlanEntries(entries);
+  return {
+    ...base,
+    type: 'tool.update',
+    toolCallId: 'daemon-plan',
+    title: 'Updated Plan',
+    status: 'completed',
+    toolName: 'TodoWrite',
+    toolKind: 'updated_plan',
+    content: [
+      {
+        type: 'content',
+        content: { type: 'text', text: contentText },
+      },
+    ],
+    rawOutput: { entries },
+  };
+}
+
+function formatPlanEntries(entries: readonly unknown[]): string {
+  return entries
+    .flatMap((entry): string[] => {
+      if (!isRecord(entry)) return [];
+      const content = getString(entry, 'content');
+      if (!content) return [];
+      const marker = getPlanEntryMarker(getString(entry, 'status'));
+      return [`- [${marker}] ${content}`];
+    })
+    .join('\n');
+}
+
+function getPlanEntryMarker(status: string | undefined): string {
+  switch (status) {
+    case 'completed':
+      return 'x';
+    case 'in_progress':
+      return '-';
+    default:
+      return ' ';
+  }
 }
 
 function capDetails(details: string): string {
@@ -279,7 +332,7 @@ function normalizePermissionRequest(
       {
         ...base,
         type: 'debug',
-        text: `permission_request: ${stringifyJson(event.data)}`,
+        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
       },
     ];
   }
@@ -290,7 +343,7 @@ function normalizePermissionRequest(
       {
         ...base,
         type: 'debug',
-        text: `permission_request: ${stringifyJson(event.data)}`,
+        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
       },
     ];
   }
@@ -319,7 +372,7 @@ function normalizePermissionResolved(
       {
         ...base,
         type: 'debug',
-        text: `${event.type}: ${stringifyJson(event.data)}`,
+        text: `${event.type}: ${stringifyRedactedJson(event.data)}`,
       },
     ];
   }
@@ -392,4 +445,39 @@ function describeToolCall(value: unknown): string {
 function getShellStream(value: unknown): 'stdout' | 'stderr' | undefined {
   const stream = getString(value, 'stream');
   return stream === 'stdout' || stream === 'stderr' ? stream : undefined;
+}
+
+function stringifyRedactedJson(value: unknown): string {
+  return stringifyJson(redactSensitiveFields(value));
+}
+
+function redactSensitiveFields(value: unknown, depth = 0): unknown {
+  if (depth > 16) return '[truncated]';
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSensitiveFields(entry, depth + 1));
+  }
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      isSensitiveKey(key)
+        ? '[redacted]'
+        : redactSensitiveFields(entry, depth + 1),
+    ]),
+  );
+}
+
+function isSensitiveKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return (
+    normalized === 'authorization' ||
+    normalized === 'cookie' ||
+    normalized === 'setcookie' ||
+    normalized === 'password' ||
+    normalized === 'apikey' ||
+    normalized.endsWith('token') ||
+    normalized.endsWith('secret') ||
+    normalized.includes('accesstoken') ||
+    normalized.includes('refreshtoken')
+  );
 }

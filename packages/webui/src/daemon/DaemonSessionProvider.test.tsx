@@ -307,7 +307,11 @@ describe('DaemonSessionProvider', () => {
             );
           }),
       ),
-      events: firstEvents.events,
+      events: async function* missingSessionEvents() {
+        await firstEvents.closed.promise;
+        yield* [];
+        throw Object.assign(new Error('missing session'), { status: 404 });
+      },
     });
     const secondSession = createMockSession({
       sessionId: 'session-b',
@@ -342,7 +346,7 @@ describe('DaemonSessionProvider', () => {
 
     firstEvents.close();
     await act(async () => {
-      await wait(5);
+      await wait(20);
       await flushPromises();
     });
 
@@ -358,6 +362,65 @@ describe('DaemonSessionProvider', () => {
       });
     });
     expect(secondSession.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses the same session client after a normal SSE stream end', async () => {
+    const events = vi.fn(async function* reusableEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (events.mock.calls.length === 1) {
+        const event: DaemonEvent = {
+          id: 5,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'hello' },
+            },
+          },
+        };
+        yield event;
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve();
+          return;
+        }
+        opts.signal?.addEventListener('abort', () => resolve(), {
+          once: true,
+        });
+      });
+      yield* [];
+    });
+    const session = createMockSession({ events });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(5);
+      await flushPromises();
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledTimes(1);
+    expect(events).toHaveBeenCalledTimes(2);
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'hello' },
+      { kind: 'status', text: 'SSE stream ended' },
+    ]);
   });
 
   it('surfaces SSE stream end and clears the session when reconnect is disabled', async () => {
@@ -472,6 +535,7 @@ function createClosedEvents(): MockSession['events'] {
 function createClosableEvents(): {
   events: MockSession['events'];
   close: () => void;
+  closed: ReturnType<typeof createDeferred<void>>;
 } {
   const closed = createDeferred<void>();
   return {
@@ -480,6 +544,7 @@ function createClosableEvents(): {
       yield* [];
     },
     close: closed.resolve,
+    closed,
   };
 }
 

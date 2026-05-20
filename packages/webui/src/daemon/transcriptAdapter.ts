@@ -12,6 +12,8 @@ import {
 import type { UnifiedMessage } from '../adapters/types.js';
 import type {
   ToolCallData,
+  ToolCallContent,
+  ToolCallLocation,
   ToolCallStatus,
 } from '../components/toolcalls/shared/index.js';
 
@@ -172,6 +174,12 @@ function daemonToolBlockToToolCallData(
       | string
       | undefined,
     rawOutput: sanitizeDaemonValue(block.rawOutput),
+    ...(block.content !== undefined
+      ? { content: normalizeToolContent(block.content) }
+      : {}),
+    ...(block.locations !== undefined
+      ? { locations: normalizeToolLocations(block.locations) }
+      : {}),
   };
 }
 
@@ -285,6 +293,62 @@ function sanitizeDaemonValue(value: unknown, depth = 0): unknown {
       sanitizeDaemonValue(entry, depth + 1),
     ]),
   );
+}
+
+function normalizeToolContent(value: unknown): ToolCallContent[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): ToolCallContent[] => {
+    const sanitized = sanitizeDaemonValue(entry);
+    if (!isRecord(sanitized)) return [];
+    const type = sanitized['type'];
+    if (type === 'diff') {
+      const path = sanitized['path'];
+      const newText = sanitized['newText'];
+      return typeof path === 'string' && typeof newText === 'string'
+        ? [
+            {
+              type: 'diff',
+              path,
+              oldText:
+                typeof sanitized['oldText'] === 'string' ||
+                sanitized['oldText'] === null
+                  ? sanitized['oldText']
+                  : null,
+              newText,
+            },
+          ]
+        : [];
+    }
+    if (type !== 'content') return [];
+    const content = sanitized['content'];
+    if (!isRecord(content) || typeof content['type'] !== 'string') return [];
+    return [
+      {
+        type: 'content',
+        content: {
+          ...content,
+          type: content['type'],
+        },
+      },
+    ];
+  });
+}
+
+function normalizeToolLocations(value: unknown): ToolCallLocation[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): ToolCallLocation[] => {
+    const sanitized = sanitizeDaemonValue(entry);
+    if (!isRecord(sanitized) || typeof sanitized['path'] !== 'string') {
+      return [];
+    }
+    const line = sanitized['line'];
+    return [
+      {
+        path: sanitized['path'],
+        ...(typeof line === 'number' || line === null ? { line } : {}),
+      },
+    ];
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
