@@ -17,6 +17,7 @@ import {
   reduceDaemonTranscriptEvents,
   sanitizeTerminalText,
   selectPendingPermissionBlocks,
+  selectTranscriptBlocksOrderedByEventId,
 } from '../../src/daemon/ui/index.js';
 
 describe('daemon UI normalizer and transcript reducer', () => {
@@ -55,6 +56,28 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks).toMatchObject([
       { kind: 'user', text: 'hello' },
       { kind: 'assistant', text: 'hi there', streaming: true },
+    ]);
+  });
+
+  it('keeps optimistic local user blocks before daemon replies when sorting', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = appendLocalUserTranscriptMessage(state, 'hello', { now: 10 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'hi',
+          eventId: 7,
+          serverTimestamp: 11,
+        },
+      ],
+      { now: 11 },
+    );
+
+    expect(selectTranscriptBlocksOrderedByEventId(state)).toMatchObject([
+      { kind: 'user', text: 'hello' },
+      { kind: 'assistant', text: 'hi' },
     ]);
   });
 
@@ -1012,6 +1035,24 @@ describe('daemon UI normalizer and transcript reducer', () => {
       [{ type: 'status', text: 'trim permission' }],
       { now: 3 },
     );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 33,
+        v: 1,
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-trimmed',
+          toolCall: { name: 'Bash', command: 'npm test' },
+          options: [{ optionId: 'allow', label: 'Allow' }],
+        },
+      }),
+      { now: 4 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'status', text: 'trim permission' },
+    ]);
 
     state = reduceDaemonTranscriptEvents(
       state,
@@ -1024,7 +1065,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
           outcome: { outcome: 'selected', optionId: 'allow' },
         },
       }),
-      { now: 4 },
+      { now: 5 },
     );
 
     expect(state.blocks).toMatchObject([
@@ -2437,6 +2478,20 @@ describe('daemon UI render contract (PR-D)', () => {
     expect(md).toContain('+ const x = 2');
   });
 
+  it('daemonBlockToMarkdown uses longer fences for embedded backticks', async () => {
+    const { daemonToolPreviewToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const md = daemonToolPreviewToMarkdown({
+      kind: 'command',
+      command: 'printf "```\\n"',
+    });
+
+    expect(md).toMatch(/^````bash\n/);
+    expect(md).toContain('printf "```\\n"');
+    expect(md).toMatch(/\n````$/);
+  });
+
   it('daemonBlockToMarkdown renders mcp_invocation preview with server::tool', async () => {
     const { daemonBlockToMarkdown } = await import(
       '../../src/daemon/ui/index.js'
@@ -2482,9 +2537,13 @@ describe('daemon UI render contract (PR-D)', () => {
     const { daemonBlockToHtml } = await import('../../src/daemon/ui/index.js');
     let state = createDaemonTranscriptState({ now: 1 });
     // Inject ANSI red color escape — should be stripped by sanitizeTerminalText
-    state = appendLocalUserTranscriptMessage(state, '\x1b[31mhostile\x1b[0m text', {
-      now: 2,
-    });
+    state = appendLocalUserTranscriptMessage(
+      state,
+      '\x1b[31mhostile\x1b[0m text',
+      {
+        now: 2,
+      },
+    );
     const html = daemonBlockToHtml(state.blocks[0]!);
     expect(html).not.toContain('\x1b[');
     expect(html).toContain('hostile');
@@ -2814,9 +2873,8 @@ describe('daemon UI adapter conformance framework (PR-G)', () => {
   });
 
   it('failed fixtures surface missing + leaked phrases for debugging', async () => {
-    const { runAdapterConformanceSuite, DAEMON_UI_CONFORMANCE_FIXTURES } = await import(
-      '../../src/daemon/ui/index.js'
-    );
+    const { runAdapterConformanceSuite, DAEMON_UI_CONFORMANCE_FIXTURES } =
+      await import('../../src/daemon/ui/index.js');
     // Buggy adapter that produces empty string — should fail every fixture
     // that has any `expectedContains`.
     const result = runAdapterConformanceSuite({
@@ -2882,10 +2940,8 @@ describe('daemon UI adapter conformance framework (PR-G)', () => {
   });
 
   it('skip excludes named fixtures', async () => {
-    const {
-      runAdapterConformanceSuite,
-      DAEMON_UI_CONFORMANCE_FIXTURES,
-    } = await import('../../src/daemon/ui/index.js');
+    const { runAdapterConformanceSuite, DAEMON_UI_CONFORMANCE_FIXTURES } =
+      await import('../../src/daemon/ui/index.js');
     const result = runAdapterConformanceSuite(
       {
         reduce() {
@@ -2898,7 +2954,9 @@ describe('daemon UI adapter conformance framework (PR-G)', () => {
       { skip: ['simple-chat'] },
     );
     expect(result.total).toBe(DAEMON_UI_CONFORMANCE_FIXTURES.length - 1);
-    expect(result.failed.find((f) => f.fixture === 'simple-chat')).toBeUndefined();
+    expect(
+      result.failed.find((f) => f.fixture === 'simple-chat'),
+    ).toBeUndefined();
   });
 
   it('plain-text reference adapter also conforms to corpus', async () => {

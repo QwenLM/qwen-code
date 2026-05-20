@@ -226,6 +226,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         status: 'completed',
         preview: { kind: 'generic' },
         rawOutput: nested,
+        clientReceivedAt: 1,
         createdAt: 1,
         updatedAt: 1,
       },

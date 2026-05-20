@@ -1,9 +1,10 @@
 # Daemon UI SDK — Developer Guide
 
-The `@qwen-code/sdk/daemon` subpath ships a complete UI primitive layer
-for building daemon clients (TUI / web / IDE / channel / mobile). This
-guide covers the API surface introduced by PR #4353 (the unified follow-up
-to PR #4328's shared UI transcript layer).
+The `@qwen-code/sdk/daemon` subpath ships shared UI primitives for daemon
+clients. The current adoption target is web chat and web terminal; native local
+TUI, channel, and IDE integrations keep their existing default paths while the
+daemon UI contract stabilizes. This guide covers the API surface introduced by
+PR #4353 (the unified follow-up to PR #4328's shared UI transcript layer).
 
 ## Three-layer model
 
@@ -37,7 +38,9 @@ import {
   selectApprovalMode,
 } from '@qwen-code/sdk/daemon';
 
-const session = await DaemonSessionClient.createOrAttach(client, { workspaceCwd });
+const session = await DaemonSessionClient.createOrAttach(client, {
+  workspaceCwd,
+});
 const store = createDaemonTranscriptStore();
 
 for await (const envelope of session.events({ signal })) {
@@ -64,39 +67,39 @@ store.subscribe(() => {
 
 ### Chat-stream events
 
-| Event | When |
-|---|---|
-| `user.text.delta` | User message chunk arrives from daemon |
-| `assistant.text.delta` | Assistant streaming chunk |
-| `assistant.done` | Prompt completion (from sendPrompt resolve) |
-| `thought.text.delta` | Agent reasoning chunk |
-| `tool.update` | Tool call lifecycle (running / completed / cancelled) |
-| `shell.output` | Shell tool stdout/stderr chunk |
-| `permission.request` | Tool needs user authorization |
-| `permission.resolved` | Permission decision arrived |
-| `model.changed` | Session model switched |
-| `status` / `debug` / `error` | Status / debug / error blocks |
+| Event                        | When                                                  |
+| ---------------------------- | ----------------------------------------------------- |
+| `user.text.delta`            | User message chunk arrives from daemon                |
+| `assistant.text.delta`       | Assistant streaming chunk                             |
+| `assistant.done`             | Prompt completion (from sendPrompt resolve)           |
+| `thought.text.delta`         | Agent reasoning chunk                                 |
+| `tool.update`                | Tool call lifecycle (running / completed / cancelled) |
+| `shell.output`               | Shell tool stdout/stderr chunk                        |
+| `permission.request`         | Tool needs user authorization                         |
+| `permission.resolved`        | Permission decision arrived                           |
+| `model.changed`              | Session model switched                                |
+| `status` / `debug` / `error` | Status / debug / error blocks                         |
 
 ### Session-meta events (PR-A)
 
-| Event | When |
-|---|---|
-| `session.metadata.changed` | Session title / display name updated |
+| Event                           | When                                             |
+| ------------------------------- | ------------------------------------------------ |
+| `session.metadata.changed`      | Session title / display name updated             |
 | `session.approval_mode.changed` | Mode toggled (plan / default / yolo / auto-edit) |
-| `session.available_commands` | Slash command list refreshed |
+| `session.available_commands`    | Slash command list refreshed                     |
 
 ### Workspace events (PR-A, Wave 3-4)
 
-| Event | When |
-|---|---|
-| `workspace.memory.changed` | QWEN.md / memory file modified |
-| `workspace.agent.changed` | Sub-agent created / updated / deleted |
-| `workspace.tool.toggled` | Builtin tool enabled / disabled |
-| `workspace.initialized` | `qwen init` completed |
-| `workspace.mcp.budget_warning` | MCP child count approaching cap |
-| `workspace.mcp.child_refused` | MCP server refused due to budget |
-| `workspace.mcp.server_restarted` | Manual MCP restart succeeded |
-| `workspace.mcp.server_restart_refused` | Manual restart blocked |
+| Event                                  | When                                  |
+| -------------------------------------- | ------------------------------------- |
+| `workspace.memory.changed`             | QWEN.md / memory file modified        |
+| `workspace.agent.changed`              | Sub-agent created / updated / deleted |
+| `workspace.tool.toggled`               | Builtin tool enabled / disabled       |
+| `workspace.initialized`                | `qwen init` completed                 |
+| `workspace.mcp.budget_warning`         | MCP child count approaching cap       |
+| `workspace.mcp.child_refused`          | MCP server refused due to budget      |
+| `workspace.mcp.server_restarted`       | Manual MCP restart succeeded          |
+| `workspace.mcp.server_restart_refused` | Manual restart blocked                |
 
 ### Auth device-flow events (PR-A, Wave 4 OAuth)
 
@@ -153,29 +156,27 @@ const html = state.blocks
 ### Cookbook: copy-paste plain text
 
 ```ts
-const plain = state.blocks
-  .map(daemonBlockToPlainText)
-  .join('\n');
+const plain = state.blocks.map(daemonBlockToPlainText).join('\n');
 navigator.clipboard.writeText(plain);
 ```
 
 ## Tool preview taxonomy (13 kinds)
 
-| Kind | Surface |
-|---|---|
-| `ask_user_question` | Multi-choice question with options |
-| `command` | Bash-style command + cwd |
-| `file_diff` | File edit with oldText/newText or patch |
-| `file_read` | Path + optional line range |
-| `web_fetch` | URL + HTTP method |
-| `mcp_invocation` | MCP server + tool + args summary |
-| `code_block` | Language-tagged code snippet |
-| `search` | Query + result count + top results |
-| `tabular` | Columns + rows (capped at 50, truncation flagged) |
-| `image_generation` | Prompt + optional thumbnail URL |
-| `subagent_delegation` | Agent name + task |
-| `key_value` | Generic label/value rows |
-| `generic` | Fallback summary |
+| Kind                  | Surface                                           |
+| --------------------- | ------------------------------------------------- |
+| `ask_user_question`   | Multi-choice question with options                |
+| `command`             | Bash-style command + cwd                          |
+| `file_diff`           | File edit with oldText/newText or patch           |
+| `file_read`           | Path + optional line range                        |
+| `web_fetch`           | URL + HTTP method                                 |
+| `mcp_invocation`      | MCP server + tool + args summary                  |
+| `code_block`          | Language-tagged code snippet                      |
+| `search`              | Query + result count + top results                |
+| `tabular`             | Columns + rows (capped at 50, truncation flagged) |
+| `image_generation`    | Prompt + optional thumbnail URL                   |
+| `subagent_delegation` | Agent name + task                                 |
+| `key_value`           | Generic label/value rows                          |
+| `generic`             | Fallback summary                                  |
 
 Each has a `daemonToolPreviewToMarkdown` projection. Custom renderers can
 dispatch on `preview.kind` for rich per-type display (file diff with
@@ -184,15 +185,16 @@ syntax highlighting, MCP server badge, image thumbnail, etc.).
 ## State selectors (PR-E)
 
 ```ts
-selectCurrentTool(state)              // → DaemonToolTranscriptBlock | undefined
-selectApprovalMode(state)             // → 'plan' | 'default' | 'auto-edit' | 'yolo' | undefined
-selectToolProgress(state, toolCallId) // → { ratio?, step? } | undefined
-selectPendingPermissionBlocks(state)  // → ReadonlyArray<DaemonPermissionTranscriptBlock>
-selectTranscriptBlocks(state)         // → ReadonlyArray<DaemonTranscriptBlock>
-selectTranscriptBlocksOrderedByEventId(state) // sorted by daemon-monotonic id
+selectCurrentTool(state); // → DaemonToolTranscriptBlock | undefined
+selectApprovalMode(state); // → 'plan' | 'default' | 'auto-edit' | 'yolo' | undefined
+selectToolProgress(state, toolCallId); // → { ratio?, step? } | undefined
+selectPendingPermissionBlocks(state); // → ReadonlyArray<DaemonPermissionTranscriptBlock>
+selectTranscriptBlocks(state); // → ReadonlyArray<DaemonTranscriptBlock>
+selectTranscriptBlocksOrderedByEventId(state); // sorted by daemon-monotonic id
 ```
 
 `currentToolCallId` is automatically maintained by the reducer:
+
 - Set when a tool enters in-flight status (`running` / `in_progress` / `pending` / `confirming`)
 - Cleared when tool enters terminal status (`completed` / `failed` / `cancelled` / etc.)
 - Unknown statuses leave it untouched (forward-compat)
@@ -209,10 +211,10 @@ spinners from spinning forever.
 
 ```ts
 interface DaemonTranscriptBlockBase {
-  eventId?: number;            // PRIMARY sort key — daemon-monotonic
-  serverTimestamp?: number;    // PREFERRED display — daemon-authoritative
-  clientReceivedAt: number;    // FALLBACK — local clock
-  createdAt: number;           // @deprecated alias for clientReceivedAt
+  eventId?: number; // PRIMARY sort key — daemon-monotonic
+  serverTimestamp?: number; // PREFERRED display — daemon-authoritative
+  clientReceivedAt: number; // FALLBACK — local clock
+  createdAt: number; // @deprecated alias for clientReceivedAt
 }
 ```
 

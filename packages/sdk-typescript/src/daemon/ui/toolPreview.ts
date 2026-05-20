@@ -13,6 +13,7 @@ import {
   getFirstString,
   isRecord,
   isSensitiveKey,
+  stringifyJson,
   stringifyRedactedJson,
 } from './utils.js';
 
@@ -471,9 +472,8 @@ function detectCodeBlock(
   // code (formatter/repl/generator) to avoid grabbing every `code: '...'`
   // field on unrelated tools.
   const toolName = opts.toolName ?? '';
-  const codeTool = /(repl|format|prettier|eslint|tsc|compile|exec[_-]?code)/i.test(
-    toolName,
-  );
+  const codeTool =
+    /(repl|format|prettier|eslint|tsc|compile|exec[_-]?code)/i.test(toolName);
   if (!language && !codeTool) return undefined;
   const origin = getFirstString(input, ['origin', 'source_location', 'path']);
   return {
@@ -503,7 +503,9 @@ function detectTabular(input: unknown): DaemonToolPreview | undefined {
       .map((row) =>
         Array.isArray(row)
           ? row.map((cell) =>
-              typeof cell === 'string' ? cell : stringifyJson(cell).slice(0, 80),
+              typeof cell === 'string'
+                ? cell
+                : stringifyJson(cell).slice(0, 80),
             )
           : [],
       );
@@ -520,7 +522,10 @@ function detectTabular(input: unknown): DaemonToolPreview | undefined {
   // the first row's keys.
   const data = input['data'] ?? input['records'];
   if (Array.isArray(data) && data.length > 0 && isRecord(data[0])) {
-    const columns = Object.keys(data[0] as Record<string, unknown>).slice(0, 30);
+    const columns = Object.keys(data[0] as Record<string, unknown>).slice(
+      0,
+      30,
+    );
     if (columns.length === 0) return undefined;
     const rows = data.slice(0, MAX_TABULAR_ROWS).map((row) => {
       const r = row as Record<string, unknown>;

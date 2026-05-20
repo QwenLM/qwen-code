@@ -20,9 +20,17 @@ import { isRecord } from './utils.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
 const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
+const TRIMMED_PERMISSION_BLOCK_ID = '__trimmed_permission_block__';
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
 const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
 const MAX_CLONE_DEPTH = 16;
+type TimestampFormatOptions = {
+  locale?: string;
+  timeZone?: string;
+  timeStyle?: 'short' | 'medium' | 'long' | 'full';
+  dateStyle?: 'short' | 'medium' | 'long' | 'full';
+};
+const timestampFormatterCache = new Map<string, Intl.DateTimeFormat>();
 
 export function createDaemonTranscriptState(
   opts: DaemonTranscriptReducerOptions = {},
@@ -425,6 +433,7 @@ function upsertPermissionBlock(
   event: Extract<DaemonUiEvent, { type: 'permission.request' }>,
 ): void {
   const existingId = state.permissionBlockByRequestId[event.requestId];
+  if (existingId === TRIMMED_PERMISSION_BLOCK_ID) return;
   const existing = getWritableBlockById(state, existingId);
   const preview = createDaemonToolPreview(event.toolCall, {
     title: event.title,
@@ -580,8 +589,9 @@ function trimTranscriptState(
   for (const [requestId, blockId] of Object.entries(
     state.permissionBlockByRequestId,
   )) {
-    if (!keptIds.has(blockId))
-      delete state.permissionBlockByRequestId[requestId];
+    if (!keptIds.has(blockId)) {
+      state.permissionBlockByRequestId[requestId] = TRIMMED_PERMISSION_BLOCK_ID;
+    }
   }
   if (!keptIds.has(state.activeUserBlockId ?? '')) {
     state.activeUserBlockId = undefined;
@@ -773,6 +783,9 @@ export function selectApprovalMode(
  * recorded for the given toolCallId. The shape `{ ratio?, step? }` matches
  * the eventual `tool.progress` event payload (daemon-side emission
  * pending — SDK is ready to consume).
+ *
+ * @alpha The daemon does not emit `tool.progress` yet, so this selector is
+ * provisional until that event lands.
  */
 export function selectToolProgress(
   state: DaemonTranscriptState,
@@ -785,13 +798,15 @@ function compareBlocksByEventOrder(
   a: DaemonTranscriptBlock,
   b: DaemonTranscriptBlock,
 ): number {
-  // Primary: eventId (monotonic when present).
+  // Primary: eventId when both sides have daemon-authored cursors.
   if (a.eventId !== undefined && b.eventId !== undefined) {
     return a.eventId - b.eventId;
   }
-  if (a.eventId !== undefined) return -1;
-  if (b.eventId !== undefined) return 1;
-  // Fallback: serverTimestamp.
+  // If only one block has eventId, fall through. Optimistic local user blocks
+  // have no eventId and must keep their time order against daemon replies.
+  if (a.eventId !== undefined || b.eventId !== undefined) {
+    return a.clientReceivedAt - b.clientReceivedAt;
+  }
   if (a.serverTimestamp !== undefined && b.serverTimestamp !== undefined) {
     return a.serverTimestamp - b.serverTimestamp;
   }
@@ -815,23 +830,29 @@ function compareBlocksByEventOrder(
  */
 export function formatBlockTimestamp(
   block: DaemonTranscriptBlock,
-  opts: {
-    locale?: string;
-    timeZone?: string;
-    timeStyle?: 'short' | 'medium' | 'long' | 'full';
-    dateStyle?: 'short' | 'medium' | 'long' | 'full';
-  } = {},
+  opts: TimestampFormatOptions = {},
 ): string {
   const ts = block.serverTimestamp ?? block.clientReceivedAt;
   if (typeof ts !== 'number' || !Number.isFinite(ts)) return '';
+  return getTimestampFormatter(opts).format(new Date(ts));
+}
+
+function getTimestampFormatter(
+  opts: TimestampFormatOptions,
+): Intl.DateTimeFormat {
+  const key = JSON.stringify([
+    opts.locale ?? '',
+    opts.timeZone ?? '',
+    opts.dateStyle ?? 'short',
+    opts.timeStyle ?? 'medium',
+  ]);
+  const cached = timestampFormatterCache.get(key);
+  if (cached) return cached;
   const formatter = new Intl.DateTimeFormat(opts.locale, {
     ...(opts.timeZone ? { timeZone: opts.timeZone } : {}),
-    ...(opts.dateStyle
-      ? { dateStyle: opts.dateStyle }
-      : { dateStyle: 'short' }),
-    ...(opts.timeStyle
-      ? { timeStyle: opts.timeStyle }
-      : { timeStyle: 'medium' }),
+    dateStyle: opts.dateStyle ?? 'short',
+    timeStyle: opts.timeStyle ?? 'medium',
   });
-  return formatter.format(new Date(ts));
+  timestampFormatterCache.set(key, formatter);
+  return formatter;
 }

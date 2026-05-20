@@ -259,7 +259,7 @@ function normalizePermissionStatus(
   resolved: string | undefined,
 ): ToolCallStatus {
   if (!resolved) return 'pending';
-  const [primary = ''] = resolved.toLowerCase().split(':');
+  const [primary = '', ...detailParts] = resolved.toLowerCase().split(':');
   switch (primary) {
     case 'cancel':
     case 'cancelled':
@@ -294,10 +294,18 @@ function normalizePermissionStatus(
     case 'selected':
       // A selected option resolves the prompt even when the option id is a
       // domain value like a city name or an option id containing deny/cancel.
-      return 'completed';
+      return classifySelectedPermissionOption(detailParts.join(':'));
     default:
       return classifyPermissionToken(primary) ?? 'failed';
   }
+}
+
+function classifySelectedPermissionOption(detail: string): ToolCallStatus {
+  const normalized = detail.trim().toLowerCase();
+  if (FAILED_PERMISSION_TERMS.has(normalized)) {
+    return 'failed';
+  }
+  return 'completed';
 }
 
 function classifyPermissionToken(token: string): ToolCallStatus | undefined {

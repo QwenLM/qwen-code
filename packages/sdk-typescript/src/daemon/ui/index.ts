@@ -30,10 +30,7 @@ export {
   daemonBlockToPlainText,
   daemonToolPreviewToMarkdown,
 } from './render.js';
-export type {
-  DaemonHtmlRenderOptions,
-  DaemonRenderOptions,
-} from './render.js';
+export type { DaemonHtmlRenderOptions, DaemonRenderOptions } from './render.js';
 export {
   DAEMON_UI_CONFORMANCE_FIXTURES,
   runAdapterConformanceSuite,
@@ -67,6 +64,7 @@ export type {
   DaemonTranscriptQuestion,
   DaemonTranscriptQuestionOption,
   DaemonTranscriptReducerOptions,
+  DaemonTranscriptSidechannelState,
   DaemonTranscriptState,
   DaemonTranscriptStore,
   // Chat-stream events

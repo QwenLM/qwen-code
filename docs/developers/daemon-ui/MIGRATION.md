@@ -1,8 +1,10 @@
 # Migrating to `@qwen-code/sdk/daemon` v2
 
 PR #4328 shipped the v1 daemon UI layer. PR #4353 (this PR) ships v2 with
-seven additive feature commits. This guide walks through the changes for
-adapter authors (TUI / web / IDE / channel / mobile maintainers).
+seven additive feature commits. This guide walks through the changes for web
+chat and web terminal adapter authors first. Native local TUI, channel, and IDE
+maintainers can reuse the same primitives later, but those default product paths
+are not migrated by this PR.
 
 ## TL;DR for existing consumers
 
@@ -51,7 +53,7 @@ const ordered = selectTranscriptBlocksOrderedByEventId(state);
 
 ```tsx
 import { formatBlockTimestamp } from '@qwen-code/sdk/daemon';
-<TimeLabel text={formatBlockTimestamp(block, { locale })} />
+<TimeLabel text={formatBlockTimestamp(block, { locale })} />;
 ```
 
 **Why**: Multiple clients see consistent "X minutes ago" only when both
@@ -69,7 +71,10 @@ blocks. They are sidechannel observations. Each adapter picks which to surface:
 
 ```ts
 // In your SSE consumer
-const uiEvents = normalizeDaemonEvent(envelope, { clientId, suppressOwnUserEcho: true });
+const uiEvents = normalizeDaemonEvent(envelope, {
+  clientId,
+  suppressOwnUserEcho: true,
+});
 store.dispatch(uiEvents);
 
 // Then in your UI side
@@ -79,7 +84,9 @@ for (const event of uiEvents) {
       myApprovalModeBadge.update(event.next);
       break;
     case 'workspace.mcp.budget_warning':
-      myToast.show(`MCP servers approaching budget: ${event.liveCount}/${event.budget}`);
+      myToast.show(
+        `MCP servers approaching budget: ${event.liveCount}/${event.budget}`,
+      );
       break;
     case 'auth.device_flow.started':
       myAuthModal.show({
@@ -98,8 +105,8 @@ Or use selectors for state-mirrored sidechannels:
 ```ts
 import { selectApprovalMode, selectCurrentTool } from '@qwen-code/sdk/daemon';
 
-const mode = selectApprovalMode(state);          // mirrored from approval_mode.changed
-const currentTool = selectCurrentTool(state);    // current in-flight tool
+const mode = selectApprovalMode(state); // mirrored from approval_mode.changed
+const currentTool = selectCurrentTool(state); // current in-flight tool
 ```
 
 ### 4. Render contract: use `daemonBlockToMarkdown` (or HTML / plainText)
@@ -109,9 +116,12 @@ const currentTool = selectCurrentTool(state);    // current in-flight tool
 ```ts
 function blockToString(block: DaemonTranscriptBlock): string {
   switch (block.kind) {
-    case 'user': return `You: ${block.text}`;
-    case 'assistant': return block.text;
-    case 'tool': return `[${block.title}]\n${block.status}`;
+    case 'user':
+      return `You: ${block.text}`;
+    case 'assistant':
+      return block.text;
+    case 'tool':
+      return `[${block.title}]\n${block.status}`;
     // ... etc
   }
 }
@@ -174,11 +184,15 @@ import type { DaemonUiToolUpdateEvent } from '@qwen-code/sdk/daemon';
 
 function toolIcon(event: DaemonUiToolUpdateEvent): React.ReactNode {
   switch (event.provenance) {
-    case 'mcp':      return <McpIcon server={event.serverId} />;
-    case 'subagent': return <SubagentIcon />;
-    case 'builtin':  return <BuiltinIcon name={event.toolName} />;
+    case 'mcp':
+      return <McpIcon server={event.serverId} />;
+    case 'subagent':
+      return <SubagentIcon />;
+    case 'builtin':
+      return <BuiltinIcon name={event.toolName} />;
     case 'unknown':
-    default:         return <GenericIcon />;
+    default:
+      return <GenericIcon />;
   }
 }
 ```
@@ -236,12 +250,30 @@ Each adapter dispatches on `preview.kind`:
 ```tsx
 function ToolPreviewComponent({ preview }: { preview: DaemonToolPreview }) {
   switch (preview.kind) {
-    case 'file_diff':   return <UnifiedDiffView path={preview.path} old={preview.oldText} new={preview.newText} />;
-    case 'mcp_invocation': return <McpCard serverId={preview.serverId} toolName={preview.toolName} />;
-    case 'tabular':     return <DataTable columns={preview.columns} rows={preview.rows} />;
-    case 'image_generation': return <ImagePreview thumbnailUrl={preview.thumbnailUrl} prompt={preview.prompt} />;
+    case 'file_diff':
+      return (
+        <UnifiedDiffView
+          path={preview.path}
+          old={preview.oldText}
+          new={preview.newText}
+        />
+      );
+    case 'mcp_invocation':
+      return (
+        <McpCard serverId={preview.serverId} toolName={preview.toolName} />
+      );
+    case 'tabular':
+      return <DataTable columns={preview.columns} rows={preview.rows} />;
+    case 'image_generation':
+      return (
+        <ImagePreview
+          thumbnailUrl={preview.thumbnailUrl}
+          prompt={preview.prompt}
+        />
+      );
     // ... or fall back to:
-    default: return <Markdown text={daemonToolPreviewToMarkdown(preview)} />;
+    default:
+      return <Markdown text={daemonToolPreviewToMarkdown(preview)} />;
   }
 }
 ```
@@ -251,13 +283,13 @@ SDK's `daemonToolPreviewToMarkdown` for any unhandled kind.
 
 ## Backward-compat checklist
 
-| Concern | Status |
-|---|---|
-| Existing `block.createdAt` reads | ✅ still works (alias for `clientReceivedAt`) |
-| Existing reducer event handling | ✅ unchanged for v1 event types |
-| `daemonTranscriptToUnifiedMessages(blocks)` call sites | ✅ new options param is optional |
-| Existing `selectTranscriptBlocks` consumers | ✅ unchanged |
-| New event types in v1 reducer | ✅ no-op, `lastEventId` still advances |
+| Concern                                                | Status                                        |
+| ------------------------------------------------------ | --------------------------------------------- |
+| Existing `block.createdAt` reads                       | ✅ still works (alias for `clientReceivedAt`) |
+| Existing reducer event handling                        | ✅ unchanged for v1 event types               |
+| `daemonTranscriptToUnifiedMessages(blocks)` call sites | ✅ new options param is optional              |
+| Existing `selectTranscriptBlocks` consumers            | ✅ unchanged                                  |
+| New event types in v1 reducer                          | ✅ no-op, `lastEventId` still advances        |
 
 ## Cross-references
 

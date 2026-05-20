@@ -507,8 +507,9 @@ export interface DaemonTranscriptBlockBase {
    * - `clientReceivedAt`: when **this** client saw the event (always set)
    * - `serverTimestamp`: when the daemon emitted it (may be unset)
    *
-   * Backwards-compatible alias `createdAt` remains as a getter for
-   * existing consumers; new code should use `clientReceivedAt`.
+   * Backwards-compatible field `createdAt` is set equal to
+   * `clientReceivedAt` at construction time. New code should use
+   * `clientReceivedAt`.
    */
   clientReceivedAt: number;
   /**

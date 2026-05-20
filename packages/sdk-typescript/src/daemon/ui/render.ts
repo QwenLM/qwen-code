@@ -81,11 +81,14 @@ export function daemonBlockToMarkdown(
     }
     case 'shell': {
       const lang = block.stream === 'stderr' ? 'shellsession-stderr' : 'shell';
-      return ['```' + lang, cap(block.text), '```'].join('\n');
+      return markdownFence(lang, cap(block.text));
     }
     case 'permission': {
       const optionList = block.options
-        .map((opt) => `- **${opt.label}**${opt.description ? ` — ${opt.description}` : ''}`)
+        .map(
+          (opt) =>
+            `- **${opt.label}**${opt.description ? ` — ${opt.description}` : ''}`,
+        )
         .join('\n');
       const resolved = block.resolved
         ? `\n\n_resolved: ${block.resolved}_`
@@ -127,35 +130,34 @@ export function daemonToolPreviewToMarkdown(
     case 'ask_user_question':
       return preview.questions.map(renderQuestion).join('\n\n');
     case 'command':
-      return [
-        '```bash',
-        preview.cwd ? `# cwd: ${preview.cwd}` : null,
-        preview.command,
-        '```',
-      ]
-        .filter(Boolean)
-        .join('\n');
+      return markdownFence(
+        'bash',
+        [preview.cwd ? `# cwd: ${preview.cwd}` : null, preview.command]
+          .filter(Boolean)
+          .join('\n'),
+      );
     case 'file_diff':
       if (preview.patch) {
-        return ['```diff', cap(preview.patch), '```'].join('\n');
+        return markdownFence('diff', cap(preview.patch));
       }
       if (preview.oldText !== undefined && preview.newText !== undefined) {
         return [
           `**Edit \`${preview.path}\`**`,
           '',
-          '```diff',
-          ...preview.oldText.split('\n').map((line) => `- ${line}`),
-          ...preview.newText.split('\n').map((line) => `+ ${line}`),
-          '```',
+          markdownFence(
+            'diff',
+            [
+              ...preview.oldText.split('\n').map((line) => `- ${line}`),
+              ...preview.newText.split('\n').map((line) => `+ ${line}`),
+            ].join('\n'),
+          ),
         ].join('\n');
       }
       if (preview.newText !== undefined) {
         return [
           `**Write \`${preview.path}\`**`,
           '',
-          '```',
-          cap(preview.newText),
-          '```',
+          markdownFence('', cap(preview.newText)),
         ].join('\n');
       }
       return `**Edit \`${preview.path}\`**`;
@@ -178,9 +180,7 @@ export function daemonToolPreviewToMarkdown(
     case 'code_block':
       return [
         preview.origin ? `_${preview.origin}_` : null,
-        '```' + (preview.language ?? ''),
-        cap(preview.code),
-        '```',
+        markdownFence(preview.language ?? '', cap(preview.code)),
       ]
         .filter(Boolean)
         .join('\n');
@@ -209,7 +209,10 @@ export function daemonToolPreviewToMarkdown(
             .join(' | ')} |`,
       );
       const lines = [headerRow, sepRow, ...bodyRows];
-      if (preview.totalRows !== undefined && preview.totalRows > preview.rows.length) {
+      if (
+        preview.totalRows !== undefined &&
+        preview.totalRows > preview.rows.length
+      ) {
         lines.push(
           `_… ${preview.totalRows - preview.rows.length} more row(s) not shown_`,
         );
@@ -247,6 +250,15 @@ export function daemonToolPreviewToMarkdown(
     default:
       return '';
   }
+}
+
+function markdownFence(language: string, raw: string): string {
+  const maxRun = Math.max(
+    2,
+    ...Array.from(raw.matchAll(/`+/g), (match) => match[0].length),
+  );
+  const fence = '`'.repeat(maxRun + 1);
+  return [`${fence}${language}`, raw, fence].join('\n');
 }
 
 function renderQuestion(question: DaemonTranscriptQuestion): string {
@@ -296,7 +308,10 @@ export function daemonBlockToPlainText(
       return `[shell ${block.stream ?? 'stdout'}]\n${cap(block.text)}`;
     case 'permission': {
       const optionList = block.options
-        .map((opt) => `  - ${opt.label}${opt.description ? `: ${opt.description}` : ''}`)
+        .map(
+          (opt) =>
+            `  - ${opt.label}${opt.description ? `: ${opt.description}` : ''}`,
+        )
         .join('\n');
       const resolved = block.resolved
         ? `(resolved: ${block.resolved})`
@@ -326,7 +341,8 @@ function daemonToolPreviewToPlainText(preview: DaemonToolPreview): string {
         : `$ ${preview.command}`;
     case 'file_diff':
       if (preview.patch) return preview.patch;
-      if (preview.newText !== undefined) return `${preview.path}: ${preview.newText}`;
+      if (preview.newText !== undefined)
+        return `${preview.path}: ${preview.newText}`;
       return preview.path;
     case 'file_read':
       return preview.range
@@ -337,11 +353,15 @@ function daemonToolPreviewToPlainText(preview: DaemonToolPreview): string {
     case 'mcp_invocation':
       return `${preview.serverId}::${preview.toolName}${preview.argsSummary ? ` (${preview.argsSummary})` : ''}`;
     case 'code_block':
-      return preview.origin ? `[${preview.origin}]\n${preview.code}` : preview.code;
+      return preview.origin
+        ? `[${preview.origin}]\n${preview.code}`
+        : preview.code;
     case 'search':
       return [
         `search: ${preview.query}`,
-        preview.resultCount !== undefined ? `(${preview.resultCount} results)` : null,
+        preview.resultCount !== undefined
+          ? `(${preview.resultCount} results)`
+          : null,
         ...(preview.top ?? []).map((r) => `  ${r}`),
       ]
         .filter(Boolean)
@@ -354,8 +374,13 @@ function daemonToolPreviewToPlainText(preview: DaemonToolPreview): string {
           preview.columns.map((_, idx) => String(row[idx] ?? '')).join('\t'),
         );
       }
-      if (preview.totalRows !== undefined && preview.totalRows > preview.rows.length) {
-        lines.push(`... ${preview.totalRows - preview.rows.length} more row(s)`);
+      if (
+        preview.totalRows !== undefined &&
+        preview.totalRows > preview.rows.length
+      ) {
+        lines.push(
+          `... ${preview.totalRows - preview.rows.length} more row(s)`,
+        );
       }
       return lines.join('\n');
     }
