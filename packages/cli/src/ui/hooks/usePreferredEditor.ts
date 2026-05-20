@@ -5,13 +5,25 @@
  */
 
 import { useMemo } from 'react';
-import { type EditorType, isValidEditorType } from '@qwen-code/qwen-code-core';
+import {
+  type EditorType,
+  isValidEditorType,
+  createDebugLogger,
+} from '@qwen-code/qwen-code-core';
 import { useSettings } from '../contexts/SettingsContext.js';
+
+const debugLogger = createDebugLogger('PREFERRED_EDITOR');
 
 export function usePreferredEditor(): EditorType | undefined {
   const settings = useSettings();
   return useMemo(() => {
     const raw = settings.merged.general?.preferredEditor ?? '';
+    if (raw && !isValidEditorType(raw)) {
+      debugLogger.warn(
+        `[usePreferredEditor] invalid preferredEditor value "${raw}", ignoring`,
+      );
+      return undefined;
+    }
     return isValidEditorType(raw) ? raw : undefined;
   }, [settings.merged.general?.preferredEditor]);
 }

@@ -2233,29 +2233,40 @@ export function useTextBuffer({
       let editorCmd: string;
       let editorArgs: string[];
       let useShell = false;
+      let editorSource: 'opts' | 'preferred' | 'env/default' = 'env/default';
 
-      const resolved = preferredEditor
-        ? getExternalEditorCommand(preferredEditor, filePath)
-        : null;
-
-      if (resolved) {
-        editorCmd = resolved.command;
-        editorArgs = resolved.args;
-        useShell = resolved.needsShell;
-      } else {
-        if (preferredEditor) {
-          debugLogger.warn(
-            `[useTextBuffer] preferred editor "${preferredEditor}" not found, falling back to env/default`,
-          );
-        }
-        editorCmd =
-          opts.editor ??
-          process.env['VISUAL'] ??
-          process.env['EDITOR'] ??
-          (process.platform === 'win32' ? 'notepad' : 'vi');
+      if (opts.editor) {
+        // Explicit programmatic override takes highest priority
+        editorCmd = opts.editor;
         editorArgs = [filePath];
+        editorSource = 'opts';
         if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
           useShell = true;
+        }
+      } else {
+        const resolved = preferredEditor
+          ? getExternalEditorCommand(preferredEditor, filePath)
+          : null;
+
+        if (resolved) {
+          editorCmd = resolved.command;
+          editorArgs = resolved.args;
+          useShell = resolved.needsShell;
+          editorSource = 'preferred';
+        } else {
+          if (preferredEditor) {
+            debugLogger.warn(
+              `[useTextBuffer] preferred editor "${preferredEditor}" not found, falling back to env/default`,
+            );
+          }
+          editorCmd =
+            process.env['VISUAL'] ??
+            process.env['EDITOR'] ??
+            (process.platform === 'win32' ? 'notepad' : 'vi');
+          editorArgs = [filePath];
+          if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
+            useShell = true;
+          }
         }
       }
 
@@ -2292,7 +2303,7 @@ export function useTextBuffer({
         }
       } catch (err) {
         debugLogger.error(
-          `[useTextBuffer] external editor error (cmd=${editorCmd}, shell=${useShell}, source=${resolved ? 'preferred' : 'env/default'})`,
+          `[useTextBuffer] external editor error (cmd=${editorCmd}, shell=${useShell}, source=${editorSource}, file=${filePath})`,
           err,
         );
       } finally {
