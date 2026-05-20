@@ -24,6 +24,10 @@ import {
 } from './mcp-pool-events.js';
 import type { SessionMcpView } from './session-mcp-view.js';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
+import {
+  discoveryTimeoutFor,
+  runWithTimeout,
+} from './mcp-discovery-timeout.js';
 
 const debugLogger = createDebugLogger('McpPool:Entry');
 
@@ -582,8 +586,24 @@ export class PoolEntry {
       prompts: DiscoveredMCPPrompt[];
     };
     try {
-      await this.client.connect();
-      snap = await this.client.discoverAndReturn(this.cliConfig);
+      // F2 (#4175 commit 6 review fix — wenshao W44): bound the
+      // restart's connect+discover with the same wall-clock timeout
+      // `spawnEntry` uses (W25). Pre-fix a hung server during a
+      // restart blocked `restartInFlight` indefinitely; because
+      // `restart()` coalesces concurrent callers onto the same
+      // promise, every subsequent restart attempt also hung forever
+      // and the HTTP restart-route handler never returned. The
+      // timeout falls through to the existing catch (which sweeps
+      // descendants per W32 + transitions to `'failed'` per C3).
+      const timeoutMs = discoveryTimeoutFor(this.cfg);
+      snap = await runWithTimeout(
+        (async () => {
+          await this.client.connect();
+          return this.client.discoverAndReturn(this.cliConfig);
+        })(),
+        timeoutMs,
+        `pool restart for ${this.id}`,
+      );
     } catch (err) {
       debugLogger.error(
         `Restart of ${this.id} failed at connect/discover: ${String(err)}. Transitioning to 'failed'.`,
@@ -622,10 +642,22 @@ export class PoolEntry {
       throw err;
     }
     // Generation guard: if a second restart raced in, drop our results.
+    //
+    // F2 (#4175 commit 6 review fix — wenshao W45): also sweep the
+    // newly-spawned transport before returning. `client.connect()`
+    // above already spawned the new subprocess (npx/uvx/pnpm dlx
+    // wrapper + MCP server grandchild); the OLD transport was
+    // disconnected via `sweepAndDisconnect('restart')` pre-attempt,
+    // so the new spawn would otherwise leak as net-new orphans. Same
+    // class of leak that W3, W32, and W37 were designed to prevent —
+    // applying their pattern here closes the gap on the
+    // generation-superseded path.
     if (oldGen + 1 !== this._generation) {
       debugLogger.debug(
-        `Restart of ${this.id} superseded by newer generation; discarding stale snapshot`,
+        `Restart of ${this.id} superseded by newer generation; ` +
+          `discarding stale snapshot + sweeping new transport`,
       );
+      await this.sweepAndDisconnect('restart_superseded');
       return;
     }
     // F2 (#4175 commit 6 review fix — wenshao W34): state guard
@@ -635,12 +667,32 @@ export class PoolEntry {
     // close), the entry is in `'closed'` / `'failed'` — writing
     // CONNECTED + emitting `reconnected` on a pool-evicted zombie
     // entry would leave subscribers thinking they're attached to a
-    // healthy connection. Drop the snapshot and exit silently.
-    if (this.state === 'closed' || this.state === 'failed') {
+    // healthy connection. Drop the snapshot AND sweep the new
+    // transport (W45 fold-in: `client.connect()` already spawned
+    // the new subprocess by the time we got here, so a silent
+    // return would leak grandchildren).
+    //
+    // W42 fix: read `this.state` into a `currentState: PoolEntryState`
+    // local. TypeScript's CFA narrows `this.state` along the
+    // non-throwing path of the `try { connect; discover } catch`
+    // (the catch sets `state='failed'` and throws) — so by the time
+    // CFA reaches this line, the type is `'spawning' | 'active'`
+    // and the comparison against `'closed'` / `'failed'` becomes a
+    // TS2367 "no overlap" build error. The runtime guard is
+    // semantically required (concurrent `forceShutdown` CAN mutate
+    // state across `await` boundaries), but we have to defeat the
+    // narrowing.
+    // `this.state as PoolEntryState` re-widens the type — assignment
+    // alone preserves the narrowing through the local variable, so a
+    // cast is required to defeat CFA explicitly.
+    const currentState = this.state as PoolEntryState;
+    if (currentState === 'closed' || currentState === 'failed') {
       debugLogger.debug(
-        `Restart of ${this.id} completed but entry is ${this.state}; ` +
-          `discarding snapshot (entry was force-shut-down mid-restart).`,
+        `Restart of ${this.id} completed but entry is ${currentState}; ` +
+          `discarding snapshot + sweeping new transport ` +
+          `(entry was force-shut-down mid-restart).`,
       );
+      await this.sweepAndDisconnect('restart_superseded');
       return;
     }
     this.toolsSnapshot = snap.tools;

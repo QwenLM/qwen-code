@@ -31,6 +31,10 @@ import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ToolRegistry } from './tool-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import type { WorkspaceMcpBudget } from './mcp-workspace-budget.js';
+import {
+  discoveryTimeoutFor,
+  runWithTimeout,
+} from './mcp-discovery-timeout.js';
 // F2 (#4175 commit 6): same `BudgetExhaustedError` thrown by the
 // per-session McpClientManager, re-used at the pool's acquire site
 // so SDK consumers see the same error class regardless of which path
@@ -623,27 +627,37 @@ export class McpTransportPool {
     );
 
     try {
-      // F2 (#4175 commit 6 review fix — gpt-5.5 W25): bound the
-      // `connect()` + `discoverAndReturn()` sequence with a wall-
-      // clock timeout matching `McpClientManager.runWithDiscoveryTimeout`
-      // (stdio default 30s, remote 5s, per-server `discoveryTimeoutMs`
-      // override). Pre-fix a hung server's connect/discover would
-      // leave `spawnInFlight` unresolved forever — every session
-      // sharing this `ConnectionId` waits indefinitely AND the
-      // budget slot is never rolled back because the catch never
-      // runs. The timeout's `reject` triggers the catch path which
-      // forces shutdown + budget rollback (W1 fold-in). The
-      // background promise from connect/discover still races to
-      // settle; we don't `await` it after rejection — the
-      // forceShutdown's transport.close() in the catch block
-      // races to disconnect ahead of any silent tool registration.
-      const timeoutMs = this.discoveryTimeoutFor(cfg);
-      await runWithTimeout(
+      // F2 (#4175 commit 6 review fix — gpt-5.5 W25 + wenshao W43):
+      // bound the `connect()` + `discoverAndReturn()` sequence with
+      // a wall-clock timeout matching
+      // `McpClientManager.runWithDiscoveryTimeout` (stdio default
+      // 30s, remote 5s, per-server `discoveryTimeoutMs` override).
+      // Pre-fix a hung server's connect/discover left
+      // `spawnInFlight` unresolved forever — every session sharing
+      // this `ConnectionId` waited indefinitely AND the budget slot
+      // was never rolled back. The timeout's `reject` triggers the
+      // catch path which forces shutdown + budget rollback (W1
+      // fold-in).
+      //
+      // W43 (commit 6 review round 6): `entries.set(id, entry)` +
+      // `entry.markActive(...)` MUST live OUTSIDE the
+      // timeout-wrapped IIFE. Pre-fix they were inside; if the
+      // timeout fired, the catch removed the entry and
+      // forceShutdown'd it, but the IIFE kept running. When
+      // connect/discover settled later, the IIFE's late `entries.set`
+      // re-inserted the deleted entry and `markActive` set
+      // `state='active'` + `localStatus=CONNECTED` on a transport
+      // that was already disconnected by forceShutdown → zombie
+      // entry that subsequent `acquire`s would attach to. Moving
+      // them out of the IIFE means the timeout's reject reaches
+      // the catch BEFORE these state writes can happen; if the
+      // background IIFE eventually settles, its return value is
+      // discarded by the rejected `await runWithTimeout(...)`.
+      const timeoutMs = discoveryTimeoutFor(cfg);
+      const snap = await runWithTimeout(
         (async () => {
           await client.connect();
-          const snap = await client.discoverAndReturn(this.cliConfig);
-          this.entries.set(id, entry);
-          entry.markActive(snap.tools, snap.prompts);
+          return client.discoverAndReturn(this.cliConfig);
         })(),
         timeoutMs,
         `pool spawn for ${id}`,
@@ -658,9 +672,8 @@ export class McpTransportPool {
       // DISCONNECTED`, defeating the CONNECTED state markActive
       // had just set. Setting first means the aggregator sees the
       // entry mid-`active` transition and returns CONNECTED.
-      // (Both `entries.set` + `markActive` now happen inside the
-      //  timeout-wrapped IIFE above; this comment documents the
-      //  ordering that the IIFE preserves.)
+      this.entries.set(id, entry);
+      entry.markActive(snap.tools, snap.prompts);
       debugLogger.info(
         `Spawned pool entry ${id} (entryIndex=${entryIndex}, transport=${transport})`,
       );
@@ -704,28 +717,6 @@ export class McpTransportPool {
     const next = this.nextIndexByName.get(serverName) ?? 0;
     this.nextIndexByName.set(serverName, next + 1);
     return next;
-  }
-
-  /**
-   * Resolve discovery timeout for `cfg`, mirroring
-   * `McpClientManager.discoveryTimeoutFor`. Stdio defaults to 30s,
-   * remote (HTTP / SSE / WebSocket) defaults to 5s — remote carries
-   * network risk; stdio runs locally so the user is more tolerant of
-   * a slow startup. Per-server override via
-   * `mcpServers.<name>.discoveryTimeoutMs` settings is honored when
-   * present (clamped to [100ms, 300_000ms] just like the manager).
-   * Wenshao W25 review fix: pool-mode spawn was previously
-   * unbounded; a hung connect/discover left `spawnInFlight`
-   * unresolved forever, blocking every same-id acquirer + leaking
-   * the budget slot.
-   */
-  private discoveryTimeoutFor(cfg: MCPServerConfig): number {
-    const override = cfg.discoveryTimeoutMs;
-    if (override !== undefined && Number.isFinite(override)) {
-      return Math.max(100, Math.min(override, 300_000));
-    }
-    const isRemote = !!(cfg.httpUrl || cfg.url || cfg.tcp);
-    return isRemote ? 5_000 : 30_000;
   }
 
   private indexAttach(sessionId: string, id: ConnectionId): void {
@@ -924,45 +915,6 @@ function poisonedPromptRegistry(serverName: string): PromptRegistry {
   } as unknown as PromptRegistry;
 }
 
-/**
- * F2 (#4175 commit 6 review fix — gpt-5.5 W25): wall-clock timeout
- * wrapper for the pool's `spawnEntry` connect/discover sequence.
- * Mirrors the bounded-async pattern `McpClientManager.runWithDiscoveryTimeout`
- * uses (separate timer + race), but local to this module to avoid a
- * cross-module dep on the manager's private method.
- *
- * The background `task` promise is NOT cancelled on timeout —
- * Node's Promise model can't cancel an in-flight `await`. Instead,
- * the catch block in `spawnEntry` calls `entry.forceShutdown('manual')`
- * which awaits `client.disconnect()` → `transport.close()`, racing
- * the disconnect ahead of any silent tool registration the slow
- * server might be midway through. Same approach the manager's
- * timeout cleanup uses for the same race.
- */
-function runWithTimeout<T>(
-  task: Promise<T>,
-  timeoutMs: number,
-  label: string,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(
-        new Error(
-          `Timed out after ${timeoutMs}ms: ${label}. The MCP server may be ` +
-            `hung; pool will roll back the spawn and free its budget slot.`,
-        ),
-      );
-    }, timeoutMs);
-    timer.unref?.();
-    task.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
-}
+// `runWithTimeout` + `discoveryTimeoutFor` moved to
+// `mcp-discovery-timeout.ts` so `PoolEntry.doRestart` (W44 fold-in)
+// can share the same primitives without cross-module value imports.
