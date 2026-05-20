@@ -411,7 +411,7 @@ Deep review verdict: APPROVE
     status=${PIPESTATUS[0]}
     set -e
     # 累加式解析（即使 timeout，已落盘的 stream 也能解出 partial）
-    node scripts/parse-review-stream.js "$out" qwen-review-summary.md
+    node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md
     if [ "$status" -eq 124 ]; then
       # prepend partial-output warning
       printf '## ⚠️ Review was time-capped at 8 min — partial output below\n\n%s' \
@@ -436,7 +436,7 @@ Deep review verdict: APPROVE
     status=${PIPESTATUS[0]}
     set -e
     # 累加式解析（关键变化：不再覆盖式）
-    node scripts/parse-review-stream.js qwen-review-stream.jsonl qwen-review-summary.md
+    node scripts/parse-review-stream.cjs qwen-review-stream.jsonl qwen-review-summary.md
     if [ "$status" -eq 124 ]; then
       printf '## ⚠️ Review was time-capped at 25 min — partial output below\n\n%s' \
         "$(cat qwen-review-summary.md)" > qwen-review-summary.md
@@ -465,7 +465,7 @@ Deep review verdict: APPROVE
     # 沿用 Phase 1-3 fallback ("see logs")
 ```
 
-> 完整 YAML 在实现阶段补；本草稿列骨架与依赖关系。`scripts/parse-review-stream.js` 是新工具（累加式解析），需要新增。
+> 完整 YAML 在实现阶段补；本草稿列骨架与依赖关系。`scripts/parse-review-stream.cjs` 是新工具（累加式解析），需要新增。
 
 ## 分阶段实施
 
@@ -549,7 +549,7 @@ Deep review verdict: APPROVE
 | `.qwen/preflight-prompt.md` | preflight 模型的提示词 | D2 |
 | `.qwen/preflight-light-review-prompt.md` | LIGHT tier 的单发 review prompt | D3 |
 | `.qwen/preflight-standard-review-prompt.md` | STANDARD tier 的单发 review prompt | D3 |
-| `scripts/parse-review-stream.js` | 累加式 stream-json 解析器（替换 workflow inline node 脚本） | §Failure modes 流式累加器 |
+| `scripts/parse-review-stream.cjs` | 累加式 stream-json 解析器（替换 workflow inline node 脚本） | §Failure modes 流式累加器 |
 | (修改) `.github/workflows/qwen-code-pr-review.yml` | 加 preflight + 4 tier 执行 + 累加式解析 | §Workflow step 草稿 |
 | (修改) `.gitignore` | 已对 `.qwen/*` 例外 `review-rules.md`、`commands/`、`skills/`、`agents/`；需追加例外上述 3 个新文件 | 配套 |
 

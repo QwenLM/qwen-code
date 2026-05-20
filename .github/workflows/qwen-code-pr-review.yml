@@ -705,7 +705,7 @@ jobs:
             echo "::warning::LIGHT review timed out at 3m; flushing partial output via accumulator."
           fi
 
-          node scripts/parse-review-stream.js "$out" qwen-review-summary.md LIGHT "$status_label"
+          node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md LIGHT "$status_label"
 
           if [ "$status_label" = "timeout" ]; then
             # Prepend warning so maintainer sees the review was capped.
@@ -788,7 +788,7 @@ jobs:
             echo "::warning::STANDARD review timed out at 8m; flushing partial output."
           fi
 
-          node scripts/parse-review-stream.js "$out" qwen-review-summary.md STANDARD "$status_label"
+          node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md STANDARD "$status_label"
 
           if [ "$status_label" = "timeout" ]; then
             # Prepend a clear warning header so the maintainer sees the
@@ -812,7 +812,7 @@ jobs:
       # stall fail fast with a clear error instead of a silent job kill.
       #
       # Timeout reduced from Phase 1-3's 50m to 25m: with always-emit
-      # accumulator (scripts/parse-review-stream.js) timeouts now flush a
+      # accumulator (scripts/parse-review-stream.cjs) timeouts now flush a
       # partial review instead of failing silently, so the previous "give
       # it as much time as possible" tradeoff no longer applies. A 25m
       # hard cap aligns with §G2 wall-time targets.
@@ -904,7 +904,7 @@ jobs:
             echo "::warning::DEEP review timed out at 25m; flushing partial output."
           fi
 
-          node scripts/parse-review-stream.js "$out" qwen-review-summary.md DEEP "$status_label"
+          node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md DEEP "$status_label"
 
           if [ "$status_label" = "timeout" ]; then
             {

@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 /**
- * parse-review-stream.js
+ * parse-review-stream.cjs
  *
  * Streaming JSON-Lines parser for `qwen --output-format stream-json
  * --include-partial-messages` review output.
+ *
+ * Filename uses .cjs (not .js) because the repo's root package.json sets
+ * "type": "module"; a plain .js would be loaded as ESM and `require()`
+ * would throw at runtime. We want CommonJS here to keep the script
+ * runnable directly via `node` without an `import` rewrite.
  *
  * Phase 1-3 used an inline node script in the workflow yml that only kept
  * the LAST assistant text segment. That worked for the happy path but
@@ -26,7 +31,7 @@
  *    `gh pr comment --body-file` step always has a non-empty body.
  *
  * Usage:
- *   parse-review-stream.js <input.jsonl> <output.md> [tier] [status]
+ *   parse-review-stream.cjs <input.jsonl> <output.md> [tier] [status]
  *
  * Args:
  *   input.jsonl   Path to the stream-json file written by `qwen ... | tee`.
@@ -52,7 +57,7 @@ const [, , inputPath, outputPath, tier = 'UNKNOWN', status = 'complete'] =
 
 if (!inputPath || !outputPath) {
   console.error(
-    'Usage: parse-review-stream.js <input.jsonl> <output.md> [tier] [status]'
+    'Usage: parse-review-stream.cjs <input.jsonl> <output.md> [tier] [status]'
   );
   process.exit(2);
 }
