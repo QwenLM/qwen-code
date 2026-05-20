@@ -4852,6 +4852,134 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
     expect(toolSpan?.ended).toBe(true);
   });
+
+  it('plan-mode block emits failure_kind=plan_mode_blocked (#4321)', async () => {
+    // _schedule line ~1599: plan mode blocks non-read-only confirmation
+    // tools. Without a regression test, dropping setToolSpanFailure or
+    // finalizeToolSpan on this branch would silently leak spans or
+    // lose attribution.
+    toolSpanRecords.length = 0;
+    const tool = new MockEditTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.PLAN,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({}),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-block-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-block',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const toolSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.mockEditTool',
+    );
+    expect(toolSpan?.ended).toBe(true);
+    expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(
+      'plan_mode_blocked',
+    );
+  });
+
+  it('pre-aborted signal: tool span ends without entering execution (#4321)', async () => {
+    // _schedule line ~1487 early-exit when signal.aborted is true at the
+    // start of the for-loop. setToolSpanCancelled + finalizeToolSpan
+    // here are otherwise untested — a regression dropping either would
+    // leak the span or land it in ERROR rather than UNSET.
+    toolSpanRecords.length = 0;
+    const execute = vi
+      .fn()
+      .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' });
+    const abortController = new AbortController();
+    abortController.abort();
+    await runSingleTool({ execute, abortController });
+
+    expect(execute).not.toHaveBeenCalled();
+    const toolSpan = toolSpanRecords.findLast(
+      (r) => r.name === 'tool.mockTool',
+    );
+    expect(toolSpan?.ended).toBe(true);
+    // setToolSpanCancelled records UNSET status — distinguishes from
+    // setToolSpanFailure paths which would land ERROR.
+    expect(toolSpan?.statusCalls).toEqual([{ code: SpanStatusCode.UNSET }]);
+  });
+
+  it('signal.abort during awaiting_approval: blocked span ends with aborted/system (#4321)', async () => {
+    // Companion to "signal.abort drains scheduler-local Maps" — that test
+    // covers tool span cancellation; this one specifically asserts the
+    // blocked_on_user decision label/source for the same drain path so
+    // dashboards filtering on `decision: 'aborted'` are guarded.
+    toolSpanRecords.length = 0;
+    const { scheduler, onToolCallsUpdate } = buildApprovalScheduler({});
+    const abortController = new AbortController();
+    await scheduler.schedule(
+      [
+        {
+          callId: 'aborted-decision-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-aborted-decision',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
+    abortController.abort();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const blockedSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.blocked_on_user',
+    );
+    expect(blockedSpan?.ended).toBe(true);
+    expect(blockedSpan?.blockedMetadata?.decision).toBe('aborted');
+    expect(blockedSpan?.blockedMetadata?.source).toBe('system');
+  });
 });
 
 // Integration tests for the fire* functions

@@ -1127,14 +1127,23 @@ export class CoreToolScheduler {
     // an `error` field, the span would record `success: false` as an
     // attribute but `code: UNSET` as status, which trace backends
     // filtering on ERROR would miss (#4321 review code-reviewer).
-    let endMeta: HookSpanMetadata = {
-      success: false,
-      error: 'hook fn threw before toEndMeta',
-    };
+    let endMeta: HookSpanMetadata = { success: false };
     try {
       const result = await fn();
       endMeta = toEndMeta(result);
       return result;
+    } catch (err) {
+      // Capture the actual thrown message instead of a hardcoded
+      // sentinel so the hook span surfaces the real failure for
+      // operators (#4321 review DeepSeek Suggestion). This branch is
+      // unreachable on the current hook-helper contract (each fire*
+      // helper catches internally) but kept defensively in case the
+      // contract evolves.
+      endMeta = {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+      throw err;
     } finally {
       endHookSpan(hookSpan, endMeta);
     }
@@ -1469,10 +1478,14 @@ export class CoreToolScheduler {
         // arg; only namespaced extras go in attrs. `call_id` (non-namespaced)
         // is dual-emitted for one release as a backwards-compat shim for
         // pre-Phase-2 dashboards/alerts that grep the old key — drop after
-        // operators migrate (#4321 review).
+        // operators migrate (#4321 review). `tool_name` is dual-emitted on
+        // the same migration window (review-2 DeepSeek Suggestion) so
+        // pre-Phase-2 dashboards filtering on it don't silently stop
+        // matching during the rollout.
         const toolSpan = startToolSpan(canonicalName, {
           'tool.call_id': reqInfo.callId,
           call_id: reqInfo.callId,
+          tool_name: canonicalName,
         });
         this.toolSpans.set(reqInfo.callId, toolSpan);
         batchCallIds.add(reqInfo.callId);
@@ -1952,6 +1965,19 @@ export class CoreToolScheduler {
           debugLogger.warn(
             `ModifyWithEditor requested for ${callId} but no editor available — tool stays in awaiting_approval; user can recover via Cancel/Proceed`,
           );
+          // Tag the tool span so operators can detect this state in
+          // production traces without enabling debug logging
+          // (#4321 review-2 DeepSeek Critical).
+          const toolSpan = this.toolSpans.get(callId);
+          if (toolSpan) {
+            try {
+              toolSpan.setAttributes({
+                'qwen-code.tool.modify_with_editor_unavailable': true,
+              });
+            } catch {
+              // OTel errors must not block API behavior.
+            }
+          }
           return;
         }
 
@@ -2203,9 +2229,11 @@ export class CoreToolScheduler {
       // canonicalToolName matches the _schedule path so dashboards
       // grouping by span name don't see two entries for migrated/MCP tools
       // when this defensive fallback fires (#4321 review).
-      toolSpan = startToolSpan(canonicalToolName(toolName), {
+      const canonical = canonicalToolName(toolName);
+      toolSpan = startToolSpan(canonical, {
         'tool.call_id': callId,
         call_id: callId, // legacy alias — see _schedule for context
+        tool_name: canonical, // legacy alias — see _schedule for context
       });
       this.toolSpans.set(callId, toolSpan);
     }
@@ -2273,7 +2301,16 @@ export class CoreToolScheduler {
           ),
         (r) =>
           r.hookError
-            ? { success: false, error: r.hookError }
+            ? {
+                success: false,
+                error: r.hookError,
+                // Hook transport failures do NOT block tool execution
+                // (firePreToolUseHook returns shouldProceed:true with a
+                // hookError). Surface that on the span too so operators
+                // see the same allow-on-failure semantics the runtime
+                // applies (#4321 review-2 DeepSeek Suggestion).
+                shouldProceed: true,
+              }
             : {
                 success: true,
                 shouldProceed: r.shouldProceed,
@@ -2468,7 +2505,16 @@ export class CoreToolScheduler {
               ),
             (r) =>
               r.hookError
-                ? { success: false, error: r.hookError }
+                ? {
+                    success: false,
+                    error: r.hookError,
+                    // Hook transport failures do NOT halt the post-execution
+                    // flow (firePostToolUseHook returns shouldStop:false with
+                    // a hookError). Mirror the PreToolUse fix so the span
+                    // matches runtime semantics (#4321 review-2 DeepSeek
+                    // Suggestion).
+                    shouldStop: false,
+                  }
                 : {
                     success: true,
                     shouldStop: r.shouldStop,
