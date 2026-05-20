@@ -548,9 +548,12 @@ export function snapshotSettingsForRollback(): Record<string, unknown> | null {
     // Leave a breadcrumb: returning null disables credential rollback, so if
     // settings are transiently unreadable (AV lock, disk hiccup) the oncall
     // engineer can tie repeated cross-restart auth failures back to here.
+    // Log only the error's class name (not its message) — consistent with the
+    // providerMatchesCredentials guard, so the security stance holds even
+    // though this catch is filesystem errors rather than user-defined fns.
     console.warn(
       '[settingsWriter] snapshotSettingsForRollback failed; credential rollback disabled:',
-      err instanceof Error ? err.message : String(err),
+      err instanceof Error ? err.constructor.name : typeof err,
     );
     return null;
   }
