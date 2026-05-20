@@ -1,12 +1,94 @@
-# F2: Shared MCP Transport Pool — Design v2.1
+# F2: Shared MCP Transport Pool — Design v2.2
 
 > Targets `daemon_mode_b_main` (per #4175 branching strategy). Replaces #4175 Wave 5 PR 23.
 > **Single-PR delivery** per maintainer's feature-cohesive batch guidance (2026-05-19).
-> Author: doudouOUC. Date: 2026-05-20. Revised: 2026-05-20 (v2.1).
+> Author: doudouOUC. Date: 2026-05-20. Revised: 2026-05-20 (v2.2 — implementation review fold-ins).
 
 ---
 
 ## 0. Changelog
+
+### v2.2 (2026-05-20) — PR #4336 implementation + 32 review fold-ins
+
+PR #4336 shipped F2 as 6 atomic commits + 6 fix commits over ~4 hours. Wenshao reviewed cumulatively in 3 batches; each batch produced inline + critical fixes that were folded back. The table below records what changed vs. v2.1, organized by review batch.
+
+#### v2.1 → first-review batch (commits 1-4, wenshao C1-C7 + S1-S4)
+
+| #   | Site                                                       | What was wrong                                                                                                                                              | Fold-in commit |
+| --- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| C1  | `acpAgent.ts:269` — IDE-close path                         | Pool drain only ran in SIGTERM handler; IDE-initiated normal close leaked entries until OS reaped. Mirror SIGTERM's pool drain on `await connection.closed` | `ae0b296c4`    |
+| C2  | `mcp-pool-entry.ts:cancelDrainTimer`                       | `cancelDrainTimer` reset `maxIdleTimer` on every flap, defeating the §6.3 hard cap. Now only clears `drainTimer`; max-idle survives entire entry lifetime   | `ae0b296c4`    |
+| C3  | `mcp-pool-entry.ts:doRestart`                              | Reconnect failure left entry in zombie state (`localStatus=CONNECTED`, `state='active'`, stale snapshot). Try/catch + transition to `'failed'` on failure   | `ae0b296c4`    |
+| C4  | `mcp-pool-entry.ts:forceShutdown`                          | `state='closed'` set AFTER awaits, so concurrent `acquire` could observe `'active'` and hand out stale connection. Set synchronously at top                 | `ae0b296c4`    |
+| C5  | `mcp-transport-pool.ts:drainAll`                           | Concurrent `acquire` could spawn fresh entry mid-drain. Added `draining` mutex flag + `await Promise.allSettled(spawnInFlight)` before clearing             | `ae0b296c4`    |
+| C6  | `mcp-pool-entry.ts:statusChangeListener`                   | Listener wasn't filtered by `serverName`; every entry got every server's status notifications + entry's own `markActive` write echoed back                  | `ae0b296c4`    |
+| C7  | `mcp-client-manager.ts:discoverAllMcpToolsIncremental`     | Pool-mode gate added to `discoverAllMcpTools` but missed `Incremental` — `/mcp refresh` bypassed pool, spawned per-session client                           | `ae0b296c4`    |
+| S1  | `session-mcp-view.ts:passesSessionFilter`                  | Doc didn't call out that `excludeTools` uses direct equality (no parens-form support); divergence vs. `mcp-client.ts:isEnabled`                             | `ae0b296c4`    |
+| S2  | `pid-descendants.ts` docstring                             | Claimed Windows-specific `taskkill /F` branch that didn't exist — Node polyfills `process.kill('SIGTERM')` to `TerminateProcess`                            | `ae0b296c4`    |
+| S3  | `session-mcp-view.ts:applyTools` debug log                 | String contained literal `"N"` instead of interpolation — operators saw `applied 12 tools (filtered to N registered)`                                       | `ae0b296c4`    |
+| S4  | `mcp-transport-pool.ts:createUnpooledConnection` status cb | Hardcoded to `() => CONNECTED` so `aggregateStatusByName` lied after disconnect. Now `() => client.getStatus()`                                             | `ae0b296c4`    |
+
+#### Commit-5 self-review batch (R1-R3 small)
+
+| #   | Site                                            | What was wrong                                                                                                                                           | Fold-in commit |
+| --- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| R1  | `server.test.ts:918` `/capabilities` envelope   | Test asserted `getAdvertisedServeFeatures()` (no toggles) but server.ts passes `mcpPoolActive: opts.mcpPoolActive !== false` (default-on). Anchor toggle | `3e68c00bc`    |
+| R2  | `server.test.ts` capability default-on coverage | No test booted with default options to verify pool tags advertise. Added explicit `mcpPoolActive: false` test                                            | `3e68c00bc`    |
+| R3  | `events.ts:DaemonMcpServerRestartRefusedData`   | Doc said pre-PR SDKs would "see new value as unknown and surface generically" — actually `MCP_RESTART_REFUSED_REASONS.has(...)` rejects → silent drop    | `3e68c00bc`    |
+
+#### Second-review batch (commits 1-5, wenshao R1-R10)
+
+| #   | Site                                                | What was wrong                                                                                                                                                                          | Fold-in commit |
+| --- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| WR1 | `mcp-pool-entry.ts:maxIdleTimer`                    | C2 fix correctly preserved `maxIdleTimer` across flap, but fire-action force-closed regardless of `refs.size`. Active session with re-attach inside grace would lose tools after 5min   | `72399f109`    |
+| WR2 | `mcp-client-manager.ts:discoverAllMcpToolsViaPool`  | `releaseAllPooledConnections` + re-acquire ALL on every pass left brief window with zero MCP tools registered AND bounced every drain timer. Diff against desired `(name, fingerprint)` | `72399f109`    |
+| WR3 | `mcp-pool-entry.ts:doRestart` snapshot fan-out      | Restart updated `toolsSnapshot`/`promptsSnapshot` and emitted typed events — but no `SessionMcpView` instance subscribed to that stream. Iterate `subscribers` directly post-snapshot   | `72399f109`    |
+| WR4 | `mcp-transport-pool.ts:getSnapshot subprocessCount` | Counted websocket toward `subprocessCount` — websocket dials remote, no local child. Restricted to `'stdio'` only                                                                       | `72399f109`    |
+| WR5 | `pid-descendants.ts` PowerShell `-Filter`           | Interpolated `${pid}` directly into `-Filter` string. Entry-point `Number.isInteger` guard prevents injection today; bind to `$p` for defense-in-depth against future guard relaxations | `72399f109`    |
+| WR6 | `mcp-pool-entry.ts` ctor `cfg` field                | `readonly cfg: MCPServerConfig` was implicitly public, exposing env API keys / header auth / OAuth fields. Made `private`; new `transportKind` getter for the only external reader      | `72399f109`    |
+| WR7 | `mcp-pool-events.ts` premature exports              | 5 PoolEvent type guards + `Prompt` re-export + `PoolEntryConnectionStatus` had zero callers. Removed; kept `MCPCallInterruptedError` (design §13.4 mandate)                             | `72399f109`    |
+| WR8 | `acpAgent.ts:269,300` pool drain duplication        | SIGTERM + IDE-close had identical `if (agentInstance) { try { await shutdownMcpPool(8_000) } catch... }` blocks. Extracted `drainPoolBeforeExit(label)` helper                          | `72399f109`    |
+
+#### Commit-6 self-review batch (R1-R3 critical race)
+
+| #   | Site                                    | What was wrong                                                                                                                                                               | Fold-in commit |
+| --- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| 6R1 | `mcp-transport-pool.ts:onClosed`        | Slot-release race: A finishes spawn, B (different fingerprint, same name) starts spawn, A drains. Close-cb checked only `entries` (B not yet registered) → premature release | `0e58a098f`    |
+| 6R2 | `events.ts:mcpBudgetWarningCount` JSDoc | Workspace-scoped events fan to N sessions → N reducer increments; consumers aggregating across sessions double-count. Docstring updated to call out the multiplier           | `0e58a098f`    |
+| 6R3 | `acpAgent.ts:broadcastBudgetEvent`      | Iterated `this.sessions.keys()` directly during async fan-out; concurrent `killSession` could corrupt iterator. Snapshot via `Array.from(...)`                               | `0e58a098f`    |
+
+#### Third-review batch (commits 1-6, wenshao W1-W15)
+
+| #   | Site                                                           | What was wrong                                                                                                                                                                                | Fold-in commit |
+| --- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| W1  | `mcp-transport-pool.ts:spawnEntry` catch                       | Spawn failure leaked `statusChangeListener` permanently — only `forceShutdown` removes it. Added `entry.forceShutdown('manual')` to catch                                                     | `4a3c5cd90`    |
+| W2  | `mcp-pool-entry.ts:statusChangeListener` cross-check           | Module-level `serverStatuses` map shared across multi-fingerprint entries. A's transport error wrote DISCONNECTED, B's listener corrupted B's `localStatus`. Added `client.getStatus()` check | `4a3c5cd90`    |
+| W3  | `mcp-pool-entry.ts:doRestart` pid sweep                        | Restart skipped `listDescendantPids` + `sigtermPids` — every restart of `npx`/`uvx`-wrapped stdio orphaned the actual MCP grandchild. Added sweep before disconnect                           | `4a3c5cd90`    |
+| W4  | `mcp-pool-entry.ts:doRestart` drain timer race                 | Drain timer could fire mid-restart yield → `forceShutdown` removes entry → `client.connect` spawns orphan. Added `cancelDrainTimer` + `state→active` at top of `doRestart`                    | `4a3c5cd90`    |
+| W5  | `mcp-client-manager.ts:pooledConnections` dead handles         | When entry transitioned to `'failed'`, manager held dead `PooledConnection` forever. Subscribe to entry events; evict on `'failed'` (idempotent via `get(name) === conn` guard)               | `4a3c5cd90`    |
+| W6  | `mcp-client-manager.ts:discoverAllMcpToolsViaPool` re-entrancy | Two passes interleaving could both `set(name, conn)` → first conn leaked. Added `discoveryInFlight` mutex; second caller awaits same promise. New regression test                             | `4a3c5cd90`    |
+| W9  | `acpAgent.ts:parsePoolDrainMs` strictness                      | `Number.parseInt` accepted `'30000ms'` / `'30000abc'`. Strict `^\d+$` regex; reject with stderr warning + default fallback                                                                    | `4a3c5cd90`    |
+| W10 | `mcp-transport-pool.ts:acquire` indexAttach order              | `indexAttach` mutated `sessionToEntries` BEFORE `entry.attach()`. If `attach` threw, stale reverse-index mapping. Moved `indexAttach` after `attach` succeeds (both fast + in-flight paths)   | `4a3c5cd90`    |
+| W13 | `mcp-transport-pool.ts:subprocessCount` JSDoc                  | Doc still claimed `stdio + websocket` after WR4 restricted to stdio. Updated                                                                                                                  | `4a3c5cd90`    |
+| W14 | `mcp-transport-pool.ts:createUnpooledConnection` catch         | Same `statusChangeListener` leak as W1 in the unpooled path. Same mirror: `forceShutdown` before disconnect                                                                                   | `4a3c5cd90`    |
+| W15 | `bridge.ts:restartMcpServer` response                          | `as PoolEntries` cast was unsound — untyped JSON from ACP child. `Array.isArray` check + per-entry shape guard; malformed entries skipped with stderr breadcrumb                              | `4a3c5cd90`    |
+
+#### Declined-with-reply (filed as F2 follow-ups)
+
+| #   | Site                                                | Reason for declining                                                                                                                    |
+| --- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| W7  | Test coverage gaps (4 untested critical paths)      | 1/4 added (W6 regression test); rest deferred to focused test-coverage PR after F2 series merges                                        |
+| W8  | `maxReconnectAttempts` / `reconnectStrategy` unused | Forward-compat placeholders for the deferred health-monitor-driven reconnect (design §6.6); removing + re-adding churns the public type |
+| W11 | Duplicate fast-path / in-flight-path attach blocks  | Refactor opportunity touching the entire `acquire` signature; not blocking F2 merge                                                     |
+| W12 | `passesSessionFilter` O(M×N) per `applyTools`       | Micro-perf optimization measurable only with hundreds of tools × large filter lists                                                     |
+| R9  | `McpClientManager` ctor 7-positional sentinels      | Refactor to options-object touches every call site (test fixtures, ToolRegistry); out of F2 scope                                       |
+| R10 | `pgrep -P <pid>` per-PID-per-level cost             | Single `ps -eo pid,ppid` requires platform-specific column flags + tree builder; current 16s worst-case bound is acceptable             |
+
+#### Bug count
+
+- **3 batches × 27 critical / important fixes** + 5 doc / suggestion folds = **32 review fold-ins** total
+- **2 critical races caught only on second look** (6R1 slot-release-during-spawn race; W6 discovery re-entrancy)
+- **0 silent failures shipped** — every fix carries an inline `// F2 (#4175 commit X review fix — wenshao YN):` breadcrumb pointing at the original review
 
 ### v2.1 (2026-05-20) — single-PR strategy + 12 review fold-ins
 
