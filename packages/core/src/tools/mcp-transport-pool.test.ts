@@ -206,6 +206,29 @@ describe('McpTransportPool', () => {
       // Entry removed via onClosed callback.
       expect(snap.byName['srv']).toBeUndefined();
     });
+
+    it('tracks unpooled entries so releaseSession closes them immediately', async () => {
+      const mocked = mockMcpSuccess();
+      const pool = new McpTransportPool(
+        cliConfig,
+        mkPoolOptions({
+          pooledTransports: new Set() as ReadonlySet<
+            'stdio' | 'websocket' | 'http' | 'sse' | 'sdk' | 'unknown'
+          >,
+        }),
+      );
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      expect(pool.getSnapshot().byName['srv'].entryCount).toBe(1);
+
+      pool.releaseSession('s1');
+      expect(pool.getSnapshot().total).toBe(0);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mocked.close).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('spawnInFlight dedupe', () => {
@@ -372,6 +395,27 @@ describe('McpTransportPool', () => {
       expect(mocked.close).toHaveBeenCalledTimes(2);
       // Pool state cleared.
       expect(pool.getSnapshot().total).toBe(0);
+    });
+
+    it('drains unpooled entries tracked in the pool map', async () => {
+      const mocked = mockMcpSuccess();
+      const pool = new McpTransportPool(
+        cliConfig,
+        mkPoolOptions({
+          pooledTransports: new Set() as ReadonlySet<
+            'stdio' | 'websocket' | 'http' | 'sse' | 'sdk' | 'unknown'
+          >,
+        }),
+      );
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+
+      const result = await pool.drainAll({ force: true });
+
+      expect(result.drained).toBe(1);
+      expect(mocked.close).toHaveBeenCalledTimes(1);
+      expect(pool.getSnapshot().byName['srv']).toBeUndefined();
     });
   });
 

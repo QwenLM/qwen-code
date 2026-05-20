@@ -260,6 +260,7 @@ interface FakeBridgeOpts {
   restartMcpServerImpl?: (
     serverName: string,
     originatorClientId: string | undefined,
+    opts?: { entryIndex?: number },
   ) => Promise<
     | { serverName: string; restarted: true; durationMs: number }
     | {
@@ -347,6 +348,7 @@ interface FakeBridge extends HttpAcpBridge {
   restartMcpServerCalls: Array<{
     serverName: string;
     originatorClientId?: string;
+    opts?: { entryIndex?: number };
   }>;
   closeCalls: Array<{
     sessionId: string;
@@ -710,12 +712,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return initWorkspaceImpl(initOpts, originatorClientId);
     },
-    async restartMcpServer(serverName, originatorClientId) {
+    async restartMcpServer(serverName, originatorClientId, restartOpts) {
       restartMcpServerCalls.push({
         serverName,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+        ...(restartOpts !== undefined ? { opts: restartOpts } : {}),
       });
-      return restartMcpServerImpl(serverName, originatorClientId);
+      return restartMcpServerImpl(serverName, originatorClientId, restartOpts);
     },
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
@@ -2663,6 +2666,28 @@ describe('createServeApp', () => {
       });
       expect(bridge.restartMcpServerCalls).toHaveLength(1);
       expect(bridge.restartMcpServerCalls[0]?.serverName).toBe('docs');
+    });
+
+    it('forwards entryIndex=0 to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart?entryIndex=0'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(bridge.restartMcpServerCalls[0]?.opts).toEqual({
+        entryIndex: 0,
+      });
+    });
+
+    it('treats entryIndex=* as all entries', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart?entryIndex=*'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(bridge.restartMcpServerCalls[0]?.opts).toBeUndefined();
     });
 
     it('200 on soft skip with structured reason', async () => {

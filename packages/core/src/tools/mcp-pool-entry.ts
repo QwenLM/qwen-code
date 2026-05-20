@@ -278,6 +278,10 @@ export class PoolEntry {
         `Cannot attach to PoolEntry ${this.id} in state ${this.state}`,
       );
     }
+    const previousState = this.state;
+    const hadRef = this.refs.has(sessionId);
+    const previousView = this.subscribers.get(sessionId);
+    const previousHandle = this.subscriberHandles.get(sessionId);
     this.refs.add(sessionId);
     this.subscribers.set(sessionId, view);
     this.cancelDrainTimer();
@@ -297,9 +301,30 @@ export class PoolEntry {
         view.applyTools(this.toolsSnapshot);
         view.applyPrompts(this.promptsSnapshot);
       } catch (err) {
+        if (!hadRef) {
+          this.refs.delete(sessionId);
+          this.subscribers.delete(sessionId);
+          this.subscriberHandles.delete(sessionId);
+          try {
+            view.teardown();
+          } catch {
+            /* best effort rollback */
+          }
+        } else if (previousView) {
+          this.subscribers.set(sessionId, previousView);
+          if (previousHandle) {
+            this.subscriberHandles.set(sessionId, previousHandle);
+          }
+        }
+        if (previousState === 'draining' && this.refs.size === 0) {
+          this.startDrainTimer(this.opts.drainDelayMs);
+        } else {
+          this.state = previousState;
+        }
         debugLogger.error(
           `Snapshot replay failed for ${sessionId}/${this.serverName}: ${String(err)}`,
         );
+        throw err;
       }
     }
 

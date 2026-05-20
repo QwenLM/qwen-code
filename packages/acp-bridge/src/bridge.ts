@@ -1227,6 +1227,33 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     return response as unknown as T;
   };
 
+  const notifyAgentSessionClose = async (
+    entry: SessionEntry,
+    ci: ChannelInfo | undefined,
+    label: 'closeSession' | 'killSession',
+  ): Promise<void> => {
+    if (!ci || ci.channel !== entry.channel) return;
+    try {
+      await Promise.race([
+        withTimeout(
+          entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+            sessionId: entry.sessionId,
+          }),
+          initTimeoutMs,
+          SERVE_CONTROL_EXT_METHODS.sessionClose,
+        ),
+        getTransportClosedReject(entry),
+      ]);
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: ${label} ACP session close notification failed ` +
+          `for session ${JSON.stringify(entry.sessionId)}: ${String(
+            err instanceof Error ? err.message : err,
+          )}`,
+      );
+    }
+  };
+
   /**
    * Fan-out an event to every live session bus. PR 17 mutation events
    * (`tool_toggled`, `workspace_initialized`, `mcp_server_restart*`,
@@ -2215,6 +2242,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
+      await notifyAgentSessionClose(entry, ci, 'closeSession');
       // F3 Commit 3 — mediator-driven cancel cascade replaces the
       // pre-F3 per-id resolvePending loop. Same effect (each pending
       // settles as cancelled, SSE permission_resolved emits, audit
@@ -3362,6 +3390,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
+      await notifyAgentSessionClose(entry, ci, 'killSession');
       // PR 14b fix (codex round 5): tombstone the killed sessionId
       // so any in-flight `extNotification` from the (about-to-be-
       // killed) child can't seed the early-event buffer for a
@@ -3386,16 +3415,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       }
       entry.events.close();
       // Only kill the channel when no other sessions remain AND no
-      // restore is in flight. ACP doesn't expose a per-session "close"
-      // call on the agent side, so the agent's `sessions: Map<string,
-      // Session>` grows by one until the channel dies — bounded by
-      // `maxSessions` (default 20) so memory is capped. FIXME(stage-
-      // 1.5): if ACP grows a `closeSession` notification, send it
-      // here so the agent can drop the entry from its map immediately
-      // rather than at channel exit. (`channelInfo` itself is cleared
-      // by the `channel.exited` handler once the OS reaps the child —
-      // tanzhenxin BkUyD invariant.)
-      //
+      // restore is in flight.
       // `pendingRestoreIds` covers in-flight `session/load` and
       // `session/resume` calls that haven't yet registered into
       // `sessionIds`. Killing the channel out from under them would

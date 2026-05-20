@@ -188,6 +188,92 @@ describe('McpClientManager', () => {
     expect(McpClient).not.toHaveBeenCalled();
   });
 
+  it('routes single-server discovery through the pool when injected', async () => {
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+
+    await manager.discoverMcpToolsForServer('srv', mockConfig);
+
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+    expect(McpClient).not.toHaveBeenCalled();
+  });
+
+  it('routes readResource through an existing pooled connection', async () => {
+    const readResource = vi.fn().mockResolvedValue({
+      contents: [{ uri: 'mcp://srv/doc', text: 'pooled' }],
+    });
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+      client: { readResource },
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    await manager.discoverAllMcpTools(mockConfig);
+
+    const result = await manager.readResource('srv', 'mcp://srv/doc');
+
+    expect(readResource).toHaveBeenCalledWith('mcp://srv/doc', undefined);
+    expect(result).toEqual({
+      contents: [{ uri: 'mcp://srv/doc', text: 'pooled' }],
+    });
+    expect(McpClient).not.toHaveBeenCalled();
+  });
+
   it('disconnectServer releases pooled connection in pool mode (F2 commit 4 / W39)', async () => {
     // Wenshao W39 review fold-in: the manager's `disconnectServer`
     // pool-mode branch (`pooledConnections.get(name).release()` +

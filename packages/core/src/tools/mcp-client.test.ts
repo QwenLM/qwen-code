@@ -10,7 +10,11 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AuthProviderType, type Config } from '../config/config.js';
+import {
+  AuthProviderType,
+  MCPServerConfig,
+  type Config,
+} from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
@@ -294,6 +298,68 @@ describe('mcp-client', () => {
       // The critical assertion: registries untouched.
       expect(toolRegistry.registerTool).not.toHaveBeenCalled();
       expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
+    });
+
+    it('discoverAndReturn ignores config filters and trust for shared pool snapshots', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [
+              { name: 'allowed' },
+              { name: 'filtered_out' },
+            ],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const client = new McpClient(
+        'pure-filter-server',
+        new MCPServerConfig(
+          'test-command',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
+          undefined,
+          ['allowed'],
+          ['filtered_out'],
+        ),
+        toolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const snapshot = await client.discoverAndReturn({} as Config);
+
+      expect(snapshot.tools.map((tool) => tool.serverToolName)).toEqual([
+        'allowed',
+        'filtered_out',
+      ]);
+      expect(snapshot.tools.every((tool) => tool.trust === undefined)).toBe(
+        true,
+      );
+      expect(toolRegistry.registerTool).not.toHaveBeenCalled();
     });
 
     it('discoverAndReturn throws "No prompts or tools found" when both empty', async () => {

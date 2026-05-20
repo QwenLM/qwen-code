@@ -105,6 +105,7 @@ export const SERVE_STATUS_EXT_METHODS = {
  * which then mutates Config / ToolRegistry / McpClientManager state.
  */
 export const SERVE_CONTROL_EXT_METHODS = {
+  sessionClose: 'qwen/control/session/close',
   sessionApprovalMode: 'qwen/control/session/approval_mode',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
 } as const;

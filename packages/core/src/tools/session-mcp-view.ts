@@ -13,6 +13,21 @@ import type { ToolRegistry } from './tool-registry.js';
 
 const debugLogger = createDebugLogger('McpPool:View');
 
+function passesNameFilter(
+  name: string,
+  includeTools?: readonly string[],
+  excludeTools?: readonly string[],
+): boolean {
+  if (excludeTools?.includes(name)) return false;
+  if (!includeTools) return true;
+  return includeTools.some((entry) => {
+    const stripped = entry.includes('(')
+      ? entry.slice(0, entry.indexOf('('))
+      : entry;
+    return stripped === name;
+  });
+}
+
 /**
  * Decide whether a tool from a snapshot passes a session's
  * include/exclude filter. Exported for unit-testability and so the
@@ -37,15 +52,7 @@ export function passesSessionFilter(
   includeTools?: readonly string[],
   excludeTools?: readonly string[],
 ): boolean {
-  const bareName = tool.serverToolName;
-  if (excludeTools?.includes(bareName)) return false;
-  if (!includeTools) return true;
-  return includeTools.some((entry) => {
-    const stripped = entry.includes('(')
-      ? entry.slice(0, entry.indexOf('('))
-      : entry;
-    return stripped === bareName;
-  });
+  return passesNameFilter(tool.serverToolName, includeTools, excludeTools);
 }
 
 /**
@@ -67,14 +74,7 @@ export function passesSessionPromptFilter(
   includeTools?: readonly string[],
   excludeTools?: readonly string[],
 ): boolean {
-  if (excludeTools?.includes(promptName)) return false;
-  if (!includeTools) return true;
-  return includeTools.some((entry) => {
-    const stripped = entry.includes('(')
-      ? entry.slice(0, entry.indexOf('('))
-      : entry;
-    return stripped === promptName;
-  });
+  return passesNameFilter(promptName, includeTools, excludeTools);
 }
 
 /**
@@ -138,8 +138,16 @@ export class SessionMcpView {
       // instance when value unchanged, so the common case (same trust)
       // pays zero allocation.
       const sessionTool = tool.withTrust(this.cfg.trust);
-      this.sessionToolRegistry.registerTool(sessionTool);
-      registered += 1;
+      try {
+        this.sessionToolRegistry.registerTool(sessionTool);
+        registered += 1;
+      } catch (err) {
+        debugLogger.error(
+          `SessionMcpView[${this.sessionId}/${this.serverName}] failed to register tool ${tool.serverToolName}: ${String(
+            err instanceof Error ? err.message : err,
+          )}`,
+        );
+      }
     }
     // wenshao S3: pre-fix this string contained literal "N" instead
     // of an interpolation; operators saw a meaningless placeholder.
@@ -179,8 +187,16 @@ export class SessionMcpView {
       ) {
         continue;
       }
-      this.sessionPromptRegistry.registerPrompt(prompt);
-      registered += 1;
+      try {
+        this.sessionPromptRegistry.registerPrompt(prompt);
+        registered += 1;
+      } catch (err) {
+        debugLogger.error(
+          `SessionMcpView[${this.sessionId}/${this.serverName}] failed to register prompt ${prompt.name}: ${String(
+            err instanceof Error ? err.message : err,
+          )}`,
+        );
+      }
     }
     debugLogger.debug(
       `SessionMcpView[${this.sessionId}/${this.serverName}] applied ${snapshot.length} prompts (filtered to ${registered} registered)`,

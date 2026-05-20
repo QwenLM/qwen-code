@@ -190,12 +190,82 @@ describe('SessionMcpView', () => {
     expect(tools.registerTool).toHaveBeenCalledTimes(1);
   });
 
+  it('applyTools continues when one registration fails', () => {
+    const toolMap = new Map<string, DiscoveredMCPTool>();
+    const tools = {
+      registerTool: vi.fn((tool: DiscoveredMCPTool) => {
+        if (tool.serverToolName === 'bad') {
+          throw new Error('bad tool');
+        }
+        toolMap.set(tool.serverToolName, tool);
+      }),
+      removeMcpToolsByServer: vi.fn(() => {
+        toolMap.clear();
+      }),
+    } as unknown as ToolRegistry & {
+      registerTool: ReturnType<typeof vi.fn>;
+    };
+    const { prompts } = mkRegistries();
+    const view = new SessionMcpView(tools, prompts, 'sid', 'srv', cfg);
+
+    expect(() =>
+      view.applyTools([
+        mkTool('srv', 'good_before'),
+        mkTool('srv', 'bad'),
+        mkTool('srv', 'good_after'),
+      ]),
+    ).not.toThrow();
+
+    expect(tools.registerTool).toHaveBeenCalledTimes(3);
+    expect([...toolMap.keys()]).toEqual(['good_before', 'good_after']);
+  });
+
   it('applyPrompts registers all snapshot prompts', () => {
     const { tools, prompts } = mkRegistries();
     const view = new SessionMcpView(tools, prompts, 'sid', 'srv', cfg);
     view.applyPrompts([mkPrompt('p1'), mkPrompt('p2')]);
     expect(prompts.removePromptsByServer).toHaveBeenCalledWith('srv');
     expect(prompts.registerPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('applyPrompts filters and continues when one registration fails', () => {
+    const { tools } = mkRegistries();
+    const promptList: string[] = [];
+    const prompts = {
+      registerPrompt: vi.fn((prompt: DiscoveredMCPPrompt) => {
+        if (prompt.name === 'bad') {
+          throw new Error('bad prompt');
+        }
+        promptList.push(prompt.name);
+      }),
+      removePromptsByServer: vi.fn(() => {
+        promptList.length = 0;
+      }),
+    } as unknown as PromptRegistry & {
+      registerPrompt: ReturnType<typeof vi.fn>;
+    };
+    const cfgFiltered = new MCPServerConfig(
+      'node',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      ['keep', 'bad'],
+    );
+    const view = new SessionMcpView(tools, prompts, 'sid', 'srv', cfgFiltered);
+
+    expect(() =>
+      view.applyPrompts([mkPrompt('keep'), mkPrompt('skip'), mkPrompt('bad')]),
+    ).not.toThrow();
+
+    expect(prompts.registerPrompt).toHaveBeenCalledTimes(2);
+    expect(promptList).toEqual(['keep']);
   });
 
   it('updateConfig changes filter for subsequent applyTools', () => {

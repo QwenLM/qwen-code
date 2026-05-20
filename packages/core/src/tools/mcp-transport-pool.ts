@@ -103,6 +103,7 @@ export interface McpTransportPoolOptions {
  */
 export class McpTransportPool {
   private readonly entries = new Map<ConnectionId, PoolEntry>();
+  private readonly unpooledIds = new Set<ConnectionId>();
   private readonly spawnInFlight = new Map<ConnectionId, Promise<PoolEntry>>();
   /** V21-2: reverse index for O(refs) `releaseSession`. */
   private readonly sessionToEntries = new Map<string, Set<ConnectionId>>();
@@ -279,13 +280,23 @@ export class McpTransportPool {
 
     // SDK MCP / non-pooled HTTP go through the per-session bypass.
     if (!poolable) {
-      return this.createUnpooledConnection(
-        serverName,
-        cfg,
-        sessionId,
-        sessionToolRegistry,
-        sessionPromptRegistry,
-      );
+      try {
+        return await this.createUnpooledConnection(
+          serverName,
+          cfg,
+          sessionId,
+          sessionToolRegistry,
+          sessionPromptRegistry,
+        );
+      } catch (err) {
+        if (
+          this.opts.budget !== undefined &&
+          !this.hasNameSibling(serverName)
+        ) {
+          this.opts.budget.release(serverName);
+        }
+        throw err;
+      }
     }
 
     // From here on poolable === true → id !== undefined (TS doesn't
@@ -354,6 +365,10 @@ export class McpTransportPool {
     entry.detach(sessionId);
     this.indexDetach(sessionId, id);
     if (entry.refs.size === 0) {
+      if (this.unpooledIds.has(id)) {
+        void entry.forceShutdown('manual');
+        return;
+      }
       entry.startDrainTimer(this.opts.drainDelayMs);
     }
   }
@@ -373,6 +388,10 @@ export class McpTransportPool {
       if (!entry) continue;
       entry.detach(sessionId);
       if (entry.refs.size === 0) {
+        if (this.unpooledIds.has(id)) {
+          void entry.forceShutdown('manual');
+          continue;
+        }
         entry.startDrainTimer(this.opts.drainDelayMs);
       }
     }
@@ -568,7 +587,16 @@ export class McpTransportPool {
         }),
         new Promise<void>((resolve) => {
           inflightTimer = setTimeout(
-            () => resolve(),
+            () => {
+              const stuckIds = [...this.spawnInFlight.keys()];
+              debugLogger.warn(
+                `drainAll: spawnInFlight wait timed out after ${timeoutMs}ms; ` +
+                  `${stuckIds.length} spawn(s) still in-flight: ${stuckIds.join(
+                    ', ',
+                  )}. Proceeding with drain.`,
+              );
+              resolve();
+            },
             Math.max(0, deadline - Date.now()),
           );
           inflightTimer.unref?.();
@@ -624,6 +652,7 @@ export class McpTransportPool {
     const forced = Math.max(0, entries.length - drainedCount - errorsCount);
     const errorsCopy = [...errors];
     this.entries.clear();
+    this.unpooledIds.clear();
     this.sessionToEntries.clear();
     this.spawnInFlight.clear();
     return {
@@ -725,6 +754,17 @@ export class McpTransportPool {
         timeoutMs,
         `pool spawn for ${id}`,
       );
+      if (this.draining) {
+        debugLogger.warn(
+          `Spawn for ${id} completed while pool is draining; discarding entry`,
+        );
+        try {
+          await entry.forceShutdown('manual');
+        } catch {
+          /* best effort — shutdown path already in progress */
+        }
+        throw new Error(`McpTransportPool is draining; discarded spawn ${id}`);
+      }
       // F2 (#4175 commit 4 review fix — wenshao C6 follow-up):
       // register the entry in `this.entries` BEFORE markActive's
       // updateGlobalStatus runs. Pre-fix the order was reversed,
@@ -742,7 +782,10 @@ export class McpTransportPool {
       );
       return entry;
     } catch (err) {
-      debugLogger.error(`Failed to spawn pool entry ${id}: ${String(err)}`);
+      debugLogger.error(
+        `Failed to spawn pool entry for '${serverName}' ` +
+          `(id=${id}, transport=${transport}): ${String(err)}`,
+      );
       // Don't leak the entry. McpClient self-flips status to
       // DISCONNECTED on discoverAndReturn error (commit 1 invariant).
       // `entries.delete` is idempotent — covers the race where the
@@ -761,12 +804,12 @@ export class McpTransportPool {
       // try/catch because the entry is in an inconsistent state
       // (state machine never reached `active`); errors are
       // non-actionable here.
-      this.entries.delete(id);
       try {
         await entry.forceShutdown('manual');
       } catch {
         /* best effort — entry never reached active state */
       }
+      this.entries.delete(id);
       try {
         await client.disconnect();
       } catch {
@@ -804,9 +847,10 @@ export class McpTransportPool {
    * tied to THIS session's registries. No refcounting; lifetime
    * managed by the caller via `release()`.
    *
-   * Not stored in `this.entries` so it doesn't appear in pool
-   * snapshots — operators see only true pool entries on
-   * `GET /workspace/mcp`.
+   * Stored in `this.entries` with an `unpooled-*` id so shared lifecycle
+   * methods (`releaseSession`, `drainAll`, budget sibling checks, and
+   * snapshots) can still reach it even though it is never reused by another
+   * session.
    */
   private async createUnpooledConnection(
     serverName: string,
@@ -861,7 +905,9 @@ export class McpTransportPool {
       // when budget is now reserved at acquire (W65 follow-on).
       // `hasNameSibling` keeps the slot reserved if any pooled
       // entry or in-flight spawn shares the name.
-      (_closedId) => {
+      (closedId) => {
+        this.entries.delete(closedId);
+        this.unpooledIds.delete(closedId);
         if (this.opts.budget !== undefined) {
           if (!this.hasNameSibling(serverName)) {
             this.opts.budget.release(serverName);
@@ -879,6 +925,8 @@ export class McpTransportPool {
     );
 
     try {
+      this.entries.set(id, entry);
+      this.unpooledIds.add(id);
       // F2 (#4175 commit 6 review fix — wenshao W62): bound the
       // unpooled connect+discover with the same `runWithTimeout`
       // wrapper `spawnEntry` (W25) and `doRestart` (W44) use. Pre-
@@ -899,6 +947,16 @@ export class McpTransportPool {
         timeoutMs,
         `unpooled spawn for ${id}`,
       );
+      if (this.draining || !this.entries.has(id)) {
+        try {
+          await entry.forceShutdown('manual');
+        } catch {
+          /* best effort — pool is already draining */
+        }
+        throw new Error(
+          `McpTransportPool is draining; discarded unpooled ${id}`,
+        );
+      }
       entry.markActive([], []);
       // Unpooled handle: skipReplay prevents `attach` from calling
       // `view.applyTools([])` which would `removeMcpToolsByServer`
@@ -906,12 +964,15 @@ export class McpTransportPool {
       // review P1 #2 fix). Release callback runs forceShutdown
       // directly — no pool refcount accounting for unpooled entries
       // since they're per-session.
-      return entry.attach(sessionId, view, {
+      const conn = entry.attach(sessionId, view, {
         skipReplay: true,
         release: () => {
+          this.indexDetach(sessionId, id);
           void entry.forceShutdown('manual');
         },
       });
+      this.indexAttach(sessionId, id);
+      return conn;
     } catch (err) {
       // F2 (#4175 commit 6 review fix — wenshao W14): same listener-
       // leak as the pooled spawn-failure path (W1). The unpooled
@@ -924,6 +985,8 @@ export class McpTransportPool {
       } catch {
         /* best effort — entry never reached active state */
       }
+      this.entries.delete(id);
+      this.unpooledIds.delete(id);
       try {
         await client.disconnect();
       } catch {

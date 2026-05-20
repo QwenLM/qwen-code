@@ -1138,6 +1138,19 @@ export class McpClientManager {
     serverName: string,
     cliConfig: Config,
   ): Promise<void> {
+    const servers = populateMcpServerCommand(
+      this.cliConfig.getMcpServers() || {},
+      this.cliConfig.getMcpServerCommand(),
+    );
+    const serverConfig = servers[serverName];
+    if (!serverConfig) {
+      return;
+    }
+    if (this.pool && !isSdkMcpServerConfig(serverConfig)) {
+      await this.discoverAllMcpToolsViaPool(cliConfig);
+      return;
+    }
+
     const inProgressDiscovery = this.serverDiscoveryPromises.get(serverName);
     if (inProgressDiscovery) {
       await inProgressDiscovery;
@@ -2231,6 +2244,19 @@ export class McpClientManager {
     uri: string,
     options?: { signal?: AbortSignal },
   ): Promise<ReadResourceResult> {
+    const servers = populateMcpServerCommand(
+      this.cliConfig.getMcpServers() || {},
+      this.cliConfig.getMcpServerCommand(),
+    );
+    const serverConfig = servers[serverName];
+    if (this.cliConfig.isMcpServerDisabled(serverName)) {
+      throw new Error(`MCP server '${serverName}' is disabled.`);
+    }
+    const pooled = this.pooledConnections.get(serverName);
+    if (pooled) {
+      return pooled.client.readResource(uri, options);
+    }
+
     let client = this.clients.get(serverName);
     // PR 14 fix (review #4247 wenshao C3): track whether THIS call
     // reserved the slot + created the client, so the zombie-leak
@@ -2244,11 +2270,6 @@ export class McpClientManager {
     // whether we're on the lazy-spawn or already-existing-client
     // path. Existing clients get the same per-server discovery
     // timeout as fresh ones — uniform behavior across spawn paths.
-    const servers = populateMcpServerCommand(
-      this.cliConfig.getMcpServers() || {},
-      this.cliConfig.getMcpServerCommand(),
-    );
-    const serverConfig = servers[serverName];
     if (!client) {
       // PR 14 invariant (wenshao R2 P3 line 501): the lookup→
       // disabled-check→budget-reserve→client-create sequence below
@@ -2353,10 +2374,6 @@ export class McpClientManager {
     // until the next incremental discovery pass calls `removeServer`.
     // Re-check disabled state on every readResource, regardless of
     // whether the client was just lazy-spawned or pre-existing.
-    if (this.cliConfig.isMcpServerDisabled(serverName)) {
-      throw new Error(`MCP server '${serverName}' is disabled.`);
-    }
-
     if (client.getStatus() !== MCPServerStatus.CONNECTED) {
       try {
         // PR 14 fix (review #4247 wenshao R9 #6 line 1521): wrap the

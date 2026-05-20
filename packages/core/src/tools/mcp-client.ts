@@ -215,6 +215,7 @@ export class McpClient {
         this.serverConfig,
         this.client,
         cliConfig,
+        { applyConfigFilters: false },
       );
 
       if (prompts.length === 0 && tools.length === 0) {
@@ -736,6 +737,7 @@ export async function discoverTools(
   mcpServerConfig: MCPServerConfig,
   mcpClient: Client,
   cliConfig: Config,
+  opts?: { applyConfigFilters?: boolean },
 ): Promise<DiscoveredMCPTool[]> {
   try {
     const mcpCallableTool = mcpToTool(mcpClient, {
@@ -766,10 +768,20 @@ export async function discoverTools(
     }
 
     const mcpTimeout = mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC;
+    const applyConfigFilters = opts?.applyConfigFilters ?? true;
     const discoveredTools: DiscoveredMCPTool[] = [];
     for (const funcDecl of tool.functionDeclarations) {
       try {
-        if (!isEnabled(funcDecl, mcpServerName, mcpServerConfig)) {
+        if (!funcDecl.name) {
+          // Preserve the existing warning text for malformed MCP servers.
+          isEnabled(funcDecl, mcpServerName, mcpServerConfig);
+          continue;
+        }
+
+        if (
+          applyConfigFilters &&
+          !isEnabled(funcDecl, mcpServerName, mcpServerConfig)
+        ) {
           continue;
         }
 
@@ -780,7 +792,7 @@ export async function discoverTools(
             funcDecl.name!,
             funcDecl.description ?? '',
             funcDecl.parametersJsonSchema ?? { type: 'object', properties: {} },
-            mcpServerConfig.trust,
+            applyConfigFilters ? mcpServerConfig.trust : undefined,
             undefined,
             cliConfig,
             mcpClient, // raw MCP Client for direct callTool with progress

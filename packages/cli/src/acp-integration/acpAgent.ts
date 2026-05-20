@@ -359,8 +359,6 @@ function parsePooledTransports(
     'websocket',
     'http',
     'sse',
-    'sdk',
-    'unknown',
   ]);
   const out = new Set<McpTransportKind>();
   for (const raw of envValue.split(',')) {
@@ -524,6 +522,37 @@ class QwenAgent implements Agent {
         `MCP pool drainAll failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  private async closeStoredSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      this.mcpPool?.releaseSession(sessionId);
+      return;
+    }
+
+    try {
+      await session.cancelPendingPrompt();
+    } catch (err) {
+      debugLogger.debug(
+        `Session ${sessionId} cancel during close failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+
+    try {
+      await session.getConfig().getToolRegistry()?.stop();
+    } catch (err) {
+      debugLogger.debug(
+        `Session ${sessionId} tool registry stop during close failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+
+    this.mcpPool?.releaseSession(sessionId);
+    this.sessions.delete(sessionId);
   }
 
   constructor(
@@ -2104,6 +2133,17 @@ class QwenAgent implements Agent {
           restarted: true,
           durationMs: Date.now() - start,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionClose: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        await this.closeStoredSession(sessionId);
+        return { sessionId, closed: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
         // #4175 Wave 4 PR 17: remote callers change a live session's
