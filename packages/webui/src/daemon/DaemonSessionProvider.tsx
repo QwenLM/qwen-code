@@ -283,8 +283,8 @@ export function DaemonSessionProvider({
         promptBusyRef.current = true;
         const promptAbort = new AbortController();
         promptAbortRef.current = promptAbort;
-        store.appendLocalUserMessage(text);
         try {
+          store.appendLocalUserMessage(text);
           const result = await session.prompt(
             {
               prompt: [{ type: 'text', text }],
