@@ -181,9 +181,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // see #4323) authenticate only on the canonical `x-api-key` header.
     // Ship both shapes side-by-side so either family accepts us. We add
     // `x-api-key` here (post-buildHeaders) so customHeaders can't override
-    // it and the env back-fill suppression (apiKey: null on the SDK side)
-    // is preserved. The value is the user's explicitly-configured key —
-    // never an env-resolved one — so this can't widen the #4020 leak.
+    // it and the SDK-level env back-fill suppression (apiKey: null on the
+    // SDK side, suppressing the SDK's own ANTHROPIC_API_KEY destructuring
+    // default) is preserved. `contentGeneratorConfig.apiKey` itself may
+    // have been env-resolved upstream by `resolveCredentialField`, but
+    // that's the same value already shipped as `Authorization: Bearer`
+    // via `authToken` on this very request — adding it as `x-api-key`
+    // doesn't widen the #4020 leak surface.
     if (useProxyIdentity && contentGeneratorConfig.apiKey) {
       defaultHeaders['x-api-key'] = contentGeneratorConfig.apiKey;
     }
