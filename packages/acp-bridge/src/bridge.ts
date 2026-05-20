@@ -14,7 +14,6 @@ import {
 import type {
   CancelNotification,
   PromptRequest,
-  RequestPermissionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
@@ -76,7 +75,6 @@ import {
   MultiClientPermissionMediator,
   type PermissionAuditPublisher,
 } from './permissionMediator.js';
-import type { PermissionResolution } from './permission.js';
 import { PermissionForbiddenError } from './bridgeErrors.js';
 
 /**
@@ -667,20 +665,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // (resolve from a route), and `mediator.forgetSession` (cleanup
   // on session teardown).
   //
-  // F3 helper: translate the mediator's internal `PermissionResolution`
-  // to the ACP-shaped `RequestPermissionResponse` the agent expects.
-  const _resolutionToAcpResponse = (
-    resolution: PermissionResolution,
-  ): RequestPermissionResponse => {
-    if (resolution.kind === 'option') {
-      return {
-        outcome: { outcome: 'selected', optionId: resolution.optionId },
-      };
-    }
-    return { outcome: { outcome: 'cancelled' } };
-  };
-  void _resolutionToAcpResponse;
-
   /**
    * Get-or-create the daemon's single `qwen --acp` channel (#3803 §02).
    * N sessions multiplex onto it via `connection.newSession()`.

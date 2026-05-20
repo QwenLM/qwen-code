@@ -1906,6 +1906,95 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.forbiddenVotes[31]!.requestId).toBe('req-34');
     });
 
+    // Wenshao review #4335 / 3270622311 — the SSE envelope's
+    // `originatorClientId` (= prompt originator per F3 N3) must reach
+    // view state. Pre-fix, the reducer copied only `event.data` and
+    // dropped the prompt-originator attribution, leaving SDK consumers
+    // unable to tell which client's prompt was targeted by the
+    // partial-vote progress / forbidden vote.
+    it('reducer stamps prompt-originator on permission_partial_vote view state (mergeOriginator)', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_request',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            toolCall: {},
+            options: [{ optionId: 'proceed_once' }],
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+          originatorClientId: 'prompt-originator-id',
+        },
+      ]);
+      expect(state.permissionVoteProgress['req-1']).toMatchObject({
+        requestId: 'req-1',
+        votesReceived: 1,
+        originatorClientId: 'prompt-originator-id',
+      });
+    });
+
+    it('reducer stamps prompt-originator on permission_forbidden view state (mergeOriginator)', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_forbidden',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            clientId: 'rejected-voter-id',
+            reason: 'designated_mismatch',
+          },
+          originatorClientId: 'prompt-originator-id',
+        },
+      ]);
+      expect(state.forbiddenVotes).toHaveLength(1);
+      expect(state.forbiddenVotes[0]).toMatchObject({
+        requestId: 'req-1',
+        clientId: 'rejected-voter-id',
+        originatorClientId: 'prompt-originator-id',
+      });
+    });
+
+    it('reducer preserves data.originatorClientId over envelope when both present (mergeOriginator)', () => {
+      // Defensive: mergeOriginator's contract is to PRESERVE any pre-
+      // existing data.originatorClientId. The daemon does not currently
+      // populate it, but if a future producer does, the reducer must
+      // not overwrite it with the envelope value.
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_forbidden',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            clientId: 'rejected',
+            reason: 'designated_mismatch',
+            originatorClientId: 'data-side-originator',
+          },
+          originatorClientId: 'envelope-side-originator',
+        },
+      ]);
+      expect(state.forbiddenVotes[0]?.originatorClientId).toBe(
+        'data-side-originator',
+      );
+    });
+
     it('partial_vote → resolved ordering (M=2 N=2 quorum scenario)', () => {
       // F3 N3 ordering invariant — partial_vote frames precede the
       // resolved frame for the same requestId.

@@ -123,6 +123,14 @@ export interface DaemonPermissionPartialVoteData {
   votesNeeded: number;
   quorum: number;
   optionTallies: Record<string, number>;
+  /**
+   * Wenshao review #4335 / 3270622311. Stamped from the SSE
+   * envelope's `originatorClientId` (= prompt originator per F3 N3)
+   * by the session reducer's `mergeOriginator` step so view-state
+   * consumers can attribute the partial vote to the prompting
+   * client without retaining the original event.
+   */
+  originatorClientId?: string;
   [key: string]: unknown;
 }
 
@@ -141,6 +149,14 @@ export interface DaemonPermissionForbiddenData {
   sessionId: string;
   clientId?: string;
   reason: 'designated_mismatch' | 'remote_not_allowed';
+  /**
+   * Wenshao review #4335 / 3270622311. Stamped from the SSE
+   * envelope's `originatorClientId` (= prompt originator per F3 N3)
+   * by the session reducer's `mergeOriginator` step. Distinct from
+   * `clientId` (the rejected voter's id) — both are useful and
+   * neither subsumes the other.
+   */
+  originatorClientId?: string;
   [key: string]: unknown;
 }
 
@@ -1025,18 +1041,31 @@ export function reduceDaemonSessionEvent(
       // requestId isn't in `pendingPermissions` (race / replay
       // misalignment), still record progress; the next
       // `permission_resolved` will clear both.
+      //
+      // Wenshao review #4335 / 3270622311: stamp the envelope's
+      // `originatorClientId` (prompt originator per N3) onto the
+      // stored data so view-state consumers can attribute the
+      // partial vote to the prompting client. Mirrors the
+      // `mergeOriginator` pattern used by approval-mode / tool-
+      // toggle / workspace-init / mcp-restart reducer cases.
       return {
         ...base,
         permissionVoteProgress: {
           ...base.permissionVoteProgress,
-          [event.data.requestId]: { ...event.data },
+          [event.data.requestId]: mergeOriginator(event.data, event),
         },
       };
     }
     case 'permission_forbidden': {
       // F3 Commit 7 — append to bounded history and bump count.
+      // Wenshao review #4335 / 3270622311: same mergeOriginator
+      // treatment as the partial-vote case above. `event.data` carries
+      // the BLOCKED voter's clientId; the envelope's
+      // `originatorClientId` carries the prompt originator. Both are
+      // useful — consumers reading view state need the prompt
+      // originator without having to keep the original event around.
       const next = base.forbiddenVotes.slice();
-      next.push({ ...event.data });
+      next.push(mergeOriginator(event.data, event));
       while (next.length > MAX_FORBIDDEN_VOTES_PER_SESSION) {
         next.shift();
       }
