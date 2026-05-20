@@ -176,7 +176,12 @@ export default {
   'Theme "{{themeName}}" not found.': '未找到主题 "{{themeName}}"。',
   'Theme "{{themeName}}" not found in selected scope.':
     '在所选作用域中未找到主题 "{{themeName}}"。',
-  'Clear conversation history and free up context': '清除对话历史并释放上下文',
+  'Clear conversation history (use --all to also reset IDE/editor context)':
+    '清除对话历史（使用 --all 同时重置 IDE/编辑器上下文）',
+  'Complete reset (also clears IDE/editor context store)':
+    '完全重置（同时清空 IDE/编辑器上下文）',
+  'Are you sure you want to completely reset the session?':
+    '确定要完全重置会话吗？',
   'Compresses the context by replacing it with a summary.':
     '通过摘要替换来压缩上下文',
   'open full Qwen Code documentation in your browser':

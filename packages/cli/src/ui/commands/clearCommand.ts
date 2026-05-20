@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SlashCommand } from './types.js';
+import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import {
   uiTelemetryService,
   SessionEndReason,
   ToolNames,
+  ideContextStore,
 } from '@qwen-code/qwen-code-core';
 import {
   hasBlockingBackgroundWork,
@@ -21,11 +22,45 @@ export const clearCommand: SlashCommand = {
   name: 'clear',
   altNames: ['reset', 'new'],
   get description() {
-    return t('Clear conversation history and free up context');
+    return t(
+      'Clear conversation history (use --all to also reset IDE/editor context)',
+    );
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  action: async (context, _args) => {
+  completion: async (_context, partialArg) => {
+    const suggestions = [
+      {
+        value: '--all',
+        description: t(
+          'Complete reset (also clears IDE/editor context store)',
+        ),
+      },
+    ];
+    const filtered = suggestions.filter((s) => s.value.startsWith(partialArg));
+    return filtered.length > 0 ? filtered : null;
+  },
+  action: async (context, args): Promise<void | SlashCommandActionReturn> => {
+    const tokens = args.trim().split(/\s+/).filter(Boolean);
+    const isAll = tokens.includes('--all');
+
+    // Only --all requires confirmation, and only in interactive mode where a
+    // confirm prompt can actually be rendered. Non-interactive/ACP scripts
+    // that pass `--all` are treated as deliberate.
+    if (
+      isAll &&
+      !context.overwriteConfirmed &&
+      context.executionMode === 'interactive'
+    ) {
+      return {
+        type: 'confirm_action',
+        prompt: t('Are you sure you want to completely reset the session?'),
+        originalInvocation: {
+          raw: context.invocation?.raw || '/clear --all',
+        },
+      };
+    }
+
     const { config } = context.services;
 
     if (config) {
@@ -93,6 +128,14 @@ export const clearCommand: SlashCommand = {
     } else {
       context.ui.setDebugMessage(t('Starting a new session and clearing.'));
       context.ui.clear();
+    }
+
+    if (isAll) {
+      // --all also clears the IDE/editor context store. ideContextStore is a
+      // global module-level store and does not depend on config, so this runs
+      // outside the `if (config)` branch above to keep behavior consistent
+      // when config is null.
+      ideContextStore.clear();
     }
 
     if (context.executionMode !== 'interactive') {

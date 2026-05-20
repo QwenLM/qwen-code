@@ -8,15 +8,18 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { clearCommand } from './clearCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import { SessionEndReason } from '@qwen-code/qwen-code-core';
+import { SessionEndReason, ideContextStore } from '@qwen-code/qwen-code-core';
 
-// Mock the telemetry service
+// Mock the telemetry service and IDE context store
 vi.mock('@qwen-code/qwen-code-core', async () => {
   const actual = await vi.importActual('@qwen-code/qwen-code-core');
   return {
     ...actual,
     uiTelemetryService: {
       reset: vi.fn(),
+    },
+    ideContextStore: {
+      clear: vi.fn(),
     },
   };
 });
@@ -112,12 +115,8 @@ describe('clearCommand', () => {
     expect(mockResetChat).toHaveBeenCalledTimes(1);
     expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
 
-    // Check that all expected operations were called
-    expect(mockContext.ui.setDebugMessage).toHaveBeenCalled();
-    expect(mockStartNewSession).toHaveBeenCalled();
-    expect(mockContext.session.startNewSession).toHaveBeenCalled();
-    expect(mockResetChat).toHaveBeenCalled();
-    expect(mockContext.ui.clear).toHaveBeenCalled();
+    // bare /clear should NOT clear the IDE context store
+    expect(ideContextStore.clear).not.toHaveBeenCalled();
   });
 
   it('should fire SessionEnd event before clearing', async () => {
@@ -278,6 +277,94 @@ describe('clearCommand', () => {
     expect(nullConfigContext.ui.clear).toHaveBeenCalledTimes(1);
   });
 
+  describe('--all flag', () => {
+    it('returns confirm_action when --all is used and not yet confirmed (interactive)', async () => {
+      if (!clearCommand.action) {
+        throw new Error('clearCommand must have an action.');
+      }
+
+      const result = await clearCommand.action(mockContext, '--all');
+
+      expect(result).toEqual({
+        type: 'confirm_action',
+        prompt: 'Are you sure you want to completely reset the session?',
+        originalInvocation: { raw: '/clear --all' },
+      });
+      // Nothing should be cleared yet — waiting for confirmation
+      expect(mockContext.ui.clear).not.toHaveBeenCalled();
+      expect(mockResetChat).not.toHaveBeenCalled();
+      expect(ideContextStore.clear).not.toHaveBeenCalled();
+    });
+
+    it('uses context.invocation.raw verbatim when present', async () => {
+      if (!clearCommand.action) {
+        throw new Error('clearCommand must have an action.');
+      }
+
+      const ctx = createMockCommandContext({
+        services: mockContext.services,
+        session: mockContext.session,
+        invocation: { raw: '/reset --all' },
+      });
+
+      const result = await clearCommand.action(ctx, '--all');
+
+      expect(result).toMatchObject({
+        type: 'confirm_action',
+        originalInvocation: { raw: '/reset --all' },
+      });
+    });
+
+    it('clears IDE context store after confirmation with --all', async () => {
+      if (!clearCommand.action) {
+        throw new Error('clearCommand must have an action.');
+      }
+
+      mockContext.overwriteConfirmed = true;
+      await clearCommand.action(mockContext, '--all');
+
+      expect(ideContextStore.clear).toHaveBeenCalledTimes(1);
+      expect(mockStartNewSession).toHaveBeenCalledTimes(1);
+      expect(mockResetChat).toHaveBeenCalledTimes(1);
+      expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears IDE context store on --all even when config is null', async () => {
+      if (!clearCommand.action) {
+        throw new Error('clearCommand must have an action.');
+      }
+
+      const nullConfigContext = createMockCommandContext({
+        services: {
+          config: null,
+        },
+        session: {
+          startNewSession: vi.fn(),
+        },
+        overwriteConfirmed: true,
+      });
+
+      await clearCommand.action(nullConfigContext, '--all');
+
+      expect(ideContextStore.clear).toHaveBeenCalledTimes(1);
+      expect(nullConfigContext.ui.clear).toHaveBeenCalledTimes(1);
+      expect(mockResetChat).not.toHaveBeenCalled();
+    });
+
+    it('treats --all as exact token (does not match --allow etc.)', async () => {
+      if (!clearCommand.action) {
+        throw new Error('clearCommand must have an action.');
+      }
+
+      const result = await clearCommand.action(mockContext, '--allow');
+
+      // --allow is not --all, so no confirmation, bare clear behavior
+      expect(result).toBeUndefined();
+      expect(ideContextStore.clear).not.toHaveBeenCalled();
+      expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('non-interactive mode', () => {
     let nonInteractiveContext: ReturnType<typeof createMockCommandContext>;
 
@@ -352,6 +439,21 @@ describe('clearCommand', () => {
         SessionEndReason.Clear,
       );
       expect(mockFireSessionStartEvent).not.toHaveBeenCalled();
+    });
+
+    it('--all skips confirmation in non-interactive mode and clears IDE store', async () => {
+      if (!clearCommand.action)
+        throw new Error('clearCommand must have an action.');
+
+      const result = await clearCommand.action(nonInteractiveContext, '--all');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Context cleared. Previous messages are no longer in context.',
+      });
+      expect(ideContextStore.clear).toHaveBeenCalledTimes(1);
+      expect(mockResetChat).toHaveBeenCalledTimes(1);
     });
 
     it('blocks session clearing while background work is still running', async () => {
@@ -515,6 +617,45 @@ describe('clearCommand', () => {
       });
       expect(mockStartNewSession).not.toHaveBeenCalled();
       expect(mockResetChat).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('completion', () => {
+    it('returns --all suggestion when partialArg is empty', async () => {
+      if (!clearCommand.completion)
+        throw new Error('clearCommand must have completion.');
+
+      const result = await clearCommand.completion(mockContext, '');
+
+      expect(result).toEqual([
+        {
+          value: '--all',
+          description: 'Complete reset (also clears IDE/editor context store)',
+        },
+      ]);
+    });
+
+    it('filters by prefix when partialArg is given', async () => {
+      if (!clearCommand.completion)
+        throw new Error('clearCommand must have completion.');
+
+      const result = await clearCommand.completion(mockContext, '--a');
+
+      expect(result).toEqual([
+        {
+          value: '--all',
+          description: 'Complete reset (also clears IDE/editor context store)',
+        },
+      ]);
+    });
+
+    it('returns null when no suggestion matches', async () => {
+      if (!clearCommand.completion)
+        throw new Error('clearCommand must have completion.');
+
+      const result = await clearCommand.completion(mockContext, '--z');
+
+      expect(result).toBeNull();
     });
   });
 });
