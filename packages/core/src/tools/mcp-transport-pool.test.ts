@@ -229,6 +229,68 @@ describe('McpTransportPool', () => {
       await Promise.resolve();
       expect(mocked.close).toHaveBeenCalledTimes(1);
     });
+
+    it('cancels in-flight unpooled acquire when releaseSession races the connect/discover window (W77)', async () => {
+      // Hold the unpooled connect() inside the runWithTimeout window so
+      // we can fire releaseSession before the entry transitions to active.
+      // Without the W77 fix the early sessionToEntries index is empty,
+      // releaseSession is a no-op, and the post-await flow registers
+      // tools/prompts into a session that has already been closed.
+      let releaseConnect!: () => void;
+      const connectGate = new Promise<void>((resolve) => {
+        releaseConnect = resolve;
+      });
+      const mocked = mockMcpSuccess();
+      mocked.connect.mockImplementation(() => connectGate);
+
+      const pool = new McpTransportPool(
+        cliConfig,
+        mkPoolOptions({
+          pooledTransports: new Set() as ReadonlySet<
+            'stdio' | 'websocket' | 'http' | 'sse' | 'sdk' | 'unknown'
+          >,
+        }),
+      );
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+
+      const acquirePromise = pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+
+      // Yield so `createUnpooledConnection` enters the await on connect.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Race: tear down the session while connect is still pending.
+      // Pre-fix: this returns silently — sessionToEntries is empty.
+      // Post-fix: the early `indexAttach` makes releaseSession find
+      // the entry and fire forceShutdown('manual'), which flips state
+      // to 'closed' synchronously.
+      pool.releaseSession('s1');
+
+      // Now let the connect resolve so the post-await flow runs.
+      releaseConnect();
+
+      await expect(acquirePromise).rejects.toThrow(
+        /draining or unpooled.*was cancelled/,
+      );
+
+      // Entry is gone from both the forward and reverse indices.
+      expect(pool.getSnapshot().total).toBe(0);
+      expect(pool.getSnapshot().byName['srv']).toBeUndefined();
+      // The legacy unpooled discover() registers tools directly into
+      // the session registry inside the await window — that call
+      // happens before we can detect cancellation — so the W77 fix
+      // rolls them back via `view.teardown()`, which calls
+      // `removeMcpToolsByServer`. Without that rollback, tools would
+      // remain in the closed session's registry.
+      expect(
+        (
+          r.tools as unknown as {
+            removeMcpToolsByServer: ReturnType<typeof vi.fn>;
+          }
+        ).removeMcpToolsByServer,
+      ).toHaveBeenCalledWith('srv');
+    });
   });
 
   describe('spawnInFlight dedupe', () => {

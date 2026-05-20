@@ -927,6 +927,20 @@ export class McpTransportPool {
     try {
       this.entries.set(id, entry);
       this.unpooledIds.add(id);
+      // F2 (#4175 commit 6 review fix — gpt-5.5 W77): populate the
+      // reverse index synchronously, BEFORE the connect/discover
+      // await. Pre-fix, `releaseSession(sessionId)` fired during this
+      // window walked an empty `sessionToEntries[sessionId]` and
+      // returned without touching the in-flight unpooled entry — the
+      // transport kept starting and `attach()` later registered tools/
+      // prompts into a session that had already been closed. With the
+      // early indexing, a concurrent `releaseSession` finds the entry,
+      // calls `entry.forceShutdown('manual')` (which synchronously
+      // flips state→'closed' per W69), and the post-await
+      // `isTerminated()` guard below catches it. Every error/discard
+      // path now mirrors this with `indexDetach` to keep the index
+      // consistent.
+      this.indexAttach(sessionId, id);
       // F2 (#4175 commit 6 review fix — wenshao W62): bound the
       // unpooled connect+discover with the same `runWithTimeout`
       // wrapper `spawnEntry` (W25) and `doRestart` (W44) use. Pre-
@@ -947,14 +961,30 @@ export class McpTransportPool {
         timeoutMs,
         `unpooled spawn for ${id}`,
       );
-      if (this.draining || !this.entries.has(id)) {
+      // W77: re-check terminal state after the await — a concurrent
+      // `releaseSession(sessionId)` may have invoked `forceShutdown`
+      // while we were spawning. Without this guard, `markActive` /
+      // `attach` would either resurrect the entry or throw deep in
+      // attach's state check, leaking the in-flight transport. Also
+      // roll back any side-effects of `client.discover()` via
+      // `view.teardown()` — the legacy unpooled discover() registers
+      // tools/prompts directly into the session registries inside the
+      // await window above, so detection alone isn't enough; the
+      // already-registered entries have to be evicted by serverName.
+      if (this.draining || !this.entries.has(id) || entry.isTerminated()) {
+        try {
+          view.teardown();
+        } catch {
+          /* best effort — view may already be torn down */
+        }
         try {
           await entry.forceShutdown('manual');
         } catch {
           /* best effort — pool is already draining */
         }
+        this.indexDetach(sessionId, id);
         throw new Error(
-          `McpTransportPool is draining; discarded unpooled ${id}`,
+          `McpTransportPool is draining or unpooled ${id} was cancelled`,
         );
       }
       entry.markActive([], []);
@@ -971,7 +1001,6 @@ export class McpTransportPool {
           void entry.forceShutdown('manual');
         },
       });
-      this.indexAttach(sessionId, id);
       return conn;
     } catch (err) {
       // F2 (#4175 commit 6 review fix — wenshao W14): same listener-
@@ -987,6 +1016,13 @@ export class McpTransportPool {
       }
       this.entries.delete(id);
       this.unpooledIds.delete(id);
+      // W77: roll back the early reverse-index insertion above so
+      // `sessionToEntries[sessionId]` does not accumulate stale ids
+      // pointing at deleted entries. `indexDetach` is a no-op if the
+      // failure happened before we ever indexed (e.g. an error in
+      // `entries.set` itself, which is impossible today but defends
+      // against future restructuring).
+      this.indexDetach(sessionId, id);
       try {
         await client.disconnect();
       } catch {

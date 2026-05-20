@@ -242,6 +242,17 @@ export class PoolEntry {
   }
 
   /**
+   * F2 (#4175 commit 6 review fix — gpt-5.5 W77): public terminal-
+   * state probe. Lets callers short-circuit before invoking
+   * `markActive` / `attach` when a concurrent `forceShutdown` has
+   * already torn the entry down (e.g. an unpooled connect/discover
+   * window racing `releaseSession`).
+   */
+  isTerminated(): boolean {
+    return this.state === 'closed' || this.state === 'failed';
+  }
+
+  /**
    * Mark the initial spawn complete. Caller (pool) must call this
    * after constructing the entry, performing the initial discovery,
    * and seeding `toolsSnapshot` / `promptsSnapshot`.
@@ -250,6 +261,13 @@ export class PoolEntry {
     initialTools: DiscoveredMCPTool[],
     initialPrompts: DiscoveredMCPPrompt[],
   ): void {
+    // F2 (#4175 commit 6 review fix — gpt-5.5 W77): never resurrect a
+    // torn-down entry. `forceShutdown` may run concurrently with the
+    // unpooled connect/discover window in `createUnpooledConnection`;
+    // without this guard, `markActive` would overwrite `state='closed'`
+    // back to `'active'`, letting `attach()` succeed against a
+    // disconnected client.
+    if (this.state === 'closed' || this.state === 'failed') return;
     this.toolsSnapshot = initialTools;
     this.promptsSnapshot = initialPrompts;
     this.state = 'active';
