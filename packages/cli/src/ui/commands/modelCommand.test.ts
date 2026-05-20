@@ -286,6 +286,49 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should report persistence failures after switching --default model', async () => {
+    const setValue = vi.fn(() => {
+      throw new Error('Disk is read-only');
+    });
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --default gpt-4',
+        name: 'model',
+        args: '--default gpt-4',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-3.5',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--default gpt-4');
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'gpt-4',
+      undefined,
+    );
+    expect(setValue).toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Switched to 'gpt-4' for this session, but failed to persist as default.\n\n" +
+        'Disk is read-only',
+    });
+  });
+
   it('should reject qwen-oauth models when --default is provided', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);

@@ -327,7 +327,18 @@ export const modelCommand: SlashCommand = {
         modelName,
       );
       if (isDefaultModelCommand) {
-        persistMainModelDefault(settings, authType, modelName);
+        try {
+          persistMainModelDefault(settings, authType, modelName);
+        } catch (e) {
+          const baseErrorMessage = e instanceof Error ? e.message : String(e);
+          return {
+            type: 'message',
+            messageType: 'error',
+            content:
+              `Switched to '${effectiveModelName}' for this session, ` +
+              `but failed to persist as default.\n\n${baseErrorMessage}`,
+          };
+        }
       }
       return {
         type: 'message',

@@ -401,14 +401,14 @@ export function ModelDialog({
         return;
       }
 
-      if (
-        key.name === 'd' &&
-        !key.ctrl &&
-        !key.meta &&
-        !isFastModelMode &&
-        highlightedEntry &&
-        !highlightedEntry.isRuntime
-      ) {
+      if (key.name === 'd' && !key.ctrl && !key.meta && !isFastModelMode) {
+        if (!config) {
+          setErrorMessage(t('Configuration not available.'));
+          return;
+        }
+        if (!highlightedEntry || highlightedEntry.isRuntime) {
+          return;
+        }
         if (highlightedEntry.authType === AuthType.QWEN_OAUTH) {
           setErrorMessage(qwenOAuthDiscontinuedMessage());
           return;
@@ -416,10 +416,6 @@ export function ModelDialog({
 
         setErrorMessage(null);
         void (async () => {
-          if (!config) {
-            return;
-          }
-
           try {
             await config.switchModel(
               highlightedEntry.authType,

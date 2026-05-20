@@ -621,6 +621,40 @@ describe('<ModelDialog />', () => {
     });
   });
 
+  it('shows an error when setting default model without config', async () => {
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const { queryByText } = render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider value={undefined}>
+          <ModelDialog onClose={vi.fn()} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    await act(async () => {
+      await keyPressHandler({
+        name: 'd',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: 'd',
+      });
+    });
+
+    await waitFor(() => {
+      expect(queryByText(/Configuration not available/)).not.toBeNull();
+    });
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+  });
+
   it('clears a stale default-model error before persisting a valid model', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
