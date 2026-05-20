@@ -422,6 +422,22 @@ export function getMCPDiscoveryState(): MCPDiscoveryState {
 }
 
 /**
+ * F2 (#4175 commit 6 review fix — gpt-5.5 W72): expose a setter so
+ * `McpClientManager.discoverAllMcpToolsViaPool` can update the
+ * module-global `mcpDiscoveryState`. Pre-fix the pool path only
+ * updated the manager-local state, leaving the global at
+ * `NOT_STARTED` while pool discovery was running or already
+ * complete — `GET /workspace/mcp` and the MCP preflight cell read
+ * the global and reported `not_started` for a workspace whose
+ * discovery had finished. Per-session managers don't have the
+ * concept of "ALL workspace discovery complete" anymore in pool
+ * mode, so the pool path becomes the canonical writer when active.
+ */
+export function setMCPDiscoveryState(state: MCPDiscoveryState): void {
+  mcpDiscoveryState = state;
+}
+
+/**
  * Extract WWW-Authenticate header from error message string.
  * This is a more robust approach than regex matching.
  *

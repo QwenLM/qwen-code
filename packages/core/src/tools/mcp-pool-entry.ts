@@ -423,6 +423,16 @@ export class PoolEntry {
     // entry mid-teardown (zombie connection). Now any concurrent
     // attach sees 'closed' immediately and rejects.
     this.state = 'closed';
+    // F2 (#4175 commit 6 review fix — wenshao W69): missed sibling of
+    // C4 fix. Pre-fix `localStatus = DISCONNECTED` happened AFTER
+    // `await sweepAndDisconnect` — during that async yield,
+    // `getSnapshot()` / `aggregateStatusByName` reading
+    // `entry.getLocalStatus()` still returned `CONNECTED` for an
+    // entry mid-teardown. Set it synchronously alongside `state` so
+    // any concurrent reader sees a consistent (closed, disconnected)
+    // pair.
+    this.localStatus = MCPServerStatus.DISCONNECTED;
+    this.suppressNextStatusEcho = true;
     this.cancelDrainTimer();
     if (this.maxIdleTimer) {
       clearTimeout(this.maxIdleTimer);
@@ -457,10 +467,9 @@ export class PoolEntry {
     // `forceShutdown` AND `doRestart` (both pre- and failure-
     // paths) so future changes to either step happen in one place.
     await this.sweepAndDisconnect(reason);
-    // state already set to 'closed' synchronously above (wenshao C4 fix).
-    this.localStatus = MCPServerStatus.DISCONNECTED;
-    // Suppress the listener echo from our own write (wenshao C6).
-    this.suppressNextStatusEcho = true;
+    // state + localStatus already set synchronously above (wenshao
+    // C4 + W69 fixes). Just propagate the now-stable status into
+    // the module-global map for cross-name aggregators.
     this.updateGlobalStatus();
     this.onClosed(this.id);
   }
@@ -759,9 +768,34 @@ export class PoolEntry {
    * Fire an event to all subscribers. Stays inside the entry's
    * EventEmitter so `PooledConnection.on('event', cb)` and
    * `removeListener` work correctly.
+   *
+   * F2 (#4175 commit 6 review fix — wenshao W70): iterate listeners
+   * with per-listener try/catch instead of delegating to
+   * `EventEmitter.emit` directly. Pre-fix a synchronous throw from
+   * one session's listener (e.g. session A's view triggered an
+   * exception) crashed the emit call — siblings B, C never received
+   * the event. In `forceShutdown`'s emit-then-disconnect sequence
+   * (line 449), one buggy listener could prevent subprocess
+   * cleanup, budget slot release, and entry eviction for ALL
+   * sessions sharing the entry. Now per-listener errors log to
+   * debug and the iteration continues to the next listener.
    */
   emit(event: PoolEvent): void {
-    this.emitter.emit('event', event);
+    const listeners = this.emitter.listeners('event') as Array<
+      (e: PoolEvent) => void
+    >;
+    for (const listener of listeners) {
+      try {
+        listener(event);
+      } catch (err) {
+        debugLogger.error(
+          `PoolEntry listener error for ${this.id} ` +
+            `(event.kind=${event.kind}): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+        );
+      }
+    }
   }
 
   internalOn(listener: (e: PoolEvent) => void): void {

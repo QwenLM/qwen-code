@@ -14,6 +14,7 @@ import {
   getMCPServerStatus,
   populateMcpServerCommand,
   removeMCPServerStatus,
+  setMCPDiscoveryState,
 } from './mcp-client.js';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -1395,6 +1396,15 @@ export class McpClientManager {
   ): Promise<void> {
     if (!this.pool) return; // unreachable; caller already gates
     this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
+    // F2 (#4175 commit 6 review fix — gpt-5.5 W72): also write the
+    // module-global `mcpDiscoveryState`. Pre-fix the pool path only
+    // updated `this.discoveryState` (manager-local) — `GET /workspace/mcp`
+    // and the MCP preflight cell read the GLOBAL via
+    // `getMCPDiscoveryState()` and reported `not_started` for a
+    // workspace whose pool discovery was running or already
+    // complete. Snapshot now reflects reality regardless of which
+    // discovery path (legacy per-session or pool) is active.
+    setMCPDiscoveryState(MCPDiscoveryState.IN_PROGRESS);
     // F2 (#4175 commit 6): bracket the pass with the pool's budget
     // bulk-pass scope so per-server BudgetExhaustedError refusals
     // accumulate into ONE coalesced `refused_batch` event at end of
@@ -1485,25 +1495,34 @@ export class McpClientManager {
               this.toolRegistry,
               promptRegistry,
             );
-            // F2 (#4175 commit 6 review fix — wenshao W5): subscribe
-            // to entry-level events so a `'failed'` event (entry's
-            // restart hit reconnect-budget exhaustion → terminal
-            // failure → entry removed from `pool.entries`) evicts our
-            // stale handle. Pre-fix the manager held the dead handle
-            // forever; subsequent discovery passes saw
-            // `pooledConnections.has(name)` and skipped re-acquiring,
-            // permanently losing the server's tools for the session.
-            // Cleanup is idempotent — a second `'failed'` event on
-            // the same id is a no-op via the `get(name) === conn`
-            // guard, and `releaseAllPooledConnections` / `stop` also
-            // call `conn.release()` independently.
-            conn.on('event', (e) => {
-              if (e.kind === 'failed') {
-                if (this.pooledConnections.get(name) === conn) {
-                  this.pooledConnections.delete(name);
-                }
+            // F2 (#4175 commit 6 review fix — wenshao W5 + W75):
+            // subscribe to entry-level events so a `'failed'` event
+            // (entry's restart hit reconnect-budget exhaustion →
+            // terminal failure → entry removed from `pool.entries`)
+            // evicts our stale handle.
+            //
+            // W75: keep a NAMED listener and unregister it on
+            // 'failed' BEFORE deleting from `pooledConnections`. Pre-
+            // fix the anonymous arrow stayed attached to the entry's
+            // EventEmitter even after we deleted from
+            // `pooledConnections` — the listener's closure pinned
+            // `this` (manager) and `conn` (PooledConnection wrapper),
+            // making cleanup depend on whole-object GC. With named +
+            // self-unregister, the listener detaches as soon as the
+            // 'failed' event fires.
+            //
+            // Idempotent — a second 'failed' event on the same id
+            // is a no-op via `get(name) === conn` guard;
+            // `releaseAllPooledConnections` / `stop` also call
+            // `conn.release()` independently.
+            const onFailed = (e: import('./mcp-pool-events.js').PoolEvent) => {
+              if (e.kind !== 'failed') return;
+              if (this.pooledConnections.get(name) === conn) {
+                this.pooledConnections.delete(name);
               }
-            });
+              conn.off('event', onFailed);
+            };
+            conn.on('event', onFailed);
             this.pooledConnections.set(name, conn);
           } catch (err) {
             // Pool acquire failure for one server is non-fatal for
@@ -1536,6 +1555,9 @@ export class McpClientManager {
     } finally {
       poolBudget?.endBulkPass();
       this.discoveryState = MCPDiscoveryState.COMPLETED;
+      // W72 fold-in: same global update as the IN_PROGRESS write
+      // above; preflight cell + snapshot route both read the global.
+      setMCPDiscoveryState(MCPDiscoveryState.COMPLETED);
       this.eventEmitter?.emit('mcp-client-update', this.clients);
     }
   }

@@ -49,6 +49,35 @@ export function passesSessionFilter(
 }
 
 /**
+ * F2 (#4175 commit 6 review fix — wenshao W66): prompt-side analog
+ * of `passesSessionFilter`. Same `excludeTools` / `includeTools`
+ * semantics applied to the prompt's `name` field. Reuses the
+ * `excludeTools` / `includeTools` config keys rather than inventing
+ * separate `excludePrompts` / `includePrompts` keys — most operators
+ * intuitively want a single filter knob per server, and prompt names
+ * rarely collide with tool names. If a future server advertises
+ * a prompt + tool with the SAME name and the operator wants to
+ * exclude only the tool (not the prompt), they can switch to the
+ * parens form `excludeTools: ['toolName(args)']` which only matches
+ * tools (the parens-stripping in `passesSessionFilter` matches
+ * `toolName` in the include list, not the exclude list).
+ */
+export function passesSessionPromptFilter(
+  promptName: string,
+  includeTools?: readonly string[],
+  excludeTools?: readonly string[],
+): boolean {
+  if (excludeTools?.includes(promptName)) return false;
+  if (!includeTools) return true;
+  return includeTools.some((entry) => {
+    const stripped = entry.includes('(')
+      ? entry.slice(0, entry.indexOf('('))
+      : entry;
+    return stripped === promptName;
+  });
+}
+
+/**
  * Per-session, per-server projection of a pool entry's tool/prompt
  * snapshots into a session's own `ToolRegistry` + `PromptRegistry`.
  *
@@ -121,8 +150,15 @@ export class SessionMcpView {
 
   /**
    * Replace this session's registered prompts for `serverName` with
-   * `snapshot`. Prompts have no per-session filter today; the entire
-   * pool snapshot fans out to every subscriber.
+   * `snapshot`. Apply the same `excludeTools` / `includeTools`
+   * filter the tool path uses (W66 fold-in). Pre-fix prompts were
+   * registered unconditionally — a session restricting tools to a
+   * subset still received every prompt the server advertised, AND
+   * each prompt's bound `invoke` closure over the pool's shared
+   * `Client` reached the same server state/credentials as the
+   * more-trusted sibling. Now the filter rejects prompts the
+   * session has explicitly excluded; un-listed prompts pass when
+   * `includeTools` is unset (matching the tool path's lenient default).
    *
    * Note: prompts carry a bound `invoke` closure over the pool's
    * shared `Client`. When the pool reconnects (new client instance),
@@ -132,11 +168,22 @@ export class SessionMcpView {
    */
   applyPrompts(snapshot: readonly DiscoveredMCPPrompt[]): void {
     this.sessionPromptRegistry.removePromptsByServer(this.serverName);
+    let registered = 0;
     for (const prompt of snapshot) {
+      if (
+        !passesSessionPromptFilter(
+          prompt.name,
+          this.cfg.includeTools,
+          this.cfg.excludeTools,
+        )
+      ) {
+        continue;
+      }
       this.sessionPromptRegistry.registerPrompt(prompt);
+      registered += 1;
     }
     debugLogger.debug(
-      `SessionMcpView[${this.sessionId}/${this.serverName}] applied ${snapshot.length} prompts`,
+      `SessionMcpView[${this.sessionId}/${this.serverName}] applied ${snapshot.length} prompts (filtered to ${registered} registered)`,
     );
   }
 

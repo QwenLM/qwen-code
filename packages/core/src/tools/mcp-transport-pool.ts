@@ -17,7 +17,7 @@ import {
   type PooledConnection,
   type PoolEntryOptions,
 } from './mcp-pool-entry.js';
-import { type ConnectionId, type PoolEvent } from './mcp-pool-events.js';
+import { type ConnectionId } from './mcp-pool-events.js';
 import {
   connectionIdOf,
   isPoolable,
@@ -216,53 +216,51 @@ export class McpTransportPool {
         `McpTransportPool is draining; refusing acquire for ${serverName} (session ${sessionId})`,
       );
     }
-    // SDK MCP / non-pooled HTTP go through the per-session bypass.
-    if (!isPoolable(cfg, this.opts.pooledTransports)) {
-      return this.createUnpooledConnection(
-        serverName,
-        cfg,
-        sessionId,
-        sessionToolRegistry,
-        sessionPromptRegistry,
-      );
+
+    // For pooled transports, fast-path attach to an existing entry
+    // — that entry's prior reservation already covers the slot, no
+    // new tryReserve needed.
+    const poolable = isPoolable(cfg, this.opts.pooledTransports);
+    const id = poolable ? connectionIdOf(serverName, cfg) : undefined;
+    if (id !== undefined) {
+      const existing = this.entries.get(id);
+      if (existing) {
+        const view = new SessionMcpView(
+          sessionToolRegistry,
+          sessionPromptRegistry,
+          sessionId,
+          serverName,
+          cfg,
+        );
+        // F2 (#4175 commit 6 review fix — wenshao W10): index update
+        // happens AFTER `attach` succeeds. Pre-fix the order was
+        // reversed; an `attach` rejection (e.g., entry transitioned
+        // to `closed`/`failed` between the `entries.get` check and the
+        // `attach` call) left a stale `sessionToEntries[sessionId]`
+        // mapping with no matching `entry.refs.has(sessionId)` —
+        // `releaseSession` would later iterate the stale id and call
+        // `entry.detach` on a non-attached session.
+        const conn = existing.attach(sessionId, view, {
+          release: () => this.release(id, sessionId),
+        });
+        this.indexAttach(sessionId, id);
+        return conn;
+      }
     }
 
-    const id = connectionIdOf(serverName, cfg);
-
-    // Fast path: existing entry.
-    const existing = this.entries.get(id);
-    if (existing) {
-      const view = new SessionMcpView(
-        sessionToolRegistry,
-        sessionPromptRegistry,
-        sessionId,
-        serverName,
-        cfg,
-      );
-      // F2 (#4175 commit 6 review fix — wenshao W10): index update
-      // happens AFTER `attach` succeeds. Pre-fix the order was
-      // reversed; an `attach` rejection (e.g., entry transitioned
-      // to `closed`/`failed` between the `entries.get` check and the
-      // `attach` call) left a stale `sessionToEntries[sessionId]`
-      // mapping with no matching `entry.refs.has(sessionId)` —
-      // `releaseSession` would later iterate the stale id and call
-      // `entry.detach` on a non-attached session.
-      const conn = existing.attach(sessionId, view, {
-        release: () => this.release(id, sessionId),
-      });
-      this.indexAttach(sessionId, id);
-      return conn;
-    }
-
-    // F2 (#4175 commit 6): workspace budget check pre-spawn. The
-    // budget reserves by NAME (not ConnectionId) so divergent
-    // fingerprints for the same name share one slot — matches PR 14
-    // v1's "configured server slots" semantic. Same-name spawn
-    // already in flight is gated by `spawnInFlight` below; this
-    // guard catches the case where a NEW name would push past the
-    // cap. Refused under enforce mode → record + throw
-    // BudgetExhaustedError so the caller (`McpClientManager.discoverAllMcpToolsViaPool`)
-    // can surface the refusal in its standard catch path.
+    // Below this point we're committed to creating a NEW connection
+    // (pooled spawn OR unpooled). Apply the workspace budget check
+    // by NAME — divergent fingerprints for the same name share one
+    // slot (matches PR 14 v1's "configured server slots" semantic).
+    //
+    // F2 (#4175 commit 6 review fix — wenshao W65): pre-fix the
+    // budget check ran AFTER the `!isPoolable` early-return, so
+    // unpooled HTTP/SSE/SDK-MCP connections bypassed enforcement
+    // entirely (`--mcp-client-budget=2` would let 3 HTTP MCP servers
+    // connect without refusal). Now the check applies uniformly to
+    // both branches; refusal under enforce mode throws
+    // BudgetExhaustedError so the caller's catch translates to
+    // `refused_batch` in the snapshot.
     if (this.opts.budget !== undefined) {
       const reservation = this.opts.budget.tryReserve(serverName);
       if (reservation === 'refused') {
@@ -279,6 +277,24 @@ export class McpTransportPool {
       // drain. Either way no slot is newly consumed.
     }
 
+    // SDK MCP / non-pooled HTTP go through the per-session bypass.
+    if (!poolable) {
+      return this.createUnpooledConnection(
+        serverName,
+        cfg,
+        sessionId,
+        sessionToolRegistry,
+        sessionPromptRegistry,
+      );
+    }
+
+    // From here on poolable === true → id !== undefined (TS doesn't
+    // narrow the local across the early-returns above, so re-narrow
+    // explicitly via a type predicate). Throwing is unreachable; the
+    // assertion documents the invariant for the spawn-in-flight block.
+    if (id === undefined) {
+      throw new Error('unreachable: poolable && id === undefined');
+    }
     // In-flight path: another acquire for the same key is already
     // spawning the entry. Await its completion, then attach.
     let inFlight = this.spawnInFlight.get(id);
@@ -384,6 +400,12 @@ export class McpTransportPool {
       reason?: string;
     }>
   > {
+    // F2 (#4175 commit 6 review fix — wenshao W68): defense-in-depth
+    // gate matching `acquire()`'s `draining` check. Pre-fix
+    // `restartByName` could call `entry.restart()` mid-`drainAll()`,
+    // spawning a fresh subprocess via `client.connect()` that
+    // wasn't in the entry snapshot drainAll captured — leak path.
+    if (this.draining) return [];
     const matching = [...this.entries.values()].filter(
       (e) =>
         e.serverName === serverName &&
@@ -411,17 +433,14 @@ export class McpTransportPool {
     );
   }
 
-  /**
-   * Subscribe to entry-level events for a specific connection id.
-   * Returns an unsubscribe function. Used by F4 (status route) to
-   * stream pool-level events to remote clients.
-   */
-  onEntryEvent(id: ConnectionId, listener: (e: PoolEvent) => void): () => void {
-    const entry = this.entries.get(id);
-    if (!entry) return () => undefined;
-    entry.internalOn(listener);
-    return () => entry.internalOff(listener);
-  }
+  // F2 (#4175 commit 6 review fix — wenshao W67): the pool-level
+  // `onEntryEvent(id, listener)` subscriber API was removed since
+  // it had zero callers — F4 (status stream route) was supposed to
+  // consume it but isn't shipping in this PR. Sessions still
+  // subscribe to entry events via `PooledConnection.on('event', ...)`
+  // (used by `McpClientManager` for the `'failed'` evict path);
+  // re-introduce the pool-level `onEntryEvent` API alongside its
+  // first concrete F4 consumer.
 
   /**
    * Snapshot the pool's current state for the daemon's
@@ -520,17 +539,45 @@ export class McpTransportPool {
     // attempting to attach mid-drain doesn't end up holding a handle
     // to an entry that's about to be force-closed.
     this.draining = true;
+    const deadline = Date.now() + timeoutMs;
 
     // Wait for in-flight spawn promises to settle BEFORE taking the
     // entry snapshot, so a spawn that's about to call
     // `this.entries.set(id, entry)` doesn't sneak past `entries.clear()`
     // and leak. `Promise.allSettled` tolerates spawn rejection (the
     // failed entry simply won't appear in `this.entries`).
+    //
+    // F2 (#4175 commit 6 review fix — gpt-5.5 W73): the
+    // `Promise.allSettled` wait was previously UNBOUNDED — a spawn
+    // with a large `discoveryTimeoutMs` override (or a stuck spawn
+    // running its own 30s default) would block daemon shutdown for
+    // the full discovery timeout BEFORE `drainAll`'s 8-10s budget
+    // even began, defeating the caller's shutdown deadline. Now the
+    // in-flight wait races against the SAME `timeoutMs` budget; if
+    // it doesn't settle, we proceed with whatever entries are
+    // already in `this.entries` (the rest will be force-closed via
+    // `clear()` below). Per-spawn timeouts (W25) bound individual
+    // spawns; the race here is the safety net for misconfigured
+    // overrides.
     if (this.spawnInFlight.size > 0) {
-      await Promise.allSettled([...this.spawnInFlight.values()]);
+      const spawnWait = Promise.allSettled([...this.spawnInFlight.values()]);
+      let inflightTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        spawnWait.then(() => {
+          if (inflightTimer) clearTimeout(inflightTimer);
+        }),
+        new Promise<void>((resolve) => {
+          inflightTimer = setTimeout(
+            () => resolve(),
+            Math.max(0, deadline - Date.now()),
+          );
+          inflightTimer.unref?.();
+        }),
+      ]);
     }
-    // Snapshot AFTER spawnInFlight settles so any entry that just
-    // got `entries.set` from a completing spawn is in the list.
+    // Snapshot AFTER spawnInFlight settles (or timed out) so any
+    // entry that just got `entries.set` from a completing spawn is
+    // in the list.
     const entries = [...this.entries.values()];
     const drained: number[] = [];
     const errors: Array<{
@@ -550,23 +597,39 @@ export class McpTransportPool {
           });
         }),
     );
-    let timedOut = 0;
+    // F2 (#4175 commit 6 review fix — wenshao W63): clear the timer
+    // when the shutdown promises win the race (otherwise it stays
+    // armed until natural fire — `unref` prevents process hang but
+    // the timer object leaks). Snapshot `drained` / `errors` lengths
+    // BEFORE returning so the caller doesn't receive a live
+    // reference to mutating arrays (background `shutdownPromises`
+    // can keep pushing if any settle after the timeout). The
+    // `forced` count is computed via subtraction at the snapshot
+    // moment and clamped to non-negative so a late settle pushing
+    // into `drained` after the snapshot can't make `forced` go
+    // negative.
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const remaining = Math.max(0, deadline - Date.now());
     await Promise.race([
-      Promise.all(shutdownPromises),
-      new Promise<void>((resolve) =>
-        setTimeout(() => {
-          timedOut = entries.length - drained.length - errors.length;
-          resolve();
-        }, timeoutMs).unref?.(),
-      ),
+      Promise.all(shutdownPromises).then(() => {
+        if (drainTimer) clearTimeout(drainTimer);
+      }),
+      new Promise<void>((resolve) => {
+        drainTimer = setTimeout(() => resolve(), remaining);
+        drainTimer.unref?.();
+      }),
     ]);
+    const drainedCount = drained.length;
+    const errorsCount = errors.length;
+    const forced = Math.max(0, entries.length - drainedCount - errorsCount);
+    const errorsCopy = [...errors];
     this.entries.clear();
     this.sessionToEntries.clear();
     this.spawnInFlight.clear();
     return {
-      drained: drained.length,
-      forced: timedOut,
-      errors,
+      drained: drainedCount,
+      forced,
+      errors: errorsCopy,
     };
   }
 
@@ -789,7 +852,22 @@ export class McpTransportPool {
       client,
       this.cliConfig,
       entryOpts,
-      () => undefined,
+      // F2 (#4175 commit 6 review fix — wenshao W65): release the
+      // budget slot when this unpooled entry closes. Pre-fix
+      // unpooled connections (HTTP/SSE not in `pooledTransports`,
+      // SDK MCP) bypassed budget enforcement entirely AND skipped
+      // budget release on close — the slot was never reserved
+      // either, but this hook makes the close-path symmetric for
+      // when budget is now reserved at acquire (W65 follow-on).
+      // `hasNameSibling` keeps the slot reserved if any pooled
+      // entry or in-flight spawn shares the name.
+      (_closedId) => {
+        if (this.opts.budget !== undefined) {
+          if (!this.hasNameSibling(serverName)) {
+            this.opts.budget.release(serverName);
+          }
+        }
+      },
       // F2 (#4175 commit 4 review fix — wenshao S4): aggregator
       // delegates to McpClient.getStatus() instead of hardcoded
       // CONNECTED. After `forceShutdown` flips client to
@@ -801,11 +879,26 @@ export class McpTransportPool {
     );
 
     try {
-      await client.connect();
-      // Per-session path: use the legacy discover() so the supplied
-      // session registries are populated directly. Avoids double-
-      // registration that would happen if we also called applyTools.
-      await client.discover(this.cliConfig);
+      // F2 (#4175 commit 6 review fix — wenshao W62): bound the
+      // unpooled connect+discover with the same `runWithTimeout`
+      // wrapper `spawnEntry` (W25) and `doRestart` (W44) use. Pre-
+      // fix a hung SDK MCP / non-pooled HTTP server blocked
+      // `acquire` indefinitely, stalling the entire session's tool
+      // discovery. Same `discoveryTimeoutFor(cfg)` resolution
+      // (stdio 30s default, remote 5s, per-server override).
+      const timeoutMs = discoveryTimeoutFor(cfg);
+      await runWithTimeout(
+        (async () => {
+          await client.connect();
+          // Per-session path: use the legacy discover() so the
+          // supplied session registries are populated directly.
+          // Avoids double-registration that would happen if we
+          // also called applyTools.
+          await client.discover(this.cliConfig);
+        })(),
+        timeoutMs,
+        `unpooled spawn for ${id}`,
+      );
       entry.markActive([], []);
       // Unpooled handle: skipReplay prevents `attach` from calling
       // `view.applyTools([])` which would `removeMcpToolsByServer`
