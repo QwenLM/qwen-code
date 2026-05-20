@@ -25,6 +25,7 @@ export {
   transcriptBlockToTerminalText,
 } from './terminal.js';
 export {
+  extractContentPart,
   getOutputText,
   isSensitiveKey as isDaemonUiSensitiveKey,
   redactSensitiveFields as redactDaemonUiSensitiveFields,
@@ -33,6 +34,7 @@ export {
   stripOscSequences,
 } from './utils.js';
 export { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+export type { DaemonUiContentPart } from './utils.js';
 export type {
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,

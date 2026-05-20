@@ -2187,3 +2187,187 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     expect(state.currentToolCallId).toBe('a');
   });
 });
+
+describe('daemon UI tool preview taxonomy (PR-C)', () => {
+  it('detects file_diff from Anthropic-style oldText/newText', () => {
+    const preview = createDaemonToolPreview({
+      path: '/work/foo.ts',
+      oldText: 'const x = 1',
+      newText: 'const x = 2',
+    });
+    expect(preview).toMatchObject({
+      kind: 'file_diff',
+      path: '/work/foo.ts',
+      oldText: 'const x = 1',
+      newText: 'const x = 2',
+    });
+  });
+
+  it('detects file_diff from patch text', () => {
+    const preview = createDaemonToolPreview({
+      filePath: '/work/bar.ts',
+      patch: '--- a/bar.ts\n+++ b/bar.ts\n@@ -1 +1 @@\n-old\n+new\n',
+    });
+    expect(preview).toMatchObject({
+      kind: 'file_diff',
+      path: '/work/bar.ts',
+      patch: expect.stringContaining('---') as string,
+    });
+  });
+
+  it('detects file_read from tool name + range (lineRange)', () => {
+    const preview = createDaemonToolPreview(
+      { path: '/work/x.md', lineRange: [10, 20] },
+      { toolName: 'Read' },
+    );
+    expect(preview).toMatchObject({
+      kind: 'file_read',
+      path: '/work/x.md',
+      range: [10, 20],
+    });
+  });
+
+  it('detects file_read from offset/limit pair', () => {
+    const preview = createDaemonToolPreview(
+      { path: '/work/y.md', offset: 100, limit: 50 },
+      { toolName: 'View' },
+    );
+    expect(preview).toMatchObject({
+      kind: 'file_read',
+      path: '/work/y.md',
+      range: [100, 149],
+    });
+  });
+
+  it('detects web_fetch from URL with scheme', () => {
+    const preview = createDaemonToolPreview({
+      url: 'https://api.example.com/data',
+      method: 'POST',
+    });
+    expect(preview).toMatchObject({
+      kind: 'web_fetch',
+      url: 'https://api.example.com/data',
+      method: 'POST',
+    });
+  });
+
+  it('does NOT detect web_fetch from relative URL (no scheme)', () => {
+    const preview = createDaemonToolPreview({
+      url: '/relative/path',
+    });
+    expect(preview.kind).not.toBe('web_fetch');
+  });
+
+  it('detects mcp_invocation from mcp__<server>__<tool> naming', () => {
+    const preview = createDaemonToolPreview(
+      { arguments: { issueTitle: 'Bug report' } },
+      { toolName: 'mcp__github__create_issue' },
+    );
+    expect(preview).toMatchObject({
+      kind: 'mcp_invocation',
+      serverId: 'github',
+      toolName: 'create_issue',
+    });
+    expect((preview as { argsSummary?: string }).argsSummary).toContain(
+      'issueTitle',
+    );
+  });
+
+  it('mcp_invocation takes priority over file_diff (more specific)', () => {
+    // Even if the input shape happens to match file_diff (e.g., an MCP
+    // tool that edits files), MCP provenance wins.
+    const preview = createDaemonToolPreview(
+      {
+        path: '/x',
+        oldText: 'a',
+        newText: 'b',
+      },
+      { toolName: 'mcp__editor__patch_file' },
+    );
+    expect(preview.kind).toBe('mcp_invocation');
+  });
+
+  it('falls back to command preview when no specific shape matches', () => {
+    const preview = createDaemonToolPreview({
+      command: 'npm test',
+      cwd: '/work',
+    });
+    expect(preview).toMatchObject({
+      kind: 'command',
+      command: 'npm test',
+      cwd: '/work',
+    });
+  });
+});
+
+describe('daemon UI content extraction (PR-C)', () => {
+  it('extractContentPart returns text for string', async () => {
+    const { extractContentPart } = await import('../../src/daemon/ui/index.js');
+    expect(extractContentPart('hello')).toEqual({
+      kind: 'text',
+      text: 'hello',
+    });
+  });
+
+  it('extractContentPart returns text for { type: "text" } object', async () => {
+    const { extractContentPart } = await import('../../src/daemon/ui/index.js');
+    expect(extractContentPart({ type: 'text', text: 'hi' })).toEqual({
+      kind: 'text',
+      text: 'hi',
+    });
+  });
+
+  it('extractContentPart returns image with source.url', async () => {
+    const { extractContentPart } = await import('../../src/daemon/ui/index.js');
+    const part = extractContentPart({
+      type: 'image',
+      mediaType: 'image/png',
+      source: { url: 'https://example.com/img.png' },
+    });
+    expect(part).toMatchObject({
+      kind: 'image',
+      mediaType: 'image/png',
+      source: { url: 'https://example.com/img.png' },
+    });
+  });
+
+  it('extractContentPart returns audio with source.data', async () => {
+    const { extractContentPart } = await import('../../src/daemon/ui/index.js');
+    const part = extractContentPart({
+      type: 'audio',
+      mediaType: 'audio/mpeg',
+      source: { data: 'base64-blob' },
+    });
+    expect(part).toMatchObject({
+      kind: 'audio',
+      mediaType: 'audio/mpeg',
+      source: { data: 'base64-blob' },
+    });
+  });
+
+  it('extractContentPart returns resource with uri', async () => {
+    const { extractContentPart } = await import('../../src/daemon/ui/index.js');
+    const part = extractContentPart({
+      type: 'resource',
+      uri: 'file:///work/README.md',
+      description: 'Project readme',
+    });
+    expect(part).toMatchObject({
+      kind: 'resource',
+      uri: 'file:///work/README.md',
+      description: 'Project readme',
+    });
+  });
+
+  it('extractContentPart returns undefined for unknown content type', async () => {
+    const { extractContentPart } = await import('../../src/daemon/ui/index.js');
+    expect(
+      extractContentPart({ type: 'video', source: { url: 'x' } }),
+    ).toBeUndefined();
+  });
+
+  it('extractContentPart returns undefined for image without source', async () => {
+    const { extractContentPart } = await import('../../src/daemon/ui/index.js');
+    expect(extractContentPart({ type: 'image' })).toBeUndefined();
+  });
+});

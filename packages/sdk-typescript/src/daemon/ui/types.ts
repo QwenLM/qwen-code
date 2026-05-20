@@ -381,6 +381,42 @@ export type DaemonToolPreview =
       cwd?: string;
     }
   | {
+      kind: 'file_diff';
+      path: string;
+      oldText?: string;
+      newText?: string;
+      /**
+       * Optional unified-diff text. When the daemon ships a pre-computed
+       * patch, prefer rendering this over recomputing in the UI.
+       */
+      patch?: string;
+    }
+  | {
+      kind: 'file_read';
+      path: string;
+      /**
+       * Optional `[startLine, endLine]` 1-based inclusive range. Undefined
+       * when the tool read the entire file.
+       */
+      range?: readonly [number, number];
+    }
+  | {
+      kind: 'web_fetch';
+      url: string;
+      /** HTTP method (defaults to GET when daemon does not stamp it). */
+      method?: string;
+    }
+  | {
+      kind: 'mcp_invocation';
+      serverId: string;
+      toolName: string;
+      /**
+       * Trimmed argument summary. Full args remain on `rawInput`; this is
+       * a short string for inline display.
+       */
+      argsSummary?: string;
+    }
+  | {
       kind: 'key_value';
       rows: Array<{ label: string; value: string }>;
     }
@@ -518,7 +554,8 @@ export interface DaemonTranscriptSidechannelState {
   toolProgress: Record<string, { ratio?: number; step?: string }>;
 }
 
-export interface DaemonTranscriptState extends DaemonTranscriptSidechannelState {
+export interface DaemonTranscriptState
+  extends DaemonTranscriptSidechannelState {
   blocks: DaemonTranscriptBlock[];
   lastEventId?: number;
   activeUserBlockId?: string;

@@ -98,6 +98,114 @@ export function getTextContent(value: unknown): string {
   return typeof text === 'string' ? text : '';
 }
 
+/**
+ * PR-C: discriminated content part extracted from a daemon `content` field.
+ *
+ * Existing `getTextContent` returns only the `text` field, silently dropping
+ * multimodal content (`image` / `audio` / `resource`). `extractContentPart`
+ * returns the typed shape so renderers can decide how to project each kind:
+ * a chat bubble for `text`, a thumbnail for `image`, a play button for
+ * `audio`, an attachment link for `resource`.
+ *
+ * Returns `undefined` for unrecognized payloads — callers should treat that
+ * as "skip this content" rather than synthesizing a placeholder.
+ */
+export type DaemonUiContentPart =
+  | { kind: 'text'; text: string }
+  | {
+      kind: 'image';
+      mediaType: string;
+      source: { url?: string; data?: string };
+    }
+  | {
+      kind: 'audio';
+      mediaType: string;
+      source: { url?: string; data?: string };
+    }
+  | {
+      kind: 'resource';
+      uri: string;
+      mediaType?: string;
+      description?: string;
+    };
+
+export function extractContentPart(
+  value: unknown,
+): DaemonUiContentPart | undefined {
+  if (typeof value === 'string') return { kind: 'text', text: value };
+  if (!isRecord(value)) return undefined;
+  const type = value['type'];
+  if (type === 'text' || type === undefined) {
+    const text = value['text'];
+    if (typeof text === 'string') return { kind: 'text', text };
+    return undefined;
+  }
+  if (type === 'image') {
+    const source = isRecord(value['source']) ? value['source'] : undefined;
+    if (!source) return undefined;
+    const mediaType =
+      (typeof value['mediaType'] === 'string'
+        ? (value['mediaType'] as string)
+        : undefined) ??
+      (typeof source['mediaType'] === 'string'
+        ? (source['mediaType'] as string)
+        : undefined) ??
+      'image/*';
+    const url =
+      typeof source['url'] === 'string' ? (source['url'] as string) : undefined;
+    const data =
+      typeof source['data'] === 'string'
+        ? (source['data'] as string)
+        : undefined;
+    if (!url && !data) return undefined;
+    return {
+      kind: 'image',
+      mediaType,
+      source: { ...(url ? { url } : {}), ...(data ? { data } : {}) },
+    };
+  }
+  if (type === 'audio') {
+    const source = isRecord(value['source']) ? value['source'] : undefined;
+    if (!source) return undefined;
+    const mediaType =
+      (typeof value['mediaType'] === 'string'
+        ? (value['mediaType'] as string)
+        : undefined) ?? 'audio/*';
+    const url =
+      typeof source['url'] === 'string' ? (source['url'] as string) : undefined;
+    const data =
+      typeof source['data'] === 'string'
+        ? (source['data'] as string)
+        : undefined;
+    if (!url && !data) return undefined;
+    return {
+      kind: 'audio',
+      mediaType,
+      source: { ...(url ? { url } : {}), ...(data ? { data } : {}) },
+    };
+  }
+  if (type === 'resource' || type === 'resource_link') {
+    const uri =
+      typeof value['uri'] === 'string' ? (value['uri'] as string) : undefined;
+    if (!uri) return undefined;
+    const mediaType =
+      typeof value['mediaType'] === 'string'
+        ? (value['mediaType'] as string)
+        : undefined;
+    const description =
+      typeof value['description'] === 'string'
+        ? (value['description'] as string)
+        : undefined;
+    return {
+      kind: 'resource',
+      uri,
+      ...(mediaType ? { mediaType } : {}),
+      ...(description ? { description } : {}),
+    };
+  }
+  return undefined;
+}
+
 const MAX_OUTPUT_TEXT_DEPTH = 64;
 
 export function getOutputText(value: unknown, depth = 0): string {
