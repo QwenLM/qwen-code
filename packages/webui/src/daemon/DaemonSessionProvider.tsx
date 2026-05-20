@@ -288,29 +288,45 @@ export function DaemonSessionProvider({
             },
             promptAbort.signal,
           );
+          store.dispatch({ type: 'assistant.done', reason: result.stopReason });
           return result;
         } catch (error) {
+          if (isAbortError(error)) {
+            return { stopReason: 'cancelled' };
+          }
           throw dispatchActionError(store, 'Prompt failed', error);
         } finally {
           if (promptAbortRef.current === promptAbort) {
             promptAbortRef.current = undefined;
+            promptBusyRef.current = false;
           }
-          promptBusyRef.current = false;
         }
       },
       async cancel(): Promise<void> {
+        const hadActivePrompt = promptAbortRef.current !== undefined;
         promptAbortRef.current?.abort();
         promptAbortRef.current = undefined;
-        promptBusyRef.current = false;
-        const session = requireSessionForAction(
-          store,
-          sessionRef.current,
-          'Cancel failed',
-        );
+        let session: DaemonSessionClient;
+        try {
+          session = requireSessionForAction(
+            store,
+            sessionRef.current,
+            'Cancel failed',
+          );
+        } catch (error) {
+          if (hadActivePrompt) {
+            promptBusyRef.current = false;
+          }
+          throw error;
+        }
         try {
           await session.cancel();
         } catch (error) {
           throw dispatchActionError(store, 'Cancel failed', error);
+        } finally {
+          if (hadActivePrompt) {
+            promptBusyRef.current = false;
+          }
         }
       },
       async setModel(modelId: string): Promise<SetModelResult> {
@@ -433,6 +449,13 @@ function dispatchActionError(
     recoverable: true,
   });
   return error instanceof Error ? error : new Error(message);
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
 }
 
 function getReconnectDelayMs(
