@@ -210,6 +210,7 @@ function normalizePermissionStatus(
     case 'aborted':
     case 'dismiss':
     case 'dismissed':
+    case 'already resolved':
       return 'cancelled';
     case 'deny':
     case 'denied':
