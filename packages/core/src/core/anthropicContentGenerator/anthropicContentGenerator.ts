@@ -28,7 +28,11 @@ type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
 import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
-import { buildRuntimeFetchOptions } from '../../utils/runtimeFetchOptions.js';
+import { buildAnthropicUsageMetadata } from './usage.js';
+import {
+  buildRuntimeFetchOptions,
+  redactProxyError,
+} from '../../utils/runtimeFetchOptions.js';
 import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
@@ -172,8 +176,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const useProxyIdentity = !isAnthropicNativeBaseUrl(contentGeneratorConfig);
     const defaultHeaders = this.buildHeaders(useProxyIdentity);
     const baseURL = contentGeneratorConfig.baseUrl;
-    // Configure runtime options to ensure user-configured timeout works as expected
-    // bodyTimeout is always disabled (0) to let Anthropic SDK timeout control the request
+    // Configure fetch options for proxy support and timeout handling.
+    // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
+    // request; without proxy, no custom dispatcher is installed.
     const runtimeOptions = buildRuntimeFetchOptions(
       'anthropic',
       this.cliConfig.getProxy(),
@@ -218,12 +223,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
   async generateContent(
     request: GenerateContentParameters,
   ): Promise<GenerateContentResponse> {
-    const anthropicRequest = await this.buildRequest(request);
-    const headers = this.buildPerRequestHeaders(anthropicRequest);
-    const response = (await this.client.messages.create(anthropicRequest, {
-      signal: request.config?.abortSignal,
-      ...(headers ? { headers } : {}),
-    })) as Message;
+    let response: Message;
+    try {
+      const anthropicRequest = await this.buildRequest(request);
+      const headers = this.buildPerRequestHeaders(anthropicRequest);
+      response = (await this.client.messages.create(anthropicRequest, {
+        signal: request.config?.abortSignal,
+        ...(headers ? { headers } : {}),
+      })) as Message;
+    } catch (error) {
+      throw redactProxyError(error);
+    }
 
     return this.converter.convertAnthropicResponseToGemini(response);
   }
@@ -240,15 +250,20 @@ export class AnthropicContentGenerator implements ContentGenerator {
       stream: true,
     };
 
-    const stream = (await this.client.messages.create(
-      streamingRequest as MessageCreateParamsStreaming,
-      {
-        signal: request.config?.abortSignal,
-        ...(headers ? { headers } : {}),
-      },
-    )) as AsyncIterable<RawMessageStreamEvent>;
+    let stream: AsyncIterable<RawMessageStreamEvent>;
+    try {
+      stream = (await this.client.messages.create(
+        streamingRequest as MessageCreateParamsStreaming,
+        {
+          signal: request.config?.abortSignal,
+          ...(headers ? { headers } : {}),
+        },
+      )) as AsyncIterable<RawMessageStreamEvent>;
+    } catch (error) {
+      throw redactProxyError(error);
+    }
 
-    return this.processStream(stream);
+    return this.processStream(this.redactStreamErrors(stream));
   }
 
   async countTokens(
@@ -738,12 +753,25 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return { effort: effectiveEffort };
   }
 
+  private async *redactStreamErrors(
+    stream: AsyncIterable<RawMessageStreamEvent>,
+  ): AsyncGenerator<RawMessageStreamEvent> {
+    try {
+      for await (const event of stream) {
+        yield event;
+      }
+    } catch (error) {
+      throw redactProxyError(error);
+    }
+  }
+
   private async *processStream(
     stream: AsyncIterable<RawMessageStreamEvent>,
   ): AsyncGenerator<GenerateContentResponse> {
     let messageId: string | undefined;
     let model = this.contentGeneratorConfig.model;
     let cachedTokens = 0;
+    let cacheCreationTokens = 0;
     let promptTokens = 0;
     let completionTokens = 0;
     let finishReason: string | undefined;
@@ -758,6 +786,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
           model = event.message.model ?? model;
           cachedTokens =
             event.message.usage?.cache_read_input_tokens ?? cachedTokens;
+          cacheCreationTokens =
+            event.message.usage?.cache_creation_input_tokens ??
+            cacheCreationTokens;
           promptTokens = event.message.usage?.input_tokens ?? promptTokens;
           break;
         }
@@ -884,6 +915,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
               cachedTokens = cacheRead;
             }
           }
+          if (usageRecord?.['cache_creation_input_tokens'] !== undefined) {
+            const cacheCreate = usageRecord['cache_creation_input_tokens'];
+            if (typeof cacheCreate === 'number') {
+              cacheCreationTokens = cacheCreate;
+            }
+          }
 
           if (finishReason || event.usage) {
             const chunk = this.buildGeminiChunk(
@@ -891,12 +928,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
               messageId,
               model,
               finishReason,
-              {
-                cachedContentTokenCount: cachedTokens,
-                promptTokenCount: cachedTokens + promptTokens,
-                candidatesTokenCount: completionTokens,
-                totalTokenCount: cachedTokens + promptTokens + completionTokens,
-              },
+              buildAnthropicUsageMetadata({
+                inputTokens: promptTokens,
+                cacheReadTokens: cachedTokens,
+                cacheCreationTokens,
+                outputTokens: completionTokens,
+              }),
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -910,12 +947,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
               messageId,
               model,
               finishReason,
-              {
-                cachedContentTokenCount: cachedTokens,
-                promptTokenCount: cachedTokens + promptTokens,
-                candidatesTokenCount: completionTokens,
-                totalTokenCount: cachedTokens + promptTokens + completionTokens,
-              },
+              buildAnthropicUsageMetadata({
+                inputTokens: promptTokens,
+                cacheReadTokens: cachedTokens,
+                cacheCreationTokens,
+                outputTokens: completionTokens,
+              }),
             );
             collectedResponses.push(chunk);
             yield chunk;

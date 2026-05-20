@@ -195,6 +195,52 @@ describe('OpenAILogger', () => {
       );
     });
 
+    it('should include a subagent suffix without the session id', async () => {
+      const logger = new OpenAILogger(testTempDir);
+      await logger.initialize();
+
+      const request = {
+        model: 'claude-opus-4-7',
+        messages: [{ role: 'user', content: 'test' }],
+      };
+      const response = { id: 'test-id', choices: [] };
+
+      const logPath = await logger.logInteraction(
+        request,
+        response,
+        undefined,
+        'e097d32b-82d6-422a-afa6-f6184565a8ab#Explore-g2tss0#7',
+      );
+
+      const basename = path.basename(logPath);
+      expect(basename).toMatch(
+        /openai-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z-[a-f0-9]{8}-subagent-Explore-g2tss0\.json/,
+      );
+      expect(basename).not.toContain('e097d32b');
+    });
+
+    it('should not include a suffix for main-session prompt ids', async () => {
+      const logger = new OpenAILogger(testTempDir);
+      await logger.initialize();
+
+      const request = {
+        model: 'claude-opus-4-7',
+        messages: [{ role: 'user', content: 'test' }],
+      };
+      const response = { id: 'test-id', choices: [] };
+
+      const logPath = await logger.logInteraction(
+        request,
+        response,
+        undefined,
+        'e097d32b-82d6-422a-afa6-f6184565a8ab########0',
+      );
+
+      expect(path.basename(logPath)).toMatch(
+        /openai-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z-[a-f0-9]{8}\.json/,
+      );
+    });
+
     it('should write correct log data structure', async () => {
       const logger = new OpenAILogger(testTempDir);
       await logger.initialize();

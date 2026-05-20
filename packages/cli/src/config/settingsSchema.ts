@@ -14,6 +14,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  DEFAULT_STOP_HOOK_BLOCK_CAP,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '@qwen-code/qwen-code-core';
@@ -297,6 +298,17 @@ const SETTINGS_SCHEMA = {
       'Model providers configuration grouped by authType. Each authType contains an array of model configurations.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
+  },
+
+  plansDirectory: {
+    type: 'string',
+    label: 'Plans Directory',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: undefined as string | undefined,
+    description:
+      'Custom directory for approved Plan Mode files. Relative paths are resolved from the project root, and the resolved path must stay within the project root. Defaults to ~/.qwen/plans.',
+    showInDialog: false,
   },
 
   // Environment variables fallback
@@ -608,20 +620,37 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      autoModeAcknowledged: {
+        type: 'boolean',
+        label: 'Auto Mode Acknowledged',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'True once the user has seen the first-time information message about the AUTO approval mode. Set automatically; not intended for manual configuration.',
+        showInDialog: false,
+      },
       statusLine: {
         type: 'object',
         label: 'Status Line',
         category: 'UI',
         requiresRestart: false,
         default: undefined as
-          | {
-              type: 'command';
-              command: string;
-              refreshInterval?: number;
-            }
+          | (
+              | {
+                  type: 'command';
+                  command: string;
+                  refreshInterval?: number;
+                }
+              | {
+                  type: 'preset';
+                  items: string[];
+                  useThemeColors?: boolean;
+                }
+            )
           | undefined,
         description:
-          'Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
+          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
         showInDialog: false,
       },
       customThemes: {
@@ -631,6 +660,16 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: {} as Record<string, CustomTheme>,
         description: 'Custom theme definitions.',
+        showInDialog: false,
+      },
+      hideBuiltinWorktreeIndicator: {
+        type: 'boolean',
+        label: 'Hide Built-in Worktree Indicator',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When true, the built-in `⎇ worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself — otherwise an active worktree silently has no UI affordance.',
         showInDialog: false,
       },
       hideWindowTitle: {
@@ -969,7 +1008,7 @@ const SETTINGS_SCHEMA = {
       properties: {
         includeSensitiveSpanAttributes: {
           description:
-            'Include prompt, function_args, and response_text in spans created by the log-to-span bridge. Only controls bridge spans; OTel logs and other telemetry sinks may still receive response_text.',
+            'When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.',
           type: 'boolean',
           default: false,
         },
@@ -1429,6 +1468,62 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
+      autoMode: {
+        type: 'object',
+        label: 'Auto Mode',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description: 'Settings consumed by the AUTO approval mode classifier.',
+        showInDialog: false,
+        properties: {
+          hints: {
+            type: 'object',
+            label: 'Classifier Hints',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description:
+              'Natural-language hints injected into the classifier system prompt.',
+            showInDialog: false,
+            properties: {
+              allow: {
+                type: 'array',
+                label: 'Auto Mode Allow Hints',
+                category: 'Tools',
+                requiresRestart: true,
+                default: undefined as string[] | undefined,
+                description:
+                  'Natural-language descriptions of actions AUTO mode should allow.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.UNION,
+              },
+              deny: {
+                type: 'array',
+                label: 'Auto Mode Deny Hints',
+                category: 'Tools',
+                requiresRestart: true,
+                default: undefined as string[] | undefined,
+                description:
+                  'Natural-language descriptions of actions AUTO mode should block.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.UNION,
+              },
+            },
+          },
+          environment: {
+            type: 'array',
+            label: 'Auto Mode Environment',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as string[] | undefined,
+            description:
+              'Environment / context lines injected into the classifier system prompt.',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.UNION,
+          },
+        },
+      },
     },
   },
 
@@ -1552,6 +1647,17 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
+      disabled: {
+        type: 'array',
+        label: 'Disabled Tools',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
       approvalMode: {
         type: 'enum',
         label: 'Tool Approval Mode',
@@ -1565,6 +1671,7 @@ const SETTINGS_SCHEMA = {
           { value: ApprovalMode.PLAN, label: 'Plan' },
           { value: ApprovalMode.DEFAULT, label: 'Default' },
           { value: ApprovalMode.AUTO_EDIT, label: 'Auto Edit' },
+          { value: ApprovalMode.AUTO, label: 'Auto' },
           { value: ApprovalMode.YOLO, label: 'YOLO' },
         ],
       },
@@ -1948,6 +2055,19 @@ const SETTINGS_SCHEMA = {
     default: false,
     description:
       'Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).',
+    showInDialog: false,
+  },
+
+  stopHookBlockingCap: {
+    type: 'number',
+    label: 'Stop Hook Blocking Cap',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: DEFAULT_STOP_HOOK_BLOCK_CAP,
+    description:
+      'Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP.',
+    // This is an advanced safety valve for runaway hook loops, not a common
+    // interactive preference.
     showInDialog: false,
   },
 

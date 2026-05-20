@@ -41,14 +41,14 @@ print(result.format_report())
 
 The result object (`BugAnalysisResult`) contains:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `issue` | `ParsedIssue` | Parsed issue with extracted paths/funcs/commits |
-| `candidates` | `list[RootCauseCandidate]` | Ranked root cause locations |
-| `path_matches` | `int` | How many extracted paths matched graph File nodes |
-| `semantic_matches` | `int` | How many semantic matches were found |
-| `caller_traces` | `int` | How many mentioned functions had traceable callers |
-| `analysis_time_ms` | `float` | Total analysis time |
+| Field              | Type                       | Description                                        |
+| ------------------ | -------------------------- | -------------------------------------------------- |
+| `issue`            | `ParsedIssue`              | Parsed issue with extracted paths/funcs/commits    |
+| `candidates`       | `list[RootCauseCandidate]` | Ranked root cause locations                        |
+| `path_matches`     | `int`                      | How many extracted paths matched graph File nodes  |
+| `semantic_matches` | `int`                      | How many semantic matches were found               |
+| `caller_traces`    | `int`                      | How many mentioned functions had traceable callers |
+| `analysis_time_ms` | `float`                    | Total analysis time                                |
 
 ### Inspecting the Parsed Issue
 

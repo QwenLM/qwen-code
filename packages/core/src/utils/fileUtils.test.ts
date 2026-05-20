@@ -27,6 +27,7 @@ import {
   detectFileType,
   processSingleFileContent,
   detectBOM,
+  decodeBufferWithEncodingInfo,
   readFileWithEncoding,
   readFileWithEncodingInfo,
   detectFileEncoding,
@@ -491,6 +492,31 @@ describe('fileUtils', () => {
     });
 
     describe('readFileWithEncodingInfo', () => {
+      it('should decode plain UTF-8 buffers without reading from a path', () => {
+        const result = decodeBufferWithEncodingInfo(
+          Buffer.from('Hello', 'utf8'),
+        );
+        expect(result).toEqual({
+          content: 'Hello',
+          encoding: 'utf-8',
+          bom: false,
+        });
+      });
+
+      it('should decode UTF-8 BOM buffers without reading from a path', () => {
+        const result = decodeBufferWithEncodingInfo(
+          Buffer.concat([
+            Buffer.from([0xef, 0xbb, 0xbf]),
+            Buffer.from('Hello', 'utf8'),
+          ]),
+        );
+        expect(result).toEqual({
+          content: 'Hello',
+          encoding: 'utf-8',
+          bom: true,
+        });
+      });
+
       it('should return bom: false and encoding utf-8 for plain UTF-8 file', async () => {
         const filePath = path.join(testDir, 'info-utf8.txt');
         await fsPromises.writeFile(filePath, 'Hello', 'utf8');

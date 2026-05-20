@@ -88,13 +88,6 @@ export interface GenerateToolUseSummaryParams {
    * so the summarizer knows what the user was trying to accomplish.
    */
   lastAssistantText?: string;
-  /**
-   * Fast model to use. If omitted, falls back to `config.getFastModel()`;
-   * if that also returns undefined, the call is skipped (returns null).
-   * Unlike `sessionRecap`, this does not fall back to the main model —
-   * summary generation is a nice-to-have and must not incur main-model cost.
-   */
-  model?: string;
 }
 
 /**
@@ -112,7 +105,7 @@ export async function generateToolUseSummary(
     return null;
   }
 
-  const model = params.model ?? config.getFastModel();
+  const model = config.getFastModel();
   if (!model) {
     debugLogger.debug('No fast model configured — skipping summary generation');
     return null;

@@ -10,6 +10,7 @@ import {
   getResponseText,
   flatMapTextParts,
   appendToLastTextPart,
+  prependToFirstTextPart,
 } from './partUtils.js';
 import type { GenerateContentResponse, Part, PartUnion } from '@google/genai';
 
@@ -296,6 +297,47 @@ describe('partUtils', () => {
       const prompt: PartUnion[] = ['first part'];
       const result = appendToLastTextPart(prompt, 'new text', '---');
       expect(result).toEqual(['first part---new text']);
+    });
+  });
+
+  describe('prependToFirstTextPart', () => {
+    it('should prepend to an empty prompt', () => {
+      expect(prependToFirstTextPart([], 'new text')).toEqual([
+        { text: 'new text' },
+      ]);
+    });
+
+    it('should prepend to a prompt with a string as the first text part', () => {
+      expect(prependToFirstTextPart(['first part'], 'new text')).toEqual([
+        'new text\n\nfirst part',
+      ]);
+    });
+
+    it('should prepend to a prompt with a text part object', () => {
+      expect(
+        prependToFirstTextPart([{ text: 'first part' }], 'new text'),
+      ).toEqual([{ text: 'new text\n\nfirst part' }]);
+    });
+
+    it('should insert a new text part before prompts without text parts', () => {
+      const nonTextPart: Part = { functionCall: { name: 'do_stuff' } };
+
+      expect(prependToFirstTextPart([nonTextPart], 'new text')).toEqual([
+        { text: 'new text' },
+        nonTextPart,
+      ]);
+    });
+
+    it('should not prepend anything if the text to prepend is empty', () => {
+      const prompt: PartUnion[] = ['first part'];
+
+      expect(prependToFirstTextPart(prompt, '')).toBe(prompt);
+    });
+
+    it('should use a custom separator', () => {
+      expect(prependToFirstTextPart(['first part'], 'new text', '---')).toEqual(
+        ['new text---first part'],
+      );
     });
   });
 });

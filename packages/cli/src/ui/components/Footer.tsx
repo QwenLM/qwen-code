@@ -19,16 +19,19 @@ import { useStatusLine } from '../hooks/useStatusLine.js';
 import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
+import { GoalPill, useFooterGoalState } from './GoalPill.js';
 import { t } from '../../i18n/index.js';
 
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
+  const settings = useSettings();
   const { vimEnabled, vimMode } = useVimMode();
-  const { lines: statusLineLines } = useStatusLine();
+  const { lines: statusLineLines, useThemeColors } = useStatusLine();
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
@@ -124,6 +127,13 @@ export const Footer: React.FC = () => {
       ),
     });
   }
+  // Goal pill: only present in `rightItems` when a goal is active so the
+  // divider chain stays tight; the pill itself does the live elapsed-time
+  // refresh internally.
+  const goalActive = useFooterGoalState() !== undefined;
+  if (goalActive) {
+    rightItems.push({ key: 'goal', node: <GoalPill /> });
+  }
 
   // Layout matches upstream: left column has status line (top) + hints/mode
   // (bottom), right section has indicators. Status line and hints coexist.
@@ -141,10 +151,34 @@ export const Footer: React.FC = () => {
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce &&
           statusLineLines.map((line, i) => (
-            <Text key={`status-line-${i}`} dimColor wrap="truncate">
+            <Text
+              key={`status-line-${i}`}
+              color={useThemeColors ? theme.text.accent : undefined}
+              dimColor={!useThemeColors}
+              wrap="truncate"
+            >
               {line}
             </Text>
           ))}
+        {/* Built-in worktree indicator. Shown by default whenever a
+            worktree is active so the user always has a UI affordance,
+            even when a custom statusline is configured — their script
+            may not render `payload.worktree` (written before Phase C,
+            ignored by choice, or only rendering some fields), and
+            silently hiding the indicator could let the user operate
+            in the wrong cwd. Users who want the suppression behaviour
+            (e.g. their statusline already renders worktree) can opt
+            in via the `ui.hideBuiltinWorktreeIndicator` setting.
+            Hidden during ctrl-quit warnings so they take precedence.
+            (PR #4174 review #3256241831.) */}
+        {uiState.activeWorktree &&
+          !settings.merged.ui?.hideBuiltinWorktreeIndicator &&
+          !uiState.ctrlCPressedOnce &&
+          !uiState.ctrlDPressedOnce && (
+            <Text dimColor wrap="truncate">
+              {`⎇ ${uiState.activeWorktree.branch} (${uiState.activeWorktree.slug})`}
+            </Text>
+          )}
         <Box flexDirection="row" flexShrink={1}>
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />

@@ -34,6 +34,7 @@ import {
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
+import type { ActiveGoal } from '../goals/activeGoalStore.js';
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -64,6 +65,7 @@ export enum GeminiEventType {
   HookSystemMessage = 'hook_system_message',
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
+  ActiveGoal = 'active_goal',
 }
 
 export type ServerGeminiRetryEvent = {
@@ -233,8 +235,14 @@ export type ServerGeminiStopHookLoopEvent = {
   };
 };
 
+export type ServerGeminiActiveGoalEvent = {
+  type: GeminiEventType.ActiveGoal;
+  value: ActiveGoal | null;
+};
+
 // The original union type, now composed of the individual types
 export type ServerGeminiStreamEvent =
+  | ServerGeminiActiveGoalEvent
   | ServerGeminiChatCompressedEvent
   | ServerGeminiCitationEvent
   | ServerGeminiContentEvent

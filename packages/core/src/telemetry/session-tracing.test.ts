@@ -9,6 +9,14 @@ import { SpanStatusCode } from '@opentelemetry/api';
 
 const mockState = vi.hoisted(() => ({
   sdkInitialized: true,
+  // Toggles to force span.setAttributes/setStatus to throw — exercises the
+  // try/catch hardening in end*Span helpers (span.end() must still run).
+  throwOnSetAttributes: false,
+  throwOnSetStatus: false,
+  // When set, `context.active()` returns a context that carries this fake
+  // span and `trace.getSpan()` reports it. Lets tests exercise the
+  // active-OTel-span fallback in resolveParentContext (#4212).
+  activeOtelSpan: undefined as unknown,
 }));
 
 vi.mock('./sdk.js', () => ({
@@ -61,10 +69,16 @@ vi.mock('@opentelemetry/api', async () => {
         traceFlags: 0,
       }),
       setAttributes: (attrs: Record<string, unknown>) => {
+        if (mockState.throwOnSetAttributes) {
+          throw new Error('setAttributes failed');
+        }
         record.setAttributesCalls.push(attrs);
         Object.assign(record.attributes, attrs);
       },
       setStatus: (status: { code: number; message?: string }) => {
+        if (mockState.throwOnSetStatus) {
+          throw new Error('setStatus failed');
+        }
         record.statuses.push(status);
       },
       end: () => {
@@ -91,10 +105,18 @@ vi.mock('@opentelemetry/api', async () => {
         ...(ctx as object),
         __parentSpan: _span,
       }),
+      getSpan: (ctx: unknown) =>
+        typeof ctx === 'object' && ctx !== null && '__activeSpan' in ctx
+          ? (ctx as { __activeSpan: unknown }).__activeSpan
+          : undefined,
       wrapSpanContext: actual.trace.wrapSpanContext,
     },
     context: {
-      active: () => ({}),
+      active: () =>
+        mockState.activeOtelSpan
+          ? { __activeSpan: mockState.activeOtelSpan }
+          : {},
+      with: <T>(_ctx: unknown, fn: () => T): T => fn(),
     },
   };
 });
@@ -107,8 +129,10 @@ import {
   endLLMRequestSpan,
   startToolSpan,
   endToolSpan,
+  runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
+  getActiveInteractionSpan,
   clearSessionTracingForTesting,
 } from './session-tracing.js';
 
@@ -129,6 +153,9 @@ describe('session-tracing', () => {
     clearSessionTracingForTesting();
     mockSpans.length = 0;
     mockState.sdkInitialized = true;
+    mockState.throwOnSetAttributes = false;
+    mockState.throwOnSetStatus = false;
+    mockState.activeOtelSpan = undefined;
   });
 
   afterEach(() => {
@@ -305,6 +332,26 @@ describe('session-tracing', () => {
       );
     });
 
+    it('LLM request span re-parents to active OTel span when no interaction is set (#4212)', () => {
+      // Models a side-query LLM call running inside another OTel span (e.g.
+      // an HTTP-instrumented span in a subagent path) — the new span must
+      // attach to the active span instead of skipping back to session root,
+      // otherwise the trace tree flattens.
+      const fakeActive = { kind: 'fake-active-span' };
+      mockState.activeOtelSpan = fakeActive;
+
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const llmSpan = mockSpans.find((s) => s.name === 'qwen-code.llm_request');
+      expect(llmSpan?.parentContext).toMatchObject({
+        __activeSpan: fakeActive,
+      });
+      // Without an explicit parent we still mark the call as standalone —
+      // the OTel parent comes from instrumentation, not from interactionContext.
+      expect(llmSpan?.attributes['llm_request.context']).toBe('standalone');
+    });
+
     it('treats missing metadata as OK status', () => {
       const span = startLLMRequestSpan('test-model', 'prompt-no-meta');
 
@@ -348,11 +395,24 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.statuses[0]!.message).toBe('command failed');
     });
 
-    it('defaults to OK when success is undefined', () => {
+    it('does not set status when no metadata is passed', () => {
       const span = startToolSpan('Read');
       endToolSpan(span);
 
-      expect(mockSpans[0]!.statuses[0]!.code).toBe(SpanStatusCode.OK);
+      expect(mockSpans[0]!.statuses).toHaveLength(0);
+    });
+
+    it('tool span re-parents to active OTel span when no interaction is set (#4212)', () => {
+      const fakeActive = { kind: 'fake-active-span' };
+      mockState.activeOtelSpan = fakeActive;
+
+      const span = startToolSpan('Bash');
+      endToolSpan(span, { success: true });
+
+      const toolSpan = mockSpans.find((s) => s.name === 'qwen-code.tool');
+      expect(toolSpan?.parentContext).toMatchObject({
+        __activeSpan: fakeActive,
+      });
     });
 
     it('concurrent tool spans are isolated', () => {
@@ -388,12 +448,17 @@ describe('session-tracing', () => {
   });
 
   describe('tool execution sub-spans', () => {
-    it('creates a tool execution span as child of tool span', () => {
+    it('creates a tool execution span as child of tool span via runInToolSpanContext', () => {
       const toolSpan = startToolSpan('Bash');
-      const execSpan = startToolExecutionSpan(toolSpan);
+
+      let execSpan!: ReturnType<typeof startToolExecutionSpan>;
+      runInToolSpanContext(toolSpan, () => {
+        execSpan = startToolExecutionSpan();
+      });
 
       expect(mockSpans).toHaveLength(2);
       expect(mockSpans[1]!.name).toBe('qwen-code.tool.execution');
+      expect(mockSpans[1]!.parentContext).toBeDefined();
 
       endToolExecutionSpan(execSpan, { success: true });
       endToolSpan(toolSpan, { success: true });
@@ -403,10 +468,172 @@ describe('session-tracing', () => {
 
     it('returns NOOP span when SDK is not initialized', () => {
       mockState.sdkInitialized = false;
-      const toolSpan = startToolSpan('Bash');
-      const execSpan = startToolExecutionSpan(toolSpan);
+      startToolSpan('Bash');
+      const execSpan = startToolExecutionSpan();
 
       expect(execSpan.spanContext().traceId).toBe('0'.repeat(32));
+    });
+
+    it('tool execution span re-parents to active OTel span when no toolContext is set (#4212)', () => {
+      const fakeActive = { kind: 'fake-active-span' };
+      mockState.activeOtelSpan = fakeActive;
+
+      const execSpan = startToolExecutionSpan();
+      endToolExecutionSpan(execSpan, { success: true });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.tool.execution');
+      expect(span?.parentContext).toMatchObject({
+        __activeSpan: fakeActive,
+      });
+    });
+
+    it('falls back gracefully when no tool span is active', () => {
+      const execSpan = startToolExecutionSpan();
+
+      expect(mockSpans).toHaveLength(1);
+      expect(mockSpans[0]!.name).toBe('qwen-code.tool.execution');
+
+      endToolExecutionSpan(execSpan, { success: true });
+      expect(mockSpans[0]!.ended).toBe(true);
+    });
+
+    it('cancelled: true keeps status UNSET while still recording attributes (#4302)', () => {
+      const execSpan = startToolExecutionSpan();
+      endToolExecutionSpan(execSpan, {
+        success: false,
+        error: 'Tool execution cancelled by user',
+        cancelled: true,
+      });
+
+      const record = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.execution',
+      );
+      expect(record?.ended).toBe(true);
+      // No setStatus call — status stays UNSET, matching setToolSpanCancelled
+      // on the parent tool span. Without this, success: false would set ERROR
+      // and trace backends filtering for errors would false-positive on
+      // user cancellations.
+      expect(record?.statuses).toHaveLength(0);
+      // Attributes still record the cancellation reason.
+      expect(record?.attributes['success']).toBe(false);
+      expect(record?.attributes['error']).toBe(
+        'Tool execution cancelled by user',
+      );
+    });
+
+    it('cancelled: false (default) still maps success: false to ERROR status', () => {
+      const execSpan = startToolExecutionSpan();
+      endToolExecutionSpan(execSpan, {
+        success: false,
+        error: 'Tool execution failed',
+      });
+
+      const record = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.execution',
+      );
+      expect(record?.statuses).toHaveLength(1);
+      expect(record?.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
+      expect(record?.statuses[0]!.message).toBe('Tool execution failed');
+    });
+  });
+
+  describe('toolContext ALS lifecycle', () => {
+    it('runInToolSpanContext scopes toolContext via run(), not enterWith', () => {
+      const toolSpan = startToolSpan('Bash');
+
+      let execSpanInsideContext: ReturnType<typeof startToolExecutionSpan>;
+
+      runInToolSpanContext(toolSpan, () => {
+        execSpanInsideContext = startToolExecutionSpan();
+      });
+      const execSpanOutsideContext = startToolExecutionSpan();
+
+      // Inside context: should have parent
+      const insideRecord = mockSpans.find(
+        (s) =>
+          s.name === 'qwen-code.tool.execution' &&
+          (s.parentContext as Record<string, unknown>)?.['__parentSpan'],
+      );
+      expect(insideRecord).toBeDefined();
+
+      // Outside context: should NOT have tool parent
+      const outsideRecord = mockSpans.filter(
+        (s) => s.name === 'qwen-code.tool.execution',
+      );
+      expect(outsideRecord).toHaveLength(2);
+      const noParent = outsideRecord.find(
+        (s) => !(s.parentContext as Record<string, unknown>)?.['__parentSpan'],
+      );
+      expect(noParent).toBeDefined();
+
+      endToolExecutionSpan(execSpanInsideContext!, { success: true });
+      endToolExecutionSpan(execSpanOutsideContext!, { success: true });
+      endToolSpan(toolSpan, { success: true });
+    });
+
+    it('endToolSpan without metadata preserves pre-set status', () => {
+      const toolSpan = startToolSpan('Bash');
+      // Simulate setToolSpanFailure calling setStatus directly
+      (
+        toolSpan as unknown as MockSpanRecord & {
+          setStatus: (s: { code: number; message?: string }) => void;
+        }
+      ).setStatus({ code: SpanStatusCode.ERROR, message: 'hook blocked' });
+
+      endToolSpan(toolSpan);
+
+      // endToolSpan should NOT have added another status
+      const toolRecord = mockSpans.find((s) => s.name === 'qwen-code.tool');
+      expect(toolRecord!.statuses).toHaveLength(1);
+      expect(toolRecord!.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
+    });
+  });
+
+  describe('getActiveInteractionSpan', () => {
+    it('returns the span when an interaction is active', () => {
+      const config = createMockConfig();
+      startInteractionSpan(config, {
+        promptId: 'p-active',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = getActiveInteractionSpan();
+      expect(span).toBeDefined();
+      expect(span).toBe(mockSpans[0]);
+    });
+
+    it('returns undefined after endInteractionSpan', () => {
+      const config = createMockConfig();
+      startInteractionSpan(config, {
+        promptId: 'p-end',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      endInteractionSpan('ok');
+
+      expect(getActiveInteractionSpan()).toBeUndefined();
+    });
+
+    it('falls back to lastInteractionCtx outside the AsyncLocalStorage context', async () => {
+      const config = createMockConfig();
+      startInteractionSpan(config, {
+        promptId: 'p-fallback',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      // Yield via setImmediate to schedule the continuation on a separate
+      // async resource — best-effort attempt to leave the ALS scope so
+      // getActiveInteractionSpan must rely on lastInteractionCtx.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      const span = getActiveInteractionSpan();
+      expect(span).toBeDefined();
+      expect(span).toBe(mockSpans[0]);
+    });
+
+    it('returns undefined when no interaction has ever started', () => {
+      expect(getActiveInteractionSpan()).toBeUndefined();
     });
   });
 
@@ -430,6 +657,61 @@ describe('session-tracing', () => {
 
       // Sequence should be reset to 1
       expect(mockSpans[0]!.attributes['interaction.sequence']).toBe(1);
+    });
+  });
+
+  describe('OTel error resilience — span.end() must run on attribute/status failure', () => {
+    it('endLLMRequestSpan: end() runs and activeSpans is cleared when setStatus throws', () => {
+      const span = startLLMRequestSpan('test-model', 'prompt-x');
+      const record = mockSpans.find((s) => s.name === 'qwen-code.llm_request')!;
+
+      mockState.throwOnSetStatus = true;
+      endLLMRequestSpan(span, { success: true });
+
+      expect(record.ended).toBe(true);
+      // Idempotency: a second call must short-circuit (spanCtx removed from activeSpans).
+      mockState.throwOnSetStatus = false;
+      endLLMRequestSpan(span, { success: true });
+      expect(record.statuses).toHaveLength(0); // no recovery status added
+    });
+
+    it('endLLMRequestSpan: end() runs when setAttributes throws', () => {
+      const span = startLLMRequestSpan('test-model', 'prompt-x');
+      const record = mockSpans.find((s) => s.name === 'qwen-code.llm_request')!;
+
+      mockState.throwOnSetAttributes = true;
+      endLLMRequestSpan(span, { success: true });
+
+      expect(record.ended).toBe(true);
+    });
+
+    it('endToolSpan: end() runs when setStatus throws', () => {
+      const span = startToolSpan('Bash');
+      const record = mockSpans.find((s) => s.name === 'qwen-code.tool')!;
+
+      mockState.throwOnSetStatus = true;
+      endToolSpan(span, { success: true });
+
+      expect(record.ended).toBe(true);
+    });
+
+    it('endToolExecutionSpan: end() runs when setAttributes throws', () => {
+      const toolSpan = startToolSpan('Bash');
+      let execSpan!: ReturnType<typeof startToolExecutionSpan>;
+      runInToolSpanContext(toolSpan, () => {
+        execSpan = startToolExecutionSpan();
+      });
+      const execRecord = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.execution',
+      )!;
+
+      mockState.throwOnSetAttributes = true;
+      endToolExecutionSpan(execSpan, { success: true });
+
+      expect(execRecord.ended).toBe(true);
+
+      mockState.throwOnSetAttributes = false;
+      endToolSpan(toolSpan, { success: true });
     });
   });
 });
