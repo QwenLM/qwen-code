@@ -126,6 +126,19 @@ export function validatePolicyConfig(
         `${String(policyConfig.consensusQuorum)}; must be a positive integer`,
     );
   }
+  // Wenshao review #4335 / 3273077270 — when consensusQuorum is set
+  // but the active strategy doesn't use it, the warning previously
+  // promised "the override will be ignored" while the function
+  // STILL propagated the value to BridgeOptions. The downstream
+  // mediator only reads it under the consensus policy, so behavior
+  // was correct, but the public contract contradicted its own
+  // warning text. Adopt option (a): make the public contract match
+  // the warning by dropping the value when the strategy is not
+  // 'consensus'. Operators reading the warning at boot now see
+  // consistent behavior all the way down.
+  const consensusQuorumActive =
+    policyConfig.consensusQuorum !== undefined &&
+    policyConfig.permissionStrategy === 'consensus';
   if (
     policyConfig.consensusQuorum !== undefined &&
     policyConfig.permissionStrategy !== 'consensus'
@@ -140,7 +153,9 @@ export function validatePolicyConfig(
     permissionPolicy: policyConfig.permissionStrategy as
       | PermissionPolicy
       | undefined,
-    permissionConsensusQuorum: policyConfig.consensusQuorum,
+    permissionConsensusQuorum: consensusQuorumActive
+      ? policyConfig.consensusQuorum
+      : undefined,
   };
 }
 

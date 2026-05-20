@@ -128,7 +128,15 @@ describe('validatePolicyConfig (#4335 boot validation)', () => {
     });
   });
 
-  it('warns (does not throw) when consensusQuorum is set but strategy is not consensus', () => {
+  it('warns AND drops consensusQuorum when strategy is not consensus (#4335 / 3273077270)', () => {
+    // Wenshao review #4335 / 3273077270 — public contract now
+    // matches the warning text: when the operator sets
+    // consensusQuorum alongside a non-consensus strategy, the
+    // override is dropped (returned as undefined) so the
+    // BridgeOptions surface stays consistent with what the warning
+    // tells them. Pre-fix the function still propagated the value;
+    // the downstream mediator ignored it but the function-level
+    // contract contradicted itself.
     const warnings: string[] = [];
     const onWarning = vi.fn((m: string) => warnings.push(m));
     const result = validatePolicyConfig(
@@ -140,7 +148,7 @@ describe('validatePolicyConfig (#4335 boot validation)', () => {
     );
     expect(result).toEqual({
       permissionPolicy: 'designated',
-      permissionConsensusQuorum: 2,
+      permissionConsensusQuorum: undefined,
     });
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('consensusQuorum is set');

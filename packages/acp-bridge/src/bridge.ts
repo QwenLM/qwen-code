@@ -2020,6 +2020,18 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // `false` BEFORE clientId validation when the requestId is
         // unknown (Round 7 / 3271978329); applying the same
         // posture here closes the oracle on the legacy route.
+        //
+        // Wenshao review #4335 / 3273077256 — symmetric observability:
+        // the session-scoped sibling writes an unconditional stderr
+        // breadcrumb on its analogous unknown-requestId rejection
+        // (Round 8 / 3272493792). Match that posture here so an
+        // operator tailing daemon stderr sees both routes' 404s
+        // without needing QWEN_SERVE_DEBUG=1.
+        writeStderrLine(
+          `qwen serve: legacy permission vote ${JSON.stringify(requestId)} ` +
+            `has no live session (peek returned ${JSON.stringify(sessionId)}); ` +
+            `returning 404.`,
+        );
         return false;
       }
       return this.respondToSessionPermission(

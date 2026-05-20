@@ -2710,7 +2710,7 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
-    it('returns false (not InvalidClientIdError) when session exists but requestId is unknown and clientId is unregistered (#4335 / 3271978329 / 3272493792)', async () => {
+    it('returns false (not InvalidClientIdError) when session exists but requestId is unknown and clientId is unregistered (#4335 / 3271978329 / 3272493792 / 3273077272)', async () => {
       // Wenshao review #4335 / 3271978329 (Critical) — error
       // precedence regression: the session-scoped vote route must
       // return `false` (→ 404) when the requestId isn't known to
@@ -2725,20 +2725,40 @@ describe('createHttpAcpBridge', () => {
       // Wenshao review #4335 / 3272493792 — explicit test for the
       // fix from Round 7 so a future refactor can't silently
       // remove the short-circuit.
-      const { bridge, session } = await setupForPermission();
+      //
+      // Wenshao review #4335 / 3273077272 — also assert the stderr
+      // breadcrumb that Round 8 promoted from debug-gated to
+      // unconditional (`writeStderrLine`). Pinning the log call
+      // means a future refactor that drops or downgrades the line
+      // is caught even when the return value still happens to be
+      // false for some other reason.
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const { bridge, session } = await setupForPermission();
 
-      // Session exists, requestId is unknown, clientId is fake.
-      // The bridge MUST return false; pre-fix it threw
-      // InvalidClientIdError (400).
-      const result = bridge.respondToSessionPermission(
-        session.sessionId,
-        'unknown-req-id',
-        { outcome: { outcome: 'cancelled' } },
-        { clientId: 'fabricated-client-id' },
-      );
-      expect(result).toBe(false);
+        // Session exists, requestId is unknown, clientId is fake.
+        // The bridge MUST return false; pre-fix it threw
+        // InvalidClientIdError (400).
+        const result = bridge.respondToSessionPermission(
+          session.sessionId,
+          'unknown-req-id',
+          { outcome: { outcome: 'cancelled' } },
+          { clientId: 'fabricated-client-id' },
+        );
+        expect(result).toBe(false);
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('rejected permission vote'),
+        );
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('unknown-req-id'),
+        );
 
-      await bridge.shutdown();
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+      }
     });
 
     it('rejects cancel sentinel injection via {selected,"__cancelled__"} (#4335 / 3271420267)', async () => {
