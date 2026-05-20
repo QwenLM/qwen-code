@@ -4131,6 +4131,68 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(postHookSpan!.hookMetadata?.blockType).toBe('stop');
   });
 
+  it('PostToolUseFailure hook span records is_interrupt=true on user-abort path (#4321)', async () => {
+    // _executeToolCallBody catch fires PostToolUseFailure with
+    // isInterrupt:true when the abort signal is set. Operators rely on
+    // is_interrupt to separate user-initiated cancellations from real
+    // exceptions in dashboards — assert the hook span carries the
+    // correct value.
+    toolSpanRecords.length = 0;
+    const abortController = new AbortController();
+    const messageBus = {
+      request: vi.fn(async (req: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'fail-hook',
+        success: true,
+        output: req.eventName === 'PreToolUse' ? { decision: 'allow' } : {},
+      })),
+    };
+    await runSingleTool({
+      abortController,
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        throw new Error('aborted');
+      }),
+    });
+
+    const failureHookSpan = getHookSpans().find(
+      (s) => s.attributes['hook_event'] === 'PostToolUseFailure',
+    );
+    expect(failureHookSpan).toBeDefined();
+    expect(failureHookSpan!.attributes['is_interrupt']).toBe(true);
+    expect(failureHookSpan!.hookMetadata?.success).toBe(true);
+  });
+
+  it('PostToolUseFailure hook span records is_interrupt=false on real exception path (#4321)', async () => {
+    // Companion to the abort test — same hook event but the
+    // executeError-not-from-abort branch tags is_interrupt:false. A
+    // copy-paste regression flipping the flag would be invisible
+    // without this assertion.
+    toolSpanRecords.length = 0;
+    const messageBus = {
+      request: vi.fn(async (req: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'fail-hook',
+        success: true,
+        output: req.eventName === 'PreToolUse' ? { decision: 'allow' } : {},
+      })),
+    };
+    await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockRejectedValue(new Error('real boom')),
+    });
+
+    const failureHookSpan = getHookSpans().find(
+      (s) => s.attributes['hook_event'] === 'PostToolUseFailure',
+    );
+    expect(failureHookSpan).toBeDefined();
+    expect(failureHookSpan!.attributes['is_interrupt']).toBe(false);
+    expect(failureHookSpan!.hookMetadata?.success).toBe(true);
+  });
+
   it('every span recorded in a successful tool call is ended (#3731 Phase 2)', async () => {
     // Leak guard: every span we record should be ended by the time
     // schedule() returns. If a future change forgets to finalize a tool

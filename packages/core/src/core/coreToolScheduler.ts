@@ -1840,6 +1840,24 @@ export class CoreToolScheduler {
       }
       await this.attemptExecutionOfScheduledCalls(signal);
       void this.checkAndNotifyCompletion();
+
+      // Drop the abort listener early when the batch is fully drained
+      // (no awaiting_approval entries left). Long-lived sessions reuse
+      // the same AbortSignal across many _schedule calls; without this
+      // cleanup, every batch leaves a one-shot listener behind and
+      // Node's MaxListenersExceededWarning trips around the 10th batch.
+      // Listeners that still cover awaiting_approval entries stay
+      // attached — the user's eventual confirmation closes the spans
+      // (handleConfirmationResponse → finalize{Blocked,Tool}Span), and
+      // the listener becomes a no-op when it later fires; or it
+      // auto-removes via `{ once: true }` on real abort (#4321
+      // review-2 wenshao Suggestion).
+      const stillLive = Array.from(batchCallIds).some(
+        (id) => this.toolSpans.has(id) || this.blockedSpans.has(id),
+      );
+      if (!stillLive) {
+        signal.removeEventListener('abort', onAbort);
+      }
     } finally {
       this.isScheduling = false;
     }
@@ -1880,14 +1898,25 @@ export class CoreToolScheduler {
       // TTL fires. Finalize both so the trace shows a deterministic
       // close. finalizeXSpan are idempotent — if the success/cancel path
       // already closed them, these are no-ops.
-      this.finalizeBlockedSpan(callId, 'error', 'system');
+      //
+      // Branch on signal.aborted so a throw caused by the abort signal
+      // (e.g. ModifyWithEditor child interrupted by Ctrl+C) lands as
+      // 'aborted'/'system' + UNSET status — matching the sister catch
+      // in `_schedule:1797` and the dashboard intent of separating
+      // user/system aborts from real exceptions (#4321 review-2 wenshao).
+      const aborted = signal.aborted;
+      this.finalizeBlockedSpan(callId, aborted ? 'aborted' : 'error', 'system');
       const toolSpan = this.toolSpans.get(callId);
       if (toolSpan) {
-        setToolSpanFailure(
-          toolSpan,
-          TOOL_FAILURE_KIND_TOOL_EXCEPTION,
-          error instanceof Error ? error.message : String(error),
-        );
+        if (aborted) {
+          setToolSpanCancelled(toolSpan);
+        } else {
+          setToolSpanFailure(
+            toolSpan,
+            TOOL_FAILURE_KIND_TOOL_EXCEPTION,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       }
       this.finalizeToolSpan(callId);
       throw error;
