@@ -64,8 +64,11 @@ import {
 export const CANCEL_VOTE_SENTINEL = '__cancelled__' as const;
 
 /**
- * Bounded LRU size for the `resolved` map (duplicate-vote dedup +
- * `permission_already_resolved` source). Mirrors the
+ * Bounded FIFO size for the `resolved` map (duplicate-vote dedup +
+ * `permission_already_resolved` source). DeepSeek review #4335 /
+ * 3271627446 — the eviction in `rememberResolved` uses
+ * `resolvedOrder.shift()` (drop oldest), not LRU; mirrors the FIFO
+ * `PermissionAuditRing` correction in commit b0242ddec. Mirrors the
  * `MAX_RESOLVED_PERMISSION_RECORDS` constant from the pre-F3 inline
  * implementation in `httpAcpBridge.ts` (512 entries). Stores only
  * requestId / sessionId / outcome, so 512 records stays well under
@@ -357,13 +360,24 @@ export class MultiClientPermissionMediator implements PermissionMediator {
   /**
    * Register a fresh permission request from the agent.
    *
-   * **Promise contract — never rejects.** All failure modes (timeout,
-   * session closure, voter cancel, emit/audit publisher exceptions) are
-   * encoded as `PermissionResolution { kind:'cancelled', reason:... }`.
-   * Consumers do not need a `.catch()` on the returned Promise to
-   * handle protocol-level failures; the bridge can `await` and forward
-   * the result directly. Attaching a defensive `.catch()` is still wise
-   * to surface bugs in any chained `.then()` handler.
+   * **Promise contract — once the Promise is returned, it never
+   * rejects.** All runtime failure modes (timeout, session closure,
+   * voter cancel, emit/audit publisher exceptions) are encoded as
+   * `PermissionResolution { kind:'cancelled', reason:... }`.
+   * Consumers can `await` the returned Promise and forward the
+   * result without a `.catch()` block.
+   *
+   * **Synchronous-throw exception** (DeepSeek review #4335 /
+   * 3271627444): when the agent's `allowedOptionIds` contains the
+   * cancel-vote sentinel string, this method throws
+   * `CancelSentinelCollisionError` synchronously BEFORE constructing
+   * the Promise. The synchronous shape is intentional — a
+   * never-settling Promise alongside a thrown error would be worse
+   * than a clean fail-fast — but callers must wrap this method
+   * itself in `try/catch` (or call it from an `async` function so
+   * the throw bubbles via the function's own Promise machinery).
+   * `bridgeClient.ts` currently has its own pre-check at the bridge
+   * layer; embedded callers must do the same. See `@throws` below.
    *
    * **N1 synchronous-register invariant**: pending entry, audit
    * record, and timer setup all happen inside the Promise executor
@@ -372,11 +386,14 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * await would otherwise miss the new pending and leak it until
    * timeout.
    *
-   * @throws `CancelSentinelCollisionError` synchronously if the
-   *   agent's `allowedOptionIds` contains the cancel-vote sentinel
-   *   string. This is a contract violation between agent and daemon
-   *   and should fail loudly at issue time rather than silently
-   *   miscount votes downstream.
+   * @throws `CancelSentinelCollisionError` SYNCHRONOUSLY (not as a
+   *   Promise rejection) if `record.allowedOptionIds` contains the
+   *   cancel-vote sentinel string. This is a contract violation
+   *   between agent and daemon and fails loudly at issue time
+   *   rather than silently miscounting votes downstream. Callers
+   *   inside an `async` function get the thrown error through the
+   *   function's own Promise; synchronous callers must use
+   *   `try/catch`.
    */
   request(
     record: PermissionRequestRecord,
@@ -691,6 +708,11 @@ export class MultiClientPermissionMediator implements PermissionMediator {
           ? { originatorClientId: pending.originatorClientId }
           : {}),
       });
+      this.writeForbiddenStderr(
+        pending,
+        vote,
+        'designated_mismatch (voter is not the prompt originator)',
+      );
       return { kind: 'forbidden', reason: 'designated_mismatch' };
     }
     // Originator's vote — resolve immediately (semantically a
@@ -720,8 +742,18 @@ export class MultiClientPermissionMediator implements PermissionMediator {
   ): PermissionVoteOutcome {
     // Voter must be in the issue-time snapshot. Anonymous voters
     // and clients that connected AFTER the prompt issued are
-    // rejected. The forbidden reason `designated_mismatch` is
-    // overloaded for "not in voter set" — see contract docs.
+    // rejected.
+    //
+    // TODO(forward-compat): DeepSeek review #4335 / 3271627459 — the
+    // `designated_mismatch` reason code is overloaded here for "not
+    // in voter set" (consensus-specific) AND for "voter is not the
+    // prompt originator" (designated-policy semantics). Both cases
+    // surface the same string on the wire (`permission_forbidden`
+    // SSE) and the same audit reason. A future PR can split these
+    // into distinct reason codes (e.g. `voter_not_eligible`,
+    // `not_originator`) once an SDK consumer needs to disambiguate
+    // them — until then, F3 v1 keeps the overload to avoid
+    // protocol churn while semantics stabilize.
     if (
       vote.clientId === undefined ||
       !pending.votersAtIssue.has(vote.clientId)
@@ -745,6 +777,11 @@ export class MultiClientPermissionMediator implements PermissionMediator {
           ? { originatorClientId: pending.originatorClientId }
           : {}),
       });
+      this.writeForbiddenStderr(
+        pending,
+        vote,
+        'designated_mismatch (voter not in consensus votersAtIssue snapshot)',
+      );
       return { kind: 'forbidden', reason: 'designated_mismatch' };
     }
 
@@ -858,6 +895,11 @@ export class MultiClientPermissionMediator implements PermissionMediator {
           ? { originatorClientId: pending.originatorClientId }
           : {}),
       });
+      this.writeForbiddenStderr(
+        pending,
+        vote,
+        'remote_not_allowed (local-only policy; vote not from loopback)',
+      );
       return { kind: 'forbidden', reason: 'remote_not_allowed' };
     }
     const outcome: PermissionVoteOutcome = {
@@ -1091,6 +1133,42 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * so audit-publisher bugs are visible without breaking the
    * Promise-settle invariant.
    */
+  /**
+   * DeepSeek review #4335 / 3271627457 — emit a stderr breadcrumb
+   * for every vote rejection (the three forbidden paths in
+   * voteDesignated / voteConsensus / voteLocalOnly). Mirrors the
+   * timeout breadcrumb pattern: audit ring + SSE event are
+   * transient observability surfaces (no v1 query route, SSE drops
+   * on disconnect), so an operator tailing daemon stderr would see
+   * zero indication of permission rejections without this.
+   *
+   * Wrapped in `try/catch` because `process.stderr.write` can
+   * synchronously throw on EPIPE during shutdown — a stderr
+   * unavailability must not propagate up through `safeEmit` /
+   * `safeAudit` and break the resolveEntry cleanup ladder. Mirrors
+   * the safeEmit/safeAudit defensive posture (see wenshao review
+   * #4335 / 3271041461 for the matching hang scenario).
+   */
+  private writeForbiddenStderr(
+    pending: MediatorPending,
+    vote: PermissionVote,
+    reasonDetail: string,
+  ): void {
+    try {
+      const voterDescriptor =
+        vote.clientId === undefined
+          ? '<anonymous>'
+          : JSON.stringify(vote.clientId);
+      process.stderr.write(
+        `qwen serve: permission ${pending.requestId} ` +
+          `(session ${pending.sessionId}): vote rejected ` +
+          `(${reasonDetail}) by client ${voterDescriptor}\n`,
+      );
+    } catch {
+      // Stderr unavailable — drop the breadcrumb and continue.
+    }
+  }
+
   private safeAudit(fn: () => void): void {
     try {
       fn();

@@ -527,6 +527,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       clientLastSeenAt: new Map<string, number>(),
     }));
   return {
+    // F3 Commit 6 — `HttpAcpBridge.permissionPolicy` is required so
+    // `/capabilities` can expose `policy.permission`. Tests don't
+    // exercise mediation; pin to the pre-F3 default ('first-responder')
+    // so existing assertions stay shape-compatible.
+    permissionPolicy: 'first-responder' as const,
     calls,
     loadCalls,
     resumeCalls,
@@ -2811,11 +2816,16 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ outcome: { outcome: 'selected', optionId: 'allow' } });
       expect(res.status).toBe(200);
+      // F3 Commit 2 — vote routes attach `fromLoopback` from
+      // `detectFromLoopback(req)`. The supertest fixture connects
+      // from `127.0.0.1`, so the captured context carries
+      // `fromLoopback: true` even though no client-id header is set.
       expect(bridge.sessionPermissionVotes).toEqual([
         {
           sessionId: 'session-A',
           requestId: 'req-1',
           response: { outcome: { outcome: 'selected', optionId: 'allow' } },
+          context: { fromLoopback: true },
         },
       ]);
     });
@@ -2829,8 +2839,13 @@ describe('createServeApp', () => {
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ outcome: { outcome: 'cancelled' } });
       expect(res.status).toBe(200);
+      // F3 Commit 2 — `fromLoopback` is derived from the kernel-stamped
+      // peer IP (`127.0.0.1` in tests), independent of the client-id
+      // header. Both fields end up on the context the route forwards
+      // to the bridge.
       expect(bridge.sessionPermissionVotes[0]?.context).toEqual({
         clientId: 'client-1',
+        fromLoopback: true,
       });
     });
 
@@ -2930,10 +2945,13 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ outcome: { outcome: 'selected', optionId: 'allow' } });
       expect(res.status).toBe(200);
+      // F3 Commit 2 — see the scoped-vote case: `fromLoopback: true`
+      // is attached because the supertest peer is `127.0.0.1`.
       expect(bridge.permissionVotes).toEqual([
         {
           requestId: 'req-1',
           response: { outcome: { outcome: 'selected', optionId: 'allow' } },
+          context: { fromLoopback: true },
         },
       ]);
     });
@@ -2949,6 +2967,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(bridge.permissionVotes[0]?.context).toEqual({
         clientId: 'client-1',
+        fromLoopback: true,
       });
     });
 
@@ -4017,6 +4036,9 @@ describe('runQwenServe', () => {
           throw new Error('unreachable');
         },
         writeTextAtomic: async () => {
+          throw new Error('unreachable');
+        },
+        writeTextOverwrite: async () => {
           throw new Error('unreachable');
         },
         edit: async () => {

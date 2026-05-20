@@ -2710,6 +2710,66 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('rejects cancel sentinel injection via {selected,"__cancelled__"} (#4335 / 3271420267)', async () => {
+      // wenshao/qwen-latest review #4335 (3271420267) — the most
+      // security-critical guard in this PR. The mediator recognizes
+      // CANCEL_VOTE_SENTINEL ('__cancelled__') BEFORE validating the
+      // option against allowedOptionIds, so a wire client sending
+      // `{outcome:'selected', optionId:'__cancelled__'}` could
+      // bypass ALL policy dispatch (designated/consensus/local-only)
+      // and resolve the request as cancelled. The bridge guards
+      // against this by throwing InvalidPermissionOptionError
+      // BEFORE forwarding to mediator.vote — without a test, a
+      // future refactor could silently remove the check.
+      const { bridge, session, conn } = await setupForPermission();
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+      const respPromise = (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'rm -rf /' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+        ],
+      });
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      const payload = next.value!.data as { requestId: string };
+
+      // Wire-injected sentinel via `selected` outcome — must
+      // throw InvalidPermissionOptionError before reaching the
+      // mediator.
+      expect(() =>
+        bridge.respondToSessionPermission(
+          session.sessionId,
+          payload.requestId,
+          {
+            outcome: { outcome: 'selected', optionId: '__cancelled__' },
+          },
+        ),
+      ).toThrow(InvalidPermissionOptionError);
+
+      // Pending was preserved — a legitimate vote still resolves.
+      expect(bridge.pendingPermissionCount).toBe(1);
+      bridge.respondToSessionPermission(session.sessionId, payload.requestId, {
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+      const response = (await respPromise) as {
+        outcome: { outcome: string; optionId?: string };
+      };
+      expect(response.outcome.outcome).toBe('selected');
+      expect(response.outcome.optionId).toBe('allow');
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
     it('rejects votes whose optionId was not in the agent-offered set (BkwQI)', async () => {
       // BkwQI: bridge.respondToPermission validates the voter's
       // `optionId` against the original `options` the agent sent.
