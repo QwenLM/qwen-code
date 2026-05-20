@@ -25,6 +25,7 @@ import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
+import { qwenOAuthDiscontinuedMessage } from '../utils/qwenOAuthDiscontinuedMessage.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -409,11 +410,7 @@ export function ModelDialog({
         !highlightedEntry.isRuntime
       ) {
         if (highlightedEntry.authType === AuthType.QWEN_OAUTH) {
-          setErrorMessage(
-            t(
-              'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
-            ),
-          );
+          setErrorMessage(qwenOAuthDiscontinuedMessage());
           return;
         }
 
@@ -441,12 +438,19 @@ export function ModelDialog({
             return;
           }
 
-          persistDefaultModelSelection({
-            settings,
-            uiState,
-            authType: highlightedEntry.authType,
-            modelId: highlightedEntry.model.id,
-          });
+          try {
+            persistDefaultModelSelection({
+              settings,
+              uiState,
+              authType: highlightedEntry.authType,
+              modelId: highlightedEntry.model.id,
+            });
+          } catch (e) {
+            const baseErrorMessage = e instanceof Error ? e.message : String(e);
+            setErrorMessage(
+              `Failed to set default model to '${highlightedEntry.model.id}'.\n\n${baseErrorMessage}`,
+            );
+          }
         })();
       }
     },
@@ -497,11 +501,7 @@ export function ModelDialog({
         `$runtime|${AuthType.QWEN_OAUTH}|`,
       );
       if (isQwenOAuthSelection && !isRuntimeOAuthSelection) {
-        setErrorMessage(
-          t(
-            'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
-          ),
-        );
+        setErrorMessage(qwenOAuthDiscontinuedMessage());
         return;
       }
 

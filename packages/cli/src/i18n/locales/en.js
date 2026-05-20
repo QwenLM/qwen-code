@@ -241,6 +241,8 @@ export default {
   'Esc to close': 'Esc to close',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter to select, ↑↓ to navigate, Esc to close',
+  'Enter to select, d to set default, ↑↓ to navigate, Esc to close':
+    'Enter to select, d to set default, ↑↓ to navigate, Esc to close',
   'Esc to go back': 'Esc to go back',
   'Enter to confirm, Esc to cancel': 'Enter to confirm, Esc to cancel',
   'Enter to select, ↑↓ to navigate, Esc to go back':
@@ -1042,6 +1044,10 @@ export default {
     'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
   'Switch the model for this session (--default to persist, --fast for suggestion model).':
     'Switch the model for this session (--default to persist, --fast for suggestion model).',
+  'Default model': 'Default model',
+  'Persist the selected model as the default':
+    'Persist the selected model as the default',
+  'Usage: /model --default <model-id>': 'Usage: /model --default <model-id>',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Set a lighter model for prompt suggestions and speculative execution',
   'Content generator configuration not available.':

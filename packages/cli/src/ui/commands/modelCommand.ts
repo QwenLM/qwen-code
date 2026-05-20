@@ -21,6 +21,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import { qwenOAuthDiscontinuedMessage } from '../utils/qwenOAuthDiscontinuedMessage.js';
 
 function persistSetting(
   settings: LoadedSettings,
@@ -32,7 +33,7 @@ function persistSetting(
 
 async function switchMainModel(
   config: Config,
-  currentAuthType: AuthType,
+  fallbackAuthType: AuthType,
   modelArg: string,
 ): Promise<string> {
   const parsed = parseAcpModelOption(modelArg);
@@ -41,7 +42,7 @@ async function switchMainModel(
     await config.switchModel(
       parsed.authType,
       parsed.modelId,
-      parsed.authType !== currentAuthType &&
+      parsed.authType !== fallbackAuthType &&
         parsed.authType === AuthType.QWEN_OAUTH
         ? { requireCachedCredentials: true }
         : undefined,
@@ -49,13 +50,13 @@ async function switchMainModel(
     return parsed.modelId;
   }
 
-  await config.switchModel(currentAuthType, modelArg, undefined);
+  await config.switchModel(fallbackAuthType, modelArg, undefined);
   return modelArg;
 }
 
 function persistMainModelDefault(
   settings: LoadedSettings,
-  currentAuthType: AuthType,
+  fallbackAuthType: AuthType,
   modelArg: string,
 ): string {
   const parsed = parseAcpModelOption(modelArg);
@@ -66,15 +67,9 @@ function persistMainModelDefault(
   }
 
   // Unqualified model ids belong to the currently active auth provider.
-  persistSetting(settings, 'security.auth.selectedType', currentAuthType);
+  persistSetting(settings, 'security.auth.selectedType', fallbackAuthType);
   persistSetting(settings, 'model.name', modelArg);
   return modelArg;
-}
-
-function qwenOAuthDiscontinuedMessage(): string {
-  return t(
-    'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider.',
-  );
 }
 
 function formatUnavailableModelMessage(

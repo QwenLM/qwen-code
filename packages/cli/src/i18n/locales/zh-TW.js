@@ -211,6 +211,8 @@ export default {
   'Esc to close': '按 Esc 關閉',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter 選擇，↑↓ 導航，Esc 關閉',
+  'Enter to select, d to set default, ↑↓ to navigate, Esc to close':
+    'Enter 選擇，d 設為預設，↑↓ 導航，Esc 關閉',
   'Esc to go back': '按 Esc 返回',
   'Enter to confirm, Esc to cancel': 'Enter 確認，Esc 取消',
   'Enter to select, ↑↓ to navigate, Esc to go back':
@@ -886,6 +888,9 @@ export default {
     '切換此會話的模型（--fast 可設置建議模型）',
   'Switch the model for this session (--default to persist, --fast for suggestion model).':
     '切換此會話的模型（--default 可持久化，--fast 可設置建議模型）',
+  'Default model': '預設模型',
+  'Persist the selected model as the default': '將所選模型持久化為預設模型',
+  'Usage: /model --default <model-id>': '用法：/model --default <模型 ID>',
   'Set a lighter model for prompt suggestions and speculative execution':
     '設置用於輸入建議和推測執行的輕量模型',
   'Content generator configuration not available.': '內容生成器配置不可用',

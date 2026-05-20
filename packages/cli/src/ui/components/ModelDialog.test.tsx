@@ -535,6 +535,53 @@ describe('<ModelDialog />', () => {
     expect(mockSettings.setValue).not.toHaveBeenCalled();
   });
 
+  it('shows an error when default model persistence fails after switching', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+
+    const { mockSettings, queryByText } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+    vi.mocked(mockSettings.setValue).mockImplementation(() => {
+      throw new Error('Disk is read-only');
+    });
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    await act(async () => {
+      await keyPressHandler({
+        name: 'd',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: 'd',
+      });
+    });
+
+    await waitFor(() => {
+      expect(
+        queryByText(/Failed to set default model to 'gpt-4'/),
+      ).not.toBeNull();
+      expect(queryByText(/Disk is read-only/)).not.toBeNull();
+    });
+    expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'gpt-4', {
+      baseUrl: undefined,
+    });
+  });
+
   it('clears a stale default-model error before persisting a valid model', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
