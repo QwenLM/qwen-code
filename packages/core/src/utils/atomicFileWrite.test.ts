@@ -695,4 +695,64 @@ describe('EXDEV fallback (async + sync)', () => {
     ).toThrow(/EIO/);
     expect(fsSync.readdirSync(tmpDir)).toEqual([]);
   });
+
+  // PR #4333 review fold-in: the EXDEV-then-fallback-write-fails path is
+  // the only place fnName='atomicWriteFileSync' is exercised, so without
+  // these tests a regression that dropped or misapplied the annotation
+  // would go undetected on sync.
+  it('atomicWriteFile: EXDEV fallback write failure is annotated with target + fn name', async () => {
+    const filePath = path.join(tmpDir, 'exdev-write-fail.txt');
+    const exdevRename = async () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+    const failingWrite = async () => {
+      const e: NodeJS.ErrnoException = new Error('ENOSPC: out of space');
+      e.code = 'ENOSPC';
+      throw e;
+    };
+
+    let caught: unknown;
+    try {
+      await atomicWriteFile(filePath, 'data', undefined, {
+        rename: exdevRename,
+        writeFile: failingWrite as unknown as typeof fs.writeFile,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as NodeJS.ErrnoException)?.code).toBe('ENOSPC');
+    expect((caught as Error).message).toMatch(
+      /atomicWriteFile\(.*exdev-write-fail\.txt.*\):.*ENOSPC/,
+    );
+  });
+
+  it('atomicWriteFileSync: EXDEV fallback write failure is annotated with sync fn name', () => {
+    const filePath = path.join(tmpDir, 'exdev-sync-write-fail.txt');
+    const exdevRename = () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+    const failingWrite = () => {
+      const e: NodeJS.ErrnoException = new Error('ENOSPC: out of space');
+      e.code = 'ENOSPC';
+      throw e;
+    };
+
+    let caught: unknown;
+    try {
+      atomicWriteFileSync(filePath, 'data', undefined, {
+        rename: exdevRename,
+        writeFile: failingWrite as unknown as typeof fsSync.writeFileSync,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as NodeJS.ErrnoException)?.code).toBe('ENOSPC');
+    expect((caught as Error).message).toMatch(
+      /atomicWriteFileSync\(.*exdev-sync-write-fail\.txt.*\):.*ENOSPC/,
+    );
+  });
 });
