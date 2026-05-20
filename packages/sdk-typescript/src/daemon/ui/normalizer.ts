@@ -11,6 +11,7 @@ import type {
   NormalizeDaemonEventOptions,
 } from './types.js';
 import {
+  getFirstString,
   getOutputText,
   getString,
   getTextContent,
@@ -71,6 +72,7 @@ export function normalizeDaemonEvent(
         {
           ...base,
           type: 'error',
+          recoverable: false,
           text:
             getString(event.data, 'reason') ??
             'Session died (no details available)',
@@ -119,8 +121,8 @@ export function normalizeDaemonEvent(
       return [
         {
           ...base,
-          type: 'debug',
-          text: `${event.type}: ${stringifyJson(event.data)}`,
+          type: 'status',
+          text: `${event.type} (unrecognized daemon event)`,
         },
       ];
   }
@@ -363,12 +365,13 @@ function normalizePermissionOptions(
 function describePermissionOutcome(value: unknown): string {
   if (!isRecord(value)) return stringifyJson(value);
   const outcome = value['outcome'];
+  if (typeof outcome === 'string') return outcome;
   if (isRecord(outcome)) {
     const kind = getString(outcome, 'outcome') ?? 'selected';
     const optionId = getString(outcome, 'optionId');
     return optionId ? `${kind}:${optionId}` : kind;
   }
-  return stringifyJson(value);
+  return getFirstString(value, ['status', 'reason']) ?? stringifyJson(value);
 }
 
 function describeToolCall(value: unknown): string {

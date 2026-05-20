@@ -12,7 +12,6 @@ import {
   ToolCallCard,
   ToolCallRow,
   groupContent,
-  mapToolStatusToContainerStatus,
 } from './shared/index.js';
 import type { BaseToolCallProps } from './shared/index.js';
 
@@ -66,7 +65,12 @@ export const ThinkToolCall: FC<BaseToolCallProps> = ({
     }
 
     // Short thoughts - compact format
-    const status = mapToolStatusToContainerStatus(toolCall.status);
+    const status =
+      toolCall.status === 'pending' || toolCall.status === 'in_progress'
+        ? 'loading'
+        : toolCall.status === 'failed'
+          ? 'error'
+          : 'default';
     return (
       <ToolCallContainer
         label="Think"

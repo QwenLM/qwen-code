@@ -328,7 +328,26 @@ describe('daemon UI normalizer and transcript reducer', () => {
 
     expect(state.blocks).toMatchObject([{ kind: 'status', text: 'trim tool' }]);
     expect(state.blockIndexById).toEqual({ 'status-2': 0 });
-    expect(state.toolBlockByCallId).toEqual({});
+    expect(state.toolBlockByCallId['tool-1']).toBeDefined();
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 8,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-1',
+            rawOutput: 'late',
+          },
+        },
+      }),
+      { now: 5 },
+    );
+
+    expect(state.blocks).toMatchObject([{ kind: 'status', text: 'trim tool' }]);
   });
 
   it('preserves rich tool preview and status on output-only updates', () => {
@@ -481,11 +500,107 @@ describe('daemon UI normalizer and transcript reducer', () => {
 
     expect(event).toMatchObject({
       type: 'error',
+      recoverable: false,
       text: 'Session died (no details available)',
     });
     expect(event && 'text' in event ? event.text : '').not.toContain(
       'secret-token',
     );
+  });
+
+  it('normalizes daemon lifecycle and control events', () => {
+    expect(
+      normalizeDaemonEvent({
+        id: 51,
+        v: 1,
+        type: 'model_switched',
+        data: { modelId: 'qwen-plus' },
+      }),
+    ).toMatchObject([{ type: 'model.changed', modelId: 'qwen-plus' }]);
+    expect(
+      normalizeDaemonEvent({
+        id: 52,
+        v: 1,
+        type: 'model_switch_failed',
+        data: { error: 'no model' },
+      }),
+    ).toMatchObject([{ type: 'error', recoverable: true, text: 'no model' }]);
+    expect(
+      normalizeDaemonEvent({
+        id: 53,
+        v: 1,
+        type: 'client_evicted',
+        data: { reason: 'slow' },
+      }),
+    ).toMatchObject([{ type: 'error', recoverable: true, text: 'slow' }]);
+    expect(
+      normalizeDaemonEvent({
+        id: 54,
+        v: 1,
+        type: 'slow_client_warning',
+        data: {},
+      }),
+    ).toMatchObject([{ type: 'status', text: 'SSE stream is lagging' }]);
+    expect(
+      normalizeDaemonEvent({
+        id: 55,
+        v: 1,
+        type: 'stream_error',
+        data: { error: 'dropped' },
+      }),
+    ).toMatchObject([{ type: 'error', recoverable: true, text: 'dropped' }]);
+    expect(
+      normalizeDaemonEvent({
+        id: 56,
+        v: 1,
+        type: 'permission_already_resolved',
+        data: { requestId: 'perm-1', outcome: 'denied' },
+      }),
+    ).toMatchObject([
+      { type: 'permission.resolved', requestId: 'perm-1', outcome: 'denied' },
+    ]);
+    expect(
+      normalizeDaemonEvent({
+        id: 59,
+        v: 1,
+        type: 'permission_already_resolved',
+        data: { requestId: 'perm-2', status: 'already resolved' },
+      }),
+    ).toMatchObject([
+      {
+        type: 'permission.resolved',
+        requestId: 'perm-2',
+        outcome: 'already resolved',
+      },
+    ]);
+    expect(
+      normalizeDaemonEvent({
+        id: 57,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: ['help', 'model'],
+          },
+        },
+      }),
+    ).toMatchObject([
+      { type: 'status', text: 'Available commands updated (2)' },
+    ]);
+    expect(
+      normalizeDaemonEvent({
+        id: 58,
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: { token: 'secret' },
+      }),
+    ).toMatchObject([
+      {
+        type: 'status',
+        text: 'mcp_budget_warning (unrecognized daemon event)',
+      },
+    ]);
   });
 
   it('caps recursive output extraction depth', () => {
@@ -573,6 +688,8 @@ describe('daemon UI normalizer and transcript reducer', () => {
         { type: 'shell.output', text: 'out-1', stream: 'stdout' },
         { type: 'shell.output', text: 'out-2', stream: 'stdout' },
         { type: 'shell.output', text: 'err-1', stream: 'stderr' },
+        { type: 'shell.output', text: 'unknown-1' },
+        { type: 'shell.output', text: 'unknown-2' },
       ],
       { now: 2 },
     );
@@ -580,6 +697,8 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks).toMatchObject([
       { kind: 'shell', text: 'out-1out-2', stream: 'stdout' },
       { kind: 'shell', text: 'err-1', stream: 'stderr' },
+      { kind: 'shell', text: 'unknown-1' },
+      { kind: 'shell', text: 'unknown-2' },
     ]);
   });
 
@@ -590,28 +709,37 @@ describe('daemon UI normalizer and transcript reducer', () => {
       calls += 1;
     });
 
-    store.dispatch({
-      type: 'status',
-      text: 'ready',
-    });
-    store.dispatch({
-      type: 'status',
-      text: 'still ready',
-    });
+    store.appendLocalUserMessage('hello');
+    store.dispatch([
+      {
+        type: 'status',
+        text: 'ready',
+      },
+      {
+        type: 'status',
+        text: 'still ready',
+      },
+    ]);
 
     expect(calls).toBe(0);
     await Promise.resolve();
 
     expect(calls).toBe(1);
     expect(store.getSnapshot().blocks).toMatchObject([
+      { kind: 'user', text: 'hello' },
       { kind: 'status', text: 'ready' },
       { kind: 'status', text: 'still ready' },
     ]);
 
+    store.reset();
+    await Promise.resolve();
+    expect(calls).toBe(2);
+    expect(store.getSnapshot().blocks).toEqual([]);
+
     unsubscribe();
     store.dispatch({ type: 'status', text: 'ignored listener' });
     await Promise.resolve();
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
   });
 
   it('renders UI events to sanitized terminal text', () => {
@@ -637,6 +765,15 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(output).not.toContain('\u202e');
     expect(output).not.toContain('\u001b[');
     expect(output).not.toContain('hidden');
+  });
+
+  it('sanitizes unterminated terminal control sequences without swallowing output', () => {
+    const output = sanitizeTerminalText(
+      `visible\u001b]${'x'.repeat(1000)}still-visible`,
+    );
+
+    expect(output).toContain('visible');
+    expect(output).toContain('still-visible');
   });
 
   it('caps nested tool preview traversal depth', () => {

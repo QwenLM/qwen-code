@@ -74,7 +74,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         title: '\u202eRun',
         status: 'completed',
         preview: { kind: 'generic' },
-        rawInput: { command: '\u202enpm test' },
+        rawInput: { '\u202ecommand': '\u202enpm test' },
         rawOutput: '\u001b]0;bad\u0007ok',
         createdAt: 2,
         updatedAt: 2,
@@ -86,6 +86,37 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       title: 'Run',
       rawInput: { command: 'npm test' },
       rawOutput: 'ok',
+    });
+  });
+
+  it('renders shell and status text as visible tool content', () => {
+    const messages = daemonTranscriptToUnifiedMessages([
+      {
+        id: 'shell-1',
+        kind: 'shell',
+        text: '\u001b[31mstdout',
+        stream: 'stdout',
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        id: 'status-1',
+        kind: 'status',
+        text: '\u202econnected',
+        createdAt: 2,
+        updatedAt: 2,
+      },
+    ]);
+
+    expect(messages[0]?.toolCall).toMatchObject({
+      kind: 'bash',
+      rawOutput: 'stdout',
+      content: [{ content: { text: 'stdout' } }],
+    });
+    expect(messages[1]?.toolCall).toMatchObject({
+      kind: 'status',
+      rawOutput: 'connected',
+      content: [{ content: { text: 'connected' } }],
     });
   });
 
@@ -126,7 +157,11 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       {
         id: 'status-1',
         type: 'tool_call',
-        toolCall: { kind: 'status', rawOutput: 'connecting' },
+        toolCall: {
+          kind: 'status',
+          rawOutput: 'connecting',
+          content: [{ content: { text: 'connecting' } }],
+        },
       },
       { id: 'assistant-1', isFirst: false, isLast: true },
     ]);
