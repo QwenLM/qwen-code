@@ -10,7 +10,10 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { StreamableHTTPClientTransportOptions } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import type {
+  FetchLike,
+  Transport,
+} from '@modelcontextprotocol/sdk/shared/transport.js';
 import type {
   GetPromptResult,
   JSONRPCMessage,
@@ -61,6 +64,9 @@ export type SendSdkMcpMessage = (
 export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 
 const debugLogger = createDebugLogger('MCP');
+
+const STREAMABLE_HTTP_SSE_ACCEPT = 'text/event-stream';
+const STREAMABLE_HTTP_POST_ACCEPT = 'text/event-stream, application/json';
 
 export type DiscoveredMCPPrompt = Prompt & {
   serverName: string;
@@ -506,7 +512,8 @@ async function createTransportWithOAuth(
         },
       };
 
-      return new StreamableHTTPClientTransport(
+      return createStreamableHTTPClientTransport(
+        mcpServerName,
         new URL(mcpServerConfig.httpUrl),
         oauthTransportOptions,
       );
@@ -529,6 +536,77 @@ async function createTransportWithOAuth(
     );
     return null;
   }
+}
+
+function isStreamableHttpSseGet(init?: RequestInit): boolean {
+  const method = init?.method?.toUpperCase() ?? 'GET';
+  if (method !== 'GET') {
+    return false;
+  }
+
+  const acceptHeader = new Headers(init?.headers).get('accept');
+  return acceptHeader?.includes(STREAMABLE_HTTP_SSE_ACCEPT) ?? false;
+}
+
+function createStreamableHttpFallbackFetch(
+  mcpServerName: string,
+  baseFetch?: FetchLike,
+): FetchLike {
+  let hasWarned = false;
+  const fetchImpl = baseFetch ?? fetch;
+
+  return async (url, init) => {
+    const response = await fetchImpl(url, init);
+    if (
+      !isStreamableHttpSseGet(init) ||
+      (response.status !== 400 && response.status !== 405)
+    ) {
+      return response;
+    }
+
+    if (!hasWarned) {
+      hasWarned = true;
+      debugLogger.warn(
+        `MCP server '${mcpServerName}' rejected the spec-compliant Streamable HTTP SSE GET with HTTP ${response.status}; retrying with POST for compatibility. ` +
+          `This usually indicates a spec-divergent server (for example Spring AI 1.1.x). Please update the server to support GET SSE when possible.`,
+      );
+    }
+
+    const retryHeaders = new Headers(init?.headers);
+    retryHeaders.set('accept', STREAMABLE_HTTP_POST_ACCEPT);
+
+    const retryInit: RequestInit = {
+      ...init,
+      method: 'POST',
+      headers: retryHeaders,
+    };
+    delete retryInit.body;
+
+    const retryResponse = await fetchImpl(url, retryInit);
+    if (retryResponse.ok) {
+      await response.body?.cancel();
+      return retryResponse;
+    }
+
+    if (response.status === 405) {
+      await retryResponse.body?.cancel();
+      return response;
+    }
+
+    await response.body?.cancel();
+    return retryResponse;
+  };
+}
+
+function createStreamableHTTPClientTransport(
+  mcpServerName: string,
+  url: URL,
+  options: StreamableHTTPClientTransportOptions = {},
+): StreamableHTTPClientTransport {
+  return new StreamableHTTPClientTransport(url, {
+    ...options,
+    fetch: createStreamableHttpFallbackFetch(mcpServerName, options.fetch),
+  });
 }
 
 /**
@@ -1332,7 +1410,8 @@ export async function createTransport(
     };
 
     if (mcpServerConfig.httpUrl) {
-      return new StreamableHTTPClientTransport(
+      return createStreamableHTTPClientTransport(
+        mcpServerName,
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
       );
@@ -1358,7 +1437,8 @@ export async function createTransport(
       authProvider: provider,
     };
     if (mcpServerConfig.httpUrl) {
-      return new StreamableHTTPClientTransport(
+      return createStreamableHTTPClientTransport(
+        mcpServerName,
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
       );
@@ -1430,7 +1510,8 @@ export async function createTransport(
       };
     }
 
-    return new StreamableHTTPClientTransport(
+    return createStreamableHTTPClientTransport(
+      mcpServerName,
       new URL(mcpServerConfig.httpUrl),
       transportOptions,
     );

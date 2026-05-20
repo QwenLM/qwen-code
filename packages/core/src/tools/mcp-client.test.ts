@@ -9,6 +9,7 @@ import * as ClientLib from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthProviderType, type Config } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
@@ -32,6 +33,12 @@ import type { ToolRegistry } from './tool-registry.js';
 
 const mockExistsSync = vi.hoisted(() => vi.fn(() => true));
 const ORIGINAL_ENV = process.env;
+
+function getStreamableHttpFetch(
+  transport: StreamableHTTPClientTransport,
+): FetchLike {
+  return (transport as unknown as { _fetch: FetchLike })._fetch;
+}
 
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
@@ -292,6 +299,114 @@ describe('mcp-client', () => {
         expect((transport as any)._requestInit?.headers).toEqual({
           Authorization: 'derp',
         });
+      });
+
+      it('retries Streamable HTTP SSE GET 400 responses with POST', async () => {
+        const fetchSpy = vi
+          .spyOn(globalThis, 'fetch')
+          .mockResolvedValueOnce(
+            new Response('bad request', {
+              status: 400,
+              statusText: 'Bad Request',
+            }),
+          )
+          .mockResolvedValueOnce(
+            new Response('', {
+              status: 200,
+              headers: { 'content-type': 'text/event-stream' },
+            }),
+          );
+        const transport = (await createTransport(
+          'spring-ai-server',
+          {
+            httpUrl: 'http://test-server/mcp',
+          },
+          false,
+        )) as StreamableHTTPClientTransport;
+
+        const response = await getStreamableHttpFetch(transport)(
+          new URL('http://test-server/mcp'),
+          {
+            method: 'GET',
+            headers: {
+              Accept: 'text/event-stream',
+              'mcp-session-id': 'session-1',
+            },
+          },
+        );
+
+        expect(response.status).toBe(200);
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        const retryInit = fetchSpy.mock.calls[1]?.[1];
+        expect(retryInit?.method).toBe('POST');
+        const retryHeaders = new Headers(retryInit?.headers);
+        expect(retryHeaders.get('accept')).toBe(
+          'text/event-stream, application/json',
+        );
+        expect(retryHeaders.get('mcp-session-id')).toBe('session-1');
+      });
+
+      it('retries Streamable HTTP SSE GET 405 responses with POST', async () => {
+        const fetchSpy = vi
+          .spyOn(globalThis, 'fetch')
+          .mockResolvedValueOnce(
+            new Response('method not allowed', {
+              status: 405,
+              statusText: 'Method Not Allowed',
+            }),
+          )
+          .mockResolvedValueOnce(
+            new Response('', {
+              status: 200,
+              headers: { 'content-type': 'text/event-stream' },
+            }),
+          );
+        const transport = (await createTransport(
+          'method-fallback-server',
+          {
+            httpUrl: 'http://test-server/mcp',
+          },
+          false,
+        )) as StreamableHTTPClientTransport;
+
+        const response = await getStreamableHttpFetch(transport)(
+          new URL('http://test-server/mcp'),
+          {
+            method: 'GET',
+            headers: { Accept: 'text/event-stream' },
+          },
+        );
+
+        expect(response.status).toBe(200);
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        expect(fetchSpy.mock.calls[1]?.[1]?.method).toBe('POST');
+      });
+
+      it('does not retry Streamable HTTP SSE GET 5xx responses', async () => {
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+          new Response('server error', {
+            status: 502,
+            statusText: 'Bad Gateway',
+          }),
+        );
+        const transport = (await createTransport(
+          'server-error',
+          {
+            httpUrl: 'http://test-server/mcp',
+          },
+          false,
+        )) as StreamableHTTPClientTransport;
+
+        const response = await getStreamableHttpFetch(transport)(
+          new URL('http://test-server/mcp'),
+          {
+            method: 'GET',
+            headers: { Accept: 'text/event-stream' },
+          },
+        );
+
+        expect(response.status).toBe(502);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
       });
     });
 
