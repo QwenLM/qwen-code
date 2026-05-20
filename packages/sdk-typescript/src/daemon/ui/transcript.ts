@@ -18,6 +18,8 @@ import { createDaemonToolPreview } from './toolPreview.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
 const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
+const MAX_TEXT_BLOCK_LENGTH = 100_000;
+const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
 
 export function createDaemonTranscriptState(
   opts: DaemonTranscriptReducerOptions = {},
@@ -158,7 +160,7 @@ function appendTextDelta(
 ): void {
   const existing = getWritableBlockById(state, state[activeKey]);
   if (existing && existing.kind === kind) {
-    existing.text += text;
+    existing.text = appendBoundedText(existing.text, text);
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (kind === 'assistant') existing.streaming = true;
@@ -253,7 +255,7 @@ function appendShellBlock(
   if (last?.kind === 'shell' && last.stream === event.stream) {
     const writable = getWritableBlockById(state, last.id);
     if (writable?.kind === 'shell') {
-      writable.text += event.text;
+      writable.text = appendBoundedText(writable.text, event.text);
       writable.updatedAt = state.now;
       if (event.eventId !== undefined) writable.eventId = event.eventId;
     }
@@ -263,7 +265,7 @@ function appendShellBlock(
   const block: DaemonShellTranscriptBlock = {
     id: allocateBlockId(state, 'shell'),
     kind: 'shell',
-    text: event.text,
+    text: truncateText(event.text),
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
@@ -350,7 +352,7 @@ function appendStatusBlock(
   const block: DaemonStatusTranscriptBlock = {
     id: allocateBlockId(state, kind),
     kind,
-    text,
+    text: truncateText(text),
     createdAt: state.now,
     updatedAt: state.now,
     ...(event?.eventId !== undefined ? { eventId: event.eventId } : {}),
@@ -465,6 +467,20 @@ function clearActiveText(state: DaemonTranscriptState): void {
   finishAssistant(state);
   state.activeUserBlockId = undefined;
   state.activeThoughtBlockId = undefined;
+}
+
+function appendBoundedText(existing: string, text: string): string {
+  if (existing.length >= MAX_TEXT_BLOCK_LENGTH) return existing;
+  return truncateText(existing + text);
+}
+
+function truncateText(text: string): string {
+  if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
+  const keepLength = Math.max(
+    0,
+    MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
+  );
+  return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
 }
 
 function assertNever(value: never): never {
