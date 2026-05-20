@@ -75,7 +75,7 @@ const MAX_CONSECUTIVE_FAILURES = 3; // 失败熔断阈值
 
 数值来源：全部沿用 claude-code 的实测值（[autoCompact.ts:30,62-65](src/services/compact/autoCompact.ts:30)）。
 
-`SUMMARY_RESERVE = COMPACT_MAX_OUTPUT_TOKENS` 是关键关系：模型受 `maxOutputTokens` 硬限制约束，输出不可能超出 20K，因此 reserve 不需要额外 safety margin。`thinking + summary` 是合并预算（Gemini SDK / 多数 provider 的 `maxOutputTokens` 语义），模型自行在两者间分配。
+`SUMMARY_RESERVE = COMPACT_MAX_OUTPUT_TOKENS` 是关键关系：模型受 `maxOutputTokens` 硬限制约束，输出不可能超出 20K，因此 reserve 不需要额外 safety margin。注意：本设计关闭 thinking 后该等式成立（output budget 全部给 summary）；若保留 thinking，`thinking + summary` 共享预算（Gemini SDK / 多数 provider 的 `maxOutputTokens` 语义），模型自行在两者间分配，此时 summary 的实际可用空间小于 20K（见「风险与注意事项」第 1、2 条）。
 
 ## 计算函数
 

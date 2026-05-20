@@ -8,12 +8,17 @@ This report records local memory benchmarks for Qwen Code runtime behavior. It
 compares Qwen Code across models and compares Qwen Code with Claude Code on the
 same task shapes where equivalent model endpoints were available.
 
-The headline result is consistent across the latest matrix:
+The headline result is consistent across the latest matrix (single run per cell,
+not statistically repeated):
 
-- Qwen Code process-tree RSS peak: about `0.85-1.06 GiB`.
-- Claude Code process-tree RSS peak: about `0.28-0.37 GiB`.
+- Qwen Code process-tree RSS peak: about `852-1062 MiB` (`0.83-1.04 GiB`).
+- Claude Code process-tree RSS peak: about `279-366 MiB` (`0.27-0.36 GiB`).
 - Qwen Code was about `2.3x-3.6x` higher in the tested
   non-interactive CLI task benchmarks.
+
+Note: process-tree RSS includes MCP child processes (~350 MiB overhead on the
+Qwen side). This inflates the absolute numbers but the relative comparison
+remains informative since both CLIs were measured the same way.
 
 The difference reproduced in small PR review, code navigation, and synthetic
 diff workloads. It is therefore unlikely to be explained only by one large PR
@@ -33,6 +38,7 @@ unknown, and what diagnostics should be added next.
 | Qwen Code binary                              | PATH-resolved `qwen` binary                |
 | Claude Code version used in the latest matrix | `2.1.129`                                  |
 | Claude Code binary used in the latest matrix  | PATH-resolved `claude` binary              |
+| Node.js version                               | v22.x (default system install)             |
 | Sampling method                               | External `ps` RSS sampling once per second |
 | Headline metric                               | Process-tree RSS peak                      |
 

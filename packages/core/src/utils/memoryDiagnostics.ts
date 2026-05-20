@@ -267,6 +267,7 @@ async function collectProcessTreeMemoryUsage(
 
   const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,ppid=,rss='], {
     maxBuffer: 1024 * 1024,
+    timeout: 5000,
   });
   const rows = parsePsRows(stdout);
   const rootPid = process.pid;

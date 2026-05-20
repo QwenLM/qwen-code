@@ -164,18 +164,18 @@ Configured MCP server names:
 
 Single-pass isolation:
 
-| Variant                   | Enabled MCPs                                 | Tools | MCP servers | Tree RSS peak | Root RSS peak | Interpretation                       |
-| ------------------------- | -------------------------------------------- | ----: | ----------: | ------------: | ------------: | ------------------------------------ |
-| none                      | none                                         |    19 |           0 |     444.4 MiB |     211.7 MiB | baseline without MCP                 |
-| full                      | all 4                                        |    48 |           4 |     857.3 MiB |     215.9 MiB | full MCP startup shape               |
-| only `approval-bridge`    | `approval-bridge`                            |    19 |           1 |     455.5 MiB |     214.0 MiB | near baseline                        |
-| only `env-center`         | `env-center`                                 |    19 |           1 |     452.3 MiB |     214.4 MiB | near baseline                        |
-| only `chrome-devtools`    | `chrome-devtools`                            |    48 |           1 |     824.4 MiB |     209.5 MiB | large RSS increase and tool increase |
-| only `code`               | `code`                                       |    19 |           1 |     452.1 MiB |     216.6 MiB | near baseline                        |
-| without `approval-bridge` | `env-center`, `chrome-devtools`, `code`      |    48 |           3 |     997.1 MiB |     215.4 MiB | still high; run showed variance      |
-| without `env-center`      | `approval-bridge`, `chrome-devtools`, `code` |    48 |           3 |     863.8 MiB |     220.9 MiB | still high                           |
-| without `chrome-devtools` | `approval-bridge`, `env-center`, `code`      |    19 |           3 |     463.4 MiB |     221.6 MiB | returns near baseline                |
-| without `code`            | `approval-bridge`, `env-center`, `chrome`    |    48 |           3 |     858.1 MiB |     219.5 MiB | still high                           |
+| Variant                   | Enabled MCPs                                       | Tools | MCP servers | Tree RSS peak | Root RSS peak | Interpretation                       |
+| ------------------------- | -------------------------------------------------- | ----: | ----------: | ------------: | ------------: | ------------------------------------ |
+| none                      | none                                               |    19 |           0 |     444.4 MiB |     211.7 MiB | baseline without MCP                 |
+| full                      | all 4                                              |    48 |           4 |     857.3 MiB |     215.9 MiB | full MCP startup shape               |
+| only `approval-bridge`    | `approval-bridge`                                  |    19 |           1 |     455.5 MiB |     214.0 MiB | near baseline                        |
+| only `env-center`         | `env-center`                                       |    19 |           1 |     452.3 MiB |     214.4 MiB | near baseline                        |
+| only `chrome-devtools`    | `chrome-devtools`                                  |    48 |           1 |     824.4 MiB |     209.5 MiB | large RSS increase and tool increase |
+| only `code`               | `code`                                             |    19 |           1 |     452.1 MiB |     216.6 MiB | near baseline                        |
+| without `approval-bridge` | `env-center`, `chrome-devtools`, `code`            |    48 |           3 |     997.1 MiB |     215.4 MiB | still high; run showed variance      |
+| without `env-center`      | `approval-bridge`, `chrome-devtools`, `code`       |    48 |           3 |     863.8 MiB |     220.9 MiB | still high                           |
+| without `chrome-devtools` | `approval-bridge`, `env-center`, `code`            |    19 |           3 |     463.4 MiB |     221.6 MiB | returns near baseline                |
+| without `code`            | `approval-bridge`, `env-center`, `chrome-devtools` |    48 |           3 |     858.1 MiB |     219.5 MiB | still high                           |
 
 Because startup RSS has some variance, the key variants were repeated twice:
 
@@ -522,9 +522,12 @@ The process exited with:
 libc++abi: terminating due to uncaught exception of type std::__1::system_error: thread constructor failed: Resource temporarily unavailable
 ```
 
-This is not the same failure string as the V8 heap OOM logs. It is still
-important because it occurred in a disabled-MCP, no-build/test, interactive
-long-session review where the Qwen Node process itself crossed about 1 GiB RSS.
+This is a **thread exhaustion** error, not a V8 heap OOM. The failure mechanism
+is distinct: the OS refused to create a new thread, likely due to per-process
+resource limits (`RLIMIT_NPROC`) or memory fragmentation preventing stack
+allocation. It is still relevant because it occurred in a disabled-MCP,
+no-build/test, interactive long-session review where the Qwen Node process
+itself crossed about 1 GiB RSS.
 The failure happened during the final summary phase, after the controller had
 already completed six review turns.
 
@@ -831,9 +834,6 @@ Verification commands:
 | `npm run typecheck --workspace=packages/cli`                                                           | passed                                                                                                                                      |
 | `npm run bundle`                                                                                       | passed                                                                                                                                      |
 | `npm run build`                                                                                        | failed in `packages/vscode-ide-companion` lint on existing internal-module import rules; core, CLI, bundle, and targeted tests above passed |
-| `npm run bundle`                                                                                       | passed                                                                                                                                      |
-| `npm run typecheck --workspace=packages/core`                                                          | passed                                                                                                                                      |
-| `npm run typecheck --workspace=packages/cli`                                                           | passed                                                                                                                                      |
 
 The full root `npm run build` was not clean in this worktree because the
 `vscode-ide-companion` package hit pre-existing `import/no-internal-modules`
@@ -842,7 +842,9 @@ completed successfully.
 
 The same PR review prompt was then run with a temporary config where MCP and
 hooks were disabled. Both rows were interrupted after a bounded long-run window
-instead of waiting for a full review to finish.
+instead of waiting for a full review to finish. **Caveat**: the two runs are
+confounded by workload size (79K vs 390K tokens) and cannot be compared as a
+controlled experiment. The comparison only shows directional evidence.
 
 | Variant           | Runtime | MCP servers | Tools | Assistant messages | Tool use/result blocks | Parent tool ids | Total tokens | Max input tokens | Root max RSS |
 | ----------------- | ------: | ----------: | ----: | -----------------: | ---------------------: | --------------: | -----------: | ---------------: | -----------: |

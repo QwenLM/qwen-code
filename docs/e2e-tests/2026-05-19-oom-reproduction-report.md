@@ -244,13 +244,13 @@ sendMessage()
 
 ### 日志证据解读
 
-| 日志观察                                                   | 含义                                                      |
-| ---------------------------------------------------------- | --------------------------------------------------------- |
-| 5.5 分钟内触发 **5 次** heap-pressure auto-compaction 尝试 | #3735 引入的 `tryCompress` 在高压时频繁触发               |
-| 每次 compaction 执行后 heap 占比仍 >70%                    | `structuredClone()` 制造的临时峰值抵消了压缩收益          |
-| 74.9% → 70.7% → 86% → 85.3% → 88.8% → 90.2% → crash        | 正反馈循环：压缩→clone 峰值→heap 更高→再压缩→更高         |
-| 日志在 90.2% 后 1 秒内断裂                                 | 下一次 `getHistory(true)` 的 `structuredClone()` 瞬间超限 |
-| `[FILE_READ_CACHE] clear after auto tryCompress` 出现 2 次 | 证实 compaction 确实走了完整的 compress → setHistory 路径 |
+| 日志观察                                                                              | 含义                                                      |
+| ------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| 2.5 分钟内触发 **4 次** heap-pressure auto-compaction 尝试（另有 2 次 cooldown 拒绝） | #3735 引入的 `tryCompress` 在高压时频繁触发               |
+| 每次 compaction 执行后 heap 占比仍 >70%                                               | `structuredClone()` 制造的临时峰值抵消了压缩收益          |
+| 74.9% → 70.7% → 86% → 85.3% → 88.8% → 90.2% → crash                                   | 正反馈循环：压缩→clone 峰值→heap 更高→再压缩→更高         |
+| 日志在 90.2% 后 1 秒内断裂                                                            | 下一次 `getHistory(true)` 的 `structuredClone()` 瞬间超限 |
+| `[FILE_READ_CACHE] clear after auto tryCompress` 出现 2 次                            | 证实 compaction 确实走了完整的 compress → setHistory 路径 |
 
 ### 正反馈死循环机制
 
@@ -310,10 +310,12 @@ sendMessage()
 
 ### 结论
 
-**#3735 (v0.15.7)** 是 OOM 频率显著上升的根本原因——它使每次 `sendMessage` 都会先跑一次
-`tryCompress()`，而 `tryCompress` 内部通过 `ChatCompressionService.compress()` →
-`chat.getHistory(true)` 做全量 `structuredClone`。在 history 较大时，这个 “先 clone 再判断
-是否需要压缩” 的设计让内存峰值从 ~1.3x 升至 ~2x+。
+**#3735 (v0.15.7)** 是 OOM 频率显著上升的最可能触发因素（非唯一根因）——它使每次
+`sendMessage` 都会先跑一次 `tryCompress()`，而 `tryCompress` 内部通过
+`ChatCompressionService.compress()` → `chat.getHistory(true)` 做全量 `structuredClone`。
+在 history 较大时，这个 “先 clone 再判断是否需要压缩” 的设计让内存峰值从 ~1.3x 升至 ~2x+。
+注：issue history 显示 OOM 报告在 #3735 之前就已存在，但 #3735 大幅增加了 structuredClone
+的调用频率，从而显著提高了 OOM 的触发概率。
 
 **#3879 (v0.15.10)** 进一步恶化了问题——在已经处于 heap 边界时 (provider 返回 context overflow)
 再触发一次全量 clone，使原本就危险的 session 更容易 crash。

@@ -1224,7 +1224,9 @@ export class GeminiChat {
       if (message?.role !== 'model') continue;
       const text =
         message.parts
-          ?.filter((part): part is { text: string } => 'text' in part)
+          ?.filter(
+            (part): part is { text: string } => typeof part.text === 'string',
+          )
           .map((part) => part.text)
           .join('') ?? '';
       return text || undefined;

@@ -122,7 +122,11 @@ The most likely buckets are:
 4. **Subagent and saved-output amplification**: previous large PR tests showed
    saved-output recovery and subagent activity, which can add memory and token
    pressure.
-5. **Native memory versus JS heap split**: external RSS cannot tell whether the
+5. **MCP child processes**: the companion diagnostics report revealed that MCP
+   servers (e.g. chrome-devtools) contribute ~350 MiB to process-tree RSS. This
+   inflates the absolute numbers but is a constant overhead unrelated to session
+   length.
+6. **Native memory versus JS heap split**: external RSS cannot tell whether the
    pressure is V8 heap, native buffers, loaded modules, or retained data.
 
 This is deliberately phrased as an inference. The next step is to add enough
@@ -166,9 +170,10 @@ These are candidates, not conclusions:
 5. **Subagent accounting**: expose subagent lifecycle and memory impact in
    diagnostics.
 
-Claude Code and Codex should be used as design references for diagnostic
-separation, bounded output retention, and lazy history loading. The implementation
-should still follow Qwen Code's own architecture and tests.
+Claude Code and OpenAI Codex (OpenAI's CLI coding agent) should be used as
+design references for diagnostic separation, bounded output retention, and lazy
+history loading. The implementation should still follow Qwen Code's own
+architecture and tests.
 
 ## Validation Plan
 
