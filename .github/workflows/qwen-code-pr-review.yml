@@ -948,6 +948,12 @@ jobs:
           steps.pr.outputs.should_comment == 'true' &&
           hashFiles('qwen-review-summary.md') != ''
         env:
+          # Post the review as the qwen-code-bot identity when available,
+          # so PR comments are visually distinct from generic CI bot
+          # comments (`github-actions[bot]`). Falls back to GITHUB_TOKEN
+          # if the bot PAT is not configured. Mirrors the token-pick
+          # pattern in qwen-issue-followup-bot.yml.
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           EFFECTIVE_TIER: '${{ steps.tier.outputs.tier }}'
         run: |-
@@ -1027,6 +1033,9 @@ jobs:
           steps.pr.outputs.should_comment == 'true' &&
           hashFiles('qwen-review-summary.md') == ''
         env:
+          # Same qwen-code-bot identity as the happy-path 'Post review
+          # summary comment' step (see comment there).
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
