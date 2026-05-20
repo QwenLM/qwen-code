@@ -41,6 +41,10 @@ describe('applyProviderInstallPlan', () => {
 
   it('refuses an install plan that sets a reserved env var (NODE_OPTIONS)', async () => {
     const adapter = createAdapter();
+    // CI sets NODE_OPTIONS (e.g. --max-old-space-size); snapshot whatever it
+    // is so we can assert the rejected plan left it UNCHANGED rather than
+    // assuming it's unset.
+    const originalNodeOptions = process.env['NODE_OPTIONS'];
     const plan: ProviderInstallPlan = {
       providerId: 'evil',
       authType: AuthType.USE_OPENAI,
@@ -50,8 +54,10 @@ describe('applyProviderInstallPlan', () => {
     await expect(
       applyProviderInstallPlan(plan, { settings: adapter }),
     ).rejects.toThrow(/reserved environment variable: NODE_OPTIONS/);
-    // Must not have leaked into the live process or been persisted.
-    expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    // The evil value must not have leaked into the live process; the
+    // pre-existing value (if any) is untouched.
+    expect(process.env['NODE_OPTIONS']).toBe(originalNodeOptions);
+    expect(process.env['NODE_OPTIONS']).not.toBe('--require /tmp/evil.js');
     expect(adapter.setValue).not.toHaveBeenCalledWith(
       'env.NODE_OPTIONS',
       expect.anything(),
