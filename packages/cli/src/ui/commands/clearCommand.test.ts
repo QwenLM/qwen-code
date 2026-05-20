@@ -363,6 +363,131 @@ describe('clearCommand', () => {
       expect(ideContextStore.clear).not.toHaveBeenCalled();
       expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
     });
+
+    it('clears IDE context store BEFORE resetChat so it survives a resetChat throw', async () => {
+      if (!clearCommand.action) {
+        throw new Error('clearCommand must have an action.');
+      }
+
+      const callOrder: string[] = [];
+      (ideContextStore.clear as ReturnType<typeof vi.fn>).mockImplementation(
+        () => {
+          callOrder.push('ideContextStore.clear');
+        },
+      );
+      mockResetChat.mockImplementation(async () => {
+        callOrder.push('resetChat');
+        throw new Error('reset failed');
+      });
+
+      mockContext.overwriteConfirmed = true;
+
+      await expect(clearCommand.action(mockContext, '--all')).rejects.toThrow(
+        'reset failed',
+      );
+
+      expect(callOrder.indexOf('ideContextStore.clear')).toBeGreaterThanOrEqual(
+        0,
+      );
+      expect(callOrder.indexOf('resetChat')).toBeGreaterThan(
+        callOrder.indexOf('ideContextStore.clear'),
+      );
+      expect(ideContextStore.clear).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns block message and does NOT prompt for confirmation when --all + blocking background work (interactive)', async () => {
+      if (!clearCommand.action) {
+        throw new Error('clearCommand must have an action.');
+      }
+
+      const blockedContext = createMockCommandContext({
+        services: {
+          config: {
+            getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+              hasUnfinalizedTasks: vi.fn().mockReturnValue(true),
+              reset: vi.fn(),
+            }),
+            getBackgroundShellRegistry: vi.fn().mockReturnValue({
+              getAll: vi.fn().mockReturnValue([]),
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              reset: vi.fn(),
+            }),
+            getMonitorRegistry: vi.fn().mockReturnValue({
+              getRunning: vi.fn().mockReturnValue([]),
+              reset: vi.fn(),
+            }),
+            getHookSystem: mockGetHookSystem,
+            startNewSession: mockStartNewSession,
+            getGeminiClient: vi.fn().mockReturnValue({
+              resetChat: mockResetChat,
+            } as unknown as GeminiClient),
+            getDebugLogger: vi.fn().mockReturnValue({ warn: vi.fn() }),
+          },
+        },
+        session: {
+          startNewSession: vi.fn(),
+        },
+      });
+
+      const result = await clearCommand.action(blockedContext, '--all');
+
+      // Should not return confirm_action — block check runs first
+      expect(result).toBeUndefined();
+      expect(blockedContext.ui.setDebugMessage).toHaveBeenCalledWith(
+        "Stop the current session's running background tasks before starting a new session.",
+      );
+      expect(ideContextStore.clear).not.toHaveBeenCalled();
+      expect(mockStartNewSession).not.toHaveBeenCalled();
+      expect(mockResetChat).not.toHaveBeenCalled();
+    });
+
+    it('returns error and does NOT clear IDE store when --all + blocking background work (non-interactive)', async () => {
+      if (!clearCommand.action) {
+        throw new Error('clearCommand must have an action.');
+      }
+
+      const blockedContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {
+            getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+              hasUnfinalizedTasks: vi.fn().mockReturnValue(true),
+              reset: vi.fn(),
+            }),
+            getBackgroundShellRegistry: vi.fn().mockReturnValue({
+              getAll: vi.fn().mockReturnValue([]),
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              reset: vi.fn(),
+            }),
+            getMonitorRegistry: vi.fn().mockReturnValue({
+              getRunning: vi.fn().mockReturnValue([]),
+              reset: vi.fn(),
+            }),
+            getHookSystem: mockGetHookSystem,
+            startNewSession: mockStartNewSession,
+            getGeminiClient: vi.fn().mockReturnValue({
+              resetChat: mockResetChat,
+            } as unknown as GeminiClient),
+            getDebugLogger: vi.fn().mockReturnValue({ warn: vi.fn() }),
+          },
+        },
+        session: {
+          startNewSession: vi.fn(),
+        },
+      });
+
+      const result = await clearCommand.action(blockedContext, '--all');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          "Stop the current session's running background tasks before starting a new session.",
+      });
+      expect(ideContextStore.clear).not.toHaveBeenCalled();
+      expect(mockStartNewSession).not.toHaveBeenCalled();
+      expect(mockResetChat).not.toHaveBeenCalled();
+    });
   });
 
   describe('non-interactive mode', () => {

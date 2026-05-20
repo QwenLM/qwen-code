@@ -44,6 +44,25 @@ export const clearCommand: SlashCommand = {
     const tokens = args.trim().split(/\s+/).filter(Boolean);
     const isAll = tokens.includes('--all');
 
+    const { config } = context.services;
+
+    // Check for blocking background work BEFORE asking for confirmation so the
+    // user is never prompted "are you sure?" for a clear that will then
+    // silently fail on the blocking guard.
+    if (config && hasBlockingBackgroundWork(config)) {
+      const content =
+        "Stop the current session's running background tasks before starting a new session.";
+      context.ui.setDebugMessage(content);
+      if (context.executionMode !== 'interactive') {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content,
+        };
+      }
+      return;
+    }
+
     // Only --all requires confirmation, and only in interactive mode where a
     // confirm prompt can actually be rendered. Non-interactive/ACP scripts
     // that pass `--all` are treated as deliberate.
@@ -61,23 +80,17 @@ export const clearCommand: SlashCommand = {
       };
     }
 
-    const { config } = context.services;
+    // Clear the IDE/editor context store synchronously, BEFORE any async work
+    // that might throw (resetChat). If we deferred this until after
+    // resetChat, a network hiccup would leave IDE context (open files,
+    // selected text, workspace state) persisting across session boundaries
+    // even though the user asked for a complete reset. ideContextStore is a
+    // global module-level store, so this runs regardless of `config`.
+    if (isAll) {
+      ideContextStore.clear();
+    }
 
     if (config) {
-      if (hasBlockingBackgroundWork(config)) {
-        const content =
-          "Stop the current session's running background tasks before starting a new session.";
-        context.ui.setDebugMessage(content);
-        if (context.executionMode !== 'interactive') {
-          return {
-            type: 'message' as const,
-            messageType: 'error' as const,
-            content,
-          };
-        }
-        return;
-      }
-
       // Fire SessionEnd event (non-blocking to avoid UI lag)
       config
         .getHookSystem()
@@ -128,14 +141,6 @@ export const clearCommand: SlashCommand = {
     } else {
       context.ui.setDebugMessage(t('Starting a new session and clearing.'));
       context.ui.clear();
-    }
-
-    if (isAll) {
-      // --all also clears the IDE/editor context store. ideContextStore is a
-      // global module-level store and does not depend on config, so this runs
-      // outside the `if (config)` branch above to keep behavior consistent
-      // when config is null.
-      ideContextStore.clear();
     }
 
     if (context.executionMode !== 'interactive') {
