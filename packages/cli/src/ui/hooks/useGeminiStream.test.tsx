@@ -53,6 +53,18 @@ const MockedGeminiClientClass = vi.hoisted(() =>
     this.addHistory = vi.fn();
     this.consumePendingMemoryTaskPromises = vi.fn().mockReturnValue([]);
     this.recordCompletedToolCall = vi.fn();
+    // Default to the fast-path accessor returning an empty Set so the
+    // dedup dispatcher in `handleCompletedTools` takes the
+    // `getHistoryFunctionResponseIds` branch by default (matching
+    // production). Tests that need a non-empty dedup set override
+    // this. Without exposing the method at all, the dispatcher would
+    // fall through to the `structuredClone(getHistory())` slow path
+    // and any regression in the fast path would silently route
+    // production onto the expensive branch while CI stays green.
+    // deepseek-v4-pro thread on PR #4176.
+    this.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set<string>());
     this.getChatRecordingService = vi.fn().mockReturnValue({
       recordThought: vi.fn(),
       initialize: vi.fn(),
@@ -766,7 +778,14 @@ describe('useGeminiStream', () => {
     const client = new MockedGeminiClientClass(mockConfig);
     // Simulate the chat-internal repair pass having already planted a
     // synthetic functionResponse for the same callId on the previous
-    // (Retry) push.
+    // (Retry) push. The dedup dispatcher consults
+    // `getHistoryFunctionResponseIds` first; we override the default
+    // empty-Set mock to return the matching callId so the fast path
+    // is what production code exercises in this test (instead of
+    // falling through to the structuredClone slow path).
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_race_A']));
     client.getHistory = vi.fn().mockReturnValue([
       { role: 'user', parts: [{ text: 'open /tmp/x.txt' }] },
       {
@@ -901,7 +920,13 @@ describe('useGeminiStream', () => {
     } as unknown as TrackedCancelledToolCall;
 
     const client = new MockedGeminiClientClass(mockConfig);
-    // Pre-paired in history: dedup will fire for this callId.
+    // Pre-paired in history: dedup will fire for this callId. Wire
+    // the fast-path accessor so the dispatcher takes the
+    // `getHistoryFunctionResponseIds` branch (matches production
+    // path; see the default mock comment in MockedGeminiClientClass).
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_dedup_cancelled']));
     client.getHistory = vi.fn().mockReturnValue([
       { role: 'user', parts: [{ text: 'cancelled write' }] },
       {
@@ -1027,6 +1052,12 @@ describe('useGeminiStream', () => {
     } as unknown as TrackedCompletedToolCall;
 
     const client = new MockedGeminiClientClass(mockConfig);
+    // Wire the fast-path accessor so the dispatcher takes the
+    // `getHistoryFunctionResponseIds` branch (matches production
+    // path; see the default mock comment in MockedGeminiClientClass).
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_race_A_responding']));
     client.getHistory = vi.fn().mockReturnValue([
       { role: 'user', parts: [{ text: 'open /tmp/y.txt' }] },
       {
