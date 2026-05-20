@@ -48,6 +48,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       createPermissionBlock('allowed-permission', 'selected:allow'),
       createPermissionBlock('allowed-substring-permission', 'selected:deny-me'),
       createPermissionBlock('cancelled-permission', 'cancelled'),
+      createPermissionBlock('already-resolved-permission', 'already resolved'),
       createPermissionBlock('denied-permission', 'denied'),
     ]);
 
@@ -55,6 +56,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       'pending',
       'completed',
       'completed',
+      'cancelled',
       'cancelled',
       'failed',
     ]);

@@ -189,7 +189,15 @@ function upsertToolBlock(
   event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
 ): void {
   const existingId = state.toolBlockByCallId[event.toolCallId];
-  if (existingId === TRIMMED_TOOL_BLOCK_ID) return;
+  if (existingId === TRIMMED_TOOL_BLOCK_ID) {
+    appendStatusBlock(
+      state,
+      'error',
+      `Tool ${event.toolCallId} output trimmed (max blocks reached)`,
+      event,
+    );
+    return;
+  }
   const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'tool') {
     if (event.title !== undefined) existing.title = event.title;
@@ -459,6 +467,8 @@ function clearActiveText(state: DaemonTranscriptState): void {
   state.activeThoughtBlockId = undefined;
 }
 
-function assertNever(value: never): void {
-  void value;
+function assertNever(value: never): never {
+  throw new Error(
+    `Unhandled daemon transcript event: ${JSON.stringify(value)}`,
+  );
 }

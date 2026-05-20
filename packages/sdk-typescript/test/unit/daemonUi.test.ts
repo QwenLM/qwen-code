@@ -367,7 +367,12 @@ describe('daemon UI normalizer and transcript reducer', () => {
       { now: 5 },
     );
 
-    expect(state.blocks).toMatchObject([{ kind: 'status', text: 'trim tool' }]);
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'error',
+        text: 'Tool tool-1 output trimmed (max blocks reached)',
+      },
+    ]);
   });
 
   it('preserves rich tool preview and status on output-only updates', () => {
