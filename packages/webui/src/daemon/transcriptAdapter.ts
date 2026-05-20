@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  DaemonTranscriptBlock,
-  DaemonToolTranscriptBlock,
+import {
+  sanitizeDaemonTerminalText,
+  type DaemonTranscriptBlock,
+  type DaemonToolTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import type { UnifiedMessage } from '../adapters/types.js';
 import type {
@@ -101,6 +102,7 @@ export function daemonTranscriptToUnifiedMessages(
               title: 'Shell output',
               status: 'completed',
               rawOutput: sanitizeDisplayText(block.text),
+              content: createTextContent(block.text),
             },
             isFirst,
             isLast,
@@ -145,6 +147,7 @@ export function daemonTranscriptToUnifiedMessages(
               title: 'Status',
               status: 'completed',
               rawOutput: sanitizeDisplayText(block.text),
+              content: createTextContent(block.text),
             },
             isFirst,
             isLast,
@@ -228,7 +231,7 @@ function sanitizeDaemonValue(value: unknown, depth = 0): unknown {
   if (!isRecord(value)) return value;
   return Object.fromEntries(
     Object.entries(value).map(([key, entry]) => [
-      key,
+      sanitizeDisplayText(key),
       sanitizeDaemonValue(entry, depth + 1),
     ]),
   );
@@ -239,39 +242,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function sanitizeDisplayText(text: string): string {
-  return text
-    .replace(BIDI_CONTROL_PATTERN, '')
-    .replace(OSC_SEQUENCE_PATTERN, '')
-    .replace(DCS_SEQUENCE_PATTERN, '')
-    .replace(CSI_SEQUENCE_PATTERN, '')
-    .replace(CONTROL_CHARACTERS_PATTERN, '');
+  return sanitizeDaemonTerminalText(text);
 }
 
-const nul = String.fromCharCode(0x00);
-const backspace = String.fromCharCode(0x08);
-const verticalTab = String.fromCharCode(0x0b);
-const formFeed = String.fromCharCode(0x0c);
-const shiftOut = String.fromCharCode(0x0e);
-const unitSeparator = String.fromCharCode(0x1f);
-const deleteChar = String.fromCharCode(0x7f);
-const c1End = String.fromCharCode(0x9f);
-const escapeChar = String.fromCharCode(0x1b);
-const bell = String.fromCharCode(0x07);
-
-const CONTROL_CHARACTERS_PATTERN = new RegExp(
-  `[${nul}-${backspace}${verticalTab}${formFeed}${shiftOut}-${unitSeparator}${deleteChar}-${c1End}]`,
-  'g',
-);
-const OSC_SEQUENCE_PATTERN = new RegExp(
-  `${escapeChar}\\][\\s\\S]*?(?:${bell}|${escapeChar}\\\\)`,
-  'g',
-);
-const DCS_SEQUENCE_PATTERN = new RegExp(
-  `${escapeChar}P[\\s\\S]*?${escapeChar}\\\\`,
-  'g',
-);
-const CSI_SEQUENCE_PATTERN = new RegExp(
-  `${escapeChar}\\[[0-?]*[ -/]*[@-~]`,
-  'g',
-);
-const BIDI_CONTROL_PATTERN = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+function createTextContent(text: string): ToolCallData['content'] {
+  return [
+    {
+      type: 'content',
+      content: {
+        type: 'text',
+        text: sanitizeDisplayText(text),
+      },
+    },
+  ];
+}
