@@ -410,11 +410,19 @@ export interface DaemonMcpServerRestartedData {
  * `mcp_server_restart_refused` event per failed entry with
  * `reason: 'restart_failed'` (additive enum value) plus a free-form
  * `details` string carrying the underlying error text. This lets
- * SDK reducers track hard failures alongside the existing soft-skip
- * flow without inventing a new event type — old reducers that pin to
- * the closed `'in_flight' | 'disabled' | 'budget_would_exceed'` enum
- * see the new value as `unknown` (TS structural widening) and surface
- * it generically rather than crashing.
+ * new SDK reducers track hard failures alongside the existing
+ * soft-skip flow without inventing a new event type. **Old SDK
+ * reducers that pre-date the additive enum** silently DROP these
+ * events: the `MCP_RESTART_REFUSED_REASONS` closed-set predicate in
+ * `isMcpServerRestartRefusedData` rejects unknown reasons, so
+ * `parseDaemonEvent` returns undefined and the reducer never sees
+ * the event. That's the additive-protocol contract — pre-PR SDKs
+ * shouldn't have been observing pool-mode multi-entry restarts in
+ * the first place (the SDK gates on the `mcp_pool_restart` capability
+ * tag before sending `entryIndex`, and the bridge only emits these
+ * events via the pool branch). New SDKs receive both the new
+ * `restart_failed` reason and the optional `entryIndex` / `details`
+ * fields.
  */
 export interface DaemonMcpServerRestartRefusedData {
   serverName: string;

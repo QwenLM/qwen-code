@@ -915,8 +915,34 @@ describe('createServeApp', () => {
       expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
       expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
       expect(res.body.mode).toBe('http-bridge');
-      expect(res.body.features).toEqual(getAdvertisedServeFeatures());
+      // F2 (#4175 commit 5): the server.ts call site flips
+      // `mcpPoolActive` to default-ON via `opts.mcpPoolActive !== false`
+      // (so a daemon booted without the kill switch advertises the F2
+      // pool surface by default). Anchor the expectation against the
+      // same toggle so the assertion reflects the runtime contract,
+      // not the registry default-OFF predicate.
+      expect(res.body.features).toEqual(
+        getAdvertisedServeFeatures(undefined, { mcpPoolActive: true }),
+      );
       expect(res.body.modelServices).toEqual([]);
+    });
+
+    it('omits mcp_workspace_pool / mcp_pool_restart when mcpPoolActive=false (F2 #4175 commit 5)', async () => {
+      // Mirrors the env-var kill switch path: `runQwenServe.ts` infers
+      // `mcpPoolActive: false` when the parent process has
+      // `QWEN_SERVE_NO_MCP_POOL=1`. Verify the capability envelope
+      // tracks the toggle so SDK clients pre-flighting on the tags
+      // observe accurate "pool is off" semantics.
+      const app = createServeApp({ ...baseOpts, mcpPoolActive: false });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('mcp_workspace_pool');
+      expect(res.body.features).not.toContain('mcp_pool_restart');
+      // The legacy MCP surface tags still advertise.
+      expect(res.body.features).toContain('workspace_mcp');
+      expect(res.body.features).toContain('workspace_mcp_restart');
     });
 
     it('reports the bound workspace (#3803 §02)', async () => {
