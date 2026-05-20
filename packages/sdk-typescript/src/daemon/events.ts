@@ -383,11 +383,19 @@ export interface DaemonWorkspaceInitializedData {
  * `POST /workspace/mcp/:server/restart` successfully reconnected and
  * rediscovered the named MCP server. `durationMs` measures the full
  * disconnect+reconnect+rediscover sequence on the ACP-child side.
+ *
+ * F2 (#4175 commit 5): under pool mode, multi-entry restarts fan
+ * out one event per entry. `entryIndex` (additive, optional)
+ * disambiguates per-entry events when one server name maps to
+ * several pool entries with different fingerprints. Pre-F2 single-
+ * entry restarts omit the field; SDK reducers that ignore unknown
+ * fields keep working.
  */
 export interface DaemonMcpServerRestartedData {
   serverName: string;
   durationMs: number;
   originatorClientId?: string;
+  entryIndex?: number;
   [key: string]: unknown;
 }
 
@@ -397,11 +405,23 @@ export interface DaemonMcpServerRestartedData {
  * (`skipped: true`). `reason` is the same closed enum surfaced on
  * the route's response body, so SDK consumers can branch on a single
  * union when reconciling event-driven state with HTTP-call results.
+ *
+ * F2 (#4175 commit 5): pool-mode hard restart failures fan out one
+ * `mcp_server_restart_refused` event per failed entry with
+ * `reason: 'restart_failed'` (additive enum value) plus a free-form
+ * `details` string carrying the underlying error text. This lets
+ * SDK reducers track hard failures alongside the existing soft-skip
+ * flow without inventing a new event type — old reducers that pin to
+ * the closed `'in_flight' | 'disabled' | 'budget_would_exceed'` enum
+ * see the new value as `unknown` (TS structural widening) and surface
+ * it generically rather than crashing.
  */
 export interface DaemonMcpServerRestartRefusedData {
   serverName: string;
-  reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+  reason: 'in_flight' | 'disabled' | 'budget_would_exceed' | 'restart_failed';
   originatorClientId?: string;
+  entryIndex?: number;
+  details?: string;
   [key: string]: unknown;
 }
 
@@ -1659,6 +1679,11 @@ const MCP_RESTART_REFUSED_REASONS: ReadonlySet<string> = new Set([
   'in_flight',
   'disabled',
   'budget_would_exceed',
+  // F2 (#4175 commit 5): pool-mode hard restart failure (entry's
+  // `client.connect()` or rediscover threw). Carried alongside the
+  // soft-skip reasons so SDK reducers maintain a single union for
+  // narrowing the event's `reason` field.
+  'restart_failed',
 ]);
 
 function isMcpServerRestartRefusedData(

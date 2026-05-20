@@ -132,6 +132,19 @@ export interface ServeOptions {
    * `warn` when budget set / `off` when budget unset.
    */
   mcpBudgetMode?: 'enforce' | 'warn' | 'off';
+  /**
+   * F2 (#4175 commit 5). Whether the daemon advertises the
+   * `mcp_workspace_pool` + `mcp_pool_restart` capability tags.
+   * Defaults to `true` (the F2 pool is always on except under the
+   * env-var kill switch). Operators set this to `false` when
+   * `QWEN_SERVE_NO_MCP_POOL=1` is in scope so SDK clients pre-flighting
+   * on the tags don't speculatively send `?entryIndex=` queries the
+   * legacy single-entry path can't honor. The tag advertisement is
+   * orthogonal to ACP child behavior — the child reads its own env
+   * var copy independently — but they're driven from the same source
+   * via `runQwenServe.ts`.
+   */
+  mcpPoolActive?: boolean;
 }
 
 /**

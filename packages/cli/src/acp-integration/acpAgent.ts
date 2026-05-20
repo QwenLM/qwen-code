@@ -842,6 +842,39 @@ class QwenAgent implements Agent {
       const workspaceCwd = this.workspaceCwd(config);
       const servers = config.getMcpServers() ?? {};
 
+      // F2 (#4175 commit 5): pool snapshot powers `entryCount` +
+      // `entrySummary` per-server fields. Captured once outside the
+      // per-server loop because `pool.getSnapshot()` walks every entry
+      // and we don't want N walks for N servers. Absent when the pool
+      // is disabled (`QWEN_SERVE_NO_MCP_POOL=1`); per-server
+      // enrichment then no-ops and the snapshot reverts to the legacy
+      // (pre-F2) shape — that's the contract for daemons that
+      // advertise `mcp_workspace_pool: false`.
+      let poolByName: Record<
+        string,
+        {
+          entryCount: number;
+          entrySummary: ReadonlyArray<{
+            entryIndex: number;
+            refs: number;
+            status: MCPServerStatus;
+          }>;
+        }
+      > = {};
+      try {
+        const snap = this.mcpPool?.getSnapshot();
+        if (snap) poolByName = snap.byName;
+      } catch (err) {
+        // Pool snapshot failures must not crash the wider status —
+        // surface to stderr so silent regressions are visible without
+        // depending on `debugLogger.debug` operator opt-in (matches
+        // the budget-accounting fail-loud pattern below).
+        process.stderr.write(
+          `qwen serve: pool snapshot for workspace MCP status failed: ` +
+            `${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+
       // PR 14: pull live accounting + budget config from the child's
       // McpClientManager so the daemon's read-only route reflects the
       // single source of truth (not a daemon-side polled cache).
@@ -930,6 +963,22 @@ class QwenAgent implements Agent {
           }
           if (typeof extensionName === 'string') {
             out.extensionName = extensionName;
+          }
+          // F2 (#4175 commit 5): pool entries enrichment. `entryCount`
+          // and `entrySummary` are present together (or both absent)
+          // — guards on `mcp_workspace_pool` capability advertise the
+          // pair atomically. The runtime status is mapped through the
+          // existing `this.mcpStatus(...)` so downstream string-typed
+          // consumers see the same `'connected' | 'connecting' |
+          // 'disconnected'` enum the top-level `mcpStatus` field uses.
+          const poolRow = poolByName[name];
+          if (poolRow) {
+            out.entryCount = poolRow.entryCount;
+            out.entrySummary = poolRow.entrySummary.map((e) => ({
+              entryIndex: e.entryIndex,
+              refs: e.refs,
+              status: this.mcpStatus(e.status),
+            }));
           }
           return out;
         }),
@@ -1588,12 +1637,43 @@ class QwenAgent implements Agent {
         // config, manager unavailable, post-discover not connected)
         // propagate as JSON-RPC errors with structured `data` that
         // the bridge translates to typed HTTP responses.
+        //
+        // F2 (#4175 commit 5): when `this.mcpPool` is present AND the
+        // pool currently holds at least one entry for this server
+        // name, restart routes through `pool.restartByName(name, opts)`
+        // instead of the legacy per-session `discoverToolsForServer`.
+        // The pool may hold multiple entries for the same name (e.g.
+        // sessions injected divergent OAuth headers); `entryIndex`
+        // narrows to one entry, omitted = restart all entries in
+        // parallel via `Promise.allSettled`. Soft-skip pre-flight
+        // checks (disabled / in_flight / budget) still run BEFORE the
+        // pool branch so the existing legacy event shape covers the
+        // skip cases without inventing per-entry skip semantics.
         const serverName = params['serverName'];
         if (typeof serverName !== 'string' || serverName.length === 0) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing serverName',
           );
+        }
+        // F2 (#4175 commit 5): optional `entryIndex` selector. The
+        // server.ts route validates the wire format (integer >= 0 or
+        // `'*'`); here we just accept a finite non-negative integer.
+        // `'*'` flattens to undefined (semantically "all").
+        let entryIndex: number | undefined;
+        const rawEntryIndex = params['entryIndex'];
+        if (rawEntryIndex !== undefined && rawEntryIndex !== '*') {
+          if (
+            typeof rawEntryIndex !== 'number' ||
+            !Number.isInteger(rawEntryIndex) ||
+            rawEntryIndex < 0
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'entryIndex must be a non-negative integer or "*"',
+            );
+          }
+          entryIndex = rawEntryIndex;
         }
         const servers = this.config.getMcpServers() ?? {};
         if (!Object.prototype.hasOwnProperty.call(servers, serverName)) {
@@ -1733,6 +1813,32 @@ class QwenAgent implements Agent {
               `tools may not take effect until daemon restart.\n`,
           );
         }
+        // F2 (#4175 commit 5): pool-mode routing. When the pool holds
+        // entries for this name, route restart through the pool so all
+        // matching entries restart with proper per-entry generation
+        // tracking + snapshot replay (see mcp-pool-entry.ts). The
+        // legacy per-session path stays as fallback when the pool is
+        // disabled (`QWEN_SERVE_NO_MCP_POOL=1`), absent, or empty for
+        // this name (e.g. unpooled HTTP/SSE/SDK transports).
+        const poolSnapshot = this.mcpPool?.getSnapshot();
+        const poolHasEntries =
+          poolSnapshot !== undefined &&
+          (poolSnapshot.byName[serverName]?.entryCount ?? 0) > 0;
+        if (this.mcpPool && poolHasEntries) {
+          const restartResults = await this.mcpPool.restartByName(serverName, {
+            ...(entryIndex !== undefined ? { entryIndex } : {}),
+          });
+          // V21-7: when the caller asked for a specific `entryIndex`
+          // that doesn't match any current pool entry, return an
+          // empty `entries` array rather than throwing — matches the
+          // design's documented "404-like soft signal" for narrowed
+          // restarts where the underlying entry drained between the
+          // status snapshot and the restart call.
+          return {
+            serverName,
+            entries: restartResults,
+          };
+        }
         // #4297 fold-in 9 (gpt-5.5 critical, addresses #3263088414):
         // route through `ToolRegistry.discoverToolsForServer` instead
         // of calling `manager.discoverMcpToolsForServer` directly.
@@ -1746,6 +1852,22 @@ class QwenAgent implements Agent {
         // that were already in the registry from the prior boot
         // would keep serving requests, silently breaking the
         // documented "toggle + restart" promise.
+        //
+        // F2 (#4175 commit 5): an explicit `entryIndex` query against
+        // the legacy (no-pool) path is invalid — the legacy path has
+        // exactly one entry per server name, so `entryIndex !== 0` can
+        // never match. Reject with invalidParams to surface the
+        // operator's mistake (likely calling pool semantics against a
+        // `--no-mcp-pool` daemon) rather than silently restarting the
+        // single legacy entry.
+        if (entryIndex !== undefined && entryIndex !== 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            `entryIndex=${entryIndex} requested but pool not active for ` +
+              `${JSON.stringify(serverName)} — legacy single-entry path ` +
+              `only supports entryIndex=0 or undefined`,
+          );
+        }
         const start = Date.now();
         const toolRegistry = this.config.getToolRegistry();
         if (!toolRegistry) {

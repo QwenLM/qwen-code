@@ -2752,7 +2752,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return { toolName, enabled };
     },
 
-    async restartMcpServer(serverName, originatorClientId) {
+    async restartMcpServer(serverName, originatorClientId, opts) {
       // #4175 Wave 4 PR 17. The restart logic lives inside the ACP
       // child (it owns the `McpClientManager`); the bridge's role is
       // to (a) pick a live channel to forward through, (b) translate
@@ -2763,37 +2763,55 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // not connected) are translated via `data.errorKind` into typed
       // bridge errors that `sendBridgeError` maps to stable HTTP
       // responses (#4282 gpt-5.5 C4/C5 fold-in).
+      //
+      // F2 (#4175 commit 5): `opts.entryIndex` is forwarded to the
+      // ACP child for pool-mode restart targeting. The agent's
+      // handler falls back to legacy single-entry semantics when no
+      // pool entry matches, so older daemons that don't yet honor
+      // `entryIndex` keep the pre-F2 response shape — clients
+      // gated on the `mcp_pool_restart` capability tag are the only
+      // ones that send `entryIndex`.
       const info = liveChannelInfo();
       if (!info) {
         throw new SessionNotFoundError(`mcp:${serverName}`);
       }
-      let response:
-        | { serverName: string; restarted: true; durationMs: number }
-        | {
-            serverName: string;
-            restarted: false;
-            skipped: true;
-            reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
-          };
+      type LegacyOk = {
+        serverName: string;
+        restarted: true;
+        durationMs: number;
+      };
+      type LegacySkip = {
+        serverName: string;
+        restarted: false;
+        skipped: true;
+        reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      };
+      type PoolEntries = {
+        serverName: string;
+        entries: Array<{
+          entryIndex: number;
+          restarted: boolean;
+          durationMs?: number;
+          reason?: string;
+        }>;
+      };
+      let response: LegacyOk | LegacySkip | PoolEntries;
+      const params: Record<string, unknown> = { serverName };
+      if (opts?.entryIndex !== undefined) {
+        params['entryIndex'] = opts.entryIndex;
+      }
       try {
         response = (await Promise.race([
           withTimeout(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
-              { serverName },
+              params,
             ),
             MCP_RESTART_TIMEOUT_MS,
             SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
           ),
           getChannelClosedReject(info),
-        ])) as
-          | { serverName: string; restarted: true; durationMs: number }
-          | {
-              serverName: string;
-              restarted: false;
-              skipped: true;
-              reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
-            };
+        ])) as LegacyOk | LegacySkip | PoolEntries;
       } catch (err) {
         // Detect structured ACP error payloads and re-instantiate as
         // typed bridge errors. JSON-RPC strips class names across the
@@ -2816,7 +2834,40 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         }
         throw err;
       }
-      if (response.restarted === true) {
+      // F2 (#4175 commit 5): pool-mode `entries[]` shape fans out one
+      // typed event per entry so SDK reducers see a stable per-entry
+      // count regardless of whether the underlying restart was
+      // single-entry (legacy) or multi-entry (pool-mode). Reusing the
+      // existing `mcp_server_restarted` / `mcp_server_restart_refused`
+      // event types keeps `KnownDaemonEvent` schema additive — clients
+      // gated only on `entryCount > 1` get accurate per-entry signals
+      // without a new event type.
+      if ('entries' in response) {
+        for (const entry of response.entries) {
+          if (entry.restarted) {
+            broadcastWorkspaceEvent({
+              type: 'mcp_server_restarted',
+              data: {
+                serverName: response.serverName,
+                durationMs: entry.durationMs ?? 0,
+                entryIndex: entry.entryIndex,
+              },
+              ...(originatorClientId ? { originatorClientId } : {}),
+            });
+          } else {
+            broadcastWorkspaceEvent({
+              type: 'mcp_server_restart_refused',
+              data: {
+                serverName: response.serverName,
+                reason: 'restart_failed',
+                entryIndex: entry.entryIndex,
+                ...(entry.reason ? { details: entry.reason } : {}),
+              },
+              ...(originatorClientId ? { originatorClientId } : {}),
+            });
+          }
+        }
+      } else if (response.restarted === true) {
         broadcastWorkspaceEvent({
           type: 'mcp_server_restarted',
           data: {

@@ -162,6 +162,27 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `'in_flight'` (concurrent discovery in progress), `'disabled'`
   // (server is configured but explicitly disabled).
   workspace_mcp_restart: { since: 'v1' },
+  // F2 (#4175 commit 5). Daemon hosts a workspace-shared MCP transport
+  // pool (`QwenAgent.mcpPool`); `GET /workspace/mcp` reflects pool-level
+  // accounting (`entryCount`, `entrySummary` on each per-server cell).
+  // Advertised CONDITIONALLY — the kill switch
+  // `QWEN_SERVE_NO_MCP_POOL=1` env var falls back to per-session MCP
+  // clients (pre-F2 behavior) and the tag is omitted so SDK consumers
+  // pre-flighting on the tag get accurate "pool is on" semantics.
+  // Old daemons without F2 also omit the tag.
+  mcp_workspace_pool: { since: 'v1' },
+  // F2 (#4175 commit 5). `POST /workspace/mcp/:server/restart`
+  // accepts an optional `?entryIndex=N` (or `*`) query parameter
+  // and may return the new `{entries: RestartResult[]}` shape when
+  // the pool holds multiple entries for the same server name (e.g.
+  // sessions injected divergent OAuth headers). Single-entry
+  // restarts continue to return the legacy `{restarted, durationMs}`
+  // shape for compatibility with pre-F2 SDK clients. Advertised
+  // CONDITIONALLY in lockstep with `mcp_workspace_pool`: pool
+  // off → both tags absent, pool on → both tags present. Operators
+  // pre-flighting on this tag can branch on whether the response
+  // shape may include `entries[]`.
+  mcp_pool_restart: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so
@@ -188,11 +209,16 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
  * Per-deployment feature toggles surfaced through `/capabilities`.
  *
  * `requireAuth` controls whether the conditional `require_auth` tag is
- * advertised. Other Wave 4 follow-ups can extend this object as more
- * deployment-shape capability tags appear (e.g. `redact_errors`).
+ * advertised. `mcpPoolActive` (F2 #4175 commit 5) advertises
+ * `mcp_workspace_pool` + `mcp_pool_restart` together when the daemon
+ * runs with the pool enabled (default; off only with
+ * `QWEN_SERVE_NO_MCP_POOL=1`). Other Wave 4 follow-ups can extend
+ * this object as more deployment-shape capability tags appear (e.g.
+ * `redact_errors`).
  */
 export interface AdvertiseFeatureToggles {
   requireAuth?: boolean;
+  mcpPoolActive?: boolean;
 }
 
 /**
@@ -232,6 +258,13 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  // F2 (#4175 commit 5): pool tags advertise as a unit. Both keys
+  // share the same predicate so SDK clients can rely on
+  // `mcp_workspace_pool ⇒ entryCount/entrySummary fields present`
+  // and `mcp_pool_restart ⇒ ?entryIndex= + entries[] response shape
+  // valid` without per-tag pre-flighting.
+  ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
+  ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

@@ -147,9 +147,18 @@ const EXPECTED_STAGE1_FEATURES = [
 // truth ORDER puts `require_auth` between PR 11 (`session_metadata`)
 // and PR 21 (`auth_device_flow`); reflect that here so the assertion
 // matches the real ordering.
+//
+// F2 (#4175 commit 5): `mcp_workspace_pool` + `mcp_pool_restart` are
+// also conditional (gated on `mcpPoolActive` toggle, default-true at
+// call site in server.ts but default-OFF at the predicate so a
+// no-toggle invocation matches the established `require_auth`
+// pattern). Both insert AFTER `workspace_mcp_restart` and BEFORE
+// `require_auth` so the registry order matches `capabilities.ts`.
 const EXPECTED_REGISTERED_FEATURES = [
   // Same order as `SERVE_CAPABILITY_REGISTRY` declaration:
   ...EXPECTED_STAGE1_FEATURES.filter((f) => f !== 'auth_device_flow'),
+  'mcp_workspace_pool',
+  'mcp_pool_restart',
   'require_auth',
   'auth_device_flow',
 ] as const;
@@ -799,6 +808,27 @@ describe('createServeApp', () => {
           expect(predicate({})).toBe(false);
           expect(
             getAdvertisedServeFeatures(undefined, { requireAuth: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (
+          feature === 'mcp_workspace_pool' ||
+          feature === 'mcp_pool_restart'
+        ) {
+          // F2 (#4175 commit 5): both pool tags share the
+          // `mcpPoolActive` predicate and advertise in lockstep.
+          // Default-OFF at the predicate (matches `require_auth`'s
+          // pattern); the server.ts call site flips to default-ON via
+          // `opts.mcpPoolActive !== false`, so a daemon booted without
+          // the kill switch advertises both tags by default.
+          expect(predicate({ mcpPoolActive: true })).toBe(true);
+          expect(predicate({ mcpPoolActive: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { mcpPoolActive: true }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
