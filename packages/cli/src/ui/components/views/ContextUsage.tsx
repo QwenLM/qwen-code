@@ -231,7 +231,7 @@ const CompactionThresholds: React.FC<{
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
         <Text bold color={tierColor(currentTier)}>
-          {currentTier}
+          {t(currentTier)}
         </Text>
       </Box>
     </Box>

@@ -103,6 +103,23 @@ export const HARD_BUFFER = 3_000;
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
+/**
+ * Compiled extraction regex for the `<state_snapshot>` envelope.
+ * Hoisted to module scope because it depends only on the immutable
+ * `COMPRESSION_SNAPSHOT_TAG` — rebuilding via `new RegExp()` on every
+ * `compress()` call was waste and signaled (falsely) to readers that
+ * the pattern might vary per call. (R11.7)
+ *
+ * The greedy `[\s\S]*` prefix anchors on the LAST opening tag so a
+ * scratchpad that mentions the tag literally (the prompt instructs
+ * the model to "generate the <state_snapshot>") doesn't pull
+ * scratchpad content into the captured envelope. See R8.6 for the
+ * design discussion.
+ */
+const SNAPSHOT_REGEX = new RegExp(
+  `[\\s\\S]*<${COMPRESSION_SNAPSHOT_TAG}>([\\s\\S]*?)</${COMPRESSION_SNAPSHOT_TAG}>`,
+);
+
 export interface CompactionThresholds {
   /** Token count at which UI warn tier triggers. */
   readonly warn: number;
@@ -325,6 +342,24 @@ export class ChatCompressionService {
     const compactTrigger = trigger ?? (force ? 'manual' : 'auto');
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
+
+    // R11.4: explicit user disable wins over all internal state. The
+    // proactive cheap-gate and hard-rescue paths NOOP; the user-
+    // initiated path (`force=true` for manual /compress) and heap-
+    // pressure bypass remain active because the user has explicitly
+    // asked or the process is at memory risk. Reactive overflow at
+    // the API layer is still the last-ditch safety net. Replaces the
+    // removed `contextPercentageThreshold: 0` escape hatch.
+    if (chatCompressionSettings?.disabled && !force && !bypassTokenThreshold) {
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      };
+    }
 
     // Cheap gates first — these don't need the curated history. Heap-pressure
     // bypass must also bypass the consecutive-failure breaker, otherwise N
@@ -553,15 +588,12 @@ export class ChatCompressionService {
     // a greedy prefix `[\s\S]*<state_snapshot>` forces the regex
     // engine to find the LAST opening tag, then the non-greedy
     // `[\s\S]*?</state_snapshot>` captures the smallest valid envelope.
-    // R9.3: build the regex from the shared `COMPRESSION_SNAPSHOT_TAG`
-    // constant so a rename in `prompts.ts` is type-safe rather than a
-    // silent failure mode (model emits old tag → regex never matches →
-    // every send EMPTY_SUMMARY → breaker trips after 3 sends → auto-
-    // compaction permanently disabled with no actionable signal).
-    const snapshotRegex = new RegExp(
-      `[\\s\\S]*<${COMPRESSION_SNAPSHOT_TAG}>([\\s\\S]*?)</${COMPRESSION_SNAPSHOT_TAG}>`,
-    );
-    const snapshotMatch = rawSummaryText?.match(snapshotRegex);
+    // R9.3 / R11.7: regex hoisted to module scope (`SNAPSHOT_REGEX`)
+    // — it depends only on `COMPRESSION_SNAPSHOT_TAG` which is itself
+    // module-level and immutable, so rebuilding per `compress()` call
+    // was waste. Hoisting also signals to readers that the pattern is
+    // a fixed contract, not parameterised.
+    const snapshotMatch = rawSummaryText?.match(SNAPSHOT_REGEX);
     const summary = snapshotMatch
       ? `<${COMPRESSION_SNAPSHOT_TAG}>${snapshotMatch[1]}</${COMPRESSION_SNAPSHOT_TAG}>`
       : '';
@@ -582,18 +614,23 @@ export class ChatCompressionService {
     // text but didn't follow the <state_snapshot> contract. Without a
     // distinguishing log, this is indistinguishable from a model that
     // genuinely returned nothing (which warrants different operator
-    // action: prompt vs. provider). Log the length + a short slice for
-    // diagnostic context. Slice is bounded so a runaway scratchpad
-    // can't flood the log; the snapshot envelope itself, if any, is
-    // already either persisted (above) or absent (this branch).
+    // action: prompt vs. provider).
+    //
+    // R11.6: log the length only. Earlier versions included
+    // `rawSummaryText.slice(0, 200)` for diagnostic context, but the
+    // scratchpad's most sensitive content (API keys, paths quoted from
+    // tool output) often appears in the FIRST 200 chars of the model's
+    // reasoning — exactly the window that slice captured. The length
+    // alone distinguishes "model returned nothing" from "model
+    // returned content but no <state_snapshot> tags", which is the
+    // operationally actionable distinction; the actual content can be
+    // recovered from provider-side logging if needed.
     if (!isRawEmpty && isSummaryEmpty) {
-      const slice = rawSummaryText!.slice(0, 200);
       config
         .getDebugLogger()
         .warn(
           `[chat-compression] model output (${rawSummaryText!.length} chars) ` +
-            `contained no <state_snapshot> tags — treating as empty summary. ` +
-            `First 200 chars: ${slice}`,
+            `contained no <${COMPRESSION_SNAPSHOT_TAG}> tags — treating as empty summary.`,
         );
     }
     const compressionUsageMetadata = summaryResult.usage;

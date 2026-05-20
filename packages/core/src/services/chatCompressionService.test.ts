@@ -672,6 +672,98 @@ describe('ChatCompressionService', () => {
     expect(mockGenerateContent).toHaveBeenCalled();
   });
 
+  it('honors chatCompression.disabled and NOOPs the cheap-gate without firing the side query (R11.4)', async () => {
+    // R11.4: re-adds the disable escape hatch removed alongside
+    // contextPercentageThreshold. Users with compliance / debugging /
+    // audit-trail needs set `chatCompression.disabled: true` to keep
+    // full uncompressed history. Reactive overflow still runs at the
+    // API layer as the safety net; only the proactive + hard-rescue
+    // paths skip. Force / heap-pressure bypass still take effect
+    // (manual /compress and process-wide memory pressure remain).
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      100_000,
+    );
+    vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+      disabled: true,
+    });
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 128_000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const mockGenerateContent = vi.fn();
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: false, // proactive path
+      model: mockModel,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+    expect(mockGenerateContent).not.toHaveBeenCalled();
+  });
+
+  it('chatCompression.disabled still allows force=true (manual /compress) to proceed (R11.4)', async () => {
+    // The disable knob is for the AUTOMATIC paths only. Manual
+    // /compress (force=true) and heap-pressure bypass remain
+    // active — the user has explicitly asked, or the process is at
+    // memory risk.
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      100_000,
+    );
+    vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+      disabled: true,
+    });
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 128_000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      text: '<state_snapshot>Manual</state_snapshot>',
+      usage: {
+        promptTokenCount: 99_000,
+        candidatesTokenCount: 1500,
+        totalTokenCount: 100_500,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      model: mockModel,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(mockGenerateContent).toHaveBeenCalled();
+  });
+
   it('should return NOOP when historyToCompress is below MIN_COMPRESSION_FRACTION of total', async () => {
     // Construct a history where the split point lands on the 2nd regular user
     // message (index 2), but indices 0-1 are tiny relative to the huge content

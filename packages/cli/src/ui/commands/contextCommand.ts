@@ -460,7 +460,10 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     lines.push(
       `  ${t('Hard threshold')}:     ${formatNum(breakdown.thresholds.hard)}`,
     );
-    lines.push(`  ${t('Current tier')}:       ${breakdown.currentTier}`);
+    // R11.8: wrap the tier value in t() so non-English locales don't
+    // see a mixed-language render (English tier name + translated
+    // label). Same pattern in ContextUsage.tsx render.
+    lines.push(`  ${t('Current tier')}:       ${t(breakdown.currentTier)}`);
     lines.push('');
     lines.push(`**${t('Usage by category')}**`);
   }

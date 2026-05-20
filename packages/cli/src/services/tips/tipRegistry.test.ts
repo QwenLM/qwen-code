@@ -62,6 +62,28 @@ describe('context-* tip thresholds align with computeThresholds', () => {
     );
   });
 
+  it('context-high covers the small-window collapse case (R11.2: hard === auto)', () => {
+    // R9.5 gated context-critical on `hard > auto` to avoid claiming
+    // "near hard limit" when there's no distinct hard tier. That
+    // created a coverage gap on small windows: context-high's band
+    // `[auto, hard)` is the empty set when hard === auto, so users at
+    // the auto threshold got no tip at all. R11.2: context-high must
+    // fire on `>= auto` when hard === auto (treating it as "everything
+    // above auto" — there's no distinct hard tier to delimit).
+    const t = tipById('context-high');
+    const collapsedCtx = {
+      ...baseCtx,
+      thresholds: {
+        effectiveWindow: 32_000,
+        warn: 18_000,
+        auto: 22_400,
+        hard: 22_400, // collapsed
+      },
+      lastPromptTokenCount: 25_000, // above the collapsed threshold
+    };
+    expect(t.isRelevant(collapsedCtx)).toBe(true);
+  });
+
   it('context-critical suppresses when hard === auto (R9.5 small-window collapse)', () => {
     // On small windows (e.g. 32K) computeThresholds collapses
     // hard to equal auto. The critical band [hard, ∞) starts at the

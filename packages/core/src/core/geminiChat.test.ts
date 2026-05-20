@@ -2465,6 +2465,51 @@ describe('GeminiChat', async () => {
       expect(internals.breakerWarningEmitted).toBe(false);
     });
 
+    it('coerces NaN candidatesTokenCount from usageMetadata to 0 (R11.1)', async () => {
+      // R11.1: `??` only coalesces null/undefined; NaN passes through.
+      // If a provider returns NaN, the stored field becomes NaN; next
+      // turn's `estimatePromptTokens` returns NaN; `NaN >= hard` is
+      // always false → hard-rescue never fires → API overflows. Guard
+      // with Number.isFinite so any non-finite value (NaN / Infinity)
+      // coerces to 0.
+      type ChatInternals = { lastCandidatesTokenCount: number };
+      const internals = chat as unknown as ChatInternals;
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'ok' }], role: 'model' },
+                finishReason: 'STOP',
+                index: 0,
+                safetyRatings: [],
+              },
+            ],
+            usageMetadata: {
+              promptTokenCount: 10_000,
+              candidatesTokenCount: NaN, // hostile provider payload
+              totalTokenCount: 10_000,
+            },
+            text: () => 'ok',
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-r11-1-nan',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // Without the Number.isFinite guard, this would be NaN.
+      expect(internals.lastCandidatesTokenCount).toBe(0);
+      expect(Number.isFinite(internals.lastCandidatesTokenCount)).toBe(true);
+    });
+
     it('budget-exhausted warn fires once per exhaustion, not on every send (R8.4)', async () => {
       // Symmetric with R7.9's `breakerWarningEmitted`: once the rescue
       // budget exhausts and the chat stays over hard, the warn must

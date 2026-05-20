@@ -67,10 +67,16 @@ export const tipRegistry: ContextualTip[] = [
     id: 'context-high',
     content: 'Context is getting full. Use /compress to free up space.',
     trigger: 'post-response',
+    // R11.2: when `hard === auto` (small windows ≤ ~77K, including
+    // 32K / 64K), the `[auto, hard)` band collapses to empty —
+    // context-critical is suppressed by R9.5's guard and the user
+    // would otherwise get no tip at all. Accept everything `>= auto`
+    // in that case: there's no distinct hard tier above to delimit.
     isRelevant: (ctx) =>
       ctx.thresholds !== undefined &&
       ctx.lastPromptTokenCount >= ctx.thresholds.auto &&
-      ctx.lastPromptTokenCount < ctx.thresholds.hard,
+      (ctx.thresholds.hard === ctx.thresholds.auto ||
+        ctx.lastPromptTokenCount < ctx.thresholds.hard),
     cooldownPrompts: 5,
     priority: 90,
   },

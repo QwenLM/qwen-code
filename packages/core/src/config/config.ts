@@ -276,6 +276,16 @@ export interface ChatCompressionSettings {
    * Env override: `QWEN_IMAGE_TOKEN_ESTIMATE`.
    */
   imageTokenEstimate?: number;
+  /**
+   * When `true`, auto-compaction (proactive + hard-tier rescue) is
+   * disabled entirely. The chat keeps growing without bound until the
+   * API rejects an oversized prompt, at which point reactive overflow
+   * recovery still runs as a last-ditch safety net. Use for
+   * compliance / debugging / audit-trail sessions that need
+   * uncompressed history. Replaces the removed
+   * `contextPercentageThreshold: 0` escape hatch. (review #4168 R11.4)
+   */
+  disabled?: boolean;
 }
 
 /**

@@ -717,6 +717,18 @@ export class GeminiChat {
       // MAX_CONSECUTIVE_FAILURES strikes in a row.
       if (!force) {
         this.consecutiveFailures += 1;
+        // R11.3: per-strike visibility. Pre-R11.3, the FIRST log line
+        // for proactive failures was the breaker-trip warn-once on
+        // strike 3 — strikes 1 and 2 produced nothing. An oncall
+        // investigating "auto-compaction stopped" couldn't see WHICH
+        // status (EMPTY_SUMMARY vs OUTPUT_TRUNCATED vs INFLATED vs
+        // TOKEN_COUNT_ERROR) drove the trip without source diving.
+        // Info-level: compaction failures are rare in normal
+        // operation, so this isn't happy-path noise.
+        debugLogger.info(
+          `[chat-compression] auto-compaction failed: status=${info.compressionStatus}, ` +
+            `strike=${this.consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}`,
+        );
       }
     }
 
@@ -873,7 +885,16 @@ export class GeminiChat {
       //   - NOOP   (history too small to split) → strike kept
       //   - failure status                      → strike kept
       //   - COMPRESSED                          → strike refunded
-      const wantHardRescue = effectiveTokens >= hard;
+      // R11.4: if the user has explicitly disabled auto-compaction,
+      // hard-rescue (which is the AUTOMATIC overflow protector, not
+      // manual /compress) is suppressed too — reactive overflow at the
+      // API layer remains the last-ditch safety net. The service-level
+      // disable gate catches the proactive cheap-gate (force=false);
+      // hard-rescue uses force=true to bypass the breaker, so it would
+      // otherwise sidestep that gate. Skip at the source.
+      const autoCompactionDisabled =
+        this.config.getChatCompression()?.disabled === true;
+      const wantHardRescue = !autoCompactionDisabled && effectiveTokens >= hard;
       const shouldForceFromHard =
         wantHardRescue &&
         this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
@@ -1650,10 +1671,19 @@ export class GeminiChat {
           // appended to history immediately after this handler runs,
           // and the next turn's prompt-size estimate needs to add it
           // back since `lastPromptTokenCount` only reflects the input
-          // sent on THIS turn. Coalesce undefined → 0 so we never feed
-          // NaN into the gate arithmetic.
-          this.lastCandidatesTokenCount =
-            usageMetadata.candidatesTokenCount ?? 0;
+          // sent on THIS turn.
+          //
+          // R11.1: use Number.isFinite so a hostile / buggy provider
+          // payload (NaN, Infinity, non-number) coerces to 0 instead
+          // of poisoning the field. `??` would let NaN through — and
+          // because `NaN >= hard` is always false, the propagated NaN
+          // would silently disable hard-tier rescue for the rest of
+          // the session.
+          this.lastCandidatesTokenCount = Number.isFinite(
+            usageMetadata.candidatesTokenCount,
+          )
+            ? (usageMetadata.candidatesTokenCount as number)
+            : 0;
           // Mirror to the global telemetry only when wired — subagents
           // pass `telemetryService=undefined` to keep their context usage
           // out of the main session's UI counters.
