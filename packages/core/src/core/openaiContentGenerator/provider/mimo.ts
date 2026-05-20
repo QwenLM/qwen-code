@@ -7,8 +7,9 @@
 import type OpenAI from 'openai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import type { ExtendedChatCompletionAssistantMessageParam } from '../converter.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
+import type { OpenAIRequestContextOverrides } from './types.js';
+import { ensureReasoningContentOnAssistantMessage } from './utils.js';
 
 export function isMiMoProvider(
   contentGeneratorConfig: ContentGeneratorConfig,
@@ -24,7 +25,7 @@ export function isMiMoProvider(
         return true;
       }
     } catch {
-      // Invalid custom URLs fall through to model-name detection.
+      // Non-MiMo URLs fall through to model-name detection.
     }
   }
 
@@ -53,35 +54,16 @@ export class MiMoOpenAICompatibleProvider extends DefaultOpenAICompatibleProvide
 
     return {
       ...baseRequest,
-      messages: baseRequest.messages.map(ensureReasoningContentOnToolCalls),
+      messages: baseRequest.messages.map(
+        ensureReasoningContentOnAssistantMessage,
+      ),
     };
   }
 
-  getRequestContextOverrides(): { splitToolMedia?: boolean } {
+  getRequestContextOverrides(): OpenAIRequestContextOverrides {
+    // Respect explicit user configuration; default to true for MiMo compatibility.
     return {
       splitToolMedia: this.contentGeneratorConfig.splitToolMedia ?? true,
     };
   }
-}
-
-function ensureReasoningContentOnToolCalls(
-  message: OpenAI.Chat.ChatCompletionMessageParam,
-): OpenAI.Chat.ChatCompletionMessageParam {
-  if (message.role !== 'assistant') {
-    return message;
-  }
-
-  const assistant = message as ExtendedChatCompletionAssistantMessageParam;
-  if (!assistant.tool_calls?.length) {
-    return message;
-  }
-
-  if (typeof assistant.reasoning_content === 'string') {
-    return message;
-  }
-
-  return {
-    ...assistant,
-    reasoning_content: '',
-  } as OpenAI.Chat.ChatCompletionMessageParam;
 }

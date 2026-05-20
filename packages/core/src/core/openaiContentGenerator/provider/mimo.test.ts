@@ -161,7 +161,7 @@ describe('MiMoOpenAICompatibleProvider', () => {
     expect(assistant.reasoning_content).toBe('I should search the repository.');
   });
 
-  it('does not add reasoning_content to assistant turns without tool calls', () => {
+  it('injects empty reasoning_content on assistant turns without tool calls', () => {
     const provider = determineProvider(
       createProviderConfig(),
       createCliConfig(),
@@ -179,6 +179,6 @@ describe('MiMoOpenAICompatibleProvider', () => {
       reasoning_content?: string;
     };
 
-    expect(assistant.reasoning_content).toBeUndefined();
+    expect(assistant.reasoning_content).toBe('');
   });
 });
