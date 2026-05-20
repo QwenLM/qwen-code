@@ -322,8 +322,14 @@ export class McpTransportPool {
       const status = entry.getLocalStatus();
       if (status === MCPServerStatus.CONNECTED) {
         total += 1;
-        const transport = mcpTransportOf(entry.cfg);
-        if (transport === 'stdio' || transport === 'websocket') {
+        // F2 (#4175 commit 5 review fix — wenshao R4 + R6): only
+        // count `stdio` toward `subprocessCount`. Websocket transports
+        // dial a (potentially remote) MCP server over the network and
+        // don't spawn a local OS child — including them inflates the
+        // subprocess metric and misleads operators doing capacity
+        // planning. Read transport via the new `entry.transportKind`
+        // getter so `entry.cfg` (carrying secrets) stays encapsulated.
+        if (entry.transportKind === 'stdio') {
           subprocessCount += 1;
         }
       }

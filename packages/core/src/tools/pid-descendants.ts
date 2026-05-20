@@ -118,8 +118,20 @@ async function listDescendantPidsWin(root: number): Promise<number[]> {
     try {
       // CIM is the modern replacement for `wmic` (deprecated in
       // Win10 21H1+). Single-line script so we can pass via -Command.
+      //
+      // F2 (#4175 commit 5 review fix — wenshao R5): bind the pid to
+      // a PowerShell `$p` variable instead of interpolating the
+      // integer directly into the `-Filter` string. The entry-point
+      // guard (`Number.isInteger(rootPid) && rootPid > 0`) plus
+      // `parseInt` filtering already make injection impossible
+      // today, but a future relaxation of either guard would turn an
+      // interpolated `${pid}` into a command-injection vector. The
+      // `$p` binding is parsed by PowerShell as a numeric variable,
+      // so even a contrived non-integer would be rejected by the
+      // `-Filter` parser rather than executed as PowerShell.
       const script =
-        `Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId=${pid}" ` +
+        `$p = ${pid}; ` +
+        `Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId=$p" ` +
         `| Select-Object -ExpandProperty ProcessId`;
       const { stdout } = await execFileAsync(
         'powershell.exe',

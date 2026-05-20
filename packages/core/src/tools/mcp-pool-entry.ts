@@ -16,7 +16,7 @@ import {
   updateMCPServerStatus,
 } from './mcp-client.js';
 import type { DiscoveredMCPTool } from './mcp-tool.js';
-import type { McpTransportKind } from './mcp-pool-key.js';
+import { mcpTransportOf, type McpTransportKind } from './mcp-pool-key.js';
 import {
   type ConnectionId,
   type PoolEntryState,
@@ -167,7 +167,13 @@ export class PoolEntry {
     readonly id: ConnectionId,
     readonly serverName: string,
     readonly entryIndex: number,
-    readonly cfg: MCPServerConfig,
+    // F2 (#4175 commit 5 review fix — wenshao R6): `cfg` carries
+    // secrets (env API keys, header auth tokens, OAuth fields) and
+    // must NOT be exposed publicly on the entry. Pool callers that
+    // need transport classification go through `transportKind`
+    // getter (computed via mcpTransportOf) instead of reading cfg
+    // directly. Internal: cliConfig/opts/onClosed already private.
+    private readonly cfg: MCPServerConfig,
     readonly client: McpClient,
     private readonly cliConfig: Config,
     private readonly opts: PoolEntryOptions,
@@ -207,6 +213,17 @@ export class PoolEntry {
 
   get currentState(): PoolEntryState {
     return this.state;
+  }
+
+  /**
+   * Transport family classification for snapshot consumers (e.g.
+   * `subprocessCount` in `pool.getSnapshot()`). Exposed as a getter
+   * instead of letting callers read `entry.cfg` so secrets in `cfg`
+   * (env API keys, header auth tokens, OAuth fields) stay
+   * encapsulated — see wenshao R6 review fold-in.
+   */
+  get transportKind(): McpTransportKind {
+    return mcpTransportOf(this.cfg);
   }
 
   /**
@@ -314,6 +331,29 @@ export class PoolEntry {
     if (this.firstIdleAt === undefined) {
       this.firstIdleAt = Date.now();
       this.maxIdleTimer = setTimeout(() => {
+        // F2 (#4175 commit 5 review fix — wenshao R1): the C2 fix
+        // intentionally lets `maxIdleTimer` survive attach/detach
+        // flap so the hard cap measures wall-clock from FIRST idle
+        // — but the timer's fire-action must still respect current
+        // refs. Pre-fix: a session re-attached inside the 30s drain
+        // grace, used the entry for 4+ minutes, then `maxIdleTimer`
+        // (started at the first detach) fired and force-closed an
+        // actively-used entry. The session would then permanently
+        // lose this server's tools because nothing re-acquires from
+        // outside — `discoverAllMcpToolsViaPool` only runs at
+        // discovery-pass boundaries and pool-mode disables health
+        // checks. Now: if there are active refs, the timer is a
+        // no-op that resets `firstIdleAt` so the next idle window
+        // gets a fresh hard cap.
+        if (this.refs.size > 0) {
+          debugLogger.debug(
+            `PoolEntry ${this.id} max-idle reached but ${this.refs.size} ` +
+              `sessions active; deferring close, resetting first-idle window`,
+          );
+          this.maxIdleTimer = undefined;
+          this.firstIdleAt = undefined;
+          return;
+        }
         debugLogger.warn(
           `PoolEntry ${this.id} hit MAX_IDLE_MS (${this.opts.maxIdleMs}ms); force-closing`,
         );
@@ -520,6 +560,28 @@ export class PoolEntry {
     }
     this.toolsSnapshot = snap.tools;
     this.promptsSnapshot = snap.prompts;
+    // F2 (#4175 commit 5 review fix — wenshao R3): subscribers don't
+    // listen on the entry's EventEmitter, so emitting toolsChanged /
+    // promptsChanged alone leaves session ToolRegistry instances
+    // holding stale pre-restart registrations. Latent until commit 5
+    // landed the restart HTTP route — now it's a correctness bug.
+    // Iterate `this.subscribers` directly and re-apply the fresh
+    // snapshots so each session's registry gets the new tools/prompts
+    // (SessionMcpView.applyTools handles the
+    // remove-old-then-register-new contract internally per its
+    // commit-2 docstring).
+    for (const [sid, view] of this.subscribers) {
+      try {
+        view.applyTools(this.toolsSnapshot);
+        view.applyPrompts(this.promptsSnapshot);
+      } catch (err) {
+        debugLogger.error(
+          `Restart fan-out to view ${sid}/${this.serverName} failed: ${String(
+            err,
+          )}`,
+        );
+      }
+    }
     this.localStatus = MCPServerStatus.CONNECTED;
     this.suppressNextStatusEcho = true;
     this.updateGlobalStatus();

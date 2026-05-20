@@ -198,6 +198,24 @@ export async function runAcpAgent(
     return agentInstance;
   }, stream);
 
+  // F2 (#4175 commit 5 review fix — wenshao R8): both the SIGTERM
+  // handler and the IDE-initiated close path need to drain the MCP
+  // pool before runExitCleanup. Pre-fix the same try/catch with the
+  // same 8s timeout was duplicated verbatim — easy drift target.
+  // Single helper closure keeps the timeout + log labels consistent
+  // and means future changes to the drain semantics happen in one
+  // place. 8s budget is `MAX_DRAIN_MS - 2s` (per design §17 wall-
+  // clock budget) so descendant pid sweeps still complete before
+  // runExitCleanup's own kill loop kicks in.
+  const drainPoolBeforeExit = async (label: string): Promise<void> => {
+    if (!agentInstance) return;
+    try {
+      await agentInstance.shutdownMcpPool(8_000);
+    } catch (err) {
+      debugLogger.error(`[ACP] MCP pool drain (${label}) error:`, err);
+    }
+  };
+
   // Handle SIGTERM/SIGINT for graceful shutdown.
   // Without this, signal handlers registered elsewhere in the CLI
   // (e.g., stdin raw mode restoration) override the default exit behavior,
@@ -264,13 +282,7 @@ export async function runAcpAgent(
     // runExitCleanup so the descendant pid sweep (commit 3) can
     // SIGTERM npx/uvx wrapper grandchildren. runExitCleanup's own
     // child kill is a fallback for processes the pool didn't track.
-    if (agentInstance) {
-      try {
-        await agentInstance.shutdownMcpPool(8_000);
-      } catch (err) {
-        debugLogger.error('[ACP] MCP pool drain error:', err);
-      }
-    }
+    await drainPoolBeforeExit('signal');
     // Clean up child processes (MCP servers, etc.) and force exit.
     // Without this, orphan subprocesses keep the Node.js event loop alive
     // and the CLI process never terminates after the IDE disconnects.
@@ -294,14 +306,9 @@ export async function runAcpAgent(
   // shared MCP entries (subprocess + descendants) until the OS
   // eventually reaped them — a real regression vs pre-F2 daemon
   // mode where each session's manager torn down its own clients
-  // on disconnect. Mirror the SIGTERM handler's pool drain here.
-  if (agentInstance) {
-    try {
-      await agentInstance.shutdownMcpPool(8_000);
-    } catch (err) {
-      debugLogger.error('[ACP] MCP pool drain on close error:', err);
-    }
-  }
+  // on disconnect. Mirror the SIGTERM handler's pool drain here via
+  // the shared helper (R8 fold-in).
+  await drainPoolBeforeExit('ide_close');
 
   process.off('SIGTERM', shutdownHandler);
   process.off('SIGINT', shutdownHandler);

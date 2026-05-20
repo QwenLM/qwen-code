@@ -4,9 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Prompt } from '@modelcontextprotocol/sdk/types.js';
 import type { DiscoveredMCPTool } from './mcp-tool.js';
-import type { DiscoveredMCPPrompt, MCPServerStatus } from './mcp-client.js';
+import type { DiscoveredMCPPrompt } from './mcp-client.js';
 
 /**
  * Opaque identifier for a pooled connection, of the form
@@ -80,45 +79,24 @@ export type PoolEvent =
     };
 
 /**
- * Type guards for narrowing PoolEvent in subscriber handlers.
- */
-export function isToolsChangedEvent(
-  e: PoolEvent,
-): e is Extract<PoolEvent, { kind: 'toolsChanged' }> {
-  return e.kind === 'toolsChanged';
-}
-
-export function isPromptsChangedEvent(
-  e: PoolEvent,
-): e is Extract<PoolEvent, { kind: 'promptsChanged' }> {
-  return e.kind === 'promptsChanged';
-}
-
-export function isDisconnectedEvent(
-  e: PoolEvent,
-): e is Extract<PoolEvent, { kind: 'disconnected' }> {
-  return e.kind === 'disconnected';
-}
-
-export function isReconnectedEvent(
-  e: PoolEvent,
-): e is Extract<PoolEvent, { kind: 'reconnected' }> {
-  return e.kind === 'reconnected';
-}
-
-export function isFailedEvent(
-  e: PoolEvent,
-): e is Extract<PoolEvent, { kind: 'failed' }> {
-  return e.kind === 'failed';
-}
-
-/**
  * Error thrown when an in-flight `callTool` is interrupted by a
  * transport disconnect mid-call. Pool does NOT auto-retry — semantics
  * are unsafe for writes (commit, file edit, etc.) and the pool can't
  * distinguish read from write. Caller decides retry policy.
  *
  * See `docs/design/f2-mcp-transport-pool.md` §13.4.
+ *
+ * F2 (#4175 commit 5 review fix — wenshao R7 partial): the throw
+ * site lives in the pool's `callTool` wrapper which is scheduled
+ * for a later F2 follow-up (the design's V21-5 in-flight call
+ * interception). Type guards (`isToolsChangedEvent`, etc.),
+ * `PoolEntryConnectionStatus`, and the `Prompt` re-export were
+ * removed in the same fold-in — none had any callers and they
+ * were premature public surface. `MCPCallInterruptedError` stays
+ * because the design doc declares it as the user-facing contract;
+ * removing it now would lose the invariant carrier across the
+ * pool's lifecycle. Re-introduce the type guards alongside their
+ * first concrete consumer.
  */
 export class MCPCallInterruptedError extends Error {
   override readonly name = 'MCPCallInterruptedError';
@@ -148,16 +126,3 @@ export class MCPCallInterruptedError extends Error {
     this.args = args;
   }
 }
-
-/**
- * Re-export Prompt for downstream consumers that import event types and
- * want the underlying MCP prompt schema without pulling from the SDK directly.
- */
-export type { Prompt };
-
-/**
- * Pool-side projection of `MCPServerStatus` for snapshot consumers.
- * Mirrors the existing enum 1:1 — exported separately so pool callers
- * don't need to import the manager-era types directly.
- */
-export type PoolEntryConnectionStatus = MCPServerStatus;

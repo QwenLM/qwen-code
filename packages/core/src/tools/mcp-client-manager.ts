@@ -21,6 +21,17 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import type { EventEmitter } from 'node:events';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+// F2 (#4175 commit 5 review fix — wenshao R2): `connectionIdOf` for
+// the discoverAllMcpToolsViaPool diff. Static import from a leaf module
+// is safe even though mcp-pool-key.ts imports `mcpTransportOf` from
+// here — that import is a value-level back-edge that ES module hoisting
+// resolves before either side's top-level code runs. The other pool
+// modules (mcp-transport-pool.ts, mcp-pool-entry.ts) intentionally use
+// `import('...')` types to avoid pulling in their RUNTIME code, but
+// mcp-pool-key.ts is pure utility (hash + string concat) with no
+// runtime side effects, so a static value import is fine.
+import { connectionIdOf } from './mcp-pool-key.js';
+import type { ConnectionId } from './mcp-pool-events.js';
 
 const debugLogger = createDebugLogger('MCP');
 
@@ -1355,7 +1366,6 @@ export class McpClientManager {
    */
   private async discoverAllMcpToolsViaPool(cliConfig: Config): Promise<void> {
     if (!this.pool) return; // unreachable; caller already gates
-    this.releaseAllPooledConnections();
     this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
     try {
       const sessionId = this.cliConfig.getSessionId();
@@ -1364,6 +1374,47 @@ export class McpClientManager {
         this.cliConfig.getMcpServers() || {},
         this.cliConfig.getMcpServerCommand(),
       );
+      // F2 (#4175 commit 5 review fix — wenshao R2): diff against the
+      // current `pooledConnections` instead of releasing all then
+      // re-acquiring everything. Pre-fix every incremental discovery
+      // pass (the default progressive-mode boot path also routes
+      // through here) was: `release-all` → `view.teardown` →
+      // `removeMcpToolsByServer` for every server, then
+      // `pool.acquire` → `view.applyTools` re-registers everything.
+      // That left a brief window with zero MCP tools registered AND
+      // bounced every pool entry's drain timer for no reason. Now:
+      //   1. Build the desired (name, fingerprint) set from current
+      //      config + filters (skip disabled, skip SDK MCP).
+      //   2. Release stale pooled connections (server removed,
+      //      disabled, or fingerprint changed) — survivors stay
+      //      attached, no tool registry churn.
+      //   3. Acquire only the desired connections we don't already
+      //      hold by id.
+      // SDK MCP servers always re-run via legacy
+      // `discoverMcpToolsForServer` (idempotent on re-call; the
+      // legacy path's `discoverMcpToolsForServer` purges existing
+      // entries before rediscovery).
+      const desiredIds = new Map<string, ConnectionId>();
+      for (const [name, config] of Object.entries(servers)) {
+        if (cliConfig.isMcpServerDisabled(name)) continue;
+        if (isSdkMcpServerConfig(config)) continue;
+        desiredIds.set(name, connectionIdOf(name, config));
+      }
+      // Release connections that are stale (no longer wanted, or
+      // wanted but with a different fingerprint).
+      for (const [name, conn] of [...this.pooledConnections]) {
+        const desired = desiredIds.get(name);
+        if (desired === undefined || desired !== conn.id) {
+          try {
+            conn.release();
+          } catch (err) {
+            debugLogger.debug(
+              `Pool release error (ignored): ${getErrorMessage(err)}`,
+            );
+          }
+          this.pooledConnections.delete(name);
+        }
+      }
       const acquirePromises = Object.entries(servers).map(
         async ([name, config]) => {
           if (cliConfig.isMcpServerDisabled(name)) {
@@ -1386,6 +1437,11 @@ export class McpClientManager {
             await this.discoverMcpToolsForServer(name, cliConfig);
             return;
           }
+          // R2 follow-on: skip if we already hold the exact desired
+          // connection (survived the diff above). Avoids the redundant
+          // `pool.acquire` call which would otherwise just bump the
+          // entry's refcount + trigger a snapshot replay.
+          if (this.pooledConnections.has(name)) return;
           try {
             const conn = await this.pool!.acquire(
               name,
