@@ -228,6 +228,7 @@ export interface DaemonTranscriptState {
   activeThoughtBlockId?: string;
   blockIndexById: Record<string, number>;
   toolBlockByCallId: Record<string, string>;
+  trimmedToolNotificationByCallId: Record<string, true>;
   permissionBlockByRequestId: Record<string, string>;
   nextOrdinal: number;
   now: number;
