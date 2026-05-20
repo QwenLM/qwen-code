@@ -26,6 +26,12 @@ import {
 import { createServeApp, resolveBridgeFsFactory } from './server.js';
 import type { ServeOptions } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
+// Wenshao review #4335 / 3272493805 — use the canonical
+// `PermissionPolicy` union from acp-bridge instead of inlining
+// the four string literals at the let-declaration, the `as`
+// cast, and the validation Set. Same drift-protection rationale
+// as types.ts/3271978342.
+import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
@@ -39,12 +45,86 @@ const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
  * matches with `instanceof InvalidPolicyConfigError` to distinguish
  * operator-misconfiguration (rethrow → fail boot loudly) from
  * settings-read failures (fall back to defaults).
+ *
+ * Exported so tests can `instanceof`-check; pre-Round-7 the class
+ * was private and the `expect(...).toThrow(InvalidPolicyConfigError)`
+ * assertion couldn't bind the constructor.
  */
-class InvalidPolicyConfigError extends Error {
+export class InvalidPolicyConfigError extends Error {
   override readonly name = 'InvalidPolicyConfigError';
   constructor(message: string) {
     super(message);
   }
+}
+
+/**
+ * Parse + validate the `policy.*` section of merged daemon settings.
+ * Extracted from inline boot logic (Round 8 / 3272493818) so the
+ * validation contract can be unit-tested without spinning up a
+ * daemon. Returns the resolved `permissionPolicy` /
+ * `permissionConsensusQuorum` for `BridgeOptions`, or throws
+ * `InvalidPolicyConfigError` for operator misconfiguration.
+ *
+ * - `permissionStrategy` must be one of the four `PermissionPolicy`
+ *   literals if present.
+ * - `consensusQuorum` must be a positive integer if present.
+ * - When `consensusQuorum` is set but `permissionStrategy` is not
+ *   `'consensus'`, the override is silently ignored — emit a
+ *   stderr warning so the operator notices.
+ *
+ * The mismatch warning runs through `onWarning` so tests can
+ * capture it; production passes `writeStderrLine`.
+ */
+export function validatePolicyConfig(
+  policyConfig: { permissionStrategy?: string; consensusQuorum?: number } = {},
+  onWarning: (message: string) => void = writeStderrLine,
+): {
+  permissionPolicy: PermissionPolicy | undefined;
+  permissionConsensusQuorum: number | undefined;
+} {
+  const _validPolicies: readonly PermissionPolicy[] = [
+    'first-responder',
+    'designated',
+    'consensus',
+    'local-only',
+  ];
+  const validSet: ReadonlySet<string> = new Set<string>(_validPolicies);
+  if (
+    policyConfig.permissionStrategy !== undefined &&
+    !validSet.has(policyConfig.permissionStrategy)
+  ) {
+    throw new InvalidPolicyConfigError(
+      `qwen serve: invalid policy.permissionStrategy ` +
+        `"${String(policyConfig.permissionStrategy)}"; must be one of ` +
+        `${Array.from(validSet).join(', ')}`,
+    );
+  }
+  if (
+    policyConfig.consensusQuorum !== undefined &&
+    (!Number.isInteger(policyConfig.consensusQuorum) ||
+      policyConfig.consensusQuorum < 1)
+  ) {
+    throw new InvalidPolicyConfigError(
+      `qwen serve: invalid policy.consensusQuorum ` +
+        `${String(policyConfig.consensusQuorum)}; must be a positive integer`,
+    );
+  }
+  if (
+    policyConfig.consensusQuorum !== undefined &&
+    policyConfig.permissionStrategy !== 'consensus'
+  ) {
+    onWarning(
+      'qwen serve: policy.consensusQuorum is set but ' +
+        'policy.permissionStrategy is not "consensus"; the override will ' +
+        'be ignored.',
+    );
+  }
+  return {
+    permissionPolicy: policyConfig.permissionStrategy as
+      | PermissionPolicy
+      | undefined,
+    permissionConsensusQuorum: policyConfig.consensusQuorum,
+  };
 }
 
 /**
@@ -367,19 +447,8 @@ export async function runQwenServe(
   // bridge's default; policy validation rethrows because invalid
   // policy is an explicit operator misconfiguration.
   let contextFilenameForInit: string | undefined;
-  let permissionPolicy:
-    | 'first-responder'
-    | 'designated'
-    | 'consensus'
-    | 'local-only'
-    | undefined;
+  let permissionPolicy: PermissionPolicy | undefined;
   let permissionConsensusQuorum: number | undefined;
-  const VALID_PERMISSION_POLICIES = new Set([
-    'first-responder',
-    'designated',
-    'consensus',
-    'local-only',
-  ]);
   try {
     const bootSettings = loadSettings(boundWorkspace);
     contextFilenameForInit = extractContextFilename(
@@ -394,43 +463,9 @@ export async function runQwenServe(
           };
         }
       ).policy ?? {};
-    if (
-      policyConfig.permissionStrategy !== undefined &&
-      !VALID_PERMISSION_POLICIES.has(policyConfig.permissionStrategy)
-    ) {
-      throw new InvalidPolicyConfigError(
-        `qwen serve: invalid policy.permissionStrategy ` +
-          `"${String(policyConfig.permissionStrategy)}"; must be one of ` +
-          `${Array.from(VALID_PERMISSION_POLICIES).join(', ')}`,
-      );
-    }
-    if (
-      policyConfig.consensusQuorum !== undefined &&
-      (!Number.isInteger(policyConfig.consensusQuorum) ||
-        policyConfig.consensusQuorum < 1)
-    ) {
-      throw new InvalidPolicyConfigError(
-        `qwen serve: invalid policy.consensusQuorum ` +
-          `${String(policyConfig.consensusQuorum)}; must be a positive integer`,
-      );
-    }
-    if (
-      policyConfig.consensusQuorum !== undefined &&
-      policyConfig.permissionStrategy !== 'consensus'
-    ) {
-      writeStderrLine(
-        'qwen serve: policy.consensusQuorum is set but ' +
-          'policy.permissionStrategy is not "consensus"; the override will ' +
-          'be ignored.',
-      );
-    }
-    permissionPolicy = policyConfig.permissionStrategy as
-      | 'first-responder'
-      | 'designated'
-      | 'consensus'
-      | 'local-only'
-      | undefined;
-    permissionConsensusQuorum = policyConfig.consensusQuorum;
+    const resolved = validatePolicyConfig(policyConfig);
+    permissionPolicy = resolved.permissionPolicy;
+    permissionConsensusQuorum = resolved.permissionConsensusQuorum;
   } catch (err) {
     // F3 invariant: invalid policy values must fail startup loudly.
     // Wenshao review #4335 / 3271978374 — discriminate by error class

@@ -351,6 +351,18 @@ export class MultiClientPermissionMediator implements PermissionMediator {
   private readonly pending = new Map<string, MediatorPending>();
   private readonly resolved = new Map<string, PermissionResolutionRecord>();
   private readonly resolvedOrder: string[] = [];
+  /**
+   * Wenshao review #4335 / 3272493829 — dedup flag for the
+   * unanimity-required stderr breadcrumb. Without this, every
+   * permission request on a 2-client consensus session would emit
+   * an identical line (the unanimity condition is the NORMAL
+   * operating mode for M=2, not a rare edge); a busy session with
+   * many tool calls would produce dozens of duplicate stderr lines
+   * within seconds. One emit per mediator (= per daemon lifetime
+   * since the bridge constructs one) is enough to make the
+   * configuration visible without spam.
+   */
+  private unanimityBreadcrumbEmitted = false;
 
   constructor(policy: PermissionPolicy, deps: MediatorDeps) {
     this.policy = policy;
@@ -453,29 +465,37 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       }
       // Wenshao review #4335 / 3271978356 — for even-sized voter
       // sets the default formula `floor(M/2)+1` requires unanimity
-      // (M=2 → quorum=2; M=4 → quorum=3 majority; the surprise is
-      // M=2). An operator who picks consensus with two clients
-      // expecting a "majority of 2 = 1" decision actually gets
-      // unanimity — a split vote silently hangs until
-      // permissionTimeoutMs. Emit a one-time breadcrumb at issue
-      // time when the default quorum equals M and M >= 2 (i.e.
-      // unanimity required without explicit override). When the
-      // operator passed an explicit override, the cap-applied
-      // breadcrumb in `consensusQuorumFor` covers the equivalent
-      // case; this branch only fires for the default formula.
+      // ONLY when M=2 (the practical surprise case); M=4 → quorum=3
+      // is supermajority; M=6 → quorum=4 is supermajority too. The
+      // condition `floor(M/2)+1 === M` is true only for M=1
+      // (single-voter; quorum=1 = M trivially) and M=2.
+      //
+      // Wenshao review #4335 / 3272493829 — dedup to one emit per
+      // mediator lifetime via `unanimityBreadcrumbEmitted`. Without
+      // this, a 2-client consensus session emits the line on EVERY
+      // permission request (unanimity is the M=2 normal operating
+      // mode, not a rare edge). The flag also ensures the line is
+      // visible at least once when the daemon boots into this
+      // configuration — operators see it on the first
+      // requestPermission and can ignore the dedup'd silence
+      // afterward.
       if (
         policy === 'consensus' &&
         this.deps.consensusQuorum === undefined &&
         votersAtIssue.size >= 2 &&
-        Math.floor(votersAtIssue.size / 2) + 1 === votersAtIssue.size
+        Math.floor(votersAtIssue.size / 2) + 1 === votersAtIssue.size &&
+        !this.unanimityBreadcrumbEmitted
       ) {
+        this.unanimityBreadcrumbEmitted = true;
         try {
           process.stderr.write(
             `permissionMediator: consensus request ${record.requestId} ` +
               `for session ${record.sessionId} requires unanimity ` +
               `(votersAtIssue.size=${votersAtIssue.size}, default ` +
               `quorum=floor(M/2)+1=${votersAtIssue.size}); split votes ` +
-              `will only resolve via permissionTimeoutMs (${timeoutMs}ms)\n`,
+              `will only resolve via permissionTimeoutMs (${timeoutMs}ms). ` +
+              `This breadcrumb fires once per mediator lifetime; ` +
+              `subsequent unanimity-required requests are silent.\n`,
           );
         } catch {
           // Stderr unavailable — silent drop.

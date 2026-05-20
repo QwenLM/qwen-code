@@ -2710,6 +2710,37 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('returns false (not InvalidClientIdError) when session exists but requestId is unknown and clientId is unregistered (#4335 / 3271978329 / 3272493792)', async () => {
+      // Wenshao review #4335 / 3271978329 (Critical) — error
+      // precedence regression: the session-scoped vote route must
+      // return `false` (→ 404) when the requestId isn't known to
+      // the mediator, BEFORE validating `context.clientId`.
+      // Without this guard a probe could fabricate a requestId,
+      // supply an arbitrary `X-Qwen-Client-Id`, and distinguish
+      // "this clientId is registered to this session" (proceeds
+      // past resolveTrustedClientId then returns false → 404) from
+      // "this clientId is not registered" (InvalidClientIdError →
+      // 400) — a session-membership oracle.
+      //
+      // Wenshao review #4335 / 3272493792 — explicit test for the
+      // fix from Round 7 so a future refactor can't silently
+      // remove the short-circuit.
+      const { bridge, session } = await setupForPermission();
+
+      // Session exists, requestId is unknown, clientId is fake.
+      // The bridge MUST return false; pre-fix it threw
+      // InvalidClientIdError (400).
+      const result = bridge.respondToSessionPermission(
+        session.sessionId,
+        'unknown-req-id',
+        { outcome: { outcome: 'cancelled' } },
+        { clientId: 'fabricated-client-id' },
+      );
+      expect(result).toBe(false);
+
+      await bridge.shutdown();
+    });
+
     it('rejects cancel sentinel injection via {selected,"__cancelled__"} (#4335 / 3271420267)', async () => {
       // wenshao/qwen-latest review #4335 (3271420267) — the most
       // security-critical guard in this PR. The mediator recognizes
@@ -3164,13 +3195,28 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
-    it('rejects unknown permission votes with unregistered client ids', async () => {
+    it('returns false uniformly for unknown permission votes regardless of clientId registration (#4335 / 3272493777)', async () => {
+      // Wenshao review #4335 / 3272493777 — error precedence: an
+      // unknown requestId must return `false` (→ 404) regardless of
+      // whether the supplied `clientId` is registered in any
+      // session. The previous PR #4231 boundary returned 400 for
+      // unregistered clientIds and 404 for registered ones, which
+      // turned out to be a cross-session client-registration
+      // oracle: a remote prober posting `POST /permission/<bogus>`
+      // with various `X-Qwen-Client-Id` headers could distinguish
+      // "this clientId is registered in some active session" (404)
+      // from "not registered anywhere" (400). The session-scoped
+      // route's matching fix landed in Round 7 (#3271978329); this
+      // pins the symmetric posture for the legacy route and
+      // explicitly inverts the assertion the pre-Round-7 test used
+      // to make.
       const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-      expect(() =>
+      // Unregistered clientId — must NOT throw; uniform `false`.
+      expect(
         bridge.respondToPermission(
           'does-not-exist',
           {
@@ -3178,7 +3224,8 @@ describe('createHttpAcpBridge', () => {
           },
           { clientId: 'client-not-issued' },
         ),
-      ).toThrow(InvalidClientIdError);
+      ).toBe(false);
+      // Registered clientId — also `false`.
       expect(
         bridge.respondToPermission(
           'does-not-exist',
@@ -3187,6 +3234,12 @@ describe('createHttpAcpBridge', () => {
           },
           { clientId: session.clientId },
         ),
+      ).toBe(false);
+      // No clientId at all — `false` (unchanged behavior).
+      expect(
+        bridge.respondToPermission('does-not-exist', {
+          outcome: { outcome: 'cancelled' },
+        }),
       ).toBe(false);
 
       await bridge.shutdown();

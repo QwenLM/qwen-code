@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { extractContextFilename } from './runQwenServe.js';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  extractContextFilename,
+  InvalidPolicyConfigError,
+  validatePolicyConfig,
+} from './runQwenServe.js';
 
 /**
  * #4297 fold-in 7 (deepseek S1, addresses #3262690842). Lock the
@@ -60,5 +64,104 @@ describe('extractContextFilename (#4297 fold-in 7 P2-1 helper)', () => {
     expect(extractContextFilename(42)).toBeUndefined();
     expect(extractContextFilename(true)).toBeUndefined();
     expect(extractContextFilename({ fileName: 'AGENTS.md' })).toBeUndefined();
+  });
+});
+
+/**
+ * Wenshao review #4335 / 3272493818 — positive tests for the
+ * `validatePolicyConfig` helper. Lock the contract so a future
+ * refactor can't silently remove the `InvalidPolicyConfigError`
+ * class or the validation paths.
+ */
+describe('validatePolicyConfig (#4335 boot validation)', () => {
+  it('returns undefined for both fields when policyConfig is empty', () => {
+    expect(validatePolicyConfig()).toEqual({
+      permissionPolicy: undefined,
+      permissionConsensusQuorum: undefined,
+    });
+    expect(validatePolicyConfig({})).toEqual({
+      permissionPolicy: undefined,
+      permissionConsensusQuorum: undefined,
+    });
+  });
+
+  it.each([['first-responder'], ['designated'], ['consensus'], ['local-only']])(
+    'accepts the %s permissionStrategy literal',
+    (literal) => {
+      expect(validatePolicyConfig({ permissionStrategy: literal })).toEqual({
+        permissionPolicy: literal,
+        permissionConsensusQuorum: undefined,
+      });
+    },
+  );
+
+  it('throws InvalidPolicyConfigError for an unknown permissionStrategy', () => {
+    expect(() => validatePolicyConfig({ permissionStrategy: 'bogus' })).toThrow(
+      InvalidPolicyConfigError,
+    );
+    expect(() => validatePolicyConfig({ permissionStrategy: 'bogus' })).toThrow(
+      /invalid policy.permissionStrategy/,
+    );
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    'throws InvalidPolicyConfigError for non-positive-integer consensusQuorum (%s)',
+    (badValue) => {
+      expect(() =>
+        validatePolicyConfig({
+          permissionStrategy: 'consensus',
+          consensusQuorum: badValue,
+        }),
+      ).toThrow(InvalidPolicyConfigError);
+    },
+  );
+
+  it('accepts a positive-integer consensusQuorum with consensus strategy', () => {
+    expect(
+      validatePolicyConfig({
+        permissionStrategy: 'consensus',
+        consensusQuorum: 3,
+      }),
+    ).toEqual({
+      permissionPolicy: 'consensus',
+      permissionConsensusQuorum: 3,
+    });
+  });
+
+  it('warns (does not throw) when consensusQuorum is set but strategy is not consensus', () => {
+    const warnings: string[] = [];
+    const onWarning = vi.fn((m: string) => warnings.push(m));
+    const result = validatePolicyConfig(
+      {
+        permissionStrategy: 'designated',
+        consensusQuorum: 2,
+      },
+      onWarning,
+    );
+    expect(result).toEqual({
+      permissionPolicy: 'designated',
+      permissionConsensusQuorum: 2,
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('consensusQuorum is set');
+    expect(warnings[0]).toContain('not "consensus"');
+  });
+
+  it('does not warn when consensusQuorum is set with consensus strategy', () => {
+    const onWarning = vi.fn();
+    validatePolicyConfig(
+      { permissionStrategy: 'consensus', consensusQuorum: 2 },
+      onWarning,
+    );
+    expect(onWarning).not.toHaveBeenCalled();
+  });
+
+  it('error messages name the field that failed (operator-debugging signal)', () => {
+    expect(() => validatePolicyConfig({ permissionStrategy: 'oops' })).toThrow(
+      /permissionStrategy/,
+    );
+    expect(() => validatePolicyConfig({ consensusQuorum: 0 })).toThrow(
+      /consensusQuorum/,
+    );
   });
 });

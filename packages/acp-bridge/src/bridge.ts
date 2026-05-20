@@ -654,12 +654,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     return clientId;
   };
 
-  const resolveAnyTrustedClientId = (clientId: string): string => {
-    for (const entry of byId.values()) {
-      if (entry.clientIds.has(clientId)) return clientId;
-    }
-    throw new InvalidClientIdError('unknown', clientId);
-  };
+  // Wenshao review #4335 / 3272493777 — `resolveAnyTrustedClientId`
+  // helper removed alongside its sole call site in
+  // `respondToPermission`. The function ranged across all live
+  // sessions to validate a clientId, which created a cross-session
+  // client-registration oracle when used in the unknown-requestId
+  // path. The session-scoped `resolveTrustedClientId` (defined
+  // above) is the correct primitive — it scopes to a single
+  // session and is never called on the unknown-requestId path
+  // after Round 7+8.
 
   // F3 Commit 3 — `registerPending` / `rollbackPending` /
   // `rememberResolvedPermission` / `publishPermissionAlreadyResolved`
@@ -2004,14 +2007,19 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // once `byId.delete(sessionId)` ran. Pre-F3 returned a clean
       // false → 404 for this case; preserve.
       if (sessionId === undefined || !byId.has(sessionId)) {
-        // Preserve the PR #4231 security boundary: a caller that
-        // supplies an unknown clientId for an unknown requestId
-        // gets a 400 (`InvalidClientIdError`) rather than a silent
-        // 404. When clientId is omitted or recognized in any session,
-        // fall through to the standard "no pending" 404.
-        if (context?.clientId !== undefined) {
-          resolveAnyTrustedClientId(context.clientId);
-        }
+        // Wenshao review #4335 / 3272493777 — the PR #4231 security
+        // boundary that previously called `resolveAnyTrustedClientId`
+        // here was inverted: it returned 400 for unregistered
+        // clientIds and 404 for registered ones, creating a
+        // cross-session client-registration oracle. A remote prober
+        // posting `POST /permission/<fabricated-id>` with various
+        // X-Qwen-Client-Id headers could distinguish "this clientId
+        // is registered in some active session" (404) from "not
+        // registered anywhere" (400). The session-scoped route at
+        // `respondToSessionPermission` already short-circuits to
+        // `false` BEFORE clientId validation when the requestId is
+        // unknown (Round 7 / 3271978329); applying the same
+        // posture here closes the oracle on the legacy route.
         return false;
       }
       return this.respondToSessionPermission(
@@ -2049,11 +2057,20 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // distinguish "session exists with these clients" (400) from
       // "no such request" (404). Match pre-F3 by short-circuiting
       // here.
+      //
+      // Wenshao review #4335 / 3272493792 — observability: the
+      // forbidden-vote paths in the mediator write unconditional
+      // stderr breadcrumbs (`writeForbiddenStderr`), but this
+      // security-sensitive guard previously logged only via the
+      // debug-gated `writeServeDebugLine`. Promote to an
+      // unconditional `writeStderrLine` so operators tailing
+      // stderr at 3 AM can correlate unexpected 404s without
+      // having to reboot with `QWEN_SERVE_DEBUG=1`.
       if (actualSessionId === undefined) {
-        writeServeDebugLine(
-          `rejected permission vote ${JSON.stringify(requestId)} ` +
+        writeStderrLine(
+          `qwen serve: rejected permission vote ${JSON.stringify(requestId)} ` +
             `for session ${JSON.stringify(sessionId)}; mediator has no ` +
-            `pending or resolved record.`,
+            `pending or resolved record (unknown / timed out / LRU-evicted).`,
         );
         return false;
       }
