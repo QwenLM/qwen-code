@@ -20,6 +20,7 @@ describe('QwenSessionUpdateHandler', () => {
       onThoughtChunk: vi.fn(),
       onToolCall: vi.fn(),
       onPlan: vi.fn(),
+      onMessage: vi.fn(),
       onModeChanged: vi.fn(),
       onModelChanged: vi.fn(),
       onUsageUpdate: vi.fn(),
@@ -60,6 +61,33 @@ describe('QwenSessionUpdateHandler', () => {
       handler.handleSessionUpdate(messageUpdate);
 
       expect(mockCallbacks.onStreamChunk).toHaveBeenCalledWith('Hello, world!');
+    });
+
+    it('routes background notification chunks as discrete assistant messages', () => {
+      const messageUpdate: SessionNotification = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Background agent "worker" completed.',
+          },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            timestamp: 1234,
+          },
+        },
+      };
+
+      handler.handleSessionUpdate(messageUpdate);
+
+      expect(mockCallbacks.onMessage).toHaveBeenCalledWith({
+        role: 'assistant',
+        content: 'Background agent "worker" completed.',
+        timestamp: 1234,
+      });
+      expect(mockCallbacks.onStreamChunk).not.toHaveBeenCalled();
     });
 
     it('emits usage metadata when present', () => {

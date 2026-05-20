@@ -88,7 +88,9 @@ const {
       | undefined,
   },
   endTurnCallbackRef: {
-    current: undefined as ((reason?: string) => void) | undefined,
+    current: undefined as
+      | ((reason?: string, source?: string) => void)
+      | undefined,
   },
   streamChunkCallbackRef: {
     current: undefined as ((chunk: string) => void) | undefined,
@@ -213,7 +215,7 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         slashCommandNotificationCallbackRef.current = callback;
       },
     );
-    onEndTurn = vi.fn((cb: (reason?: string) => void) => {
+    onEndTurn = vi.fn((cb: (reason?: string, source?: string) => void) => {
       endTurnCallbackRef.current = cb;
     });
     onToolCall = vi.fn();
@@ -1545,6 +1547,28 @@ describe('Notification & dot indicator', () => {
     // Second endTurn (final) — should NOT fire another notification
     endTurnCallbackRef.current?.('end_turn');
     expect(mockShowInformationMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show idle notification for background notification turns', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn', 'background_notification');
+
+    expect(mockShowInformationMessage).not.toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
   });
 
   it('does not notify when notifications setting is disabled', async () => {

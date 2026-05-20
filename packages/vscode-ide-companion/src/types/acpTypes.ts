@@ -40,6 +40,14 @@ export interface SessionUpdateMeta {
   durationMs?: number | null;
   timestamp?: number | null;
   availableSkills?: string[] | null;
+  source?: string | null;
+  qwenDiscreteMessage?: boolean | null;
+  backgroundTask?: {
+    taskId?: string;
+    status?: string;
+    kind?: string;
+    toolUseId?: string;
+  } | null;
 }
 
 export {

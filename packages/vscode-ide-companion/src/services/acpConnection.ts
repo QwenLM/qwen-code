@@ -68,7 +68,7 @@ export class AcpConnection {
     () => {};
   onSlashCommandNotification: (data: SlashCommandNotification) => void =
     () => {};
-  onEndTurn: (reason?: string) => void = () => {};
+  onEndTurn: (reason?: string, source?: string) => void = () => {};
   /** Invoked when the child process exits (expected or unexpected). */
   onDisconnected: (code: number | null, signal: string | null) => void =
     () => {};
@@ -351,6 +351,16 @@ export class AcpConnection {
             this.onSlashCommandNotification(
               params as unknown as SlashCommandNotification,
             );
+          } else if (method === '_qwencode/end_turn') {
+            const reason =
+              typeof params['reason'] === 'string'
+                ? params['reason']
+                : undefined;
+            const source =
+              typeof params['source'] === 'string'
+                ? params['source']
+                : undefined;
+            this.onEndTurn(reason, source);
           } else {
             console.warn(`[ACP] Unhandled extension notification: ${method}`);
           }

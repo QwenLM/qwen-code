@@ -416,7 +416,7 @@ export class WebViewProvider {
     });
 
     // Setup end-turn handler from ACP stopReason notifications
-    this.agentManager.onEndTurn((reason) => {
+    this.agentManager.onEndTurn((reason, source) => {
       // Ensure WebView exits streaming state even if no explicit streamEnd was emitted elsewhere
       this.sendMessageToWebView({
         type: 'streamEnd',
@@ -428,7 +428,9 @@ export class WebViewProvider {
       // Fire the idle notification from here (authoritative "task done" event) rather
       // than relying on the webview's isStreaming transition, which fires on every
       // intermediate streamEnd in multi-tool-call sequences and on cancellation.
-      this.handleAgentIdle();
+      if (source !== 'background_notification') {
+        this.handleAgentIdle();
+      }
     });
 
     // Note: Tool call updates are handled in handleSessionUpdate within QwenAgentManager

@@ -129,6 +129,15 @@ type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
+interface BackgroundNotificationQueueItem {
+  displayText: string;
+  modelText: string;
+  taskId: string;
+  status: string;
+  kind: 'agent' | 'monitor';
+  toolUseId?: string;
+}
+
 export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
@@ -275,6 +284,12 @@ export class Session implements SessionContext {
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: GeminiChat | null = null;
 
+  // Background notification drain state. ACP does not have the TUI's idle
+  // hook, so the session serializes registry callbacks through this queue.
+  private notificationQueue: BackgroundNotificationQueueItem[] = [];
+  private notificationProcessing = false;
+  private notificationCompletion: Promise<void> | null = null;
+
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
   private readonly toolCallEmitter: ToolCallEmitter;
@@ -316,6 +331,8 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+
+    this.#registerBackgroundNotificationCallbacks();
   }
 
   getId(): string {
@@ -530,6 +547,17 @@ export class Session implements SessionContext {
       }
     }
 
+    // A background notification turn mutates the same chat history as a
+    // user prompt. Wait for an already-running drain before accepting the
+    // new prompt so ACP never sends two turns against the same chat at once.
+    if (this.notificationCompletion) {
+      try {
+        await this.notificationCompletion;
+      } catch {
+        // Notification errors are surfaced through the session stream.
+      }
+    }
+
     // Cancelled while waiting for the previous prompt to finish.
     if (pendingSend.signal.aborted) {
       return { stopReason: 'cancelled' };
@@ -547,6 +575,7 @@ export class Session implements SessionContext {
       this.#startCronSchedulerIfNeeded();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
       return result;
     } finally {
       resolveCompletion();
@@ -1372,6 +1401,8 @@ export class Session implements SessionContext {
       resolveCompletion();
       this.cronCompletion = null;
 
+      void this.#drainNotificationQueue();
+
       // Stop scheduler if all jobs were deleted during execution
       if (this.config.isCronEnabled()) {
         const scheduler = this.config.getCronScheduler();
@@ -1518,6 +1549,247 @@ export class Session implements SessionContext {
       'Cron jobs disabled for the rest of this session due to token limit. Restart the session to re-enable.',
       'Failed to emit cron-disabled diagnostic',
     );
+  }
+
+  #registerBackgroundNotificationCallbacks(): void {
+    const backgroundRegistry = this.config.getBackgroundTaskRegistry();
+    backgroundRegistry.setNotificationCallback(
+      (displayText, modelText, meta) => {
+        this.#enqueueBackgroundNotification({
+          displayText,
+          modelText,
+          taskId: meta.agentId,
+          status: meta.status,
+          kind: 'agent',
+          toolUseId: meta.toolUseId,
+        });
+      },
+    );
+
+    const monitorRegistry = this.config.getMonitorRegistry();
+    monitorRegistry.setNotificationCallback((displayText, modelText, meta) => {
+      this.#enqueueBackgroundNotification({
+        displayText,
+        modelText,
+        taskId: meta.monitorId,
+        status: meta.status,
+        kind: 'monitor',
+        toolUseId: meta.toolUseId,
+      });
+    });
+  }
+
+  #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
+    this.notificationQueue.push(item);
+    void this.#drainNotificationQueue();
+  }
+
+  async #drainNotificationQueue(): Promise<void> {
+    if (this.notificationProcessing) return;
+    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+      return;
+    }
+    if (this.notificationQueue.length === 0) return;
+
+    this.notificationProcessing = true;
+    let resolveCompletion!: () => void;
+    this.notificationCompletion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    try {
+      while (this.notificationQueue.length > 0) {
+        if (
+          this.pendingPrompt ||
+          this.cronProcessing ||
+          this.cronAbortController
+        ) {
+          break;
+        }
+        const item = this.notificationQueue.shift()!;
+        await this.#executeBackgroundNotificationPrompt(item);
+      }
+    } finally {
+      this.notificationProcessing = false;
+      resolveCompletion();
+      this.notificationCompletion = null;
+
+      if (
+        this.notificationQueue.length > 0 &&
+        !this.pendingPrompt &&
+        !this.cronProcessing &&
+        !this.cronAbortController
+      ) {
+        void this.#drainNotificationQueue();
+      }
+    }
+  }
+
+  async #executeBackgroundNotificationPrompt(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<void> {
+    const ac = new AbortController();
+    const promptId =
+      this.config.getSessionId() + '########notification' + Date.now();
+
+    try {
+      await this.#emitBackgroundNotificationDisplay(item);
+
+      let nextMessage: Content | null = {
+        role: 'user',
+        parts: [{ text: item.modelText }],
+      };
+
+      while (nextMessage !== null) {
+        if (ac.signal.aborted) return;
+
+        const functionCalls: FunctionCall[] = [];
+        let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+        let responseText = '';
+        const streamStartTime = Date.now();
+
+        const sendResult = await this.#sendMessageStreamWithAutoCompression(
+          promptId,
+          nextMessage.parts ?? [],
+          ac.signal,
+        );
+        if (!sendResult.responseStream) {
+          this.#preserveUnsentMessageHistory(
+            nextMessage,
+            sendResult.stopReason === 'cancelled',
+          );
+          await this.#emitBackgroundNotificationEndTurn(sendResult.stopReason);
+          return;
+        }
+
+        const responseStream = sendResult.responseStream;
+        nextMessage = null;
+
+        for await (const resp of responseStream) {
+          if (ac.signal.aborted) {
+            await this.#emitBackgroundNotificationEndTurn('cancelled');
+            return;
+          }
+
+          if (
+            resp.type === StreamEventType.CHUNK &&
+            resp.value.candidates &&
+            resp.value.candidates.length > 0
+          ) {
+            const candidate = resp.value.candidates[0];
+            for (const part of candidate.content?.parts ?? []) {
+              if (!part.text) continue;
+              if (part.thought) {
+                await this.messageEmitter.emitMessage(
+                  part.text,
+                  'assistant',
+                  true,
+                );
+              } else {
+                responseText += part.text;
+              }
+            }
+          }
+
+          if (resp.type === StreamEventType.CHUNK && resp.value.usageMetadata) {
+            usageMetadata = resp.value.usageMetadata;
+          }
+
+          if (resp.type === StreamEventType.CHUNK && resp.value.functionCalls) {
+            functionCalls.push(...resp.value.functionCalls);
+          }
+        }
+
+        if (usageMetadata) {
+          this.#recordPromptTokenCount(usageMetadata);
+          const durationMs = Date.now() - streamStartTime;
+          await this.messageEmitter.emitUsageMetadata(
+            usageMetadata,
+            '',
+            durationMs,
+          );
+        }
+
+        if (responseText.length > 0) {
+          await this.#emitBackgroundNotificationResponse(item, responseText);
+        }
+
+        if (functionCalls.length > 0) {
+          const toolResponseParts = await this.runToolCalls(
+            ac.signal,
+            promptId,
+            functionCalls,
+          );
+          nextMessage = { role: 'user', parts: toolResponseParts };
+        }
+      }
+
+      await this.#emitBackgroundNotificationEndTurn('end_turn');
+    } catch (error) {
+      if (ac.signal.aborted) {
+        await this.#emitBackgroundNotificationEndTurn('cancelled');
+        return;
+      }
+      debugLogger.error('Error processing background notification:', error);
+      const msg = error instanceof Error ? error.message : String(error);
+      await this.messageEmitter.emitAgentMessage(`[notification error] ${msg}`);
+      await this.#emitBackgroundNotificationEndTurn('end_turn');
+    }
+  }
+
+  async #emitBackgroundNotificationDisplay(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: item.displayText },
+      _meta: {
+        source: 'background_notification',
+        qwenDiscreteMessage: true,
+        backgroundTask: {
+          taskId: item.taskId,
+          status: item.status,
+          kind: item.kind,
+          toolUseId: item.toolUseId,
+        },
+      },
+    });
+  }
+
+  async #emitBackgroundNotificationResponse(
+    item: BackgroundNotificationQueueItem,
+    text: string,
+  ): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text },
+      _meta: {
+        source: 'background_notification_response',
+        qwenDiscreteMessage: true,
+        backgroundTask: {
+          taskId: item.taskId,
+          status: item.status,
+          kind: item.kind,
+          toolUseId: item.toolUseId,
+        },
+      },
+    });
+  }
+
+  async #emitBackgroundNotificationEndTurn(
+    reason: PromptResponse['stopReason'],
+  ): Promise<void> {
+    try {
+      await this.client.extNotification('_qwencode/end_turn', {
+        sessionId: this.sessionId,
+        reason,
+        source: 'background_notification',
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `Background notification end-turn extNotification dropped: ${this.#formatError(error)}`,
+      );
+    }
   }
 
   async sendAvailableCommandsUpdate(): Promise<void> {

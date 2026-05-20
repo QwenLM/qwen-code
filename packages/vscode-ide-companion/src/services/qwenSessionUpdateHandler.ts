@@ -69,12 +69,21 @@ export class QwenSessionUpdateHandler {
         const text = this.getTextContent(
           (update as { content?: unknown }).content,
         );
-        if (text && this.callbacks.onStreamChunk) {
+        const meta = (update as { _meta?: SessionUpdateMeta | null })._meta;
+        const isDiscreteMessage =
+          meta?.qwenDiscreteMessage === true ||
+          meta?.source === 'background_notification';
+        if (text && isDiscreteMessage && this.callbacks.onMessage) {
+          this.callbacks.onMessage({
+            role: 'assistant',
+            content: text,
+            timestamp:
+              typeof meta?.timestamp === 'number' ? meta.timestamp : Date.now(),
+          });
+        } else if (text && this.callbacks.onStreamChunk) {
           this.callbacks.onStreamChunk(text);
         }
-        this.emitUsageMeta(
-          (update as { _meta?: SessionUpdateMeta | null })._meta,
-        );
+        this.emitUsageMeta(meta);
         break;
       }
 

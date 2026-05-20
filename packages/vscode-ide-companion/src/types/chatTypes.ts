@@ -67,7 +67,7 @@ export interface QwenAgentCallbacks {
   onAskUserQuestion?: (
     request: AskUserQuestionRequest,
   ) => Promise<{ optionId: string; answers?: Record<string, string> }>;
-  onEndTurn?: (reason?: string) => void;
+  onEndTurn?: (reason?: string, source?: string) => void;
   onModeInfo?: (info: {
     currentModeId?: ApprovalModeValue;
     availableModes?: Array<{
