@@ -304,6 +304,13 @@ interface MediatorPending {
   readonly votersAtIssue: ReadonlySet<string>;
   /** Mediator-internal — do not read or write from outside the class. */
   timer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Wenshao review #4335 / 3271185594 — set to `true` once the
+   * `consensusQuorum` override cap has emitted its stderr
+   * breadcrumb for this pending so we don't repeat the line every
+   * time `consensusQuorumFor` is called within the same request.
+   */
+  consensusQuorumCapNoted: boolean;
 }
 
 interface PermissionResolutionRecord {
@@ -401,11 +408,32 @@ export class MultiClientPermissionMediator implements PermissionMediator {
         tallies: new Map(),
         votersAtIssue,
         timer: undefined,
+        consensusQuorumCapNoted: false,
       };
       this.pending.set(record.requestId, pending);
       this.safeAudit(() =>
         this.deps.audit.recordRequested(record, policy, votersAtIssue),
       );
+      // Wenshao review #4335 / 3271185594 — when consensus is in
+      // force but the bridge captured zero eligible voters at
+      // issue time, the request can ONLY resolve via timeout (no
+      // vote will ever pass `votersAtIssue.has(clientId)`). Emit
+      // a stderr breadcrumb so operators don't have to derive that
+      // from "5 minutes of silence + permission_request frame".
+      // Doesn't change semantics; the timer still fires per the
+      // configured `permissionTimeoutMs`.
+      if (policy === 'consensus' && votersAtIssue.size === 0) {
+        try {
+          process.stderr.write(
+            `permissionMediator: consensus request ${record.requestId} ` +
+              `for session ${record.sessionId} issued with empty ` +
+              `votersAtIssue; can only resolve via permissionTimeoutMs ` +
+              `(${timeoutMs}ms)\n`,
+          );
+        } catch {
+          // Stderr unavailable — silent drop.
+        }
+      }
       if (timeoutMs > 0) {
         pending.timer = setTimeout(() => {
           // Timer fires asynchronously — guard against the entry
@@ -860,13 +888,34 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * `floor(M/2) + 1` of `votersAtIssue.size`; overridden by
    * `deps.consensusQuorum` when set, capped to `M` so an operator
    * misconfig (N > M) can't deadlock.
+   *
+   * Wenshao review #4335 / 3271185594 — when the cap fires, write
+   * a one-time stderr breadcrumb per request so operators don't
+   * have to diff their `policy.consensusQuorum` against
+   * `votersAtIssue.size` manually to understand why a quorum
+   * resolved sooner than configured. Tracked on `MediatorPending`
+   * so the breadcrumb fires once even though `consensusQuorumFor`
+   * may be called multiple times per request (vote tally + final
+   * resolution).
    */
   private consensusQuorumFor(pending: MediatorPending): number {
     const m = pending.votersAtIssue.size;
     const override = this.deps.consensusQuorum;
     if (override !== undefined) {
-      // Cap at M so N>M is silently treated as N=M.
-      return Math.min(override, Math.max(m, 1));
+      const capped = Math.min(override, Math.max(m, 1));
+      if (capped < override && !pending.consensusQuorumCapNoted) {
+        pending.consensusQuorumCapNoted = true;
+        try {
+          process.stderr.write(
+            `permissionMediator: consensusQuorum override ${override} ` +
+              `capped to ${capped} (votersAtIssue.size=${m}) for ` +
+              `request ${pending.requestId} session ${pending.sessionId}\n`,
+          );
+        } catch {
+          // Stderr unavailable — silent drop.
+        }
+      }
+      return capped;
     }
     return Math.max(1, Math.floor(m / 2) + 1);
   }

@@ -2151,20 +2151,18 @@ function parseClientIdHeader(
 }
 
 /**
- * #4175 F3 Commit 2 — kernel-stamped peer-IP loopback set used by the
- * `local-only` permission policy to gate vote routes. IPv4
- * `127.0.0.1`, IPv6 `::1`, and the dual-stack form `::ffff:127.0.0.1`
- * Node prints when an IPv4 client hits an IPv6 listener.
- */
-const LOOPBACK_REMOTE_ADDRS: ReadonlySet<string> = new Set([
-  '127.0.0.1',
-  '::1',
-  '::ffff:127.0.0.1',
-]);
-
-/**
  * #4175 F3 Commit 2 — decide whether a permission vote arrived from a
  * loopback peer.
+ *
+ * Per RFC 1122 the entire `127.0.0.0/8` block is loopback (and the
+ * IPv4-mapped IPv6 form `::ffff:127.0.0.0/104` mirrors that). IPv6
+ * loopback is `::1` (single literal). Wenshao review #4335 /
+ * 3271185597 — the previous exact-match Set of three literals
+ * (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`) silently fail-CLOSED
+ * on legitimate non-`.0.0.1` loopback addresses (`127.0.0.2`,
+ * `127.0.1.1`, etc.), causing unexpected `remote_not_allowed`
+ * rejections under `local-only` policy. Switched to a prefix
+ * test so the entire `/8` and its dual-stack mirror are accepted.
  *
  * **Security**: this function reads `req.socket.remoteAddress` only.
  * It does NOT consult `X-Forwarded-For` or any HTTP header — those
@@ -2173,10 +2171,21 @@ const LOOPBACK_REMOTE_ADDRS: ReadonlySet<string> = new Set([
  * loopback-equivalent treatment for a reverse-proxied daemon should
  * use a dedicated daemon process instead, or pick `designated`
  * policy where loopback identity is irrelevant.
+ *
+ * Direction is fail-CLOSED: an unrecognized `remoteAddress` shape
+ * (missing socket, non-string) returns `false`, gating votes
+ * conservatively rather than admitting them.
  */
 function detectFromLoopback(req: import('express').Request): boolean {
   const addr = req.socket?.remoteAddress;
-  return typeof addr === 'string' && LOOPBACK_REMOTE_ADDRS.has(addr);
+  if (typeof addr !== 'string') return false;
+  // IPv6 loopback (single literal).
+  if (addr === '::1') return true;
+  // IPv4 loopback: 127.0.0.0/8.
+  if (addr.startsWith('127.')) return true;
+  // IPv4-mapped IPv6 loopback: ::ffff:127.0.0.0/104.
+  if (addr.startsWith('::ffff:127.')) return true;
+  return false;
 }
 
 /**

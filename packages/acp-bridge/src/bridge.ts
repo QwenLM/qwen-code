@@ -46,8 +46,14 @@ import {
   SessionLimitExceededError,
   WorkspaceMismatchError,
   InvalidClientIdError,
-  // InvalidPermissionOptionError now thrown inside the mediator
-  // (`vote()` validates `optionId ∈ allowedOptionIds`).
+  // Mediator's `vote()` validates `optionId ∈ allowedOptionIds`,
+  // but the bridge ALSO throws `InvalidPermissionOptionError`
+  // pre-mediator when a wire client tries to inject the cancel
+  // sentinel via a `selected` outcome (wenshao review #4335 /
+  // 3271185588 — without this guard, a wire-supplied
+  // `optionId === CANCEL_VOTE_SENTINEL` would short-circuit all
+  // policy dispatch).
+  InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   WorkspaceInitConflictError,
   WorkspaceInitPathEscapeError,
@@ -2042,6 +2048,25 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `optionId`. Map it to the mediator-internal sentinel so
       // the mediator can resolve the pending as cancelled
       // regardless of the active policy.
+      //
+      // Wenshao review #4335 / 3271185588 (Critical) — the mediator
+      // recognizes `CANCEL_VOTE_SENTINEL` BEFORE validating the
+      // option against `allowedOptionIds`, so a wire client sending
+      // `{outcome: 'selected', optionId: '__cancelled__'}` would
+      // short-circuit all policy dispatch (designated originator
+      // check / consensus quorum / local-only loopback gate). The
+      // mediator's JSDoc warns that callers MUST NOT forward this
+      // case from the wire; enforce the precondition here. The
+      // collision-defense at request issue time
+      // (`CancelSentinelCollisionError`) already prevents agents
+      // from advertising the sentinel as an option, so this guard
+      // closes the only remaining vector.
+      if (
+        response.outcome.outcome === 'selected' &&
+        response.outcome.optionId === CANCEL_VOTE_SENTINEL
+      ) {
+        throw new InvalidPermissionOptionError(requestId, CANCEL_VOTE_SENTINEL);
+      }
       const optionId =
         response.outcome.outcome === 'selected'
           ? response.outcome.optionId

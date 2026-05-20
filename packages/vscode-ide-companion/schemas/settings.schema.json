@@ -767,8 +767,9 @@
           "default": "first-responder"
         },
         "consensusQuorum": {
-          "description": "Optional fixed quorum size for consensus policy. Capped at M (count of registered voters at request issue time) to prevent unreachable quorum. Unset = floor(M/2)+1. Requires daemon restart — F3 v1 reads this once at boot.",
-          "type": "number"
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional fixed quorum size for consensus policy. Capped at M (count of registered voters at request issue time) to prevent unreachable quorum. Unset = floor(M/2)+1. Requires daemon restart — F3 v1 reads this once at boot."
         }
       }
     },
