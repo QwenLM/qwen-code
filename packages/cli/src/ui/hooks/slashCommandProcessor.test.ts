@@ -592,19 +592,14 @@ describe('useSlashCommandProcessor', () => {
     });
 
     it('expand-now command updates history without info feedback', async () => {
-      const mockClient = { setHistory: vi.fn() } as unknown as GeminiClient;
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
-
       const historyCmd = createTestCommand({
         name: 'history',
         subCommands: [
           {
             name: 'expand-now',
-            action: vi.fn().mockResolvedValue({
-              type: 'load_history',
-              history: [],
-              clientHistory: [],
-            }),
+            description: 'Expand collapsed history',
+            kind: CommandKind.BUILT_IN,
+            action: vi.fn().mockResolvedValue(undefined),
           },
         ],
       });
@@ -615,8 +610,8 @@ describe('useSlashCommandProcessor', () => {
         await result.current.handleSlashCommand('/history expand-now');
       });
 
-      // User message added, then load_history replaces all items
-      expect(mockAddItem).toHaveBeenCalled();
+      // User message added, no info feedback (action returns void)
+      expect(mockAddItem).toHaveBeenCalledTimes(1);
       expect(mockAddItem).toHaveBeenCalledWith(
         {
           type: MessageType.USER,
@@ -624,7 +619,6 @@ describe('useSlashCommandProcessor', () => {
         },
         expect.any(Number),
       );
-      expect(mockClient.setHistory).toHaveBeenCalledWith([]);
     });
 
     it('opens memory dialog when command returns dialog:memory', async () => {

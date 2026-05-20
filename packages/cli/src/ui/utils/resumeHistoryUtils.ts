@@ -501,15 +501,10 @@ export function buildResumedHistoryItems(
 
 /**
  * Applies the quiet-restore display policy to resumed history items.
- * When `collapseOnResume` is true, marks each item with
- * `display.suppressOnRestore` so the rendering layer skips them while
- * the canonical history (used by /rewind turn mapping) is preserved.
+ * Marks each item with `display.suppressOnRestore` so the rendering layer
+ * skips them while the canonical history (used by /rewind turn mapping) is preserved.
  */
-function applyResumeDisplayPolicy(
-  items: HistoryItem[],
-  options: { collapseOnResume?: boolean },
-): HistoryItem[] {
-  if (!options.collapseOnResume) return items;
+function applyResumeDisplayPolicy(items: HistoryItem[]): HistoryItem[] {
   return items.map((item) => ({
     ...item,
     display: { ...item.display, suppressOnRestore: true },
@@ -566,9 +561,7 @@ export function applyCollapsePolicyAndSummary(
 ): HistoryItem[] {
   if (!collapseOnResume) return rawItems;
 
-  const uiHistoryItems = applyResumeDisplayPolicy(rawItems, {
-    collapseOnResume,
-  });
+  const uiHistoryItems = applyResumeDisplayPolicy(rawItems);
 
   if (rawItems.length > 0) {
     const nextId = rawItems[rawItems.length - 1].id + 1;
