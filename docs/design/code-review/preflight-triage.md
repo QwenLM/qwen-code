@@ -1,8 +1,26 @@
 # Preflight Triage（评审前预筛）
 
 > 本文档定义 PR review 进入 bundled `/review` 深审**之前**的 tier 路由机制。
-> 设计独立，但实现复用 `code-review-design.md` 落地的 workflow wiring（PR ctx 解析、size gate、cache、fallback comment）。
+> 设计独立，但实现复用 `code-review-design.md` 落地的 workflow wiring（PR ctx 解析、cache、fallback comment）。
 > 本文档当前是**草稿（draft）**，未填部分用 `TODO` 标记。
+
+## 与 PR 合规门禁的关系（重要）
+
+本设计专注于 **AI review 内部的 tier 路由**。**合并阻断（merge gating）由独立的 `pr-gate.yml` workflow 负责**，与本文档正交。两者分工：
+
+| 关注点 | 由谁负责 | 是否阻塞合并 | 速度 |
+| --- | --- | --- | --- |
+| PR title 格式 | `pr-gate.yml` | ✅ required | 秒级 |
+| PR body 必填段 (Summary / Validation) | `pr-gate.yml` | ✅ required | 秒级 |
+| PR size 上限 | `pr-gate.yml` | ✅ required (XL 拒) | 秒级 |
+| Lint / Test / CodeQL | `ci.yml` | ✅ required | 分钟级 |
+| **AI 代码 review (本设计)** | `qwen-code-pr-review.yml` | ❌ **informational only** | 5–25 min |
+
+**核心定位**：**AI review 永远不应作为 merge gate**。模型抽风、API 限流、偶发 garbage 输出都不该阻断合并。AI review 提供建议，maintainer 看完后用人工判断决定合不合。
+
+合规门禁的完整 plan 见 [`pr-gate-plan.md`](../pr-gate-plan.md)（不在 `code-review/` 目录下，位于 `docs/design/`）。本文档只覆盖 AI review 自身的 tier 路由设计。
+
+> 实施层面影响：`qwen-code-pr-review.yml` 中现有的 `Check PR size` step **不应再发 "PR too large" 评论阻断合并** —— 该职责移交 `pr-gate.yml` 的 `PR Size` job。本 workflow 在 size 超限时只需**内部跳过 AI review**，不影响合并状态。详见 [`pr-gate-plan.md`](../pr-gate-plan.md) Phase B。
 
 ## 问题陈述
 

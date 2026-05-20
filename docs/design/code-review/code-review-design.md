@@ -40,6 +40,16 @@ bundled `/review` skill 跑完一次就退出，不维护跨 run 状态。所有
 
 > P2（每条判断必须 cite anchor）、P3（按轮次抑制非 critical）、P4（方向判断不进 `/review` deep 流程）属于 Phase 4-6，本 PR 不实现，详见 roadmap。
 
+## 定位：advisory，不是 merge gate
+
+本 workflow 输出的 AI review 是 **informational only**。它**不应**被加入 Branch Protection 的 required status checks，原因：
+
+- LLM 抽风（超时 / 限流 / 偶发 garbage 输出）不应阻断合并
+- 模型判断结果对 maintainer 是建议，最终决策仍在人
+- 实测数据（详见 [`preflight-triage.md`](./preflight-triage.md) §问题陈述）显示 AI review 长尾耗时不可预测，把它当门禁会让 PR 流卡顿
+
+**合并门禁**由独立的 `pr-gate.yml` workflow 负责（title 格式 / body 必填段 / size 上限），设计见 [`../pr-gate-plan.md`](../pr-gate-plan.md)。两条线正交，可并行推进。
+
 ## 触发与权限
 
 ### 触发事件

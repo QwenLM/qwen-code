@@ -42,9 +42,30 @@
 
 ---
 
+## 与 PR 合规门禁（pr-gate）的关系
+
+本 roadmap 只覆盖 **AI review 自身**的演进路线。**PR 合规门禁**（title / body 必填段 / size 上限 / lint / test）是正交的另一条线，由独立 workflow `pr-gate.yml` 负责，设计见 [`../pr-gate-plan.md`](../pr-gate-plan.md)（位于 `docs/design/`，非本 `code-review/` 目录）。
+
+**核心定位**：AI review **永远不应作为 merge gate**。本 roadmap 中所有阶段（Phase 1-7）产出的 AI review 都是 *informational only*。合并门禁由 `pr-gate.yml` 提供。
+
+两条线**可并行推进**，互不阻塞：
+
+```
+合规门禁线：    pr-gate.yml (title/body/size) ─────┐
+                                                   ▼
+                                            Branch Protection
+                                              required checks
+AI review 线：  Phase 1-3 → Phase 4 → Phase 4.5 → … ─┘
+                                                   │
+                                                   ▼
+                                              (informational)
+```
+
+---
+
 ## 后续阶段（独立 PR，设计随实现提交）
 
-- **Phase 4 — Preflight Triage（tier 路由）**：在 bundled `/review` 之前加 preflight step，按 `{ULTRA_LIGHT, LIGHT, STANDARD, DEEP}` 四档路由；shell 层 hard rule 兜底；新增 `.qwen/review-rules.md` 的 `tier-floor:` token。详细设计见 [`preflight-triage.md`](./preflight-triage.md)。依赖 Phase 1-3 合入。
+- **Phase 4 — Preflight Triage（tier 路由）**：在 bundled `/review` 之前加 preflight step，按 `{ULTRA_LIGHT, LIGHT, STANDARD, DEEP}` 四档路由。详细设计见 [`preflight-triage.md`](./preflight-triage.md)。依赖 Phase 1-3 合入。
 - **Phase 4.5 — Design Gate（方向 / scope / anchor cite）**：原 Phase 4 的方向类判定部分独立出来，新增 workflow helper 在 preflight 之后跑方向 / scope / 架构 / Claude Code 对标检查，输出 `PASS / ADVISORY_ONLY / BLOCK`；调整 `review-rules.md` 要求 cite anchor；加 Feature PR Readiness gate。依赖 Phase 4 合入。
 - **Phase 5 — 历史 PR / Issue 感知**：Design Gate 增加 4 类历史检测（同 issue 解决过 / 已有 PR 实现过 / by-design 拒过 → VIOLATION / 历史"坏"PR 信号），`gh search prs/issues` 实现。依赖 Phase 4.5。
 - **Phase 6 — 轮次抑制**：bundled skill 写 finding cache，对第 2 轮起的 `Suggestion` 同 file/line 抑制，`Critical` 永不抑制；加 `--force` 语义。需改上游 skill，依赖 release 节奏。

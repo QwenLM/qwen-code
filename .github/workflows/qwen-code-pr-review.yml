@@ -358,25 +358,18 @@ jobs:
           echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines changed lines)"
 
           if [ "$changed_lines" -gt "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" ]; then
+            # Size > AI-review threshold: skip AI review but DO NOT post a
+            # blocking comment. Merge-blocking by size is the job of
+            # pr-gate.yml (PR Size check). This step is informational only.
+            # See docs/design/pr-gate-plan.md Phase B.
             write_output "should_review=false"
+            echo "::notice::PR size ($changed_lines lines) exceeds AI-review threshold ($QWEN_PR_REVIEW_MAX_CHANGED_LINES). Skipping AI review. The pr-gate.yml 'PR Size' check is responsible for blocking oversized PRs from merging."
             {
-              printf 'This PR changes %s lines across %s files, which is above the current automated review threshold of %s changed lines.\n\n' \
+              printf '### Qwen PR review skipped (PR too large for AI review)\n\n'
+              printf 'PR size: %s lines across %s files (threshold %s).\n\n' \
                 "$changed_lines" "$changed_files" "$QWEN_PR_REVIEW_MAX_CHANGED_LINES"
-              printf 'Please consider splitting it into smaller, focused PRs before requesting a full Qwen Code review. Smaller PRs are easier to validate, easier to dogfood, and less likely to mix product direction, refactoring, and implementation details in one review.\n\n'
-              printf "_Qwen Code PR review did not run a detailed code review for this oversized changeset. Model configured for review: \`%s\`._\n" \
-                "$OPENAI_MODEL"
-            } > qwen-pr-review-size-comment.md
-            if [ "$SHOULD_COMMENT" = "true" ]; then
-              gh pr comment "$PR_NUMBER" \
-                --repo "$GITHUB_REPOSITORY" \
-                --body-file qwen-pr-review-size-comment.md
-            else
-              {
-                printf '### Qwen PR review dry run\n\n'
-                cat qwen-pr-review-size-comment.md
-                printf "\n\nReview mode: \`%s\`; no PR comments were posted.\n" "$REVIEW_MODE"
-              } >> "$GITHUB_STEP_SUMMARY"
-            fi
+              printf 'Skipped automated AI review. Merge-blocking by size is handled by `pr-gate.yml` (PR Size check) — see that workflow for the actual size compliance gate.\n'
+            } >> "$GITHUB_STEP_SUMMARY"
           else
             write_output "should_review=true"
           fi
