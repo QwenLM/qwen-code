@@ -175,6 +175,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // half of the bundle without the other.
     const useProxyIdentity = !isAnthropicNativeBaseUrl(contentGeneratorConfig);
     const defaultHeaders = this.buildHeaders(useProxyIdentity);
+    // On the proxy branch the SDK is constructed with `authToken` so it
+    // emits `Authorization: Bearer <key>` natively, but some
+    // Anthropic-compatible servers (OpenCode-Go, Claude proxy products —
+    // see #4323) authenticate only on the canonical `x-api-key` header.
+    // Ship both shapes side-by-side so either family accepts us. We add
+    // `x-api-key` here (post-buildHeaders) so customHeaders can't override
+    // it and the env back-fill suppression (apiKey: null on the SDK side)
+    // is preserved. The value is the user's explicitly-configured key —
+    // never an env-resolved one — so this can't widen the #4020 leak.
+    if (useProxyIdentity && contentGeneratorConfig.apiKey) {
+      defaultHeaders['x-api-key'] = contentGeneratorConfig.apiKey;
+    }
     const baseURL = contentGeneratorConfig.baseUrl;
     // Configure fetch options for proxy support and timeout handling.
     // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
