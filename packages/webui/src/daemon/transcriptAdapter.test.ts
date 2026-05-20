@@ -46,12 +46,14 @@ describe('daemonTranscriptToUnifiedMessages', () => {
     const messages = daemonTranscriptToUnifiedMessages([
       createPermissionBlock('pending-permission'),
       createPermissionBlock('allowed-permission', 'selected:allow'),
+      createPermissionBlock('allowed-substring-permission', 'selected:deny-me'),
       createPermissionBlock('cancelled-permission', 'cancelled'),
       createPermissionBlock('denied-permission', 'denied'),
     ]);
 
     expect(messages.map((message) => message.toolCall?.status)).toEqual([
       'pending',
+      'completed',
       'completed',
       'cancelled',
       'failed',

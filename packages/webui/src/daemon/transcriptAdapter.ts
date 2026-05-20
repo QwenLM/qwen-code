@@ -201,25 +201,28 @@ function normalizePermissionStatus(
   resolved: string | undefined,
 ): ToolCallStatus {
   if (!resolved) return 'pending';
-  const normalized = resolved.toLowerCase();
-  if (
-    normalized.includes('cancel') ||
-    normalized.includes('abort') ||
-    normalized.includes('dismiss')
-  ) {
-    return 'cancelled';
+  const primary = resolved.split(':', 1)[0]?.toLowerCase();
+  switch (primary) {
+    case 'cancel':
+    case 'cancelled':
+    case 'canceled':
+    case 'abort':
+    case 'aborted':
+    case 'dismiss':
+    case 'dismissed':
+      return 'cancelled';
+    case 'deny':
+    case 'denied':
+    case 'reject':
+    case 'rejected':
+    case 'blocked':
+    case 'error':
+    case 'failed':
+    case 'fail':
+      return 'failed';
+    default:
+      return 'completed';
   }
-  if (
-    normalized.includes('deny') ||
-    normalized.includes('denied') ||
-    normalized.includes('reject') ||
-    normalized.includes('blocked') ||
-    normalized.includes('error') ||
-    normalized.includes('fail')
-  ) {
-    return 'failed';
-  }
-  return 'completed';
 }
 
 function sanitizeDaemonValue(value: unknown, depth = 0): unknown {

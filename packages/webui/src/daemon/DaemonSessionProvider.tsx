@@ -129,6 +129,9 @@ export function DaemonSessionProvider({
               previousSessionId !== undefined &&
               nextSession.sessionId !== previousSessionId
             ) {
+              promptAbortRef.current?.abort();
+              promptAbortRef.current = undefined;
+              promptBusyRef.current = false;
               store.reset();
             }
             session = nextSession;

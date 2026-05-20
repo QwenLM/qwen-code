@@ -120,7 +120,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
-  it('surfaces session_closed as a visible terminal error', () => {
+  it('surfaces session_closed as a visible terminal status', () => {
     const events = normalizeDaemonEvent({
       id: 23,
       v: 1,
@@ -130,8 +130,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
 
     expect(events).toMatchObject([
       {
-        type: 'error',
-        recoverable: false,
+        type: 'status',
         text: 'Session closed: idle timeout',
       },
     ]);
