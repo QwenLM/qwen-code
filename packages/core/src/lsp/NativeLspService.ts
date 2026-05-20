@@ -45,7 +45,8 @@ import type {
 import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as fs from 'node:fs';
-import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
+import { promises as fsp } from 'node:fs';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { globSync } from 'glob';
 
@@ -1313,7 +1314,7 @@ export class NativeLspService {
     // replace the unreadable target with edits applied to an empty buffer.
     let content: string;
     try {
-      content = fs.readFileSync(filePath, 'utf-8');
+      content = await fsp.readFile(filePath, 'utf-8');
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
         throw err;
@@ -1358,7 +1359,7 @@ export class NativeLspService {
     // parent-directory write access. ENOENT is fine — LSP may be creating
     // the file via edits.
     try {
-      fs.accessSync(filePath, fs.constants.W_OK);
+      await fsp.access(filePath, fs.constants.W_OK);
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
         throw err;
@@ -1366,7 +1367,9 @@ export class NativeLspService {
     }
 
     // Atomic write so a crash mid-edit can't leave the user file half-written.
-    atomicWriteFileSync(filePath, lines.join('\n'), { encoding: 'utf-8' });
+    // Async variant avoids blocking the event loop on the LSP edit hot path
+    // (sync renameWithRetry can stall up to 350ms under Atomics.wait backoff).
+    await atomicWriteFile(filePath, lines.join('\n'), { encoding: 'utf-8' });
   }
 
   /**

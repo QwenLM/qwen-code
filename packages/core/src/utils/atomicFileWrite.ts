@@ -201,9 +201,15 @@ export async function atomicWriteFile(
 
     // EXDEV: cross-device rename not supported — fall back to direct write.
     if (isNodeError(error) && error.code === 'EXDEV') {
-      await writeFileImpl(targetPath, data, writeOptions);
-      await tryChmod(targetPath);
-      return;
+      try {
+        await writeFileImpl(targetPath, data, writeOptions);
+        await tryChmod(targetPath);
+        return;
+      } catch (fallbackError) {
+        // Preserve the function's error-shape contract even on the
+        // non-atomic fallback path (e.g. ENOSPC writing directly).
+        throw annotateWriteError(fallbackError, targetPath);
+      }
     }
 
     throw annotateWriteError(error, targetPath);
@@ -218,10 +224,18 @@ export async function atomicWriteFile(
  * preserve every other property (`code`, `errno`, `syscall`, `stack`,
  * the prototype chain) so existing `err.code === 'ENOENT'` checks and
  * `instanceof` narrowing continue to work unchanged.
+ *
+ * `fnName` defaults to the async variant; sync callers pass
+ * `'atomicWriteFileSync'` so incident-response logs identify which
+ * code path actually failed.
  */
-function annotateWriteError(error: unknown, targetPath: string): unknown {
+function annotateWriteError(
+  error: unknown,
+  targetPath: string,
+  fnName: string = 'atomicWriteFile',
+): unknown {
   if (error instanceof Error && !error.message.includes(targetPath)) {
-    error.message = `atomicWriteFile(${JSON.stringify(targetPath)}): ${error.message}`;
+    error.message = `${fnName}(${JSON.stringify(targetPath)}): ${error.message}`;
   }
   return error;
 }
@@ -400,11 +414,19 @@ export function atomicWriteFileSync(
     }
 
     if (isNodeError(error) && error.code === 'EXDEV') {
-      writeFileImpl(targetPath, data, writeOptions);
-      tryChmodSync(targetPath);
-      return;
+      try {
+        writeFileImpl(targetPath, data, writeOptions);
+        tryChmodSync(targetPath);
+        return;
+      } catch (fallbackError) {
+        throw annotateWriteError(
+          fallbackError,
+          targetPath,
+          'atomicWriteFileSync',
+        );
+      }
     }
 
-    throw annotateWriteError(error, targetPath);
+    throw annotateWriteError(error, targetPath, 'atomicWriteFileSync');
   }
 }
