@@ -531,7 +531,10 @@ describe('standalone release packaging', () => {
   });
 });
 
-describe('Linux/macOS installer end-to-end', () => {
+// These end-to-end installs spawn child processes via execFileSync;
+// the default 5s vitest timeout is too tight on slow CI runners even
+// without Windows' cmd.exe + node.exe startup overhead.
+describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
   itOnUnix(
     'installs a local standalone archive with checksum verification',
     () => {
