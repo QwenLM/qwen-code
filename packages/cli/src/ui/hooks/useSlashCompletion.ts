@@ -521,7 +521,7 @@ function toSuggestion(item: string | CommandCompletionItem): Suggestion | null {
     label: item.label ?? item.value,
     value: item.value,
     description: item.description,
-    isDirectory: item.isDirectory,
+    isDirectory: item.isDirectory ?? false,
   };
 }
 
