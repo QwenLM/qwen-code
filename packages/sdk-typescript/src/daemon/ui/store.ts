@@ -78,6 +78,9 @@ function createState(
     blocks,
     blockIndexById: rebuildDaemonTranscriptBlockIndex(blocks),
     toolBlockByCallId: { ...(seed.toolBlockByCallId ?? {}) },
+    trimmedToolNotificationByCallId: {
+      ...(seed.trimmedToolNotificationByCallId ?? {}),
+    },
     permissionBlockByRequestId: {
       ...(seed.permissionBlockByRequestId ?? {}),
     },

@@ -371,8 +371,112 @@ describe('daemon UI normalizer and transcript reducer', () => {
       {
         kind: 'error',
         text: 'Tool tool-1 output trimmed (max blocks reached)',
+        eventId: 8,
       },
     ]);
+    expect(state.trimmedToolNotificationByCallId['tool-1']).toBe(true);
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 9,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-1',
+            status: 'completed',
+            rawOutput: 'late again',
+          },
+        },
+      }),
+      { now: 6 },
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'error',
+        text: 'Tool tool-1 output trimmed (max blocks reached)',
+        eventId: 8,
+      },
+    ]);
+  });
+
+  it('keeps active assistant text open when reporting trimmed tool updates', () => {
+    let state = createDaemonTranscriptState({ maxBlocks: 2, now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 10,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'tool-stream',
+            title: 'Run command',
+            status: 'running',
+          },
+        },
+      }),
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        { type: 'status', text: 'first trim filler' },
+        { type: 'status', text: 'second trim filler' },
+      ],
+      { now: 3 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'streaming' }],
+      { now: 4 },
+    );
+
+    const assistantBlockBeforeLateToolUpdate = state.blocks.find(
+      (block) => block.kind === 'assistant',
+    );
+    expect(assistantBlockBeforeLateToolUpdate).toMatchObject({
+      kind: 'assistant',
+      streaming: true,
+    });
+    expect(state.activeAssistantBlockId).toBe(
+      assistantBlockBeforeLateToolUpdate?.id,
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 11,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-stream',
+            rawOutput: 'late',
+          },
+        },
+      }),
+      { now: 5 },
+    );
+
+    const assistantBlockAfterLateToolUpdate = state.blocks.find(
+      (block) => block.kind === 'assistant',
+    );
+    expect(assistantBlockAfterLateToolUpdate).toMatchObject({
+      kind: 'assistant',
+      text: 'streaming',
+      streaming: true,
+    });
+    expect(state.activeAssistantBlockId).toBe(
+      assistantBlockAfterLateToolUpdate?.id,
+    );
   });
 
   it('preserves rich tool preview and status on output-only updates', () => {
@@ -519,7 +623,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
       [
-        { type: 'assistant.text.delta', text: 'x'.repeat(80_000) },
+        { type: 'assistant.text.delta', text: 'x'.repeat(160_000) },
         { type: 'assistant.text.delta', text: 'y'.repeat(80_000) },
       ],
       { now: 2 },

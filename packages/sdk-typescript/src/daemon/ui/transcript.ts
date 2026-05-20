@@ -28,6 +28,7 @@ export function createDaemonTranscriptState(
     blocks: [],
     blockIndexById: {},
     toolBlockByCallId: {},
+    trimmedToolNotificationByCallId: {},
     permissionBlockByRequestId: {},
     nextOrdinal: 1,
     now: opts.now ?? Date.now(),
@@ -192,12 +193,16 @@ function upsertToolBlock(
 ): void {
   const existingId = state.toolBlockByCallId[event.toolCallId];
   if (existingId === TRIMMED_TOOL_BLOCK_ID) {
-    appendStatusBlock(
-      state,
-      'error',
-      `Tool ${event.toolCallId} output trimmed (max blocks reached)`,
-      event,
-    );
+    if (!state.trimmedToolNotificationByCallId[event.toolCallId]) {
+      state.trimmedToolNotificationByCallId[event.toolCallId] = true;
+      appendStatusBlock(
+        state,
+        'error',
+        `Tool ${event.toolCallId} output trimmed (max blocks reached)`,
+        event,
+        { clearActiveText: false },
+      );
+    }
     return;
   }
   const existing = getWritableBlockById(state, existingId);
@@ -348,6 +353,7 @@ function appendStatusBlock(
   kind: 'status' | 'error' | 'debug',
   text: string,
   event?: DaemonUiEvent,
+  opts: { clearActiveText?: boolean } = {},
 ): void {
   const block: DaemonStatusTranscriptBlock = {
     id: allocateBlockId(state, kind),
@@ -358,7 +364,7 @@ function appendStatusBlock(
     ...(event?.eventId !== undefined ? { eventId: event.eventId } : {}),
   };
   appendBlock(state, block);
-  clearActiveText(state);
+  if (opts.clearActiveText !== false) clearActiveText(state);
 }
 
 function createTextBlock(
@@ -370,7 +376,7 @@ function createTextBlock(
   return {
     id: allocateBlockId(state, kind),
     kind,
-    text,
+    text: truncateText(text),
     createdAt: state.now,
     updatedAt: state.now,
     ...(eventId !== undefined ? { eventId } : {}),
@@ -388,6 +394,9 @@ function cloneTranscriptState(
     blocks: [...state.blocks],
     blockIndexById: { ...state.blockIndexById },
     toolBlockByCallId: { ...state.toolBlockByCallId },
+    trimmedToolNotificationByCallId: {
+      ...state.trimmedToolNotificationByCallId,
+    },
     permissionBlockByRequestId: { ...state.permissionBlockByRequestId },
   };
 }
