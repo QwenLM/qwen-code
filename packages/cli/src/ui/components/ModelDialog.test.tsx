@@ -329,6 +329,110 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('persists the effective model after "d" switches the session', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+
+    const { mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-effective',
+      })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'd',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: 'd',
+    });
+
+    await waitFor(() => {
+      expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'gpt-4', {
+        baseUrl: undefined,
+      });
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'claude-effective',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'security.auth.selectedType',
+        AuthType.USE_ANTHROPIC,
+      );
+    });
+  });
+
+  it('ignores repeated "d" presses while a model switch is in flight', async () => {
+    let resolveSwitch!: () => void;
+    const switchModel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSwitch = resolve;
+        }),
+    );
+
+    const { props } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'd',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: 'd',
+    });
+    keyPressHandler({
+      name: 'd',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: 'd',
+    });
+
+    expect(switchModel).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveSwitch();
+    });
+
+    await waitFor(() => {
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('blocks setting qwen-oauth as default with "d" (discontinued)', async () => {
     const { props, mockConfig, mockSettings } = renderComponent();
 

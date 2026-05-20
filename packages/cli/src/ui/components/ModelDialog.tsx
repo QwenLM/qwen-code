@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useCallback, useContext, useMemo, useState } from 'react';
+import { useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   AuthType,
@@ -198,6 +198,7 @@ export function ModelDialog({
   // Local error state for displaying errors within the dialog
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [highlightedValue, setHighlightedValue] = useState<string | null>(null);
+  const isSwitchingRef = useRef(false);
 
   const authType = config?.getAuthType();
 
@@ -413,43 +414,69 @@ export function ModelDialog({
           setErrorMessage(qwenOAuthDiscontinuedMessage());
           return;
         }
+        if (isSwitchingRef.current) {
+          return;
+        }
 
+        isSwitchingRef.current = true;
         setErrorMessage(null);
         void (async () => {
-          try {
-            await config.switchModel(
-              highlightedEntry.authType,
-              highlightedEntry.model.id,
-              { baseUrl: highlightedEntry.model.baseUrl },
-            );
-            logModelSlashCommand(
-              config,
-              new ModelSlashCommandEvent(highlightedEntry.model.id),
-            );
-          } catch (e) {
-            const baseErrorMessage = e instanceof Error ? e.message : String(e);
-            setErrorMessage(
-              `Failed to switch model to '${highlightedEntry.model.id}'.\n\n${baseErrorMessage}`,
-            );
-            return;
-          }
+          let after: ContentGeneratorConfig | undefined;
+          let effectiveAuthType = highlightedEntry.authType;
+          let effectiveModelId = highlightedEntry.model.id;
 
           try {
-            persistDefaultModelSelection({
-              settings,
+            try {
+              await config.switchModel(
+                highlightedEntry.authType,
+                highlightedEntry.model.id,
+                { baseUrl: highlightedEntry.model.baseUrl },
+              );
+              logModelSlashCommand(
+                config,
+                new ModelSlashCommandEvent(highlightedEntry.model.id),
+              );
+              after = config.getContentGeneratorConfig?.() as
+                | ContentGeneratorConfig
+                | undefined;
+              effectiveAuthType = after?.authType ?? highlightedEntry.authType;
+              effectiveModelId = after?.model ?? highlightedEntry.model.id;
+            } catch (e) {
+              const baseErrorMessage =
+                e instanceof Error ? e.message : String(e);
+              setErrorMessage(
+                `Failed to switch model to '${highlightedEntry.model.id}'.\n\n${baseErrorMessage}`,
+              );
+              return;
+            }
+
+            try {
+              persistDefaultModelSelection({
+                settings,
+                uiState,
+                authType: effectiveAuthType,
+                modelId: effectiveModelId,
+              });
+            } catch (e) {
+              const baseErrorMessage =
+                e instanceof Error ? e.message : String(e);
+              setErrorMessage(
+                `Switched to '${effectiveModelId}' for this session, but failed to persist as default.\n\n${baseErrorMessage}`,
+              );
+              return;
+            }
+
+            logModelSwitchResult({
               uiState,
-              authType: highlightedEntry.authType,
-              modelId: highlightedEntry.model.id,
+              after,
+              effectiveAuthType,
+              effectiveModelId,
+              isRuntime: false,
             });
-          } catch (e) {
-            const baseErrorMessage = e instanceof Error ? e.message : String(e);
-            setErrorMessage(
-              `Switched to '${highlightedEntry.model.id}' for this session, but failed to persist as default.\n\n${baseErrorMessage}`,
-            );
-            return;
+            onClose();
+          } finally {
+            isSwitchingRef.current = false;
           }
-
-          onClose();
         })();
       }
     },
@@ -458,123 +485,132 @@ export function ModelDialog({
 
   const handleSelect = useCallback(
     async (selected: string) => {
-      setErrorMessage(null);
-
-      // Fast model mode: save authType:modelId so duplicate model ids across
-      // providers remain unambiguous. baseUrl is intentionally discarded.
-      if (isFastModelMode) {
-        let fastModel: string;
-        if (selected.includes('::')) {
-          const parsed = parseModelSelectionKey(selected);
-          fastModel = `${parsed.authType}:${parsed.modelId}`;
-        } else if (selected.startsWith('$runtime|')) {
-          const parts = selected.split('|');
-          fastModel =
-            parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
-        } else {
-          fastModel = selected;
-        }
-        const scope = getPersistScopeForModelSelection(settings);
-        settings.setValue(scope, 'fastModel', fastModel);
-        // Sync the runtime Config so forked agents pick up the change immediately.
-        config?.setFastModel(fastModel);
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Fast Model')}: ${fastModel}`,
-          },
-          Date.now(),
-        );
-        onClose();
+      if (isSwitchingRef.current) {
         return;
       }
 
-      // Block selection of discontinued qwen-oauth models
-      // (only block non-runtime OAuth; runtime OAuth models from existing
-      //  cached tokens are still allowed to work until the server rejects them)
-      const isQwenOAuthSelection =
-        selected.startsWith(`${AuthType.QWEN_OAUTH}::`) ||
-        (selected.startsWith('$runtime|') &&
-          selected.split('|')[1] === AuthType.QWEN_OAUTH);
-      const isRuntimeOAuthSelection = selected.startsWith(
-        `$runtime|${AuthType.QWEN_OAUTH}|`,
-      );
-      if (isQwenOAuthSelection && !isRuntimeOAuthSelection) {
-        setErrorMessage(qwenOAuthDiscontinuedMessage());
-        return;
-      }
-
-      let after: ContentGeneratorConfig | undefined;
-      let effectiveAuthType: AuthType | undefined;
-      let effectiveModelId = selected;
-      let isRuntime = false;
-
-      if (!config) {
-        onClose();
-        return;
-      }
-
+      isSwitchingRef.current = true;
       try {
-        // Determine if this is a runtime model selection
-        // Runtime model format: $runtime|${authType}|${modelId}
-        isRuntime = selected.startsWith('$runtime|');
+        setErrorMessage(null);
 
-        let selectedAuthType: AuthType;
-        let modelId: string;
-
-        let selectedBaseUrl: string | undefined;
-        if (isRuntime) {
-          // For runtime models, extract authType from the snapshot ID
-          // Format: $runtime|${authType}|${modelId}
-          const parts = selected.split('|');
-          if (parts.length >= 2 && parts[0] === '$runtime') {
-            selectedAuthType = parts[1] as AuthType;
+        // Fast model mode: save authType:modelId so duplicate model ids across
+        // providers remain unambiguous. baseUrl is intentionally discarded.
+        if (isFastModelMode) {
+          let fastModel: string;
+          if (selected.includes('::')) {
+            const parsed = parseModelSelectionKey(selected);
+            fastModel = `${parsed.authType}:${parsed.modelId}`;
+          } else if (selected.startsWith('$runtime|')) {
+            const parts = selected.split('|');
+            fastModel =
+              parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
           } else {
-            selectedAuthType = authType as AuthType;
+            fastModel = selected;
           }
-          modelId = selected; // Pass the full snapshot ID to switchModel
-        } else {
-          const parsed = parseModelSelectionKey(selected);
-          selectedAuthType = (parsed.authType || authType) as AuthType;
-          modelId = parsed.modelId;
-          selectedBaseUrl = parsed.baseUrl;
+          const scope = getPersistScopeForModelSelection(settings);
+          settings.setValue(scope, 'fastModel', fastModel);
+          // Sync the runtime Config so forked agents pick up the change immediately.
+          config?.setFastModel(fastModel);
+          uiState?.historyManager.addItem(
+            {
+              type: 'success',
+              text: `${t('Fast Model')}: ${fastModel}`,
+            },
+            Date.now(),
+          );
+          onClose();
+          return;
         }
 
-        await config.switchModel(selectedAuthType, modelId, {
-          ...(selectedAuthType !== authType &&
-          selectedAuthType === AuthType.QWEN_OAUTH
-            ? { requireCachedCredentials: true }
-            : {}),
-          baseUrl: selectedBaseUrl,
+        // Block selection of discontinued qwen-oauth models
+        // (only block non-runtime OAuth; runtime OAuth models from existing
+        //  cached tokens are still allowed to work until the server rejects them)
+        const isQwenOAuthSelection =
+          selected.startsWith(`${AuthType.QWEN_OAUTH}::`) ||
+          (selected.startsWith('$runtime|') &&
+            selected.split('|')[1] === AuthType.QWEN_OAUTH);
+        const isRuntimeOAuthSelection = selected.startsWith(
+          `$runtime|${AuthType.QWEN_OAUTH}|`,
+        );
+        if (isQwenOAuthSelection && !isRuntimeOAuthSelection) {
+          setErrorMessage(qwenOAuthDiscontinuedMessage());
+          return;
+        }
+
+        let after: ContentGeneratorConfig | undefined;
+        let effectiveAuthType: AuthType | undefined;
+        let effectiveModelId = selected;
+        let isRuntime = false;
+
+        if (!config) {
+          onClose();
+          return;
+        }
+
+        try {
+          // Determine if this is a runtime model selection
+          // Runtime model format: $runtime|${authType}|${modelId}
+          isRuntime = selected.startsWith('$runtime|');
+
+          let selectedAuthType: AuthType;
+          let modelId: string;
+
+          let selectedBaseUrl: string | undefined;
+          if (isRuntime) {
+            // For runtime models, extract authType from the snapshot ID
+            // Format: $runtime|${authType}|${modelId}
+            const parts = selected.split('|');
+            if (parts.length >= 2 && parts[0] === '$runtime') {
+              selectedAuthType = parts[1] as AuthType;
+            } else {
+              selectedAuthType = authType as AuthType;
+            }
+            modelId = selected; // Pass the full snapshot ID to switchModel
+          } else {
+            const parsed = parseModelSelectionKey(selected);
+            selectedAuthType = (parsed.authType || authType) as AuthType;
+            modelId = parsed.modelId;
+            selectedBaseUrl = parsed.baseUrl;
+          }
+
+          await config.switchModel(selectedAuthType, modelId, {
+            ...(selectedAuthType !== authType &&
+            selectedAuthType === AuthType.QWEN_OAUTH
+              ? { requireCachedCredentials: true }
+              : {}),
+            baseUrl: selectedBaseUrl,
+          });
+
+          if (!isRuntime) {
+            const event = new ModelSlashCommandEvent(modelId);
+            logModelSlashCommand(config, event);
+          }
+
+          after = config.getContentGeneratorConfig?.() as
+            | ContentGeneratorConfig
+            | undefined;
+          effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
+          effectiveModelId = after?.model ?? modelId;
+        } catch (e) {
+          const baseErrorMessage = e instanceof Error ? e.message : String(e);
+          const errorPrefix = isRuntime
+            ? 'Failed to switch to runtime model.'
+            : `Failed to switch model to '${effectiveModelId ?? selected}'.`;
+          setErrorMessage(`${errorPrefix}\n\n${baseErrorMessage}`);
+          return;
+        }
+
+        logModelSwitchResult({
+          uiState,
+          after,
+          effectiveAuthType,
+          effectiveModelId,
+          isRuntime,
         });
-
-        if (!isRuntime) {
-          const event = new ModelSlashCommandEvent(modelId);
-          logModelSlashCommand(config, event);
-        }
-
-        after = config.getContentGeneratorConfig?.() as
-          | ContentGeneratorConfig
-          | undefined;
-        effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
-        effectiveModelId = after?.model ?? modelId;
-      } catch (e) {
-        const baseErrorMessage = e instanceof Error ? e.message : String(e);
-        const errorPrefix = isRuntime
-          ? 'Failed to switch to runtime model.'
-          : `Failed to switch model to '${effectiveModelId ?? selected}'.`;
-        setErrorMessage(`${errorPrefix}\n\n${baseErrorMessage}`);
-        return;
+        onClose();
+      } finally {
+        isSwitchingRef.current = false;
       }
-
-      logModelSwitchResult({
-        uiState,
-        after,
-        effectiveAuthType,
-        effectiveModelId,
-        isRuntime,
-      });
-      onClose();
     },
     [
       authType,
