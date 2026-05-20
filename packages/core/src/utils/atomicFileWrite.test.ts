@@ -707,10 +707,28 @@ describe('EXDEV fallback (async + sync)', () => {
       e.code = 'EXDEV';
       throw e;
     };
-    // Realistic message: Node's fs errors always embed the path being
-    // written, so the annotation guard MUST tolerate target-as-substring
-    // (otherwise it would silently skip annotation in production).
-    const failingWrite = async () => {
+    // Selective failure: succeed on the first call (the tmp-file write)
+    // so the EXDEV branch is actually reached; fail on the second call
+    // (the direct write inside the EXDEV fallback). Without this
+    // distinction the tmp-file write would fail FIRST with ENOSPC,
+    // skipping the EXDEV branch entirely and leaving the inner
+    // annotateWriteError call dead-code untested.
+    let writeCalls = 0;
+    const failingWrite = async (
+      p: string,
+      d: string | Buffer | NodeJS.ArrayBufferView,
+      opts: unknown,
+    ) => {
+      writeCalls++;
+      if (writeCalls === 1) {
+        // Actually write the tmp file so subsequent cleanup works.
+        await fs.writeFile(
+          p,
+          d as Buffer,
+          opts as Parameters<typeof fs.writeFile>[2],
+        );
+        return;
+      }
       const e: NodeJS.ErrnoException = new Error(
         `ENOSPC: no space left on device, open '${filePath}'`,
       );
@@ -740,9 +758,24 @@ describe('EXDEV fallback (async + sync)', () => {
       e.code = 'EXDEV';
       throw e;
     };
-    // Realistic message embedding the path — exercises the substring-vs-prefix
-    // guard distinction in annotateWriteError.
-    const failingWrite = () => {
+    // Same selective-failure pattern as the async test: first call (tmp
+    // write) succeeds so the EXDEV branch is genuinely reached; second
+    // call (fallback write) throws.
+    let writeCalls = 0;
+    const failingWrite = (
+      p: string,
+      d: string | NodeJS.ArrayBufferView,
+      opts: unknown,
+    ) => {
+      writeCalls++;
+      if (writeCalls === 1) {
+        fsSync.writeFileSync(
+          p,
+          d,
+          opts as Parameters<typeof fsSync.writeFileSync>[2],
+        );
+        return;
+      }
       const e: NodeJS.ErrnoException = new Error(
         `ENOSPC: no space left on device, open '${filePath}'`,
       );
@@ -763,5 +796,99 @@ describe('EXDEV fallback (async + sync)', () => {
     expect((caught as Error).message).toMatch(
       /atomicWriteFileSync\(.*exdev-sync-write-fail\.txt.*\):.*ENOSPC/,
     );
+  });
+});
+
+// PR #4333 review fold-in: noFollow is a security-critical option used
+// by all credential write sites — these tests verify the actual
+// symlink-skipping behavior (happy path AND EXDEV fallback path),
+// not just that the option is passed through to a mock.
+describe('noFollow option — symlink protection', () => {
+  let tmpDir: string;
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'no-follow-test-'));
+  });
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('atomicWriteFile: noFollow replaces a pre-placed symlink instead of writing through it', async () => {
+    const real = path.join(tmpDir, 'real.txt');
+    const link = path.join(tmpDir, 'link.txt');
+    await fs.writeFile(real, 'ORIGINAL');
+    await fs.symlink(real, link);
+
+    await atomicWriteFile(link, 'NEW', { noFollow: true });
+
+    // link is now a regular file, not a symlink
+    expect(fsSync.lstatSync(link).isSymbolicLink()).toBe(false);
+    expect(await fs.readFile(link, 'utf-8')).toBe('NEW');
+    // real file was NOT followed-through to
+    expect(await fs.readFile(real, 'utf-8')).toBe('ORIGINAL');
+  });
+
+  it('atomicWriteFileSync: noFollow replaces a pre-placed symlink instead of writing through it', () => {
+    const real = path.join(tmpDir, 'real.txt');
+    const link = path.join(tmpDir, 'link.txt');
+    fsSync.writeFileSync(real, 'ORIGINAL');
+    fsSync.symlinkSync(real, link);
+
+    atomicWriteFileSync(link, 'NEW', { noFollow: true });
+
+    expect(fsSync.lstatSync(link).isSymbolicLink()).toBe(false);
+    expect(fsSync.readFileSync(link, 'utf-8')).toBe('NEW');
+    expect(fsSync.readFileSync(real, 'utf-8')).toBe('ORIGINAL');
+  });
+
+  it('atomicWriteFile: noFollow EXDEV fallback also refuses to follow symlinks', async () => {
+    const real = path.join(tmpDir, 'real.txt');
+    const link = path.join(tmpDir, 'link.txt');
+    await fs.writeFile(real, 'ORIGINAL');
+    await fs.symlink(real, link);
+
+    // Force the rename path to fail with EXDEV → exercise the
+    // noFollow-aware fallback (was the security regression Codex caught).
+    const exdevRename = async () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+
+    await atomicWriteFile(
+      link,
+      'NEW',
+      { noFollow: true },
+      { rename: exdevRename },
+    );
+
+    expect(fsSync.lstatSync(link).isSymbolicLink()).toBe(false);
+    expect(await fs.readFile(link, 'utf-8')).toBe('NEW');
+    // The real file MUST be untouched — pre-fix this is where the
+    // attacker's symlink would have redirected credentials to.
+    expect(await fs.readFile(real, 'utf-8')).toBe('ORIGINAL');
+  });
+
+  it('atomicWriteFileSync: noFollow EXDEV fallback also refuses to follow symlinks', () => {
+    const real = path.join(tmpDir, 'real.txt');
+    const link = path.join(tmpDir, 'link.txt');
+    fsSync.writeFileSync(real, 'ORIGINAL');
+    fsSync.symlinkSync(real, link);
+
+    const exdevRename = () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+
+    atomicWriteFileSync(
+      link,
+      'NEW',
+      { noFollow: true },
+      { rename: exdevRename },
+    );
+
+    expect(fsSync.lstatSync(link).isSymbolicLink()).toBe(false);
+    expect(fsSync.readFileSync(link, 'utf-8')).toBe('NEW');
+    expect(fsSync.readFileSync(real, 'utf-8')).toBe('ORIGINAL');
   });
 });

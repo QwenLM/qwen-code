@@ -216,7 +216,38 @@ export async function atomicWriteFile(
     // EXDEV: cross-device rename not supported — fall back to direct write.
     if (isNodeError(error) && error.code === 'EXDEV') {
       try {
-        await writeFileImpl(targetPath, data, writeOptions);
+        if (options?.noFollow) {
+          // Naive fallback `writeFile(targetPath)` follows symlinks,
+          // defeating the entire purpose of noFollow on credential
+          // paths. Unlink any existing entry (matches the rename
+          // happy path that atomically replaces a symlink), then
+          // open with O_EXCL to refuse writing through a symlink
+          // that races back into existence.
+          try {
+            await fs.unlink(targetPath);
+          } catch (unlinkErr) {
+            if (!isNodeError(unlinkErr) || unlinkErr.code !== 'ENOENT') {
+              throw unlinkErr;
+            }
+          }
+          const fd = await fs.open(
+            targetPath,
+            fsSync.constants.O_WRONLY |
+              fsSync.constants.O_CREAT |
+              fsSync.constants.O_EXCL,
+            desiredMode ?? 0o666,
+          );
+          try {
+            await fd.writeFile(
+              typeof data === 'string' ? Buffer.from(data, encoding) : data,
+            );
+            if (flush) await fd.sync();
+          } finally {
+            await fd.close();
+          }
+        } else {
+          await writeFileImpl(targetPath, data, writeOptions);
+        }
         await tryChmod(targetPath);
         return;
       } catch (fallbackError) {
@@ -439,7 +470,34 @@ export function atomicWriteFileSync(
 
     if (isNodeError(error) && error.code === 'EXDEV') {
       try {
-        writeFileImpl(targetPath, data, writeOptions);
+        if (options?.noFollow) {
+          // See atomicWriteFile for the rationale — noFollow must not
+          // be silently dropped on the cross-device fallback path.
+          try {
+            fsSync.unlinkSync(targetPath);
+          } catch (unlinkErr) {
+            if (!isNodeError(unlinkErr) || unlinkErr.code !== 'ENOENT') {
+              throw unlinkErr;
+            }
+          }
+          const fd = fsSync.openSync(
+            targetPath,
+            fsSync.constants.O_WRONLY |
+              fsSync.constants.O_CREAT |
+              fsSync.constants.O_EXCL,
+            desiredMode ?? 0o666,
+          );
+          try {
+            const buf =
+              typeof data === 'string' ? Buffer.from(data, encoding) : data;
+            fsSync.writeSync(fd, buf);
+            if (flush) fsSync.fsyncSync(fd);
+          } finally {
+            fsSync.closeSync(fd);
+          }
+        } else {
+          writeFileImpl(targetPath, data, writeOptions);
+        }
         tryChmodSync(targetPath);
         return;
       } catch (fallbackError) {
