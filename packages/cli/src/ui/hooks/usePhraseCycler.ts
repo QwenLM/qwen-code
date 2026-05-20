@@ -6,30 +6,12 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { t, ta, getCurrentLanguage } from '../../i18n/index.js';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-
-const execAsync = promisify(exec);
+import { getFortuneQuote } from './fortune.js';
+import { selectRandomPhrase } from './phraseSelector.js';
 
 export const WITTY_LOADING_PHRASES: string[] = ["I'm Feeling Lucky"];
 
 export const PHRASE_CHANGE_INTERVAL_MS = 15000;
-
-/**
- * Get a random fortune quote by calling the fortune command.
- * Uses -s flag to get only short (single-line) fortunes.
- */
-async function getFortuneQuote(command: string): Promise<string | null> {
-  try {
-    const { stdout } = await execAsync(command);
-    // Replace newlines with spaces and trim to ensure single-line output
-    const quote = stdout.trim().replace(/\s+/g, ' ');
-    return quote || null;
-  } catch {
-    // Return null to signal fallback to preselected phrases
-    return null;
-  }
-}
 
 /**
  * Custom hook to manage cycling through loading phrases.
@@ -79,11 +61,14 @@ export const usePhraseCycler = (
       }
 
       const updatePhrase = async () => {
-        if (enableFortunes && fortuneCommand.trim()) {
+        const hasFortuneCommand = enableFortunes && fortuneCommand?.trim();
+        if (hasFortuneCommand) {
           const fortuneQuote = await getFortuneQuote(fortuneCommand);
-          setCurrentLoadingPhrase(fortuneQuote ?? loadingPhrases[0]);
+          setCurrentLoadingPhrase(
+            fortuneQuote ?? selectRandomPhrase(loadingPhrases),
+          );
         } else {
-          setCurrentLoadingPhrase(loadingPhrases[0]);
+          setCurrentLoadingPhrase(selectRandomPhrase(loadingPhrases));
         }
       };
 
