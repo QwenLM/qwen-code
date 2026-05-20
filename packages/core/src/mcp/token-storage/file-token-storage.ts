@@ -104,6 +104,7 @@ export class FileTokenStorage extends BaseTokenStorage {
     await atomicWriteFile(this.tokenFilePath, encrypted, {
       mode: 0o600,
       forceMode: true,
+      noFollow: true,
     });
   }
 

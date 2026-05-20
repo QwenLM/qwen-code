@@ -707,8 +707,13 @@ describe('EXDEV fallback (async + sync)', () => {
       e.code = 'EXDEV';
       throw e;
     };
+    // Realistic message: Node's fs errors always embed the path being
+    // written, so the annotation guard MUST tolerate target-as-substring
+    // (otherwise it would silently skip annotation in production).
     const failingWrite = async () => {
-      const e: NodeJS.ErrnoException = new Error('ENOSPC: out of space');
+      const e: NodeJS.ErrnoException = new Error(
+        `ENOSPC: no space left on device, open '${filePath}'`,
+      );
       e.code = 'ENOSPC';
       throw e;
     };
@@ -735,8 +740,12 @@ describe('EXDEV fallback (async + sync)', () => {
       e.code = 'EXDEV';
       throw e;
     };
+    // Realistic message embedding the path — exercises the substring-vs-prefix
+    // guard distinction in annotateWriteError.
     const failingWrite = () => {
-      const e: NodeJS.ErrnoException = new Error('ENOSPC: out of space');
+      const e: NodeJS.ErrnoException = new Error(
+        `ENOSPC: no space left on device, open '${filePath}'`,
+      );
       e.code = 'ENOSPC';
       throw e;
     };

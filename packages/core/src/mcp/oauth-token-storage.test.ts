@@ -163,7 +163,7 @@ describe('MCPOAuthTokenStorage', () => {
         expect(atomicWriteFile).toHaveBeenCalledWith(
           path.join('/mock/home', QWEN_DIR, 'mcp-oauth-tokens.json'),
           expect.stringContaining('test-server'),
-          { mode: 0o600, forceMode: true },
+          { mode: 0o600, forceMode: true, noFollow: true },
         );
       });
 

@@ -147,7 +147,11 @@ describe('FileTokenStorage', () => {
 
       const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
       expect(writeCall[1]).toMatch(/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
-      expect(writeCall[2]).toEqual({ mode: 0o600, forceMode: true });
+      expect(writeCall[2]).toEqual({
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      });
     });
 
     it('should update existing credentials', async () => {

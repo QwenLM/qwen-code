@@ -32,6 +32,18 @@ export interface AtomicWriteFileOptions extends AtomicWriteOptions {
    * Default: false.
    */
   forceMode?: boolean;
+  /**
+   * Do NOT follow symlinks at `filePath` — write to / replace the link
+   * itself rather than its target. Pre-`atomicWriteFile` migration code
+   * used `fs.rename(tmp, filePath)`, which atomically *replaces* a
+   * symlink with the new regular file. The default behavior resolves
+   * the chain and writes through, which is a security regression for
+   * credential files on shared hosts (a pre-placed symlink could
+   * redirect tokens to an attacker-controlled path). Credential write
+   * sites pass `noFollow: true` to match the old replace-the-symlink
+   * semantics. Default: false (follow symlinks). See PR #4333 review.
+   */
+  noFollow?: boolean;
 }
 
 /**
@@ -147,7 +159,9 @@ export async function atomicWriteFile(
   const renameImpl = _testFs?.rename ?? fs.rename;
   const writeFileImpl = _testFs?.writeFile ?? fs.writeFile;
 
-  const targetPath = await resolveSymlinkChain(filePath);
+  const targetPath = options?.noFollow
+    ? filePath
+    : await resolveSymlinkChain(filePath);
 
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
@@ -234,7 +248,15 @@ function annotateWriteError(
   targetPath: string,
   fnName: string = 'atomicWriteFile',
 ): unknown {
-  if (error instanceof Error && !error.message.includes(targetPath)) {
+  // Idempotency guard: skip if we already annotated this error (the
+  // prefix is a literal `${fnName}(`). The earlier guard used
+  // `includes(targetPath)`, but real fs syscall errors embed the *tmp*
+  // path (e.g. `ENOSPC ... '/path/creds.json.a1b2c3.tmp'`) which
+  // *contains* the target path as a substring — so the annotation was
+  // silently skipped on every real failure. Check for our own prefix
+  // instead so the message gets annotated exactly once across the
+  // tmp-write → rename → EXDEV-fallback chain.
+  if (error instanceof Error && !error.message.startsWith(`${fnName}(`)) {
     error.message = `${fnName}(${JSON.stringify(targetPath)}): ${error.message}`;
   }
   return error;
@@ -365,7 +387,9 @@ export function atomicWriteFileSync(
   const renameImpl = _testFs?.rename ?? fsSync.renameSync;
   const writeFileImpl = _testFs?.writeFile ?? fsSync.writeFileSync;
 
-  const targetPath = resolveSymlinkChainSync(filePath);
+  const targetPath = options?.noFollow
+    ? filePath
+    : resolveSymlinkChainSync(filePath);
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
   // forceMode without mode falls back to permission preservation — otherwise

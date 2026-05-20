@@ -642,6 +642,7 @@ export class SharedTokenManager {
       await atomicWriteFile(filePath, credString, {
         mode: 0o600,
         forceMode: true,
+        noFollow: true,
       });
 
       // Update cached file modification time atomically after successful write

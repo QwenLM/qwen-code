@@ -96,7 +96,7 @@ describe('debugLogger', () => {
       expect(fs.appendFile).toHaveBeenCalledWith(
         Storage.getDebugLogPath('test-session-123'),
         '2026-01-24T10:30:00.000Z [DEBUG] Hello world\n',
-        { encoding: 'utf8', flush: true },
+        'utf8',
       );
     });
 
@@ -109,7 +109,7 @@ describe('debugLogger', () => {
       expect(fs.appendFile).toHaveBeenCalledWith(
         Storage.getDebugLogPath('test-session-123'),
         '2026-01-24T10:30:00.000Z [INFO] [STARTUP] Server started\n',
-        { encoding: 'utf8', flush: true },
+        'utf8',
       );
     });
 
@@ -149,7 +149,7 @@ describe('debugLogger', () => {
         expect.stringContaining(
           '[trace_id=realtraceidddddddddddddddddddddd span_id=realspanid111111]',
         ),
-        { encoding: 'utf8', flush: true },
+        'utf8',
       );
     });
 
@@ -170,7 +170,7 @@ describe('debugLogger', () => {
       expect(fs.appendFile).toHaveBeenCalledWith(
         expect.any(String),
         expect.not.stringContaining('trace_id='),
-        { encoding: 'utf8', flush: true },
+        'utf8',
       );
     });
 
@@ -187,7 +187,7 @@ describe('debugLogger', () => {
       expect(fs.appendFile).toHaveBeenCalledWith(
         expect.any(String),
         expect.not.stringContaining('trace_id='),
-        { encoding: 'utf8', flush: true },
+        'utf8',
       );
     });
 
@@ -230,7 +230,7 @@ describe('debugLogger', () => {
         expect.stringContaining(
           '[trace_id=cccccccccccccccccccccccccccccccc span_id=dddddddddddddddd]',
         ),
-        { encoding: 'utf8', flush: true },
+        'utf8',
       );
     });
 
@@ -264,7 +264,7 @@ describe('debugLogger', () => {
       expect(fs.appendFile).toHaveBeenCalledWith(
         expect.any(String),
         expect.stringContaining('Count: 42 items'),
-        { encoding: 'utf8', flush: true },
+        'utf8',
       );
     });
 

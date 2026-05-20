@@ -103,6 +103,7 @@ export class MCPOAuthTokenStorage implements TokenStorage {
       await atomicWriteFile(tokenFile, JSON.stringify(tokenArray, null, 2), {
         mode: 0o600,
         forceMode: true,
+        noFollow: true,
       });
     } catch (error) {
       debugLogger.error(
@@ -182,7 +183,7 @@ export class MCPOAuthTokenStorage implements TokenStorage {
           await atomicWriteFile(
             tokenFile,
             JSON.stringify(tokenArray, null, 2),
-            { mode: 0o600, forceMode: true },
+            { mode: 0o600, forceMode: true, noFollow: true },
           );
         }
       } catch (error) {
