@@ -6,6 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import type { HookPlanner, HookEventContext } from './hookPlanner.js';
+import { getHookMatcherTarget } from './hookPlanner.js';
 import type { HookRunner } from './hookRunner.js';
 import type { HookAggregator, AggregatedHookResult } from './hookAggregator.js';
 import type { SessionHooksManager } from './sessionHooksManager.js';
@@ -538,50 +539,6 @@ export class HookEventHandler {
   }
 
   /**
-   * Choose the matcher target for session hooks based on the event.
-   *
-   * Mirrors HookPlanner.matchesContext() so session hooks honor the same
-   * event-specific matcher semantics as configured hooks. Returning `undefined`
-   * means the event has no matcher semantics and all session hooks for the
-   * event should run.
-   */
-  private getSessionHookMatcherTarget(
-    eventName: HookEventName,
-    context?: HookEventContext,
-  ): string | undefined {
-    switch (eventName) {
-      case HookEventName.PreToolUse:
-      case HookEventName.PostToolUse:
-      case HookEventName.PostToolUseFailure:
-      case HookEventName.PermissionRequest:
-        return context?.toolName ?? '';
-
-      case HookEventName.SubagentStart:
-      case HookEventName.SubagentStop:
-        return context?.agentType ?? '';
-
-      case HookEventName.PreCompact:
-      case HookEventName.PostCompact:
-      case HookEventName.SessionStart:
-      case HookEventName.SessionEnd:
-        return context?.trigger ?? '';
-
-      case HookEventName.StopFailure:
-        return context?.error ?? '';
-
-      case HookEventName.Notification:
-        return context?.notificationType ?? '';
-
-      case HookEventName.UserPromptSubmit:
-      case HookEventName.Stop:
-      case HookEventName.TodoCreated:
-      case HookEventName.TodoCompleted:
-      default:
-        return undefined;
-    }
-  }
-
-  /**
    * Execute hooks for a specific event (direct execution without MessageBus)
    * Used as fallback when MessageBus is not available
    */
@@ -612,10 +569,7 @@ export class HookEventHandler {
 
       // Get session hooks and merge with registry hooks
       const sessionId = input.session_id;
-      const matcherTarget = this.getSessionHookMatcherTarget(
-        eventName,
-        context,
-      );
+      const matcherTarget = getHookMatcherTarget(eventName, context)?.target;
       const sessionHooks =
         sessionId !== undefined
           ? matcherTarget === undefined

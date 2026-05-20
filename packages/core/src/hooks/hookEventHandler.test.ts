@@ -480,6 +480,81 @@ describe('HookEventHandler', () => {
       );
     });
 
+    it('matches PreToolUse session hooks against the tool name', async () => {
+      const sessionHook = createSessionHookEntry(
+        HookEventName.PreToolUse,
+        'shell',
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        sessionHook,
+      ]);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreToolUseEvent(
+        'shell',
+        { command: 'ls' },
+        'toolu_123',
+        PermissionMode.Default,
+      );
+
+      expect(mockSessionHooksManager.getMatchingHooks).toHaveBeenCalledWith(
+        'test-session-id',
+        HookEventName.PreToolUse,
+        'shell',
+      );
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [sessionHook.config],
+        HookEventName.PreToolUse,
+        expect.objectContaining({ tool_name: 'shell' }),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('matches SubagentStart session hooks against the agent type', async () => {
+      const sessionHook = createSessionHookEntry(
+        HookEventName.SubagentStart,
+        AgentType.Explorer,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        sessionHook,
+      ]);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireSubagentStartEvent(
+        'agent_123',
+        AgentType.Explorer,
+        PermissionMode.Default,
+      );
+
+      expect(mockSessionHooksManager.getMatchingHooks).toHaveBeenCalledWith(
+        'test-session-id',
+        HookEventName.SubagentStart,
+        AgentType.Explorer,
+      );
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [sessionHook.config],
+        HookEventName.SubagentStart,
+        expect.objectContaining({ agent_type: AgentType.Explorer }),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
     it('matches StopFailure session hooks against the error type', async () => {
       const sessionHook = createSessionHookEntry(
         HookEventName.StopFailure,
