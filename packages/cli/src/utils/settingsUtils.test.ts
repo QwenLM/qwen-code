@@ -1168,7 +1168,8 @@ describe('setNestedProperty prototype-pollution guards', () => {
     it('writes a normal dotted path', () => {
       const obj: Record<string, unknown> = {};
       setNestedPropertySafe(obj, 'a.b.c', 1);
-      expect((obj.a as Record<string, Record<string, unknown>>).b.c).toBe(1);
+      const a = obj['a'] as Record<string, Record<string, unknown>>;
+      expect(a['b']['c']).toBe(1);
     });
 
     it('refuses a __proto__ segment (no pollution, no write)', () => {
@@ -1190,7 +1191,7 @@ describe('setNestedProperty prototype-pollution guards', () => {
     it('writes a normal dotted path', () => {
       const obj: Record<string, unknown> = {};
       setNestedPropertyForce(obj, 'x.y', 2);
-      expect((obj.x as Record<string, unknown>).y).toBe(2);
+      expect((obj['x'] as Record<string, unknown>)['y']).toBe(2);
     });
 
     it('refuses a __proto__ segment (no pollution, no write)', () => {
