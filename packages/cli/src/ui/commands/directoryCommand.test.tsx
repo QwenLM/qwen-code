@@ -399,8 +399,8 @@ describe('getDirPathCompletions', () => {
       // Only directories starting with "su" should be returned
       results.forEach((suggestion) => {
         expect(suggestion.isDirectory).toBe(true);
-        expect(suggestion.value).toMatch(/\/su.+$/);
-
+        const sepRe = path.sep === '\\' ? '\\\\' : path.sep;
+        expect(suggestion.value).toMatch(new RegExp(`${sepRe}su.+$`));
         // Subdirectories like sub1/deep should also be included with their full path
         const dirname = path.dirname(suggestion.value);
         expect(dirname).toContain(tempTestDir);
@@ -417,7 +417,7 @@ describe('getDirPathCompletions', () => {
       results.forEach((suggestion) => {
         expect(suggestion.isDirectory).toBe(true);
         expect(suggestion.value.startsWith(`${tempTestDir}`)).toBe(true);
-        expect(suggestion.value).toMatch(/\/$/);
+        expect(suggestion.value.endsWith(path.sep)).toBe(true);      
       });
     });
 
@@ -431,8 +431,7 @@ describe('getDirPathCompletions', () => {
       deepResults.forEach((suggestion) => {
         expect(suggestion.isDirectory).toBe(true);
         expect(suggestion.value).toContain('sub1');
-        expect(suggestion.value).toMatch(/\/$/);
-
+        expect(suggestion.value.endsWith(path.sep)).toBe(true);
         // The nested 'deep' directory should be in the results
         const basename = path.basename(suggestion.value.slice(0, -1));
         expect(basename).toBe('deep');

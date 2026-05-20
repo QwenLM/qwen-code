@@ -13,7 +13,6 @@ import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
 import { useState } from 'react';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
-import { directoryCommand } from '../commands/directoryCommand.js';
 
 // Test utility type and helper function for creating test SlashCommands
 type TestSlashCommand = Omit<SlashCommand, 'kind'> &
