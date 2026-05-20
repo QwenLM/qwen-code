@@ -1902,6 +1902,8 @@ export default {
   'session only': 'session uniquement',
   'Persist the selected model as the default':
     'Persister le modèle sélectionné comme modèle par défaut',
+  'Enter to select, d to set default, ↑↓ to navigate, Esc to close':
+    'Entrée pour sélectionner, d pour définir par défaut, ↑↓ pour naviguer, Échap pour fermer',
   'Usage: /model --default <model-id>':
     'Utilisation : /model --default <id-modèle>',
   'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':

@@ -1884,6 +1884,8 @@ export default {
   'session only': 'только эта сессия',
   'Persist the selected model as the default':
     'Сохранить выбранную модель как модель по умолчанию',
+  'Enter to select, d to set default, ↑↓ to navigate, Esc to close':
+    'Enter — выбрать, d — сделать моделью по умолчанию, ↑↓ — навигация, Esc — закрыть',
   'Usage: /model --default <model-id>':
     'Использование: /model --default <model-id>',
   'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':

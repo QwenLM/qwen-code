@@ -1864,6 +1864,8 @@ export default {
   'session only': 'només aquesta sessió',
   'Persist the selected model as the default':
     'Persistir el model seleccionat com a predeterminat',
+  'Enter to select, d to set default, ↑↓ to navigate, Esc to close':
+    'Intro per seleccionar, d per definir com a predeterminat, ↑↓ per navegar, Esc per tancar',
   'Usage: /model --default <model-id>': 'Ús: /model --default <id-del-model>',
   'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
     'Model actual: {{model}}\nUseu "/model <model-id>" per canviar de model (només aquesta sessió), "/model --default <model-id>" per persistir-lo, o "/model --fast <model-id>" per definir el model ràpid.',

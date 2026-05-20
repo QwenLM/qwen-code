@@ -20,7 +20,10 @@ import {
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import {
+  formatAcpModelId,
+  parseAcpModelOption,
+} from '../../utils/acpModelUtils.js';
 import { qwenOAuthDiscontinuedMessage } from '../utils/qwenOAuthDiscontinuedMessage.js';
 
 function persistSetting(
@@ -113,15 +116,30 @@ function formatUnavailableFastModelMessage(
 }
 
 // Get an array of the available model IDs as strings
-function getAvailableModelIds(context: CommandContext) {
+function getAvailableModelIds(
+  context: CommandContext,
+  options: { excludeRuntimeModels?: boolean } = {},
+) {
   const { services } = context;
   const { config } = services;
   if (!config) {
     return [];
   }
-  const availableModels = config.getAvailableModels();
-  // Convert AvailableModel[] to string[] on AvailableModel.id
-  return availableModels.map((model) => model.id);
+  const currentAuthType = config.getContentGeneratorConfig()?.authType;
+  const availableModels = config.getAllConfiguredModels();
+  return Array.from(
+    new Set(
+      availableModels
+        .filter(
+          (model) => !options.excludeRuntimeModels || !model.isRuntimeModel,
+        )
+        .map((model) =>
+          model.authType === currentAuthType
+            ? model.id
+            : formatAcpModelId(model.id, model.authType),
+        ),
+    ),
+  );
 }
 
 export const modelCommand: SlashCommand = {
@@ -136,12 +154,23 @@ export const modelCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
-    const trimmedPartialArg = partialArg.trim();
-    if (trimmedPartialArg.startsWith('--default ')) {
-      const modelPartial = trimmedPartialArg.replace('--default', '').trim();
-      return getAvailableModelIds(context)
+    const leadingTrimmedPartialArg = partialArg.trimStart();
+    const trimmedPartialArg = leadingTrimmedPartialArg.trimEnd();
+    if (leadingTrimmedPartialArg.startsWith('--default ')) {
+      const modelPartial = leadingTrimmedPartialArg
+        .slice('--default '.length)
+        .trimStart();
+      return getAvailableModelIds(context, { excludeRuntimeModels: true })
         .filter((id) => id.startsWith(modelPartial))
         .map((id) => `--default ${id}`);
+    }
+    if (leadingTrimmedPartialArg.startsWith('--fast ')) {
+      const modelPartial = leadingTrimmedPartialArg
+        .slice('--fast '.length)
+        .trimStart();
+      return getAvailableModelIds(context)
+        .filter((id) => id.startsWith(modelPartial))
+        .map((id) => `--fast ${id}`);
     }
 
     const flagCompletions = [

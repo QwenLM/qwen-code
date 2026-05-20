@@ -50,6 +50,79 @@ describe('modelCommand', () => {
     expect(modelCommand.argumentHint).toBe('[--default|--fast] [<model-id>]');
   });
 
+  describe('completion', () => {
+    beforeEach(() => {
+      mockContext = createMockCommandContext({
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi.fn().mockReturnValue([
+              {
+                id: 'gpt-4',
+                label: 'GPT-4',
+                authType: AuthType.USE_OPENAI,
+              },
+              {
+                id: 'claude-sonnet-4-5',
+                label: 'Claude Sonnet 4.5',
+                authType: AuthType.USE_ANTHROPIC,
+              },
+              {
+                id: '$runtime|openai|runtime-model',
+                label: 'Runtime Model',
+                authType: AuthType.USE_OPENAI,
+                isRuntimeModel: true,
+              },
+            ]),
+          },
+        },
+      });
+    });
+
+    it('should complete model flags', async () => {
+      await expect(
+        modelCommand.completion!(mockContext, '--'),
+      ).resolves.toEqual([
+        {
+          value: '--default',
+          description: 'Persist the selected model as the default',
+        },
+        {
+          value: '--fast',
+          description:
+            'Set a lighter model for prompt suggestions and speculative execution',
+        },
+      ]);
+    });
+
+    it('should complete --default models across configured providers', async () => {
+      await expect(
+        modelCommand.completion!(mockContext, '--default '),
+      ).resolves.toEqual([
+        '--default gpt-4',
+        '--default claude-sonnet-4-5(anthropic)',
+      ]);
+    });
+
+    it('should complete --fast models across configured providers', async () => {
+      await expect(
+        modelCommand.completion!(mockContext, '--fast cla'),
+      ).resolves.toEqual(['--fast claude-sonnet-4-5(anthropic)']);
+    });
+
+    it('should qualify non-current provider model completions', async () => {
+      await expect(
+        modelCommand.completion!(mockContext, 'gpt'),
+      ).resolves.toEqual(['gpt-4']);
+      await expect(
+        modelCommand.completion!(mockContext, 'cla'),
+      ).resolves.toEqual(['claude-sonnet-4-5(anthropic)']);
+    });
+  });
+
   it('should return error when config is not available', async () => {
     mockContext.services.config = null;
 
