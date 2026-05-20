@@ -132,6 +132,33 @@ function applyDaemonTranscriptEvent(
     case 'error':
       appendStatusBlock(next, event.type, event.text, event);
       break;
+    // Session-meta / workspace / auth events do NOT push transcript blocks.
+    // Renderers subscribe to the store and select them via separate
+    // selectors (e.g., `selectApprovalMode`, `selectAvailableCommands`,
+    // `selectAuthFlow`) — see `selectors.ts`. They are still observed by
+    // the reducer so `lastEventId` advances monotonically, but the
+    // chat-stream transcript stays focused on user/assistant/tool/shell/
+    // permission content. PRs in the C/D series may opt some of these
+    // into transcript projection as structured non-chat blocks.
+    case 'session.metadata.changed':
+    case 'session.approval_mode.changed':
+    case 'session.available_commands':
+    case 'workspace.memory.changed':
+    case 'workspace.agent.changed':
+    case 'workspace.tool.toggled':
+    case 'workspace.initialized':
+    case 'workspace.mcp.budget_warning':
+    case 'workspace.mcp.child_refused':
+    case 'workspace.mcp.server_restarted':
+    case 'workspace.mcp.server_restart_refused':
+    case 'auth.device_flow.started':
+    case 'auth.device_flow.throttled':
+    case 'auth.device_flow.authorized':
+    case 'auth.device_flow.failed':
+    case 'auth.device_flow.cancelled':
+      // Intentional no-op against `blocks[]`. Sidechannel state machines
+      // (introduced in PR-A follow-ups) consume these via `selectors.ts`.
+      break;
     default:
       assertNever(event);
   }

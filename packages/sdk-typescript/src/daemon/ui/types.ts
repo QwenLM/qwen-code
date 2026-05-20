@@ -4,11 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonEvent, PermissionResponse } from '../types.js';
+import type {
+  DaemonAuthDeviceFlowSdkErrorKind,
+  DaemonAuthProviderId,
+  DaemonEvent,
+  DaemonErrorKind,
+  PermissionResponse,
+} from '../types.js';
 
 export const DAEMON_PLAN_TOOL_CALL_ID = 'daemon-plan';
 
 export type DaemonUiEventType =
+  // Chat-stream events (Stage 1)
   | 'user.text.delta'
   | 'assistant.text.delta'
   | 'assistant.done'
@@ -20,7 +27,26 @@ export type DaemonUiEventType =
   | 'model.changed'
   | 'status'
   | 'error'
-  | 'debug';
+  | 'debug'
+  // Session-meta events
+  | 'session.metadata.changed'
+  | 'session.approval_mode.changed'
+  | 'session.available_commands'
+  // Workspace events (Wave 3-4)
+  | 'workspace.memory.changed'
+  | 'workspace.agent.changed'
+  | 'workspace.tool.toggled'
+  | 'workspace.initialized'
+  | 'workspace.mcp.budget_warning'
+  | 'workspace.mcp.child_refused'
+  | 'workspace.mcp.server_restarted'
+  | 'workspace.mcp.server_restart_refused'
+  // Auth flow events (Wave 4 OAuth)
+  | 'auth.device_flow.started'
+  | 'auth.device_flow.throttled'
+  | 'auth.device_flow.authorized'
+  | 'auth.device_flow.failed'
+  | 'auth.device_flow.cancelled';
 
 export interface DaemonUiEventBase {
   type: DaemonUiEventType;
@@ -39,6 +65,17 @@ export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
   reason?: string;
 }
 
+/**
+ * Where a tool originated. Closed enum so UI dispatch (icon, MCP server
+ * badge, subagent header) doesn't depend on string-matching `toolName`.
+ *
+ * - `builtin`: ships with qwen-code (Bash, Edit, Read, etc.)
+ * - `mcp`: provided by an MCP server (cross-reference `serverId`)
+ * - `subagent`: invoked by a sub-agent delegation
+ * - `unknown`: daemon did not stamp provenance — treat as unspecified
+ */
+export type DaemonUiToolProvenance = 'builtin' | 'mcp' | 'subagent' | 'unknown';
+
 export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   type: 'tool.update';
   toolCallId: string;
@@ -48,6 +85,18 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   toolKind?: string;
   content?: unknown;
   locations?: unknown;
+  /**
+   * Provenance taxonomy — defaults to `'unknown'` when the daemon event
+   * lacks the `provenance` field. Heuristic fallback: a `toolName` starting
+   * with `mcp__` is treated as `'mcp'`.
+   */
+  provenance?: DaemonUiToolProvenance;
+  /**
+   * When `provenance: 'mcp'`, identifies which MCP server provides the
+   * tool. Parsed from `update.serverId` when present, or extracted from
+   * `mcp__<serverId>__<toolName>` naming convention as a fallback.
+   */
+  serverId?: string;
   details?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
@@ -95,9 +144,163 @@ export interface DaemonUiErrorEvent extends DaemonUiEventBase {
   type: 'error';
   text: string;
   recoverable?: boolean;
+  /**
+   * Closed-enum error category propagated from the daemon's typed-error
+   * taxonomy. Lets renderers branch on `errorKind` for "retry auth" vs
+   * "check file path" affordances instead of regex-matching `text`.
+   * Undefined when the originating daemon event is not categorized.
+   */
+  errorKind?: DaemonErrorKind;
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * Session-meta events
+ * ──────────────────────────────────────────────────────────────────────── */
+
+export interface DaemonUiSessionMetadataChangedEvent extends DaemonUiEventBase {
+  type: 'session.metadata.changed';
+  sessionId: string;
+  displayName?: string;
+}
+
+export interface DaemonUiSessionApprovalModeChangedEvent
+  extends DaemonUiEventBase {
+  type: 'session.approval_mode.changed';
+  sessionId: string;
+  previous: string;
+  next: string;
+  persisted: boolean;
+}
+
+/**
+ * Slash-command availability snapshot for the session. Fires from the
+ * daemon's `available_commands_update` session-update. Renderers use it
+ * to refresh command completion menus (TUI / web command palette / IDE
+ * quick pick).
+ */
+export interface DaemonUiSessionAvailableCommandsEvent
+  extends DaemonUiEventBase {
+  type: 'session.available_commands';
+  /** Total count exposed by the daemon; convenience for renderers. */
+  count: number;
+  /** Raw command objects from the daemon for downstream parsing. */
+  commands: ReadonlyArray<Record<string, unknown>>;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Workspace events (Wave 3-4)
+ * ──────────────────────────────────────────────────────────────────────── */
+
+export interface DaemonUiWorkspaceMemoryChangedEvent extends DaemonUiEventBase {
+  type: 'workspace.memory.changed';
+  scope: 'workspace' | 'global';
+  filePath: string;
+  mode: 'append' | 'replace';
+  bytesWritten: number;
+}
+
+export interface DaemonUiWorkspaceAgentChangedEvent extends DaemonUiEventBase {
+  type: 'workspace.agent.changed';
+  change: 'created' | 'updated' | 'deleted';
+  name: string;
+  level: 'project' | 'user';
+}
+
+export interface DaemonUiWorkspaceToolToggledEvent extends DaemonUiEventBase {
+  type: 'workspace.tool.toggled';
+  toolName: string;
+  enabled: boolean;
+}
+
+export interface DaemonUiWorkspaceInitializedEvent extends DaemonUiEventBase {
+  type: 'workspace.initialized';
+  path: string;
+  action: 'created' | 'overwrote' | 'noop';
+}
+
+export interface DaemonUiMcpBudgetWarningEvent extends DaemonUiEventBase {
+  type: 'workspace.mcp.budget_warning';
+  liveCount: number;
+  reservedCount: number;
+  budget: number;
+  thresholdRatio: number;
+  mode: 'warn' | 'enforce';
+}
+
+export interface DaemonUiMcpChildRefusedEvent extends DaemonUiEventBase {
+  type: 'workspace.mcp.child_refused';
+  refusedServers: ReadonlyArray<{
+    name: string;
+    transport: string;
+    reason: 'budget_exhausted';
+  }>;
+  budget: number;
+  liveCount: number;
+  reservedCount: number;
+}
+
+export interface DaemonUiMcpServerRestartedEvent extends DaemonUiEventBase {
+  type: 'workspace.mcp.server_restarted';
+  serverName: string;
+  durationMs: number;
+}
+
+export interface DaemonUiMcpServerRestartRefusedEvent
+  extends DaemonUiEventBase {
+  type: 'workspace.mcp.server_restart_refused';
+  serverName: string;
+  reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Auth device-flow events (Wave 4 OAuth, RFC 8628)
+ * ──────────────────────────────────────────────────────────────────────── */
+
+export interface DaemonUiAuthDeviceFlowStartedEvent extends DaemonUiEventBase {
+  type: 'auth.device_flow.started';
+  deviceFlowId: string;
+  providerId: DaemonAuthProviderId;
+  expiresAt: number;
+}
+
+export interface DaemonUiAuthDeviceFlowThrottledEvent
+  extends DaemonUiEventBase {
+  type: 'auth.device_flow.throttled';
+  deviceFlowId: string;
+  intervalMs: number;
+}
+
+export interface DaemonUiAuthDeviceFlowAuthorizedEvent
+  extends DaemonUiEventBase {
+  type: 'auth.device_flow.authorized';
+  deviceFlowId: string;
+  providerId: DaemonAuthProviderId;
+  expiresAt?: number;
+  accountAlias?: string;
+}
+
+export interface DaemonUiAuthDeviceFlowFailedEvent extends DaemonUiEventBase {
+  type: 'auth.device_flow.failed';
+  deviceFlowId: string;
+  errorKind: DaemonAuthDeviceFlowSdkErrorKind;
+  hint?: string;
+}
+
+export interface DaemonUiAuthDeviceFlowCancelledEvent
+  extends DaemonUiEventBase {
+  type: 'auth.device_flow.cancelled';
+  deviceFlowId: string;
+}
+
+export type DaemonUiAuthDeviceFlowEvent =
+  | DaemonUiAuthDeviceFlowStartedEvent
+  | DaemonUiAuthDeviceFlowThrottledEvent
+  | DaemonUiAuthDeviceFlowAuthorizedEvent
+  | DaemonUiAuthDeviceFlowFailedEvent
+  | DaemonUiAuthDeviceFlowCancelledEvent;
+
 export type DaemonUiEvent =
+  // Chat-stream events
   | DaemonUiTextEvent
   | DaemonUiAssistantDoneEvent
   | DaemonUiToolUpdateEvent
@@ -106,7 +309,22 @@ export type DaemonUiEvent =
   | DaemonUiPermissionResolvedEvent
   | DaemonUiModelChangedEvent
   | DaemonUiStatusEvent
-  | DaemonUiErrorEvent;
+  | DaemonUiErrorEvent
+  // Session-meta events
+  | DaemonUiSessionMetadataChangedEvent
+  | DaemonUiSessionApprovalModeChangedEvent
+  | DaemonUiSessionAvailableCommandsEvent
+  // Workspace events
+  | DaemonUiWorkspaceMemoryChangedEvent
+  | DaemonUiWorkspaceAgentChangedEvent
+  | DaemonUiWorkspaceToolToggledEvent
+  | DaemonUiWorkspaceInitializedEvent
+  | DaemonUiMcpBudgetWarningEvent
+  | DaemonUiMcpChildRefusedEvent
+  | DaemonUiMcpServerRestartedEvent
+  | DaemonUiMcpServerRestartRefusedEvent
+  // Auth device-flow events
+  | DaemonUiAuthDeviceFlowEvent;
 
 export interface NormalizeDaemonEventOptions {
   /**

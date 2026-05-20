@@ -830,30 +830,31 @@ describe('daemon UI normalizer and transcript reducer', () => {
         data: {
           update: {
             sessionUpdate: 'available_commands_update',
-            availableCommands: ['help', 'model'],
+            // Raw command objects pass through to the typed event;
+            // primitive entries (the legacy `['help', 'model']` shape) are
+            // filtered since they cannot be projected as records.
+            availableCommands: [{ name: 'help' }, { name: 'model' }],
           },
         },
       }),
-    ).toMatchObject([
-      { type: 'status', text: 'Available commands updated (2)' },
-    ]);
-    expect(
-      normalizeDaemonEvent({
-        id: 58,
-        v: 1,
-        type: 'mcp_budget_warning',
-        data: { token: 'secret' },
-      }),
-    ).toMatchObject([
-      {
-        type: 'status',
-        text: 'mcp_budget_warning (unrecognized daemon event)',
-      },
-      {
+    ).toMatchObject([{ type: 'session.available_commands', count: 2 }]);
+    // Known event type with malformed payload: normalizer drops to `debug`
+    // with a `<type>: malformed payload` text. Crucially the raw `data` is
+    // NOT dumped — `token: 'secret'` must not appear in the fallback text.
+    const malformed = normalizeDaemonEvent({
+      id: 58,
+      v: 1,
+      type: 'mcp_budget_warning',
+      data: { token: 'secret' },
+    });
+    expect(malformed).toEqual([
+      expect.objectContaining({
         type: 'debug',
-        text: expect.not.stringContaining('secret') as string,
-      },
+        text: expect.stringContaining('mcp_budget_warning'),
+      }),
     ]);
+    expect(malformed[0]).toMatchObject({ type: 'debug' });
+    expect((malformed[0] as { text: string }).text).not.toContain('secret');
   });
 
   it('normalizes plan session updates as visible tool blocks', () => {
@@ -1433,5 +1434,339 @@ describe('daemon UI normalizer and transcript reducer', () => {
         }
       ).reportError = previousReportError;
     }
+  });
+});
+
+describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
+  function envelopeOf<T>(type: string, data: T, id = 100) {
+    return { id, v: 1 as const, type, data } as never;
+  }
+
+  it('normalizes session_metadata_updated into a typed session-meta event', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_metadata_updated', {
+        sessionId: 'sess-1',
+        displayName: 'Fix login bug',
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'session.metadata.changed',
+        sessionId: 'sess-1',
+        displayName: 'Fix login bug',
+      }),
+    ]);
+  });
+
+  it('normalizes approval_mode_changed with persisted flag', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('approval_mode_changed', {
+        sessionId: 's1',
+        previous: 'default',
+        next: 'yolo',
+        persisted: true,
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'session.approval_mode.changed',
+        sessionId: 's1',
+        previous: 'default',
+        next: 'yolo',
+        persisted: true,
+      }),
+    ]);
+  });
+
+  it('upgrades available_commands_update from status text to typed event', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            { name: 'memory', description: 'Manage memory' },
+            { name: 'mcp', description: 'Manage MCP' },
+          ],
+        },
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'session.available_commands',
+        count: 2,
+      }),
+    ]);
+  });
+
+  it('normalizes memory_changed with closed-enum scope + mode', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('memory_changed', {
+        scope: 'workspace',
+        filePath: '/work/QWEN.md',
+        mode: 'append',
+        bytesWritten: 42,
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.memory.changed',
+        scope: 'workspace',
+        filePath: '/work/QWEN.md',
+        mode: 'append',
+        bytesWritten: 42,
+      }),
+    ]);
+  });
+
+  it('normalizes agent_changed for create/update/delete', () => {
+    for (const change of ['created', 'updated', 'deleted'] as const) {
+      const events = normalizeDaemonEvent(
+        envelopeOf('agent_changed', {
+          change,
+          name: 'reviewer',
+          level: 'project',
+        }),
+      );
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: 'workspace.agent.changed',
+          change,
+          name: 'reviewer',
+          level: 'project',
+        }),
+      ]);
+    }
+  });
+
+  it('normalizes tool_toggled', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('tool_toggled', { toolName: 'Bash', enabled: false }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.tool.toggled',
+        toolName: 'Bash',
+        enabled: false,
+      }),
+    ]);
+  });
+
+  it('normalizes workspace_initialized actions', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('workspace_initialized', { path: '/w', action: 'created' }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.initialized',
+        path: '/w',
+        action: 'created',
+      }),
+    ]);
+  });
+
+  it('normalizes mcp_budget_warning with mode enum', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('mcp_budget_warning', {
+        liveCount: 6,
+        reservedCount: 2,
+        budget: 8,
+        thresholdRatio: 0.75,
+        mode: 'warn',
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.mcp.budget_warning',
+        liveCount: 6,
+        budget: 8,
+        mode: 'warn',
+      }),
+    ]);
+  });
+
+  it('normalizes mcp_child_refused_batch with refusedServers list', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('mcp_child_refused_batch', {
+        refusedServers: [
+          { name: 'github', transport: 'stdio', reason: 'budget_exhausted' },
+        ],
+        budget: 4,
+        liveCount: 4,
+        reservedCount: 0,
+        mode: 'enforce',
+      }),
+    );
+    expect(events[0]).toMatchObject({
+      type: 'workspace.mcp.child_refused',
+      budget: 4,
+      refusedServers: [
+        { name: 'github', transport: 'stdio', reason: 'budget_exhausted' },
+      ],
+    });
+  });
+
+  it('normalizes mcp_server_restarted and restart_refused', () => {
+    const restarted = normalizeDaemonEvent(
+      envelopeOf('mcp_server_restarted', {
+        serverName: 'github',
+        durationMs: 142,
+      }),
+    );
+    expect(restarted[0]).toMatchObject({
+      type: 'workspace.mcp.server_restarted',
+      serverName: 'github',
+      durationMs: 142,
+    });
+    const refused = normalizeDaemonEvent(
+      envelopeOf('mcp_server_restart_refused', {
+        serverName: 'github',
+        reason: 'in_flight',
+      }),
+    );
+    expect(refused[0]).toMatchObject({
+      type: 'workspace.mcp.server_restart_refused',
+      reason: 'in_flight',
+    });
+  });
+
+  it('normalizes auth_device_flow lifecycle (started → throttled → authorized)', () => {
+    const started = normalizeDaemonEvent(
+      envelopeOf('auth_device_flow_started', {
+        deviceFlowId: 'df-1',
+        providerId: 'qwen',
+        expiresAt: 1_900_000_000_000,
+      }),
+    );
+    expect(started[0]).toMatchObject({
+      type: 'auth.device_flow.started',
+      providerId: 'qwen',
+    });
+
+    const throttled = normalizeDaemonEvent(
+      envelopeOf('auth_device_flow_throttled', {
+        deviceFlowId: 'df-1',
+        intervalMs: 10_000,
+      }),
+    );
+    expect(throttled[0]).toMatchObject({
+      type: 'auth.device_flow.throttled',
+      intervalMs: 10_000,
+    });
+
+    const authorized = normalizeDaemonEvent(
+      envelopeOf('auth_device_flow_authorized', {
+        deviceFlowId: 'df-1',
+        providerId: 'qwen',
+        accountAlias: 'alice',
+      }),
+    );
+    expect(authorized[0]).toMatchObject({
+      type: 'auth.device_flow.authorized',
+      accountAlias: 'alice',
+    });
+  });
+
+  it('normalizes auth_device_flow_failed with closed-enum errorKind', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('auth_device_flow_failed', {
+        deviceFlowId: 'df-1',
+        errorKind: 'expired',
+        hint: 'restart the device flow',
+      }),
+    );
+    expect(events[0]).toMatchObject({
+      type: 'auth.device_flow.failed',
+      errorKind: 'expired',
+      hint: 'restart the device flow',
+    });
+  });
+
+  it('falls back to debug for malformed payloads (e.g., missing required field)', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('memory_changed', {
+        scope: 'unknown-scope',
+        filePath: '/x',
+        mode: 'append',
+        bytesWritten: 5,
+      }),
+    );
+    expect(events[0]).toMatchObject({ type: 'debug' });
+  });
+
+  it('infers mcp tool provenance from `mcp__<server>__<tool>` naming', () => {
+    const events = normalizeDaemonEvent({
+      id: 999,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'call-1',
+          name: 'mcp__github__create_issue',
+          title: 'Create Issue',
+          status: 'running',
+        },
+      },
+    } as never);
+    expect(events[0]).toMatchObject({
+      type: 'tool.update',
+      toolName: 'mcp__github__create_issue',
+      provenance: 'mcp',
+      serverId: 'github',
+    });
+  });
+
+  it('passes through errorKind on session_died when daemon stamps it', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_died',
+      data: {
+        sessionId: 's',
+        reason: 'ACP child crashed',
+        errorKind: 'init_timeout',
+      },
+    } as never);
+    expect(events[0]).toMatchObject({
+      type: 'error',
+      errorKind: 'init_timeout',
+    });
+  });
+
+  it('reducer is no-op on session-meta / workspace / auth events (no transcript blocks emitted)', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        ...normalizeDaemonEvent(
+          envelopeOf('memory_changed', {
+            scope: 'workspace',
+            filePath: '/x',
+            mode: 'replace',
+            bytesWritten: 1,
+          }),
+        ),
+        ...normalizeDaemonEvent(
+          envelopeOf('approval_mode_changed', {
+            sessionId: 's',
+            previous: 'default',
+            next: 'plan',
+            persisted: false,
+          }),
+        ),
+        ...normalizeDaemonEvent(
+          envelopeOf('auth_device_flow_started', {
+            deviceFlowId: 'df',
+            providerId: 'qwen',
+            expiresAt: 1_900_000_000_000,
+          }),
+        ),
+      ],
+      { now: 2 },
+    );
+    // No transcript blocks pushed — sidechannel state subscribers handle these.
+    expect(state.blocks).toEqual([]);
+    // lastEventId still advanced (monotonic invariant preserved).
+    expect(state.lastEventId).toBe(100);
   });
 });

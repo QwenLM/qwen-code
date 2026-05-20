@@ -41,6 +41,7 @@ export type {
   DaemonTranscriptReducerOptions,
   DaemonTranscriptState,
   DaemonTranscriptStore,
+  // Chat-stream events
   DaemonUiAssistantDoneEvent,
   DaemonUiErrorEvent,
   DaemonUiEvent,
@@ -55,5 +56,26 @@ export type {
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
   DaemonUiToolUpdateEvent,
+  DaemonUiToolProvenance,
+  // Session-meta events
+  DaemonUiSessionMetadataChangedEvent,
+  DaemonUiSessionApprovalModeChangedEvent,
+  DaemonUiSessionAvailableCommandsEvent,
+  // Workspace events
+  DaemonUiWorkspaceMemoryChangedEvent,
+  DaemonUiWorkspaceAgentChangedEvent,
+  DaemonUiWorkspaceToolToggledEvent,
+  DaemonUiWorkspaceInitializedEvent,
+  DaemonUiMcpBudgetWarningEvent,
+  DaemonUiMcpChildRefusedEvent,
+  DaemonUiMcpServerRestartedEvent,
+  DaemonUiMcpServerRestartRefusedEvent,
+  // Auth device-flow events
+  DaemonUiAuthDeviceFlowEvent,
+  DaemonUiAuthDeviceFlowStartedEvent,
+  DaemonUiAuthDeviceFlowThrottledEvent,
+  DaemonUiAuthDeviceFlowAuthorizedEvent,
+  DaemonUiAuthDeviceFlowFailedEvent,
+  DaemonUiAuthDeviceFlowCancelledEvent,
   NormalizeDaemonEventOptions,
 } from './types.js';
