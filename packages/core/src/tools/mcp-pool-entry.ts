@@ -653,12 +653,21 @@ export class PoolEntry {
     // applying their pattern here closes the gap on the
     // generation-superseded path.
     if (oldGen + 1 !== this._generation) {
-      debugLogger.debug(
-        `Restart of ${this.id} superseded by newer generation; ` +
-          `discarding stale snapshot + sweeping new transport`,
-      );
+      // F2 (#4175 commit 6 review fix — wenshao W52): throw rather
+      // than return silently. `restartByName`'s try/catch translates
+      // the throw into `{restarted: false, reason: <message>}` on the
+      // HTTP response. Pre-fix the void return resolved `restart()`
+      // successfully → `restartByName` reported `{restarted: true}`
+      // even though the snapshot was discarded and (on the state-
+      // guard path) the entry was force-shut-down mid-restart.
+      // Operators saw "restart succeeded" while sessions silently
+      // lost the server. Sweep the new transport before throwing so
+      // the W45 leak fix still holds.
       await this.sweepAndDisconnect('restart_superseded');
-      return;
+      throw new Error(
+        `Restart of ${this.id} superseded by newer generation; ` +
+          `discarded stale snapshot + swept new transport.`,
+      );
     }
     // F2 (#4175 commit 6 review fix — wenshao W34): state guard
     // after the generation guard. If `forceShutdown` ran during any
@@ -687,13 +696,18 @@ export class PoolEntry {
     // cast is required to defeat CFA explicitly.
     const currentState = this.state as PoolEntryState;
     if (currentState === 'closed' || currentState === 'failed') {
-      debugLogger.debug(
-        `Restart of ${this.id} completed but entry is ${currentState}; ` +
-          `discarding snapshot + sweeping new transport ` +
-          `(entry was force-shut-down mid-restart).`,
-      );
+      // W52 fold-in (same rationale as the generation-guard branch
+      // above): throw so `restartByName` reports
+      // `{restarted: false, reason: <message>}` to the HTTP caller
+      // instead of falsely reporting success on an aborted restart.
+      // Sweep the new transport first so the W45 leak fix still
+      // covers the throw path.
       await this.sweepAndDisconnect('restart_superseded');
-      return;
+      throw new Error(
+        `Restart of ${this.id} aborted: entry state is ${currentState} ` +
+          `(forceShutdown ran concurrently mid-restart). ` +
+          `Snapshot discarded; new transport swept.`,
+      );
     }
     this.toolsSnapshot = snap.tools;
     this.promptsSnapshot = snap.prompts;
