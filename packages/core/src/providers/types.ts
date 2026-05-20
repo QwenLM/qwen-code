@@ -168,11 +168,26 @@ export interface ProviderInstallPlan {
 export interface ProviderSettingsAdapter {
   /** Get a value by dotted key path (e.g. 'security.auth.selectedType'). */
   getValue(key: string): unknown;
-  /** Set a value by dotted key path. */
+  /**
+   * Set a value by dotted key path.
+   *
+   * IMPORTANT: implementations MAY flush to disk on every call (the CLI's
+   * LoadedSettings-backed adapter does — each setValue triggers a
+   * saveSettings). Callers must therefore NOT assume the on-disk file is
+   * untouched until `persist()`; if the process crashes mid-sequence, disk
+   * can hold a partial write. `backup()`/`restore()` are the rollback path
+   * for that, not deferred persistence. Don't insert new pre-persist steps
+   * assuming atomicity.
+   */
   setValue(key: string, value: unknown): void;
   /** Get the current model providers config. */
   getModelProviders(): ModelProvidersConfig;
-  /** Flush changes to disk. */
+  /**
+   * Flush changes to disk. NOTE: this may be a no-op for adapters whose
+   * `setValue` already persists eagerly (see the warning on `setValue`).
+   * It remains in the contract as the explicit commit point for adapters
+   * that *do* buffer (e.g. the VS Code file adapter writes here).
+   */
   persist(): void;
   /** Create a backup before making changes (for rollback on error). */
   backup?(): void;

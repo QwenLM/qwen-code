@@ -75,4 +75,5 @@ export {
   applyProviderInstallPlan,
   type ApplyProviderInstallPlanOptions,
   type ApplyProviderInstallPlanResult,
+  type ProviderInstallError,
 } from './install.js';

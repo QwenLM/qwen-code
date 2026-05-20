@@ -365,8 +365,15 @@ export function providerMatchesCredentials(
           configEnvKey = derived;
           break;
         }
-      } catch {
-        /* try next protocol */
+      } catch (err) {
+        // A throw here is a programming error in the provider's envKey fn,
+        // not an expected "no match" — surface it so a custom provider
+        // silently vanishing from /doctor / system-info has a trace.
+        // eslint-disable-next-line no-console -- diagnostic for a misconfigured provider
+        console.warn(
+          `[providerMatchesCredentials] envKey(${proto}, ${baseUrl}) threw; skipping this protocol:`,
+          err,
+        );
       }
     }
   }

@@ -443,10 +443,16 @@ describe('applyProviderInstallPlan', () => {
     }
 
     expect(caught).toBeInstanceOf(Error);
-    const err = caught as Error & { cause?: Error };
-    expect(err.message).toContain('step "refreshAuth"');
-    expect(err.message).toContain('authType=openai');
-    expect(err.message).toContain('endpoint unreachable');
+    const err = caught as Error & {
+      step?: string;
+      authType?: string;
+      cause?: Error;
+    };
+    // Step + authType are structured properties (not baked into the
+    // user-facing message, which stays the underlying error text).
+    expect(err.step).toBe('refreshAuth');
+    expect(err.authType).toBe('openai');
+    expect(err.message).toBe('endpoint unreachable');
     // Original error preserved via cause so callers matching on err.code
     // (NodeJS.ErrnoException) still work.
     expect(err.cause).toBeInstanceOf(Error);

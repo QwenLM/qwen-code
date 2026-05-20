@@ -75,6 +75,18 @@ export interface ApplyProviderInstallPlanResult {
   updatedModelProviders: ModelProvidersConfig;
 }
 
+/**
+ * Error thrown by {@link applyProviderInstallPlan} when a step fails. The
+ * message is the underlying error's message (safe to surface to users); the
+ * `step` and `authType` properties carry diagnostic context, and `cause`
+ * preserves the original error (so callers matching on `err.code` still work
+ * via the chain).
+ */
+export interface ProviderInstallError extends Error {
+  step: string;
+  authType: AuthType;
+}
+
 export async function applyProviderInstallPlan(
   plan: ProviderInstallPlan,
   options: ApplyProviderInstallPlanOptions,
@@ -220,16 +232,16 @@ export async function applyProviderInstallPlan(
         reloadErr,
       );
     }
-    // Annotate the rethrow with the step that failed so a downstream catch
-    // (handleAuthFailure, /doctor) can tell EACCES-from-persist apart from a
-    // refreshAuth rejection. Preserve the original via `cause`.
+    // Attach the failing step + authType as *structured properties* rather
+    // than baking them into the message. Keeps the user-facing message clean
+    // (callers show error.message verbatim) while letting devs read
+    // error.step / error.authType and the original error.cause off the chain.
     const errMsg = error instanceof Error ? error.message : String(error);
-    const annotated = new Error(
-      `applyProviderInstallPlan failed at step "${currentStep}" for authType=${plan.authType}: ${errMsg}`,
-      { cause: error instanceof Error ? error : undefined },
-    );
-    // Preserve the original name (e.g. NodeJS.ErrnoException) so callers
-    // matching on err.code still work via the `cause` chain.
+    const annotated = new Error(errMsg, {
+      cause: error instanceof Error ? error : undefined,
+    }) as ProviderInstallError;
+    annotated.step = currentStep;
+    annotated.authType = plan.authType;
     throw annotated;
   }
 }

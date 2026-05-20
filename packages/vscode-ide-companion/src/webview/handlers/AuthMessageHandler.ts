@@ -318,13 +318,19 @@ export class AuthMessageHandler extends BaseMessageHandler {
     }
 
     // Step 2: API Key
-    const apiKey = await this.input({
+    const apiKeyInput = await this.input({
       title: `${flowTitle}: API Key`,
       prompt: 'Enter your API key',
       placeHolder: provider.apiKeyPlaceholder ?? 'sk-...',
       password: true,
       required: true,
     });
+    if (!apiKeyInput) return;
+    // Trim before validation and persistence — a key pasted with trailing
+    // whitespace would otherwise be stored as-is and cause silent auth
+    // failures, and validateApiKey could reject in VS Code what the CLI
+    // (which trims) accepts.
+    const apiKey = apiKeyInput.trim();
     if (!apiKey) return;
 
     // Validate API key if provider has validation

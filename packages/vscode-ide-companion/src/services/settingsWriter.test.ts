@@ -31,6 +31,8 @@ import {
   applyProviderInstallPlanToFile,
   clearPersistedAuth,
   readQwenSettingsForVSCode,
+  restoreSettingsSnapshot,
+  snapshotSettingsForRollback,
   writeCodingPlanConfig,
   writeModelProvidersConfig,
 } from './settingsWriter.js';
@@ -311,6 +313,55 @@ describe('settingsWriter', () => {
     it('is a no-op when no settings file exists', () => {
       // No settings file written — clear must not throw.
       expect(() => clearPersistedAuth()).not.toThrow();
+    });
+  });
+
+  describe('snapshotSettingsForRollback / restoreSettingsSnapshot', () => {
+    it('round-trips: snapshot → mutate → restore brings the old state back', () => {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      const original = {
+        env: { OPENAI_API_KEY: 'sk-good' },
+        security: { auth: { selectedType: 'openai' } },
+      };
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify(original, null, 2),
+        'utf-8',
+      );
+
+      const snapshot = snapshotSettingsForRollback();
+      expect(snapshot).not.toBeNull();
+
+      // Simulate a bad-credential install writing over the file.
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({ env: { OPENAI_API_KEY: 'sk-bad' } }, null, 2),
+        'utf-8',
+      );
+
+      restoreSettingsSnapshot(snapshot);
+
+      const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(after).toEqual(original);
+    });
+
+    it('snapshot returns null on a malformed file and restore is then a no-op', () => {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(settingsPath, '{ "broken": [1, 2', 'utf-8');
+
+      const snapshot = snapshotSettingsForRollback();
+      expect(snapshot).toBeNull();
+
+      // No-op restore must not throw and must not clobber the file.
+      expect(() => restoreSettingsSnapshot(snapshot)).not.toThrow();
+      expect(fs.readFileSync(settingsPath, 'utf-8')).toBe('{ "broken": [1, 2');
+    });
+
+    it('snapshot returns {} (not null) when no settings file exists', () => {
+      // ENOENT → readSettings returns {}, so we get a valid empty snapshot
+      // that restore can write (creating the file).
+      const snapshot = snapshotSettingsForRollback();
+      expect(snapshot).toEqual({});
     });
   });
 });

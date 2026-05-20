@@ -166,6 +166,9 @@ vi.mock('../../services/settingsWriter.js', () => ({
   writeModelProvidersConfig: mockWriteModelProvidersConfig,
   readQwenSettingsForVSCode: mockReadQwenSettingsForVSCode,
   clearPersistedAuth: mockClearPersistedAuth,
+  applyProviderInstallPlanToFile: vi.fn().mockResolvedValue(undefined),
+  snapshotSettingsForRollback: vi.fn().mockReturnValue(null),
+  restoreSettingsSnapshot: vi.fn(),
 }));
 
 vi.mock('../../services/qwenAgentManager.js', () => ({

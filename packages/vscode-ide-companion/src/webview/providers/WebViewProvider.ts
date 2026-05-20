@@ -29,6 +29,8 @@ import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
   applyProviderInstallPlanToFile,
+  snapshotSettingsForRollback,
+  restoreSettingsSnapshot,
   writeCodingPlanConfig,
   readQwenSettingsForVSCode,
   clearPersistedAuth,
@@ -1326,6 +1328,13 @@ export class WebViewProvider {
       `[WebViewProvider] authInteractive: provider=${providerConfig.id}, host=${baseUrlHost}`,
     );
 
+    // Snapshot the pre-write settings so we can roll back bad credentials if
+    // the reconnect below rejects them. applyProviderInstallPlanToFile's own
+    // backup/restore only covers failures *inside* the plan; the
+    // disconnect/reconnect runs after the plan commits (cleanupBackup), so
+    // without this a rejected key would persist and every VS Code restart
+    // would keep retrying it.
+    const rollbackSnapshot = snapshotSettingsForRollback();
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
@@ -1355,6 +1364,9 @@ export class WebViewProvider {
           data: { message: 'Provider configured successfully!' },
         });
       } else {
+        // Auth failed against the live backend — roll the bad credentials
+        // back off disk so a restart doesn't keep retrying them.
+        restoreSettingsSnapshot(rollbackSnapshot);
         this.sendMessageToWebView({
           type: 'authError',
           data: {
@@ -1366,6 +1378,11 @@ export class WebViewProvider {
     } catch (error) {
       const errorMsg = getErrorMessage(error);
       console.error('[WebViewProvider] authInteractive failed:', error);
+      // A throw can land here after the plan committed but before/while
+      // reconnecting — restore the snapshot so partial/bad state doesn't
+      // linger. (Redundant but harmless if the plan's own rollback already
+      // ran: it just rewrites the same pre-state.)
+      restoreSettingsSnapshot(rollbackSnapshot);
       this.sendMessageToWebView({
         type: 'authError',
         data: { message: `Configuration failed: ${errorMsg}` },
