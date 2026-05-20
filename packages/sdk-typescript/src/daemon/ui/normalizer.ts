@@ -29,6 +29,16 @@ import {
   stringifyRedactedJson,
 } from './utils.js';
 
+/**
+ * Common base fields stamped on every normalized UI event. Centralized as a
+ * type alias so adding new envelope fields (e.g., `serverTimestamp` in PR-B,
+ * `traceId` in future) doesn't require touching every normalizer helper.
+ */
+type NormalizedEventBase = Pick<
+  DaemonUiEvent,
+  'eventId' | 'serverTimestamp' | 'originatorClientId' | 'rawEvent'
+>;
+
 const DAEMON_ERROR_KIND_SET = new Set<string>(DAEMON_ERROR_KINDS);
 const DEVICE_FLOW_ERROR_KIND_SET = new Set<string>([
   'expired',
@@ -227,9 +237,11 @@ export function normalizeDaemonEvent(
 function createBase(
   event: DaemonEvent,
   opts: NormalizeDaemonEventOptions,
-): Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'> {
+): NormalizedEventBase {
+  const serverTimestamp = extractServerTimestamp(event);
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
+    ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
@@ -239,9 +251,39 @@ function createBase(
   };
 }
 
+/**
+ * Extract daemon-authoritative timestamp from envelope. Looks at three
+ * candidate locations in order:
+ *
+ *   1. `event.serverTimestamp` — top-level, preferred when daemon adds it
+ *   2. `event._meta.serverTimestamp` — Anthropic-style metadata convention
+ *   3. `event.data._meta.serverTimestamp` — sessionUpdate nested location
+ *
+ * Returns undefined when none of them are present or all are non-finite.
+ * Forward-compat: SDK reads whichever location the daemon eventually emits
+ * without requiring a coordinated SDK release.
+ */
+function extractServerTimestamp(event: DaemonEvent): number | undefined {
+  const direct = (event as { serverTimestamp?: unknown }).serverTimestamp;
+  if (typeof direct === 'number' && Number.isFinite(direct)) return direct;
+  const envelopeMeta = (event as { _meta?: unknown })._meta;
+  if (isRecord(envelopeMeta)) {
+    const ts = envelopeMeta['serverTimestamp'];
+    if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+  }
+  if (isRecord(event.data)) {
+    const dataMeta = (event.data as Record<string, unknown>)['_meta'];
+    if (isRecord(dataMeta)) {
+      const ts = dataMeta['serverTimestamp'];
+      if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+    }
+  }
+  return undefined;
+}
+
 function normalizeSessionUpdate(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
   opts: NormalizeDaemonEventOptions,
 ): DaemonUiEvent[] {
   const update = getSessionUpdatePayload(event.data);
@@ -325,7 +367,7 @@ function normalizeSessionUpdate(
 
 function normalizeToolUpdate(
   update: Record<string, unknown>,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent {
   const metadata = isRecord(update['_meta']) ? update['_meta'] : undefined;
   const toolName =
@@ -488,7 +530,7 @@ function capDetails(details: string): string {
 
 function normalizePermissionRequest(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   if (!isRecord(event.data)) {
     return [
@@ -530,7 +572,7 @@ function normalizePermissionRequest(
 
 function normalizePermissionResolved(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const requestId = getString(event.data, 'requestId');
   if (!requestId) {
@@ -625,7 +667,7 @@ function getShellStream(value: unknown): 'stdout' | 'stderr' | undefined {
 
 function fallbackDebug(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
   reason: string,
 ): DaemonUiEvent[] {
   return [
@@ -639,7 +681,7 @@ function fallbackDebug(
 
 function normalizeSessionMetadataUpdated(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const sessionId = getString(event.data, 'sessionId');
   if (!sessionId) return fallbackDebug(event, base, 'missing sessionId');
@@ -656,7 +698,7 @@ function normalizeSessionMetadataUpdated(
 
 function normalizeApprovalModeChanged(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const sessionId = getString(event.data, 'sessionId');
   const previous = getString(event.data, 'previous');
@@ -682,7 +724,7 @@ function normalizeApprovalModeChanged(
 
 function normalizeMemoryChanged(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const scope = getString(event.data, 'scope');
   const filePath = getString(event.data, 'filePath');
@@ -713,7 +755,7 @@ function normalizeMemoryChanged(
 
 function normalizeAgentChanged(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const change = getString(event.data, 'change');
   const name = getString(event.data, 'name');
@@ -738,7 +780,7 @@ function normalizeAgentChanged(
 
 function normalizeToolToggled(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const toolName = getString(event.data, 'toolName');
   const enabled =
@@ -760,7 +802,7 @@ function normalizeToolToggled(
 
 function normalizeWorkspaceInitialized(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const path = getString(event.data, 'path');
   const action = getString(event.data, 'action');
@@ -779,7 +821,7 @@ function normalizeWorkspaceInitialized(
 
 function normalizeMcpBudgetWarning(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   if (!isRecord(event.data)) {
     return fallbackDebug(event, base, 'non-object payload');
@@ -813,7 +855,7 @@ function normalizeMcpBudgetWarning(
 
 function normalizeMcpChildRefused(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   if (!isRecord(event.data)) {
     return fallbackDebug(event, base, 'non-object payload');
@@ -871,7 +913,7 @@ function normalizeMcpChildRefused(
 
 function normalizeMcpServerRestarted(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const serverName = getString(event.data, 'serverName');
   const durationMs = numberField(event.data, 'durationMs');
@@ -890,7 +932,7 @@ function normalizeMcpServerRestarted(
 
 function normalizeMcpServerRestartRefused(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const serverName = getString(event.data, 'serverName');
   const reason = getString(event.data, 'reason');
@@ -913,7 +955,7 @@ function normalizeMcpServerRestartRefused(
 
 function normalizeAuthDeviceFlowStarted(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const deviceFlowId = getString(event.data, 'deviceFlowId');
   const providerId = getString(event.data, 'providerId');
@@ -943,7 +985,7 @@ function normalizeAuthDeviceFlowStarted(
 
 function normalizeAuthDeviceFlowThrottled(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const deviceFlowId = getString(event.data, 'deviceFlowId');
   const intervalMs = numberField(event.data, 'intervalMs');
@@ -966,7 +1008,7 @@ function normalizeAuthDeviceFlowThrottled(
 
 function normalizeAuthDeviceFlowAuthorized(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const deviceFlowId = getString(event.data, 'deviceFlowId');
   const providerId = getString(event.data, 'providerId');
@@ -997,7 +1039,7 @@ function normalizeAuthDeviceFlowAuthorized(
 
 function normalizeAuthDeviceFlowFailed(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const deviceFlowId = getString(event.data, 'deviceFlowId');
   const errorKind = getString(event.data, 'errorKind');
@@ -1026,7 +1068,7 @@ function normalizeAuthDeviceFlowFailed(
 
 function normalizeAuthDeviceFlowCancelled(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const deviceFlowId = getString(event.data, 'deviceFlowId');
   if (!deviceFlowId) {

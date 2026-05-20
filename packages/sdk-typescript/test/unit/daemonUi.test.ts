@@ -1770,3 +1770,184 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     expect(state.lastEventId).toBe(100);
   });
 });
+
+describe('daemon UI time schema (PR-B)', () => {
+  it('extracts serverTimestamp from envelope _meta and propagates to blocks', () => {
+    const eventWithMeta = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      _meta: { serverTimestamp: 1_900_000_000_000 },
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'hi' },
+        },
+      },
+    } as never);
+    expect(eventWithMeta[0]).toMatchObject({
+      type: 'assistant.text.delta',
+      serverTimestamp: 1_900_000_000_000,
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      eventWithMeta,
+      { now: 2 },
+    );
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      serverTimestamp: 1_900_000_000_000,
+      clientReceivedAt: 2,
+      createdAt: 2,
+    });
+  });
+
+  it('extracts serverTimestamp from data._meta as fallback (sessionUpdate nested location)', () => {
+    const events = normalizeDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        _meta: { serverTimestamp: 1_888_888_888_888 },
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    } as never);
+    expect(events[0]).toMatchObject({
+      type: 'user.text.delta',
+      serverTimestamp: 1_888_888_888_888,
+    });
+  });
+
+  it('extracts serverTimestamp from top-level envelope field when present', () => {
+    const events = normalizeDaemonEvent({
+      id: 3,
+      v: 1,
+      type: 'model_switched',
+      serverTimestamp: 1_777_777_777_777,
+      data: { sessionId: 's', modelId: 'qwen-coder-flash' },
+    } as never);
+    expect(events[0]).toMatchObject({
+      type: 'model.changed',
+      serverTimestamp: 1_777_777_777_777,
+    });
+  });
+
+  it('defaults serverTimestamp undefined when envelope has none (forward-compat with older daemons)', () => {
+    const events = normalizeDaemonEvent({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'no ts' },
+        },
+      },
+    });
+    expect(events[0]).not.toHaveProperty('serverTimestamp');
+  });
+
+  it('selectTranscriptBlocksOrderedByEventId sorts by eventId, ignoring out-of-order arrival', async () => {
+    const { selectTranscriptBlocksOrderedByEventId } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    // Push 3 blocks; insert ids in mixed arrival order (replay scenario)
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        ...normalizeDaemonEvent({
+          id: 10,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'ten' },
+            },
+          },
+        } as never),
+      ],
+      { now: 2 },
+    );
+    // simulate a later (higher id) event arriving first, then earlier replayed
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        ...normalizeDaemonEvent({
+          id: 20,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 't',
+              title: 'twenty',
+              status: 'completed',
+            },
+          },
+        } as never),
+      ],
+      { now: 3 },
+    );
+    // Append a third with id between the two (would normally arrive earlier
+    // but replay delivered it out-of-order).
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        ...normalizeDaemonEvent({
+          id: 15,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'fifteen' },
+            },
+          },
+        } as never),
+      ],
+      { now: 4 },
+    );
+
+    const ordered = selectTranscriptBlocksOrderedByEventId(state);
+    const eventIds = ordered.map((b) => b.eventId);
+    expect(eventIds).toEqual([10, 15, 20]);
+  });
+
+  it('formatBlockTimestamp prefers serverTimestamp over clientReceivedAt', async () => {
+    const { formatBlockTimestamp } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      _meta: { serverTimestamp: 1_900_000_000_000 },
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'x' },
+        },
+      },
+    } as never);
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+      { now: 2 },
+    );
+    const formatted = formatBlockTimestamp(state.blocks[0]!, {
+      locale: 'en-US',
+      timeZone: 'UTC',
+      dateStyle: 'long',
+      timeStyle: 'medium',
+    });
+    // 1_900_000_000_000 ms = March 17, 2030 UTC
+    expect(formatted).toContain('2030');
+    expect(formatted).toContain('March');
+  });
+});

@@ -9,10 +9,12 @@ export { createDaemonToolPreview } from './toolPreview.js';
 export {
   appendLocalUserTranscriptMessage,
   createDaemonTranscriptState,
+  formatBlockTimestamp,
   rebuildDaemonTranscriptBlockIndex,
   reduceDaemonTranscriptEvents,
   selectPendingPermissionBlocks,
   selectTranscriptBlocks,
+  selectTranscriptBlocksOrderedByEventId,
 } from './transcript.js';
 export { createDaemonTranscriptStore } from './store.js';
 export {

@@ -50,7 +50,23 @@ export type DaemonUiEventType =
 
 export interface DaemonUiEventBase {
   type: DaemonUiEventType;
+  /**
+   * Daemon-monotonic SSE cursor. Use as the **primary ordering key** when
+   * sorting events or transcript blocks — independent of any clock and
+   * preserved across reconnects via `Last-Event-ID` replay.
+   */
   eventId?: number;
+  /**
+   * Daemon-authoritative wall-clock timestamp (ms since epoch). Extracted
+   * from `event._meta.serverTimestamp` if present. Use as the fallback
+   * ordering key when `eventId` is absent (synthetic frames). Always
+   * prefer this over client clock for cross-client "X minutes ago" display
+   * — multiple subscribers viewing the same session see the same value.
+   *
+   * Undefined when the daemon did not stamp the envelope. Forward-compat:
+   * the SDK reads the field whether the daemon emits it today or not.
+   */
+  serverTimestamp?: number;
   originatorClientId?: string;
   rawEvent?: DaemonEvent;
 }
@@ -387,8 +403,40 @@ export type DaemonTranscriptBlockKind =
 export interface DaemonTranscriptBlockBase {
   id: string;
   kind: DaemonTranscriptBlockKind;
+  /**
+   * Daemon-monotonic SSE cursor. Primary ordering key — use this for
+   * `blocks.sort((a, b) => (a.eventId ?? 0) - (b.eventId ?? 0))` instead
+   * of `createdAt`, which is client-clock-based and unstable under
+   * replay/reconnect (see PR-B time-schema notes).
+   */
   eventId?: number;
+  /**
+   * Daemon-authoritative wall-clock timestamp captured when the block was
+   * first observed. Mirrors the event's `serverTimestamp`. Undefined when
+   * the daemon did not stamp the envelope (current state) or when the
+   * block was created locally (e.g., `appendLocalUserTranscriptMessage`).
+   *
+   * **Prefer this** over `createdAt` for cross-client "X minutes ago"
+   * display: clients viewing the same session see the same value.
+   */
+  serverTimestamp?: number;
+  /**
+   * Same as the previous `createdAt` semantics — client-local clock at the
+   * moment the block was first observed. Renamed for clarity:
+   * - `clientReceivedAt`: when **this** client saw the event (always set)
+   * - `serverTimestamp`: when the daemon emitted it (may be unset)
+   *
+   * Backwards-compatible alias `createdAt` remains as a getter for
+   * existing consumers; new code should use `clientReceivedAt`.
+   */
+  clientReceivedAt: number;
+  /**
+   * @deprecated Use `clientReceivedAt` instead. Preserved for backwards
+   * compatibility with code written before PR-B. Always equals
+   * `clientReceivedAt`.
+   */
   createdAt: number;
+  /** Client-local clock at the moment the block was last mutated. */
   updatedAt: number;
 }
 

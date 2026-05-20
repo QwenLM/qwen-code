@@ -198,7 +198,13 @@ function appendTextDelta(
     return;
   }
 
-  const block = createTextBlock(state, kind, text, event.eventId);
+  const block = createTextBlock(
+    state,
+    kind,
+    text,
+    event.eventId,
+    event.serverTimestamp,
+  );
   if (kind === 'assistant') block.streaming = true;
   if (kind === 'thought') block.collapsed = true;
   appendBlock(state, block);
@@ -274,9 +280,13 @@ function upsertToolBlock(
       toolName: event.toolName,
       toolKind: event.toolKind,
     }),
+    clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
     ...(event.details ? { details: event.details } : {}),
     ...(event.content !== undefined ? { content: event.content } : {}),
     ...(event.locations !== undefined ? { locations: event.locations } : {}),
@@ -310,9 +320,13 @@ function appendShellBlock(
     id: allocateBlockId(state, 'shell'),
     kind: 'shell',
     text: truncateText(event.text),
+    clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
     ...(event.stream ? { stream: event.stream } : {}),
   };
   appendBlock(state, block);
@@ -345,9 +359,13 @@ function upsertPermissionBlock(
     title: event.title,
     options: event.options.map((option) => ({ ...option })),
     preview,
+    clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
     ...(event.sessionId ? { sessionId: event.sessionId } : {}),
     ...(event.toolCall !== undefined ? { toolCall: event.toolCall } : {}),
   };
@@ -378,9 +396,13 @@ function resolvePermissionBlock(
     options: [],
     preview: { kind: 'generic', summary: event.outcome },
     resolved: event.outcome,
+    clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
   };
   appendBlock(state, block);
   state.permissionBlockByRequestId[event.requestId] = block.id;
@@ -398,9 +420,13 @@ function appendStatusBlock(
     id: allocateBlockId(state, kind),
     kind,
     text: truncateText(text),
+    clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
     ...(event?.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event?.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
   };
   appendBlock(state, block);
   if (opts.clearActiveText !== false) clearActiveText(state);
@@ -411,14 +437,17 @@ function createTextBlock(
   kind: 'user' | 'assistant' | 'thought',
   text: string,
   eventId?: number,
+  serverTimestamp?: number,
 ): DaemonTextTranscriptBlock {
   return {
     id: allocateBlockId(state, kind),
     kind,
     text: truncateText(text),
+    clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
     ...(eventId !== undefined ? { eventId } : {}),
+    ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
   };
 }
 
@@ -593,4 +622,83 @@ function assertNever(value: never): never {
   throw new Error(
     `Unhandled daemon transcript event: ${JSON.stringify(value)}`,
   );
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * PR-B helpers: timestamp ordering + formatting
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Return transcript blocks sorted by **daemon-authoritative** ordering. Use
+ * this instead of `state.blocks` when displaying a long session where event
+ * id 5 may arrive AFTER event id 7 (typical in SSE replay-after-reconnect).
+ *
+ * Ordering precedence:
+ *   1. `eventId` (daemon-monotonic SSE cursor) — primary key
+ *   2. `serverTimestamp` (daemon wall clock) — fallback for synthetic frames
+ *   3. `clientReceivedAt` (local clock) — last resort
+ *
+ * Returns a new array — callers can rely on referential stability of
+ * untouched blocks (structural sharing in the reducer) but the array
+ * itself is fresh.
+ */
+export function selectTranscriptBlocksOrderedByEventId(
+  state: DaemonTranscriptState,
+): readonly DaemonTranscriptBlock[] {
+  return [...state.blocks].sort(compareBlocksByEventOrder);
+}
+
+function compareBlocksByEventOrder(
+  a: DaemonTranscriptBlock,
+  b: DaemonTranscriptBlock,
+): number {
+  // Primary: eventId (monotonic when present).
+  if (a.eventId !== undefined && b.eventId !== undefined) {
+    return a.eventId - b.eventId;
+  }
+  if (a.eventId !== undefined) return -1;
+  if (b.eventId !== undefined) return 1;
+  // Fallback: serverTimestamp.
+  if (a.serverTimestamp !== undefined && b.serverTimestamp !== undefined) {
+    return a.serverTimestamp - b.serverTimestamp;
+  }
+  if (a.serverTimestamp !== undefined) return -1;
+  if (b.serverTimestamp !== undefined) return 1;
+  // Last resort: client clock at the moment of receipt.
+  return a.clientReceivedAt - b.clientReceivedAt;
+}
+
+/**
+ * Format the most authoritative timestamp on a block as a localized
+ * string. Prefers `serverTimestamp` (cross-client consistent), falls back
+ * to `clientReceivedAt` (always set, but client-clock).
+ *
+ * Returns `''` if the block has neither — defensive against future block
+ * types that may not carry timestamps.
+ *
+ * @example
+ *   formatBlockTimestamp(block) // "2026-05-20 14:32:18"
+ *   formatBlockTimestamp(block, { locale: 'zh-CN', timeStyle: 'short' })
+ */
+export function formatBlockTimestamp(
+  block: DaemonTranscriptBlock,
+  opts: {
+    locale?: string;
+    timeZone?: string;
+    timeStyle?: 'short' | 'medium' | 'long' | 'full';
+    dateStyle?: 'short' | 'medium' | 'long' | 'full';
+  } = {},
+): string {
+  const ts = block.serverTimestamp ?? block.clientReceivedAt;
+  if (typeof ts !== 'number' || !Number.isFinite(ts)) return '';
+  const formatter = new Intl.DateTimeFormat(opts.locale, {
+    ...(opts.timeZone ? { timeZone: opts.timeZone } : {}),
+    ...(opts.dateStyle
+      ? { dateStyle: opts.dateStyle }
+      : { dateStyle: 'short' }),
+    ...(opts.timeStyle
+      ? { timeStyle: opts.timeStyle }
+      : { timeStyle: 'medium' }),
+  });
+  return formatter.format(new Date(ts));
 }
