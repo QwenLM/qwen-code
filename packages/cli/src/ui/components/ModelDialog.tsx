@@ -405,7 +405,8 @@ export function ModelDialog({
         !key.ctrl &&
         !key.meta &&
         !isFastModelMode &&
-        highlightedEntry
+        highlightedEntry &&
+        !highlightedEntry.isRuntime
       ) {
         if (highlightedEntry.authType === AuthType.QWEN_OAUTH) {
           setErrorMessage(
@@ -427,6 +428,10 @@ export function ModelDialog({
               highlightedEntry.authType,
               highlightedEntry.model.id,
               { baseUrl: highlightedEntry.model.baseUrl },
+            );
+            logModelSlashCommand(
+              config,
+              new ModelSlashCommandEvent(highlightedEntry.model.id),
             );
           } catch (e) {
             const baseErrorMessage = e instanceof Error ? e.message : String(e);

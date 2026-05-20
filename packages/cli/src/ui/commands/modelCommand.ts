@@ -71,6 +71,12 @@ function persistMainModelDefault(
   return modelArg;
 }
 
+function qwenOAuthDiscontinuedMessage(): string {
+  return t(
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider.',
+  );
+}
+
 function formatUnavailableModelMessage(
   kind: 'Model' | 'Fast model',
   modelName: string,
@@ -299,6 +305,13 @@ export const modelCommand: SlashCommand = {
       }
       const parsed = parseAcpModelOption(modelName);
       const targetAuthType = parsed.authType ?? authType;
+      if (isDefaultModelCommand && targetAuthType === AuthType.QWEN_OAUTH) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: qwenOAuthDiscontinuedMessage(),
+        };
+      }
       const availableModels =
         config.getAvailableModelsForAuthType(targetAuthType);
       if (!availableModels.some((model) => model.id === parsed.modelId)) {

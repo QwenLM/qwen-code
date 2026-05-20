@@ -192,6 +192,100 @@ describe('modelCommand', () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     mockContext = createMockCommandContext({
       invocation: {
+        raw: '/model --default gpt-4',
+        name: 'model',
+        args: '--default gpt-4',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-3.5',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--default gpt-4');
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'gpt-4',
+      undefined,
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.name',
+      'gpt-4',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Default model: gpt-4',
+    });
+  });
+
+  it('should persist provider-qualified models when --default is provided', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: `/model --default gpt-4(${AuthType.USE_OPENAI})`,
+        name: 'model',
+        args: `--default gpt-4(${AuthType.USE_OPENAI})`,
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      `--default gpt-4(${AuthType.USE_OPENAI})`,
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'gpt-4',
+      undefined,
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI,
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.name',
+      'gpt-4',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Default model: gpt-4',
+    });
+  });
+
+  it('should reject qwen-oauth models when --default is provided', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
         raw: '/model --default qwen-max',
         name: 'model',
         args: '--default qwen-max',
@@ -202,9 +296,7 @@ describe('modelCommand', () => {
             model: 'qwen-plus',
             authType: AuthType.QWEN_OAUTH,
           }),
-          getAvailableModelsForAuthType: vi
-            .fn()
-            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          getAvailableModelsForAuthType: vi.fn(),
           switchModel,
         },
         settings: createMockSettings(setValue),
@@ -216,20 +308,43 @@ describe('modelCommand', () => {
       '--default qwen-max',
     );
 
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.QWEN_OAUTH,
-      'qwen-max',
-      undefined,
-    );
-    expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
-      'model.name',
-      'qwen-max',
-    );
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
     expect(result).toEqual({
       type: 'message',
-      messageType: 'info',
-      content: 'Default model: qwen-max',
+      messageType: 'error',
+      content:
+        'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider.',
+    });
+  });
+
+  it('should return settings error when --default is used without settings', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --default gpt-4',
+        name: 'model',
+        args: '--default gpt-4',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-3.5',
+            authType: AuthType.USE_OPENAI,
+          }),
+          switchModel,
+        },
+      },
+    });
+    mockContext.services.settings = undefined as unknown as LoadedSettings;
+
+    const result = await modelCommand.action!(mockContext, '--default gpt-4');
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Settings service not available.',
     });
   });
 

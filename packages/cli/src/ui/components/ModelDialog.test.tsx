@@ -417,6 +417,124 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
+  it('ignores runtime models when "d" is pressed', () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const runtimeSnapshotId = `$runtime|${AuthType.USE_OPENAI}|gpt-4`;
+    const { props, mockSettings } = renderComponent({}, {
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getModel: vi.fn(() => 'gpt-4'),
+      switchModel,
+      getActiveRuntimeModelSnapshot: vi.fn(() => ({
+        id: runtimeSnapshotId,
+      })),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          isRuntimeModel: true,
+          runtimeSnapshotId,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'd',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: 'd',
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it('ignores "d" in fast model mode', () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const { props, mockSettings } = renderComponent({ isFastModelMode: true }, {
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getModel: vi.fn(() => 'gpt-4'),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'd',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: 'd',
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it('shows an error when setting the highlighted model as default fails', async () => {
+    const switchModel = vi
+      .fn()
+      .mockRejectedValue(new Error('Credential refresh failed'));
+
+    const { mockSettings, queryByText } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    await act(async () => {
+      await keyPressHandler({
+        name: 'd',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: 'd',
+      });
+    });
+
+    await waitFor(() => {
+      expect(queryByText(/Failed to switch model to 'gpt-4'/)).not.toBeNull();
+      expect(queryByText(/Credential refresh failed/)).not.toBeNull();
+    });
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+  });
+
   it('clears a stale default-model error before persisting a valid model', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
