@@ -171,6 +171,27 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ).toMatchObject([{ type: 'user.text.delta', text: 'hello' }]);
   });
 
+  it('optionally carries raw daemon events for diagnostics', () => {
+    const event = {
+      id: 24,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    } as const;
+
+    const [withoutRaw] = normalizeDaemonEvent(event);
+    expect(withoutRaw).toMatchObject({ type: 'assistant.text.delta' });
+    expect(withoutRaw).not.toHaveProperty('rawEvent');
+    expect(
+      normalizeDaemonEvent(event, { includeRawEvent: true }),
+    ).toMatchObject([{ type: 'assistant.text.delta', rawEvent: event }]);
+  });
+
   it('projects AskUserQuestion into a semantic tool preview', () => {
     const events = normalizeDaemonEvent({
       id: 3,
