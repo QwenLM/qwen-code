@@ -458,6 +458,24 @@ export class McpClientManager {
    */
   private onBudgetEvent?: (event: McpBudgetEvent) => void;
 
+  /**
+   * F2 (#4175 commit 4): when present, non-SDK MCP server discovery
+   * delegates to the workspace-shared pool instead of spawning a
+   * per-session `McpClient`. Tracked here so `disconnectServer` /
+   * `stop` can `release` the pool reference cleanly without leaking
+   * refs (the pool's drain timer kicks in when refs hit zero).
+   *
+   * SDK MCP servers (`isSdkMcpServerConfig`) always bypass the pool
+   * — the `sendSdkMcpMessage` callback is per-session by design and
+   * the pool's transport is workspace-level. Per-server gating in
+   * `discoverMcpToolsForServer` keeps the legacy path for SDK MCP.
+   */
+  private readonly pool?: import('./mcp-transport-pool.js').McpTransportPool;
+  private readonly pooledConnections = new Map<
+    string,
+    import('./mcp-pool-entry.js').PooledConnection
+  >();
+
   constructor(
     config: Config,
     toolRegistry: ToolRegistry,
@@ -465,9 +483,11 @@ export class McpClientManager {
     sendSdkMcpMessage?: SendSdkMcpMessage,
     healthConfig?: Partial<MCPHealthMonitorConfig>,
     budgetConfig?: McpBudgetConfig,
+    pool?: import('./mcp-transport-pool.js').McpTransportPool,
   ) {
     this.cliConfig = config;
     this.toolRegistry = toolRegistry;
+    this.pool = pool;
 
     this.eventEmitter = eventEmitter;
     this.sendSdkMcpMessage = sendSdkMcpMessage;
@@ -930,10 +950,21 @@ export class McpClientManager {
    * Initiates the tool discovery process for all configured MCP servers.
    * It connects to each server, discovers its available tools, and registers
    * them with the `ToolRegistry`.
+   *
+   * F2 (#4175 commit 4): in pool mode (`this.pool !== undefined`),
+   * non-SDK MCP servers go through the workspace-shared transport
+   * pool. SDK MCP and HTTP/SSE (when not opt-in) fall back through
+   * the pool's own `createUnpooledConnection` path so this manager
+   * doesn't need to maintain a parallel SDK code path. Pool entries
+   * are tracked in `this.pooledConnections` for `disconnectServer` /
+   * `stop` to release cleanly.
    */
   async discoverAllMcpTools(cliConfig: Config): Promise<void> {
     if (!cliConfig.isTrustedFolder()) {
       return;
+    }
+    if (this.pool) {
+      return this.discoverAllMcpToolsViaPool(cliConfig);
     }
     await this.stop();
 
@@ -1301,12 +1332,100 @@ export class McpClientManager {
   }
 
   /**
+   * F2 (#4175 commit 4): pool-mode discovery. Iterates configured
+   * servers and calls `pool.acquire(name, cfg, sessionId, toolReg,
+   * promptReg)` for each non-disabled server. Pool internally:
+   *   - Returns the existing PoolEntry if same fingerprint already
+   *     spawned for this workspace (other sessions sharing it)
+   *   - Spawns a new entry otherwise (deduped via spawnInFlight)
+   *   - For SDK MCP / non-pooled HTTP: routes to
+   *     `createUnpooledConnection` (per-session McpClient with the
+   *     supplied session registries)
+   *   - On attach: synchronously applies tool/prompt snapshots into
+   *     the supplied session registries via `SessionMcpView`
+   *
+   * Per-session reconnect / health monitoring / budget enforcement
+   * lives inside the pool, NOT in this manager — `this.reservedSlots`
+   * / `this.healthCheckTimers` etc. stay empty in pool mode (they're
+   * still allocated for legacy mode coexistence).
+   *
+   * Pre-pool path's `await this.stop()` releases EVERYTHING; here we
+   * only need to drop the manager's own pool refs because cross-
+   * session pool entries still belong to the pool.
+   */
+  private async discoverAllMcpToolsViaPool(cliConfig: Config): Promise<void> {
+    if (!this.pool) return; // unreachable; caller already gates
+    this.releaseAllPooledConnections();
+    this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
+    try {
+      const sessionId = this.cliConfig.getSessionId();
+      const promptRegistry = this.cliConfig.getPromptRegistry();
+      const servers = populateMcpServerCommand(
+        this.cliConfig.getMcpServers() || {},
+        this.cliConfig.getMcpServerCommand(),
+      );
+      const acquirePromises = Object.entries(servers).map(
+        async ([name, config]) => {
+          if (cliConfig.isMcpServerDisabled(name)) {
+            debugLogger.debug(
+              `Skipping disabled MCP server (pool mode): ${name}`,
+            );
+            return;
+          }
+          try {
+            const conn = await this.pool!.acquire(
+              name,
+              config,
+              sessionId,
+              this.toolRegistry,
+              promptRegistry,
+            );
+            this.pooledConnections.set(name, conn);
+          } catch (err) {
+            // Pool acquire failure for one server is non-fatal for
+            // siblings (matches the pre-F2 `discoverMcpToolsForServer`
+            // catch behavior). Operator visibility through standard
+            // error logger; status snapshot reflects reality via the
+            // global `serverStatuses` Map (pool's
+            // `aggregateStatusByName` keeps it consistent).
+            debugLogger.error(
+              `Pool acquire failed for ${name}: ${getErrorMessage(err)}`,
+            );
+          }
+        },
+      );
+      await Promise.all(acquirePromises);
+    } finally {
+      this.discoveryState = MCPDiscoveryState.COMPLETED;
+      this.eventEmitter?.emit('mcp-client-update', this.clients);
+    }
+  }
+
+  private releaseAllPooledConnections(): void {
+    for (const conn of this.pooledConnections.values()) {
+      try {
+        conn.release();
+      } catch (err) {
+        debugLogger.debug(
+          `Pool release error (ignored): ${getErrorMessage(err)}`,
+        );
+      }
+    }
+    this.pooledConnections.clear();
+  }
+
+  /**
    * Stops all running local MCP servers and closes all client connections.
    * This is the cleanup method to be called on application exit.
    */
   async stop(): Promise<void> {
     // Stop all health checks first
     this.stopAllHealthChecks();
+
+    // F2 (#4175 commit 4): release all pool refs this manager holds.
+    // Pool's drain timer kicks in for entries that hit refs=0; other
+    // sessions still referencing the same entry keep it alive.
+    this.releaseAllPooledConnections();
 
     const disconnectionPromises = Array.from(this.clients.entries()).map(
       async ([name, client]) => {
@@ -1348,6 +1467,15 @@ export class McpClientManager {
   async disconnectServer(serverName: string): Promise<void> {
     // Stop health check for this server
     this.stopHealthCheck(serverName);
+
+    // F2 (#4175 commit 4): release this server's pool reference if
+    // we acquired one. Pool starts drain timer at refs=0; entry will
+    // be force-closed unless another session re-acquires.
+    const pooled = this.pooledConnections.get(serverName);
+    if (pooled) {
+      pooled.release();
+      this.pooledConnections.delete(serverName);
+    }
 
     const client = this.clients.get(serverName);
     if (client) {

@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
+import type {
+
+  ApprovalMode,
+  Config,
+  ConversationRecord,
+  DeviceAuthorizationData,
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
@@ -21,6 +26,8 @@ import {
   getMCPServerStatus,
   MCPDiscoveryState,
   MCPServerStatus,
+  McpTransportPool,
+  POOLED_TRANSPORTS_DEFAULT,
   SessionEndReason,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -28,6 +35,7 @@ import type {
   Config,
   ConversationRecord,
   DeviceAuthorizationData,
+  McpTransportKind,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -257,6 +265,17 @@ export async function runAcpAgent(
     } catch {
       // stdout may already be closed
     }
+    // F2 (#4175 commit 4): drain the workspace MCP pool BEFORE
+    // runExitCleanup so the descendant pid sweep (commit 3) can
+    // SIGTERM npx/uvx wrapper grandchildren. runExitCleanup's own
+    // child kill is a fallback for processes the pool didn't track.
+    if (agentInstance) {
+      try {
+        await agentInstance.shutdownMcpPool(8_000);
+      } catch (err) {
+        debugLogger.error('[ACP] MCP pool drain error:', err);
+      }
+    }
     // Clean up child processes (MCP servers, etc.) and force exit.
     // Without this, orphan subprocesses keep the Node.js event loop alive
     // and the CLI process never terminates after the IDE disconnects.
@@ -304,12 +323,102 @@ export function toHttpServer(
   return undefined;
 }
 
+/**
+ * F2 (#4175 commit 4): parse `QWEN_SERVE_MCP_POOL_TRANSPORTS` env var
+ * (set by `runQwenServe.ts` from the `--mcp-pool-transports` CLI flag).
+ * Comma-separated list e.g. "stdio,websocket,http". Falls back to
+ * `POOLED_TRANSPORTS_DEFAULT` ({stdio, websocket}) on missing /
+ * malformed input. Unknown transport names are silently dropped — the
+ * resulting set is still a valid `ReadonlySet<McpTransportKind>`.
+ */
+function parsePooledTransports(
+  envValue: string | undefined,
+): ReadonlySet<McpTransportKind> {
+  if (!envValue || !envValue.trim()) return POOLED_TRANSPORTS_DEFAULT;
+  const KNOWN: ReadonlySet<McpTransportKind> = new Set([
+    'stdio',
+    'websocket',
+    'http',
+    'sse',
+    'sdk',
+    'unknown',
+  ]);
+  const out = new Set<McpTransportKind>();
+  for (const raw of envValue.split(',')) {
+    const trimmed = raw.trim().toLowerCase();
+    if (KNOWN.has(trimmed as McpTransportKind)) {
+      out.add(trimmed as McpTransportKind);
+    }
+  }
+  // Empty after parsing (all unknown) → fall back to defaults so an
+  // operator typo doesn't silently disable the pool entirely.
+  return out.size > 0 ? out : POOLED_TRANSPORTS_DEFAULT;
+}
+
+/**
+ * Parse `QWEN_SERVE_MCP_POOL_DRAIN_MS` env var. Default 30000ms per
+ * design §6.3. Bounded to [1000, 600000] (1s–10min) so a typo
+ * can't permanently strand pool entries (lower bound) or starve the
+ * MAX_IDLE hard cap (upper bound).
+ */
+function parsePoolDrainMs(envValue: string | undefined): number {
+  if (!envValue) return 30_000;
+  const n = Number.parseInt(envValue, 10);
+  if (!Number.isFinite(n)) return 30_000;
+  return Math.min(600_000, Math.max(1_000, n));
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
 
+  /**
+   * F2 (#4175 commit 4): workspace-shared MCP transport pool. Eagerly
+   * constructed in the ctor (per V21-13 Q6 resolved); lazy w.r.t.
+   * actual MCP work — spawns nothing until the first session's
+   * `discoverAllMcpToolsViaPool` calls `pool.acquire`.
+   *
+   * Set to `undefined` when `QWEN_SERVE_NO_MCP_POOL=1` env var is
+   * present (kill switch for rollback / A-B comparison). When
+   * undefined, sessions fall back to per-session McpClient spawn
+   * (pre-F2 behavior, identical to standalone `qwen` runtime).
+   *
+   * Single instance per QwenAgent → single instance per ACP child
+   * process → single instance per workspace (post-#4113 invariant).
+   * Pool is workspace-bound via `this.config.getWorkspaceContext()`.
+   */
+  private readonly mcpPool?: McpTransportPool;
+
   getActiveSessions(): Session[] {
     return [...this.sessions.values()];
+  }
+
+  /**
+   * F2 (#4175 commit 4): drain the workspace MCP transport pool.
+   * Called by the runAcpAgent SIGTERM/SIGINT shutdownHandler so all
+   * pool entries (subprocess + wrappers) get a coordinated SIGTERM
+   * with descendant pid sweep before process.exit. No-op when pool
+   * is undefined (kill-switch mode).
+   *
+   * Bounded by `timeoutMs` (default 10s); entries that don't close
+   * cleanly are reported in `DrainResult.errors` but the pool clears
+   * its maps regardless because the process is exiting.
+   */
+  async shutdownMcpPool(timeoutMs = 10_000): Promise<void> {
+    if (!this.mcpPool) return;
+    try {
+      const result = await this.mcpPool.drainAll({ force: true, timeoutMs });
+      if (result.forced > 0 || result.errors.length > 0) {
+        debugLogger.warn(
+          `MCP pool drain: ${result.drained} clean, ${result.forced} timed out, ` +
+            `${result.errors.length} errors`,
+        );
+      }
+    } catch (err) {
+      debugLogger.error(
+        `MCP pool drainAll failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   constructor(
@@ -317,7 +426,31 @@ class QwenAgent implements Agent {
     private settings: LoadedSettings,
     private argv: CliArgs,
     private connection: AgentSideConnection,
-  ) {}
+  ) {
+    // Pool kill switch via env var so operators can A/B compare or
+    // roll back without rebuilding. `runQwenServe.ts` sets this when
+    // `--no-mcp-pool` is passed at daemon startup.
+    if (process.env['QWEN_SERVE_NO_MCP_POOL'] === '1') {
+      this.mcpPool = undefined;
+    } else {
+      this.mcpPool = new McpTransportPool(this.config, {
+        workspaceContext: this.config.getWorkspaceContext(),
+        debugMode: this.config.getDebugMode(),
+        // sendSdkMcpMessage left undefined: SDK MCP servers always
+        // bypass the pool via createUnpooledConnection (per-session
+        // routing through ACP control plane). The legacy
+        // McpClientManager path retains its own per-session SDK
+        // wiring; pool-mode discoverAllMcpToolsViaPool delegates SDK
+        // MCP to that bypass.
+        pooledTransports: parsePooledTransports(
+          process.env['QWEN_SERVE_MCP_POOL_TRANSPORTS'],
+        ),
+        drainDelayMs: parsePoolDrainMs(
+          process.env['QWEN_SERVE_MCP_POOL_DRAIN_MS'],
+        ),
+      });
+    }
+  }
 
   async initialize(args: InitializeRequest): Promise<InitializeResponse> {
     this.clientCapabilities = args.clientCapabilities;
@@ -1908,6 +2041,20 @@ class QwenAgent implements Agent {
         projectHooks: this.settings.getProjectHooks(),
       },
     );
+    // F2 (#4175 commit 4): inject the workspace-shared MCP transport
+    // pool BEFORE `config.initialize()` so the ToolRegistry that
+    // initialize() constructs picks up the pool reference and the
+    // session's McpClientManager routes non-SDK MCP discovery
+    // through it. Calling after initialize would leave the manager
+    // with a stale `pool=undefined` and the pool would never be
+    // exercised. The pool is workspace-scoped (`QwenAgent.mcpPool`)
+    // and lives for the daemon's lifetime — see ctor.
+    if (
+      this.mcpPool !== undefined &&
+      typeof config.setMcpTransportPool === 'function'
+    ) {
+      config.setMcpTransportPool(this.mcpPool);
+    }
     // PR 14b fix #2 (codex review round 1): register the MCP guardrail
     // budget-event callback BEFORE `config.initialize()`. Pre-fix the
     // registration ran AFTER initialize, which (a) missed end-of-pass

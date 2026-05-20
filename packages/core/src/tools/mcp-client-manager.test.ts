@@ -27,6 +27,83 @@ describe('McpClientManager', () => {
     vi.restoreAllMocks();
   });
 
+  it('routes discovery through the pool when one is injected (F2 commit 4)', async () => {
+    // F2 contract: when a McpTransportPool is wired into the manager
+    // ctor, `discoverAllMcpTools` MUST go through `pool.acquire`
+    // instead of constructing its own McpClient. This catches a
+    // regression where the pool branch is silently bypassed and N
+    // sessions revert to N spawns.
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+    expect(acquireSpy).toHaveBeenCalledWith(
+      'srv',
+      {},
+      'sid-1',
+      expect.anything(),
+      expect.anything(),
+    );
+    // Critical inverse invariant: pool path must NOT also spawn its
+    // own McpClient (would double-spawn one process per session).
+    expect(McpClient).not.toHaveBeenCalled();
+  });
+
+  it('falls back to per-session McpClient spawn when no pool injected (backward compat)', async () => {
+    // The 70+ existing tests already assert this implicitly. This
+    // adds an explicit assertion so future refactors that flip the
+    // default break this test.
+    const mockedMcpClient = {
+      connect: vi.fn(),
+      discover: vi.fn(),
+      disconnect: vi.fn(),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(McpClient).toHaveBeenCalledOnce();
+    expect(mockedMcpClient.connect).toHaveBeenCalledOnce();
+  });
+
   it('should discover tools from all servers', async () => {
     const mockedMcpClient = {
       connect: vi.fn(),

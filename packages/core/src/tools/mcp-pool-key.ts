@@ -10,6 +10,7 @@ import {
   type MCPServerConfig,
 } from '../config/config.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
+import { type McpTransportKind, mcpTransportOf } from './mcp-client-manager.js';
 import type { ConnectionId } from './mcp-pool-events.js';
 
 /**
@@ -21,32 +22,12 @@ import type { ConnectionId } from './mcp-pool-events.js';
 export type PoolKey = string;
 
 /**
- * Transport-family classification used both for fingerprint canonical
- * form and for the `pooledTransports` opt-in gate. `unknown` covers
- * misconfigured entries that lack any transport-defining field.
+ * `McpTransportKind` and `mcpTransportOf` re-exported from
+ * `mcp-client-manager.ts` (where they originated as part of the
+ * PR 14 budget guardrail accounting). F2 imports + re-exports
+ * via the pool barrel for downstream daemon code.
  */
-export type McpTransportKind =
-  | 'stdio'
-  | 'sse'
-  | 'http'
-  | 'websocket'
-  | 'sdk'
-  | 'unknown';
-
-/**
- * Classify an `MCPServerConfig` by the transport it would establish.
- * Order of checks matters: stdio (command), then websocket (tcp),
- * then http (httpUrl), then sse (url). SDK servers detected via
- * `isSdkMcpServerConfig` (sets `type: 'sdk'`).
- */
-export function mcpTransportOf(cfg: MCPServerConfig): McpTransportKind {
-  if (isSdkMcpServerConfig(cfg)) return 'sdk';
-  if (cfg.command) return 'stdio';
-  if (cfg.tcp) return 'websocket';
-  if (cfg.httpUrl) return 'http';
-  if (cfg.url) return 'sse';
-  return 'unknown';
-}
+export { mcpTransportOf, type McpTransportKind } from './mcp-client-manager.js';
 
 /**
  * Default set of transports the pool will share. stdio + websocket

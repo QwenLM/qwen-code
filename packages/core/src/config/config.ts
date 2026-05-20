@@ -2353,6 +2353,32 @@ export class Config {
     return this.mcpServerCommand;
   }
 
+  /**
+   * F2 (#4175 commit 4): optional workspace-shared MCP transport pool
+   * injected by the daemon-mode `QwenAgent`. When set, the wrapping
+   * `ToolRegistry` threads it into `McpClientManager`, which delegates
+   * non-SDK MCP server discovery to the pool instead of spawning its
+   * own per-session `McpClient`. Standalone `qwen` (non-daemon) leaves
+   * this `undefined` and the manager keeps its pre-F2 behavior.
+   *
+   * Eagerly instantiated by `QwenAgent` (per V21-13 Q6 resolved); the
+   * pool itself is lazy w.r.t. actual MCP work — it spawns nothing
+   * until the first `acquire()` from a session.
+   */
+  private mcpTransportPool?: import('../tools/mcp-transport-pool.js').McpTransportPool;
+
+  setMcpTransportPool(
+    pool: import('../tools/mcp-transport-pool.js').McpTransportPool | undefined,
+  ): void {
+    this.mcpTransportPool = pool;
+  }
+
+  getMcpTransportPool():
+    | import('../tools/mcp-transport-pool.js').McpTransportPool
+    | undefined {
+    return this.mcpTransportPool;
+  }
+
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
     let mcpServers = { ...(this.mcpServers || {}) };
     const extensions = this.getActiveExtensions();
