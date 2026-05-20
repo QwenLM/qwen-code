@@ -193,6 +193,11 @@ function upsertToolBlock(
 ): void {
   const existingId = state.toolBlockByCallId[event.toolCallId];
   if (existingId === TRIMMED_TOOL_BLOCK_ID) {
+    if (shouldRecreateTrimmedToolBlock(event)) {
+      delete state.toolBlockByCallId[event.toolCallId];
+      delete state.trimmedToolNotificationByCallId[event.toolCallId];
+      return upsertToolBlock(state, event);
+    }
     if (!state.trimmedToolNotificationByCallId[event.toolCallId]) {
       state.trimmedToolNotificationByCallId[event.toolCallId] = true;
       appendStatusBlock(
@@ -418,6 +423,13 @@ function trimTranscriptState(
       state.toolBlockByCallId[toolCallId] = TRIMMED_TOOL_BLOCK_ID;
     }
   }
+  for (const [toolCallId] of Object.entries(
+    state.trimmedToolNotificationByCallId,
+  )) {
+    if (state.toolBlockByCallId[toolCallId] !== TRIMMED_TOOL_BLOCK_ID) {
+      delete state.trimmedToolNotificationByCallId[toolCallId];
+    }
+  }
   for (const [requestId, blockId] of Object.entries(
     state.permissionBlockByRequestId,
   )) {
@@ -434,6 +446,14 @@ function trimTranscriptState(
     state.activeThoughtBlockId = undefined;
   }
   return state;
+}
+
+function shouldRecreateTrimmedToolBlock(
+  event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
+): boolean {
+  return (
+    event.toolCallId === 'daemon-plan' || event.toolKind === 'updated_plan'
+  );
 }
 
 function appendBlock(
