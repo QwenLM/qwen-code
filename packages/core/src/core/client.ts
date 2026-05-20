@@ -30,6 +30,7 @@ const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
 import { GeminiChat } from './geminiChat.js';
+import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   getArenaSystemReminder,
   getCoreSystemPrompt,
@@ -185,6 +186,7 @@ export class GeminiClient {
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
+  private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
 
   private readonly loopDetector: LoopDetectionService;
@@ -463,6 +465,7 @@ export class GeminiClient {
   async resetChat(): Promise<void> {
     this.initializedSessionId = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
+    this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
     // startChat() rewrites the chat to its initial state. Any prior
     // read_file tool results the FileReadCache still tracks are no
@@ -499,28 +502,41 @@ export class GeminiClient {
     });
   }
 
+  private getCachedGitStatus(): string | null {
+    if (this.cachedGitStatus === undefined) {
+      // Mirror claude-code: append git status (branch + recent commits) to the
+      // system prompt so the main agent treats version history as authoritative
+      // context, not background noise. Only injected when cwd is a git repo.
+      this.cachedGitStatus = getRecentGitStatus(this.config.getCwd());
+    }
+    return this.cachedGitStatus;
+  }
+
   private getMainSessionSystemInstruction(
     deferredTools?: Array<{ name: string; description: string }>,
   ): string {
     const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
+    const gitStatus = this.getCachedGitStatus();
 
     if (overrideSystemPrompt) {
-      return getCustomSystemPrompt(
+      const base = getCustomSystemPrompt(
         overrideSystemPrompt,
         userMemory,
         appendSystemPrompt,
         deferredTools,
       );
+      return gitStatus ? base + '\n\n' + gitStatus : base;
     }
 
-    return getCoreSystemPrompt(
+    const base = getCoreSystemPrompt(
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
       deferredTools,
     );
+    return gitStatus ? base + '\n\n' + gitStatus : base;
   }
 
   /**
