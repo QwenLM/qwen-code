@@ -733,12 +733,8 @@ describe('openInExternalEditor', () => {
 
     expect(mockSetRawMode).toHaveBeenCalledWith(false);
     expect(mockSetRawMode).toHaveBeenCalledWith(true);
-    const falseIdx = mockSetRawMode.mock.calls.findIndex(
-      (c: [boolean]) => c[0] === false,
-    );
-    const trueIdx = mockSetRawMode.mock.calls.findIndex(
-      (c: [boolean]) => c[0] === true,
-    );
+    const falseIdx = mockSetRawMode.mock.calls.findIndex((c) => c[0] === false);
+    const trueIdx = mockSetRawMode.mock.calls.findIndex((c) => c[0] === true);
     expect(falseIdx).toBeLessThan(trueIdx);
   });
 
