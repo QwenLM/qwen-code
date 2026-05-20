@@ -417,7 +417,7 @@ describe('getDirPathCompletions', () => {
       results.forEach((suggestion) => {
         expect(suggestion.isDirectory).toBe(true);
         expect(suggestion.value.startsWith(`${tempTestDir}`)).toBe(true);
-        expect(suggestion.value.endsWith(path.sep)).toBe(true);      
+        expect(suggestion.value.endsWith(path.sep)).toBe(true);
       });
     });
 
