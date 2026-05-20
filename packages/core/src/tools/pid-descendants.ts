@@ -150,9 +150,15 @@ async function listDescendantPidsWin(root: number): Promise<number[]> {
 }
 
 /**
- * Send SIGTERM (or `taskkill /F` on Windows) to a list of pids,
- * tolerating per-pid failures (already exited, permission denied,
- * etc.). Returns the count of pids that were successfully signaled.
+ * Send SIGTERM to a list of pids, tolerating per-pid failures
+ * (already exited, permission denied, etc.). On Windows, Node's
+ * `process.kill(pid, 'SIGTERM')` polyfills to `TerminateProcess`
+ * (similar to `taskkill /F`) — so the same call works cross-platform
+ * and we don't shell out to taskkill. Returns the count of pids
+ * that were successfully signaled.
+ *
+ * wenshao S2 doc fix: pre-fix docstring claimed a Windows-specific
+ * `taskkill /F` branch that didn't exist in the implementation.
  *
  * Caller's responsibility to handle the root pid separately (which
  * is typically already being shutdown via `client.disconnect()` →

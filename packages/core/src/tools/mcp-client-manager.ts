@@ -1682,6 +1682,17 @@ export class McpClientManager {
     if (!cliConfig.isTrustedFolder()) {
       return;
     }
+    // F2 (#4175 commit 4 review fix — wenshao C7): incremental
+    // discovery is the path `Config.startMcpDiscoveryInBackground` takes
+    // during `config.initialize()` under the default progressive mode.
+    // Without this gate, daemon-mode sessions would bypass the
+    // workspace-shared pool and silently revert to per-session
+    // McpClient spawning during boot — the exact regression `discoverAllMcpTools`
+    // was hardened against. Route through the same pool branch so every
+    // discovery entry point honors the pool injection.
+    if (this.pool) {
+      return this.discoverAllMcpToolsViaPool(cliConfig);
+    }
 
     const servers = populateMcpServerCommand(
       this.cliConfig.getMcpServers() || {},

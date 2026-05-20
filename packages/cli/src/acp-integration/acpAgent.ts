@@ -288,6 +288,20 @@ export async function runAcpAgent(
   await connection.closed;
   // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
   await fireSessionEndOnce(SessionEndReason.PromptInputExit);
+  // F2 (#4175 commit 4 review fix — wenshao C1): the SIGTERM/SIGINT
+  // shutdownHandler drains the pool, but the IDE-initiated normal
+  // close path (this branch) returned without draining, leaking
+  // shared MCP entries (subprocess + descendants) until the OS
+  // eventually reaped them — a real regression vs pre-F2 daemon
+  // mode where each session's manager torn down its own clients
+  // on disconnect. Mirror the SIGTERM handler's pool drain here.
+  if (agentInstance) {
+    try {
+      await agentInstance.shutdownMcpPool(8_000);
+    } catch (err) {
+      debugLogger.error('[ACP] MCP pool drain on close error:', err);
+    }
+  }
 
   process.off('SIGTERM', shutdownHandler);
   process.off('SIGINT', shutdownHandler);

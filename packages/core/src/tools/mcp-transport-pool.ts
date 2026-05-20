@@ -84,6 +84,13 @@ export class McpTransportPool {
   /** V21-2: reverse index for O(refs) `releaseSession`. */
   private readonly sessionToEntries = new Map<string, Set<ConnectionId>>();
   /**
+   * Drain mutex (wenshao C5): when `drainAll` is in progress, new
+   * acquires reject so they don't latch onto entries that are about
+   * to be force-closed. Cleared by `drainAll` only on successful
+   * teardown — once set, a fresh pool is required for further work.
+   */
+  private draining = false;
+  /**
    * Monotonic per-server-name index for `entryIndex` (V21-7). Each
    * new entry for a name gets `nextIndexByName.get(name)++`; old
    * entries keep their assigned index even after newer ones appear
@@ -136,6 +143,11 @@ export class McpTransportPool {
     sessionToolRegistry: ToolRegistry,
     sessionPromptRegistry: PromptRegistry,
   ): Promise<PooledConnection> {
+    if (this.draining) {
+      throw new Error(
+        `McpTransportPool is draining; refusing acquire for ${serverName} (session ${sessionId})`,
+      );
+    }
     // SDK MCP / non-pooled HTTP go through the per-session bypass.
     if (!isPoolable(cfg, this.opts.pooledTransports)) {
       return this.createUnpooledConnection(
@@ -367,6 +379,24 @@ export class McpTransportPool {
   }): Promise<DrainResult> {
     const timeoutMs = opts?.timeoutMs ?? 10_000;
     const force = opts?.force ?? false;
+
+    // F2 (#4175 commit 4 review fix — wenshao C5): block new
+    // acquires for the duration of drain. After this flag flips,
+    // `acquire` rejects with a "draining" error so a session
+    // attempting to attach mid-drain doesn't end up holding a handle
+    // to an entry that's about to be force-closed.
+    this.draining = true;
+
+    // Wait for in-flight spawn promises to settle BEFORE taking the
+    // entry snapshot, so a spawn that's about to call
+    // `this.entries.set(id, entry)` doesn't sneak past `entries.clear()`
+    // and leak. `Promise.allSettled` tolerates spawn rejection (the
+    // failed entry simply won't appear in `this.entries`).
+    if (this.spawnInFlight.size > 0) {
+      await Promise.allSettled([...this.spawnInFlight.values()]);
+    }
+    // Snapshot AFTER spawnInFlight settles so any entry that just
+    // got `entries.set` from a completing spawn is in the list.
     const entries = [...this.entries.values()];
     const drained: number[] = [];
     const errors: Array<{
@@ -446,16 +476,32 @@ export class McpTransportPool {
     try {
       await client.connect();
       const snap = await client.discoverAndReturn(this.cliConfig);
-      entry.markActive(snap.tools, snap.prompts);
+      // F2 (#4175 commit 4 review fix — wenshao C6 follow-up):
+      // register the entry in `this.entries` BEFORE markActive's
+      // updateGlobalStatus runs. Pre-fix the order was reversed,
+      // and `aggregateStatusByName(serverName)` iterated `entries`
+      // without finding the just-spawned entry → returned
+      // DISCONNECTED → wrote that to the module-level map → my
+      // status-change listener echoed it back as `localStatus =
+      // DISCONNECTED`, defeating the CONNECTED state markActive
+      // had just set. Setting first means the aggregator sees the
+      // entry mid-`active` transition and returns CONNECTED.
       this.entries.set(id, entry);
+      entry.markActive(snap.tools, snap.prompts);
       debugLogger.info(
         `Spawned pool entry ${id} (entryIndex=${entryIndex}, transport=${transport})`,
       );
       return entry;
     } catch (err) {
       debugLogger.error(`Failed to spawn pool entry ${id}: ${String(err)}`);
-      // Don't store the failed entry. McpClient self-flips status to
+      // Don't leak the entry. McpClient self-flips status to
       // DISCONNECTED on discoverAndReturn error (commit 1 invariant).
+      // `entries.delete` is idempotent — covers the race where the
+      // error came from `markActive` AFTER `entries.set` ran (rare;
+      // markActive is mostly assignment + updateGlobalStatus, but
+      // a listener could throw). Catches both pre- and post-set
+      // failure modes uniformly.
+      this.entries.delete(id);
       try {
         await client.disconnect();
       } catch {
@@ -542,7 +588,14 @@ export class McpTransportPool {
       this.cliConfig,
       entryOpts,
       () => undefined,
-      () => MCPServerStatus.CONNECTED,
+      // F2 (#4175 commit 4 review fix — wenshao S4): aggregator
+      // delegates to McpClient.getStatus() instead of hardcoded
+      // CONNECTED. After `forceShutdown` flips client to
+      // DISCONNECTED, the global serverStatuses Map gets the
+      // correct value rather than a permanently-stale CONNECTED
+      // (which would mislead operators reading the global map
+      // for unpooled servers).
+      () => client.getStatus(),
     );
 
     try {

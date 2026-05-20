@@ -8,7 +8,9 @@ import { EventEmitter } from 'node:events';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  addMCPStatusChangeListener,
   MCPServerStatus,
+  removeMCPStatusChangeListener,
   type DiscoveredMCPPrompt,
   type McpClient,
   updateMCPServerStatus,
@@ -118,6 +120,30 @@ export class PoolEntry {
   private readonly emitter = new EventEmitter();
 
   /**
+   * F2 (#4175 commit 4 review fix — wenshao C6): status change
+   * listener registered against the module-level `serverStatuses`
+   * registry. McpClient.onerror flips the GLOBAL map to DISCONNECTED
+   * on transport drop, but pool's `aggregateStatusByName` reads each
+   * entry's `localStatus` and "any-CONNECTED-wins" overwrites
+   * back. Without this listener, a transport drop would leave
+   * `localStatus = CONNECTED` permanently while the actual transport
+   * is dead, and snapshot consumers see lying status.
+   *
+   * Stored so `forceShutdown` can detach to avoid leaking listeners
+   * on the module-level array across entry recreate.
+   */
+  private statusChangeListener?: Parameters<
+    typeof addMCPStatusChangeListener
+  >[0];
+
+  /**
+   * Re-entry guard: when our own `updateGlobalStatus` writes to the
+   * module-level map, the status-change listener will fire back at
+   * us. Skip those echoes (we already know our localStatus).
+   */
+  private suppressNextStatusEcho = false;
+
+  /**
    * @param id Stable ConnectionId (`name::fingerprint`).
    * @param serverName Server name as advertised in `MCPServerConfig`.
    * @param entryIndex Opaque, monotonic-within-name-group index for
@@ -150,6 +176,29 @@ export class PoolEntry {
   ) {
     // Unbounded listener count — N session views may attach.
     this.emitter.setMaxListeners(0);
+
+    // F2 commit 4 review fix (wenshao C6): subscribe to McpClient's
+    // module-level status writes (CONNECTING / CONNECTED /
+    // DISCONNECTED). When the underlying SDK transport dies and
+    // McpClient.onerror writes DISCONNECTED, we need to mirror it
+    // into `localStatus` so subsequent `aggregateStatusByName` calls
+    // surface accurate state. Filter by serverName; ignore removal
+    // notifications (`status === undefined` after disable/uninstall).
+    this.statusChangeListener = (name, status) => {
+      if (name !== this.serverName) return;
+      if (status === undefined) return;
+      if (this.suppressNextStatusEcho) {
+        this.suppressNextStatusEcho = false;
+        return;
+      }
+      if (status === this.localStatus) return;
+      this.localStatus = status;
+      // Do NOT call updateGlobalStatus here — it would loop back via
+      // the listener. McpClient already wrote the authoritative
+      // status to the module-level map; our job is to mirror it
+      // into localStatus only.
+    };
+    addMCPStatusChangeListener(this.statusChangeListener);
   }
 
   get generation(): number {
@@ -284,16 +333,17 @@ export class PoolEntry {
       clearTimeout(this.drainTimer);
       this.drainTimer = undefined;
     }
-    // Reset first-idle tracking only when truly returning to active
-    // with subscribers — not when attach happens mid-drain timer
-    // (we want max-idle to cap thrashing).
-    if (this.refs.size > 0) {
-      if (this.maxIdleTimer) {
-        clearTimeout(this.maxIdleTimer);
-        this.maxIdleTimer = undefined;
-      }
-      this.firstIdleAt = undefined;
-    }
+    // F2 (#4175 commit 4 review fix — wenshao C2): the maxIdle hard
+    // cap is intentionally NEVER reset by attach/detach flap. Pre-fix
+    // this code cleared `maxIdleTimer` + `firstIdleAt` whenever
+    // `refs.size > 0`, but `attach()` adds the ref BEFORE calling
+    // `cancelDrainTimer`, so the condition was always true and the
+    // hard cap got reset on every attach — completely defeating its
+    // purpose (per design §6.3: "started at first idle and NEVER
+    // reset"). Now `cancelDrainTimer` only cancels the drain grace
+    // timer; the maxIdle timer survives the entire entry lifetime
+    // and is only cleared by `forceShutdown` (which is the entry's
+    // terminal transition).
   }
 
   /**
@@ -309,10 +359,26 @@ export class PoolEntry {
     reason: 'drain_timer' | 'max_idle' | 'manual',
   ): Promise<void> {
     if (this.state === 'closed' || this.state === 'failed') return;
+    // F2 (#4175 commit 4 review fix — wenshao C4): flip state to
+    // `'closed'` SYNCHRONOUSLY before any await. Pre-fix this
+    // assignment lived at line 361, after `await listDescendantPids`
+    // and `await client.disconnect()` — during those yields a
+    // concurrent `acquire` would call `attach()`, which only
+    // rejects 'closed'/'failed', and would return a handle to an
+    // entry mid-teardown (zombie connection). Now any concurrent
+    // attach sees 'closed' immediately and rejects.
+    this.state = 'closed';
     this.cancelDrainTimer();
     if (this.maxIdleTimer) {
       clearTimeout(this.maxIdleTimer);
       this.maxIdleTimer = undefined;
+    }
+    // Detach the module-level status listener now that this entry
+    // is terminal — leaving it attached would leak across entry
+    // recreation (wenshao C6 cleanup symmetry).
+    if (this.statusChangeListener) {
+      removeMCPStatusChangeListener(this.statusChangeListener);
+      this.statusChangeListener = undefined;
     }
     // Notify any remaining subscribers BEFORE disconnecting so
     // pending callTool promises can route to MCPCallInterruptedError.
@@ -358,8 +424,10 @@ export class PoolEntry {
         `client.disconnect failed for ${this.id} (${reason}): ${String(err)}`,
       );
     }
-    this.state = 'closed';
+    // state already set to 'closed' synchronously above (wenshao C4 fix).
     this.localStatus = MCPServerStatus.DISCONNECTED;
+    // Suppress the listener echo from our own write (wenshao C6).
+    this.suppressNextStatusEcho = true;
     this.updateGlobalStatus();
     this.onClosed(this.id);
   }
@@ -398,8 +466,51 @@ export class PoolEntry {
         `Restart disconnect (best-effort) failed for ${this.id}: ${String(err)}`,
       );
     }
-    await this.client.connect();
-    const snap = await this.client.discoverAndReturn(this.cliConfig);
+    // F2 (#4175 commit 4 review fix — wenshao C3): wrap connect +
+    // discover in try/catch. Pre-fix a thrown `client.connect()` or
+    // `client.discoverAndReturn()` propagated up to `restartByName`
+    // but left the entry in zombie state: `localStatus` still
+    // CONNECTED (never updated on the failure path), `state` still
+    // `active`, snapshot pointing at the pre-restart tools — pool
+    // snapshot lies, subsequent acquires reuse the broken entry.
+    // On failure: transition to `'failed'` terminal state so
+    // `aggregateStatusByName` reflects reality and the next
+    // `pool.acquire` for this fingerprint spawns a fresh entry.
+    let snap: {
+      tools: DiscoveredMCPTool[];
+      prompts: DiscoveredMCPPrompt[];
+    };
+    try {
+      await this.client.connect();
+      snap = await this.client.discoverAndReturn(this.cliConfig);
+    } catch (err) {
+      debugLogger.error(
+        `Restart of ${this.id} failed at connect/discover: ${String(err)}. Transitioning to 'failed'.`,
+      );
+      this.state = 'failed';
+      this.localStatus = MCPServerStatus.DISCONNECTED;
+      this.suppressNextStatusEcho = true;
+      this.updateGlobalStatus();
+      // Detach the status listener — terminal state mirrors forceShutdown.
+      if (this.statusChangeListener) {
+        removeMCPStatusChangeListener(this.statusChangeListener);
+        this.statusChangeListener = undefined;
+      }
+      this.emit({
+        kind: 'failed',
+        serverName: this.serverName,
+        generation: this._generation,
+        lastError: err instanceof Error ? err.message : String(err),
+      });
+      // Detach all subscribers since the entry is terminal — they'll
+      // get the `failed` event above and remove this server's tools
+      // from their session registries via SessionMcpView.teardown.
+      for (const [sid] of this.subscribers) {
+        this.detach(sid);
+      }
+      this.onClosed(this.id);
+      throw err;
+    }
     // Generation guard: if a second restart raced in, drop our results.
     if (oldGen + 1 !== this._generation) {
       debugLogger.debug(
@@ -410,6 +521,7 @@ export class PoolEntry {
     this.toolsSnapshot = snap.tools;
     this.promptsSnapshot = snap.prompts;
     this.localStatus = MCPServerStatus.CONNECTED;
+    this.suppressNextStatusEcho = true;
     this.updateGlobalStatus();
     this.emit({
       kind: 'reconnected',

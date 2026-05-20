@@ -23,10 +23,14 @@ const debugLogger = createDebugLogger('McpPool:View');
  * `excludeTools` wins over `includeTools` when both list the same
  * tool (pre-F2 behavior preserved).
  *
- * `serverToolName` is the bare name as advertised by the MCP server;
- * `includeTools`/`excludeTools` may use either the bare name or a
- * `<name>(<args>)` parenthesized form — strip the args before
- * comparing.
+ * `serverToolName` is the bare name as advertised by the MCP server.
+ * `includeTools` entries may use either the bare name or a
+ * `<name>(<args>)` parenthesized form — the parens form is stripped
+ * before comparing (matches `mcp-client.ts:isEnabled` history).
+ * `excludeTools` is checked via direct equality — no parens-form
+ * support, intentionally matching the existing pre-F2 behavior so
+ * operators don't see semantic divergence between the two filter
+ * lists when migrating sessions through pool mode.
  */
 export function passesSessionFilter(
   tool: DiscoveredMCPTool,
@@ -94,6 +98,7 @@ export class SessionMcpView {
    */
   applyTools(snapshot: readonly DiscoveredMCPTool[]): void {
     this.sessionToolRegistry.removeMcpToolsByServer(this.serverName);
+    let registered = 0;
     for (const tool of snapshot) {
       if (
         !passesSessionFilter(tool, this.cfg.includeTools, this.cfg.excludeTools)
@@ -105,9 +110,12 @@ export class SessionMcpView {
       // pays zero allocation.
       const sessionTool = tool.withTrust(this.cfg.trust);
       this.sessionToolRegistry.registerTool(sessionTool);
+      registered += 1;
     }
+    // wenshao S3: pre-fix this string contained literal "N" instead
+    // of an interpolation; operators saw a meaningless placeholder.
     debugLogger.debug(
-      `SessionMcpView[${this.sessionId}/${this.serverName}] applied ${snapshot.length} tools (filtered to N registered)`,
+      `SessionMcpView[${this.sessionId}/${this.serverName}] applied ${snapshot.length} tools (filtered to ${registered} registered)`,
     );
   }
 
