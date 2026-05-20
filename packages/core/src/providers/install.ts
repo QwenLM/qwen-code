@@ -12,6 +12,24 @@ import type {
   ProviderSettingsAdapter,
 } from './types.js';
 
+/**
+ * Environment variable names an install plan must never set — they alter
+ * process/loader behavior (code injection, PATH hijack, home redirection).
+ * Compared case-insensitively. Provider API-key envs never collide with
+ * these.
+ */
+const DENY_ENV_KEYS = new Set([
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'PATH',
+  'HOME',
+  'TMPDIR',
+]);
+
 // ---------------------------------------------------------------------------
 // Model providers merge logic
 // ---------------------------------------------------------------------------
@@ -119,9 +137,19 @@ export async function applyProviderInstallPlan(
     currentStep = 'backup';
     settings.backup?.();
 
-    // Set environment variables (snapshot previous values for rollback)
+    // Set environment variables (snapshot previous values for rollback).
+    // Defense in depth: refuse process-altering env names. Today every
+    // caller routes through buildInstallPlan with hardcoded provider keys,
+    // but ProviderInstallPlan is exported, so a future provider config or a
+    // hand-built plan could otherwise inject NODE_OPTIONS / LD_PRELOAD /
+    // PATH etc. into both settings.json and the live process.env.
     currentStep = 'env';
     for (const [key, value] of Object.entries(plan.env ?? {})) {
+      if (DENY_ENV_KEYS.has(key.toUpperCase())) {
+        throw new Error(
+          `Install plan must not set reserved environment variable: ${key}`,
+        );
+      }
       previousEnvValues.set(key, process.env[key]);
       settings.setValue(`env.${key}`, value);
       process.env[key] = value;

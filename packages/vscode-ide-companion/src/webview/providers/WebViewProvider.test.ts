@@ -1755,6 +1755,46 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
     expect(mockRestoreSettingsSnapshot).toHaveBeenCalledWith(snapshot);
   });
 
+  it('disconnects the agent after rolling back rejected credentials', async () => {
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      env: { OPENAI_API_KEY: 'sk-old' },
+    });
+
+    const provider = makeProvider();
+    const disconnect = vi.fn();
+    (
+      provider as unknown as {
+        agentManager: { disconnect: () => void };
+        agentInitialized: boolean;
+      }
+    ).agentManager = { disconnect } as never;
+    (provider as unknown as { agentInitialized: boolean }).agentInitialized =
+      true;
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+        authState: boolean;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      // Reconnect happened (sets agentInitialized true) but auth rejected.
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized =
+        true;
+      (provider as unknown as { authState: boolean }).authState = false;
+    });
+
+    await (
+      provider as unknown as {
+        handleAuthInteractive: (c: unknown, i: unknown) => Promise<void>;
+      }
+    ).handleAuthInteractive(providerConfig, inputs);
+
+    // Bad-key agent must be torn down so later actions don't hit it.
+    expect(disconnect).toHaveBeenCalled();
+    expect(
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized,
+    ).toBe(false);
+  });
+
   it('does NOT restore when the reconnect authenticates (authState === true)', async () => {
     mockSnapshotSettingsForRollback.mockReturnValue({
       env: { OPENAI_API_KEY: 'sk-old' },

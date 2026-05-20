@@ -390,12 +390,34 @@ export function settingExistsInScope(
   return value !== undefined;
 }
 
+/**
+ * True if any dotted-path segment would let a write climb into the prototype
+ * chain. Defense in depth at the utility level: callers like
+ * migrateProviderMetadata feed `field` names straight from Object.entries on
+ * user-editable settings.json, and JSON.parse preserves `__proto__` as an own
+ * property — a crafted file could otherwise pollute Object.prototype here.
+ * Inline literal === comparisons (not Set.has) so CodeQL recognises this as a
+ * prototype-pollution sanitiser.
+ */
+function pathHasUnsafeSegment(keys: string[]): boolean {
+  for (const key of keys) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function setNestedPropertyForce(
   obj: Record<string, unknown>,
   path: string,
   value: unknown,
 ): void {
   const keys = path.split('.');
+  // Refuse prototype-chain segments (see UNSAFE_PATH_SEGMENTS). Silent skip
+  // rather than throw: callers iterate user data and a poisoned key should
+  // be ignored, not crash the operation.
+  if (pathHasUnsafeSegment(keys)) return;
   const lastKey = keys.pop();
   if (!lastKey) return;
 
@@ -416,6 +438,8 @@ export function setNestedPropertySafe(
   value: unknown,
 ): void {
   const keys = path.split('.');
+  // Refuse prototype-chain segments (see UNSAFE_PATH_SEGMENTS).
+  if (pathHasUnsafeSegment(keys)) return;
   const lastKey = keys.pop();
   if (!lastKey) return;
 

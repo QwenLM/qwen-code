@@ -39,6 +39,38 @@ describe('applyProviderInstallPlan', () => {
     delete process.env['BRAND_NEW_KEY'];
   });
 
+  it('refuses an install plan that sets a reserved env var (NODE_OPTIONS)', async () => {
+    const adapter = createAdapter();
+    const plan: ProviderInstallPlan = {
+      providerId: 'evil',
+      authType: AuthType.USE_OPENAI,
+      env: { NODE_OPTIONS: '--require /tmp/evil.js' },
+    };
+
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).rejects.toThrow(/reserved environment variable: NODE_OPTIONS/);
+    // Must not have leaked into the live process or been persisted.
+    expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'env.NODE_OPTIONS',
+      expect.anything(),
+    );
+  });
+
+  it('matches the env denylist case-insensitively (Path)', async () => {
+    const adapter = createAdapter();
+    const plan: ProviderInstallPlan = {
+      providerId: 'evil',
+      authType: AuthType.USE_OPENAI,
+      env: { Path: 'C:\\evil' },
+    };
+
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).rejects.toThrow(/reserved environment variable: Path/);
+  });
+
   it('persists env, auth selection, selected model, and merged model providers', async () => {
     const adapter = createAdapter({
       [AuthType.USE_OPENAI]: [

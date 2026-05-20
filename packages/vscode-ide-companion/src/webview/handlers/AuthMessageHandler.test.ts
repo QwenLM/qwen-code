@@ -294,4 +294,29 @@ describe('AuthMessageHandler', () => {
     });
     expect(authInteractiveHandler).not.toHaveBeenCalled();
   });
+
+  it('does not send authCancelled after a validation authError (would clear the message)', async () => {
+    // Pick custom + openai, then enter a non-http(s) URL → scheme validation
+    // fails. The webview clears the error on authCancelled, so a validation
+    // failure must send ONLY authError, never a trailing authCancelled.
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'openai' });
+    mockShowInputBox.mockResolvedValueOnce('file:///etc/passwd');
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+    handler.setAuthInteractiveHandler(vi.fn().mockResolvedValue(undefined));
+
+    await handler.handle({ type: 'auth' });
+
+    const types = sendToWebView.mock.calls.map((c) => c[0]?.type);
+    expect(types).toContain('authError');
+    expect(types).not.toContain('authCancelled');
+  });
 });

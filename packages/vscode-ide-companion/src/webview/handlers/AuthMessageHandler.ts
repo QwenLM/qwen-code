@@ -303,13 +303,17 @@ export class AuthMessageHandler extends BaseMessageHandler {
         if (urlInput === undefined) return;
         baseUrl = urlInput.trim() || placeholder;
         if (!/^https?:\/\//i.test(baseUrl)) {
+          // authError already clears the webview's connecting state; do NOT
+          // also send authCancelled — the webview clears the error on
+          // cancel, so the two messages race and the error flashes away
+          // before the user can read it. authCancelled is reserved for
+          // user-initiated dismissals (Escape on a QuickPick/InputBox).
           this.sendToWebView({
             type: 'authError',
             data: {
               message: 'Base URL must start with http:// or https://.',
             },
           });
-          this.notifyAuthCancelled();
           return;
         }
       }
@@ -337,11 +341,11 @@ export class AuthMessageHandler extends BaseMessageHandler {
     if (provider.validateApiKey) {
       const validationError = provider.validateApiKey(apiKey, baseUrl);
       if (validationError) {
+        // No authCancelled here — see the base-URL validation note above.
         this.sendToWebView({
           type: 'authError',
           data: { message: validationError },
         });
-        this.notifyAuthCancelled();
         return;
       }
     }
@@ -363,12 +367,12 @@ export class AuthMessageHandler extends BaseMessageHandler {
         .map((id) => id.trim())
         .filter(Boolean);
       if (modelIds.length === 0) {
-        // E.g. user typed only whitespace/commas like ", , ,".
+        // E.g. user typed only whitespace/commas like ", , ,". No
+        // authCancelled — see the base-URL validation note above.
         this.sendToWebView({
           type: 'authError',
           data: { message: 'Model IDs cannot be empty.' },
         });
-        this.notifyAuthCancelled();
         return;
       }
     } else {
@@ -406,6 +410,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       console.error(
         '[AuthMessageHandler] authInteractiveHandler not set; cannot apply provider config.',
       );
+      // No authCancelled — see the base-URL validation note above.
       this.sendToWebView({
         type: 'authError',
         data: {
@@ -413,7 +418,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
             'Auth handler not initialized. Please reopen the panel and try again.',
         },
       });
-      this.notifyAuthCancelled();
       return;
     }
     await this.authInteractiveHandler(provider, {

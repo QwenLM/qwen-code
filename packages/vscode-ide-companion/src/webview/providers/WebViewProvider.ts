@@ -1380,6 +1380,21 @@ export class WebViewProvider {
         // Auth failed against the live backend — roll the bad credentials
         // back off disk so a restart doesn't keep retrying them.
         safeRollback();
+        // The agent process spawned above is still connected with the
+        // rejected key in memory. Disconnect it so a subsequent chat
+        // message doesn't hit a stale-credential error that looks unrelated
+        // to this auth failure; the next /auth attempt reconnects cleanly.
+        if (this.agentInitialized) {
+          try {
+            this.agentManager.disconnect();
+          } catch (e) {
+            console.log(
+              '[WebViewProvider] Error disconnecting after rollback:',
+              e,
+            );
+          }
+          this.agentInitialized = false;
+        }
         this.sendMessageToWebView({
           type: 'authError',
           data: {
