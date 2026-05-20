@@ -7,26 +7,26 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-export interface SelfImproveSources {
+export interface AutoImproveSources {
   githubIssues: boolean;
   githubPrs: boolean;
   localSignals: boolean;
 }
 
-export interface SelfImproveConfig {
+export interface AutoImproveConfig {
   version: 1;
-  sources: SelfImproveSources;
+  sources: AutoImproveSources;
   userContext: string;
 }
 
-export interface SelfImproveRunRef {
+export interface AutoImproveRunRef {
   runId: string;
   status: string;
   worktreePath?: string;
   runDoc?: string;
 }
 
-export interface SelfImproveLoopState {
+export interface AutoImproveLoopState {
   version: 1;
   loopId: string;
   status: 'running' | 'stopping' | 'stopped' | 'stale';
@@ -39,19 +39,19 @@ export interface SelfImproveLoopState {
   repoRoot: string;
   autoMerge: true;
   stopRequested: boolean;
-  sourceSnapshot: SelfImproveConfig;
+  sourceSnapshot: AutoImproveConfig;
   prompt: string;
-  currentRun?: SelfImproveRunRef;
-  lastRun?: SelfImproveRunRef;
+  currentRun?: AutoImproveRunRef;
+  lastRun?: AutoImproveRunRef;
 }
 
-export interface SelfImproveActivePointer {
+export interface AutoImproveActivePointer {
   activeLoopId: string;
 }
 
-export const SELF_IMPROVE_DIR = path.join('.qwen', 'self-improve');
+export const AUTO_IMPROVE_DIR = path.join('.qwen', 'auto-improve');
 
-export const DEFAULT_SELF_IMPROVE_CONFIG: SelfImproveConfig = {
+export const DEFAULT_AUTO_IMPROVE_CONFIG: AutoImproveConfig = {
   version: 1,
   sources: {
     githubIssues: false,
@@ -61,30 +61,30 @@ export const DEFAULT_SELF_IMPROVE_CONFIG: SelfImproveConfig = {
   userContext: '',
 };
 
-export function getSelfImproveRoot(repoRoot: string): string {
-  return path.join(repoRoot, SELF_IMPROVE_DIR);
+export function getAutoImproveRoot(repoRoot: string): string {
+  return path.join(repoRoot, AUTO_IMPROVE_DIR);
 }
 
-export function getSelfImproveConfigPath(repoRoot: string): string {
-  return path.join(getSelfImproveRoot(repoRoot), 'config.json');
+export function getAutoImproveConfigPath(repoRoot: string): string {
+  return path.join(getAutoImproveRoot(repoRoot), 'config.json');
 }
 
-export function getSelfImproveActivePath(repoRoot: string): string {
-  return path.join(getSelfImproveRoot(repoRoot), 'active.json');
+export function getAutoImproveActivePath(repoRoot: string): string {
+  return path.join(getAutoImproveRoot(repoRoot), 'active.json');
 }
 
-export function getSelfImproveLoopDir(
+export function getAutoImproveLoopDir(
   repoRoot: string,
   loopId: string,
 ): string {
-  return path.join(getSelfImproveRoot(repoRoot), 'loops', loopId);
+  return path.join(getAutoImproveRoot(repoRoot), 'loops', loopId);
 }
 
-export function getSelfImproveStatePath(
+export function getAutoImproveStatePath(
   repoRoot: string,
   loopId: string,
 ): string {
-  return path.join(getSelfImproveLoopDir(repoRoot, loopId), 'state.json');
+  return path.join(getAutoImproveLoopDir(repoRoot, loopId), 'state.json');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -95,8 +95,8 @@ function readBoolean(value: unknown): boolean {
   return typeof value === 'boolean' ? value : false;
 }
 
-function normalizeConfig(value: unknown): SelfImproveConfig {
-  if (!isRecord(value)) return DEFAULT_SELF_IMPROVE_CONFIG;
+function normalizeConfig(value: unknown): AutoImproveConfig {
+  if (!isRecord(value)) return DEFAULT_AUTO_IMPROVE_CONFIG;
   const rawSources = value['sources'];
   const sources = isRecord(rawSources) ? rawSources : {};
   return {
@@ -111,15 +111,15 @@ function normalizeConfig(value: unknown): SelfImproveConfig {
   };
 }
 
-export async function ensureSelfImproveRoot(repoRoot: string): Promise<void> {
-  await fs.mkdir(getSelfImproveRoot(repoRoot), { recursive: true });
+export async function ensureAutoImproveRoot(repoRoot: string): Promise<void> {
+  await fs.mkdir(getAutoImproveRoot(repoRoot), { recursive: true });
 }
 
-export async function readSelfImproveConfig(
+export async function readAutoImproveConfig(
   repoRoot: string,
-): Promise<SelfImproveConfig> {
+): Promise<AutoImproveConfig> {
   try {
-    const raw = await fs.readFile(getSelfImproveConfigPath(repoRoot), 'utf8');
+    const raw = await fs.readFile(getAutoImproveConfigPath(repoRoot), 'utf8');
     return normalizeConfig(JSON.parse(raw));
   } catch (error) {
     if (
@@ -128,29 +128,29 @@ export async function readSelfImproveConfig(
       'code' in error &&
       error.code === 'ENOENT'
     ) {
-      return DEFAULT_SELF_IMPROVE_CONFIG;
+      return DEFAULT_AUTO_IMPROVE_CONFIG;
     }
     throw error;
   }
 }
 
-export async function writeSelfImproveConfig(
+export async function writeAutoImproveConfig(
   repoRoot: string,
-  config: SelfImproveConfig,
+  config: AutoImproveConfig,
 ): Promise<void> {
-  await ensureSelfImproveRoot(repoRoot);
+  await ensureAutoImproveRoot(repoRoot);
   await fs.writeFile(
-    getSelfImproveConfigPath(repoRoot),
+    getAutoImproveConfigPath(repoRoot),
     `${JSON.stringify(normalizeConfig(config), null, 2)}\n`,
     'utf8',
   );
 }
 
-export async function readActiveSelfImproveLoop(
+export async function readActiveAutoImproveLoop(
   repoRoot: string,
-): Promise<SelfImproveActivePointer | null> {
+): Promise<AutoImproveActivePointer | null> {
   try {
-    const raw = await fs.readFile(getSelfImproveActivePath(repoRoot), 'utf8');
+    const raw = await fs.readFile(getAutoImproveActivePath(repoRoot), 'utf8');
     const parsed = JSON.parse(raw) as unknown;
     if (
       isRecord(parsed) &&
@@ -173,34 +173,34 @@ export async function readActiveSelfImproveLoop(
   }
 }
 
-export async function writeActiveSelfImproveLoop(
+export async function writeActiveAutoImproveLoop(
   repoRoot: string,
   loopId: string,
 ): Promise<void> {
-  await ensureSelfImproveRoot(repoRoot);
+  await ensureAutoImproveRoot(repoRoot);
   await fs.writeFile(
-    getSelfImproveActivePath(repoRoot),
+    getAutoImproveActivePath(repoRoot),
     `${JSON.stringify({ activeLoopId: loopId }, null, 2)}\n`,
     'utf8',
   );
 }
 
-export async function clearActiveSelfImproveLoop(
+export async function clearActiveAutoImproveLoop(
   repoRoot: string,
 ): Promise<void> {
-  await fs.rm(getSelfImproveActivePath(repoRoot), { force: true });
+  await fs.rm(getAutoImproveActivePath(repoRoot), { force: true });
 }
 
-export async function readSelfImproveLoopState(
+export async function readAutoImproveLoopState(
   repoRoot: string,
   loopId: string,
-): Promise<SelfImproveLoopState | null> {
+): Promise<AutoImproveLoopState | null> {
   try {
     const raw = await fs.readFile(
-      getSelfImproveStatePath(repoRoot, loopId),
+      getAutoImproveStatePath(repoRoot, loopId),
       'utf8',
     );
-    return JSON.parse(raw) as SelfImproveLoopState;
+    return JSON.parse(raw) as AutoImproveLoopState;
   } catch (error) {
     if (
       error &&
@@ -214,11 +214,11 @@ export async function readSelfImproveLoopState(
   }
 }
 
-export async function writeSelfImproveLoopState(
+export async function writeAutoImproveLoopState(
   repoRoot: string,
-  state: SelfImproveLoopState,
+  state: AutoImproveLoopState,
 ): Promise<void> {
-  const loopDir = getSelfImproveLoopDir(repoRoot, state.loopId);
+  const loopDir = getAutoImproveLoopDir(repoRoot, state.loopId);
   await fs.mkdir(path.join(loopDir, 'runs'), { recursive: true });
   await fs.writeFile(
     path.join(loopDir, 'state.json'),
@@ -227,17 +227,17 @@ export async function writeSelfImproveLoopState(
   );
 }
 
-export async function initializeSelfImproveLoopFiles(
+export async function initializeAutoImproveLoopFiles(
   repoRoot: string,
-  state: SelfImproveLoopState,
+  state: AutoImproveLoopState,
 ): Promise<void> {
-  const loopDir = getSelfImproveLoopDir(repoRoot, state.loopId);
+  const loopDir = getAutoImproveLoopDir(repoRoot, state.loopId);
   await fs.mkdir(path.join(loopDir, 'runs'), { recursive: true });
-  await writeSelfImproveLoopState(repoRoot, state);
+  await writeAutoImproveLoopState(repoRoot, state);
   await fs.writeFile(
     path.join(loopDir, 'summary.md'),
     [
-      '# Self-Improve Summary',
+      '# Auto-Improve Summary',
       '',
       `Loop: ${state.loopId}`,
       `Target branch: ${state.targetBranch}`,

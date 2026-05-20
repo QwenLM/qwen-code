@@ -1,8 +1,8 @@
-# Self-Improve Built-In Command Design
+# Auto-Improve Built-In Command Design
 
 ## Goal
 
-Add a built-in `/self-improve` command that runs a session-scoped loop for
+Add a built-in `/auto-improve` command that runs a session-scoped loop for
 small, locally verifiable repository improvements. The command should be useful
 without becoming a hard-coded automation framework: first version keeps the
 actual implementation, testing, repair, merge, and documentation work
@@ -13,10 +13,10 @@ status, and source configuration.
 
 Expose four user-facing subcommands:
 
-- `/self-improve source`
-- `/self-improve start --every <interval> [prompt]`
-- `/self-improve status`
-- `/self-improve stop`
+- `/auto-improve source`
+- `/auto-improve start --every <interval> [prompt]`
+- `/auto-improve status`
+- `/auto-improve stop`
 
 `source` is interactive-only. It opens a dialog with checkboxes for GitHub
 issues, GitHub PRs / CI / review comments, and local repository signals, plus
@@ -31,10 +31,10 @@ loops.
 
 ## State Layout
 
-Store state under `.qwen/self-improve/`:
+Store state under `.qwen/auto-improve/`:
 
 ```text
-.qwen/self-improve/
+.qwen/auto-improve/
   config.json
   active.json
   loops/
@@ -50,7 +50,7 @@ is a thin pointer to the one active loop. First version allows at most one
 active loop per repository. `state.json` belongs to a single loop and contains
 the cadence, target branch, source snapshot, start prompt, status, stop request
 flag, current run, last run, and cron job id when available. Historical loops
-remain in `loops/`, but `/self-improve status` reads only the active loop.
+remain in `loops/`, but `/auto-improve status` reads only the active loop.
 
 The loop is session-scoped. Exiting Qwen Code is equivalent to stopping the
 loop. If the CLI exits abruptly and leaves `active.json` behind, a later status
@@ -58,7 +58,7 @@ can mark it stale rather than pretending it is still running.
 
 ## Loop Behavior
 
-`/self-improve start --every 2h [prompt]`:
+`/auto-improve start --every 2h [prompt]`:
 
 1. Refuses to start if another active loop exists.
 2. Reads `config.json`.
@@ -99,8 +99,8 @@ information when available.
 
 ## Implementation Shape
 
-Implement `/self-improve` as a built-in command. Use a small hidden
-`/self-improve tick <loop-id>` subcommand as the scheduled entrypoint; it
+Implement `/auto-improve` as a built-in command. Use a small hidden
+`/auto-improve tick <loop-id>` subcommand as the scheduled entrypoint; it
 returns `submit_prompt` with the internal tick instructions. The hidden tick is
 not shown in help and is not part of the public UX.
 

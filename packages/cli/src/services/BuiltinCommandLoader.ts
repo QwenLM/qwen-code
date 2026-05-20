@@ -62,7 +62,7 @@ import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 import { insightCommand } from '../ui/commands/insightCommand.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
 import { lspCommand } from '../ui/commands/lspCommand.js';
-import { selfImproveCommand } from '../ui/commands/selfImproveCommand.js';
+import { autoImproveCommand } from '../ui/commands/autoImproveCommand.js';
 
 const builtinDebugLogger = createDebugLogger('BUILTIN_COMMAND_LOADER');
 
@@ -146,7 +146,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       settingsCommand,
       vimCommand,
       setupGithubCommand,
-      selfImproveCommand,
+      autoImproveCommand,
       terminalSetupCommand,
       insightCommand,
       statuslineCommand,

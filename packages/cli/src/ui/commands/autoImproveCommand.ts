@@ -17,16 +17,16 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import {
-  clearActiveSelfImproveLoop,
-  getSelfImproveLoopDir,
-  initializeSelfImproveLoopFiles,
-  readActiveSelfImproveLoop,
-  readSelfImproveConfig,
-  readSelfImproveLoopState,
-  writeActiveSelfImproveLoop,
-  writeSelfImproveLoopState,
-  type SelfImproveLoopState,
-} from './selfImproveState.js';
+  clearActiveAutoImproveLoop,
+  getAutoImproveLoopDir,
+  initializeAutoImproveLoopFiles,
+  readActiveAutoImproveLoop,
+  readAutoImproveConfig,
+  readAutoImproveLoopState,
+  writeActiveAutoImproveLoop,
+  writeAutoImproveLoopState,
+  type AutoImproveLoopState,
+} from './autoImproveState.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -147,7 +147,7 @@ function makeLoopId(targetBranch: string): string {
   return `${stamp}-${slugify(targetBranch)}-${suffix}`;
 }
 
-function describeSources(state: SelfImproveLoopState): string {
+function describeSources(state: AutoImproveLoopState): string {
   const enabled: string[] = [];
   if (state.sourceSnapshot.sources.githubIssues) enabled.push('GitHub issues');
   if (state.sourceSnapshot.sources.githubPrs) {
@@ -192,9 +192,9 @@ function formatRunRef(value: unknown): string | null {
   return null;
 }
 
-function buildTickPrompt(state: SelfImproveLoopState): string {
-  const loopDir = getSelfImproveLoopDir(state.repoRoot, state.loopId);
-  return `You are running one tick of the built-in /self-improve loop.
+function buildTickPrompt(state: AutoImproveLoopState): string {
+  const loopDir = getAutoImproveLoopDir(state.repoRoot, state.loopId);
+  return `You are running one tick of the built-in /auto-improve loop.
 
 Loop state:
 - Repo root: ${state.repoRoot}
@@ -249,7 +249,7 @@ Validation: <commands and results>
 Risk: <short note>`;
 }
 
-async function startSelfImprove(
+async function startAutoImprove(
   config: Config,
   args: string,
 ): Promise<SlashCommandActionReturn> {
@@ -257,7 +257,7 @@ async function startSelfImprove(
     return message(
       'error',
       t(
-        'Self-improve start requires Cron/Loop Tools. Enable experimental.cron or QWEN_CODE_ENABLE_CRON=1, then try again.',
+        'Auto-improve start requires Cron/Loop Tools. Enable experimental.cron or QWEN_CODE_ENABLE_CRON=1, then try again.',
       ),
     );
   }
@@ -266,7 +266,7 @@ async function startSelfImprove(
   if (!parsed) {
     return message(
       'error',
-      t('Usage: /self-improve start --every <interval> [prompt]'),
+      t('Usage: /auto-improve start --every <interval> [prompt]'),
     );
   }
 
@@ -282,7 +282,7 @@ async function startSelfImprove(
     return message(
       'error',
       t(
-        'Self-improve must be started from a git repository on a branch: {{error}}',
+        'Auto-improve must be started from a git repository on a branch: {{error}}',
         {
           error: error instanceof Error ? error.message : String(error),
         },
@@ -290,22 +290,22 @@ async function startSelfImprove(
     );
   }
 
-  const active = await readActiveSelfImproveLoop(repoRoot);
+  const active = await readActiveAutoImproveLoop(repoRoot);
   if (active) {
-    const state = await readSelfImproveLoopState(repoRoot, active.activeLoopId);
+    const state = await readAutoImproveLoopState(repoRoot, active.activeLoopId);
     if (state && ['running', 'stopping'].includes(state.status)) {
       return message(
         'error',
-        t('A self-improve loop is already active: {{loopId}}', {
+        t('An auto-improve loop is already active: {{loopId}}', {
           loopId: active.activeLoopId,
         }),
       );
     }
   }
 
-  const sourceSnapshot = await readSelfImproveConfig(repoRoot);
+  const sourceSnapshot = await readAutoImproveConfig(repoRoot);
   const loopId = makeLoopId(targetBranch);
-  const state: SelfImproveLoopState = {
+  const state: AutoImproveLoopState = {
     version: 1,
     loopId,
     status: 'running',
@@ -322,12 +322,12 @@ async function startSelfImprove(
   };
 
   const scheduler = config.getCronScheduler();
-  const cronPrompt = `/self-improve tick ${loopId}`;
+  const cronPrompt = `/auto-improve tick ${loopId}`;
   const job = scheduler.create(interval.cron, cronPrompt, true);
   state.cronJobId = job.id;
 
-  await initializeSelfImproveLoopFiles(repoRoot, state);
-  await writeActiveSelfImproveLoop(repoRoot, loopId);
+  await initializeAutoImproveLoopFiles(repoRoot, state);
+  await writeActiveAutoImproveLoop(repoRoot, loopId);
 
   return {
     type: 'submit_prompt',
@@ -335,18 +335,18 @@ async function startSelfImprove(
   };
 }
 
-async function statusSelfImprove(config: Config): Promise<MessageActionReturn> {
+async function statusAutoImprove(config: Config): Promise<MessageActionReturn> {
   const repoRoot = await getRepoRoot(config);
-  const active = await readActiveSelfImproveLoop(repoRoot);
+  const active = await readActiveAutoImproveLoop(repoRoot);
   if (!active) {
-    return message('info', t('No active self-improve loop.'));
+    return message('info', t('No active auto-improve loop.'));
   }
 
-  const state = await readSelfImproveLoopState(repoRoot, active.activeLoopId);
+  const state = await readAutoImproveLoopState(repoRoot, active.activeLoopId);
   if (!state) {
     return message(
       'error',
-      t('Active self-improve loop state is missing: {{loopId}}', {
+      t('Active auto-improve loop state is missing: {{loopId}}', {
         loopId: active.activeLoopId,
       }),
     );
@@ -375,19 +375,19 @@ async function statusSelfImprove(config: Config): Promise<MessageActionReturn> {
   return message('info', lines.join('\n'));
 }
 
-async function stopSelfImprove(config: Config): Promise<MessageActionReturn> {
+async function stopAutoImprove(config: Config): Promise<MessageActionReturn> {
   const repoRoot = await getRepoRoot(config);
-  const active = await readActiveSelfImproveLoop(repoRoot);
+  const active = await readActiveAutoImproveLoop(repoRoot);
   if (!active) {
-    return message('info', t('No active self-improve loop.'));
+    return message('info', t('No active auto-improve loop.'));
   }
 
-  const state = await readSelfImproveLoopState(repoRoot, active.activeLoopId);
+  const state = await readAutoImproveLoopState(repoRoot, active.activeLoopId);
   if (!state) {
-    await clearActiveSelfImproveLoop(repoRoot);
+    await clearActiveAutoImproveLoop(repoRoot);
     return message(
       'info',
-      t('Cleared missing self-improve loop pointer: {{loopId}}', {
+      t('Cleared missing auto-improve loop pointer: {{loopId}}', {
         loopId: active.activeLoopId,
       }),
     );
@@ -405,36 +405,36 @@ async function stopSelfImprove(config: Config): Promise<MessageActionReturn> {
 
   state.stopRequested = true;
   state.status = hasActiveRun ? 'stopping' : 'stopped';
-  await writeSelfImproveLoopState(repoRoot, state);
+  await writeAutoImproveLoopState(repoRoot, state);
   if (!hasActiveRun) {
-    await clearActiveSelfImproveLoop(repoRoot);
+    await clearActiveAutoImproveLoop(repoRoot);
   }
 
   return message(
     'info',
     hasActiveRun
-      ? t('Stop requested. The current self-improve run may finish naturally.')
-      : t('Self-improve loop stopped.'),
+      ? t('Stop requested. The current auto-improve run may finish naturally.')
+      : t('Auto-improve loop stopped.'),
   );
 }
 
-async function tickSelfImprove(
+async function tickAutoImprove(
   config: Config,
   loopId: string,
 ): Promise<SlashCommandActionReturn> {
   const repoRoot = await getRepoRoot(config);
-  const active = await readActiveSelfImproveLoop(repoRoot);
+  const active = await readActiveAutoImproveLoop(repoRoot);
   if (!active || active.activeLoopId !== loopId) {
-    return message('info', t('Self-improve tick skipped: loop is not active.'));
+    return message('info', t('Auto-improve tick skipped: loop is not active.'));
   }
 
-  const state = await readSelfImproveLoopState(repoRoot, loopId);
+  const state = await readAutoImproveLoopState(repoRoot, loopId);
   if (!state) {
-    return message('error', t('Self-improve tick skipped: state is missing.'));
+    return message('error', t('Auto-improve tick skipped: state is missing.'));
   }
 
   if (state.stopRequested || state.status !== 'running') {
-    return message('info', t('Self-improve tick skipped: loop is stopping.'));
+    return message('info', t('Auto-improve tick skipped: loop is stopping.'));
   }
 
   return {
@@ -443,10 +443,10 @@ async function tickSelfImprove(
   };
 }
 
-export const selfImproveCommand: SlashCommand = {
-  name: 'self-improve',
+export const autoImproveCommand: SlashCommand = {
+  name: 'auto-improve',
   get description() {
-    return t('Run a session-scoped repository self-improvement loop');
+    return t('Run a session-scoped automated repository improvement loop');
   },
   argumentHint: 'source|start|status|stop',
   kind: CommandKind.BUILT_IN,
@@ -462,19 +462,19 @@ export const selfImproveCommand: SlashCommand = {
         if (context.executionMode !== 'interactive') {
           return message(
             'error',
-            t('/self-improve source is available only in interactive mode.'),
+            t('/auto-improve source is available only in interactive mode.'),
           );
         }
         return {
           type: 'dialog',
-          dialog: 'self-improve-source',
+          dialog: 'auto-improve-source',
         } satisfies OpenDialogActionReturn;
       },
     },
     {
       name: 'start',
       get description() {
-        return t('Start a session-scoped self-improvement loop');
+        return t('Start a session-scoped automated improvement loop');
       },
       argumentHint: '--every <interval> [prompt]',
       kind: CommandKind.BUILT_IN,
@@ -483,13 +483,13 @@ export const selfImproveCommand: SlashCommand = {
         if (!config) {
           return message('error', t('Config not loaded.'));
         }
-        return startSelfImprove(config, `start ${args.trim()}`.trim());
+        return startAutoImprove(config, `start ${args.trim()}`.trim());
       },
     },
     {
       name: 'status',
       get description() {
-        return t('Show the active self-improve loop status');
+        return t('Show the active auto-improve loop status');
       },
       kind: CommandKind.BUILT_IN,
       action: async (context): Promise<SlashCommandActionReturn> => {
@@ -497,13 +497,13 @@ export const selfImproveCommand: SlashCommand = {
         if (!config) {
           return message('error', t('Config not loaded.'));
         }
-        return statusSelfImprove(config);
+        return statusAutoImprove(config);
       },
     },
     {
       name: 'stop',
       get description() {
-        return t('Gracefully stop the active self-improve loop');
+        return t('Gracefully stop the active auto-improve loop');
       },
       kind: CommandKind.BUILT_IN,
       action: async (context): Promise<SlashCommandActionReturn> => {
@@ -511,14 +511,14 @@ export const selfImproveCommand: SlashCommand = {
         if (!config) {
           return message('error', t('Config not loaded.'));
         }
-        return stopSelfImprove(config);
+        return stopAutoImprove(config);
       },
     },
     {
       name: 'tick',
       hidden: true,
       get description() {
-        return t('Run one scheduled self-improve tick');
+        return t('Run one scheduled auto-improve tick');
       },
       argumentHint: '<loop-id>',
       kind: CommandKind.BUILT_IN,
@@ -529,9 +529,9 @@ export const selfImproveCommand: SlashCommand = {
         }
         const loopId = args.trim();
         if (!loopId) {
-          return message('error', t('Missing self-improve loop id.'));
+          return message('error', t('Missing auto-improve loop id.'));
         }
-        return tickSelfImprove(config, loopId);
+        return tickAutoImprove(config, loopId);
       },
     },
   ],
@@ -546,40 +546,40 @@ export const selfImproveCommand: SlashCommand = {
       if (context.executionMode !== 'interactive') {
         return message(
           'error',
-          t('/self-improve source is available only in interactive mode.'),
+          t('/auto-improve source is available only in interactive mode.'),
         );
       }
       return {
         type: 'dialog',
-        dialog: 'self-improve-source',
+        dialog: 'auto-improve-source',
       } satisfies OpenDialogActionReturn;
     }
 
     if (trimmed.startsWith('start')) {
-      return startSelfImprove(config, trimmed);
+      return startAutoImprove(config, trimmed);
     }
 
     if (trimmed === 'status') {
-      return statusSelfImprove(config);
+      return statusAutoImprove(config);
     }
 
     if (trimmed === 'stop') {
-      return stopSelfImprove(config);
+      return stopAutoImprove(config);
     }
 
     const tickMatch = trimmed.match(/^tick\s+(\S+)$/);
     if (tickMatch) {
-      return tickSelfImprove(config, tickMatch[1]!);
+      return tickAutoImprove(config, tickMatch[1]!);
     }
 
     return message(
       'error',
       [
         t('Usage:'),
-        '  /self-improve source',
-        '  /self-improve start --every <interval> [prompt]',
-        '  /self-improve status',
-        '  /self-improve stop',
+        '  /auto-improve source',
+        '  /auto-improve start --every <interval> [prompt]',
+        '  /auto-improve status',
+        '  /auto-improve stop',
       ].join('\n'),
     );
   },

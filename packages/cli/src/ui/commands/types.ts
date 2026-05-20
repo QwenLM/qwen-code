@@ -187,7 +187,7 @@ export interface OpenDialogActionReturn {
     | 'branch'
     | 'extensions_manage'
     | 'hooks'
-    | 'self-improve-source'
+    | 'auto-improve-source'
     | 'mcp'
     | 'rewind'
     | 'diff';

@@ -10,13 +10,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { selfImproveCommand } from './selfImproveCommand.js';
+import { autoImproveCommand } from './autoImproveCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { CommandContext } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
-describe('selfImproveCommand', () => {
+describe('autoImproveCommand', () => {
   let tempDir: string;
   let context: CommandContext;
   const scheduler = {
@@ -26,7 +26,7 @@ describe('selfImproveCommand', () => {
   };
 
   beforeEach(async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'self-improve-test-'));
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'auto-improve-test-'));
     await execFileAsync('git', ['init'], { cwd: tempDir });
     scheduler.create.mockClear();
     scheduler.list.mockClear();
@@ -49,16 +49,16 @@ describe('selfImproveCommand', () => {
   });
 
   it('opens the source dialog in interactive mode', async () => {
-    const result = await selfImproveCommand.action?.(context, 'source');
+    const result = await autoImproveCommand.action?.(context, 'source');
     expect(result).toEqual({
       type: 'dialog',
-      dialog: 'self-improve-source',
+      dialog: 'auto-improve-source',
     });
   });
 
   it('rejects source configuration outside interactive mode', async () => {
     context.executionMode = 'non_interactive';
-    const result = await selfImproveCommand.action?.(context, 'source');
+    const result = await autoImproveCommand.action?.(context, 'source');
     expect(result).toMatchObject({
       type: 'message',
       messageType: 'error',
@@ -66,23 +66,23 @@ describe('selfImproveCommand', () => {
   });
 
   it('declares public subcommands and argument hints for completion', () => {
-    expect(selfImproveCommand.argumentHint).toBe('source|start|status|stop');
+    expect(autoImproveCommand.argumentHint).toBe('source|start|status|stop');
     expect(
-      selfImproveCommand.subCommands?.map((command) => command.name),
+      autoImproveCommand.subCommands?.map((command) => command.name),
     ).toEqual(['source', 'start', 'status', 'stop', 'tick']);
     expect(
-      selfImproveCommand.subCommands?.find(
+      autoImproveCommand.subCommands?.find(
         (command) => command.name === 'start',
       )?.argumentHint,
     ).toBe('--every <interval> [prompt]');
     expect(
-      selfImproveCommand.subCommands?.find((command) => command.name === 'tick')
+      autoImproveCommand.subCommands?.find((command) => command.name === 'tick')
         ?.hidden,
     ).toBe(true);
   });
 
   it('starts a session loop and submits the first tick prompt', async () => {
-    const result = await selfImproveCommand.action?.(
+    const result = await autoImproveCommand.action?.(
       context,
       'start --every 2h prefer small fixes',
     );
@@ -90,12 +90,12 @@ describe('selfImproveCommand', () => {
     expect(result).toMatchObject({ type: 'submit_prompt' });
     expect(scheduler.create).toHaveBeenCalledWith(
       '7 */2 * * *',
-      expect.stringMatching(/^\/self-improve tick /),
+      expect.stringMatching(/^\/auto-improve tick /),
       true,
     );
 
     const activeRaw = await fs.readFile(
-      path.join(tempDir, '.qwen', 'self-improve', 'active.json'),
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
       'utf8',
     );
     const active = JSON.parse(activeRaw) as { activeLoopId: string };
@@ -103,7 +103,7 @@ describe('selfImproveCommand', () => {
       path.join(
         tempDir,
         '.qwen',
-        'self-improve',
+        'auto-improve',
         'loops',
         active.activeLoopId,
         'state.json',
@@ -117,7 +117,7 @@ describe('selfImproveCommand', () => {
       path.join(
         tempDir,
         '.qwen',
-        'self-improve',
+        'auto-improve',
         'loops',
         active.activeLoopId,
         'summary.md',
@@ -126,8 +126,8 @@ describe('selfImproveCommand', () => {
   });
 
   it('reports active loop status', async () => {
-    await selfImproveCommand.action?.(context, 'start --every 30m');
-    const result = await selfImproveCommand.action?.(context, 'status');
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+    const result = await autoImproveCommand.action?.(context, 'status');
     expect(result).toMatchObject({
       type: 'message',
       messageType: 'info',
@@ -139,16 +139,16 @@ describe('selfImproveCommand', () => {
   });
 
   it('does not print undefined for legacy primitive run refs', async () => {
-    await selfImproveCommand.action?.(context, 'start --every 30m');
+    await autoImproveCommand.action?.(context, 'start --every 30m');
     const activeRaw = await fs.readFile(
-      path.join(tempDir, '.qwen', 'self-improve', 'active.json'),
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
       'utf8',
     );
     const active = JSON.parse(activeRaw) as { activeLoopId: string };
     const statePath = path.join(
       tempDir,
       '.qwen',
-      'self-improve',
+      'auto-improve',
       'loops',
       active.activeLoopId,
       'state.json',
@@ -162,7 +162,7 @@ describe('selfImproveCommand', () => {
     state['lastRun'] = '2026-05-15T02:02:00Z';
     await fs.writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
 
-    const result = await selfImproveCommand.action?.(context, 'status');
+    const result = await autoImproveCommand.action?.(context, 'status');
     const content = (result as { content: string }).content;
     expect(content).toContain('Status: completed_one_run');
     expect(content).toContain('Current run: 1');

@@ -164,7 +164,7 @@ export interface UIState {
   isMcpDialogOpen: boolean;
   // Hooks dialog
   isHooksDialogOpen: boolean;
-  isSelfImproveSourceDialogOpen: boolean;
+  isAutoImproveSourceDialogOpen: boolean;
   // Feedback dialog
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking

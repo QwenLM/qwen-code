@@ -16,14 +16,14 @@ import { t } from '../../i18n/index.js';
 import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
-  readSelfImproveConfig,
-  writeSelfImproveConfig,
-  type SelfImproveConfig,
-} from '../commands/selfImproveState.js';
+  readAutoImproveConfig,
+  writeAutoImproveConfig,
+  type AutoImproveConfig,
+} from '../commands/autoImproveState.js';
 
 const execFileAsync = promisify(execFile);
 
-interface SelfImproveSourceDialogProps {
+interface AutoImproveSourceDialogProps {
   config: Config;
   addItem: UseHistoryManagerReturn['addItem'];
   onClose: () => void;
@@ -56,16 +56,16 @@ async function resolveRepoRoot(config: Config): Promise<string> {
   }
 }
 
-export function SelfImproveSourceDialog({
+export function AutoImproveSourceDialog({
   config,
   addItem,
   onClose,
-}: SelfImproveSourceDialogProps): React.JSX.Element {
+}: AutoImproveSourceDialogProps): React.JSX.Element {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [repoRoot, setRepoRoot] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [sources, setSources] = useState<SelfImproveConfig['sources']>({
+  const [sources, setSources] = useState<AutoImproveConfig['sources']>({
     githubIssues: false,
     githubPrs: false,
     localSignals: false,
@@ -76,7 +76,7 @@ export function SelfImproveSourceDialog({
     let cancelled = false;
     resolveRepoRoot(config)
       .then(async (root) => {
-        const stored = await readSelfImproveConfig(root);
+        const stored = await readAutoImproveConfig(root);
         return { root, stored };
       })
       .then((stored) => {
@@ -99,7 +99,7 @@ export function SelfImproveSourceDialog({
   }, [config]);
 
   const save = useCallback(() => {
-    const nextConfig: SelfImproveConfig = {
+    const nextConfig: AutoImproveConfig = {
       version: 1,
       sources,
       userContext,
@@ -108,12 +108,12 @@ export function SelfImproveSourceDialog({
       setError(t('Repository root is not ready yet.'));
       return;
     }
-    writeSelfImproveConfig(repoRoot, nextConfig)
+    writeAutoImproveConfig(repoRoot, nextConfig)
       .then(() => {
         addItem(
           {
             type: 'info',
-            text: t('Self-improve source configuration saved.'),
+            text: t('Auto-improve source configuration saved.'),
           },
           Date.now(),
         );
@@ -166,14 +166,14 @@ export function SelfImproveSourceDialog({
   if (!loaded) {
     return (
       <Text color={theme.text.secondary}>
-        {t('Loading self-improve sources...')}
+        {t('Loading auto-improve sources...')}
       </Text>
     );
   }
 
   return (
     <Box flexDirection="column" gap={1}>
-      <Text bold>{t('Self-improve sources')}</Text>
+      <Text bold>{t('Auto-improve sources')}</Text>
       {error && <Text color={theme.status.error}>{error}</Text>}
 
       <Box flexDirection="column">

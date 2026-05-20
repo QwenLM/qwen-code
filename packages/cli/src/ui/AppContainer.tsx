@@ -1042,14 +1042,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isMcpDialogOpen, openMcpDialog, closeMcpDialog } = useMcpDialog();
   const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
     useHooksDialog();
-  const [isSelfImproveSourceDialogOpen, setSelfImproveSourceDialogOpen] =
+  const [isAutoImproveSourceDialogOpen, setAutoImproveSourceDialogOpen] =
     useState(false);
-  const openSelfImproveSourceDialog = useCallback(
-    () => setSelfImproveSourceDialogOpen(true),
+  const openAutoImproveSourceDialog = useCallback(
+    () => setAutoImproveSourceDialogOpen(true),
     [],
   );
-  const closeSelfImproveSourceDialog = useCallback(
-    () => setSelfImproveSourceDialogOpen(false),
+  const closeAutoImproveSourceDialog = useCallback(
+    () => setAutoImproveSourceDialogOpen(false),
     [],
   );
 
@@ -1098,7 +1098,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
-      openSelfImproveSourceDialog,
+      openAutoImproveSourceDialog,
       openResumeDialog,
       openRewindSelector: () => openRewindSelectorRef.current(),
       openDiffDialog,
@@ -1127,7 +1127,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
-      openSelfImproveSourceDialog,
+      openAutoImproveSourceDialog,
       openResumeDialog,
       handleResume,
       handleBranch,
@@ -2285,7 +2285,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isAgentsManagerDialogOpen ||
     isMcpDialogOpen ||
     isHooksDialogOpen ||
-    isSelfImproveSourceDialogOpen ||
+    isAutoImproveSourceDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
@@ -3291,7 +3291,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Hooks dialog
       isHooksDialogOpen,
-      isSelfImproveSourceDialogOpen,
+      isAutoImproveSourceDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -3417,7 +3417,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Hooks dialog
       isHooksDialogOpen,
-      isSelfImproveSourceDialogOpen,
+      isAutoImproveSourceDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -3491,7 +3491,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       // Hooks dialog
       closeHooksDialog,
-      closeSelfImproveSourceDialog,
+      closeAutoImproveSourceDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -3568,7 +3568,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       // Hooks dialog
       closeHooksDialog,
-      closeSelfImproveSourceDialog,
+      closeAutoImproveSourceDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
