@@ -47,17 +47,21 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       createPermissionBlock('pending-permission'),
       createPermissionBlock('allowed-permission', 'selected:allow'),
       createPermissionBlock('allowed-substring-permission', 'selected:deny-me'),
+      createPermissionBlock('cancelled-substring-permission', 'selected:abort'),
       createPermissionBlock('cancelled-permission', 'cancelled'),
       createPermissionBlock('already-resolved-permission', 'already resolved'),
       createPermissionBlock('denied-permission', 'denied'),
+      createPermissionBlock('unknown-permission', 'timed out'),
     ]);
 
     expect(messages.map((message) => message.toolCall?.status)).toEqual([
       'pending',
       'completed',
-      'completed',
+      'failed',
       'cancelled',
       'cancelled',
+      'cancelled',
+      'failed',
       'failed',
     ]);
   });

@@ -637,6 +637,24 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(block && 'text' in block ? block.text : '').toContain('[truncated]');
   });
 
+  it('caps shell transcript blocks to prevent unbounded output growth', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'shell.output', text: 'x'.repeat(160_000), stream: 'stdout' },
+        { type: 'shell.output', text: 'y'.repeat(80_000), stream: 'stdout' },
+      ],
+      { now: 2 },
+    );
+    const [block] = state.blocks;
+
+    expect(block).toMatchObject({ kind: 'shell', stream: 'stdout' });
+    expect(
+      block && 'text' in block ? block.text.length : 0,
+    ).toBeLessThanOrEqual(100_000);
+    expect(block && 'text' in block ? block.text : '').toContain('[truncated]');
+  });
+
   it('redacts raw daemon payloads from fallback error text', () => {
     const [event] = normalizeDaemonEvent({
       id: 43,
