@@ -6,8 +6,8 @@ Date: 2026-05-18
 
 Local benchmarks show Qwen Code using substantially more process-tree RSS than
 Claude Code for similar non-interactive CLI task shapes. The latest five-case
-matrix found Qwen Code peaking around `0.85-1.06 GiB` while Claude Code stayed
-around `0.28-0.37 GiB`.
+matrix found Qwen Code peaking around `0.83-1.04 GiB` while Claude Code stayed
+around `0.27-0.36 GiB`.
 
 This document proposes a draft investigation and optimization direction. It is
 not intended to claim a final root cause yet. The immediate goal is to make the
