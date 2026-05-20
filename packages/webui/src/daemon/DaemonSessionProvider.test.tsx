@@ -224,17 +224,17 @@ describe('DaemonSessionProvider', () => {
 
   it('treats prompt abort during cancel as cancellation and keeps busy until cancel completes', async () => {
     const cancel = createDeferred<void>();
+    let promptCalls = 0;
     const session = createMockSession({
-      prompt: vi.fn(
-        (_req: unknown, signal?: AbortSignal) =>
-          new Promise<PromptResult>((_resolve, reject) => {
-            signal?.addEventListener(
-              'abort',
-              () => reject(createAbortError()),
-              { once: true },
-            );
-          }),
-      ),
+      prompt: vi.fn((_req: unknown, signal?: AbortSignal) => {
+        promptCalls += 1;
+        if (promptCalls > 1) return Promise.resolve({ stopReason: 'end_turn' });
+        return new Promise<PromptResult>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(createAbortError()), {
+            once: true,
+          });
+        });
+      }),
       cancel: vi.fn(() => cancel.promise),
       events: createIdleEvents(),
     });
@@ -278,6 +278,14 @@ describe('DaemonSessionProvider', () => {
       await pendingCancel;
     });
     expect(session.cancel).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await expect(providerActions.sendPrompt('after cancel')).resolves.toEqual(
+        {
+          stopReason: 'end_turn',
+        },
+      );
+    });
+    expect(session.prompt).toHaveBeenCalledTimes(2);
     expect(
       blocks.some(
         (block) => block.kind === 'error' && block.text.includes('AbortError'),

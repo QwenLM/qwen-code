@@ -201,7 +201,7 @@ function normalizePermissionStatus(
   resolved: string | undefined,
 ): ToolCallStatus {
   if (!resolved) return 'pending';
-  const primary = resolved.split(':', 1)[0]?.toLowerCase();
+  const [primary = '', ...detailParts] = resolved.toLowerCase().split(':');
   switch (primary) {
     case 'cancel':
     case 'cancelled':
@@ -221,9 +221,55 @@ function normalizePermissionStatus(
     case 'failed':
     case 'fail':
       return 'failed';
-    default:
+    case 'allow':
+    case 'allowed':
+    case 'approve':
+    case 'approved':
+    case 'accept':
+    case 'accepted':
+    case 'confirm':
+    case 'confirmed':
+    case 'proceed':
+    case 'success':
+    case 'succeeded':
       return 'completed';
+    case 'selected':
+      return classifyPermissionToken(detailParts.join(':')) ?? 'completed';
+    default:
+      return classifyPermissionToken(primary) ?? 'failed';
   }
+}
+
+function classifyPermissionToken(token: string): ToolCallStatus | undefined {
+  if (!token) return undefined;
+  if (
+    token.includes('deny') ||
+    token.includes('reject') ||
+    token.includes('block') ||
+    token.includes('fail') ||
+    token.includes('error')
+  ) {
+    return 'failed';
+  }
+  if (
+    token.includes('cancel') ||
+    token.includes('abort') ||
+    token.includes('dismiss')
+  ) {
+    return 'cancelled';
+  }
+  if (
+    token.includes('allow') ||
+    token.includes('approve') ||
+    token.includes('accept') ||
+    token.includes('confirm') ||
+    token.includes('proceed') ||
+    token.includes('grant') ||
+    token.includes('success')
+  ) {
+    return 'completed';
+  }
+  return undefined;
 }
 
 function sanitizeDaemonValue(value: unknown, depth = 0): unknown {
