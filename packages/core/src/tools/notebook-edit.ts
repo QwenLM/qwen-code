@@ -294,8 +294,10 @@ function prepareModifiedNotebookContent(
   params: NotebookEditToolParams,
 ): NotebookEditResult {
   let notebook: ReturnType<typeof parseNotebook>;
+  let originalNotebook: ReturnType<typeof parseNotebook>;
   try {
     notebook = parseNotebook(modifiedContent);
+    originalNotebook = parseNotebook(originalContent);
   } catch (error) {
     throw new NotebookEditError(
       error instanceof Error ? error.message : String(error),
@@ -310,8 +312,7 @@ function prepareModifiedNotebookContent(
     language: getNotebookLanguage(notebook),
     mode: params.edit_mode ?? 'replace',
     requiresReadAfterWrite:
-      !hasStableCellIds(parseNotebook(originalContent)) ||
-      !hasStableCellIds(notebook),
+      !hasStableCellIds(originalNotebook) || !hasStableCellIds(notebook),
   };
 }
 

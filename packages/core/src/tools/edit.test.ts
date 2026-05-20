@@ -1216,6 +1216,7 @@ describe('EditTool', () => {
       expect(result.error?.message).toMatch(
         /binary \/ image \/ audio \/ video \/ PDF \/ notebook payload/,
       );
+      expect(result.error?.message).toContain('notebook_edit');
       expect(result.error?.message).not.toMatch(/Use the read_file tool first/);
       // EditTool's verb is "edit", not "overwrite" — using the
       // wrong one here would be confusing for in-place edits.

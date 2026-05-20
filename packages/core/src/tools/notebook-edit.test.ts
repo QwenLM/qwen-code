@@ -521,6 +521,22 @@ describe('NotebookEditTool', () => {
     expect(invalidResult.error?.type).toBe(ToolErrorType.NOTEBOOK_INVALID_JSON);
   });
 
+  it('keeps invalid original notebook errors structured for user-modified content', async () => {
+    const invalidPath = path.join(tempDir, 'bad-original.ipynb');
+    fs.writeFileSync(invalidPath, 'not json', 'utf-8');
+    seedNotebookRead(invalidPath);
+
+    const result = await buildInvocation({
+      notebook_path: invalidPath,
+      edit_mode: 'insert',
+      new_source: 'x = 1',
+      modified_by_user: true,
+      modified_notebook_content: JSON.stringify({ cells: [], metadata: {} }),
+    }).execute(abortSignal);
+
+    expect(result.error?.type).toBe(ToolErrorType.NOTEBOOK_INVALID_JSON);
+  });
+
   it('rejects qwenignored notebooks during validation', () => {
     fs.writeFileSync(path.join(tempDir, '.qwenignore'), '*.ipynb\n', 'utf-8');
     const filePath = writeNotebook('ignored.ipynb', {
