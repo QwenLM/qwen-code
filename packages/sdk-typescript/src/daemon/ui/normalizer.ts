@@ -82,8 +82,7 @@ export function normalizeDaemonEvent(
       return [
         {
           ...base,
-          type: 'error',
-          recoverable: false,
+          type: 'status',
           text: `Session closed: ${getString(event.data, 'reason') ?? 'closed'}`,
         },
       ];
