@@ -616,6 +616,46 @@ describe('useCommandCompletion', () => {
         '@src/file1.txt is a good file',
       );
     });
+
+    it('should append trailing space for directory completions when cursor is mid-line', async () => {
+      const text = '@src/com is a dir';
+      const cursorOffset = 8; // after "m"
+
+      setupMocks({
+        atSuggestions: [
+          {
+            label: 'src/components/',
+            value: 'src/components/',
+            isDirectory: true,
+          },
+        ],
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest(text, cursorOffset);
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe(
+        '@src/components/ is a dir',
+      );
+    });
   });
 
   describe('argument hint ghost text', () => {
