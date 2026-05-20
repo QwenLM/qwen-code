@@ -35,6 +35,15 @@ jobs:
     # `@qwen /review` on the PR. Broadening auto-trigger for community
     # PRs (with per-author rate limiting) is deferred to a later phase,
     # not dropped here. See docs/design/code-review/code-review-design.md.
+    #
+    # NOTE: contains() below is a substring match, so '@qwen /reviewer'
+    # (or any other suffix) also passes this gate. That's intentional:
+    # GHA expressions cannot anchor a regex here, and the
+    # 'Resolve PR context' shell step re-checks with a properly
+    # end-anchored awk/grep regex (@qwen /review($|[[:space:]])) and sets
+    # should_run_review=false on non-matches. The cost of the extra
+    # runner spin-up on a malformed mention is a few seconds and
+    # acceptable.
     if: |-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_target' &&
@@ -58,11 +67,9 @@ jobs:
     timeout-minutes: 60
     runs-on: 'ubuntu-latest'
     permissions:
-      checks: 'read'
       contents: 'read'
       pull-requests: 'read'
       issues: 'write'
-      statuses: 'read'
     env:
       GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
       OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
@@ -165,15 +172,17 @@ jobs:
 
           # Build the review prompt for qwen-code-action.
           # Pass the full PR URL so the skill can resolve owner/repo unambiguously.
+          #
+          # Intentionally NOT passing `/review --comment` even in comment mode:
+          # the bundled skill may submit an APPROVE review when no findings are
+          # found, and this workflow is comment-only (it posts the action
+          # summary itself below). The dry-run vs comment distinction is
+          # carried via $should_comment, not by changing the slash-command.
           review_target="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/pull/${pr_number}"
+          review_prompt="/review $review_target"
           if [ "$review_mode" = "comment" ]; then
-            # Do not pass /review --comment here: the bundled skill may submit
-            # an APPROVE review when no findings are found. This workflow is
-            # intentionally comment-only, so it posts the action summary below.
-            review_prompt="/review $review_target"
             should_comment="true"
           else
-            review_prompt="/review $review_target"
             should_comment="false"
           fi
 
@@ -400,6 +409,15 @@ jobs:
           }
           EOF
 
+          # Intentionally @latest: this workflow is still in the Phase 1-3
+          # bundled-action rollout (see docs/design/code-review/roadmap.md)
+          # and we want every CI run to exercise the newest bundled /review
+          # skill while it stabilizes — pinning a version would freeze the
+          # in-progress skill iterations behind a manual bump PR. Once the
+          # workflow lands and the skill cadence slows, switch this to a
+          # pinned `@qwen-code/qwen-code@x.y.z` so the secret-bearing
+          # pull_request_target run can't be moved by a future package
+          # publish. Tracked as a follow-up; not blocking on this PR.
           echo "::group::Install qwen-code"
           npm install -g @qwen-code/qwen-code@latest
           qwen --version
@@ -412,6 +430,13 @@ jobs:
           # builds/tests every PR, so Agent 7 is redundant here. The
           # extra "do not post" clause is added only for dry-run.
           # Prompt-level steering only — the bundled SKILL.md is unchanged.
+          #
+          # Validation Evidence verdict: the exact section name, PRESENT /
+          # MISSING semantics, and the verbatim advisory closing line all
+          # live in .qwen/review-rules.md ("Validation And Dogfooding").
+          # The bundled /review skill is expected to load that file, so the
+          # prompt only references it instead of restating the spec — that
+          # way edits to review-rules.md don't drift from the workflow.
           prompt="${REVIEW_PROMPT}
 
           CI LIGHTWEIGHT MODE — follow these execution constraints, they
@@ -423,12 +448,11 @@ jobs:
              Performance, Test Coverage) and ONE consolidated audit
              instead of the three separate 6a/6b/6c personas.
           3. Skip the local linter/typecheck step (Step 3).
-          4. The review MUST include a section titled exactly
-             \`## Validation Evidence\` stating PRESENT (name the
-             commands/logs/trace/screenshot/recording/test-report found)
-             or MISSING (what reviewer-facing evidence is absent); end
-             that section with the verbatim advisory/comment-only line
-             from .qwen/review-rules.md.
+          4. Apply the \`## Validation Evidence\` requirement defined in
+             .qwen/review-rules.md (section 'Validation And Dogfooding')
+             exactly as written there — same section title, same PRESENT/
+             MISSING verdict, same verbatim advisory closing line. Do not
+             paraphrase.
           5. Produce the complete code review."
           if [ "${SHOULD_COMMENT:-}" != "true" ]; then
             prompt="${prompt}
@@ -457,6 +481,18 @@ jobs:
 
           # Extract the final assistant text from the stream for a
           # human-readable summary (downstream comment step / artifact).
+          #
+          # Intentional simplification while debugging: this loop keeps
+          # overwriting `txt` on every assistant/message event so the file
+          # ends up with the LAST text segment seen. With
+          # --include-partial-messages enabled, intermediate progress lines
+          # land in the live job log (via `tee` above), which is exactly
+          # what we want to verify the review is actually running. The
+          # parsed-summary file only needs the final segment for the PR
+          # comment. If multi-turn assistant output ever becomes the norm,
+          # switch to a stop_reason / terminal-event filter and concatenate
+          # — but that costs the live-progress visibility we rely on for
+          # now, so this is staying simple until the skill stabilizes.
           node -e '
             const fs=require("fs");
             const lines=fs.readFileSync(process.argv[1],"utf8").split(/\r?\n/);
@@ -525,6 +561,11 @@ jobs:
             else
               printf '_Qwen Code review completed, but no summary was captured. See the workflow logs for details._\n'
             fi
+            # The single-quoted format string keeps literal backticks
+            # around %s and /review for the rendered Markdown; %s is a
+            # printf placeholder filled by the positional arg, so the
+            # single quotes are correct here.
+            # shellcheck disable=SC2016
             printf '\n\n---\n_Reviewed by `%s` via Qwen Code `/review` (automated). Reply `@qwen /review` to re-run._\n' "${OPENAI_MODEL:-unknown}"
           } > qwen-pr-review-summary-comment.md
 
