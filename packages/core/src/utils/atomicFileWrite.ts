@@ -206,8 +206,24 @@ export async function atomicWriteFile(
       return;
     }
 
-    throw error;
+    throw annotateWriteError(error, targetPath);
   }
+}
+
+/**
+ * Prefix the error message with the logical target path so downstream
+ * debug logs identify which file actually failed (the original syscall
+ * error usually references the random `.tmp.<hex>` temp path, which is
+ * unhelpful when a caller doesn't wrap the error). Mutates in place to
+ * preserve every other property (`code`, `errno`, `syscall`, `stack`,
+ * the prototype chain) so existing `err.code === 'ENOENT'` checks and
+ * `instanceof` narrowing continue to work unchanged.
+ */
+function annotateWriteError(error: unknown, targetPath: string): unknown {
+  if (error instanceof Error && !error.message.includes(targetPath)) {
+    error.message = `atomicWriteFile(${JSON.stringify(targetPath)}): ${error.message}`;
+  }
+  return error;
 }
 
 /**
@@ -389,6 +405,6 @@ export function atomicWriteFileSync(
       return;
     }
 
-    throw error;
+    throw annotateWriteError(error, targetPath);
   }
 }

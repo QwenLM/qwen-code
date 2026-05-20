@@ -1224,7 +1224,7 @@ describe('NativeLspService', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    test.skipIf(process.platform === 'win32')(
+    test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
       'read failure on chmod 0000 file propagates EACCES (does not silently become empty content)',
       async () => {
         const filePath = path.join(tmpDir, 'unreadable.txt');
@@ -1263,7 +1263,7 @@ describe('NativeLspService', () => {
       },
     );
 
-    test.skipIf(process.platform === 'win32')(
+    test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
       'chmod 0444 read-only file is rejected before write (W_OK check)',
       async () => {
         const filePath = path.join(tmpDir, 'readonly.txt');
