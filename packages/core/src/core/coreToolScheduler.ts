@@ -1159,19 +1159,6 @@ export class CoreToolScheduler {
   }
 
   /**
-   * Wrap a hook fire site with span lifecycle management. Centralizes the
-   * try/finally pattern across the 6 hook fire sites (PreToolUse,
-   * PostToolUse, 4× PostToolUseFailure) so future protocol changes
-   * (e.g. new metadata fields) can be made in one place instead of in
-   * lockstep across each site (#4321 review wenshao Suggestion).
-   *
-   * On the happy path `toEndMeta(result)` builds the metadata recorded on
-   * the span. On a throw, the default `endMeta = { success: false }`
-   * survives — today's hook helpers in `toolHookTriggers.ts` swallow
-   * throws internally so this branch is unreachable, but the pattern
-   * future-proofs the lifecycle if that contract changes.
-   */
-  /**
    * Shared toEndMeta callback for the 4 PostToolUseFailure hook fire
    * sites. Each was previously inlined as a byte-identical lambda; the
    * helper avoids drift between cancel-vs-error and abort-vs-non-abort
@@ -1188,6 +1175,19 @@ export class CoreToolScheduler {
           hasAdditionalContext: !!r.additionalContext,
         };
 
+  /**
+   * Wrap a hook fire site with span lifecycle management. Centralizes the
+   * try/finally pattern across the 6 hook fire sites (PreToolUse,
+   * PostToolUse, 4× PostToolUseFailure) so future protocol changes
+   * (e.g. new metadata fields) can be made in one place instead of in
+   * lockstep across each site (#4321 review wenshao Suggestion).
+   *
+   * On the happy path `toEndMeta(result)` builds the metadata recorded on
+   * the span. On a throw, the default `endMeta = { success: false }`
+   * survives — today's hook helpers in `toolHookTriggers.ts` swallow
+   * throws internally so this branch is unreachable, but the pattern
+   * future-proofs the lifecycle if that contract changes.
+   */
   private async withHookSpan<T>(
     opts: StartHookSpanOptions,
     fn: () => Promise<T>,

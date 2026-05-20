@@ -195,19 +195,25 @@ function getSpanId(span: Span): string {
   return span.spanContext().spanId || '';
 }
 
-const SPAN_ERROR_MAX_BYTES = 1024;
+const SPAN_ERROR_MAX_CHARS = 1024;
 
 /**
  * Bound the size of error strings written to span attributes / status
  * messages. Hook server responses, raw exception stacks, or malicious
  * inputs can be unbounded; some OTel backends drop the entire span when
- * any field exceeds their limit. 1KB is small enough to fit any
- * sensible error and large enough that operators rarely need to look
- * up the raw payload (#4321 review-3 wenshao Critical).
+ * any field exceeds their limit (#4321 review-3 wenshao Critical).
+ *
+ * Truncates by UTF-16 code units (`String.length`/`String.slice`), not
+ * bytes — for ASCII-heavy text this approximates a 1KB byte limit, but
+ * CJK/emoji-heavy errors can land in the ~2-3KB range after UTF-8
+ * encoding. That's still well under all major OTel backends'
+ * per-attribute limits (Jaeger ~64KB, Honeycomb ~64KB, OTLP default
+ * ~32KB), so we keep the simpler char-count bound rather than paying
+ * the encoder cost on every endXSpan (review-4 follow-up).
  */
 function truncateSpanError(s: string): string {
-  return s.length > SPAN_ERROR_MAX_BYTES
-    ? s.slice(0, SPAN_ERROR_MAX_BYTES) + '…[truncated]'
+  return s.length > SPAN_ERROR_MAX_CHARS
+    ? s.slice(0, SPAN_ERROR_MAX_CHARS) + '…[truncated]'
     : s;
 }
 
