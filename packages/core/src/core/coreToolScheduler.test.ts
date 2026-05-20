@@ -226,9 +226,10 @@ vi.mock('../telemetry/session-tracing.js', () => ({
   endLLMRequestSpan: vi.fn(),
   clearSessionTracingForTesting: vi.fn(),
   // truncateSpanError is exported from session-tracing and used in
-  // setToolSpanFailure to bound status messages. The real implementation
-  // is a pure utility function — passthrough is fine for tests.
-  truncateSpanError: (s: string): string => s,
+  // setToolSpanFailure to bound status messages. Wrap as a spy so a
+  // dedicated regression test can substitute a sentinel return value
+  // and verify setToolSpanFailure forwards it (#4321 review-6).
+  truncateSpanError: vi.fn((s: string): string => s),
 }));
 
 vi.mock('fs/promises', () => ({
@@ -3506,6 +3507,47 @@ describe('CoreToolScheduler telemetry spans', () => {
       'Tool execution blocked by hook',
       'pre_hook_blocked',
     );
+  });
+
+  it('setToolSpanFailure forwards the truncateSpanError result to the span status (#4321)', async () => {
+    // Lock the integration: if a future change drops the
+    // truncateSpanError(message) call inside setToolSpanFailure, this
+    // test catches it. Substitute a sentinel return so the assertion
+    // doesn't depend on the utility's exact truncation behaviour
+    // (review-6 wenshao).
+    const sessionTracing = await import('../telemetry/session-tracing.js');
+    const truncateSpy = vi.mocked(sessionTracing.truncateSpanError);
+    truncateSpy.mockImplementationOnce(() => '<<TRUNCATED-SENTINEL>>');
+
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'pre-hook',
+        success: true,
+        output: {
+          decision: 'deny',
+          reason: 'truncate-me-pretty-please',
+        },
+      }),
+    };
+
+    const { spanRecord } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+    });
+
+    // setToolSpanFailure(span, kind, msg) → safeSetStatus({code: ERROR,
+    // message: truncateSpanError(msg)}). The mock returns the sentinel
+    // for that single call, so the span's status message must equal it.
+    const errorStatusCall = spanRecord.statusCalls.find(
+      (s) => s.code === SpanStatusCode.ERROR,
+    );
+    expect(errorStatusCall?.message).toBe('<<TRUNCATED-SENTINEL>>');
+    expect(truncateSpy).toHaveBeenCalled();
+
+    // Restore default identity behaviour so other tests aren't affected.
+    truncateSpy.mockReset();
+    truncateSpy.mockImplementation((s) => s);
   });
 
   it('marks post-hook stop with a sanitized failure kind', async () => {
