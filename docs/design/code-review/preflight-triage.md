@@ -263,15 +263,23 @@ shell-only   单发 qwen   单发 qwen   bundled /review
 
 ### Review 执行阶段（G3 always-emit 落地）
 
+> **设计 vs 实现说明**：早期设计草稿写过"LIGHT timeout → 升 STANDARD 重试 1 次"。
+> 实现阶段（commit `f2d3e240f`）取消了 LIGHT-to-STANDARD 自动升档：
+> 一来重试本身违反"每次 review 是无状态"的 P1 原则；二来上下游成本（preflight 已经花掉一次 LLM 调用，LIGHT 再花一次，再升 STANDARD 又花一次）超过了"对小 PR 也要发详细评论"的边际收益。
+> 现在所有 tier 的失败路径都是统一的"partial flush via accumulator → 加 ⚠️ 警告头 → 发出"。下表反映**实现**。
+
 | 故障 | 兜底动作 | 落地评论 |
 | --- | --- | --- |
 | **ULTRA_LIGHT**：shell compose 失败 | 走 fallback comment 路径 | 既有 fallback（"see logs"） |
-| **LIGHT**：`timeout 3m` 触发 | 升级到 STANDARD 重试 1 次 | 重试后的 STANDARD 输出 |
-| **LIGHT**：模型返回空 / 解析失败 | 升级到 STANDARD 重试 1 次 | 同上 |
-| **STANDARD**：`timeout 8m` 触发 | 启动流式累加器（同 DEEP）→ 取已生成内容 → 头部加 `⚠️ time-capped` 警告 → 发出 | **partial review markdown** |
-| **STANDARD**：累加器也为空（极罕见，model 还没开始输出） | 走 fallback comment 路径 | 既有 fallback |
-| **DEEP**：`timeout 25m` 触发 | 累加器收集所有 assistant text segments → SIGTERM + 60s grace → 头部加 `⚠️ time-capped` 警告 → 发出 | **partial review markdown** |
-| **DEEP**：bundled skill 抛错（非 timeout） | 检查累加器：有内容 → partial flush；空 → fallback | partial 或 fallback |
+| **LIGHT**：`timeout 3m` 触发 | accumulator partial flush → 头部加 `⚠️ time-capped` 警告 → 发出 | **partial review markdown** |
+| **LIGHT**：非 timeout 非零 exit（crash / OOM 137 / SIGINT 130 等） | 同上，status_label=error，警告头改 "exited with error" | partial review markdown |
+| **LIGHT**：accumulator 输出 < 200 字节（占位符 only） | 删 summary 文件 → 触发 fallback comment | 既有 fallback |
+| **STANDARD**：`timeout 8m` 触发 | accumulator partial flush → 头部加 `⚠️ time-capped` 警告 → 发出 | partial review markdown |
+| **STANDARD**：非 timeout 非零 exit | 同 LIGHT 同样处理 | partial review markdown |
+| **STANDARD**：accumulator 输出 < 200 字节 | 删 summary → fallback | 既有 fallback |
+| **DEEP**：`timeout 25m` 触发 | accumulator 收集所有 assistant text → SIGTERM + 60s grace → 头部加 `⚠️ time-capped` 警告 → 发出 | partial review markdown |
+| **DEEP**：bundled skill 非 timeout 非零 exit | 同 LIGHT 同样处理 | partial review markdown |
+| **DEEP**：accumulator 输出 < 200 字节 | 删 summary → fallback | 既有 fallback |
 
 **Always-emit 不变量**：每次 review 执行阶段的退出路径只有两种 —— "正常 review 评论"或"partial review 评论"或"fallback 评论"，前两者覆盖 ≥ 95% 的失败 case，fallback 只在累加器都空时触发。
 

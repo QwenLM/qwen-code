@@ -290,7 +290,7 @@ jobs:
 
           pr_json="$(gh pr view "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
-            --json additions,deletions,changedFiles,title,baseRefName,baseRefOid,headRefName,headRefOid)"
+            --json additions,deletions,changedFiles,files,title,baseRefName,baseRefOid,headRefName,headRefOid)"
           additions="$(jq -r '.additions' <<< "$pr_json")"
           deletions="$(jq -r '.deletions' <<< "$pr_json")"
           changed_files="$(jq -r '.changedFiles' <<< "$pr_json")"
@@ -299,7 +299,13 @@ jobs:
           base_sha="$(jq -r '.baseRefOid // ""' <<< "$pr_json")"
           head_ref="$(jq -r '.headRefName' <<< "$pr_json")"
           head_sha="$(jq -r '.headRefOid // ""' <<< "$pr_json")"
-          changed_lines=$((additions + deletions))
+          # Compute "meaningful" changed_lines that excludes lockfile /
+          # docs / snapshot / generated content. Mirrors the exclusion
+          # list in pr-gate.yml's PR Size job so the two workflows agree
+          # on whether a PR exceeds the threshold (see
+          # scripts/compute-pr-size.cjs for the canonical regex list).
+          printf '%s' "$pr_json" > /tmp/pr-json-for-size.json
+          changed_lines="$(node scripts/compute-pr-size.cjs /tmp/pr-json-for-size.json)"
 
           # Reject empty head_sha / base_sha early. Both are queried via
           # gh pr view; an empty value almost always means gh pr view
@@ -520,20 +526,14 @@ jobs:
             printf '**PR body (first 2KB):**\n%s\n' "$pr_body"
           } > /tmp/preflight-pr-context.md
 
-          # Render the final prompt by substituting the two template markers.
-          # Use node (Node 22 is on the runner already) for reliable handling
-          # of any character in the substituted text.
-          PR_CONTEXT_FILE=/tmp/preflight-pr-context.md \
-          node -e '
-            const fs = require("fs");
-            const template = fs.readFileSync(".qwen/preflight-prompt.md", "utf8");
-            const rules = fs.readFileSync(".qwen/review-rules.md", "utf8");
-            const ctx = fs.readFileSync(process.env.PR_CONTEXT_FILE, "utf8");
-            const out = template
-              .replace("<<<REVIEW_RULES_MD>>>", rules)
-              .replace("<<<PR_CONTEXT>>>", ctx);
-            fs.writeFileSync("/tmp/preflight-prompt-rendered.md", out);
-          ' || { echo "::error::Failed to render preflight prompt"; exit 1; }
+          # Render the final prompt by substituting template markers
+          # via the shared helper script (see scripts/render-review-prompt.cjs).
+          node scripts/render-review-prompt.cjs \
+            .qwen/preflight-prompt.md \
+            /tmp/preflight-prompt-rendered.md \
+            --context /tmp/preflight-pr-context.md \
+            --rules .qwen/review-rules.md \
+            || { echo "::error::Failed to render preflight prompt"; exit 1; }
 
           echo "::group::Run preflight LLM"
           set +e
@@ -582,8 +582,19 @@ jobs:
           fi
 
           echo "tier=$tier" >> "$GITHUB_OUTPUT"
-          echo "rationale=$rationale" >> "$GITHUB_OUTPUT"
-          echo "::notice::Preflight tier=$tier (rationale: $rationale)"
+          # Use multiline output format so a multi-line rationale survives.
+          # GHA's single-line `key=value` form silently truncates at the
+          # first newline, which would chop a multi-sentence rationale.
+          {
+            echo "rationale<<RATIONALE_EOF"
+            printf '%s\n' "$rationale"
+            echo "RATIONALE_EOF"
+          } >> "$GITHUB_OUTPUT"
+          # For the ::notice:: log line, condense newlines into spaces so
+          # the GHA UI shows the full rationale on one line (GHA notice
+          # annotations don't render multi-line text usefully anyway).
+          rationale_oneline="$(printf '%s' "$rationale" | tr '\n' ' ' | sed 's/  */ /g')"
+          echo "::notice::Preflight tier=$tier (rationale: $rationale_oneline)"
 
       # ─── Compute effective tier (override OR preflight) ────────────────────
       #
@@ -683,13 +694,14 @@ jobs:
             printf '**PR body (first 2KB):**\n%s\n' "$pr_body"
           } > /tmp/light-pr-context.md
 
-          PR_CONTEXT_FILE=/tmp/light-pr-context.md \
-          node -e '
-            const fs = require("fs");
-            const template = fs.readFileSync(".qwen/preflight-light-review-prompt.md", "utf8");
-            const ctx = fs.readFileSync(process.env.PR_CONTEXT_FILE, "utf8");
-            fs.writeFileSync("/tmp/light-prompt-rendered.md", template.replace("<<<PR_CONTEXT>>>", ctx));
-          '
+          # Same shared helper as the preflight step. The LIGHT template
+          # was updated to include <<<REVIEW_RULES_MD>>>, so pass --rules
+          # too (project conventions apply at every tier).
+          node scripts/render-review-prompt.cjs \
+            .qwen/preflight-light-review-prompt.md \
+            /tmp/light-prompt-rendered.md \
+            --context /tmp/light-pr-context.md \
+            --rules .qwen/review-rules.md
 
           out=qwen-review-stream.jsonl
           echo "::group::Qwen LIGHT review (live stream)"
@@ -705,6 +717,12 @@ jobs:
           if [ "$status" -eq 124 ]; then
             status_label="timeout"
             echo "::warning::LIGHT review timed out at 3m; flushing partial output via accumulator."
+          elif [ "$status" -ne 0 ]; then
+            # Non-zero, non-timeout exit (crash / OOM (137) / SIGINT (130) / etc.)
+            # Mark explicitly so partial flush + warning header still fire;
+            # without this, the file would be labeled 'complete' silently.
+            status_label="error"
+            echo "::warning::LIGHT review exited with status $status (non-timeout failure); flushing any partial output via accumulator."
           fi
 
           node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md LIGHT "$status_label"
@@ -766,13 +784,13 @@ jobs:
             printf '\n\n**PR body (first 4KB):**\n%s\n' "$pr_body"
           } > /tmp/standard-pr-context.md
 
-          PR_CONTEXT_FILE=/tmp/standard-pr-context.md \
-          node -e '
-            const fs = require("fs");
-            const template = fs.readFileSync(".qwen/preflight-standard-review-prompt.md", "utf8");
-            const ctx = fs.readFileSync(process.env.PR_CONTEXT_FILE, "utf8");
-            fs.writeFileSync("/tmp/standard-prompt-rendered.md", template.replace("<<<PR_CONTEXT>>>", ctx));
-          '
+          # STANDARD already inlines review-rules.md via `cat` in the
+          # context block above, so the template doesn't need
+          # <<<REVIEW_RULES_MD>>> substitution. Pass --context only.
+          node scripts/render-review-prompt.cjs \
+            .qwen/preflight-standard-review-prompt.md \
+            /tmp/standard-prompt-rendered.md \
+            --context /tmp/standard-pr-context.md
 
           out=qwen-review-stream.jsonl
           echo "::group::Qwen STANDARD review (live stream)"
@@ -788,6 +806,10 @@ jobs:
           if [ "$status" -eq 124 ]; then
             status_label="timeout"
             echo "::warning::STANDARD review timed out at 8m; flushing partial output."
+          elif [ "$status" -ne 0 ]; then
+            # Non-zero, non-timeout exit (crash / OOM (137) / SIGINT (130) / etc.)
+            status_label="error"
+            echo "::warning::STANDARD review exited with status $status (non-timeout failure); flushing any partial output via accumulator."
           fi
 
           node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md STANDARD "$status_label"
@@ -800,6 +822,21 @@ jobs:
               cat qwen-review-summary.md
             } > /tmp/qwen-review-summary-with-warning.md
             mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
+          elif [ "$status_label" = "error" ]; then
+            # Same partial-flush treatment for non-timeout failures.
+            {
+              printf '## ⚠️ STANDARD review exited with error (status %s) — partial output below\n\n' "$status"
+              cat qwen-review-summary.md
+            } > /tmp/qwen-review-summary-with-warning.md
+            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
+          fi
+
+          # Apply LIGHT's 200-byte near-empty guard: if accumulator only
+          # wrote its placeholder, remove the file so the fallback comment
+          # fires instead of posting the placeholder verbatim.
+          if [ -f qwen-review-summary.md ] && [ "$(wc -c < qwen-review-summary.md)" -lt 200 ]; then
+            echo "::warning::STANDARD review produced near-empty output; removing summary file so fallback comment fires."
+            rm -f qwen-review-summary.md
           fi
 
       # ─── DEEP: bundled /review skill (Phase 1-3 path, with parser update) ──
@@ -904,6 +941,9 @@ jobs:
           if [ "$status" -eq 124 ]; then
             status_label="timeout"
             echo "::warning::DEEP review timed out at 25m; flushing partial output."
+          elif [ "$status" -ne 0 ]; then
+            status_label="error"
+            echo "::warning::DEEP review exited with status $status (non-timeout failure); flushing any partial output via accumulator."
           fi
 
           node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md DEEP "$status_label"
@@ -914,10 +954,25 @@ jobs:
               cat qwen-review-summary.md
             } > /tmp/qwen-review-summary-with-warning.md
             mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
+          elif [ "$status_label" = "error" ]; then
+            # Same partial-flush treatment for non-timeout failures.
+            {
+              printf '## ⚠️ DEEP review exited with error (status %s) — partial output below\n\n' "$status"
+              cat qwen-review-summary.md
+            } > /tmp/qwen-review-summary-with-warning.md
+            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
+          fi
+
+          # Apply LIGHT's 200-byte near-empty guard: if accumulator only
+          # wrote its placeholder, remove the file so the fallback comment
+          # fires instead of posting the placeholder verbatim.
+          if [ -f qwen-review-summary.md ] && [ "$(wc -c < qwen-review-summary.md)" -lt 200 ]; then
+            echo "::warning::DEEP review produced near-empty output; removing summary file so fallback comment fires."
+            rm -f qwen-review-summary.md
           fi
 
           echo "::group::Parsed review summary"
-          cat qwen-review-summary.md
+          cat qwen-review-summary.md 2>/dev/null || echo "(summary file removed by near-empty guard; fallback comment will fire)"
           echo "::endgroup::"
 
       - name: 'Post dry-run summary'
@@ -978,6 +1033,25 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --body-file qwen-pr-review-summary-comment.md
 
+      # CACHE SCOPE NOTE: the incremental review cache is intentionally
+      # bound to the DEEP tier only (step id `review`). LIGHT and STANDARD
+      # tiers are single-shot qwen calls that do NOT invoke the bundled
+      # `/review` skill, so they never write `.qwen/review-cache/pr-<n>.json`
+      # (the file the skill uses to record `lastCommitSha + lastModelId`).
+      # Gating cache save/restore on `steps.review.outcome == 'success'`
+      # therefore correctly scopes the cache to DEEP runs; adding LIGHT or
+      # STANDARD outcomes would save an empty cache directory with no
+      # incremental-review semantics behind it (the skill's contract is
+      # what makes the cache meaningful, and only DEEP invokes the skill).
+      #
+      # Cross-tier sequencing on the same PR: when a PR's first review is
+      # LIGHT/STANDARD and a later synchronize is DEEP, the DEEP run does
+      # a full review (no prior cache from DEEP's perspective). This is
+      # correct — the LIGHT/STANDARD review markdown is already posted as
+      # a comment, but DEEP doesn't know what LIGHT/STANDARD covered. A
+      # small amount of work duplication is the trade-off for keeping the
+      # skill stateless across the LIGHT/STANDARD vs DEEP boundary.
+      #
       # Check the exact cache key after the review comment is delivered.
       # lookup-only avoids downloading/restoring cache contents here; it only
       # prevents actions/cache/save from attempting to create a key that already

@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 /**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/**
  * parse-review-stream.cjs
  *
  * Streaming JSON-Lines parser for `qwen --output-format stream-json
@@ -52,63 +57,105 @@
 
 const fs = require('fs');
 
-const [, , inputPath, outputPath, tier = 'UNKNOWN', status = 'complete'] =
-  process.argv;
-
-if (!inputPath || !outputPath) {
-  console.error(
-    'Usage: parse-review-stream.cjs <input.jsonl> <output.md> [tier] [status]'
-  );
-  process.exit(2);
-}
-
-let raw;
-try {
-  raw = fs.readFileSync(inputPath, 'utf8');
-} catch (err) {
-  console.error(`parse-review-stream: failed to read ${inputPath}: ${err.message}`);
-  process.exit(1);
-}
-
-const segments = [];
-const lines = raw.split(/\r?\n/);
-
-for (const line of lines) {
-  if (!line.trim()) continue;
-  let event;
-  try {
-    event = JSON.parse(line);
-  } catch {
-    // Malformed line — most commonly the final line of a truncated stream
-    // when qwen was killed mid-write. Skip and continue.
-    continue;
-  }
+/**
+ * Parse one assistant-text segment from a single JSONL event.
+ * Returns the joined text (possibly empty string) or null if the
+ * event doesn't carry an assistant message.
+ *
+ * Exposed for unit tests.
+ */
+function extractSegmentFromEvent(event) {
+  if (!event || typeof event !== 'object') return null;
+  if (event.type !== 'assistant' && event.type !== 'message') return null;
   const content = event?.message?.content;
-  if (
-    (event.type === 'assistant' || event.type === 'message') &&
-    Array.isArray(content)
-  ) {
-    const text = content
-      .filter((part) => part?.type === 'text' && typeof part.text === 'string')
-      .map((part) => part.text)
-      .join('');
-    if (text) segments.push(text);
+  if (!Array.isArray(content)) return null;
+  const text = content
+    .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('');
+  return text;
+}
+
+/**
+ * Accumulate all assistant text segments from a JSONL stream string.
+ * Malformed lines are skipped (the final line of a truncated stream
+ * is the common case). Whitespace-only segments are rejected so the
+ * `segments=N` header doesn't lie.
+ *
+ * Exposed for unit tests.
+ */
+function accumulateSegments(raw) {
+  const segments = [];
+  if (typeof raw !== 'string') return segments;
+  const lines = raw.split(/\r?\n/);
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const text = extractSegmentFromEvent(event);
+    if (text && text.trim()) segments.push(text);
   }
+  return segments;
 }
 
-const header = `<!-- tier=${tier}; status=${status}; segments=${segments.length} -->\n`;
-const body =
-  segments.length > 0
-    ? segments.join('\n\n')
-    : '(no assistant text parsed; see the raw stream in the job log)';
-
-try {
-  fs.writeFileSync(outputPath, header + body);
-} catch (err) {
-  console.error(`parse-review-stream: failed to write ${outputPath}: ${err.message}`);
-  process.exit(1);
+/**
+ * Build the final on-disk markdown body from accumulated segments.
+ * Empty input gets a placeholder so downstream `gh pr comment
+ * --body-file` always has a non-empty body to post.
+ */
+function buildOutput(segments, tier, status) {
+  const header = `<!-- tier=${tier}; status=${status}; segments=${segments.length} -->\n`;
+  const body =
+    segments.length > 0
+      ? segments.join('\n\n')
+      : '(no assistant text parsed; see the raw stream in the job log)';
+  return { header, body, full: header + body };
 }
 
-console.error(
-  `parse-review-stream: ${segments.length} segment(s), ${body.length} char(s) written to ${outputPath}`
-);
+function main() {
+  const [, , inputPath, outputPath, tier = 'UNKNOWN', status = 'complete'] =
+    process.argv;
+
+  if (!inputPath || !outputPath) {
+    console.error(
+      'Usage: parse-review-stream.cjs <input.jsonl> <output.md> [tier] [status]'
+    );
+    process.exit(2);
+  }
+
+  let raw;
+  try {
+    raw = fs.readFileSync(inputPath, 'utf8');
+  } catch (err) {
+    console.error(
+      `parse-review-stream: failed to read ${inputPath}: ${err.message}`
+    );
+    process.exit(1);
+  }
+
+  const segments = accumulateSegments(raw);
+  const { full, body } = buildOutput(segments, tier, status);
+
+  try {
+    fs.writeFileSync(outputPath, full);
+  } catch (err) {
+    console.error(
+      `parse-review-stream: failed to write ${outputPath}: ${err.message}`
+    );
+    process.exit(1);
+  }
+
+  console.error(
+    `parse-review-stream: ${segments.length} segment(s), ${body.length} char(s) written to ${outputPath}`
+  );
+}
+
+module.exports = { extractSegmentFromEvent, accumulateSegments, buildOutput };
+
+if (require.main === module) {
+  main();
+}

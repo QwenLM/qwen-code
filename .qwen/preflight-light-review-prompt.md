@@ -8,6 +8,17 @@ Your job is a **fast, focused review** suitable for a few-minute turnaround.
 
 ---
 
+## Project-specific rules
+
+The repository maintainers have defined the following rules that override
+the generic guidance below when they conflict. These are the same rules
+loaded for STANDARD / DEEP reviews; LIGHT reviews must honor them too so
+project conventions are enforced consistently across tiers.
+
+<<<REVIEW_RULES_MD>>>
+
+---
+
 ## Hard rules for this tier
 
 1. **Be brief.** Output one short markdown comment. Aim for ≤ 200 lines.
