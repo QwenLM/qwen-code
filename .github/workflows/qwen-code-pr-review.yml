@@ -644,8 +644,10 @@ jobs:
             if [ -n "${RATIONALE:-}" ]; then
               printf '**Rationale:** %s\n\n' "$RATIONALE"
             fi
-            printf '- Changed files: %s\n' "$CHANGED_FILES"
-            printf '- Changed lines: %s\n\n' "$CHANGED_LINES"
+            # printf needs `--` to stop treating the leading dash as a flag
+            # on some bash builds (caught by CI dry-run on 2026-05-20).
+            printf -- '- Changed files: %s\n' "$CHANGED_FILES"
+            printf -- '- Changed lines: %s\n\n' "$CHANGED_LINES"
             printf '_Reply `@qwen /review --tier=light|standard|deep` to force a deeper review._\n'
           } > qwen-review-summary.md
 
