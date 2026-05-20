@@ -1014,7 +1014,7 @@ const SETTINGS_SCHEMA = {
         },
         resourceAttributes: {
           description:
-            'Static resource attributes attached to every span/log/metric exported via OTLP. Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version) are silently dropped with a warning.',
+            'Static resource attributes attached to every span/log/metric the SDK exports (OTLP or file outfile — they share the same Resource). Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version, session.id) are dropped with a warning.',
           type: 'object',
           additionalProperties: { type: 'string' },
           default: {},

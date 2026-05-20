@@ -305,9 +305,11 @@ export interface TelemetrySettings {
   includeSensitiveSpanAttributes?: boolean;
   outfile?: string;
   /**
-   * Static resource attributes attached to every span/log/metric exported via
-   * OTLP. Merged with `OTEL_RESOURCE_ATTRIBUTES`; settings win on key conflict.
-   * Reserved keys (`service.version`) are silently dropped.
+   * Static resource attributes attached to every span/log/metric the SDK
+   * exports (OTLP or file outfile — they share the same Resource).
+   * Merged with `OTEL_RESOURCE_ATTRIBUTES`; settings win on key conflict.
+   * Reserved keys (`service.version`, `session.id`) are dropped with a
+   * `diag.warn`.
    */
   resourceAttributes?: Record<string, string>;
   /** Per-signal cardinality controls. */

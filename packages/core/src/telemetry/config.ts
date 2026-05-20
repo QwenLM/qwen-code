@@ -133,9 +133,9 @@ export async function resolveTelemetrySettings(options: {
 
   // Resource attributes: merge OTEL_RESOURCE_ATTRIBUTES (lowest), then
   // settings.resourceAttributes (settings wins on key conflict). RESERVED
-  // keys (service.version) are stripped from both sources with a warning.
-  // OTEL_SERVICE_NAME is a standard escape hatch that overrides
-  // service.name from any other source.
+  // keys (`service.version`, `session.id`) are stripped from both sources
+  // with a `diag.warn`. OTEL_SERVICE_NAME is a standard escape hatch that
+  // overrides service.name from any other source.
   const envResourceAttrs = stripReservedResourceAttributes(
     parseOtelResourceAttributes(env['OTEL_RESOURCE_ATTRIBUTES']),
     'OTEL_RESOURCE_ATTRIBUTES',
