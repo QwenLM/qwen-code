@@ -116,6 +116,7 @@ export function DaemonSessionProvider({
           if (!session) {
             setConnection({ status: 'connecting' });
             const caps = await client.capabilities();
+            if (disposed || abort.signal.aborted) return;
             const nextSession = await DaemonSessionClient.createOrAttach(
               client,
               {
@@ -124,6 +125,7 @@ export function DaemonSessionProvider({
                 workspaceCwd: workspaceCwd ?? caps.workspaceCwd,
               },
             );
+            if (disposed || abort.signal.aborted) return;
             const previousSessionId = lastSessionIdRef.current;
             if (
               previousSessionId !== undefined &&

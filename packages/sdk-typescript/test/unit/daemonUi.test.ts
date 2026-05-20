@@ -852,6 +852,61 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('recreates synthetic plan blocks after transcript trimming', () => {
+    let state = createDaemonTranscriptState({ maxBlocks: 1, now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 60,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: 'Design API', status: 'completed' }],
+          },
+        },
+      }),
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'status', text: 'trim plan block' }],
+      { now: 3 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 61,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: 'Implement UI', status: 'in_progress' }],
+          },
+        },
+      }),
+      { now: 4 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'tool',
+        toolCallId: 'daemon-plan',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: '- [-] Implement UI',
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
   it('caps recursive output extraction depth', () => {
     let nested: unknown = 'leaf';
     for (let i = 0; i < 70; i += 1) {

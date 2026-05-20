@@ -242,6 +242,8 @@ function normalizePermissionStatus(
     case 'succeeded':
       return 'completed';
     case 'selected':
+      // A selected option resolves the prompt even when the option id is a
+      // domain value like a city name rather than allow/deny terminology.
       return classifyPermissionToken(detailParts.join(':')) ?? 'completed';
     default:
       return classifyPermissionToken(primary) ?? 'failed';

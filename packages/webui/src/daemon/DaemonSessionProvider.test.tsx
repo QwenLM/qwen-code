@@ -40,13 +40,12 @@ interface MockSession {
 
 const sdkMocks = vi.hoisted(() => {
   const sessions: MockSession[] = [];
+  const capabilities = vi.fn();
 
   class MockDaemonClient {
     constructor(_opts: unknown) {}
 
-    capabilities = vi.fn(async () => ({
-      workspaceCwd: '/mock-workspace',
-    }));
+    capabilities = capabilities;
   }
 
   class MockDaemonSessionClient {
@@ -61,10 +60,13 @@ const sdkMocks = vi.hoisted(() => {
 
   return {
     sessions,
+    capabilities,
     MockDaemonClient,
     MockDaemonSessionClient,
     reset() {
       sessions.length = 0;
+      capabilities.mockReset();
+      capabilities.mockResolvedValue({ workspaceCwd: '/mock-workspace' });
       MockDaemonSessionClient.createOrAttach.mockClear();
     },
   };
@@ -421,6 +423,63 @@ describe('DaemonSessionProvider', () => {
       { kind: 'assistant', text: 'hello' },
       { kind: 'status', text: 'SSE stream ended' },
     ]);
+  });
+
+  it('ignores stale connect attempts after provider props change', async () => {
+    const staleAttach = createDeferred<MockSession>();
+    const staleSession = createMockSession({ sessionId: 'session-a' });
+    const activeSession = createMockSession({ sessionId: 'session-b' });
+    sdkMocks.MockDaemonSessionClient.createOrAttach
+      .mockImplementationOnce(async () => staleAttach.promise)
+      .mockImplementationOnce(async () => activeSession);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect={true}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4171"
+          autoConnect={true}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({ sessionId: 'session-b' });
+
+    staleAttach.resolve(staleSession);
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({ sessionId: 'session-b' });
   });
 
   it('surfaces SSE stream end and clears the session when reconnect is disabled', async () => {
