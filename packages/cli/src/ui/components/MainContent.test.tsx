@@ -482,9 +482,16 @@ describe('<MainContent />', () => {
     const renderedHistoryItems = historyItemDisplayPropsSpy.mock.calls.map(
       (c) => c[0].item,
     );
-    // Only the unsuppressed user message should render
-    expect(renderedHistoryItems).toHaveLength(1);
-    expect(renderedHistoryItems[0]).toMatchObject({ id: 1 });
+    // Unsuppressed user message and collapse-summary should render (summary has no suppressOnRestore)
+    expect(renderedHistoryItems).toHaveLength(2);
+    expect(renderedHistoryItems.find((i) => i.id === 1)).toMatchObject({
+      id: 1,
+    });
+    expect(renderedHistoryItems.find((i) => i.id === 3)).toMatchObject({
+      id: 3,
+    });
+    // Suppressed gemini item should NOT render
+    expect(renderedHistoryItems.find((i) => i.id === 2)).toBeUndefined();
   });
 
   it('does NOT reset progressive replay when only currentModel changes (PR #4119 regression guard)', async () => {

@@ -100,12 +100,7 @@ export const MainContent = () => {
   // Canonical consumers (/rewind, turn mapping) use the full historyManager.history;
   // rendering consumers use this visible subset.
   const visibleHistory = useMemo(
-    () =>
-      uiState.history.filter(
-        (item) =>
-          !item.display?.suppressOnRestore &&
-          item.display?.kind !== 'collapse-summary',
-      ),
+    () => uiState.history.filter((item) => !item.display?.suppressOnRestore),
     [uiState.history],
   );
 

@@ -183,6 +183,7 @@ export function useResumeCommand(
           Date.now(),
         );
         closeResumeDialog();
+        remount?.();
       }
     },
     [

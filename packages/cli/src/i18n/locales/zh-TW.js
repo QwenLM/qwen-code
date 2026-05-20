@@ -1591,7 +1591,6 @@ export default {
   'History will be expanded by default for future resumed sessions.':
     '未來恢復的會話將預設展開歷史記錄。',
   'History is already expanded in this session.': '當前會話的歷史記錄已展開。',
-  'History expanded.': '歷史記錄已展開。',
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
     '用法：/history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':

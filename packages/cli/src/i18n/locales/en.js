@@ -865,7 +865,6 @@ export default {
     'History will be expanded by default for future resumed sessions.',
   'History is already expanded in this session.':
     'History is already expanded in this session.',
-  'History expanded.': 'History expanded.',
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
     'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
