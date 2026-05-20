@@ -821,7 +821,7 @@ verify_checksum() {
 
     if [[ ! -f "${checksum_file}" ]]; then
         rm -f "${temp_checksum}"
-        log_error "SHA256SUMS not found; cannot verify archive."
+        log_error "SHA256SUMS not found at ${checksum_file}; cannot verify archive."
         return 1
     fi
 

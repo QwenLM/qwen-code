@@ -132,6 +132,26 @@ const HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS = {
     /VERSION\s*=\s*"\$\{QWEN_INSTALL_VERSION:-latest\}"/,
   'install-qwen-standalone.bat': /set\s+"VERSION=latest"/,
 };
+// install-qwen-standalone.ps1 is a shim that downloads the .bat and forwards
+// `@args` unchanged, so it has no VERSION variable to default-pin. Guard the
+// shim instead with forbidden-content patterns: any attempt to hardcode a
+// specific version (either by assigning $env:QWEN_INSTALL_VERSION or by
+// prepending --version to the forwarded argument list) fails the build.
+// Patterns are matched per non-comment line (PowerShell line comments start
+// with `#`) so the usage examples in the header docstring keep working.
+const HOSTED_INSTALLER_FORBIDDEN_PATTERNS = {
+  'install-qwen-standalone.ps1': [
+    {
+      name: 'no hardcoded QWEN_INSTALL_VERSION assignment',
+      pattern: /^\s*\$env:QWEN_INSTALL_VERSION\s*=/m,
+    },
+    {
+      name: 'no hardcoded --version prepended to forwarded args',
+      pattern:
+        /^\s*&\s+\$qwenInstallerPath\s+(?:'--version'|"--version"|--version)/m,
+    },
+  ],
+};
 // SHA256SUMS is allowed in an existing output directory because every staging
 // run rewrites it from scratch after copying the hosted installer assets.
 const HOSTED_INSTALLATION_OUTPUT_NAMES = new Set([
@@ -235,6 +255,15 @@ function assertHostedInstallerSource(source, output) {
   if (defaultPattern && !defaultPattern.test(contents)) {
     fail(
       `${output} default install version must be 'latest' for the hosted entrypoint`,
+    );
+  }
+
+  const forbidden = (HOSTED_INSTALLER_FORBIDDEN_PATTERNS[output] || []).filter(
+    ({ pattern }) => pattern.test(contents),
+  );
+  if (forbidden.length > 0) {
+    fail(
+      `${output} must not contain: ${forbidden.map(({ name }) => name).join(', ')}`,
     );
   }
 }

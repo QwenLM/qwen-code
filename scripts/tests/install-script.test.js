@@ -94,7 +94,9 @@ describe('installation scripts', () => {
     expect(script).toContain('install_npm()');
     expect(script).toContain('detect_target()');
     expect(script).toContain('verify_checksum()');
-    expect(script).toContain('SHA256SUMS not found; cannot verify archive');
+    expect(script).toContain(
+      'SHA256SUMS not found at ${checksum_file}; cannot verify archive',
+    );
     expect(script).toContain('awk -v archive_name');
     expect(script).not.toContain(
       'grep -E "(^|[[:space:]])[*]?${archive_name}$"',
@@ -251,7 +253,9 @@ describe('installation scripts', () => {
     expect(script).toContain(':InstallStandalone');
     expect(script).toContain(':InstallNpm');
     expect(script).toContain(':VerifyChecksum');
-    expect(script).toContain('SHA256SUMS not found; cannot verify archive');
+    expect(script).toContain(
+      'SHA256SUMS not found at !CHECKSUM_FILE!; cannot verify archive',
+    );
     expect(script).toContain('Get-FileHash -Algorithm SHA256');
     expect(script).toContain('tokens=1,2');
     expect(script).toContain('CHECKSUM_NAME');
@@ -1019,6 +1023,118 @@ describe('standalone release packaging', () => {
       await expect(
         buildHostedInstallationAssets(tmpDir, { root: tmpRoot }),
       ).rejects.toThrow(/install-qwen-standalone\.sh.*--version parser/);
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects hosted ps1 shim with a hardcoded version pin', async () => {
+    const { buildHostedInstallationAssets } = await import(
+      hostedInstallationScriptUrl
+    );
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-root-'));
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-install-'));
+    const sourceDir = path.join(tmpRoot, 'scripts', 'installation');
+
+    try {
+      mkdirSync(sourceDir, { recursive: true });
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-standalone.sh'),
+        '#!/usr/bin/env bash\n' +
+          'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
+          'case "$1" in --version) shift; VERSION="$1" ;; --version=*) VERSION="${1#*=}" ;; esac\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-standalone.bat'),
+        '@echo off\r\nset "VERSION=%QWEN_INSTALL_VERSION%"\r\nif "%VERSION%"=="" set "VERSION=latest"\r\nset "VERSION=latest"\r\nif "%~1"=="--version" set "VERSION=%~2"\r\n',
+      );
+      // The ps1 shim has every required behavior pattern but also contains
+      // a hardcoded $env:QWEN_INSTALL_VERSION assignment, which must be
+      // rejected by the forbidden-patterns guard.
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-standalone.ps1'),
+        '# QWEN_INSTALL_VERSION documentation\n' +
+          '$env:QWEN_INSTALL_VERSION = "v0.1.0"\n' +
+          '$tmp = Get-FileHash $env:TEMP\n' +
+          '# SHA256SUMS\n' +
+          '& $qwenInstallerPath @args\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'uninstall-qwen-standalone.sh'),
+        '#!/usr/bin/env bash\n' +
+          'is_qwen_standalone_install_dir() { return 0; }\n' +
+          'remove_shell_path_entry() { :; }\n' +
+          'QWEN_UNINSTALL_PURGE=""\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
+        'function Test-QwenStandaloneInstallDir { return $true }\n' +
+          'function Remove-UserPathEntry { }\n' +
+          'function Remove-CurrentCmdPathShim { }\n' +
+          '$env:QWEN_UNINSTALL_PURGE = ""\n',
+      );
+
+      await expect(
+        buildHostedInstallationAssets(tmpDir, { root: tmpRoot }),
+      ).rejects.toThrow(
+        /install-qwen-standalone\.ps1 must not contain.*no hardcoded QWEN_INSTALL_VERSION assignment/,
+      );
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('allows hosted ps1 shim that only documents QWEN_INSTALL_VERSION in comments', async () => {
+    const { buildHostedInstallationAssets } = await import(
+      hostedInstallationScriptUrl
+    );
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-root-'));
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-install-'));
+    const sourceDir = path.join(tmpRoot, 'scripts', 'installation');
+
+    try {
+      mkdirSync(sourceDir, { recursive: true });
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-standalone.sh'),
+        '#!/usr/bin/env bash\n' +
+          'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
+          'case "$1" in --version) shift; VERSION="$1" ;; --version=*) VERSION="${1#*=}" ;; esac\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-standalone.bat'),
+        '@echo off\r\nset "VERSION=%QWEN_INSTALL_VERSION%"\r\nif "%VERSION%"=="" set "VERSION=latest"\r\nset "VERSION=latest"\r\nif "%~1"=="--version" set "VERSION=%~2"\r\n',
+      );
+      // ps1 contains the exact docstring shipped in production
+      // ("$env:QWEN_INSTALL_VERSION = 'vX.Y.Z'") as a `#` comment; the
+      // forbidden-pattern guard must not regress on that documented example.
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-standalone.ps1'),
+        '# To pin a specific release, set $env:QWEN_INSTALL_VERSION before invoking,\n' +
+          "# e.g. $env:QWEN_INSTALL_VERSION = 'vX.Y.Z'. This is equivalent to passing\n" +
+          '# --version vX.Y.Z to install-qwen-standalone.bat directly.\n' +
+          '$tmp = Get-FileHash $env:TEMP\n' +
+          '# SHA256SUMS\n' +
+          '& $qwenInstallerPath @args\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'uninstall-qwen-standalone.sh'),
+        '#!/usr/bin/env bash\n' +
+          'is_qwen_standalone_install_dir() { return 0; }\n' +
+          'remove_shell_path_entry() { :; }\n' +
+          'QWEN_UNINSTALL_PURGE=""\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
+        'function Test-QwenStandaloneInstallDir { return $true }\n' +
+          'function Remove-UserPathEntry { }\n' +
+          'function Remove-CurrentCmdPathShim { }\n' +
+          '$env:QWEN_UNINSTALL_PURGE = ""\n',
+      );
+
+      // Build should succeed (only resolves; throws would fail the test).
+      await buildHostedInstallationAssets(tmpDir, { root: tmpRoot });
     } finally {
       rmSync(tmpRoot, { recursive: true, force: true });
       rmSync(tmpDir, { recursive: true, force: true });

@@ -694,7 +694,7 @@ if "!CHECKSUM_FILE!"=="" (
 )
 
 if not exist "!CHECKSUM_FILE!" (
-    echo ERROR: SHA256SUMS not found; cannot verify archive.
+    echo ERROR: SHA256SUMS not found at !CHECKSUM_FILE!; cannot verify archive.
     exit /b 1
 )
 
