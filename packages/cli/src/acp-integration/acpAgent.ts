@@ -426,15 +426,24 @@ function createWorkspaceMcpBudget(
 ): WorkspaceMcpBudget | undefined {
   const rawBudget = process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
   const rawMode = process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
+  // F2 (#4175 commit 6 review fix — wenshao W24): match
+  // `McpClientManager.readBudgetFromEnv`'s parsing exactly. Pre-fix
+  // we used `Number.parseInt(rawBudget, 10)` which silently accepted
+  // `"2.5"` as `2`, `"1e2"` as `1` (manager reads it as `100` — 100×
+  // enforcement divergence on the same env var), and rejected
+  // `"0x10"` (manager accepts as `16`). Switch to `Number(...)` +
+  // explicit `Number.isInteger` guard so the pool and the manager
+  // honor the same env values.
   const budget =
-    rawBudget !== undefined && rawBudget !== ''
-      ? Number.parseInt(rawBudget, 10)
-      : undefined;
+    rawBudget !== undefined && rawBudget !== '' ? Number(rawBudget) : undefined;
   const mode: McpBudgetMode = (() => {
     if (rawMode === 'enforce' || rawMode === 'warn' || rawMode === 'off') {
       return rawMode;
     }
-    return budget !== undefined && Number.isFinite(budget) && budget > 0
+    return budget !== undefined &&
+      Number.isFinite(budget) &&
+      Number.isInteger(budget) &&
+      budget > 0
       ? 'warn'
       : 'off';
   })();
@@ -442,6 +451,7 @@ function createWorkspaceMcpBudget(
     mode === 'off' ||
     budget === undefined ||
     !Number.isFinite(budget) ||
+    !Number.isInteger(budget) ||
     budget <= 0
   ) {
     return undefined;

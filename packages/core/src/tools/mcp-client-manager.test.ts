@@ -82,6 +82,66 @@ describe('McpClientManager', () => {
     expect(McpClient).not.toHaveBeenCalled();
   });
 
+  it('swallows BudgetExhaustedError from pool.acquire and logs at debug (F2 commit 6 W23)', async () => {
+    // Wenshao W23 review fold-in: the manager's `discoverAllMcpToolsViaPool`
+    // catch block now branches on `instanceof BudgetExhaustedError`
+    // (deliberate refusal → debug log; other errors still go to
+    // error-level). The `Promise.all` await must NOT see the
+    // rejection — refusals are non-fatal for sibling acquires. This
+    // test wires a fake pool whose `acquire` throws
+    // BudgetExhaustedError for `srvB` and succeeds for `srvA`, then
+    // asserts (a) the discovery completes (`Promise.all` resolves),
+    // (b) only `srvA` lands in `pooledConnections`, (c) `endBulkPass`
+    // fires once via the budget mock so the refused_batch contract
+    // is preserved.
+    const { BudgetExhaustedError } = await import('./mcp-client-manager.js');
+    const acquireSpy = vi.fn().mockImplementation((name: string) => {
+      if (name === 'srvB') {
+        throw new BudgetExhaustedError('srvB', 1, 1);
+      }
+      return Promise.resolve({
+        release: vi.fn(),
+        on: vi.fn(),
+        id: `${name}::abc`,
+        serverName: name,
+        entryIndex: 0,
+      });
+    });
+    const beginBulkPass = vi.fn();
+    const endBulkPass = vi.fn();
+    const fakeBudget = { beginBulkPass, endBulkPass };
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(fakeBudget),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srvA: {}, srvB: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    // Should resolve without throwing — the BudgetExhaustedError on
+    // srvB is caught and downgraded to a debug log.
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(beginBulkPass).toHaveBeenCalledTimes(1);
+    expect(endBulkPass).toHaveBeenCalledTimes(1);
+    expect(acquireSpy).toHaveBeenCalledTimes(2);
+  });
+
   it('serializes concurrent discovery passes via mutex (F2 commit 6 W6)', async () => {
     // Wenshao W6 review fold-in: pre-fix two concurrent
     // `discoverAllMcpTools[Incremental]` invocations could both see

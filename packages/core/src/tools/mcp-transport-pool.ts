@@ -22,6 +22,7 @@ import {
   connectionIdOf,
   isPoolable,
   mcpTransportOf,
+  parseConnectionId,
   POOLED_TRANSPORTS_DEFAULT,
   type McpTransportKind,
 } from './mcp-pool-key.js';
@@ -160,19 +161,28 @@ export class McpTransportPool {
    * stays reserved as long as at least one entry / spawn for the
    * name exists.
    *
-   * `spawnInFlight` keys have the form `${name}::${fingerprint}`,
-   * so a `startsWith(`${name}::`)` test isolates same-name in-flight
-   * spawns. The startsWith form is safe because both `name` and the
-   * separator `::` are sanitized by `connectionIdOf` (no embedded
-   * `::` in canonical names per design §5).
+   * `spawnInFlight` keys have the form `${name}::${fingerprint}`.
+   * Wenshao W21 review fix: pre-fix used `startsWith(`${name}::`)`
+   * which produced a false positive when a sibling name BEGAN with
+   * `${name}::` (server names can contain `::` per
+   * `mcp-pool-key.test.ts:258`; `parseConnectionId` uses
+   * `lastIndexOf('::')` precisely to split on the LAST occurrence).
+   * `connectionIdOf` is just string concatenation — zero
+   * sanitization. Now: parse each id with `parseConnectionId` and
+   * compare the extracted `serverName` exactly. Malformed ids
+   * (defensive) are skipped so a stray bad key in `spawnInFlight`
+   * can't crash the rollback path.
    */
   private hasNameSibling(serverName: string): boolean {
     for (const e of this.entries.values()) {
       if (e.serverName === serverName) return true;
     }
-    const prefix = `${serverName}::`;
     for (const id of this.spawnInFlight.keys()) {
-      if (id.startsWith(prefix)) return true;
+      try {
+        if (parseConnectionId(id).serverName === serverName) return true;
+      } catch {
+        // Malformed id — skip rather than crash the rollback path.
+      }
     }
     return false;
   }
@@ -609,8 +619,31 @@ export class McpTransportPool {
     );
 
     try {
-      await client.connect();
-      const snap = await client.discoverAndReturn(this.cliConfig);
+      // F2 (#4175 commit 6 review fix — gpt-5.5 W25): bound the
+      // `connect()` + `discoverAndReturn()` sequence with a wall-
+      // clock timeout matching `McpClientManager.runWithDiscoveryTimeout`
+      // (stdio default 30s, remote 5s, per-server `discoveryTimeoutMs`
+      // override). Pre-fix a hung server's connect/discover would
+      // leave `spawnInFlight` unresolved forever — every session
+      // sharing this `ConnectionId` waits indefinitely AND the
+      // budget slot is never rolled back because the catch never
+      // runs. The timeout's `reject` triggers the catch path which
+      // forces shutdown + budget rollback (W1 fold-in). The
+      // background promise from connect/discover still races to
+      // settle; we don't `await` it after rejection — the
+      // forceShutdown's transport.close() in the catch block
+      // races to disconnect ahead of any silent tool registration.
+      const timeoutMs = this.discoveryTimeoutFor(cfg);
+      await runWithTimeout(
+        (async () => {
+          await client.connect();
+          const snap = await client.discoverAndReturn(this.cliConfig);
+          this.entries.set(id, entry);
+          entry.markActive(snap.tools, snap.prompts);
+        })(),
+        timeoutMs,
+        `pool spawn for ${id}`,
+      );
       // F2 (#4175 commit 4 review fix — wenshao C6 follow-up):
       // register the entry in `this.entries` BEFORE markActive's
       // updateGlobalStatus runs. Pre-fix the order was reversed,
@@ -621,8 +654,9 @@ export class McpTransportPool {
       // DISCONNECTED`, defeating the CONNECTED state markActive
       // had just set. Setting first means the aggregator sees the
       // entry mid-`active` transition and returns CONNECTED.
-      this.entries.set(id, entry);
-      entry.markActive(snap.tools, snap.prompts);
+      // (Both `entries.set` + `markActive` now happen inside the
+      //  timeout-wrapped IIFE above; this comment documents the
+      //  ordering that the IIFE preserves.)
       debugLogger.info(
         `Spawned pool entry ${id} (entryIndex=${entryIndex}, transport=${transport})`,
       );
@@ -666,6 +700,28 @@ export class McpTransportPool {
     const next = this.nextIndexByName.get(serverName) ?? 0;
     this.nextIndexByName.set(serverName, next + 1);
     return next;
+  }
+
+  /**
+   * Resolve discovery timeout for `cfg`, mirroring
+   * `McpClientManager.discoveryTimeoutFor`. Stdio defaults to 30s,
+   * remote (HTTP / SSE / WebSocket) defaults to 5s — remote carries
+   * network risk; stdio runs locally so the user is more tolerant of
+   * a slow startup. Per-server override via
+   * `mcpServers.<name>.discoveryTimeoutMs` settings is honored when
+   * present (clamped to [100ms, 300_000ms] just like the manager).
+   * Wenshao W25 review fix: pool-mode spawn was previously
+   * unbounded; a hung connect/discover left `spawnInFlight`
+   * unresolved forever, blocking every same-id acquirer + leaking
+   * the budget slot.
+   */
+  private discoveryTimeoutFor(cfg: MCPServerConfig): number {
+    const override = cfg.discoveryTimeoutMs;
+    if (override !== undefined && Number.isFinite(override)) {
+      return Math.max(100, Math.min(override, 300_000));
+    }
+    const isRemote = !!(cfg.httpUrl || cfg.url || cfg.tcp);
+    return isRemote ? 5_000 : 30_000;
   }
 
   private indexAttach(sessionId: string, id: ConnectionId): void {
@@ -862,4 +918,47 @@ function poisonedPromptRegistry(serverName: string): PromptRegistry {
       );
     },
   } as unknown as PromptRegistry;
+}
+
+/**
+ * F2 (#4175 commit 6 review fix — gpt-5.5 W25): wall-clock timeout
+ * wrapper for the pool's `spawnEntry` connect/discover sequence.
+ * Mirrors the bounded-async pattern `McpClientManager.runWithDiscoveryTimeout`
+ * uses (separate timer + race), but local to this module to avoid a
+ * cross-module dep on the manager's private method.
+ *
+ * The background `task` promise is NOT cancelled on timeout —
+ * Node's Promise model can't cancel an in-flight `await`. Instead,
+ * the catch block in `spawnEntry` calls `entry.forceShutdown('manual')`
+ * which awaits `client.disconnect()` → `transport.close()`, racing
+ * the disconnect ahead of any silent tool registration the slow
+ * server might be midway through. Same approach the manager's
+ * timeout cleanup uses for the same race.
+ */
+function runWithTimeout<T>(
+  task: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(
+        new Error(
+          `Timed out after ${timeoutMs}ms: ${label}. The MCP server may be ` +
+            `hung; pool will roll back the spawn and free its budget slot.`,
+        ),
+      );
+    }, timeoutMs);
+    timer.unref?.();
+    task.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
