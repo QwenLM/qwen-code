@@ -430,5 +430,5 @@ const { warn, auto, hard, effectiveWindow } =
 
 2. **小窗口（≤ ~76.7K）下 hard 与 auto 退化为同一值** — 决定**不在 `/context` 明示**。理由：
    - 塌缩范围不只是 32K，所有 `effectiveWindow - HARD_BUFFER ≤ 0.7 × window` 的窗口都塌缩（包括 64K）
-   - 用户行为不变：`currentTier` 跳过 `'hard'` 直接到 `'auto'`，`context-high` band 为空带来的"少一档提示"在小窗口上是合理的——窗口本身就小，用户大概率手动管理上下文
+   - 用户行为不变：塌缩窗口上 `currentTier` 跳过 `'auto'` 直接报 `'hard'`（`contextCommand.ts:43-44` 先判 `>= hard`），`context-high` band（`auto ≤ t < hard`）变成空带，少一档提示在小窗口上是合理的——窗口本身就小，用户大概率手动管理上下文
    - 如果未来有真实用户报告"小窗口看不到中间档提示"，再决定加 UI 标注或调整 `context-high` 触发条件（这是 UI 工作，不是 spec 工作）。当前选不增加 UI 复杂度
