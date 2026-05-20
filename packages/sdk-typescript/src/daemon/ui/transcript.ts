@@ -18,6 +18,8 @@ import { createDaemonToolPreview } from './toolPreview.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
 const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
+const MAX_TEXT_BLOCK_LENGTH = 100_000;
+const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
 
 export function createDaemonTranscriptState(
   opts: DaemonTranscriptReducerOptions = {},
@@ -26,6 +28,7 @@ export function createDaemonTranscriptState(
     blocks: [],
     blockIndexById: {},
     toolBlockByCallId: {},
+    trimmedToolNotificationByCallId: {},
     permissionBlockByRequestId: {},
     nextOrdinal: 1,
     now: opts.now ?? Date.now(),
@@ -158,7 +161,7 @@ function appendTextDelta(
 ): void {
   const existing = getWritableBlockById(state, state[activeKey]);
   if (existing && existing.kind === kind) {
-    existing.text += text;
+    existing.text = appendBoundedText(existing.text, text);
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (kind === 'assistant') existing.streaming = true;
@@ -189,7 +192,24 @@ function upsertToolBlock(
   event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
 ): void {
   const existingId = state.toolBlockByCallId[event.toolCallId];
-  if (existingId === TRIMMED_TOOL_BLOCK_ID) return;
+  if (existingId === TRIMMED_TOOL_BLOCK_ID) {
+    if (shouldRecreateTrimmedToolBlock(event)) {
+      delete state.toolBlockByCallId[event.toolCallId];
+      delete state.trimmedToolNotificationByCallId[event.toolCallId];
+      return upsertToolBlock(state, event);
+    }
+    if (!state.trimmedToolNotificationByCallId[event.toolCallId]) {
+      state.trimmedToolNotificationByCallId[event.toolCallId] = true;
+      appendStatusBlock(
+        state,
+        'error',
+        `Tool ${event.toolCallId} output trimmed (max blocks reached)`,
+        event,
+        { clearActiveText: false },
+      );
+    }
+    return;
+  }
   const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'tool') {
     if (event.title !== undefined) existing.title = event.title;
@@ -204,6 +224,8 @@ function upsertToolBlock(
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (event.details) existing.details = event.details;
+    if (event.content !== undefined) existing.content = event.content;
+    if (event.locations !== undefined) existing.locations = event.locations;
     if (event.rawInput !== undefined) existing.rawInput = event.rawInput;
     if (event.rawOutput !== undefined) existing.rawOutput = event.rawOutput;
     if (event.toolName) existing.toolName = event.toolName;
@@ -226,6 +248,8 @@ function upsertToolBlock(
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
     ...(event.details ? { details: event.details } : {}),
+    ...(event.content !== undefined ? { content: event.content } : {}),
+    ...(event.locations !== undefined ? { locations: event.locations } : {}),
     ...(event.rawInput !== undefined ? { rawInput: event.rawInput } : {}),
     ...(event.rawOutput !== undefined ? { rawOutput: event.rawOutput } : {}),
     ...(event.toolName ? { toolName: event.toolName } : {}),
@@ -245,7 +269,7 @@ function appendShellBlock(
   if (last?.kind === 'shell' && last.stream === event.stream) {
     const writable = getWritableBlockById(state, last.id);
     if (writable?.kind === 'shell') {
-      writable.text += event.text;
+      writable.text = appendBoundedText(writable.text, event.text);
       writable.updatedAt = state.now;
       if (event.eventId !== undefined) writable.eventId = event.eventId;
     }
@@ -255,7 +279,7 @@ function appendShellBlock(
   const block: DaemonShellTranscriptBlock = {
     id: allocateBlockId(state, 'shell'),
     kind: 'shell',
-    text: event.text,
+    text: truncateText(event.text),
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
@@ -338,17 +362,18 @@ function appendStatusBlock(
   kind: 'status' | 'error' | 'debug',
   text: string,
   event?: DaemonUiEvent,
+  opts: { clearActiveText?: boolean } = {},
 ): void {
   const block: DaemonStatusTranscriptBlock = {
     id: allocateBlockId(state, kind),
     kind,
-    text,
+    text: truncateText(text),
     createdAt: state.now,
     updatedAt: state.now,
     ...(event?.eventId !== undefined ? { eventId: event.eventId } : {}),
   };
   appendBlock(state, block);
-  clearActiveText(state);
+  if (opts.clearActiveText !== false) clearActiveText(state);
 }
 
 function createTextBlock(
@@ -360,7 +385,7 @@ function createTextBlock(
   return {
     id: allocateBlockId(state, kind),
     kind,
-    text,
+    text: truncateText(text),
     createdAt: state.now,
     updatedAt: state.now,
     ...(eventId !== undefined ? { eventId } : {}),
@@ -378,6 +403,9 @@ function cloneTranscriptState(
     blocks: [...state.blocks],
     blockIndexById: { ...state.blockIndexById },
     toolBlockByCallId: { ...state.toolBlockByCallId },
+    trimmedToolNotificationByCallId: {
+      ...state.trimmedToolNotificationByCallId,
+    },
     permissionBlockByRequestId: { ...state.permissionBlockByRequestId },
   };
 }
@@ -393,6 +421,13 @@ function trimTranscriptState(
   for (const [toolCallId, blockId] of Object.entries(state.toolBlockByCallId)) {
     if (!keptIds.has(blockId)) {
       state.toolBlockByCallId[toolCallId] = TRIMMED_TOOL_BLOCK_ID;
+    }
+  }
+  for (const [toolCallId] of Object.entries(
+    state.trimmedToolNotificationByCallId,
+  )) {
+    if (state.toolBlockByCallId[toolCallId] !== TRIMMED_TOOL_BLOCK_ID) {
+      delete state.trimmedToolNotificationByCallId[toolCallId];
     }
   }
   for (const [requestId, blockId] of Object.entries(
@@ -411,6 +446,14 @@ function trimTranscriptState(
     state.activeThoughtBlockId = undefined;
   }
   return state;
+}
+
+function shouldRecreateTrimmedToolBlock(
+  event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
+): boolean {
+  return (
+    event.toolCallId === 'daemon-plan' || event.toolKind === 'updated_plan'
+  );
 }
 
 function appendBlock(
@@ -459,6 +502,22 @@ function clearActiveText(state: DaemonTranscriptState): void {
   state.activeThoughtBlockId = undefined;
 }
 
-function assertNever(value: never): void {
-  void value;
+function appendBoundedText(existing: string, text: string): string {
+  if (existing.length >= MAX_TEXT_BLOCK_LENGTH) return existing;
+  return truncateText(existing + text);
+}
+
+function truncateText(text: string): string {
+  if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
+  const keepLength = Math.max(
+    0,
+    MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
+  );
+  return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
+}
+
+function assertNever(value: never): never {
+  throw new Error(
+    `Unhandled daemon transcript event: ${JSON.stringify(value)}`,
+  );
 }

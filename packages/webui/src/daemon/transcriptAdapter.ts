@@ -12,6 +12,8 @@ import {
 import type { UnifiedMessage } from '../adapters/types.js';
 import type {
   ToolCallData,
+  ToolCallContent,
+  ToolCallLocation,
   ToolCallStatus,
 } from '../components/toolcalls/shared/index.js';
 
@@ -172,6 +174,12 @@ function daemonToolBlockToToolCallData(
       | string
       | undefined,
     rawOutput: sanitizeDaemonValue(block.rawOutput),
+    ...(block.content !== undefined
+      ? { content: normalizeToolContent(block.content) }
+      : {}),
+    ...(block.locations !== undefined
+      ? { locations: normalizeToolLocations(block.locations) }
+      : {}),
   };
 }
 
@@ -201,7 +209,7 @@ function normalizePermissionStatus(
   resolved: string | undefined,
 ): ToolCallStatus {
   if (!resolved) return 'pending';
-  const primary = resolved.split(':', 1)[0]?.toLowerCase();
+  const [primary = '', ...detailParts] = resolved.toLowerCase().split(':');
   switch (primary) {
     case 'cancel':
     case 'cancelled':
@@ -210,6 +218,7 @@ function normalizePermissionStatus(
     case 'aborted':
     case 'dismiss':
     case 'dismissed':
+    case 'already resolved':
       return 'cancelled';
     case 'deny':
     case 'denied':
@@ -220,9 +229,57 @@ function normalizePermissionStatus(
     case 'failed':
     case 'fail':
       return 'failed';
-    default:
+    case 'allow':
+    case 'allowed':
+    case 'approve':
+    case 'approved':
+    case 'accept':
+    case 'accepted':
+    case 'confirm':
+    case 'confirmed':
+    case 'proceed':
+    case 'success':
+    case 'succeeded':
       return 'completed';
+    case 'selected':
+      // A selected option resolves the prompt even when the option id is a
+      // domain value like a city name rather than allow/deny terminology.
+      return classifyPermissionToken(detailParts.join(':')) ?? 'completed';
+    default:
+      return classifyPermissionToken(primary) ?? 'failed';
   }
+}
+
+function classifyPermissionToken(token: string): ToolCallStatus | undefined {
+  if (!token) return undefined;
+  if (
+    token.includes('deny') ||
+    token.includes('reject') ||
+    token.includes('block') ||
+    token.includes('fail') ||
+    token.includes('error')
+  ) {
+    return 'failed';
+  }
+  if (
+    token.includes('cancel') ||
+    token.includes('abort') ||
+    token.includes('dismiss')
+  ) {
+    return 'cancelled';
+  }
+  if (
+    token.includes('allow') ||
+    token.includes('approve') ||
+    token.includes('accept') ||
+    token.includes('confirm') ||
+    token.includes('proceed') ||
+    token.includes('grant') ||
+    token.includes('success')
+  ) {
+    return 'completed';
+  }
+  return undefined;
 }
 
 function sanitizeDaemonValue(value: unknown, depth = 0): unknown {
@@ -238,6 +295,62 @@ function sanitizeDaemonValue(value: unknown, depth = 0): unknown {
       sanitizeDaemonValue(entry, depth + 1),
     ]),
   );
+}
+
+function normalizeToolContent(value: unknown): ToolCallContent[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): ToolCallContent[] => {
+    const sanitized = sanitizeDaemonValue(entry);
+    if (!isRecord(sanitized)) return [];
+    const type = sanitized['type'];
+    if (type === 'diff') {
+      const path = sanitized['path'];
+      const newText = sanitized['newText'];
+      return typeof path === 'string' && typeof newText === 'string'
+        ? [
+            {
+              type: 'diff',
+              path,
+              oldText:
+                typeof sanitized['oldText'] === 'string' ||
+                sanitized['oldText'] === null
+                  ? sanitized['oldText']
+                  : null,
+              newText,
+            },
+          ]
+        : [];
+    }
+    if (type !== 'content') return [];
+    const content = sanitized['content'];
+    if (!isRecord(content) || typeof content['type'] !== 'string') return [];
+    return [
+      {
+        type: 'content',
+        content: {
+          ...content,
+          type: content['type'],
+        },
+      },
+    ];
+  });
+}
+
+function normalizeToolLocations(value: unknown): ToolCallLocation[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): ToolCallLocation[] => {
+    const sanitized = sanitizeDaemonValue(entry);
+    if (!isRecord(sanitized) || typeof sanitized['path'] !== 'string') {
+      return [];
+    }
+    const line = sanitized['line'];
+    return [
+      {
+        path: sanitized['path'],
+        ...(typeof line === 'number' || line === null ? { line } : {}),
+      },
+    ];
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

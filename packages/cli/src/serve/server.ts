@@ -28,6 +28,7 @@ import {
   type DeviceFlowPublicView,
 } from './auth/deviceFlow.js';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
+import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
 import { isLoopbackBind } from './loopbackBinds.js';
@@ -109,6 +110,53 @@ export function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
       );
     }
   };
+}
+
+/**
+ * Shared `WorkspaceFileSystemFactory` construction used by both
+ * `runQwenServe` and `createServeApp`'s default bridge wiring.
+ * Centralizes the "use the injected factory if provided, otherwise
+ * build one with the given trust + audit-emit posture" logic so a
+ * future change to one call site doesn't silently diverge the other
+ * (#4334 DWcK4 review fold-in).
+ *
+ * Trust is intentionally a **required** parameter — the two call
+ * sites have different correct defaults and centralizing only the
+ * construction shape (not the policy) prevents accidental coupling:
+ *   - `runQwenServe` defaults to `trusted: true` (production daemon
+ *     boots up trusted; an explicit `deps.trustedWorkspace: false`
+ *     overrides for sandboxed runs).
+ *   - `createServeApp` defaults to `trusted: false` (test-safe;
+ *     direct embeds — IDE companions, hosted daemons — must
+ *     explicitly opt in to writes via `deps.fsFactory` or by
+ *     injecting their own `deps.bridge`).
+ *
+ * The audit-emit defaults to `createDefaultFsAuditEmit()` (the
+ * throttled stderr warning) when not provided.
+ */
+/**
+ * Module-scoped once-per-process guard for the `createServeApp`
+ * default-trust stderr warning (#4334 wenshao review DWrbn). Without
+ * this, `server.test.ts`'s ~25 `createServeApp` calls would flood
+ * stderr with identical lines, masking genuine failures in CI logs.
+ * Module scope (not closure-per-app) is intentional — the warning is
+ * a *posture* statement about this binary, not about each individual
+ * createServeApp instance.
+ */
+let warnedDefaultTrust = false;
+
+export function resolveBridgeFsFactory(input: {
+  boundWorkspace: string;
+  injected?: WorkspaceFileSystemFactory;
+  trusted: boolean;
+  emit?: (event: BridgeEvent) => void;
+}): WorkspaceFileSystemFactory {
+  if (input.injected) return input.injected;
+  return createWorkspaceFileSystemFactory({
+    boundWorkspace: input.boundWorkspace,
+    trusted: input.trusted,
+    emit: input.emit ?? createDefaultFsAuditEmit(),
+  });
 }
 
 export interface ServeAppDeps {
@@ -240,6 +288,52 @@ export function createServeApp(
   const boundWorkspace =
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  // F1 follow-up (#4319): construct `fsFactory` BEFORE the bridge so
+  // the bridge can wire it through `BridgeFileSystem` for ACP-side
+  // writeTextFile / readTextFile calls. Symmetric with
+  // `runQwenServe.ts` — without this wiring, direct embeds / tests
+  // that don't inject `deps.bridge` would silently lose the PR 18
+  // defensive fs layer for agent-triggered fs (the inline raw-fs
+  // proxy in `BridgeClient` would still run, bypassing trust /
+  // TOCTOU / audit). Default trust here is `false` (test-safe) to
+  // match the existing `createServeApp` posture below.
+  //
+  // Behavior change warning for embed consumers (#4334 wenshao review):
+  // pre-this-PR, ACP writeTextFile went through `BridgeClient`'s inline
+  // proxy which had no trust gate, so embeds calling `createServeApp`
+  // without providing `deps.fsFactory` had agent writes always succeed.
+  // Now those writes will reject with `untrusted_workspace` unless the
+  // embed either (a) provides its own `deps.fsFactory` with `trusted:
+  // true`, (b) provides its own `deps.bridge` (which controls its own
+  // `BridgeFileSystem` wiring and bypasses the default adapter), or
+  // (c) explicitly accepts the trust-gate-default posture for its
+  // hosting environment. Warn loudly so the asymmetry is visible to
+  // operators rather than appearing as opaque agent-side write failures.
+  // `runQwenServe.ts` consumers are unaffected — that path constructs
+  // `fsFactory` with `trusted: true` by default.
+  //
+  // Suppress the warning when `deps.bridge` is provided — that embed
+  // owns its own fileSystem wiring (the default adapter never runs) so
+  // the warning's claim about ACP writes rejecting would be false.
+  //
+  // Throttled to fire ONCE per process (#4334 wenshao review DWrbn):
+  // `server.test.ts` calls `createServeApp` ~25 times and the
+  // unthrottled warning floods stderr, masking genuine failures in CI
+  // output. Operators see the warning the first time and can take
+  // action; subsequent calls don't add information.
+  if (!deps.fsFactory && !deps.bridge && !warnedDefaultTrust) {
+    warnedDefaultTrust = true;
+    process.stderr.write(
+      'qwen serve: createServeApp default fsFactory uses trusted=false ' +
+        '— agent ACP writeTextFile calls will reject with untrusted_workspace. ' +
+        'Inject deps.fsFactory (with explicit trust) or deps.bridge to override.\n',
+    );
+  }
+  const fsFactory = resolveBridgeFsFactory({
+    boundWorkspace,
+    ...(deps.fsFactory ? { injected: deps.fsFactory } : {}),
+    trusted: false,
+  });
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -260,6 +354,10 @@ export function createServeApp(
       // here preserves byte-for-byte route output on the default
       // bridge construction path.
       statusProvider: createDaemonStatusProvider(),
+      // F1 follow-up (#4319): wire the WorkspaceFileSystem adapter so
+      // ACP writeTextFile / readTextFile pick up trust / TOCTOU /
+      // audit. See `bridgeFileSystemAdapter.ts`.
+      fileSystem: createBridgeFileSystemAdapter(fsFactory),
     });
 
   // Allow same-origin requests from the demo page. Browsers send an
@@ -303,13 +401,12 @@ export function createServeApp(
   // audit destination — `runQwenServe` will inject one whose
   // `trusted` mirrors `Config.isTrustedFolder()` and whose `emit`
   // plumbs into the per-session EventBus once PR 19/20 lands.
-  const fsFactory: WorkspaceFileSystemFactory =
-    deps.fsFactory ??
-    createWorkspaceFileSystemFactory({
-      boundWorkspace,
-      trusted: false,
-      emit: createDefaultFsAuditEmit(),
-    });
+  //
+  // F1 follow-up (#4319): the `fsFactory` is now constructed earlier
+  // (above the bridge) so the bridge can wire it into the
+  // `BridgeFileSystem` seam for ACP fs methods. Re-using the same
+  // instance for HTTP fs routes + ACP fs ensures a single operator
+  // audit stream covers both surfaces.
   // Park the factory on `app.locals` so PR 19/20 route handlers can
   // pick it up via `req.app.locals.fsFactory` without re-threading
   // the value through every handler signature, and so PR 18 tests

@@ -47,15 +47,29 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       createPermissionBlock('pending-permission'),
       createPermissionBlock('allowed-permission', 'selected:allow'),
       createPermissionBlock('allowed-substring-permission', 'selected:deny-me'),
+      createPermissionBlock('cancelled-substring-permission', 'selected:abort'),
+      createPermissionBlock('grant-permission', 'selected:grant-access'),
+      createPermissionBlock('reject-permission', 'selected:reject-policy'),
+      createPermissionBlock('dismiss-permission', 'selected:dismiss-dialog'),
+      createPermissionBlock('question-choice-permission', 'selected:beijing'),
       createPermissionBlock('cancelled-permission', 'cancelled'),
+      createPermissionBlock('already-resolved-permission', 'already resolved'),
       createPermissionBlock('denied-permission', 'denied'),
+      createPermissionBlock('unknown-permission', 'timed out'),
     ]);
 
     expect(messages.map((message) => message.toolCall?.status)).toEqual([
       'pending',
       'completed',
+      'failed',
+      'cancelled',
+      'completed',
+      'failed',
+      'cancelled',
       'completed',
       'cancelled',
+      'cancelled',
+      'failed',
       'failed',
     ]);
   });
@@ -119,6 +133,50 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       kind: 'status',
       rawOutput: 'connected',
       content: [{ content: { text: 'connected' } }],
+    });
+  });
+
+  it('preserves daemon tool content and locations for specialized renderers', () => {
+    const messages = daemonTranscriptToUnifiedMessages([
+      {
+        id: 'tool-rich',
+        kind: 'tool',
+        toolCallId: 'tool-rich',
+        title: 'Read file',
+        status: 'completed',
+        preview: { kind: 'generic' },
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: '\u202eread ok' },
+          },
+          {
+            type: 'diff',
+            path: '\u202esrc/index.ts',
+            oldText: 'old',
+            newText: '\u202enew',
+          },
+        ],
+        locations: [{ path: '\u202esrc/index.ts', line: 3 }],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(messages[0]?.toolCall).toMatchObject({
+      content: [
+        {
+          type: 'content',
+          content: { type: 'text', text: 'read ok' },
+        },
+        {
+          type: 'diff',
+          path: 'src/index.ts',
+          oldText: 'old',
+          newText: 'new',
+        },
+      ],
+      locations: [{ path: 'src/index.ts', line: 3 }],
     });
   });
 

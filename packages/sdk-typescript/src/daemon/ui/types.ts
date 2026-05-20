@@ -44,6 +44,8 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   status?: string;
   toolName?: string;
   toolKind?: string;
+  content?: unknown;
+  locations?: unknown;
   details?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
@@ -185,6 +187,8 @@ export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
   toolName?: string;
   toolKind?: string;
   preview: DaemonToolPreview;
+  content?: unknown;
+  locations?: unknown;
   details?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
@@ -228,6 +232,7 @@ export interface DaemonTranscriptState {
   activeThoughtBlockId?: string;
   blockIndexById: Record<string, number>;
   toolBlockByCallId: Record<string, string>;
+  trimmedToolNotificationByCallId: Record<string, true>;
   permissionBlockByRequestId: Record<string, string>;
   nextOrdinal: number;
   now: number;

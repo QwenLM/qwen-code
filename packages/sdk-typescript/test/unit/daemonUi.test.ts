@@ -367,7 +367,116 @@ describe('daemon UI normalizer and transcript reducer', () => {
       { now: 5 },
     );
 
-    expect(state.blocks).toMatchObject([{ kind: 'status', text: 'trim tool' }]);
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'error',
+        text: 'Tool tool-1 output trimmed (max blocks reached)',
+        eventId: 8,
+      },
+    ]);
+    expect(state.trimmedToolNotificationByCallId['tool-1']).toBe(true);
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 9,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-1',
+            status: 'completed',
+            rawOutput: 'late again',
+          },
+        },
+      }),
+      { now: 6 },
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'error',
+        text: 'Tool tool-1 output trimmed (max blocks reached)',
+        eventId: 8,
+      },
+    ]);
+  });
+
+  it('keeps active assistant text open when reporting trimmed tool updates', () => {
+    let state = createDaemonTranscriptState({ maxBlocks: 2, now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 10,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'tool-stream',
+            title: 'Run command',
+            status: 'running',
+          },
+        },
+      }),
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        { type: 'status', text: 'first trim filler' },
+        { type: 'status', text: 'second trim filler' },
+      ],
+      { now: 3 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'streaming' }],
+      { now: 4 },
+    );
+
+    const assistantBlockBeforeLateToolUpdate = state.blocks.find(
+      (block) => block.kind === 'assistant',
+    );
+    expect(assistantBlockBeforeLateToolUpdate).toMatchObject({
+      kind: 'assistant',
+      streaming: true,
+    });
+    expect(state.activeAssistantBlockId).toBe(
+      assistantBlockBeforeLateToolUpdate?.id,
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 11,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-stream',
+            rawOutput: 'late',
+          },
+        },
+      }),
+      { now: 5 },
+    );
+
+    const assistantBlockAfterLateToolUpdate = state.blocks.find(
+      (block) => block.kind === 'assistant',
+    );
+    expect(assistantBlockAfterLateToolUpdate).toMatchObject({
+      kind: 'assistant',
+      text: 'streaming',
+      streaming: true,
+    });
+    expect(state.activeAssistantBlockId).toBe(
+      assistantBlockAfterLateToolUpdate?.id,
+    );
   });
 
   it('preserves rich tool preview and status on output-only updates', () => {
@@ -414,6 +523,47 @@ describe('daemon UI normalizer and transcript reducer', () => {
         status: 'running',
         preview: { kind: 'command', command: 'npm test' },
         rawOutput: 'ok',
+      },
+    ]);
+  });
+
+  it('preserves daemon tool content and locations for web renderers', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent({
+        id: 46,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-rich',
+            title: 'Read file',
+            status: 'completed',
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: 'read ok' },
+              },
+            ],
+            locations: [{ path: 'src/index.ts', line: 3 }],
+          },
+        },
+      }),
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'tool',
+        toolCallId: 'tool-rich',
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: 'read ok' },
+          },
+        ],
+        locations: [{ path: 'src/index.ts', line: 3 }],
       },
     ]);
   });
@@ -508,6 +658,42 @@ describe('daemon UI normalizer and transcript reducer', () => {
       { kind: 'assistant', text: 'answer' },
       { kind: 'thought', text: 'second thought' },
     ]);
+  });
+
+  it('caps text transcript blocks to prevent unbounded memory growth', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'x'.repeat(160_000) },
+        { type: 'assistant.text.delta', text: 'y'.repeat(80_000) },
+      ],
+      { now: 2 },
+    );
+    const [block] = state.blocks;
+
+    expect(block).toMatchObject({ kind: 'assistant' });
+    expect(
+      block && 'text' in block ? block.text.length : 0,
+    ).toBeLessThanOrEqual(100_000);
+    expect(block && 'text' in block ? block.text : '').toContain('[truncated]');
+  });
+
+  it('caps shell transcript blocks to prevent unbounded output growth', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'shell.output', text: 'x'.repeat(160_000), stream: 'stdout' },
+        { type: 'shell.output', text: 'y'.repeat(80_000), stream: 'stdout' },
+      ],
+      { now: 2 },
+    );
+    const [block] = state.blocks;
+
+    expect(block).toMatchObject({ kind: 'shell', stream: 'stdout' });
+    expect(
+      block && 'text' in block ? block.text.length : 0,
+    ).toBeLessThanOrEqual(100_000);
+    expect(block && 'text' in block ? block.text : '').toContain('[truncated]');
   });
 
   it('redacts raw daemon payloads from fallback error text', () => {
@@ -622,7 +808,101 @@ describe('daemon UI normalizer and transcript reducer', () => {
       },
       {
         type: 'debug',
-        text: expect.stringContaining('secret') as string,
+        text: expect.not.stringContaining('secret') as string,
+      },
+    ]);
+  });
+
+  it('normalizes plan session updates as visible tool blocks', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent({
+        id: 60,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [
+              { content: 'Design API', status: 'completed' },
+              { content: 'Implement UI', status: 'in_progress' },
+              { content: 'Add tests', status: 'pending' },
+            ],
+          },
+        },
+      }),
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'tool',
+        toolCallId: 'daemon-plan',
+        toolKind: 'updated_plan',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: '- [x] Design API\n- [-] Implement UI\n- [ ] Add tests',
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('recreates synthetic plan blocks after transcript trimming', () => {
+    let state = createDaemonTranscriptState({ maxBlocks: 1, now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 60,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: 'Design API', status: 'completed' }],
+          },
+        },
+      }),
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'status', text: 'trim plan block' }],
+      { now: 3 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 61,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: 'Implement UI', status: 'in_progress' }],
+          },
+        },
+      }),
+      { now: 4 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'tool',
+        toolCallId: 'daemon-plan',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: '- [-] Implement UI',
+            },
+          },
+        ],
       },
     ]);
   });
