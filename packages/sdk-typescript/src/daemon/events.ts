@@ -660,6 +660,20 @@ export interface DaemonSessionViewState {
    * one warning per crossing episode. Adapters tap this counter to
    * surface MCP-pressure UI; the snapshot at `GET /workspace/mcp`
    * still carries the authoritative state-after-reconnect.
+   *
+   * **F2 (#4175 commit 6) workspace-scope multiplier**: when the
+   * daemon advertises `mcp_workspace_pool` and the budget is workspace-
+   * scoped (`scope: 'workspace'` on the event payload), a SINGLE
+   * underlying budget crossing fans out as N notifications — one per
+   * attached session. Each session's reducer increments its OWN
+   * counter independently, so this counter is per-stream NOT
+   * per-budget-event. Consumers aggregating `mcpBudgetWarningCount`
+   * across multiple sessions on the same connection will count an
+   * N× multiplier; gate on `isWorkspaceScopedBudgetEvent` (or branch
+   * on `lastMcpBudgetWarning?.scope === 'workspace'`) and divide by
+   * the active session count if a workspace-level "events fired"
+   * tally is needed. The per-stream counter remains the right shape
+   * for "did THIS session see budget pressure" UI.
    */
   mcpBudgetWarningCount: number;
   lastMcpBudgetWarning?: DaemonMcpBudgetWarningData;
@@ -669,6 +683,11 @@ export interface DaemonSessionViewState {
    * length-1 from `readResource`'s lazy-spawn refusal); the count
    * reflects batches not refused-server entries. Mirrors the
    * snapshot's `disabledReason: 'budget'` per-server tag.
+   *
+   * **F2 (#4175 commit 6) workspace-scope multiplier**: same N×
+   * fan-out semantics as `mcpBudgetWarningCount` — one workspace-
+   * scoped refused_batch event becomes N reducer increments across
+   * N attached sessions on the daemon's connection.
    */
   mcpChildRefusedBatchCount: number;
   lastMcpChildRefusedBatch?: DaemonMcpChildRefusedBatchData;

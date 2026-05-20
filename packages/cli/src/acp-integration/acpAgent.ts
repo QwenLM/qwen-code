@@ -573,7 +573,15 @@ class QwenAgent implements Agent {
     // session id) over the same connection. Each notification is
     // independently fire-and-forget; a mid-flight ACP disconnect
     // shouldn't sink delivery to siblings.
-    for (const sid of this.sessions.keys()) {
+    //
+    // R3 (commit 6 self-review fold-in): snapshot the session id
+    // list before the async fan-out so a concurrent `killSession`
+    // (which mutates `this.sessions` synchronously) can't corrupt
+    // the iterator. `Array.from` produces a stable snapshot; per-id
+    // notifications then run on the snapshot regardless of live-map
+    // mutations.
+    const sessionIds = Array.from(this.sessions.keys());
+    for (const sid of sessionIds) {
       void this.connection
         .extNotification('qwen/notify/session/mcp-budget-event', {
           v: 1,

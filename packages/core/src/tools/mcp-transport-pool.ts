@@ -153,6 +153,31 @@ export class McpTransportPool {
   }
 
   /**
+   * Check whether any pool entry (live OR currently spawning) shares
+   * the given `serverName`. Used by the close-callback and spawn-
+   * failure rollback to decide whether the budget slot for `name`
+   * should still be held — slot ownership is per-NAME, so the slot
+   * stays reserved as long as at least one entry / spawn for the
+   * name exists.
+   *
+   * `spawnInFlight` keys have the form `${name}::${fingerprint}`,
+   * so a `startsWith(`${name}::`)` test isolates same-name in-flight
+   * spawns. The startsWith form is safe because both `name` and the
+   * separator `::` are sanitized by `connectionIdOf` (no embedded
+   * `::` in canonical names per design §5).
+   */
+  private hasNameSibling(serverName: string): boolean {
+    for (const e of this.entries.values()) {
+      if (e.serverName === serverName) return true;
+    }
+    const prefix = `${serverName}::`;
+    for (const id of this.spawnInFlight.keys()) {
+      if (id.startsWith(prefix)) return true;
+    }
+    return false;
+  }
+
+  /**
    * Acquire a pooled (or unpooled, if `cfg` is not poolable) connection
    * for `sessionId`. Returns the connection handle; caller should call
    * `pool.release(handle.id, sessionId)` when done.
@@ -235,25 +260,28 @@ export class McpTransportPool {
     // spawning the entry. Await its completion, then attach.
     let inFlight = this.spawnInFlight.get(id);
     if (!inFlight) {
-      inFlight = this.spawnEntry(serverName, cfg, id)
+      const spawnPromise = this.spawnEntry(serverName, cfg, id);
+      // Order of cleanup matters: `finally` removes the in-flight
+      // promise from `spawnInFlight` BEFORE the catch block runs the
+      // budget rollback, so `hasNameSibling` (which inspects
+      // `spawnInFlight.keys`) sees the post-cleanup state. Wenshao R1
+      // race-fix: previously the rollback only checked `this.entries`
+      // and a sibling entry could prematurely keep the slot reserved
+      // even when this rollback should have released it.
+      inFlight = spawnPromise
+        .finally(() => {
+          this.spawnInFlight.delete(id);
+        })
         .catch((err) => {
           // F2 (#4175 commit 6): roll back the slot reservation on
           // spawn failure (V21-4) so a transient connect failure
           // doesn't leak the slot until daemon restart.
           if (this.opts.budget !== undefined) {
-            // Only release if no other entry for this name exists —
-            // matches the close-path bookkeeping at `entryClosed`.
-            const stillHasEntries = [...this.entries.values()].some(
-              (e) => e.serverName === serverName,
-            );
-            if (!stillHasEntries) {
+            if (!this.hasNameSibling(serverName)) {
               this.opts.budget.release(serverName);
             }
           }
           throw err;
-        })
-        .finally(() => {
-          this.spawnInFlight.delete(id);
         });
       this.spawnInFlight.set(id, inFlight);
     }
@@ -548,19 +576,20 @@ export class McpTransportPool {
       entryOpts,
       // F2 (#4175 commit 6): when an entry transitions to terminal
       // `closed` / `failed`, release its budget slot — but ONLY if
-      // no sibling entry shares the same `serverName` (multi-
+      // no sibling entry (live OR currently spawning) shares the same
+      // `serverName`. Pool tracks slot ownership by NAME; multi-
       // fingerprint case where two divergent OAuth headers spawned
-      // two entries; either entry closing alone shouldn't free the
-      // shared name's slot). The pool tracks slot ownership by
-      // NAME, mirroring `WorkspaceMcpBudget.tryReserve` semantics.
+      // two entries should keep the slot until the LAST entry for
+      // the name closes. Wenshao R1 fix: previous version checked
+      // only `this.entries` and missed in-flight spawns — entry A
+      // closing during entry B's still-pending spawn would
+      // prematurely release the slot, letting a third name slip
+      // past the cap once B finished.
       (closedId) => {
         const closing = this.entries.get(closedId);
         this.entries.delete(closedId);
         if (closing && this.opts.budget !== undefined) {
-          const siblings = [...this.entries.values()].some(
-            (e) => e.serverName === closing.serverName,
-          );
-          if (!siblings) {
+          if (!this.hasNameSibling(closing.serverName)) {
             this.opts.budget.release(closing.serverName);
           }
         }

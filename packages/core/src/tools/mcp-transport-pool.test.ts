@@ -389,6 +389,46 @@ describe('McpTransportPool', () => {
       expect(budget.getReservedSlots()).toEqual([]);
     });
 
+    it('preserves slot when entry closes during a same-name in-flight spawn (R1 race fix)', async () => {
+      // Wenshao R1 review fold-in: previously the close-callback's
+      // sibling check inspected only `this.entries`. If entry A for
+      // 'srvA' closed while a divergent-fingerprint entry B for the
+      // same 'srvA' was still in `spawnInFlight` (not yet registered
+      // in `this.entries`), the close path released the slot
+      // prematurely — letting a third name slip past the cap once B
+      // finished. Fix: check `spawnInFlight` keys for `${name}::*`
+      // matches alongside `entries`.
+      mockMcpSuccess();
+      const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
+      const budget = new WorkspaceMcpBudget({
+        clientBudget: 1,
+        mode: 'enforce',
+      });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions({ budget }));
+      const r = mkSessionRegistries();
+      const cfgA = new MCPServerConfig('node', ['-a']);
+      const cfgB = new MCPServerConfig('node', ['-b']);
+      const cfgC = new MCPServerConfig('node', ['-c']);
+      // Entry A spawns and is in `entries`.
+      const connA = await pool.acquire('srvA', cfgA, 's1', r.tools, r.prompts);
+      // Entry B for same name (different fingerprint) — kick off
+      // spawn but DON'T await. By calling synchronously the second
+      // tryReserve resolves to 'already_held' because the slot was
+      // taken by A's reservation.
+      const acquireB = pool.acquire('srvA', cfgB, 's1', r.tools, r.prompts);
+      // Force-close A while B is still in flight.
+      connA.release();
+      await vi.advanceTimersByTimeAsync(50);
+      // B's spawn finishes — should still be the only remaining
+      // entry for 'srvA', slot still held.
+      await acquireB;
+      // Now a name-different acquire should be REFUSED (B holds the
+      // sole slot for 'srvA' but cap is 1, so 'srvC' overflows).
+      await expect(
+        pool.acquire('srvC', cfgC, 's1', r.tools, r.prompts),
+      ).rejects.toThrow(/budget exhausted/i);
+    });
+
     it('rolls back the slot reservation on spawn failure', async () => {
       // Mock connect to throw → entry never reaches `markActive`,
       // pool's `entries.delete(id)` runs in the catch block.
