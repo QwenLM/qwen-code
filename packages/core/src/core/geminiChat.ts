@@ -444,8 +444,20 @@ const ORPHAN_TOOL_USE_REPAIR_REASON =
 export function repairOrphanedToolUseTurns(
   history: Content[],
   reason: string = ORPHAN_TOOL_USE_REPAIR_REASON,
-): { injected: Array<{ callId: string; name: string }> } {
+): {
+  injected: Array<{ callId: string; name: string }>;
+  droppedDuplicates: Array<{ callId: string; name: string }>;
+} {
   const injected: Array<{ callId: string; name: string }> = [];
+  // Duplicates removed during the cleanup pass (any callId that had
+  // more than one `functionResponse` echo across the consecutive
+  // user turns). Returned alongside `injected` so call sites can log
+  // the cleanup — without this, a duplicate-only repair (no
+  // synthesis, no hoist) leaves zero diagnostic trail and a future
+  // callId-collision bug in the resolver could silently drop the
+  // wrong fr with no breadcrumb pointing here.
+  // qwen-latest-series-invite-beta-v34 thread on PR #4176.
+  const droppedDuplicates: Array<{ callId: string; name: string }> = [];
 
   // Forward walk: i mutates as we splice, so use index-based iteration
   // and skip the freshly-inserted user turn to avoid re-scanning it.
@@ -558,6 +570,7 @@ export function repairOrphanedToolUseTurns(
           turnIdx: locations[k]!.turnIdx,
           partIdx: locations[k]!.partIdx,
         });
+        droppedDuplicates.push({ callId: id, name });
       }
     }
     if (synthesizeIds.length === 0 && allRemovalTargets.length === 0) continue;
@@ -649,7 +662,7 @@ export function repairOrphanedToolUseTurns(
     }
   }
 
-  return { injected };
+  return { injected, droppedDuplicates };
 }
 
 /**
@@ -1073,6 +1086,19 @@ export class GeminiChat {
           `[REPAIR] sendMessageStream inline pass synthesized ` +
             `${inlineRepair.injected.length} functionResponse(s): ` +
             inlineRepair.injected
+              .map((entry) => `${entry.name}(${entry.callId})`)
+              .join(', '),
+        );
+      }
+      if (inlineRepair.droppedDuplicates.length > 0) {
+        // Symmetrical with the synthesis log: a duplicate-only repair
+        // (no synthesis, no hoist) here would otherwise be silent.
+        // qwen-latest-series-invite-beta-v34 thread on PR #4176.
+        debugLogger.warn(
+          `[REPAIR] sendMessageStream inline pass dropped ` +
+            `${inlineRepair.droppedDuplicates.length} duplicate ` +
+            `functionResponse(s): ` +
+            inlineRepair.droppedDuplicates
               .map((entry) => `${entry.name}(${entry.callId})`)
               .join(', '),
         );
@@ -1571,11 +1597,39 @@ export class GeminiChat {
               // in lockstep so the outer `finally` JSONL flush can't
               // resurrect a partial we just deleted from live history.
               // qwen-latest-series-invite-beta-v34 thread on PR #4176.
+              // Index-checked pop instead of a positional `pop()` so
+              // we match the diagnostic standard set by
+              // `popPartialIfPushed` above (splice at `idx` + warn on
+              // bounds/role mismatch). The two rollback strategies
+              // share an undocumented positional assumption: nothing
+              // mutates `this.history` between
+              // `processStreamResponse`'s push and the for-await
+              // catch here. If a future change inserts a mutation in
+              // that window (compression side-effect, abort-signal
+              // handler, telemetry hook), a naked
+              // `history.pop()` would silently remove the wrong
+              // entry while `clearPendingPartialState()` clears
+              // markers for the actual partial — leaving it
+              // permanently stranded with no log trail. The warn
+              // makes any future violation visible immediately.
+              // qwen-latest-series-invite-beta-v34 thread on PR #4176.
+              const expectedIdx = self.pendingPartialAssistantTurnIndex;
+              const lastIdx = self.history.length - 1;
               if (
-                self.pendingPartialAssistantTurnIndex !== null &&
+                expectedIdx !== null &&
                 self.history.length > 0 &&
-                self.history[self.history.length - 1].role === 'model'
+                self.history[lastIdx]?.role === 'model'
               ) {
+                if (expectedIdx !== lastIdx) {
+                  debugLogger.warn(
+                    `[RECOVERY_POP] Marker/last-index mismatch: ` +
+                      `marker=${expectedIdx}, lastIdx=${lastIdx}, ` +
+                      `historyLength=${self.history.length}. Popping ` +
+                      `last entry as best-effort rollback — investigate ` +
+                      `any history mutation between processStreamResponse's ` +
+                      `partial push and this catch.`,
+                  );
+                }
                 self.history.pop();
                 self.clearPendingPartialState();
               }
@@ -1948,6 +2002,7 @@ export class GeminiChat {
    */
   repairOrphanedToolUseTurns(reason?: string): {
     injected: Array<{ callId: string; name: string }>;
+    droppedDuplicates: Array<{ callId: string; name: string }>;
   } {
     return repairOrphanedToolUseTurns(this.history, reason);
   }

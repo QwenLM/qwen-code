@@ -397,12 +397,27 @@ export class GeminiClient {
    */
   repairOrphanedToolUseTurnsInHistory(reason?: string): {
     injected: Array<{ callId: string; name: string }>;
+    droppedDuplicates: Array<{ callId: string; name: string }>;
   } {
     const result = this.getChat().repairOrphanedToolUseTurns(reason);
     if (result.injected.length > 0) {
       debugLogger.warn(
         `[REPAIR] Synthesized ${result.injected.length} functionResponse(s) ` +
           `for dangling tool_use(s): ${result.injected
+            .map((e) => `${e.name}(${e.callId})`)
+            .join(', ')}`,
+      );
+    }
+    if (result.droppedDuplicates.length > 0) {
+      // Surface the duplicate-cleanup pass so investigators tracing
+      // a dedup-drop log have a breadcrumb pointing back to the
+      // repair function. Without this a duplicate-only repair (no
+      // synthesis, no hoist) leaves zero diagnostic trail and a
+      // future callId-collision bug would silently delete the
+      // wrong fr. qwen-latest-series-invite-beta-v34 thread on PR #4176.
+      debugLogger.warn(
+        `[REPAIR] Dropped ${result.droppedDuplicates.length} duplicate ` +
+          `functionResponse(s) for callId(s): ${result.droppedDuplicates
             .map((e) => `${e.name}(${e.callId})`)
             .join(', ')}`,
       );

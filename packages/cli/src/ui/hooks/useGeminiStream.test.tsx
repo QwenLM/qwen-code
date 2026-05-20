@@ -1228,8 +1228,20 @@ describe('useGeminiStream', () => {
     } as unknown as TrackedCompletedToolCall;
 
     const client = new MockedGeminiClientClass(mockConfig);
-    // History has fr for ONLY the deduped callId — `call_mixed_fresh`
-    // is not paired and must flow through to sendMessageStream.
+    // Wire BOTH the fast-path accessor (`getHistoryFunctionResponseIds`)
+    // and the legacy `getHistory()` fallback. Wiring the fast path
+    // is the actual point of this test: production code prefers
+    // `getHistoryFunctionResponseIds` to skip the multi-millisecond
+    // `structuredClone` cost on long sessions, and an earlier
+    // version of this test only mocked `getHistory()` so the slow
+    // path was always the one exercised. We assert below that the
+    // fast path was the only one called — a regression that drops
+    // the fast-path branch from the dispatcher would silently
+    // re-route every batch onto the slow clone path with no test
+    // failure.
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_mixed_deduped']));
     client.getHistory = vi.fn().mockReturnValue([
       { role: 'user', parts: [{ text: 'kick off' }] },
       {
@@ -1325,6 +1337,18 @@ describe('useGeminiStream', () => {
     // (c) The fresh tool's real result reaches sendMessageStream —
     // dedup didn't accidentally suppress it.
     expect(mockSendMessageStream).toHaveBeenCalled();
+
+    // (d) Fast-path was taken: `getHistoryFunctionResponseIds` was
+    // called for the dedup pass, and the cloning `getHistory()`
+    // fallback was NOT used by the dedup. (Other call sites in the
+    // hook may still call getHistory for their own purposes; we
+    // pin only that the dedup itself did not re-clone.) A future
+    // refactor that drops the fast-path branch from the dispatcher
+    // would re-route the dedup pass onto the structuredClone path
+    // and break this assertion — exactly the regression the
+    // accessor was added to prevent.
+    expect(client.getHistoryFunctionResponseIds).toHaveBeenCalled();
+    expect(client.getHistory).not.toHaveBeenCalled();
   });
 
   it('should not flicker streaming state to Idle between tool completion and submission', async () => {

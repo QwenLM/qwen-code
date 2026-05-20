@@ -9,6 +9,7 @@ import type {
   Content,
   GenerateContentConfig,
   GenerateContentResponse,
+  Part,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
@@ -2219,6 +2220,163 @@ describe('GeminiChat', async () => {
       chat.addHistory({ role: 'model', parts: [{ text: 'b' }] });
       chat.addHistory({ role: 'user', parts: [{ text: 'c' }] });
       expect(chat.getHistoryLength()).toBe(chat.getHistory().length);
+    });
+  });
+
+  describe('getHistoryFunctionResponseIds (qwen-latest-series-invite-beta-v34 thread on PR #4176)', () => {
+    // Walk-only accessor used by `useGeminiStream.handleCompletedTools`
+    // for the dedup pass. The whole point of this method is to avoid
+    // the multi-millisecond `structuredClone` hit that
+    // `getHistory()` pays on long sessions when only the id Set is
+    // needed. Pin the contract: returned Set contains every fr id
+    // present in user turns (including duplicates collapsed to one
+    // Set entry), and ignores parts that aren't functionResponses
+    // and turns that aren't user.
+    it('returns an empty Set for empty history', () => {
+      expect(chat.getHistoryFunctionResponseIds()).toEqual(new Set());
+    });
+
+    it('collects fr ids from user turns and ignores non-fr parts', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'go' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'cid_a', name: 'read_file', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_a',
+                name: 'read_file',
+                response: { output: 'a' },
+              },
+            },
+            { text: 'follow up' },
+          ],
+        },
+      ]);
+
+      expect(chat.getHistoryFunctionResponseIds()).toEqual(new Set(['cid_a']));
+    });
+
+    it('skips functionCall parts in model turns (only user[fr] counts)', () => {
+      // Defensive: a regression that walks all turns instead of just
+      // user turns would pull in `functionCall.id`s and double-count.
+      chat.setHistory([
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'cid_model', name: 'read_file', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_user',
+                name: 'read_file',
+                response: { output: 'u' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const ids = chat.getHistoryFunctionResponseIds();
+      expect(ids).toEqual(new Set(['cid_user']));
+      expect(ids.has('cid_model')).toBe(false);
+    });
+
+    it('collapses duplicate fr ids across multiple user turns to one Set entry', () => {
+      // Same id echoed twice in different user turns: dedup callers
+      // only need to know "is this id paired anywhere", not the
+      // count, so a Set is sufficient and natural.
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_dup',
+                name: 'read_file',
+                response: { output: '1' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_dup',
+                name: 'read_file',
+                response: { output: '2' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const ids = chat.getHistoryFunctionResponseIds();
+      expect(ids.size).toBe(1);
+      expect(ids.has('cid_dup')).toBe(true);
+    });
+
+    it('handles entries with no parts and parts with no functionResponse', () => {
+      // Defensive against malformed history (missing parts, parts
+      // with neither text nor fr): must not crash.
+      chat.setHistory([
+        { role: 'user', parts: undefined as unknown as Part[] },
+        { role: 'user', parts: [] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_ok',
+                name: 'read_file',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      expect(chat.getHistoryFunctionResponseIds()).toEqual(new Set(['cid_ok']));
+    });
+
+    it('does not deep-clone history (returns a fresh Set, not aliased to internal state)', () => {
+      // The whole reason this method exists is to avoid the
+      // structuredClone in getHistory(). Mutating the returned Set
+      // must not bleed into the next call.
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_immut',
+                name: 'read_file',
+                response: { output: 'v' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const first = chat.getHistoryFunctionResponseIds();
+      first.add('cid_FAKE');
+      first.delete('cid_immut');
+
+      const second = chat.getHistoryFunctionResponseIds();
+      expect(second.has('cid_immut')).toBe(true);
+      expect(second.has('cid_FAKE')).toBe(false);
     });
   });
 
