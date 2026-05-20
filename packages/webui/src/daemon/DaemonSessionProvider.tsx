@@ -75,6 +75,8 @@ const DaemonConnectionContext = createContext<
 const DaemonActionsContext = createContext<DaemonUiSessionActions | undefined>(
   undefined,
 );
+const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
+const TERMINAL_SESSION_HTTP_STATUSES = new Set([401, 403, 404, 410]);
 
 export function DaemonSessionProvider({
   baseUrl,
@@ -95,6 +97,10 @@ export function DaemonSessionProvider({
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const promptAbortRef = useRef<AbortController | undefined>(undefined);
   const promptBusyRef = useRef(false);
+  const eventOptionsRef = useRef({ suppressOwnUserEcho, includeRawEvent });
+  const reconnectConfigRef = useRef({ reconnectDelayMs, maxReconnectDelayMs });
+  eventOptionsRef.current = { suppressOwnUserEcho, includeRawEvent };
+  reconnectConfigRef.current = { reconnectDelayMs, maxReconnectDelayMs };
   const modelServiceId = createSessionRequest?.modelServiceId;
   const sessionScope = createSessionRequest?.sessionScope;
   const [connection, setConnection] = useState<DaemonConnectionState>({
@@ -157,10 +163,11 @@ export function DaemonSessionProvider({
               reconnectAttempt = 0;
             }
             try {
+              const eventOptions = eventOptionsRef.current;
               const uiEvents = normalizeDaemonEvent(event, {
                 clientId: session.clientId,
-                suppressOwnUserEcho,
-                includeRawEvent,
+                suppressOwnUserEcho: eventOptions.suppressOwnUserEcho,
+                includeRawEvent: eventOptions.includeRawEvent,
               });
               store.dispatch(uiEvents);
             } catch (error) {
@@ -174,6 +181,8 @@ export function DaemonSessionProvider({
             }
           }
           if (!disposed && !abort.signal.aborted) {
+            // Keep the session handle after a normal SSE close so the next
+            // subscription can resume from DaemonSessionClient.lastEventId.
             store.dispatch({
               type: 'status',
               text: 'SSE stream ended',
@@ -184,8 +193,8 @@ export function DaemonSessionProvider({
           const message =
             error instanceof Error ? error.message : String(error);
           store.dispatch({ type: 'error', text: message, recoverable: true });
-          const sessionMissing = isDaemonHttpNotFound(error);
-          if (sessionMissing) {
+          const terminalSessionError = isTerminalSessionHttpError(error);
+          if (terminalSessionError) {
             session = undefined;
             sessionRef.current = undefined;
           }
@@ -225,10 +234,11 @@ export function DaemonSessionProvider({
         }
 
         reconnectAttempt += 1;
+        const reconnectConfig = reconnectConfigRef.current;
         const delayMs = getReconnectDelayMs(
           reconnectAttempt,
-          reconnectDelayMs,
-          maxReconnectDelayMs,
+          reconnectConfig.reconnectDelayMs,
+          reconnectConfig.maxReconnectDelayMs,
         );
         setConnection((current) => ({
           ...current,
@@ -257,10 +267,6 @@ export function DaemonSessionProvider({
     modelServiceId,
     sessionScope,
     maxQueued,
-    suppressOwnUserEcho,
-    includeRawEvent,
-    reconnectDelayMs,
-    maxReconnectDelayMs,
     store,
   ]);
 
@@ -297,6 +303,7 @@ export function DaemonSessionProvider({
             store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
             return { stopReason: 'cancelled' };
           }
+          store.dispatch({ type: 'assistant.done', reason: 'error' });
           throw dispatchActionError(store, 'Prompt failed', error);
         } finally {
           if (promptAbortRef.current === promptAbort) {
@@ -323,7 +330,7 @@ export function DaemonSessionProvider({
           throw error;
         }
         try {
-          await session.cancel();
+          await withActionTimeout(session.cancel(), 'Cancel timed out');
         } catch (error) {
           throw dispatchActionError(store, 'Cancel failed', error);
         } finally {
@@ -339,7 +346,10 @@ export function DaemonSessionProvider({
           'Set model failed',
         );
         try {
-          return await session.setModel(modelId);
+          return await withActionTimeout(
+            session.setModel(modelId),
+            'Set model timed out',
+          );
         } catch (error) {
           throw dispatchActionError(store, 'Set model failed', error);
         }
@@ -354,7 +364,10 @@ export function DaemonSessionProvider({
           'Permission response failed',
         );
         try {
-          return await session.respondToSessionPermission(requestId, response);
+          return await withActionTimeout(
+            session.respondToSessionPermission(requestId, response),
+            'Permission response timed out',
+          );
         } catch (error) {
           throw dispatchActionError(store, 'Permission response failed', error);
         }
@@ -462,11 +475,14 @@ function isAbortError(error: unknown): boolean {
   );
 }
 
-function isDaemonHttpNotFound(error: unknown): boolean {
-  return (
-    (error instanceof DaemonHttpError && error.status === 404) ||
-    (isRecord(error) && error['status'] === 404)
-  );
+function isTerminalSessionHttpError(error: unknown): boolean {
+  const status =
+    error instanceof DaemonHttpError
+      ? error.status
+      : isRecord(error) && typeof error['status'] === 'number'
+        ? error['status']
+        : undefined;
+  return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -487,7 +503,28 @@ function getReconnectDelayMs(
       ? Math.max(base, maxReconnectDelayMs)
       : base;
   const exponential = base * 2 ** Math.max(0, attempt - 1);
-  return Math.min(exponential, max);
+  const capped = Math.min(exponential, max);
+  const jitter = 0.8 + Math.random() * 0.4;
+  return Math.min(max, Math.max(1, Math.round(capped * jitter)));
+}
+
+async function withActionTimeout<T>(
+  promise: Promise<T>,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${message} after ${DEFAULT_ACTION_TIMEOUT_MS}ms`));
+        }, DEFAULT_ACTION_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function delay(delayMs: number, signal: AbortSignal): Promise<void> {

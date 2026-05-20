@@ -30,15 +30,21 @@ describe('daemonTranscriptToUnifiedMessages', () => {
     });
   });
 
-  it('preserves cancelled and unknown daemon tool statuses', () => {
+  it('maps daemon tool statuses without leaving terminal states spinning', () => {
     const messages = daemonTranscriptToUnifiedMessages([
       createToolBlock('cancelled-tool', 'cancelled'),
-      createToolBlock('future-tool', 'waiting_for_input'),
+      createToolBlock('waiting-tool', 'waiting_for_input'),
+      createToolBlock('skipped-tool', 'skipped'),
+      createToolBlock('timeout-tool', 'timeout'),
+      createToolBlock('future-tool', 'future_status'),
     ]);
 
     expect(messages.map((message) => message.toolCall?.status)).toEqual([
       'cancelled',
-      'in_progress',
+      'pending',
+      'cancelled',
+      'failed',
+      'failed',
     ]);
   });
 

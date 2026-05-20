@@ -9,7 +9,12 @@ import type {
   DaemonTranscriptQuestion,
   DaemonTranscriptQuestionOption,
 } from './types.js';
-import { getFirstString, isRecord, stringifyJson } from './utils.js';
+import {
+  getFirstString,
+  isRecord,
+  isSensitiveKey,
+  stringifyRedactedJson,
+} from './utils.js';
 
 const MAX_TOOL_PREVIEW_DEPTH = 8;
 
@@ -117,7 +122,10 @@ function collectPreviewRows(
   for (const [key, value] of Object.entries(input).slice(0, 4)) {
     if (value === undefined || value === null || Array.isArray(value)) continue;
     if (isRecord(value)) continue;
-    rows.push({ label: key, value: stringifyJson(value) });
+    rows.push({
+      label: key,
+      value: isSensitiveKey(key) ? '[redacted]' : stringifyRedactedJson(value),
+    });
   }
   return rows;
 }

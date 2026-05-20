@@ -196,12 +196,19 @@ function normalizeToolStatus(status: string): ToolCallStatus {
       return 'completed';
     case 'canceled':
     case 'cancelled':
+    case 'skipped':
       return 'cancelled';
+    case 'waiting':
+    case 'waiting_for_input':
+    case 'queued':
+      return 'pending';
     case 'failed':
     case 'error':
+    case 'timeout':
+    case 'timed_out':
       return 'failed';
     default:
-      return 'in_progress';
+      return 'failed';
   }
 }
 

@@ -41,6 +41,7 @@ export {
   createDaemonToolPreview,
   createDaemonTranscriptState,
   createDaemonTranscriptStore,
+  DAEMON_PLAN_TOOL_CALL_ID,
   daemonUiEventToTerminalText,
   getOutputText as getDaemonUiOutputText,
   getSessionUpdatePayload,

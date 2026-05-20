@@ -335,6 +335,76 @@ describe('DaemonSessionProvider', () => {
     ).toBe(false);
   });
 
+  it('ends assistant streaming when prompt fails with a non-abort error', async () => {
+    const prompt = createDeferred<PromptResult>();
+    const assistantChunk = createDeferred<void>();
+    const session = createMockSession({
+      prompt: vi.fn(() => prompt.promise),
+      events: async function* assistantThenIdleEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await assistantChunk.promise;
+        yield {
+          id: 11,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'partial' },
+            },
+          },
+        };
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = providerActions.sendPrompt('fail later');
+      await flushPromises();
+      assistantChunk.resolve();
+      await flushPromises();
+    });
+    expect(blocks).toMatchObject([
+      { kind: 'user', text: 'fail later' },
+      { kind: 'assistant', text: 'partial', streaming: true },
+    ]);
+
+    prompt.reject(new Error('network down'));
+    const failedPrompt = promptResult;
+    if (!failedPrompt) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(failedPrompt).rejects.toThrow('network down');
+    });
+
+    expect(blocks).toMatchObject([
+      { kind: 'user', text: 'fail later' },
+      { kind: 'assistant', text: 'partial', streaming: false },
+      { kind: 'error', text: 'Prompt failed: network down' },
+    ]);
+  });
+
   it('clears prompt state and transcript when reconnect attaches a different session', async () => {
     const firstEvents = createClosableEvents();
     const firstSession = createMockSession({
@@ -522,6 +592,54 @@ describe('DaemonSessionProvider', () => {
     expect(connection).toMatchObject({ sessionId: 'session-b' });
   });
 
+  it('does not reconnect when event processing options change', async () => {
+    const session = createMockSession({ events: createIdleEvents() });
+    sdkMocks.sessions.push(session);
+
+    function Harness() {
+      return null;
+    }
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect={true}
+          includeRawEvent={false}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect={true}
+          includeRawEvent={true}
+          suppressOwnUserEcho={false}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledTimes(1);
+  });
+
   it('surfaces SSE stream end and clears the session when reconnect is disabled', async () => {
     const session = createMockSession({ events: createClosedEvents() });
     sdkMocks.sessions.push(session);
@@ -550,6 +668,46 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       { kind: 'status', text: 'SSE stream ended' },
     ]);
+    await act(async () => {
+      await expect(providerActions.cancel()).rejects.toThrow(
+        'Daemon session is not connected',
+      );
+    });
+  });
+
+  it('clears stale sessions on terminal HTTP stream errors', async () => {
+    const session = createMockSession({
+      events: async function* terminalErrorEvents() {
+        await Promise.resolve();
+        yield* [];
+        throw Object.assign(new Error('session gone'), { status: 410 });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    const providerActions = requireActions(actions);
+
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'session gone',
+    });
+    expect(connection?.sessionId).toBeUndefined();
     await act(async () => {
       await expect(providerActions.cancel()).rejects.toThrow(
         'Daemon session is not connected',

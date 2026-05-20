@@ -38,6 +38,56 @@ export function stringifyJson(value: unknown): string {
   }
 }
 
+export function stringifyRedactedJson(value: unknown): string {
+  return stringifyJson(redactSensitiveFields(value));
+}
+
+export function redactSensitiveFields(value: unknown, depth = 0): unknown {
+  if (depth > 16) return '[truncated]';
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSensitiveFields(entry, depth + 1));
+  }
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      isSensitiveKey(key)
+        ? '[redacted]'
+        : redactSensitiveFields(entry, depth + 1),
+    ]),
+  );
+}
+
+export function isSensitiveKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return (
+    normalized === 'authorization' ||
+    normalized === 'auth' ||
+    normalized === 'cookie' ||
+    normalized === 'setcookie' ||
+    normalized === 'credential' ||
+    normalized === 'credentials' ||
+    normalized === 'password' ||
+    normalized === 'passphrase' ||
+    normalized === 'privatekey' ||
+    normalized === 'apikey' ||
+    normalized === 'clientsecret' ||
+    normalized === 'idtoken' ||
+    normalized === 'sessiontoken' ||
+    normalized === 'xapikey' ||
+    normalized === 'xauthkey' ||
+    normalized === 'xauthtoken' ||
+    normalized.endsWith('token') ||
+    normalized.endsWith('secret') ||
+    normalized.endsWith('apikey') ||
+    normalized.endsWith('privatekey') ||
+    normalized.includes('accesstoken') ||
+    normalized.includes('refreshtoken') ||
+    normalized.includes('bearertoken') ||
+    normalized.includes('personalaccesstoken')
+  );
+}
+
 export function getTextContent(value: unknown): string {
   if (typeof value === 'string') return value;
   if (!isRecord(value)) return '';

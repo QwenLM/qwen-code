@@ -25,6 +25,7 @@ export {
   stringifyJson,
   stripOscSequences,
 } from './utils.js';
+export { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
 export type {
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,

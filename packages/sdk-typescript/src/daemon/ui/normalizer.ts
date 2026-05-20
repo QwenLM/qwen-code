@@ -10,13 +10,16 @@ import type {
   DaemonUiPermissionOption,
   NormalizeDaemonEventOptions,
 } from './types.js';
+import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
 import {
   getFirstString,
   getOutputText,
   getString,
   getTextContent,
   isRecord,
+  redactSensitiveFields,
   stringifyJson,
+  stringifyRedactedJson,
 } from './utils.js';
 
 const MAX_DETAILS_LENGTH = 4096;
@@ -264,9 +267,13 @@ function normalizeToolUpdate(
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(rawInput !== undefined
-      ? { details: capDetails(stringifyJson(rawInput)) }
+      ? { details: capDetails(stringifyRedactedJson(rawInput)) }
       : rawOutput !== undefined
-        ? { details: capDetails(getOutputText(rawOutput)) }
+        ? {
+            details: capDetails(
+              getOutputText(redactSensitiveFields(rawOutput)),
+            ),
+          }
         : {}),
   };
 }
@@ -280,7 +287,7 @@ function normalizePlanUpdate(
   return {
     ...base,
     type: 'tool.update',
-    toolCallId: 'daemon-plan',
+    toolCallId: DAEMON_PLAN_TOOL_CALL_ID,
     title: 'Updated Plan',
     status: 'completed',
     toolName: 'TodoWrite',
@@ -445,54 +452,4 @@ function describeToolCall(value: unknown): string {
 function getShellStream(value: unknown): 'stdout' | 'stderr' | undefined {
   const stream = getString(value, 'stream');
   return stream === 'stdout' || stream === 'stderr' ? stream : undefined;
-}
-
-function stringifyRedactedJson(value: unknown): string {
-  return stringifyJson(redactSensitiveFields(value));
-}
-
-function redactSensitiveFields(value: unknown, depth = 0): unknown {
-  if (depth > 16) return '[truncated]';
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactSensitiveFields(entry, depth + 1));
-  }
-  if (!isRecord(value)) return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [
-      key,
-      isSensitiveKey(key)
-        ? '[redacted]'
-        : redactSensitiveFields(entry, depth + 1),
-    ]),
-  );
-}
-
-function isSensitiveKey(key: string): boolean {
-  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
-  return (
-    normalized === 'authorization' ||
-    normalized === 'auth' ||
-    normalized === 'cookie' ||
-    normalized === 'setcookie' ||
-    normalized === 'credential' ||
-    normalized === 'credentials' ||
-    normalized === 'password' ||
-    normalized === 'passphrase' ||
-    normalized === 'privatekey' ||
-    normalized === 'apikey' ||
-    normalized === 'clientsecret' ||
-    normalized === 'idtoken' ||
-    normalized === 'sessiontoken' ||
-    normalized === 'xapikey' ||
-    normalized === 'xauthkey' ||
-    normalized === 'xauthtoken' ||
-    normalized.endsWith('token') ||
-    normalized.endsWith('secret') ||
-    normalized.endsWith('apikey') ||
-    normalized.endsWith('privatekey') ||
-    normalized.includes('accesstoken') ||
-    normalized.includes('refreshtoken') ||
-    normalized.includes('bearertoken') ||
-    normalized.includes('personalaccesstoken')
-  );
 }

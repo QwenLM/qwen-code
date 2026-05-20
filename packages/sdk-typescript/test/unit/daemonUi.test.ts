@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   appendLocalUserTranscriptMessage,
   createDaemonToolPreview,
@@ -404,6 +404,25 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('bounds trimmed tool indexes while keeping recent trimmed diagnostics', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ maxBlocks: 2, now: 1 }),
+      Array.from({ length: 8 }, (_, index) => ({
+        type: 'tool.update' as const,
+        toolCallId: `tool-${index}`,
+        title: `Tool ${index}`,
+        status: 'running',
+      })),
+      { now: 2 },
+    );
+
+    const trimmedToolCallIds = Object.entries(state.toolBlockByCallId)
+      .filter(([, blockId]) => blockId === '__trimmed_tool_block__')
+      .map(([toolCallId]) => toolCallId);
+    expect(trimmedToolCallIds).toHaveLength(2);
+    expect(Object.keys(state.toolBlockByCallId)).toHaveLength(4);
+  });
+
   it('keeps active assistant text open when reporting trimmed tool updates', () => {
     let state = createDaemonTranscriptState({ maxBlocks: 2, now: 1 });
 
@@ -578,7 +597,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
           sessionUpdate: 'tool_call',
           toolCallId: 'large-input',
           title: 'Large input',
-          rawInput: { text: 'x'.repeat(5000) },
+          rawInput: { text: 'x'.repeat(5000), apiKey: 'input-secret' },
         },
       },
     });
@@ -591,7 +610,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
           sessionUpdate: 'tool_call',
           toolCallId: 'large-output',
           title: 'Large output',
-          rawOutput: 'y'.repeat(5000),
+          rawOutput: { text: 'y'.repeat(5000), token: 'output-secret' },
         },
       },
     });
@@ -610,6 +629,12 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(
       outputEvent && 'details' in outputEvent ? outputEvent.details?.length : 0,
     ).toBeLessThan(4200);
+    expect(
+      inputEvent && 'details' in inputEvent ? inputEvent.details : '',
+    ).not.toContain('input-secret');
+    expect(
+      outputEvent && 'details' in outputEvent ? outputEvent.details : '',
+    ).not.toContain('output-secret');
   });
 
   it('marks active assistant block complete when a tool interrupts the stream', () => {
@@ -1076,6 +1101,36 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(calls).toBe(2);
   });
 
+  it('keeps notifying store listeners when one listener throws', async () => {
+    const store = createDaemonTranscriptStore();
+    const globalWithReportError = globalThis as typeof globalThis & {
+      reportError?: (error: unknown) => void;
+    };
+    const originalReportError = globalWithReportError.reportError;
+    const reportError = vi.fn();
+    globalWithReportError.reportError = reportError;
+    let calls = 0;
+    store.subscribe(() => {
+      throw new Error('listener failed');
+    });
+    store.subscribe(() => {
+      calls += 1;
+    });
+
+    try {
+      store.dispatch({ type: 'status', text: 'ready' });
+      await Promise.resolve();
+      expect(calls).toBe(1);
+      expect(reportError).toHaveBeenCalledWith(expect.any(Error));
+    } finally {
+      if (originalReportError) {
+        globalWithReportError.reportError = originalReportError;
+      } else {
+        delete globalWithReportError.reportError;
+      }
+    }
+  });
+
   it('renders UI events to sanitized terminal text', () => {
     const output = daemonUiEventToTerminalText({
       type: 'shell.output',
@@ -1149,6 +1204,23 @@ describe('daemon UI normalizer and transcript reducer', () => {
 
     expect(createDaemonToolPreview(nested)).toMatchObject({
       kind: 'generic',
+    });
+  });
+
+  it('redacts sensitive values in generic tool previews', () => {
+    expect(
+      createDaemonToolPreview({
+        apiKey: 'secret-key',
+        password: 'secret-password',
+        visible: 'ok',
+      }),
+    ).toMatchObject({
+      kind: 'key_value',
+      rows: [
+        { label: 'apiKey', value: '[redacted]' },
+        { label: 'password', value: '[redacted]' },
+        { label: 'visible', value: 'ok' },
+      ],
     });
   });
 });
