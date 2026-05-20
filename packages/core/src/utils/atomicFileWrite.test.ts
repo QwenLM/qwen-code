@@ -891,4 +891,48 @@ describe('noFollow option — symlink protection', () => {
     expect(fsSync.readFileSync(link, 'utf-8')).toBe('NEW');
     expect(fsSync.readFileSync(real, 'utf-8')).toBe('ORIGINAL');
   });
+
+  // Earlier noFollow EXDEV tests pre-place a symlink, so the
+  // `unlink(targetPath)` in the fallback always succeeds. These exercise
+  // the ENOENT-swallow branch — first-write scenarios (initial credential
+  // provisioning on a cross-device mount).
+  it('atomicWriteFile: noFollow EXDEV fallback creates a new file when target does not exist', async () => {
+    const target = path.join(tmpDir, 'never-created.txt');
+    const exdevRename = async () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+
+    await atomicWriteFile(
+      target,
+      'NEW',
+      { noFollow: true, mode: 0o600 },
+      { rename: exdevRename },
+    );
+
+    expect(fsSync.lstatSync(target).isSymbolicLink()).toBe(false);
+    expect(await fs.readFile(target, 'utf-8')).toBe('NEW');
+    expect(fsSync.statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  it('atomicWriteFileSync: noFollow EXDEV fallback creates a new file when target does not exist', () => {
+    const target = path.join(tmpDir, 'never-created-sync.txt');
+    const exdevRename = () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+
+    atomicWriteFileSync(
+      target,
+      'NEW',
+      { noFollow: true, mode: 0o600 },
+      { rename: exdevRename },
+    );
+
+    expect(fsSync.lstatSync(target).isSymbolicLink()).toBe(false);
+    expect(fsSync.readFileSync(target, 'utf-8')).toBe('NEW');
+    expect(fsSync.statSync(target).mode & 0o777).toBe(0o600);
+  });
 });

@@ -242,13 +242,24 @@ export async function atomicWriteFile(
               typeof data === 'string' ? Buffer.from(data, encoding) : data,
             );
             if (flush) await fd.sync();
+            // fchmod via the open fd — immune to symlink swap between
+            // close and a path-based chmod, which would otherwise redirect
+            // the 0o600 onto an attacker-pointed target and silently
+            // defeat noFollow on the EXDEV fallback path.
+            if (desiredMode !== undefined) {
+              try {
+                await fd.chmod(desiredMode);
+              } catch {
+                // Ignore — FAT/exFAT lack POSIX permissions.
+              }
+            }
           } finally {
             await fd.close();
           }
         } else {
           await writeFileImpl(targetPath, data, writeOptions);
+          await tryChmod(targetPath);
         }
-        await tryChmod(targetPath);
         return;
       } catch (fallbackError) {
         // Preserve the function's error-shape contract even on the
@@ -492,13 +503,21 @@ export function atomicWriteFileSync(
               typeof data === 'string' ? Buffer.from(data, encoding) : data;
             fsSync.writeSync(fd, buf);
             if (flush) fsSync.fsyncSync(fd);
+            // fchmod on the open fd (see atomicWriteFile for rationale).
+            if (desiredMode !== undefined) {
+              try {
+                fsSync.fchmodSync(fd, desiredMode);
+              } catch {
+                // FAT/exFAT.
+              }
+            }
           } finally {
             fsSync.closeSync(fd);
           }
         } else {
           writeFileImpl(targetPath, data, writeOptions);
+          tryChmodSync(targetPath);
         }
-        tryChmodSync(targetPath);
         return;
       } catch (fallbackError) {
         throw annotateWriteError(
