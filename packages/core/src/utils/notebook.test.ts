@@ -411,6 +411,31 @@ describe('notebook utilities', () => {
     await expect(readNotebook(filePath)).rejects.toThrow();
   });
 
+  it('should parse notebooks with a leading UTF-8 BOM', async () => {
+    const notebook = {
+      cells: [
+        {
+          cell_type: 'code',
+          source: ['print("bom")'],
+          execution_count: null,
+          outputs: [],
+          metadata: {},
+        },
+      ],
+      metadata: { language_info: { name: 'python' } },
+    };
+    tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'notebook-test-'));
+    const filePath = path.join(tempDir, 'bom.ipynb');
+    await fsp.writeFile(filePath, `\ufeff${JSON.stringify(notebook)}`, 'utf-8');
+
+    expect(
+      parseNotebook(`\ufeff${JSON.stringify(notebook)}`).cells,
+    ).toHaveLength(1);
+    await expect(readNotebookWithMetadata(filePath)).resolves.toMatchObject({
+      isTruncated: false,
+    });
+  });
+
   it('should parse cell-N IDs as zero-based indexes', () => {
     expect(parseCellId('cell-0')).toBe(0);
     expect(parseCellId('cell-12')).toBe(12);

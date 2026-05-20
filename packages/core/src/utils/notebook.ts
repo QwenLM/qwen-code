@@ -95,7 +95,9 @@ export function normalizeSource(source: string | string[]): string {
 }
 
 export function parseNotebook(content: string): NotebookContent {
-  const parsed = JSON.parse(content) as unknown;
+  const jsonContent =
+    content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const parsed = JSON.parse(jsonContent) as unknown;
   if (!parsed || typeof parsed !== 'object') {
     throw new Error('Invalid notebook: expected a JSON object');
   }

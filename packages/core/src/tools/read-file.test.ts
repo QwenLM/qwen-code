@@ -170,6 +170,17 @@ describe('ReadFileTool', () => {
         'offset and limit are not supported for Jupyter notebook (.ipynb) files',
       );
     });
+
+    it('should reject pages for notebook files', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.ipynb'),
+        pages: '1',
+      };
+
+      expect(() => tool.build(params)).toThrow(
+        'pages is not supported for Jupyter notebook (.ipynb) files',
+      );
+    });
   });
 
   describe('getDefaultPermission', () => {
@@ -586,7 +597,9 @@ describe('ReadFileTool', () => {
         file_path: path.join(tempRootDir, 'test.txt'),
         pages: '',
       };
-      expect(() => tool.build(params)).not.toThrow();
+      const invocation = tool.build(params);
+
+      expect(invocation.params.pages).toBeUndefined();
     });
 
     it('should support offset and limit for text files', async () => {

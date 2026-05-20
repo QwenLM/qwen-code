@@ -437,11 +437,21 @@ export class ReadFileTool extends BaseDeclarativeTool<
       return 'Limit must be a positive number';
     }
 
+    if (params.pages !== undefined) {
+      const pages = params.pages.trim();
+      params.pages = pages.length > 0 ? pages : undefined;
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
     if (
       (params.offset !== undefined || params.limit !== undefined) &&
-      path.extname(filePath).toLowerCase() === '.ipynb'
+      ext === '.ipynb'
     ) {
       return 'offset and limit are not supported for Jupyter notebook (.ipynb) files. Notebooks are always read in full with structured cell output.';
+    }
+
+    if (params.pages !== undefined && ext === '.ipynb') {
+      return 'pages is not supported for Jupyter notebook (.ipynb) files. Notebooks are always read in full with structured cell output.';
     }
 
     if (params.pages) {
