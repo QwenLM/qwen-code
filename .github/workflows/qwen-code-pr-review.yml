@@ -19,6 +19,17 @@ on:
         options:
           - 'dry-run'
           - 'comment'
+      tier_override:
+        description: 'Force a specific tier and skip preflight triage'
+        required: false
+        default: 'auto'
+        type: 'choice'
+        options:
+          - 'auto'
+          - 'ultra_light'
+          - 'light'
+          - 'standard'
+          - 'deep'
       additional_instructions:
         description: 'Optional maintainer focus for this review'
         required: false
@@ -98,17 +109,34 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           WORKFLOW_PR_NUMBER: '${{ github.event.inputs.pr_number }}'
           WORKFLOW_REVIEW_MODE: '${{ github.event.inputs.review_mode }}'
+          WORKFLOW_TIER_OVERRIDE: '${{ github.event.inputs.tier_override }}'
           WORKFLOW_ADDITIONAL_INSTRUCTIONS: '${{ github.event.inputs.additional_instructions }}'
         run: |-
           set -euo pipefail
 
           additional_instructions=""
+          # tier_override: '' = run preflight; 'ULTRA_LIGHT'|'LIGHT'|'STANDARD'|'DEEP' = skip preflight.
+          # Parsed from workflow_dispatch input or from a `--tier=X` token in
+          # the issue_comment body. Always uppercased before being stored.
+          tier_override=""
           case "$EVENT_NAME" in
             workflow_dispatch)
               pr_number="$WORKFLOW_PR_NUMBER"
               review_mode="${WORKFLOW_REVIEW_MODE:-dry-run}"
               additional_instructions="${WORKFLOW_ADDITIONAL_INSTRUCTIONS:-}"
               comment_body=""
+              # dispatch input 'auto' means "run preflight"; anything else
+              # is a forced tier.
+              case "${WORKFLOW_TIER_OVERRIDE:-auto}" in
+                auto|'') tier_override="" ;;
+                ultra_light|light|standard|deep)
+                  tier_override="$(printf '%s' "$WORKFLOW_TIER_OVERRIDE" | tr '[:lower:]' '[:upper:]')"
+                  ;;
+                *)
+                  echo "::error::Unsupported tier_override value: $WORKFLOW_TIER_OVERRIDE"
+                  exit 1
+                  ;;
+              esac
               ;;
             pull_request_target)
               pr_number="$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
@@ -166,6 +194,24 @@ jobs:
               should_run_review="false"
             fi
           fi
+
+          # Parse `--tier=X` from comment body or from additional_instructions
+          # (it ends up there after the regex strip above). Match: --tier=light,
+          # --tier=DEEP, etc. The matched token is REMOVED from
+          # additional_instructions so it doesn't leak into the review prompt.
+          # Only honored when the event is issue_comment (workflow_dispatch
+          # already set tier_override from its input above).
+          if [ "$EVENT_NAME" = "issue_comment" ] && [ -z "$tier_override" ]; then
+            if printf '%s' "$additional_instructions" | grep -qiE '(^|[[:space:]])--tier=(ultra_light|light|standard|deep)([[:space:]]|$)'; then
+              tier_raw="$(printf '%s' "$additional_instructions" \
+                | grep -oiE -- '--tier=(ultra_light|light|standard|deep)' \
+                | head -n1 \
+                | sed 's/^--tier=//')"
+              tier_override="$(printf '%s' "$tier_raw" | tr '[:lower:]' '[:upper:]')"
+              additional_instructions="$(printf '%s' "$additional_instructions" \
+                | sed -E 's/(^|[[:space:]])--tier=(ultra_light|light|standard|deep|ULTRA_LIGHT|LIGHT|STANDARD|DEEP)([[:space:]]|$)/\1\3/g')"
+            fi
+          fi
           # Strip leading blank lines so the prompt doesn't start with an
           # empty line when @qwen /review is on its own line.
           additional_instructions="$(printf '%s' "$additional_instructions" | sed '/./,$!d')"
@@ -204,6 +250,10 @@ jobs:
             echo "review_mode=$review_mode"
             echo "should_comment=$should_comment"
             echo "should_run_review=$should_run_review"
+            echo "tier_override=$tier_override"
+            echo "additional_instructions<<QWEN_REVIEW_AI_${output_delimiter}"
+            printf '%s\n' "$additional_instructions"
+            echo "QWEN_REVIEW_AI_${output_delimiter}"
             echo "review_prompt<<$output_delimiter"
             printf '%s\n' "$review_prompt"
             echo "$output_delimiter"
@@ -381,28 +431,26 @@ jobs:
           restore-keys: |
             qwen-npm-global-${{ runner.os }}-
 
-      # Direct invocation instead of QwenLM/qwen-code-action.
-      # The action wraps the CLI in `QWEN_RESPONSE=$(qwen ...)` command
-      # substitution, which buffers ALL stdout until the process exits —
-      # so a slow or stuck bundled /review produced zero observable
-      # output for the whole job and could not be diagnosed. Calling
-      # qwen ourselves and piping through `tee` streams progress to the
-      # live job log in real time, and an explicit `timeout` makes a
-      # stall fail fast with a clear error instead of a silent job kill.
-      # settings.json mirrors what the action wrote (folder trust off +
-      # yolo + sandbox off) so the bundled /review skill's full tool set
-      # runs non-interactively.
-      - name: 'Run Qwen Code Review'
-        id: 'review'
+      # ─── Install qwen-code CLI (shared by preflight, LIGHT, STANDARD, DEEP) ───
+      #
+      # Extracted from the previous monolithic 'Run Qwen Code Review' step so
+      # the same `qwen` binary is reused by the preflight LLM call and by all
+      # tier-specific execution paths below. ULTRA_LIGHT does not need qwen
+      # but the install is cached and cheap (~5s warm); skipping it
+      # conditionally would add branching with no real saving.
+      #
+      # Intentionally @latest: this workflow is still in the Phase 1-3
+      # bundled-action rollout (see docs/design/code-review/roadmap.md)
+      # and we want every CI run to exercise the newest bundled /review
+      # skill while it stabilizes — pinning a version would freeze the
+      # in-progress skill iterations behind a manual bump PR. Once the
+      # workflow lands and the skill cadence slows, switch this to a
+      # pinned `@qwen-code/qwen-code@x.y.z` so the secret-bearing
+      # pull_request_target run can't be moved by a future package
+      # publish. Tracked as a follow-up; not blocking on this PR.
+      - name: 'Install qwen-code CLI'
         if: |-
           steps.size.outputs.should_review == 'true'
-        env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
-          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          REVIEW_PROMPT: '${{ steps.pr.outputs.review_prompt }}'
-          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
         run: |-
           set -euo pipefail
 
@@ -415,19 +463,372 @@ jobs:
           }
           EOF
 
-          # Intentionally @latest: this workflow is still in the Phase 1-3
-          # bundled-action rollout (see docs/design/code-review/roadmap.md)
-          # and we want every CI run to exercise the newest bundled /review
-          # skill while it stabilizes — pinning a version would freeze the
-          # in-progress skill iterations behind a manual bump PR. Once the
-          # workflow lands and the skill cadence slows, switch this to a
-          # pinned `@qwen-code/qwen-code@x.y.z` so the secret-bearing
-          # pull_request_target run can't be moved by a future package
-          # publish. Tracked as a follow-up; not blocking on this PR.
           echo "::group::Install qwen-code"
           npm install -g @qwen-code/qwen-code@latest
           qwen --version
           echo "::endgroup::"
+
+      # ─── Preflight triage: LLM judges blast radius, picks tier ────────────
+      #
+      # Skipped when the maintainer explicitly forced a tier via slash flag
+      # (`@qwen /review --tier=...`) or workflow_dispatch input. Otherwise
+      # runs a single qwen call against `.qwen/preflight-prompt.md` with PR
+      # context appended, expecting strict JSON output. Any failure mode
+      # (timeout, non-JSON, schema invalid) defaults to DEEP (P7 conservative
+      # bias). See docs/design/code-review/preflight-triage.md §Preflight 实现.
+      - name: 'Preflight triage'
+        id: 'triage'
+        if: |-
+          steps.size.outputs.should_review == 'true' &&
+          steps.pr.outputs.tier_override == ''
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_PREFLIGHT_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          CHANGED_LINES: '${{ steps.size.outputs.changed_lines }}'
+        timeout-minutes: 5
+        run: |-
+          set -euo pipefail
+
+          if [ -z "${{ vars.QWEN_PR_PREFLIGHT_MODEL }}" ]; then
+            echo "::warning::vars.QWEN_PR_PREFLIGHT_MODEL is unset; preflight is falling back to the deep-review model SKU. Configure a cheaper SKU to reduce token cost — see docs/design/code-review/preflight-triage.md §关键决策 D1."
+          fi
+
+          echo "::group::Gather preflight inputs"
+          pr_json="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json title,body,additions,deletions,changedFiles,files,headRefName,baseRefName)"
+          pr_title="$(jq -r '.title' <<< "$pr_json")"
+          # Trim the body to keep prompt size bounded.
+          pr_body="$(jq -r '.body // ""' <<< "$pr_json" | head -c 2000)"
+          base_ref="$(jq -r '.baseRefName' <<< "$pr_json")"
+          head_ref="$(jq -r '.headRefName' <<< "$pr_json")"
+          changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
+          diff_stat="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | diffstat -p1 2>/dev/null || gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | head -200)"
+          # First ~50KB of unified diff for content judgment. Anything beyond
+          # is unlikely to flip the tier — preflight is a triage step, not
+          # the actual review.
+          unified_diff="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | head -c 50000)"
+          echo "::endgroup::"
+
+          # Build the PR context body into a file so the heredoc-with-YAML
+          # indentation pitfall is avoided. Variable substitution happens at
+          # the shell level (printf), not the YAML level.
+          {
+            printf '**PR title:** %s\n\n' "$pr_title"
+            printf '**Branches:** %s → %s\n\n' "$head_ref" "$base_ref"
+            printf '**Changed lines:** %s\n\n' "$CHANGED_LINES"
+            printf '**Changed files (path + line counts):**\n'
+            printf '```\n%s\n```\n\n' "$changed_files_block"
+            printf '**git diff --stat:**\n'
+            printf '```\n%s\n```\n\n' "$diff_stat"
+            printf '**First 50KB of unified diff:**\n'
+            printf '```diff\n%s\n```\n\n' "$unified_diff"
+            printf '**PR body (first 2KB):**\n%s\n' "$pr_body"
+          } > /tmp/preflight-pr-context.md
+
+          # Render the final prompt by substituting the two template markers.
+          # Use node (Node 22 is on the runner already) for reliable handling
+          # of any character in the substituted text.
+          PR_CONTEXT_FILE=/tmp/preflight-pr-context.md \
+          node -e '
+            const fs = require("fs");
+            const template = fs.readFileSync(".qwen/preflight-prompt.md", "utf8");
+            const rules = fs.readFileSync(".qwen/review-rules.md", "utf8");
+            const ctx = fs.readFileSync(process.env.PR_CONTEXT_FILE, "utf8");
+            const out = template
+              .replace("<<<REVIEW_RULES_MD>>>", rules)
+              .replace("<<<PR_CONTEXT>>>", ctx);
+            fs.writeFileSync("/tmp/preflight-prompt-rendered.md", out);
+          ' || { echo "::error::Failed to render preflight prompt"; exit 1; }
+
+          echo "::group::Run preflight LLM"
+          set +e
+          # `timeout 3m` kills qwen at 3 min; the step's `timeout-minutes: 5`
+          # is the outer safety net (D6).
+          raw_out="$(timeout 3m qwen --yolo --prompt "$(cat /tmp/preflight-prompt-rendered.md)" 2>&1)"
+          qwen_status=$?
+          set -e
+          echo "$raw_out"
+          echo "::endgroup::"
+
+          # Default to DEEP on any failure (P7 conservative bias).
+          tier="DEEP"
+          rationale="preflight defaulted to DEEP"
+
+          if [ "$qwen_status" -eq 124 ]; then
+            echo "::warning::Preflight timed out at 3m; falling back to DEEP."
+            rationale="preflight timed out at 3m"
+          elif [ "$qwen_status" -ne 0 ]; then
+            echo "::warning::Preflight exited with status $qwen_status; falling back to DEEP."
+            rationale="preflight exited non-zero ($qwen_status)"
+          else
+            # Strip code fences if the model added them despite instructions.
+            json_text="$(printf '%s' "$raw_out" | sed -E 's/^```(json)?$//; s/^```$//' | sed '/^[[:space:]]*$/d')"
+            if ! parsed="$(printf '%s' "$json_text" | jq -e '. | select(.tier and .blast_radius)' 2>/dev/null)"; then
+              echo "::warning::Preflight returned invalid JSON or missing required fields; falling back to DEEP."
+              rationale="invalid preflight JSON"
+            else
+              model_tier="$(printf '%s' "$parsed" | jq -r '.tier' | tr '[:lower:]' '[:upper:]')"
+              case "$model_tier" in
+                ULTRA_LIGHT|LIGHT|STANDARD|DEEP)
+                  tier="$model_tier"
+                  rationale="$(printf '%s' "$parsed" | jq -r '.rationale // ""' | head -c 200)"
+                  # Optional fields, may be empty.
+                  focus_areas="$(printf '%s' "$parsed" | jq -c '.focus_areas // []')"
+                  agents_to_run="$(printf '%s' "$parsed" | jq -c '.agents_to_run // []')"
+                  printf '%s' "$focus_areas" > /tmp/qwen-focus-areas.json
+                  printf '%s' "$agents_to_run" > /tmp/qwen-agents-to-run.json
+                  ;;
+                *)
+                  echo "::warning::Preflight returned unknown tier value '$model_tier'; falling back to DEEP."
+                  rationale="unknown tier value: $model_tier"
+                  ;;
+              esac
+            fi
+          fi
+
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          echo "rationale=$rationale" >> "$GITHUB_OUTPUT"
+          echo "::notice::Preflight tier=$tier (rationale: $rationale)"
+
+      # ─── Compute effective tier (override OR preflight) ────────────────────
+      #
+      # Final tier = `tier_override` (if set by maintainer slash flag or
+      # dispatch input) else `triage.outputs.tier`. Shell-only step; no LLM
+      # call. Output is used by the four tier-execution steps below.
+      - name: 'Compute effective tier'
+        id: 'tier'
+        if: |-
+          steps.size.outputs.should_review == 'true'
+        env:
+          TIER_OVERRIDE: '${{ steps.pr.outputs.tier_override }}'
+          TRIAGE_TIER: '${{ steps.triage.outputs.tier }}'
+        run: |-
+          set -euo pipefail
+
+          if [ -n "${TIER_OVERRIDE}" ]; then
+            tier="$TIER_OVERRIDE"
+            source="override"
+          elif [ -n "${TRIAGE_TIER:-}" ]; then
+            tier="$TRIAGE_TIER"
+            source="preflight"
+          else
+            # Defensive fallback: if neither override nor preflight ran (e.g.
+            # preflight step was skipped due to an upstream condition), pick
+            # DEEP. Should be unreachable in practice.
+            tier="DEEP"
+            source="default-fallback"
+          fi
+
+          case "$tier" in
+            ULTRA_LIGHT|LIGHT|STANDARD|DEEP) ;;
+            *)
+              echo "::error::Invalid effective tier '$tier'"
+              exit 1
+              ;;
+          esac
+
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+          echo "::notice::Effective tier=$tier (source=$source)"
+
+      # ─── ULTRA_LIGHT: shell-only "no deep review needed" comment ──────────
+      - name: 'Compose ULTRA_LIGHT verdict'
+        id: 'ultra-light'
+        if: |-
+          steps.size.outputs.should_review == 'true' &&
+          steps.tier.outputs.tier == 'ULTRA_LIGHT'
+        env:
+          RATIONALE: '${{ steps.triage.outputs.rationale }}'
+          CHANGED_FILES: '${{ steps.size.outputs.changed_files }}'
+          CHANGED_LINES: '${{ steps.size.outputs.changed_lines }}'
+        run: |-
+          set -euo pipefail
+          {
+            printf '## Qwen Code Review — ULTRA_LIGHT\n\n'
+            printf '_Preflight triage decided this PR does not need a deep review._\n\n'
+            if [ -n "${RATIONALE:-}" ]; then
+              printf '**Rationale:** %s\n\n' "$RATIONALE"
+            fi
+            printf '- Changed files: %s\n' "$CHANGED_FILES"
+            printf '- Changed lines: %s\n\n' "$CHANGED_LINES"
+            printf '_Reply `@qwen /review --tier=light|standard|deep` to force a deeper review._\n'
+          } > qwen-review-summary.md
+
+      # ─── LIGHT: single-shot qwen with focused prompt ──────────────────────
+      - name: 'Run LIGHT review'
+        id: 'light'
+        if: |-
+          steps.size.outputs.should_review == 'true' &&
+          steps.tier.outputs.tier == 'LIGHT'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+        timeout-minutes: 5
+        run: |-
+          set -euo pipefail
+
+          pr_json="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json title,body,files)"
+          pr_title="$(jq -r '.title' <<< "$pr_json")"
+          pr_body="$(jq -r '.body // ""' <<< "$pr_json" | head -c 2000)"
+          changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
+          unified_diff="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | head -c 50000)"
+          focus_areas="$(cat /tmp/qwen-focus-areas.json 2>/dev/null || echo '[]')"
+
+          {
+            printf '**PR title:** %s\n\n' "$pr_title"
+            printf '**Changed files:**\n```\n%s\n```\n\n' "$changed_files_block"
+            printf '**Unified diff (first 50KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
+            printf '**Preflight focus_areas (hints, not mandatory):**\n```json\n%s\n```\n\n' "$focus_areas"
+            printf '**PR body (first 2KB):**\n%s\n' "$pr_body"
+          } > /tmp/light-pr-context.md
+
+          PR_CONTEXT_FILE=/tmp/light-pr-context.md \
+          node -e '
+            const fs = require("fs");
+            const template = fs.readFileSync(".qwen/preflight-light-review-prompt.md", "utf8");
+            const ctx = fs.readFileSync(process.env.PR_CONTEXT_FILE, "utf8");
+            fs.writeFileSync("/tmp/light-prompt-rendered.md", template.replace("<<<PR_CONTEXT>>>", ctx));
+          '
+
+          out=qwen-review-stream.jsonl
+          echo "::group::Qwen LIGHT review (live stream)"
+          set +e
+          timeout --kill-after=15s 3m qwen --yolo \
+            --output-format stream-json --include-partial-messages \
+            --prompt "$(cat /tmp/light-prompt-rendered.md)" 2>&1 | tee "$out"
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "::endgroup::"
+
+          status_label="complete"
+          if [ "$status" -eq 124 ]; then
+            status_label="timeout"
+            echo "::warning::LIGHT review timed out at 3m; will be retried as STANDARD."
+            echo "needs_upgrade=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          node scripts/parse-review-stream.js "$out" qwen-review-summary.md LIGHT "$status_label"
+          # Empty review → escalate to STANDARD rather than posting empty.
+          if [ "$(wc -c < qwen-review-summary.md)" -lt 80 ]; then
+            echo "::warning::LIGHT review produced empty output; will be retried as STANDARD."
+            echo "needs_upgrade=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+      # ─── STANDARD: single-shot qwen with structured prompt + LIGHT upgrade ─
+      - name: 'Run STANDARD review'
+        id: 'standard'
+        if: |-
+          steps.size.outputs.should_review == 'true' &&
+          (steps.tier.outputs.tier == 'STANDARD' ||
+           steps.light.outputs.needs_upgrade == 'true')
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+        timeout-minutes: 10
+        run: |-
+          set -euo pipefail
+
+          pr_json="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json title,body,files)"
+          pr_title="$(jq -r '.title' <<< "$pr_json")"
+          pr_body="$(jq -r '.body // ""' <<< "$pr_json" | head -c 4000)"
+          changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
+          # STANDARD gets a larger diff window than LIGHT (200KB vs 50KB)
+          unified_diff="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | head -c 200000)"
+          focus_areas="$(cat /tmp/qwen-focus-areas.json 2>/dev/null || echo '[]')"
+          agents_to_run="$(cat /tmp/qwen-agents-to-run.json 2>/dev/null || echo '[]')"
+
+          {
+            printf '**PR title:** %s\n\n' "$pr_title"
+            printf '**Changed files:**\n```\n%s\n```\n\n' "$changed_files_block"
+            printf '**Unified diff (first 200KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
+            printf '**Preflight focus_areas (hints):**\n```json\n%s\n```\n\n' "$focus_areas"
+            printf '**Preflight agents_to_run (hints):**\n```json\n%s\n```\n\n' "$agents_to_run"
+            printf '**Repository review rules (.qwen/review-rules.md):**\n'
+            cat .qwen/review-rules.md
+            printf '\n\n**PR body (first 4KB):**\n%s\n' "$pr_body"
+          } > /tmp/standard-pr-context.md
+
+          PR_CONTEXT_FILE=/tmp/standard-pr-context.md \
+          node -e '
+            const fs = require("fs");
+            const template = fs.readFileSync(".qwen/preflight-standard-review-prompt.md", "utf8");
+            const ctx = fs.readFileSync(process.env.PR_CONTEXT_FILE, "utf8");
+            fs.writeFileSync("/tmp/standard-prompt-rendered.md", template.replace("<<<PR_CONTEXT>>>", ctx));
+          '
+
+          out=qwen-review-stream.jsonl
+          echo "::group::Qwen STANDARD review (live stream)"
+          set +e
+          timeout --kill-after=30s 8m qwen --yolo \
+            --output-format stream-json --include-partial-messages \
+            --prompt "$(cat /tmp/standard-prompt-rendered.md)" 2>&1 | tee "$out"
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "::endgroup::"
+
+          status_label="complete"
+          if [ "$status" -eq 124 ]; then
+            status_label="timeout"
+            echo "::warning::STANDARD review timed out at 8m; flushing partial output."
+          fi
+
+          node scripts/parse-review-stream.js "$out" qwen-review-summary.md STANDARD "$status_label"
+
+          if [ "$status_label" = "timeout" ]; then
+            # Prepend a clear warning header so the maintainer sees the
+            # review was capped at the timeout.
+            {
+              printf '## ⚠️ STANDARD review was time-capped at 8 min — partial output below\n\n'
+              cat qwen-review-summary.md
+            } > /tmp/qwen-review-summary-with-warning.md
+            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
+          fi
+
+      # ─── DEEP: bundled /review skill (Phase 1-3 path, with parser update) ──
+      #
+      # Direct invocation instead of QwenLM/qwen-code-action.
+      # The action wraps the CLI in `QWEN_RESPONSE=$(qwen ...)` command
+      # substitution, which buffers ALL stdout until the process exits —
+      # so a slow or stuck bundled /review produced zero observable
+      # output for the whole job and could not be diagnosed. Calling
+      # qwen ourselves and piping through `tee` streams progress to the
+      # live job log in real time, and an explicit `timeout` makes a
+      # stall fail fast with a clear error instead of a silent job kill.
+      #
+      # Timeout reduced from Phase 1-3's 50m to 25m: with always-emit
+      # accumulator (scripts/parse-review-stream.js) timeouts now flush a
+      # partial review instead of failing silently, so the previous "give
+      # it as much time as possible" tradeoff no longer applies. A 25m
+      # hard cap aligns with §G2 wall-time targets.
+      - name: 'Run DEEP review (bundled skill)'
+        id: 'review'
+        if: |-
+          steps.size.outputs.should_review == 'true' &&
+          steps.tier.outputs.tier == 'DEEP'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          REVIEW_PROMPT: '${{ steps.pr.outputs.review_prompt }}'
+          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
+          FOCUS_AREAS_FILE: '/tmp/qwen-focus-areas.json'
+        timeout-minutes: 30
+        run: |-
+          set -euo pipefail
 
           # CI-lightweight steering applies to EVERY CI run (comment and
           # dry-run): the full bundled /review (9 agents incl. Agent 7 =
@@ -443,7 +844,11 @@ jobs:
           # The bundled /review skill is expected to load that file, so the
           # prompt only references it instead of restating the spec — that
           # way edits to review-rules.md don't drift from the workflow.
-          prompt="${REVIEW_PROMPT}
+          focus_areas_text=""
+          if [ -s "$FOCUS_AREAS_FILE" ]; then
+            focus_areas_text="$(jq -r 'if length>0 then "\nPreflight focus_areas: " + (join("; ")) else "" end' "$FOCUS_AREAS_FILE" 2>/dev/null || true)"
+          fi
+          prompt="${REVIEW_PROMPT}${focus_areas_text}
 
           CI LIGHTWEIGHT MODE — follow these execution constraints, they
           override the skill's defaults for this run:
@@ -476,103 +881,86 @@ jobs:
           # messages` is qwen's purpose-built incremental event stream —
           # each event is written as it happens, so `tee` shows real
           # progress in the live job log. `timeout` bounds a stall.
-          echo "::group::Qwen /review (live stream-json events)"
+          echo "::group::Qwen DEEP review (live stream-json events)"
           set +e
-          timeout 50m qwen --yolo \
+          timeout --kill-after=60s 25m qwen --yolo \
             --output-format stream-json --include-partial-messages \
             --prompt "$prompt" 2>&1 | tee "$out"
           status=${PIPESTATUS[0]}
           set -e
           echo "::endgroup::"
 
-          # Extract the final assistant text from the stream for a
-          # human-readable summary (downstream comment step / artifact).
-          #
-          # Intentional simplification while debugging: this loop keeps
-          # overwriting `txt` on every assistant/message event so the file
-          # ends up with the LAST text segment seen. With
-          # --include-partial-messages enabled, intermediate progress lines
-          # land in the live job log (via `tee` above), which is exactly
-          # what we want to verify the review is actually running. The
-          # parsed-summary file only needs the final segment for the PR
-          # comment. If multi-turn assistant output ever becomes the norm,
-          # switch to a stop_reason / terminal-event filter and concatenate
-          # — but that costs the live-progress visibility we rely on for
-          # now, so this is staying simple until the skill stabilizes.
-          node -e '
-            const fs=require("fs");
-            const lines=fs.readFileSync(process.argv[1],"utf8").split(/\r?\n/);
-            let txt="";
-            for (const l of lines) {
-              if (!l.trim()) continue;
-              let e; try { e=JSON.parse(l); } catch { continue; }
-              const c=e?.message?.content;
-              if ((e.type==="assistant"||e.type==="message") && Array.isArray(c)) {
-                const t=c.filter(p=>p?.type==="text").map(p=>p.text).join("");
-                if (t) txt=t;
-              }
-            }
-            fs.writeFileSync("qwen-review-summary.md", txt || "(no assistant text parsed; see raw stream in the job log)");
-          ' "$out" || cp "$out" qwen-review-summary.md
+          # Accumulator parser: collects ALL assistant text segments and
+          # writes to qwen-review-summary.md. Even if qwen was killed mid-
+          # stream by `timeout 25m`, the on-disk JSONL captured everything
+          # the model emitted up to that point. This is the G3 always-emit
+          # contract — partial reviews must reach the PR.
+          status_label="complete"
+          if [ "$status" -eq 124 ]; then
+            status_label="timeout"
+            echo "::warning::DEEP review timed out at 25m; flushing partial output."
+          fi
+
+          node scripts/parse-review-stream.js "$out" qwen-review-summary.md DEEP "$status_label"
+
+          if [ "$status_label" = "timeout" ]; then
+            {
+              printf '## ⚠️ DEEP review was time-capped at 25 min — partial output below\n\n'
+              cat qwen-review-summary.md
+            } > /tmp/qwen-review-summary-with-warning.md
+            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
+          fi
 
           echo "::group::Parsed review summary"
           cat qwen-review-summary.md
           echo "::endgroup::"
 
-          delimiter="QWEN_REVIEW_SUMMARY_$(openssl rand -hex 8)"
-          {
-            echo "summary<<$delimiter"
-            cat qwen-review-summary.md
-            echo ""
-            echo "$delimiter"
-          } >> "$GITHUB_OUTPUT"
-
-          if [ "$status" -eq 124 ]; then
-            echo "::error::qwen /review exceeded the 50m step timeout."
-            exit 1
-          fi
-          exit "$status"
-
       - name: 'Post dry-run summary'
         if: |-
-          steps.review.outcome == 'success' &&
-          steps.pr.outputs.should_comment != 'true'
+          steps.size.outputs.should_review == 'true' &&
+          steps.pr.outputs.should_comment != 'true' &&
+          hashFiles('qwen-review-summary.md') != ''
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          EFFECTIVE_TIER: '${{ steps.tier.outputs.tier }}'
         run: |-
           {
             printf '### Qwen PR review dry run\n\n'
-            printf 'Completed review for PR #%s without posting PR comments.\n' "$PR_NUMBER"
-            printf '\nReview logs are available in this workflow run.\n'
+            printf 'Completed %s review for PR #%s without posting PR comments.\n\n' \
+              "$EFFECTIVE_TIER" "$PR_NUMBER"
+            printf 'Review logs are available in this workflow run.\n\n'
+            printf '#### Review content (would be posted)\n\n'
+            cat qwen-review-summary.md
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Post the review markdown produced by whichever tier-execution step
+      # ran. All tier steps write to the same file (qwen-review-summary.md),
+      # so this step is tier-agnostic — it just needs the file to exist.
       - name: 'Post review summary comment'
         id: 'post-summary'
         if: |-
-          steps.review.outcome == 'success' &&
-          steps.pr.outputs.should_comment == 'true'
+          steps.size.outputs.should_review == 'true' &&
+          steps.pr.outputs.should_comment == 'true' &&
+          hashFiles('qwen-review-summary.md') != ''
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
-          REVIEW_SUMMARY: '${{ steps.review.outputs.summary }}'
+          EFFECTIVE_TIER: '${{ steps.tier.outputs.tier }}'
         run: |-
           set -euo pipefail
 
+          summary_bytes=$(wc -c < qwen-review-summary.md)
           {
-            printf '## Qwen Code Review\n\n'
-            if [ -n "${REVIEW_SUMMARY:-}" ]; then
-              printf '%s\n' "${REVIEW_SUMMARY:0:60000}"
-              if [ "${#REVIEW_SUMMARY}" -gt 60000 ]; then
-                printf '\n\n_Review summary was truncated. See the workflow logs for the full output._\n'
-              fi
-            else
-              printf '_Qwen Code review completed, but no summary was captured. See the workflow logs for details._\n'
+            head -c 60000 qwen-review-summary.md
+            if [ "$summary_bytes" -gt 60000 ]; then
+              printf '\n\n_Review summary was truncated at 60KB. See the workflow logs for the full output._\n'
             fi
             # The single-quoted format string keeps literal backticks
             # around %s and /review for the rendered Markdown; %s is a
             # printf placeholder filled by the positional arg, so the
             # single quotes are correct here.
             # shellcheck disable=SC2016
-            printf '\n\n---\n_Reviewed by `%s` via Qwen Code `/review` (automated). Reply `@qwen /review` to re-run._\n' "${OPENAI_MODEL:-unknown}"
+            printf '\n\n---\n_Reviewed by `%s` via Qwen Code `/review` (tier=`%s`). Reply `@qwen /review` to re-run; add `--tier=light|standard|deep` to force a tier._\n' \
+              "${OPENAI_MODEL:-unknown}" "${EFFECTIVE_TIER:-unknown}"
           } > qwen-pr-review-summary-comment.md
 
           gh pr comment "$PR_NUMBER" \
@@ -621,18 +1009,18 @@ jobs:
           path: '.qwen/review-cache'
           key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
 
-      # Fires on either review-step failure OR post-summary failure, so a
-      # broken `gh pr comment` (permission gap, rate limit, transient
-      # network) still leaves a visible trace on the PR pointing reviewers
-      # at the workflow run. Without the post-summary branch a silent
-      # post-comment failure would look identical to "no review happened"
-      # from the PR's perspective.
+      # Fires when the job is failing AND there's no review markdown to
+      # post (the always-emit accumulator failed to produce even a partial).
+      # Without this fallback, a broken `gh pr comment`, an early-step
+      # crash, or a totally empty model output would all look identical to
+      # "no review happened" from the PR's perspective. The fallback's
+      # own `gh pr comment` ends with `|| true` so the step never causes
+      # a secondary cascade failure.
       - name: 'Post fallback comment on review failure'
         if: |-
           failure() &&
-          (steps.review.conclusion == 'failure' ||
-           steps.post-summary.conclusion == 'failure') &&
-          steps.pr.outputs.should_comment == 'true'
+          steps.pr.outputs.should_comment == 'true' &&
+          hashFiles('qwen-review-summary.md') == ''
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
