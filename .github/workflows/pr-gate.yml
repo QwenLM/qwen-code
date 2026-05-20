@@ -61,9 +61,10 @@ jobs:
           requireScope: false
           subjectPattern: '^.{1,72}$'
           subjectPatternError: 'PR title subject (the part after `type:`) must be between 1 and 72 characters. Got: "{subject}".'
-          # 'wip:' is a common dev marker for in-progress PRs — accept it
-          # but the rest of the gate (or maintainer) will block actual merge.
-          wip: true
+          # No WIP exemption: contributors who want to mark in-progress
+          # status should use the GitHub PR draft state instead (which
+          # the workflow gates already respect — pr-gate runs on
+          # ready_for_review and edited, so retitling is cheap).
 
   pr-template:
     name: 'PR Template'

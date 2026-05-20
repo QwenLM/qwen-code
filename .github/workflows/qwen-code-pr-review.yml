@@ -81,12 +81,11 @@ jobs:
       contents: 'read'
       # 'write' is required even though we only use `gh pr comment`: the gh
       # CLI calls the GraphQL addComment mutation, which is gated on
-      # pull-requests write (not issues write — that path is for issue
+      # pull-requests:write (not issues:write — that path is for issue
       # comments on non-PR issues). Validated by an empirical
       # workflow_dispatch run that failed with
       # "GraphQL: Resource not accessible by integration (addComment)".
       pull-requests: 'write'
-      issues: 'write'
     env:
       GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
       OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'

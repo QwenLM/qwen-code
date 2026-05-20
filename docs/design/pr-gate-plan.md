@@ -105,6 +105,7 @@ pr-body:
           const requiredSections = [
             { marker: '## Summary', name: 'Summary' },
             { marker: '## Validation', name: 'Validation' },
+            { marker: '## Linked Issues', name: 'Linked Issues' },  // 注意 substring 匹配，仓库现有模板里的 '## Linked Issues / Bugs' 也满足
           ];
           for (const s of requiredSections) {
             if (!body.includes(s.marker)) {
