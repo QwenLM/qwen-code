@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// no hooks needed beyond keypress handled inside
 import { Box, Text, useStdin } from 'ink';
 import chalk from 'chalk';
 import stringWidth from 'string-width';

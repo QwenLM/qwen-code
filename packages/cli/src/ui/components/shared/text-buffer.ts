@@ -2241,7 +2241,7 @@ export function useTextBuffer({
         editorArgs = [filePath];
         editorSource = 'opts';
         if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
-          if (/["|]/.test(editorCmd)) {
+          if (/["|%!]/.test(editorCmd)) {
             debugLogger.error(
               `[useTextBuffer] opts.editor command contains unsafe characters: ${editorCmd}`,
             );
@@ -2276,7 +2276,7 @@ export function useTextBuffer({
             (process.platform === 'win32' ? 'notepad' : 'vi');
           editorArgs = [filePath];
           if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
-            if (/["|]/.test(editorCmd)) {
+            if (/["|%!]/.test(editorCmd)) {
               debugLogger.error(
                 `[useTextBuffer] Editor command from environment contains unsafe characters: ${editorCmd}`,
               );

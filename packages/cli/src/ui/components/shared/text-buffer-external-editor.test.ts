@@ -713,6 +713,105 @@ describe('openInExternalEditor', () => {
     }
   });
 
+  it('should disable and restore raw mode around editor session', async () => {
+    const mockSetRawMode = vi.fn();
+    const mockStdin = { isRaw: true } as unknown as NodeJS.ReadStream;
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+        stdin: mockStdin,
+        setRawMode: mockSetRawMode,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(mockSetRawMode).toHaveBeenCalledWith(false);
+    expect(mockSetRawMode).toHaveBeenCalledWith(true);
+    const falseIdx = mockSetRawMode.mock.calls.findIndex(
+      (c: [boolean]) => c[0] === false,
+    );
+    const trueIdx = mockSetRawMode.mock.calls.findIndex(
+      (c: [boolean]) => c[0] === true,
+    );
+    expect(falseIdx).toBeLessThan(trueIdx);
+  });
+
+  it('should fall back to vi when VISUAL and EDITOR are unset on non-Windows', async () => {
+    const origPlatform = process.platform;
+    const origVISUAL = process.env['VISUAL'];
+    const origEDITOR = process.env['EDITOR'];
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    delete process.env['VISUAL'];
+    delete process.env['EDITOR'];
+
+    try {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'hello',
+          viewport,
+          isValidPath: () => false,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.openInExternalEditor();
+      });
+
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'vi',
+        expect.arrayContaining([expect.stringMatching(/\.txt$/)]),
+        expect.objectContaining({ stdio: 'inherit' }),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { value: origPlatform });
+      if (origVISUAL === undefined) delete process.env['VISUAL'];
+      else process.env['VISUAL'] = origVISUAL;
+      if (origEDITOR === undefined) delete process.env['EDITOR'];
+      else process.env['EDITOR'] = origEDITOR;
+    }
+  });
+
+  it('should fall back to notepad when VISUAL and EDITOR are unset on Windows', async () => {
+    const origPlatform = process.platform;
+    const origVISUAL = process.env['VISUAL'];
+    const origEDITOR = process.env['EDITOR'];
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    delete process.env['VISUAL'];
+    delete process.env['EDITOR'];
+
+    try {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'hello',
+          viewport,
+          isValidPath: () => false,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.openInExternalEditor();
+      });
+
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'notepad',
+        expect.arrayContaining([expect.stringMatching(/\.txt$/)]),
+        expect.objectContaining({ stdio: 'inherit' }),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { value: origPlatform });
+      if (origVISUAL === undefined) delete process.env['VISUAL'];
+      else process.env['VISUAL'] = origVISUAL;
+      if (origEDITOR === undefined) delete process.env['EDITOR'];
+      else process.env['EDITOR'] = origEDITOR;
+    }
+  });
+
   it('should reject env-var .cmd with unsafe characters on Windows', async () => {
     const origPlatform = process.platform;
     const origVISUAL = process.env['VISUAL'];
