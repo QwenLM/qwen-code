@@ -259,6 +259,11 @@ describe('HistoryReplayer', () => {
           rawInput: { path: '/test.ts' },
           _meta: {
             toolName: 'read_file',
+            // #4175 F4 prereq — ToolCallEmitter now stamps provenance
+            // on every tool_call / tool_call_update event so the UI can
+            // dispatch on builtin / mcp / subagent without string-
+            // matching toolName.
+            provenance: 'builtin',
             timestamp: toEpochMs(record.timestamp),
           },
         }),
@@ -314,6 +319,8 @@ describe('HistoryReplayer', () => {
         rawOutput: 'File contents here',
         _meta: {
           toolName: 'read_file',
+          // #4175 F4 prereq — provenance stamped on update events too.
+          provenance: 'builtin',
           timestamp: toEpochMs(record.timestamp),
         },
       });

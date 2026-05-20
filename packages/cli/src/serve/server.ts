@@ -27,6 +27,7 @@ import {
   type DeviceFlowProviderId,
   type DeviceFlowPublicView,
 } from './auth/deviceFlow.js';
+import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
@@ -1943,11 +1944,23 @@ export function createServeApp(
           // hard-coded `id: 0` would regress the client's `Last-Event-ID`
           // tracker. `formatSseFrame` omits the `id:` line when the input
           // event has no id.
+          //
+          // `errorKind` (#4175 F4 prereq, chiga0 issue #19 P0): stamp the
+          // classified error kind so UIs can render typed responses
+          // (auth retry / file picker / proxy hint / etc.) rather than
+          // regex-matching the human-readable `error` string. Returns
+          // `undefined` for unclassified errors — SDK falls back to
+          // rendering `error` text as before, so adding `errorKind` is
+          // strictly additive / backward-compatible.
+          const errorKind = mapDomainErrorToErrorKind(err);
           await writeWithBackpressure(
             formatSseFrame({
               v: 1,
               type: 'stream_error',
-              data: { error: errorMessage(err) },
+              data: {
+                error: errorMessage(err),
+                ...(errorKind ? { errorKind } : {}),
+              },
             }),
           ).catch(() => {});
         }
@@ -2540,7 +2553,25 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // The SDK parser at `sdk-typescript/src/daemon/sse.ts` handles the
   // multi-line variant on the receive side — input/output asymmetry is
   // intentional.
-  const dataJson = JSON.stringify(event);
+  //
+  // `_meta.serverTimestamp` (#4175 F4 prereq, chiga0 issue #19 P0): stamp
+  // the daemon's wall-clock at SSE write time so multi-client transcript
+  // ordering and "X minutes ago" UIs use the server's clock rather than
+  // each client's drifting local clock. Stamped at the wire boundary
+  // (NOT at EventBus.publish) so the in-memory `BridgeEvent` type stays
+  // unchanged and internal consumers don't see `_meta`. Pre-existing
+  // `_meta` keys on the event (e.g. tool_call carries `_meta.toolName` /
+  // `_meta.timestamp` from ToolCallEmitter) are preserved by spreading
+  // first. SDK consumers read via the 3-location probe in
+  // `extractServerTimestamp` (sdk-typescript) — `_meta.serverTimestamp`
+  // is one of the supported locations; the other two stay free for
+  // future use.
+  const existingMeta = (event as { _meta?: Record<string, unknown> })._meta;
+  const stamped = {
+    ...event,
+    _meta: { ...(existingMeta ?? {}), serverTimestamp: Date.now() },
+  };
+  const dataJson = JSON.stringify(stamped);
   const idLine =
     'id' in event && event.id !== undefined ? `id: ${event.id}\n` : '';
   return `${idLine}event: ${event.type}\ndata: ${dataJson}\n\n`;

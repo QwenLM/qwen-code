@@ -4358,13 +4358,90 @@ describe('GET /session/:id/events (SSE)', () => {
     expect(frames).toHaveLength(2);
     expect(frames[0]?.id).toBe('1');
     expect(frames[0]?.event).toBe('session_update');
-    expect(JSON.parse(frames[0]!.data!)).toEqual({
+    // `toMatchObject` rather than `toEqual` because the SSE write
+    // boundary stamps `_meta.serverTimestamp` (#4175 F4 prereq);
+    // a dedicated test below pins that field's shape.
+    expect(JSON.parse(frames[0]!.data!)).toMatchObject({
       id: 1,
       v: 1,
       type: 'session_update',
       data: { foo: 'bar' },
     });
     expect(frames[1]?.id).toBe('2');
+  });
+
+  it('stamps _meta.serverTimestamp on every SSE frame (#4175 F4 prereq, chiga0 #19 P0)', async () => {
+    // The daemon stamps `_meta.serverTimestamp` at the SSE write
+    // boundary so multi-client UIs use the server clock for transcript
+    // ordering / "X minutes ago" instead of each client's drifting
+    // local clock. The chiga0 SDK PR #4353 reads this via a 3-
+    // location probe (`event.serverTimestamp` / `event._meta.
+    // serverTimestamp` / `event.data._meta.serverTimestamp`); we
+    // pick `_meta.serverTimestamp` (Anthropic convention) so the
+    // top-level event type stays unpolluted.
+    const before = Date.now();
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: { foo: 'bar' },
+        };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    const frames = await readSseFrames(res.body!, 1);
+    const after = Date.now();
+
+    const parsed = JSON.parse(frames[0]!.data!);
+    expect(parsed._meta).toBeDefined();
+    expect(typeof parsed._meta.serverTimestamp).toBe('number');
+    // Server clock at stamp time must fall within the test's
+    // before/after wall-clock window.
+    expect(parsed._meta.serverTimestamp).toBeGreaterThanOrEqual(before);
+    expect(parsed._meta.serverTimestamp).toBeLessThanOrEqual(after);
+  });
+
+  it('preserves pre-existing _meta keys when stamping serverTimestamp', async () => {
+    // ToolCallEmitter (and other emitters) attach `_meta.toolName` etc.
+    // The SSE boundary stamp must MERGE (not overwrite) so downstream
+    // consumers keep both fields. `BridgeEvent` doesn't type `_meta`
+    // explicitly (it's a wire-only escape hatch) so we cast the yield.
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: { sessionUpdate: 'tool_call', toolCallId: 't1' },
+          // Pre-existing _meta on the event (mimics ToolCallEmitter).
+          _meta: { toolName: 'Read', timestamp: 1234567890 },
+        } as unknown as { id: 1; v: 1; type: 'session_update'; data: unknown };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    const frames = await readSseFrames(res.body!, 1);
+
+    const parsed = JSON.parse(frames[0]!.data!);
+    // Both the pre-existing _meta keys AND serverTimestamp must survive.
+    expect(parsed._meta.toolName).toBe('Read');
+    expect(parsed._meta.timestamp).toBe(1234567890);
+    expect(typeof parsed._meta.serverTimestamp).toBe('number');
   });
 
   it('forwards Last-Event-ID to the bridge', async () => {
@@ -4574,7 +4651,36 @@ describe('GET /session/:id/events (SSE)', () => {
     // it doesn't pollute the per-session monotonic sequence used for
     // Last-Event-ID resume.
     expect(frames[1]?.id).toBeUndefined();
+    // `Error('agent died')` isn't classified by `mapDomainErrorToErrorKind`
+    // (no Bridge*Error class, no errno code, no special name), so no
+    // `errorKind` is stamped — only `error`. The next test covers the
+    // classified-error path.
     expect(JSON.parse(frames[1]!.data!).data).toEqual({ error: 'agent died' });
+  });
+
+  it('stamps errorKind on stream_error when the thrown error is classified (#4175 F4 prereq, chiga0 #19 P0)', async () => {
+    // BridgeTimeoutError → `init_timeout` per mapDomainErrorToErrorKind.
+    // UI consumers can render "retry" on init_timeout vs "show stack
+    // trace" on unknown errors, without regex-matching the message
+    // string.
+    const { BridgeTimeoutError } = await import('@qwen-code/acp-bridge');
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+        throw new BridgeTimeoutError('initialize timed out');
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    const frames = await readSseFrames(res.body!, 2);
+    expect(frames[1]?.event).toBe('stream_error');
+    const parsed = JSON.parse(frames[1]!.data!);
+    expect(parsed.data.errorKind).toBe('init_timeout');
+    expect(parsed.data.error).toContain('timed out');
   });
 
   it('forwards numeric Last-Event-ID even when supplied as a string', async () => {
