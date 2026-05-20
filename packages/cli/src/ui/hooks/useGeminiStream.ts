@@ -2044,12 +2044,32 @@ export const useGeminiStream = (
       // wire — same trade-off upstream Claude Code makes when its
       // `StreamingToolExecutor.discard()` follows a
       // `yieldMissingToolResultBlocks` synthesis (`query.ts:733` + `:984`).
-      const historyCallIdsWithResponse = new Set<string>();
-      // Guard the call: some test harnesses build a partial GeminiClient
-      // mock without `getHistory`. Skipping dedup in that case is safe —
-      // it just means tests that never set up the repair pre-condition
-      // run with the original (pre-dedup) submission shape.
-      if (geminiClient && typeof geminiClient.getHistory === 'function') {
+      // Walk raw history WITHOUT cloning — `geminiClient.getHistory()`
+      // returns `structuredClone(this.history)`, which on long sessions
+      // (200+ entries with sizable tool outputs) costs several ms on
+      // the React UI thread and visibly stalls streaming when the
+      // dedup pass runs on every tool-completion batch. The
+      // `getHistoryFunctionResponseIds` accessor walks history in
+      // place and only collects the id strings we actually need.
+      // Guard the call: some test harnesses build a partial
+      // GeminiClient mock without it. Skipping dedup in that case is
+      // safe — tests that never set up the repair pre-condition run
+      // with the original (pre-dedup) submission shape. We fall back
+      // to the cloning getHistory() path for older mocks that only
+      // expose that method, so legacy tests stay green.
+      // qwen-latest-series-invite-beta-v34 thread on PR #4176.
+      let historyCallIdsWithResponse: Set<string>;
+      if (
+        geminiClient &&
+        typeof geminiClient.getHistoryFunctionResponseIds === 'function'
+      ) {
+        historyCallIdsWithResponse =
+          geminiClient.getHistoryFunctionResponseIds();
+      } else if (
+        geminiClient &&
+        typeof geminiClient.getHistory === 'function'
+      ) {
+        historyCallIdsWithResponse = new Set<string>();
         for (const entry of geminiClient.getHistory()) {
           if (entry.role !== 'user') continue;
           for (const part of entry.parts ?? []) {
@@ -2057,6 +2077,8 @@ export const useGeminiStream = (
             if (id) historyCallIdsWithResponse.add(id);
           }
         }
+      } else {
+        historyCallIdsWithResponse = new Set<string>();
       }
       const dedupedTools = completedAndReadyToSubmitTools.filter((tc) =>
         historyCallIdsWithResponse.has(tc.request.callId),
@@ -2104,8 +2126,15 @@ export const useGeminiStream = (
       }
 
       // Finalize any client-initiated tools as soon as they are done.
+      // Skip ones whose callId already lives in chat history with a
+      // matching `functionResponse` — the dedup block above already
+      // called `markToolsAsSubmitted` for those, and re-dispatching
+      // the same callIds here would queue an extra React render.
+      // qwen-latest-series-invite-beta-v34 thread on PR #4176.
       const clientTools = completedAndReadyToSubmitTools.filter(
-        (t) => t.request.isClientInitiated,
+        (t) =>
+          t.request.isClientInitiated &&
+          !historyCallIdsWithResponse.has(t.request.callId),
       );
       if (clientTools.length > 0) {
         markToolsAsSubmitted(clientTools.map((t) => t.request.callId));

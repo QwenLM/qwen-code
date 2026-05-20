@@ -1137,6 +1137,196 @@ describe('useGeminiStream', () => {
     releaseStream();
   });
 
+  it('handles a mixed batch (one deduped + one non-deduped) without double-counting telemetry (qwen-latest-series-invite-beta-v34 thread on PR #4176)', async () => {
+    // The dedup filter on `geminiTools` (`!historyCallIdsWithResponse.has(callId)`)
+    // is the only thing preventing double `recordCompletedToolCall`
+    // for tools whose late real result lands AFTER the orphan-tool_use
+    // repair already planted a synthetic. Existing dedup tests supply
+    // ONLY deduped tools, so a regression that removed that filter
+    // would silently inflate `toolCallCount` (and flip
+    // `skillsModifiedInSession` for the SAME skill-write callId twice)
+    // without breaking any current test.
+    //
+    // Mixed-batch repro: scheduler completes two tools in the same
+    // batch — one whose callId already has a fr in history (deduped),
+    // one whose callId is fresh (must reach sendMessageStream). Pin:
+    //   (a) markToolsAsSubmitted called with BOTH callIds,
+    //   (b) recordCompletedToolCall fires once per non-deduped tool,
+    //       NOT twice for the deduped one,
+    //   (c) sendMessageStream IS called (the non-deduped tool's real
+    //       result must reach the wire).
+    const dedupedTool = {
+      request: {
+        callId: 'call_mixed_deduped',
+        name: 'read_file',
+        args: { path: '/tmp/d.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-mixed',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_mixed_deduped',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_mixed_deduped',
+              name: 'read_file',
+              response: { output: 'late real for deduped' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'read_file',
+        displayName: 'ReadFile',
+        description: 'Read a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'read /tmp/d.txt',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    const freshTool = {
+      request: {
+        callId: 'call_mixed_fresh',
+        name: 'read_file',
+        args: { path: '/tmp/f.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-mixed',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_mixed_fresh',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_mixed_fresh',
+              name: 'read_file',
+              response: { output: 'real for fresh' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'read_file',
+        displayName: 'ReadFile',
+        description: 'Read a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'read /tmp/f.txt',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    // History has fr for ONLY the deduped callId — `call_mixed_fresh`
+    // is not paired and must flow through to sendMessageStream.
+    client.getHistory = vi.fn().mockReturnValue([
+      { role: 'user', parts: [{ text: 'kick off' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call_mixed_deduped',
+              name: 'read_file',
+              args: { path: '/tmp/d.txt' },
+            },
+          },
+          {
+            functionCall: {
+              id: 'call_mixed_fresh',
+              name: 'read_file',
+              args: { path: '/tmp/f.txt' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call_mixed_deduped',
+              name: 'read_file',
+              response: { error: 'Tool execution result was not recorded' },
+            },
+          },
+        ],
+      },
+    ]);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([dedupedTool, freshTool]);
+      }
+    });
+
+    await waitFor(() => {
+      // (a) Both callIds were marked submitted somewhere across the
+      // dedup pass (deduped) and the post-isResponding flow (fresh).
+      const allMarked = mockMarkToolsAsSubmitted.mock.calls.flatMap(
+        (call) => call[0] as string[],
+      );
+      expect(allMarked).toContain('call_mixed_deduped');
+      expect(allMarked).toContain('call_mixed_fresh');
+    });
+
+    // (b) recordCompletedToolCall fires EXACTLY once per tool (deduped
+    // gets one call from the dedup-loop; fresh gets one from the
+    // geminiTools loop). The filter is what prevents the double
+    // record on the deduped callId.
+    const recordedCallIds = (
+      client.recordCompletedToolCall as unknown as ReturnType<typeof vi.fn>
+    ).mock.calls.map((call) => (call[1] as { path: string }).path);
+    expect(recordedCallIds.filter((p) => p === '/tmp/d.txt').length).toBe(1);
+    expect(recordedCallIds.filter((p) => p === '/tmp/f.txt').length).toBe(1);
+
+    // (c) The fresh tool's real result reaches sendMessageStream —
+    // dedup didn't accidentally suppress it.
+    expect(mockSendMessageStream).toHaveBeenCalled();
+  });
+
   it('should not flicker streaming state to Idle between tool completion and submission', async () => {
     const toolCallResponseParts: PartListUnion = [
       { text: 'tool 1 final response' },

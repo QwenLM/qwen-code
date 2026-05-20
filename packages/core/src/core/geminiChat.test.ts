@@ -2524,6 +2524,98 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('rolls back the partial assistant turn when an InvalidStreamError fires after a tool_use chunk on the transient-stream retry budget (qwen-latest-series-invite-beta-v34 thread on PR #4176)', async () => {
+      // Counterpart to the rate-limit rollback above. The
+      // transient-stream retry budget (NO_FINISH_REASON /
+      // NO_RESPONSE_TEXT) has its own popPartialIfPushed call site —
+      // separate from the rate-limit branch the existing test
+      // covers. Without a regression test, that call could be
+      // accidentally removed and the rate-limit test would still
+      // pass while a stale partial silently rode the retry.
+      vi.useFakeTimers();
+      try {
+        const failingStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call_transient_retry_partial',
+                        name: 'read_file',
+                        args: { path: '/tmp/t.txt' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          // Mid-tool_use cut without a finish reason — the transient-
+          // stream retry budget catches this and retries with delay.
+          throw new InvalidStreamError(
+            'Model stream ended without a finish reason.',
+            'NO_FINISH_REASON',
+          );
+        })();
+        const successStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Recovered on retry' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(failingStream)
+          .mockResolvedValueOnce(successStream);
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-rollback-transient',
+        );
+        const iterator = stream[Symbol.asyncIterator]();
+        // Advance through the transient-retry delay (initial 2000 ms).
+        for (;;) {
+          const next = iterator.next();
+          await vi.advanceTimersByTimeAsync(5_000);
+          const r = await next;
+          if (r.done) break;
+        }
+
+        const history = chat.getHistory();
+        // Final shape must be clean: [user, model(success text)].
+        // The failed attempt's partial functionCall must NOT survive.
+        expect(history.length).toBe(2);
+        expect(history[0]!.role).toBe('user');
+        expect(history[1]!.role).toBe('model');
+        expect(history[1]!.parts!.find((p) => p.text)?.text).toBe(
+          'Recovered on retry',
+        );
+        expect(history.some((h) => h.parts?.some((p) => p.functionCall))).toBe(
+          false,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // NOTE: no test for the InvalidStreamError content-retry branch
+    // (geminiChat.ts ~line 1399). Verified unreachable for that error
+    // class: `isTransientStreamError` and `isContentError` are the
+    // same predicate (`error instanceof InvalidStreamError`), so the
+    // transient branch above always either `continue`s or `break`s
+    // before control reaches the content branch. The
+    // `popPartialIfPushed()` call there is preserved as
+    // defense-in-depth for a future error class that should diverge
+    // the predicates; see the comment block at that call site for
+    // the full analysis. qwen-latest-series-invite-beta-v34 thread
+    // on PR #4176.
+
     it('rolls back the chat-recording entry too when the retry succeeds (yiliang114 PR #4176 follow-up)', async () => {
       // The in-memory rollback test above asserts `this.history` ends
       // clean after a retry-success. This test asserts the same about
@@ -3775,6 +3867,161 @@ describe('GeminiChat', async () => {
     });
   });
 
+  describe('partial-push marker invariants on history mutation (qwen-latest-series-invite-beta-v34 thread on PR #4176)', () => {
+    // The whole partial-push lifecycle relies on the invariant
+    //   "every history-mutation method clears the partial-push markers"
+    // — six sites enforce it (clearHistory, addHistory, setHistory,
+    // truncateHistory, stripThoughtsFromHistory,
+    // stripOrphanedUserEntriesFromHistory). If any site forgets, a
+    // stale `pendingPartialAssistantTurnIndex` could line up with an
+    // unrelated model turn in the post-mutation history and cause
+    // `popPartialIfPushed` to splice the WRONG entry — silently losing
+    // a real assistant response.
+    //
+    // The markers are ephemeral within a single sendMessageStream
+    // call: the `finally` block flushes the deferred JSONL record
+    // and calls `clearPendingPartialState()` before the generator
+    // unwinds. So we can't observe non-null markers after a real
+    // mid-stream error completes — by that point the lifecycle has
+    // already cleared them. Instead, we plant the markers directly
+    // via the same private-field assignment the production code uses,
+    // then call each mutation method and verify both fields are reset
+    // in lockstep. This pins the invariant against future refactors
+    // that drop a `clearPendingPartialState()` call from one site
+    // while the other five still pass.
+    type PrivateFields = {
+      pendingPartialAssistantTurnIndex: number | null;
+      pendingPartialAssistantRecord: unknown;
+    };
+    function plantMarkers(c: GeminiChat): void {
+      const internal = c as unknown as PrivateFields;
+      internal.pendingPartialAssistantTurnIndex = 0;
+      internal.pendingPartialAssistantRecord = {
+        model: 'test-model',
+        message: [{ functionCall: { id: 'call_test', name: 't', args: {} } }],
+      };
+    }
+    function markers(c: GeminiChat): {
+      idx: number | null;
+      record: unknown;
+    } {
+      const internal = c as unknown as PrivateFields;
+      return {
+        idx: internal.pendingPartialAssistantTurnIndex,
+        record: internal.pendingPartialAssistantRecord,
+      };
+    }
+
+    it('clearHistory() clears the partial-push markers', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'kick off' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'x', name: 't', args: {} } }],
+        },
+      ]);
+      plantMarkers(chat);
+      expect(markers(chat).idx).toBe(0);
+
+      chat.clearHistory();
+
+      expect(markers(chat).idx).toBeNull();
+      expect(markers(chat).record).toBeNull();
+    });
+
+    it('addHistory() clears the partial-push markers (violation path)', () => {
+      // addHistory is documented to be called between sends, NOT
+      // mid-send. Calling it with markers active is a violation —
+      // the implementation logs a warn so the offending caller is
+      // visible in diagnostics, then clears the markers.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'kick off' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'x', name: 't', args: {} } }],
+        },
+      ]);
+      plantMarkers(chat);
+      expect(markers(chat).idx).toBe(0);
+
+      chat.addHistory({ role: 'user', parts: [{ text: 'between sends' }] });
+
+      expect(markers(chat).idx).toBeNull();
+      expect(markers(chat).record).toBeNull();
+    });
+
+    it('setHistory() clears the partial-push markers', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'kick off' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'x', name: 't', args: {} } }],
+        },
+      ]);
+      plantMarkers(chat);
+      expect(markers(chat).idx).toBe(0);
+
+      chat.setHistory([{ role: 'user', parts: [{ text: 'replacement' }] }]);
+
+      expect(markers(chat).idx).toBeNull();
+      expect(markers(chat).record).toBeNull();
+    });
+
+    it('truncateHistory() clears the partial-push markers', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'kick off' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'x', name: 't', args: {} } }],
+        },
+      ]);
+      plantMarkers(chat);
+      expect(markers(chat).idx).toBe(0);
+
+      chat.truncateHistory(1);
+
+      expect(markers(chat).idx).toBeNull();
+      expect(markers(chat).record).toBeNull();
+    });
+
+    it('stripThoughtsFromHistory() clears the partial-push markers', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'kick off' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'x', name: 't', args: {} } }],
+        },
+      ]);
+      plantMarkers(chat);
+      expect(markers(chat).idx).toBe(0);
+
+      chat.stripThoughtsFromHistory();
+
+      expect(markers(chat).idx).toBeNull();
+      expect(markers(chat).record).toBeNull();
+    });
+
+    it('stripOrphanedUserEntriesFromHistory() clears the partial-push markers', () => {
+      // History tail is a model turn — strip is a no-op on history,
+      // but the marker reset must still fire so all six mutation
+      // sites stay uniform.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'kick off' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'x', name: 't', args: {} } }],
+        },
+      ]);
+      plantMarkers(chat);
+      expect(markers(chat).idx).toBe(0);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(markers(chat).idx).toBeNull();
+      expect(markers(chat).record).toBeNull();
+    });
+  });
+
   describe('repairOrphanedToolUseTurns', () => {
     // Verifies the inverse-of-strip pass: every `model[functionCall]`
     // without a matching `user[functionResponse]` in the next turn gets
@@ -4265,6 +4512,138 @@ describe('GeminiChat', async () => {
       expect(history[2]!.parts![1]).toEqual({ text: 'never mind' });
       expect(history[3]!.parts).toEqual([{ text: 'thanks anyway' }]);
     });
+
+    it('drops duplicate functionResponse entries for the same callId across user turns (gpt-5.5 thread on PR #4176)', () => {
+      // Critical regression: when the same callId is echoed back more
+      // than once (e.g. the React scheduler retries the late submitQuery
+      // after the orphan repair already planted one, or two parallel
+      // late-submit paths land), hoisting only the first leaves the
+      // duplicate behind. The wire payload then serializes
+      //   `model[tool_use] -> user[tool_result] -> user[tool_result]`
+      // and Anthropic-compatible backends reject the trailing block as
+      // an orphan, re-wedging the session. The repair MUST hoist one
+      // canonical fr into the adjacent turn AND delete every duplicate.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'open file' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { id: 'cid_dup', name: 'read_file', args: {} },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'never mind' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_dup',
+                name: 'read_file',
+                response: { output: 'data' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_dup',
+                name: 'read_file',
+                response: { output: 'data' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const result = chat.repairOrphanedToolUseTurns();
+
+      expect(result.injected).toEqual([]);
+      const history = chat.getHistory();
+      // 5 → 3: both source turns held only the duplicate fr, so both
+      // are removed; the canonical fr is hoisted into history[2] and
+      // sits at the head before the text part.
+      expect(history.length).toBe(3);
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe('cid_dup');
+      expect(history[2]!.parts![1]).toEqual({ text: 'never mind' });
+      // No fr for cid_dup remains anywhere AFTER the adjacent turn.
+      const trailingHasDup = history
+        .slice(3)
+        .some((entry) =>
+          (entry.parts ?? []).some(
+            (part) => part.functionResponse?.id === 'cid_dup',
+          ),
+        );
+      expect(trailingHasDup).toBe(false);
+    });
+
+    it('drops duplicate fr even when the canonical copy is already in the adjacent turn', () => {
+      // Variant of the duplicate case where the FIRST fr lands in the
+      // immediate next user turn (no hoist needed) but a second
+      // duplicate copy is in a later user turn. The hoist branch is
+      // skipped, but duplicate cleanup must still fire — otherwise the
+      // wire payload still has two `tool_result` blocks for the same id.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'kick off' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { id: 'cid_adj_dup', name: 'read_file', args: {} },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_adj_dup',
+                name: 'read_file',
+                response: { output: 'real' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_adj_dup',
+                name: 'read_file',
+                response: { output: 'real' },
+              },
+            },
+            { text: 'follow up' },
+          ],
+        },
+      ]);
+
+      const result = chat.repairOrphanedToolUseTurns();
+
+      expect(result.injected).toEqual([]);
+      const history = chat.getHistory();
+      // The source duplicate turn loses its fr but keeps its text part
+      // → 4 entries preserved, but the duplicate fr is gone.
+      expect(history.length).toBe(4);
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe('cid_adj_dup');
+      expect(history[2]!.parts!.length).toBe(1);
+      expect(history[3]!.parts).toEqual([{ text: 'follow up' }]);
+      // The model[fc] is followed by exactly one fr for that id across
+      // all subsequent user turns.
+      const allFrIds = history
+        .slice(2)
+        .flatMap((entry) =>
+          (entry.parts ?? []).map((p) => p.functionResponse?.id),
+        )
+        .filter((id): id is string => Boolean(id));
+      expect(allFrIds).toEqual(['cid_adj_dup']);
+    });
   });
 
   describe('output token recovery', () => {
@@ -4468,6 +4847,104 @@ describe('GeminiChat', async () => {
       // not an empty placeholder.
       expect(lastEntry.role).toBe('model');
       expect(lastEntry.parts!.length).toBeGreaterThan(0);
+    });
+
+    it('should pop both the partial model turn AND the recovery user message when recovery throws after a functionCall (qwen-latest-series-invite-beta-v34 thread on PR #4176)', async () => {
+      // Critical regression for the recovery catch's pop ordering.
+      // When the recovery stream yields a `functionCall` chunk and
+      // then throws, `processStreamResponse` pushes a partial `model`
+      // turn into history BEFORE re-throwing — so by the time the
+      // recovery catch runs, the trailing entries are
+      //   [..., user(OUTPUT_RECOVERY_MESSAGE), model(partial fc)]
+      // The naive "if last is user, pop" check would no-op here (last
+      // is now `model`), leaving the OUTPUT_RECOVERY_MESSAGE control
+      // prompt stranded as a real user turn. The catch must pop the
+      // partial model turn FIRST, then the recovery user turn, and
+      // clear the partial-push markers so the outer `finally` JSONL
+      // flush doesn't resurrect the partial we just deleted.
+      const streams = [
+        // Initial: text + MAX_TOKENS → triggers escalation.
+        makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
+        // Escalated: text + MAX_TOKENS → triggers recovery iteration 1.
+        makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
+        // Recovery iter 1: yields functionCall chunk, then throws.
+        // processStreamResponse pushes a partial model turn before
+        // re-throwing the synthetic error.
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call_recovery_throw',
+                        name: 'read_file',
+                        args: { path: '/tmp/r.txt' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw new Error('synthetic recovery mid-tool_use cut');
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'recovery throws after functionCall' },
+        'prompt-recovery-fc-throw',
+      );
+
+      // Consume; the catch swallows the error and emits a synthetic
+      // STOP chunk so the consumer sees a clean termination.
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      const history = chat.getHistory();
+
+      // OUTPUT_RECOVERY_MESSAGE must NOT appear anywhere in history.
+      // The pop-ordering bug strands it as a real user turn that then
+      // pollutes durable history and biases later turns.
+      const flattened = JSON.stringify(history);
+      expect(flattened).not.toContain('Output token limit hit');
+      expect(flattened).not.toContain('Resume directly');
+
+      // The partial model[functionCall] from the recovery throw must
+      // also be popped — leaving it would create a dangling tool_use
+      // that the inline repair on the next sendMessageStream would
+      // synthesize an `error` functionResponse for, and the React
+      // scheduler's late real result would be dropped by the
+      // history-based dedup. Symptom: model sees an "execution result
+      // was not recorded" error for a tool that actually succeeded.
+      const stillHasPartialFc = history.some((entry) =>
+        (entry.parts ?? []).some(
+          (part) => part.functionCall?.id === 'call_recovery_throw',
+        ),
+      );
+      expect(stillHasPartialFc).toBe(false);
+
+      // Roles must strictly alternate (no consecutive same-role) so
+      // providers don't reject the next turn.
+      for (let i = 1; i < history.length; i++) {
+        expect(history[i]!.role).not.toBe(history[i - 1]!.role);
+      }
+
+      // History tail should be the escalated model response (text:
+      // 'escalated'), preserved as the user-visible answer.
+      const lastEntry = history[history.length - 1]!;
+      expect(lastEntry.role).toBe('model');
+      const lastModelText = (lastEntry.parts ?? [])
+        .map((p) => ('text' in p ? ((p as { text?: string }).text ?? '') : ''))
+        .join('');
+      expect(lastModelText).toContain('escalated');
     });
 
     it('should stop recovery mid-loop when a later iteration emits functionCall', async () => {

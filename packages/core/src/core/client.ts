@@ -315,6 +315,22 @@ export class GeminiClient {
   }
 
   /**
+   * Walk-only accessor for the set of `functionResponse.id` strings in
+   * raw history. Callers that only need the dedup id set (notably
+   * `useGeminiStream.handleCompletedTools`) MUST prefer this over
+   * {@link getHistory}, which deep-clones the entire conversation via
+   * `structuredClone` on every call. On long sessions with sizable
+   * tool outputs the clone is a multi-millisecond hit on the React UI
+   * thread; running it on every tool-completion batch caused visible
+   * frame drops during streaming. See
+   * `GeminiChat.getHistoryFunctionResponseIds` for the implementation
+   * and the qwen-latest-series-invite-beta-v34 thread on PR #4176.
+   */
+  getHistoryFunctionResponseIds(): Set<string> {
+    return this.getChat().getHistoryFunctionResponseIds();
+  }
+
+  /**
    * Pop orphaned trailing user entries from the in-memory chat history.
    * Used by:
    *   - The Retry submit path (sendMessageStream below), which drops a

@@ -486,9 +486,25 @@ export function repairOrphanedToolUseTurns(
     //    they reject with "tool_use_id ... must have a corresponding
     //    tool_use block in the previous message". gpt-5.5 review thread
     //    on PR #4176.
+    // Collect EVERY (turnIdx, partIdx, part) for every functionResponse
+    // we encounter, keyed by id. Storing all locations (not just the
+    // first) is load-bearing for the duplicate case: if the same callId
+    // is echoed back more than once across the consecutive user turns
+    // (e.g. `model[fc id=cid], user[text], user[fr cid], user[fr cid]`
+    // — possible when the React scheduler retries the late submitQuery
+    // and a duplicate fr lands), hoisting only the first leaves the
+    // duplicate(s) behind in a non-adjacent later user turn. The wire
+    // payload then serializes
+    //   `model[tool_use] -> user[tool_result] -> user[tool_result]`
+    // and the backend rejects the trailing block as an orphan
+    // ("tool_use_id ... must have a corresponding tool_use block in the
+    // previous message"), so the session stays wedged for the same 400
+    // class this repair pass exists to escape. We MUST drop every
+    // duplicate; the survivor at history[i+1] is whichever copy we
+    // hoist, and the rest are erased. (gpt-5.5 thread on PR #4176.)
     const matched = new Map<
       string,
-      { turnIdx: number; partIdx: number; part: Part }
+      Array<{ turnIdx: number; partIdx: number; part: Part }>
     >();
     let scanIdx = i + 1;
     while (scanIdx < history.length && history[scanIdx]?.role === 'user') {
@@ -496,29 +512,55 @@ export function repairOrphanedToolUseTurns(
       for (let pIdx = 0; pIdx < parts.length; pIdx++) {
         const part = parts[pIdx];
         const id = part.functionResponse?.id;
-        if (id && !matched.has(id)) {
-          matched.set(id, { turnIdx: scanIdx, partIdx: pIdx, part });
+        if (id) {
+          const list = matched.get(id);
+          if (list) list.push({ turnIdx: scanIdx, partIdx: pIdx, part });
+          else matched.set(id, [{ turnIdx: scanIdx, partIdx: pIdx, part }]);
         }
       }
       scanIdx++;
     }
 
     const synthesizeIds: Array<[string, string]> = [];
-    const hoistLocations: Array<{
-      turnIdx: number;
-      partIdx: number;
-      part: Part;
-    }> = [];
+    const hoistedParts: Part[] = [];
+    // Removal targets cover BOTH:
+    //  - the survivor's original location for ids being hoisted (we
+    //    move it into history[i+1])
+    //  - every duplicate copy of an id (hoisted or already-adjacent)
+    // For an id whose canonical fr is already in history[i+1] but has
+    // duplicates further down, we don't hoist (no relocation needed)
+    // but we still must drop the duplicates so the wire format only
+    // contains one fr per call.
+    const allRemovalTargets: Array<{ turnIdx: number; partIdx: number }> = [];
     for (const [id, name] of expected) {
-      const loc = matched.get(id);
-      if (!loc) {
+      const locations = matched.get(id);
+      if (!locations || locations.length === 0) {
         synthesizeIds.push([id, name]);
-      } else if (loc.turnIdx !== i + 1) {
-        hoistLocations.push(loc);
+        continue;
       }
-      // else: already in the immediate next user turn — wire format ok.
+      // Pick the first location's part as the canonical survivor (any
+      // copy works — the response payload should be identical for the
+      // same callId; if they differ the wire is already corrupt and the
+      // backend will reject regardless).
+      const survivor = locations[0]!;
+      if (survivor.turnIdx !== i + 1) {
+        // Hoist: the canonical part needs to move into history[i+1].
+        hoistedParts.push(survivor.part);
+        allRemovalTargets.push({
+          turnIdx: survivor.turnIdx,
+          partIdx: survivor.partIdx,
+        });
+      }
+      // else: canonical already adjacent — no relocation.
+      // Either way, drop EVERY duplicate beyond the first.
+      for (let k = 1; k < locations.length; k++) {
+        allRemovalTargets.push({
+          turnIdx: locations[k]!.turnIdx,
+          partIdx: locations[k]!.partIdx,
+        });
+      }
     }
-    if (synthesizeIds.length === 0 && hoistLocations.length === 0) continue;
+    if (synthesizeIds.length === 0 && allRemovalTargets.length === 0) continue;
 
     const syntheticParts: Part[] = synthesizeIds.map(([callId, name]) => ({
       functionResponse: {
@@ -527,23 +569,19 @@ export function repairOrphanedToolUseTurns(
         response: { error: reason },
       },
     }));
-    // Hoisted parts come from REAL tool_results elsewhere in history.
-    // We capture references first, then splice them out below in
-    // descending order so earlier removals don't shift later indices.
-    const hoistedParts: Part[] = hoistLocations.map((loc) => loc.part);
     // Synthetics first, then hoisted. Order between synthetic and
     // hoisted is internal — backends just need ALL tool_results at the
     // head of the user turn, regardless of order among themselves.
     const partsToInject: Part[] = [...syntheticParts, ...hoistedParts];
 
-    // Remove hoisted parts from their original turns. Sort by
-    // (turnIdx desc, partIdx desc) so each splice operates on stable
-    // indices for everything still to be removed.
-    const removalOrder = [...hoistLocations].sort((a, b) => {
+    // Remove every removal target (hoist survivors + all duplicates).
+    // Sort by (turnIdx desc, partIdx desc) so each splice operates on
+    // stable indices for everything still to be removed.
+    allRemovalTargets.sort((a, b) => {
       if (a.turnIdx !== b.turnIdx) return b.turnIdx - a.turnIdx;
       return b.partIdx - a.partIdx;
     });
-    for (const loc of removalOrder) {
+    for (const loc of allRemovalTargets) {
       const turnParts = history[loc.turnIdx].parts;
       if (turnParts) turnParts.splice(loc.partIdx, 1);
     }
@@ -1357,7 +1395,18 @@ export class GeminiChat {
               break;
             }
 
-            // Other content validation errors (e.g. NO_FINISH_REASON).
+            // Currently unreachable for `InvalidStreamError`. The
+            // `isContentError` predicate is identical to
+            // `isTransientStreamError` (`error instanceof InvalidStreamError`),
+            // and the transient branch above already either continued or
+            // broke for that class. The branch is preserved as
+            // defense-in-depth: a future error class that should consume
+            // its own content-retry budget but NOT the transient one
+            // could be threaded through here without re-deriving the
+            // popPartialIfPushed sequence. Reviewer thread on PR #4176
+            // (qwen-latest-series-invite-beta-v34) flagged the absence
+            // of a test — there is no reachable test path until the
+            // predicates diverge.
             const isContentError = error instanceof InvalidStreamError;
             if (isContentError) {
               if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
@@ -1499,6 +1548,37 @@ export class GeminiChat {
               // If a recovery attempt fails (e.g., empty response, network
               // error), stop recovering and let the partial output stand.
               // Pop the dangling recovery message to keep history valid.
+              //
+              // Order matters: when the recovery stream errors AFTER
+              // yielding a `functionCall` chunk, `processStreamResponse`
+              // pushes a partial `model` turn into history before
+              // re-throwing. The naive "if last is user, pop" check
+              // would then no-op (last is now the partial `model`),
+              // leaving `user(OUTPUT_RECOVERY_MESSAGE)` stranded as a
+              // real user turn the user never sent. Two consequences:
+              //  - the control-prompt text (which carries instructions
+              //    meant only for the model's own continuation context)
+              //    pollutes durable history and biases later turns,
+              //  - the inline repair on the next sendMessageStream
+              //    synthesizes an `error` `functionResponse` for the
+              //    dangling `functionCall`, which the
+              //    `handleCompletedTools` history-based dedup then drops
+              //    when the React scheduler's REAL tool result arrives,
+              //    so the model sees an "execution result was not
+              //    recorded" error for a tool that actually succeeded.
+              // Pop the partial model turn FIRST, then the recovery
+              // user turn. The partial-push markers are also cleared
+              // in lockstep so the outer `finally` JSONL flush can't
+              // resurrect a partial we just deleted from live history.
+              // qwen-latest-series-invite-beta-v34 thread on PR #4176.
+              if (
+                self.pendingPartialAssistantTurnIndex !== null &&
+                self.history.length > 0 &&
+                self.history[self.history.length - 1].role === 'model'
+              ) {
+                self.history.pop();
+                self.clearPendingPartialState();
+              }
               if (
                 self.history.length > 0 &&
                 self.history[self.history.length - 1].role === 'user'
@@ -1585,9 +1665,28 @@ export class GeminiChat {
         // and stash are dropped together to preserve the
         // "marker non-null ⇔ stash non-null" invariant.
         if (self.pendingPartialAssistantRecord) {
-          self.chatRecordingService?.recordAssistantTurn(
-            self.pendingPartialAssistantRecord,
-          );
+          // Recording-service errors (disk full, write permission,
+          // serialization failure) MUST NOT propagate out of the
+          // generator's `finally` — that would mask the real send
+          // outcome (success or original throw) with a JSONL-write
+          // error the caller can't usefully act on. Instead, log and
+          // drop the record: the partial is already durable in
+          // `this.history`, so live behavior is unaffected; only the
+          // disk transcript loses this turn (eventual consistency
+          // restored on the next successful flush of any other turn).
+          // qwen-latest-series-invite-beta-v34 thread on PR #4176.
+          try {
+            self.chatRecordingService?.recordAssistantTurn(
+              self.pendingPartialAssistantRecord,
+            );
+          } catch (recordErr) {
+            debugLogger.warn(
+              '[PARTIAL_FLUSH] Failed to persist deferred JSONL record: ' +
+                (recordErr instanceof Error
+                  ? recordErr.message
+                  : String(recordErr)),
+            );
+          }
           self.clearPendingPartialState();
         }
       }
@@ -1696,6 +1795,32 @@ export class GeminiChat {
    */
   getHistoryLength(): number {
     return this.history.length;
+  }
+
+  /**
+   * Returns the set of `functionResponse.id` values present anywhere
+   * in user turns of the raw chat history. Walks `this.history` in
+   * place — no `structuredClone`, no per-part copy — so it is safe to
+   * call on hot paths (e.g. on every tool-completion batch in
+   * `useGeminiStream.handleCompletedTools`).
+   *
+   * The dedup pass only needs id strings; routing it through
+   * {@link getHistory} would deep-clone the entire conversation
+   * (recursive `structuredClone` over every part, including large tool
+   * outputs) on every batch and visibly stall the React UI thread on
+   * long sessions (200+ entries with sizable tool results).
+   * qwen-latest-series-invite-beta-v34 thread on PR #4176.
+   */
+  getHistoryFunctionResponseIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const entry of this.history) {
+      if (entry.role !== 'user') continue;
+      for (const part of entry.parts ?? []) {
+        const id = part.functionResponse?.id;
+        if (id) ids.add(id);
+      }
+    }
+    return ids;
   }
 
   /**
@@ -2056,10 +2181,15 @@ export class GeminiChat {
     // re-issues it; a stale partial-text model turn between them would
     // either bias the retry or surface as a duplicate.
     if (streamError !== null) {
-      if (
-        hasToolCall &&
-        (thoughtContentPart || consolidatedHistoryParts.length > 0)
-      ) {
+      // Reuse the `willPersistToHistory` gate from the recordAssistantTurn
+      // block above instead of re-deriving it. When `streamError !== null`,
+      // `willPersistToHistory` reduces to exactly the original expression
+      // `hasToolCall && (thoughtContentPart || consolidatedHistoryParts.length > 0)`;
+      // sharing the single binding eliminates drift risk if one gate is
+      // tightened without the other and the JSONL recording silently
+      // desyncs from in-memory history.
+      // qwen-latest-series-invite-beta-v34 thread on PR #4176.
+      if (willPersistToHistory) {
         this.history.push({
           role: 'model',
           parts: [
