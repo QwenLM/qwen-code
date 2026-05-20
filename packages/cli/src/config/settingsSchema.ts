@@ -741,6 +741,26 @@ const SETTINGS_SCHEMA = {
         description: 'Custom witty phrases to display during loading.',
         showInDialog: false,
       },
+      enableFortunes: {
+        type: 'boolean',
+        label: 'Enable Fortune Quotes',
+        category: 'UI',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Display random fortune quotes during loading instead of static phrases. Requires the `fortune` command to be installed.',
+        showInDialog: true,
+      },
+      fortuneCommand: {
+        type: 'string',
+        label: 'Fortune Command',
+        category: 'UI',
+        requiresRestart: true,
+        default: '/usr/games/fortune -s -n 45',
+        description:
+          'Command to execute for fortune quotes. Use -s for short fortunes, -n <chars> to limit length. Set to empty string to disable. Requires restart to apply.',
+        showInDialog: false,
+      },
       enableWelcomeBack: {
         type: 'boolean',
         label: 'Show Welcome Back Dialog',

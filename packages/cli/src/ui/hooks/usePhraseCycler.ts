@@ -6,21 +6,47 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { t, ta, getCurrentLanguage } from '../../i18n/index.js';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 export const WITTY_LOADING_PHRASES: string[] = ["I'm Feeling Lucky"];
 
 export const PHRASE_CHANGE_INTERVAL_MS = 15000;
 
 /**
+ * Get a random fortune quote by calling the fortune command.
+ * Uses -s flag to get only short (single-line) fortunes.
+ */
+async function getFortuneQuote(command: string): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync(command);
+    // Replace newlines with spaces and trim to ensure single-line output
+    const quote = stdout.trim().replace(/\s+/g, ' ');
+    return quote || null;
+  } catch {
+    // Return null to signal fallback to preselected phrases
+    return null;
+  }
+}
+
+/**
  * Custom hook to manage cycling through loading phrases.
+ * Uses fortune command for dynamic quotes instead of static phrases.
  * @param isActive Whether the phrase cycling should be active.
  * @param isWaiting Whether to show a specific waiting phrase.
+ * @param customPhrases Optional custom phrases to cycle through.
+ * @param enableFortunes Whether to use fortune quotes (default: false).
+ * @param fortuneCommand Optional custom fortune command (default: '/usr/games/fortune -s -n 45').
  * @returns The current loading phrase.
  */
 export const usePhraseCycler = (
   isActive: boolean,
   isWaiting: boolean,
   customPhrases?: string[],
+  enableFortunes: boolean = false,
+  fortuneCommand: string = '/usr/games/fortune -s -n 45',
 ) => {
   // Get phrases from translations if available
   const currentLanguage = getCurrentLanguage();
@@ -51,20 +77,22 @@ export const usePhraseCycler = (
       if (phraseIntervalRef.current) {
         clearInterval(phraseIntervalRef.current);
       }
-      // Select an initial random phrase
-      const initialRandomIndex = Math.floor(
-        Math.random() * loadingPhrases.length,
-      );
-      setCurrentLoadingPhrase(loadingPhrases[initialRandomIndex]);
 
-      phraseIntervalRef.current = setInterval(() => {
-        // Select a new random phrase
-        const randomIndex = Math.floor(Math.random() * loadingPhrases.length);
-        setCurrentLoadingPhrase(loadingPhrases[randomIndex]);
-      }, PHRASE_CHANGE_INTERVAL_MS);
+      const updatePhrase = async () => {
+        if (enableFortunes && fortuneCommand.trim()) {
+          const fortuneQuote = await getFortuneQuote(fortuneCommand);
+          setCurrentLoadingPhrase(fortuneQuote ?? loadingPhrases[0]);
+        } else {
+          setCurrentLoadingPhrase(loadingPhrases[0]);
+        }
+      };
+
+      updatePhrase();
+      phraseIntervalRef.current = setInterval(
+        updatePhrase,
+        PHRASE_CHANGE_INTERVAL_MS,
+      );
     } else {
-      // Idle or other states, clear the phrase interval
-      // and reset to the first phrase for next active state.
       if (phraseIntervalRef.current) {
         clearInterval(phraseIntervalRef.current);
         phraseIntervalRef.current = null;
@@ -78,7 +106,7 @@ export const usePhraseCycler = (
         phraseIntervalRef.current = null;
       }
     };
-  }, [isActive, isWaiting, loadingPhrases]);
+  }, [isActive, isWaiting, loadingPhrases, enableFortunes, fortuneCommand]);
 
   return currentLoadingPhrase;
 };

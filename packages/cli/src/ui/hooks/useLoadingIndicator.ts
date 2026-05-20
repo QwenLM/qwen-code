@@ -13,6 +13,8 @@ export const useLoadingIndicator = (
   streamingState: StreamingState,
   customWittyPhrases?: string[],
   currentCandidatesTokens?: number,
+  enableFortunes: boolean = false,
+  fortuneCommand?: string,
 ) => {
   const [timerResetKey, setTimerResetKey] = useState(0);
   const isTimerActive = streamingState === StreamingState.Responding;
@@ -25,6 +27,8 @@ export const useLoadingIndicator = (
     isPhraseCyclingActive,
     isWaiting,
     customWittyPhrases,
+    enableFortunes,
+    fortuneCommand,
   );
 
   const [retainedElapsedTime, setRetainedElapsedTime] = useState(0);

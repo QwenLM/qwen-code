@@ -2711,6 +2711,8 @@ export const AppContainer = (props: AppContainerProps) => {
       streamingState,
       settings.merged.ui?.customWittyPhrases,
       currentCandidatesTokens,
+      settings.merged.ui?.enableFortunes,
+      settings.merged.ui?.fortuneCommand,
     );
 
   useAttentionNotifications({

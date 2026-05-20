@@ -245,6 +245,16 @@
             "type": "string"
           }
         },
+        "enableFortunes": {
+          "description": "Display random fortune quotes during loading instead of static phrases. Requires the `fortune` command to be installed.",
+          "type": "boolean",
+          "default": false
+        },
+        "fortuneCommand": {
+          "description": "Command to execute for fortune quotes. Use -s for short fortunes, -n <chars> to limit length. Set to empty string to disable. Requires restart to apply.",
+          "type": "string",
+          "default": "/usr/games/fortune -s -n 45"
+        },
         "enableWelcomeBack": {
           "description": "Show welcome back dialog when returning to a project with conversation history. Choosing \"Start new chat session\" suppresses the dialog for that project until the project summary changes.",
           "type": "boolean",
