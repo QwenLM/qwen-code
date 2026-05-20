@@ -107,9 +107,24 @@ export function createBridgeFileSystemAdapter(
       // ACP `line` / `limit` are `number | null | undefined`; PR 18's
       // `readText` opts expect `number | undefined`. Drop nulls AND
       // undefineds so we only forward concrete numeric windows.
+      //
+      // Also drop non-positive `limit` (e.g. `-1`, `0`): pre-PR the
+      // inline `BridgeClient.readTextFile` proxy returned `{ content:
+      // '' }` for `limit <= 0`, but PR 18's `readText` applies
+      // `slice(0, limit)` which returns "all lines except the last
+      // |limit|" for negative limits — wrong content. Same for non-
+      // positive `line` (1-based; <= 0 is meaningless and currently
+      // rejected with parse_error). Drop both so PR 18 falls back to
+      // its `undefined` defaults (no windowing) — closest match to the
+      // pre-PR empty-content posture without smuggling a `parse_error`
+      // to agents that previously got `''`.
       const opts: { line?: number; limit?: number } = {};
-      if (typeof params.line === 'number') opts.line = params.line;
-      if (typeof params.limit === 'number') opts.limit = params.limit;
+      if (typeof params.line === 'number' && params.line > 0) {
+        opts.line = params.line;
+      }
+      if (typeof params.limit === 'number' && params.limit > 0) {
+        opts.limit = params.limit;
+      }
       const { content } = await wfs.readText(resolved, opts);
       return { content };
     },

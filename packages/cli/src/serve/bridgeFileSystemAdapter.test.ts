@@ -264,6 +264,46 @@ describe('createBridgeFileSystemAdapter', () => {
       } as ReadTextFileRequest);
       expect(response.content).toBe('hello\nworld\n');
     });
+
+    it('drops non-positive limit (negative / zero) instead of forwarding', async () => {
+      // wenshao #4334 review: pre-PR inline `BridgeClient.readTextFile`
+      // returned `{ content: '' }` for `limit <= 0`. PR 18's `readText`
+      // applies `slice(0, limit)` which for `limit: -1` returns "all
+      // lines except the last" — wrong content. The adapter drops
+      // non-positive `limit` and `line` so PR 18 falls back to no-
+      // windowing defaults (closest approximation to the pre-PR empty-
+      // content posture without smuggling `parse_error` to agents).
+      const target = path.join(tmpDir, 'neg-limit.txt');
+      await fsp.writeFile(target, 'a\nb\nc\n', 'utf8');
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+      const response = await adapter.readText({
+        path: target,
+        sessionId: 'sess:test',
+        limit: -1 as number,
+      });
+      // With `limit: -1` dropped, no windowing → full file content.
+      // Notably NOT 'a\nb\n' (which would be the broken slice(0,-1) result).
+      expect(response.content).toBe('a\nb\nc\n');
+    });
+
+    it('drops non-positive line (zero) instead of forwarding parse_error', async () => {
+      const target = path.join(tmpDir, 'zero-line.txt');
+      await fsp.writeFile(target, 'x\ny\n', 'utf8');
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+      // Pre-fix the adapter would forward `line: 0` and PR 18 would
+      // reject with `parse_error` ("line must be a positive integer").
+      // Post-fix it's dropped and the read returns the full content.
+      const response = await adapter.readText({
+        path: target,
+        sessionId: 'sess:test',
+        line: 0 as number,
+      });
+      expect(response.content).toBe('x\ny\n');
+    });
   });
 
   describe('boundary enforcement', () => {

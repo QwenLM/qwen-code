@@ -257,13 +257,18 @@ export function createServeApp(
   // without providing `deps.fsFactory` had agent writes always succeed.
   // Now those writes will reject with `untrusted_workspace` unless the
   // embed either (a) provides its own `deps.fsFactory` with `trusted:
-  // true`, (b) provides its own `deps.bridge` (bypassing the default
-  // adapter wiring), or (c) explicitly accepts the trust-gate-default
-  // posture for its hosting environment. Warn loudly so the asymmetry
-  // is visible to operators rather than appearing as opaque agent-side
-  // write failures. `runQwenServe.ts` consumers are unaffected — that
-  // path constructs `fsFactory` with `trusted: true` by default.
-  if (!deps.fsFactory) {
+  // true`, (b) provides its own `deps.bridge` (which controls its own
+  // `BridgeFileSystem` wiring and bypasses the default adapter), or
+  // (c) explicitly accepts the trust-gate-default posture for its
+  // hosting environment. Warn loudly so the asymmetry is visible to
+  // operators rather than appearing as opaque agent-side write failures.
+  // `runQwenServe.ts` consumers are unaffected — that path constructs
+  // `fsFactory` with `trusted: true` by default.
+  //
+  // Suppress the warning when `deps.bridge` is provided — that embed
+  // owns its own fileSystem wiring (the default adapter never runs) so
+  // the warning's claim about ACP writes rejecting would be false.
+  if (!deps.fsFactory && !deps.bridge) {
     process.stderr.write(
       'qwen serve: createServeApp default fsFactory uses trusted=false ' +
         '— agent ACP writeTextFile calls will reject with untrusted_workspace. ' +

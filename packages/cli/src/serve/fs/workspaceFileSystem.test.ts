@@ -552,6 +552,33 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect(await fsp.readFile(target, 'utf-8')).toBe('tiny');
   });
 
+  it('writeTextOverwrite succeeds over an existing 0o000 (unreadable) file', async () => {
+    // wenshao #4334 review: EACCES on the best-effort meta-read must
+    // NOT block the overwrite. Pre-PR the inline BridgeClient proxy
+    // never read the existing file, so the daemon could always
+    // overwrite an unreadable target (subject only to the parent dir's
+    // write permission). The 0o000 case also matters as a probing
+    // defense — bubbling EACCES on overwrite would let agents probe
+    // file readability indirectly.
+    // Skipped on Windows + when running as root (root bypasses mode bits).
+    if (process.platform === 'win32') return;
+    if (process.getuid && process.getuid() === 0) return;
+    const target = path.join(h.workspace, 'unreadable-secret.txt');
+    await fsp.writeFile(target, 'old-secret', { mode: 0o000 });
+    await fsp.chmod(target, 0o000);
+    try {
+      const r = await h.fs.resolve('unreadable-secret.txt', 'write');
+      const out = await h.fs.writeTextOverwrite(r, 'new-content');
+      expect(out.created).toBe(false);
+      // Restore mode so the test can read back the content for verification.
+      await fsp.chmod(target, 0o600);
+      expect(await fsp.readFile(target, 'utf-8')).toBe('new-content');
+    } finally {
+      // Best-effort restore so afterEach rm doesn't trip on a 0o000 file.
+      await fsp.chmod(target, 0o600).catch(() => {});
+    }
+  });
+
   it('writeTextOverwrite succeeds over an existing binary file', async () => {
     // Sibling of the >MAX_READ_BYTES regression: existing binary
     // content makes `readExistingTextMeta` throw `binary_file`. The
@@ -581,6 +608,22 @@ describe('WorkspaceFileSystem - write/edit', () => {
       .catch((e: unknown) => e);
     expect(isFsError(err)).toBe(true);
     expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+
+  it('writeTextOverwrite rejects content exceeding MAX_WRITE_BYTES with file_too_large', async () => {
+    // wenshao #4334 review: the `enforceWriteSize(decodedSizeBytes)`
+    // call at the top of `writeTextOverwrite` mirrors `writeText`'s
+    // 5 MiB cap. The existing oversized-write test only exercises
+    // `writeText`; pin the cap for `writeTextOverwrite` too since it's
+    // the primary consumer (ACP adapter). A regression dropping this
+    // check would let agents write arbitrarily large files undetected.
+    const { MAX_WRITE_BYTES } = await import('./policy.js');
+    const r = await h.fs.resolve('huge-overwrite.txt', 'write');
+    const err = await h.fs
+      .writeTextOverwrite(r, 'a'.repeat(MAX_WRITE_BYTES + 1024))
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
   });
 
   it('writeTextAtomic rejects mode="overwrite" with parse_error (internal-only)', async () => {

@@ -864,17 +864,27 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             // encoding / BOM / line-ending hints across overwrites. The
             // overwrite itself never needs the existing content, so any
             // failure to read it must NOT block the write:
-            //   - ENOENT       → new file, no meta to preserve (UTF-8/LF defaults)
-            //   - file_too_large → existing is >256 KiB; fall back to defaults
-            //   - binary_file   → existing is binary; text meta is meaningless
+            //   - ENOENT          → new file, no meta to preserve (UTF-8/LF defaults)
+            //   - EACCES / EPERM  → daemon can't read (e.g. 0o000 or
+            //                       other-user-owned); the actual write
+            //                       may still succeed if the parent dir
+            //                       grants write. Bubbling here would
+            //                       both regress pre-PR behavior AND let
+            //                       agents probe file readability by
+            //                       observing EACCES on overwrite.
+            //   - file_too_large  → existing is >256 KiB; fall back to defaults
+            //   - binary_file     → existing is binary; text meta is meaningless
             // Pre-PR, ACP `BridgeClient.writeTextFile` never read the
-            // existing file at all, so a 1 MiB log or binary config could
-            // always be overwritten by an agent. Bubbling `file_too_large`
-            // or `binary_file` here would silently regress that.
+            // existing file at all, so a 1 MiB log, binary config, or
+            // unreadable secret could always be overwritten by an agent
+            // (subject only to the parent dir's write permission).
+            // Bubbling any of these here would silently regress that.
             const code = (err as NodeJS.ErrnoException)?.code;
             const kind = (err as { kind?: string })?.kind;
             if (
               code !== 'ENOENT' &&
+              code !== 'EACCES' &&
+              code !== 'EPERM' &&
               kind !== 'file_too_large' &&
               kind !== 'binary_file'
             ) {
