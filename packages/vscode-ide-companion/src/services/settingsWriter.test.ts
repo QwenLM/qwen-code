@@ -109,7 +109,6 @@ describe('settingsWriter', () => {
     expect(readQwenSettingsForVSCode()).toEqual({
       provider: 'api-key',
       apiKey: 'manual-key',
-      codingPlanRegion: 'china',
     });
   });
 

@@ -728,7 +728,6 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
   return {
     provider: 'api-key',
     apiKey,
-    codingPlanRegion: 'china',
   };
 }
 
