@@ -488,6 +488,29 @@ describe('openInExternalEditor', () => {
     expect(result.current.text).toBe('unchanged');
   });
 
+  it('should undo to pre-editor content after successful edit', async () => {
+    (fs.readFileSync as Mock).mockReturnValue('new content');
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'old content',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(result.current.text).toBe('new content');
+
+    act(() => {
+      result.current.undo();
+    });
+    expect(result.current.text).toBe('old content');
+  });
+
   it('should clean up tmpDir and file in finally', async () => {
     const { result } = renderHook(() =>
       useTextBuffer({
