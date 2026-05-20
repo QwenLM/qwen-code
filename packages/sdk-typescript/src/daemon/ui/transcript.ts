@@ -219,6 +219,8 @@ function upsertToolBlock(
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (event.details) existing.details = event.details;
+    if (event.content !== undefined) existing.content = event.content;
+    if (event.locations !== undefined) existing.locations = event.locations;
     if (event.rawInput !== undefined) existing.rawInput = event.rawInput;
     if (event.rawOutput !== undefined) existing.rawOutput = event.rawOutput;
     if (event.toolName) existing.toolName = event.toolName;
@@ -241,6 +243,8 @@ function upsertToolBlock(
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
     ...(event.details ? { details: event.details } : {}),
+    ...(event.content !== undefined ? { content: event.content } : {}),
+    ...(event.locations !== undefined ? { locations: event.locations } : {}),
     ...(event.rawInput !== undefined ? { rawInput: event.rawInput } : {}),
     ...(event.rawOutput !== undefined ? { rawOutput: event.rawOutput } : {}),
     ...(event.toolName ? { toolName: event.toolName } : {}),

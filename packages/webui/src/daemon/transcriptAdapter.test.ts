@@ -128,6 +128,50 @@ describe('daemonTranscriptToUnifiedMessages', () => {
     });
   });
 
+  it('preserves daemon tool content and locations for specialized renderers', () => {
+    const messages = daemonTranscriptToUnifiedMessages([
+      {
+        id: 'tool-rich',
+        kind: 'tool',
+        toolCallId: 'tool-rich',
+        title: 'Read file',
+        status: 'completed',
+        preview: { kind: 'generic' },
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: '\u202eread ok' },
+          },
+          {
+            type: 'diff',
+            path: '\u202esrc/index.ts',
+            oldText: 'old',
+            newText: '\u202enew',
+          },
+        ],
+        locations: [{ path: '\u202esrc/index.ts', line: 3 }],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(messages[0]?.toolCall).toMatchObject({
+      content: [
+        {
+          type: 'content',
+          content: { type: 'text', text: 'read ok' },
+        },
+        {
+          type: 'diff',
+          path: 'src/index.ts',
+          oldText: 'old',
+          newText: 'new',
+        },
+      ],
+      locations: [{ path: 'src/index.ts', line: 3 }],
+    });
+  });
+
   it('computes grouping after filtering debug blocks and renders status', () => {
     const messages = daemonTranscriptToUnifiedMessages([
       {

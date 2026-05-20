@@ -176,16 +176,13 @@ export function DaemonSessionProvider({
               type: 'status',
               text: 'SSE stream ended',
             });
-            session = undefined;
-            sessionRef.current = undefined;
           }
         } catch (error) {
           if (disposed || abort.signal.aborted) return;
           const message =
             error instanceof Error ? error.message : String(error);
           store.dispatch({ type: 'error', text: message, recoverable: true });
-          const sessionMissing =
-            error instanceof DaemonHttpError && error.status === 404;
+          const sessionMissing = isDaemonHttpNotFound(error);
           if (sessionMissing) {
             session = undefined;
             sessionRef.current = undefined;
@@ -459,6 +456,17 @@ function isAbortError(error: unknown): boolean {
     (error instanceof DOMException && error.name === 'AbortError') ||
     (error instanceof Error && error.name === 'AbortError')
   );
+}
+
+function isDaemonHttpNotFound(error: unknown): boolean {
+  return (
+    (error instanceof DaemonHttpError && error.status === 404) ||
+    (isRecord(error) && error['status'] === 404)
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 function getReconnectDelayMs(

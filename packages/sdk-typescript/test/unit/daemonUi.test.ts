@@ -527,6 +527,47 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('preserves daemon tool content and locations for web renderers', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent({
+        id: 46,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-rich',
+            title: 'Read file',
+            status: 'completed',
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: 'read ok' },
+              },
+            ],
+            locations: [{ path: 'src/index.ts', line: 3 }],
+          },
+        },
+      }),
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'tool',
+        toolCallId: 'tool-rich',
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: 'read ok' },
+          },
+        ],
+        locations: [{ path: 'src/index.ts', line: 3 }],
+      },
+    ]);
+  });
+
   it('caps verbose tool details from raw input and output', () => {
     const [inputEvent] = normalizeDaemonEvent({
       id: 44,
@@ -767,7 +808,46 @@ describe('daemon UI normalizer and transcript reducer', () => {
       },
       {
         type: 'debug',
-        text: expect.stringContaining('secret') as string,
+        text: expect.not.stringContaining('secret') as string,
+      },
+    ]);
+  });
+
+  it('normalizes plan session updates as visible tool blocks', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent({
+        id: 60,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [
+              { content: 'Design API', status: 'completed' },
+              { content: 'Implement UI', status: 'in_progress' },
+              { content: 'Add tests', status: 'pending' },
+            ],
+          },
+        },
+      }),
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'tool',
+        toolCallId: 'daemon-plan',
+        toolKind: 'updated_plan',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: '- [x] Design API\n- [-] Implement UI\n- [ ] Add tests',
+            },
+          },
+        ],
       },
     ]);
   });
