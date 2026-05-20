@@ -616,7 +616,7 @@ describe('standalone release packaging', () => {
     const hostedInstallScript = readScript(
       'scripts/build-hosted-installation-assets.js',
     );
-    expect(hostedInstallScript).toContain('Copyright 2025 Qwen Team');
+    expect(hostedInstallScript).toContain('Copyright 2026 Qwen Team');
     expect(hostedInstallScript).toContain('buildHostedInstallationAssets');
     expect(hostedInstallScript).toContain('HOSTED_INSTALLATION_ASSETS');
     expect(hostedInstallScript).toContain(
@@ -633,7 +633,7 @@ describe('standalone release packaging', () => {
     const releaseVerifyScript = readScript(
       'scripts/verify-installation-release.js',
     );
-    expect(releaseVerifyScript).toContain('Copyright 2025 Qwen Team');
+    expect(releaseVerifyScript).toContain('Copyright 2026 Qwen Team');
     expect(releaseVerifyScript).toContain('verifyReleaseDirectory');
     expect(releaseVerifyScript).toContain('verifyReleaseBaseUrl');
     expect(releaseVerifyScript).toContain('EXPECTED_RELEASE_ASSET_NAMES');
