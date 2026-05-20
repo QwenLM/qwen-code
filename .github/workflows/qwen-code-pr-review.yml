@@ -68,7 +68,13 @@ jobs:
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'read'
-      pull-requests: 'read'
+      # 'write' is required even though we only use `gh pr comment`: the gh
+      # CLI calls the GraphQL addComment mutation, which is gated on
+      # pull-requests write (not issues write — that path is for issue
+      # comments on non-PR issues). Validated by an empirical
+      # workflow_dispatch run that failed with
+      # "GraphQL: Resource not accessible by integration (addComment)".
+      pull-requests: 'write'
       issues: 'write'
     env:
       GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
@@ -615,10 +621,17 @@ jobs:
           path: '.qwen/review-cache'
           key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
 
+      # Fires on either review-step failure OR post-summary failure, so a
+      # broken `gh pr comment` (permission gap, rate limit, transient
+      # network) still leaves a visible trace on the PR pointing reviewers
+      # at the workflow run. Without the post-summary branch a silent
+      # post-comment failure would look identical to "no review happened"
+      # from the PR's perspective.
       - name: 'Post fallback comment on review failure'
         if: |-
           failure() &&
-          steps.review.conclusion == 'failure' &&
+          (steps.review.conclusion == 'failure' ||
+           steps.post-summary.conclusion == 'failure') &&
           steps.pr.outputs.should_comment == 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
