@@ -89,6 +89,7 @@ const nul = String.fromCharCode(0x00);
 const backspace = String.fromCharCode(0x08);
 const verticalTab = String.fromCharCode(0x0b);
 const formFeed = String.fromCharCode(0x0c);
+const carriageReturn = String.fromCharCode(0x0d);
 const shiftOut = String.fromCharCode(0x0e);
 const unitSeparator = String.fromCharCode(0x1f);
 const deleteChar = String.fromCharCode(0x7f);
@@ -97,7 +98,7 @@ const escapeChar = String.fromCharCode(0x1b);
 const bell = String.fromCharCode(0x07);
 
 const controlCharactersPattern = new RegExp(
-  `[${nul}-${backspace}${verticalTab}${formFeed}${shiftOut}-${unitSeparator}${deleteChar}-${c1End}]`,
+  `[${nul}-${backspace}${verticalTab}${formFeed}${carriageReturn}${shiftOut}-${unitSeparator}${deleteChar}-${c1End}]`,
   'g',
 );
 

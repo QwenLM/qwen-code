@@ -252,39 +252,79 @@ function normalizePermissionStatus(
 
 function classifyPermissionToken(token: string): ToolCallStatus | undefined {
   if (!token) return undefined;
-  if (
-    token.includes('deny') ||
-    token.includes('reject') ||
-    token.includes('block') ||
-    token.includes('fail') ||
-    token.includes('error')
-  ) {
+  const terms = new Set(
+    token
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean),
+  );
+  if (hasAnyTerm(terms, FAILED_PERMISSION_TERMS)) {
     return 'failed';
   }
-  if (
-    token.includes('cancel') ||
-    token.includes('abort') ||
-    token.includes('dismiss')
-  ) {
+  if (hasAnyTerm(terms, CANCELLED_PERMISSION_TERMS)) {
     return 'cancelled';
   }
-  if (
-    token.includes('allow') ||
-    token.includes('approve') ||
-    token.includes('accept') ||
-    token.includes('confirm') ||
-    token.includes('proceed') ||
-    token.includes('grant') ||
-    token.includes('success')
-  ) {
+  if (hasAnyTerm(terms, COMPLETED_PERMISSION_TERMS)) {
     return 'completed';
   }
   return undefined;
 }
 
+const FAILED_PERMISSION_TERMS = new Set([
+  'block',
+  'blocked',
+  'deny',
+  'denied',
+  'disallow',
+  'disallowed',
+  'error',
+  'fail',
+  'failed',
+  'reject',
+  'rejected',
+]);
+
+const CANCELLED_PERMISSION_TERMS = new Set([
+  'abort',
+  'aborted',
+  'cancel',
+  'cancelled',
+  'canceled',
+  'dismiss',
+  'dismissed',
+]);
+
+const COMPLETED_PERMISSION_TERMS = new Set([
+  'accept',
+  'accepted',
+  'allow',
+  'allowed',
+  'approve',
+  'approved',
+  'confirm',
+  'confirmed',
+  'grant',
+  'granted',
+  'proceed',
+  'success',
+  'succeeded',
+  'unblock',
+  'unblocked',
+]);
+
+function hasAnyTerm(
+  terms: ReadonlySet<string>,
+  expected: ReadonlySet<string>,
+): boolean {
+  for (const term of terms) {
+    if (expected.has(term)) return true;
+  }
+  return false;
+}
+
 function sanitizeDaemonValue(value: unknown, depth = 0): unknown {
   if (typeof value === 'string') return sanitizeDisplayText(value);
-  if (depth > 16) return value;
+  if (depth > 16) return '[truncated]';
   if (Array.isArray(value)) {
     return value.map((entry) => sanitizeDaemonValue(entry, depth + 1));
   }

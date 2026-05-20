@@ -52,6 +52,8 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       createPermissionBlock('reject-permission', 'selected:reject-policy'),
       createPermissionBlock('dismiss-permission', 'selected:dismiss-dialog'),
       createPermissionBlock('question-choice-permission', 'selected:beijing'),
+      createPermissionBlock('disallowed-permission', 'selected:disallow'),
+      createPermissionBlock('unblocked-permission', 'selected:unblock'),
       createPermissionBlock('cancelled-permission', 'cancelled'),
       createPermissionBlock('already-resolved-permission', 'already resolved'),
       createPermissionBlock('denied-permission', 'denied'),
@@ -66,6 +68,8 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       'completed',
       'failed',
       'cancelled',
+      'completed',
+      'failed',
       'completed',
       'cancelled',
       'cancelled',
@@ -178,6 +182,37 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       ],
       locations: [{ path: 'src/index.ts', line: 3 }],
     });
+  });
+
+  it('truncates deeply nested daemon values instead of returning raw subtrees', () => {
+    let nested: unknown = '\u202eraw';
+    for (let i = 0; i < 20; i += 1) {
+      nested = { child: nested };
+    }
+
+    const messages = daemonTranscriptToUnifiedMessages([
+      {
+        id: 'tool-deep',
+        kind: 'tool',
+        toolCallId: 'tool-deep',
+        title: 'Deep',
+        status: 'completed',
+        preview: { kind: 'generic' },
+        rawOutput: nested,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(messages[0]?.toolCall?.rawOutput).toMatchObject({
+      child: expect.any(Object) as object,
+    });
+    expect(JSON.stringify(messages[0]?.toolCall?.rawOutput)).toContain(
+      '[truncated]',
+    );
+    expect(JSON.stringify(messages[0]?.toolCall?.rawOutput)).not.toContain(
+      '\u202e',
+    );
   });
 
   it('computes grouping after filtering debug blocks and renders status', () => {

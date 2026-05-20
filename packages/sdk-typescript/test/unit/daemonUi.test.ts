@@ -852,6 +852,37 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('caps normalized plan content before storing it in tool content', () => {
+    const longPlan = 'x'.repeat(5_000);
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent({
+        id: 62,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: longPlan, status: 'in_progress' }],
+          },
+        },
+      }),
+      { now: 2 },
+    );
+
+    const block = state.blocks[0];
+    expect(block).toMatchObject({ kind: 'tool', toolKind: 'updated_plan' });
+    if (block?.kind !== 'tool') throw new Error('expected plan tool block');
+    const firstContent = block.content?.[0];
+    expect(firstContent).toMatchObject({
+      content: {
+        type: 'text',
+        text: expect.stringContaining('[truncated]') as string,
+      },
+    });
+    expect(JSON.stringify(block.content).length).toBeLessThan(4_300);
+  });
+
   it('recreates synthetic plan blocks after transcript trimming', () => {
     let state = createDaemonTranscriptState({ maxBlocks: 1, now: 1 });
     state = reduceDaemonTranscriptEvents(
@@ -1059,15 +1090,46 @@ describe('daemon UI normalizer and transcript reducer', () => {
 
   it('strips terminal control and bidi spoofing sequences', () => {
     const output = sanitizeTerminalText(
-      '\u202etxt.exe\u001b[31mred\u001bPhidden\u001b\\ok',
+      '\u202etxt.exe\u001b[31mred\roverwrite\u001bPhidden\u001b\\ok',
     );
 
     expect(output).toContain('txt.exe');
     expect(output).toContain('red');
+    expect(output).toContain('overwrite');
     expect(output).toContain('ok');
     expect(output).not.toContain('\u202e');
     expect(output).not.toContain('\u001b[');
+    expect(output).not.toContain('\r');
     expect(output).not.toContain('hidden');
+  });
+
+  it('redacts nested sensitive daemon payload fields', () => {
+    const events = normalizeDaemonEvent({
+      id: 70,
+      v: 1,
+      type: 'future_event',
+      data: {
+        headers: {
+          Authorization: 'Bearer secret',
+          'x-api-key': 'key-secret',
+        },
+        nested: [{ client_secret: 'client-secret' }],
+        credentials: { passphrase: 'pass-secret' },
+      },
+    });
+
+    expect(events).toMatchObject([
+      { type: 'status' },
+      {
+        type: 'debug',
+        text: expect.stringContaining('[redacted]') as string,
+      },
+    ]);
+    const debug = events.find((event) => event.type === 'debug');
+    expect(debug?.text).not.toContain('Bearer secret');
+    expect(debug?.text).not.toContain('key-secret');
+    expect(debug?.text).not.toContain('client-secret');
+    expect(debug?.text).not.toContain('pass-secret');
   });
 
   it('sanitizes unterminated terminal control sequences without swallowing output', () => {

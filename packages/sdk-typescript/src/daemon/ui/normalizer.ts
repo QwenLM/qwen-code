@@ -276,7 +276,7 @@ function normalizePlanUpdate(
   base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
 ): DaemonUiEvent {
   const entries = Array.isArray(update['entries']) ? update['entries'] : [];
-  const contentText = formatPlanEntries(entries);
+  const contentText = capDetails(formatPlanEntries(entries));
   return {
     ...base,
     type: 'tool.update',
@@ -471,13 +471,28 @@ function isSensitiveKey(key: string): boolean {
   const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
   return (
     normalized === 'authorization' ||
+    normalized === 'auth' ||
     normalized === 'cookie' ||
     normalized === 'setcookie' ||
+    normalized === 'credential' ||
+    normalized === 'credentials' ||
     normalized === 'password' ||
+    normalized === 'passphrase' ||
+    normalized === 'privatekey' ||
     normalized === 'apikey' ||
+    normalized === 'clientsecret' ||
+    normalized === 'idtoken' ||
+    normalized === 'sessiontoken' ||
+    normalized === 'xapikey' ||
+    normalized === 'xauthkey' ||
+    normalized === 'xauthtoken' ||
     normalized.endsWith('token') ||
     normalized.endsWith('secret') ||
+    normalized.endsWith('apikey') ||
+    normalized.endsWith('privatekey') ||
     normalized.includes('accesstoken') ||
-    normalized.includes('refreshtoken')
+    normalized.includes('refreshtoken') ||
+    normalized.includes('bearertoken') ||
+    normalized.includes('personalaccesstoken')
   );
 }

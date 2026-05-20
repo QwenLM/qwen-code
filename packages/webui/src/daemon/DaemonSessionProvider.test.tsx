@@ -226,6 +226,7 @@ describe('DaemonSessionProvider', () => {
 
   it('treats prompt abort during cancel as cancellation and keeps busy until cancel completes', async () => {
     const cancel = createDeferred<void>();
+    const assistantChunk = createDeferred<void>();
     let promptCalls = 0;
     const session = createMockSession({
       prompt: vi.fn((_req: unknown, signal?: AbortSignal) => {
@@ -238,7 +239,31 @@ describe('DaemonSessionProvider', () => {
         });
       }),
       cancel: vi.fn(() => cancel.promise),
-      events: createIdleEvents(),
+      events: async function* assistantThenIdleEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await assistantChunk.promise;
+        yield {
+          id: 10,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'streaming' },
+            },
+          },
+        };
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
     });
     sdkMocks.sessions.push(session);
     let actions: DaemonUiSessionActions | undefined;
@@ -258,6 +283,15 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       promptResult = providerActions.sendPrompt('cancel me');
       await flushPromises();
+      assistantChunk.resolve();
+      await flushPromises();
+    });
+    expect(blocks).toMatchObject([
+      { kind: 'user', text: 'cancel me' },
+      { kind: 'assistant', text: 'streaming', streaming: true },
+    ]);
+
+    await act(async () => {
       cancelResult = providerActions.cancel();
       await flushPromises();
     });
@@ -280,6 +314,12 @@ describe('DaemonSessionProvider', () => {
       await pendingCancel;
     });
     expect(session.cancel).toHaveBeenCalledTimes(1);
+    expect(blocks[0]).toMatchObject({ kind: 'user', text: 'cancel me' });
+    expect(blocks[1]).toMatchObject({
+      kind: 'assistant',
+      text: 'streaming',
+      streaming: false,
+    });
     await act(async () => {
       await expect(providerActions.sendPrompt('after cancel')).resolves.toEqual(
         {

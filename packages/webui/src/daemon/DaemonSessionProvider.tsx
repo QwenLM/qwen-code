@@ -294,6 +294,7 @@ export function DaemonSessionProvider({
           return result;
         } catch (error) {
           if (isAbortError(error)) {
+            store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
             return { stopReason: 'cancelled' };
           }
           throw dispatchActionError(store, 'Prompt failed', error);
@@ -405,7 +406,8 @@ export function useDaemonTranscriptBlocks(): readonly DaemonTranscriptBlock[] {
 }
 
 export function useDaemonPendingPermissions() {
-  return selectPendingPermissionBlocks(useDaemonTranscriptState());
+  const state = useDaemonTranscriptState();
+  return useMemo(() => selectPendingPermissionBlocks(state), [state]);
 }
 
 export function useDaemonActions(): DaemonUiSessionActions {
@@ -468,7 +470,7 @@ function isDaemonHttpNotFound(error: unknown): boolean {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function getReconnectDelayMs(
