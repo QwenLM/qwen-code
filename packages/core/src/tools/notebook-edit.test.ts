@@ -136,6 +136,48 @@ describe('NotebookEditTool', () => {
     }
   });
 
+  it('replaces a code cell in a UTF-8 BOM notebook and preserves the BOM', async () => {
+    const filePath = path.join(tempDir, 'bom-replace.ipynb');
+    fs.writeFileSync(
+      filePath,
+      `\ufeff${JSON.stringify(
+        {
+          nbformat: 4,
+          nbformat_minor: 5,
+          cells: [
+            {
+              cell_type: 'code',
+              id: 'load-data',
+              source: ['x = 1\n'],
+              execution_count: 7,
+              outputs: [{ output_type: 'stream', text: ['old\n'] }],
+              metadata: {},
+            },
+          ],
+          metadata: { language_info: { name: 'python' } },
+        },
+        null,
+        1,
+      )}`,
+      'utf-8',
+    );
+    seedNotebookRead(filePath);
+
+    const result = await buildInvocation({
+      notebook_path: filePath,
+      cell_id: 'load-data',
+      new_source: 'x = 2\nprint(x)',
+    }).execute(abortSignal);
+
+    expect(result.error).toBeUndefined();
+    const updatedBuffer = fs.readFileSync(filePath);
+    expect([...updatedBuffer.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+    const updated = JSON.parse(updatedBuffer.toString('utf-8').slice(1));
+    expect(updated.cells[0].source).toEqual(['x = 2\n', 'print(x)']);
+    expect(updated.cells[0].execution_count).toBeNull();
+    expect(updated.cells[0].outputs).toEqual([]);
+  });
+
   it('replaces by cell-N fallback and converts code to markdown cleanly', async () => {
     const filePath = writeNotebook('convert.ipynb', {
       nbformat: 4,
