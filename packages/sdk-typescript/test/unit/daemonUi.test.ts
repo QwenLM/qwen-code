@@ -515,6 +515,24 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('caps text transcript blocks to prevent unbounded memory growth', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'x'.repeat(80_000) },
+        { type: 'assistant.text.delta', text: 'y'.repeat(80_000) },
+      ],
+      { now: 2 },
+    );
+    const [block] = state.blocks;
+
+    expect(block).toMatchObject({ kind: 'assistant' });
+    expect(
+      block && 'text' in block ? block.text.length : 0,
+    ).toBeLessThanOrEqual(100_000);
+    expect(block && 'text' in block ? block.text : '').toContain('[truncated]');
+  });
+
   it('redacts raw daemon payloads from fallback error text', () => {
     const [event] = normalizeDaemonEvent({
       id: 43,
