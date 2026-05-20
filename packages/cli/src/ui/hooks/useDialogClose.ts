@@ -70,6 +70,10 @@ export interface DialogCloseOptions {
   isBackgroundTasksDialogOpen: boolean;
   closeBackgroundTasksDialog: () => void;
 
+  // Diff dialog
+  isDiffDialogOpen?: boolean;
+  closeDiffDialog?: () => void;
+
   // Worktree exit dialog (Phase C)
   showWorktreeExitDialog?: boolean;
   closeWorktreeExitDialog?: () => void;
@@ -137,6 +141,23 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.showWelcomeBackDialog) {
       // WelcomeBack has its own close handler
       options.handleWelcomeBackClose();
+      return true;
+    }
+
+    // Scoped invariant: the diff-dialog branch MUST sit above the
+    // background-tasks branch because `DialogManager` renders the diff
+    // dialog over `BackgroundTasksDialog` when both flags are true (see
+    // `DialogManager.tsx` — diff block at the `BackgroundTasksDialog`
+    // fall-through). The rest of this hook's ordering is **not** a
+    // mirror of `DialogManager` and isn't intended to be: most higher-
+    // priority dialogs in `DialogManager` (theme, auth, settings, …)
+    // already appear above this block in their own priority order. Only
+    // the diff-vs-background pair previously matched the wrong way.
+    if (options.isDiffDialogOpen && options.closeDiffDialog) {
+      // /diff dialog — same rationale as the background-tasks dialog:
+      // Ctrl+C should dismiss the dialog rather than fall through to the
+      // exit-prompt path or cancel the (non-existent) request.
+      options.closeDiffDialog();
       return true;
     }
 

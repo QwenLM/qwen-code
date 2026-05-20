@@ -49,6 +49,7 @@ import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
+import { DiffDialog } from './DiffDialog.js';
 import { MemoryDialog } from './MemoryDialog.js';
 import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
@@ -482,6 +483,18 @@ export const DialogManager = ({
         onCancel={uiActions.closeRewindSelector}
         fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
         fileHistoryService={config.getFileHistoryService()}
+      />
+    );
+  }
+
+  if (uiState.isDiffDialogOpen) {
+    return (
+      <DiffDialog
+        history={uiState.history}
+        cwd={config.getWorkingDir() || config.getProjectRoot()}
+        fileHistoryService={config.getFileHistoryService()}
+        fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
+        onClose={uiActions.closeDiffDialog}
       />
     );
   }

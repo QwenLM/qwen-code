@@ -110,6 +110,7 @@ export interface SlashCommandProcessorActions {
   openMcpDialog: () => void;
   openHooksDialog: () => void;
   openRewindSelector: () => void;
+  openDiffDialog: () => void;
   openHelpDialog: () => void;
 }
 
@@ -740,6 +741,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'rewind':
                       actions.openRewindSelector();
+                      return { type: 'handled' };
+                    case 'diff':
+                      actions.openDiffDialog();
                       return { type: 'handled' };
                     case 'help':
                       actions.openHelpDialog();

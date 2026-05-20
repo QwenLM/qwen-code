@@ -1051,6 +1051,17 @@ export const AppContainer = (props: AppContainerProps) => {
   // is swapped in once the real callback exists.
   const openRewindSelectorRef = useRef<() => void>(() => {});
 
+  // /diff opens a per-turn diff dialog. Unlike rewind, no double-press or
+  // history-bound guard is needed, so the open/close handlers can live here
+  // (no ref bridge required).
+  const [isDiffDialogOpen, setIsDiffDialogOpen] = useState(false);
+  const openDiffDialog = useCallback(() => {
+    setIsDiffDialogOpen(true);
+  }, []);
+  const closeDiffDialog = useCallback(() => {
+    setIsDiffDialogOpen(false);
+  }, []);
+
   const slashCommandActions = useMemo(
     () => ({
       openAuthDialog,
@@ -1082,6 +1093,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       openResumeDialog,
       openRewindSelector: () => openRewindSelectorRef.current(),
+      openDiffDialog,
       handleResume,
       handleBranch,
       openDeleteDialog,
@@ -1113,6 +1125,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleBranch,
       openDeleteDialog,
       openHelpDialog,
+      openDiffDialog,
     ],
   );
 
@@ -2271,6 +2284,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isHelpDialogOpen ||
     isExtensionsManagerDialogOpen ||
     isRewindSelectorOpen ||
+    isDiffDialogOpen ||
     bgTasksDialogOpen ||
     showWorktreeExitDialog;
   dialogsVisibleRef.current = dialogsVisible;
@@ -2740,6 +2754,8 @@ export const AppContainer = (props: AppContainerProps) => {
     closeHelpDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
+    isDiffDialogOpen,
+    closeDiffDialog,
     showWorktreeExitDialog,
     closeWorktreeExitDialog: () => setShowWorktreeExitDialog(false),
   });
@@ -3284,6 +3300,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,
+      // Diff dialog
+      isDiffDialogOpen,
     }),
     [
       isThemeDialogOpen,
@@ -3408,6 +3426,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,
+      // Diff dialog
+      isDiffDialogOpen,
     ],
   );
 
@@ -3489,6 +3509,9 @@ export const AppContainer = (props: AppContainerProps) => {
       openRewindSelector,
       closeRewindSelector,
       handleRewindConfirm,
+      // Diff dialog
+      openDiffDialog,
+      closeDiffDialog,
     }),
     [
       openThemeDialog,
@@ -3564,6 +3587,9 @@ export const AppContainer = (props: AppContainerProps) => {
       openRewindSelector,
       closeRewindSelector,
       handleRewindConfirm,
+      // Diff dialog
+      openDiffDialog,
+      closeDiffDialog,
     ],
   );
 

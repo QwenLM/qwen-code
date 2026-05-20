@@ -13,20 +13,16 @@ import {
   CommandKind,
   type CommandContext,
   type MessageActionReturn,
+  type OpenDialogActionReturn,
   type SlashCommand,
 } from './types.js';
 import { t } from '../../i18n/index.js';
-import {
-  MessageType,
-  type DiffRenderModel,
-  type DiffRenderRow,
-  type HistoryItemDiffStats,
-} from '../types.js';
-import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
+import { type DiffRenderModel, type DiffRenderRow } from '../types.js';
+import { sanitizeFilenameForDisplay } from '../utils/textUtils.js';
 
 async function diffAction(
   context: CommandContext,
-): Promise<MessageActionReturn | void> {
+): Promise<MessageActionReturn | OpenDialogActionReturn | void> {
   const { config } = context.services;
   if (!config) {
     return {
@@ -34,6 +30,13 @@ async function diffAction(
       messageType: 'error',
       content: t('Configuration not available.'),
     };
+  }
+
+  // Interactive mode: open the per-turn diff dialog. Non-interactive / ACP
+  // paths keep the plain-text "working tree vs HEAD" summary so pipes, logs,
+  // and remote transports that don't speak Ink still get legible output.
+  if (context.executionMode === 'interactive') {
+    return { type: 'dialog', dialog: 'diff' };
   }
 
   const cwd = config.getWorkingDir() || config.getProjectRoot();
@@ -77,19 +80,6 @@ async function diffAction(
   }
 
   const model = buildDiffRenderModel(result);
-
-  // Interactive path: dispatch a structured history item so `DiffStatsDisplay`
-  // can render with theme colors. Non-interactive / ACP stay on the
-  // plain-text MessageActionReturn path so pipes, logs, and transports that
-  // don't speak Ink still see legible output.
-  if (context.executionMode === 'interactive') {
-    const item: HistoryItemDiffStats = {
-      type: MessageType.DIFF_STATS,
-      model,
-    };
-    context.ui.addItem(item, Date.now());
-    return;
-  }
 
   return {
     type: 'message',
@@ -205,43 +195,6 @@ export function renderDiffModelText(model: DiffRenderModel): string {
         })}`
       : '';
   return lines.length > 0 ? `${header}\n${lines.join('\n')}${capNote}` : header;
-}
-
-// Match standalone C0 controls (incl. TAB/CR/LF/BEL/BS), DEL, and C1 controls.
-// `escapeAnsiCtrlCodes` only neutralizes multi-byte ANSI sequences, so a
-// filename like `bad\nINJECTED.txt` or `bad\roverwrite.txt` would otherwise
-// still break layout in the non-interactive / ACP rendering path.
-// eslint-disable-next-line no-control-regex
-const FILENAME_CONTROL_CHARS_REGEX = /[\x00-\x1f\x7f-\x9f]/g;
-
-function escapeControlChar(ch: string): string {
-  switch (ch) {
-    case '\b':
-      return '\\b';
-    case '\t':
-      return '\\t';
-    case '\n':
-      return '\\n';
-    case '\f':
-      return '\\f';
-    case '\r':
-      return '\\r';
-    default: {
-      // JSON.stringify only escapes 0x00-0x1F (and `"` / `\`); DEL (0x7F) and
-      // C1 controls (0x80-0x9F) are returned as raw bytes, which is exactly
-      // what we are trying to keep out of the rendered output. Hand-roll the
-      // \uXXXX escape so every matched code point becomes printable.
-      const code = ch.charCodeAt(0);
-      return `\\u${code.toString(16).padStart(4, '0')}`;
-    }
-  }
-}
-
-function sanitizeFilenameForDisplay(name: string): string {
-  return escapeAnsiCtrlCodes(name).replace(
-    FILENAME_CONTROL_CHARS_REGEX,
-    escapeControlChar,
-  );
 }
 
 function formatRowsText(rows: DiffRenderRow[]): string[] {

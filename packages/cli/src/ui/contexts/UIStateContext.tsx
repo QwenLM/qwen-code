@@ -183,6 +183,8 @@ export interface UIState {
   // Rewind selector
   isRewindSelectorOpen: boolean;
   rewindEscPending: boolean;
+  // Diff dialog
+  isDiffDialogOpen: boolean;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);
