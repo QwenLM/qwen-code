@@ -58,14 +58,12 @@ function makeClient(fileSystem?: BridgeFileSystem): BridgeClient {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run in fs-path tests');
   };
-  const throwerMediator = {
-    policy: 'first-responder',
-    request: noPermissionFlow,
-    vote: noPermissionFlow,
-    forgetSession: noPermissionFlow,
-    peekSessionFor: noPermissionFlow,
-    pendingCount: 0,
-  } as never;
+  // Wenshao review #4335 / 3272581569 — `BridgeClient.mediator` is
+  // narrowed to `Pick<PermissionMediator, 'request'>`, so the
+  // thrower stub only needs to provide `request`. Eliminates the
+  // 5 unused-method placeholders the pre-narrowing version
+  // required (policy/vote/forgetSession/peekSessionFor/pendingCount).
+  const throwerMediator = { request: noPermissionFlow } as never;
   return new BridgeClient(
     noPermissionFlow as never, // resolveEntry
     noPermissionFlow as never, // resolvePendingRestoreEvents
@@ -226,14 +224,9 @@ describe('BridgeClient — requestPermission pre-publish collision guard', () =>
     const noPermissionFlow = () => {
       throw new Error('test: not reachable on collision-throw path');
     };
-    const throwerMediator = {
-      policy: 'first-responder',
-      request: noPermissionFlow,
-      vote: noPermissionFlow,
-      forgetSession: noPermissionFlow,
-      peekSessionFor: noPermissionFlow,
-      pendingCount: 0,
-    } as never;
+    // Wenshao review #4335 / 3272581569 — narrowed mediator type
+    // means the stub only needs `request`.
+    const throwerMediator = { request: noPermissionFlow } as never;
     const client = new BridgeClient(
       ((sid: string) => (sid === 'sess:test' ? fakeEntry : undefined)) as never,
       noPermissionFlow as never,

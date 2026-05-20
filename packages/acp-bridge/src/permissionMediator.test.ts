@@ -814,6 +814,65 @@ describe('MultiClientPermissionMediator — consensus', () => {
     mediator.forgetSession('sess-1');
   });
 
+  // Wenshao review #4335 / 3272568031 — `writeForbiddenStderr` has 3
+  // call sites (voteDesignated / voteConsensus / voteLocalOnly) but
+  // before this commit only the SSE event + audit record were tested.
+  // Pin the stderr breadcrumb format and presence so a refactor can't
+  // silently drop it.
+  it('writes stderr breadcrumbs for all 3 forbidden-vote paths', () => {
+    const writes: string[] = [];
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: string | Uint8Array): boolean => {
+        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+    try {
+      // 1. designated — non-originator voter rejected.
+      {
+        const { mediator } = makeMediator('designated');
+        void mediator.request(makeRecord(), 5_000);
+        mediator.vote(makeVote({ clientId: 'client_B' }));
+        mediator.forgetSession('sess-1');
+      }
+      // 2. consensus — voter not in votersAtIssue rejected.
+      {
+        const { mediator } = makeMediator(
+          'consensus',
+          new Set(['client_A', 'client_B']),
+        );
+        void mediator.request(makeRecord(), 5_000);
+        mediator.vote(makeVote({ clientId: 'client_late_join' }));
+        mediator.forgetSession('sess-1');
+      }
+      // 3. local-only — non-loopback voter rejected.
+      {
+        const { mediator } = makeMediator('local-only');
+        void mediator.request(makeRecord(), 5_000);
+        mediator.vote(
+          makeVote({ clientId: 'client_remote', fromLoopback: false }),
+        );
+        mediator.forgetSession('sess-1');
+      }
+
+      const breadcrumbs = writes.filter((w) => w.includes('vote rejected'));
+      expect(breadcrumbs).toHaveLength(3);
+      expect(breadcrumbs[0]).toContain('designated_mismatch');
+      expect(breadcrumbs[0]).toContain('voter is not the prompt originator');
+      expect(breadcrumbs[1]).toContain('designated_mismatch');
+      expect(breadcrumbs[1]).toContain('not in consensus votersAtIssue');
+      expect(breadcrumbs[2]).toContain('remote_not_allowed');
+      expect(breadcrumbs[2]).toContain('local-only policy');
+      // Each breadcrumb names the requestId + sessionId for grep-ability.
+      for (const b of breadcrumbs) {
+        expect(b).toContain('req-1');
+        expect(b).toContain('sess-1');
+      }
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
   it('M=4 N=3 split 2-2 never resolves and times out', async () => {
     // I-5 (Commit 4 review) — explicitly cover the
     // "no winner; only cancel via timeout / forgetSession" case

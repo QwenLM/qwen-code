@@ -1110,6 +1110,13 @@ export function reduceDaemonSessionEvent(
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
         permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — terminal
+        // events must also drop `forbiddenVotes` history so adapters
+        // reading view state for a dead session don't render stale
+        // rejection data. Pre-fix only `pendingPermissions` /
+        // `permissionVoteProgress` were cleared.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
       };
     case 'session_closed':
       return {
@@ -1119,6 +1126,9 @@ export function reduceDaemonSessionEvent(
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
         permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — see session_died.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
       };
     case 'session_metadata_updated':
       return {
@@ -1133,6 +1143,9 @@ export function reduceDaemonSessionEvent(
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
         permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — see session_died.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
       };
     case 'slow_client_warning':
       // Non-terminal: warning precedes eviction but doesn't close
@@ -1152,6 +1165,9 @@ export function reduceDaemonSessionEvent(
         streamError: event.data,
         pendingPermissions: {},
         permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — see session_died.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
       };
     case 'mcp_budget_warning':
       // Non-terminal: budget pressure is a status signal, not a stream

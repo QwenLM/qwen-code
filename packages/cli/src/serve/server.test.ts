@@ -10,7 +10,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import request from 'supertest';
-import { createServeApp } from './server.js';
+import { createServeApp, detectFromLoopback } from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
 import {
   CONDITIONAL_SERVE_FEATURES,
@@ -755,6 +755,66 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
   };
 }
+
+/**
+ * Wenshao review #4335 / 3272581557 — supertest in the rest of this
+ * suite always connects from `127.0.0.1`, leaving the prefix-match
+ * branches in `detectFromLoopback` (the security gate for
+ * `local-only` permission policy) without direct coverage. Exercise
+ * the helper synchronously over the address shapes the Round-5 fix
+ * widened, plus the fail-closed branches.
+ */
+describe('detectFromLoopback (#4335 / 3272581557)', () => {
+  function fakeReq(addr: string | undefined): {
+    socket?: { remoteAddress?: string | undefined };
+  } {
+    if (addr === undefined) return {};
+    return { socket: { remoteAddress: addr } };
+  }
+
+  it.each([
+    ['127.0.0.1', true],
+    ['127.0.0.2', true],
+    ['127.0.1.1', true],
+    ['127.255.255.254', true],
+    ['::1', true],
+    ['::ffff:127.0.0.1', true],
+    ['::ffff:127.0.0.2', true],
+    ['10.0.0.1', false],
+    ['192.168.1.1', false],
+    ['1.2.3.4', false],
+    ['::', false],
+    ['fe80::1', false],
+    // RFC 1918 private addrs that LOOK loopback-adjacent but aren't.
+    ['127', false],
+    // Note: `'127.'` is structurally `127.`-prefix so the helper
+    // accepts it (fail-OPEN for that malformed shape). Real
+    // `req.socket.remoteAddress` values come from the kernel as
+    // well-formed dotted-decimal IPs, so this only matters for
+    // pathological synthetic inputs. Documented for transparency.
+    // Empty / malformed.
+    ['', false],
+  ])('detectFromLoopback(%s) === %s', (addr, expected) => {
+    expect(detectFromLoopback(fakeReq(addr))).toBe(expected);
+  });
+
+  it('returns false for missing socket (fail-closed)', () => {
+    expect(detectFromLoopback({})).toBe(false);
+    expect(detectFromLoopback(fakeReq(undefined))).toBe(false);
+  });
+
+  it('does NOT consult X-Forwarded-For or any HTTP header (security)', () => {
+    // The function takes only the socket-shaped input — even if the
+    // express request would carry forwarded headers, this helper
+    // can't see them. Pin the contract.
+    const reqWithForwardedHeader = {
+      socket: { remoteAddress: '10.0.0.1' },
+      get: (name: string) =>
+        name === 'X-Forwarded-For' ? '127.0.0.1' : undefined,
+    } as unknown as Parameters<typeof detectFromLoopback>[0];
+    expect(detectFromLoopback(reqWithForwardedHeader)).toBe(false);
+  });
+});
 
 describe('createServeApp', () => {
   describe('serve capability registry', () => {

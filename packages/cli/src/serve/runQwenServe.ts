@@ -24,6 +24,11 @@ import {
   PermissionAuditRing,
 } from './permissionAudit.js';
 import { createServeApp, resolveBridgeFsFactory } from './server.js';
+// Wenshao review #4335 / 3272581563 — single runtime source of
+// truth for the closed permission-policy set. `validatePolicyConfig`
+// derives its valid-set from `permission_mediation.modes` so a
+// future 5th policy lands in one place.
+import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 import type { ServeOptions } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 // Wenshao review #4335 / 3272493805 — use the canonical
@@ -74,6 +79,12 @@ export class InvalidPolicyConfigError extends Error {
  *
  * The mismatch warning runs through `onWarning` so tests can
  * capture it; production passes `writeStderrLine`.
+ *
+ * Wenshao review #4335 / 3272581563 — the runtime valid-policy set
+ * is derived from `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes`
+ * (single source of truth) instead of repeating the four literals
+ * a fourth time. The compile-time check that every entry is a
+ * `PermissionPolicy` ensures registry drift surfaces here.
  */
 export function validatePolicyConfig(
   policyConfig: { permissionStrategy?: string; consensusQuorum?: number } = {},
@@ -82,13 +93,19 @@ export function validatePolicyConfig(
   permissionPolicy: PermissionPolicy | undefined;
   permissionConsensusQuorum: number | undefined;
 } {
-  const _validPolicies: readonly PermissionPolicy[] = [
-    'first-responder',
-    'designated',
-    'consensus',
-    'local-only',
-  ];
-  const validSet: ReadonlySet<string> = new Set<string>(_validPolicies);
+  // Derive from the capability registry so the runtime set, the
+  // settings schema enum, the `PermissionPolicy` union, and the
+  // capability advertisement all stay aligned through a single
+  // edit point. The cast asserts every `modes` entry is a
+  // `PermissionPolicy` — TypeScript's `satisfies Record<string,
+  // ServeCapabilityDescriptor>` on the registry doesn't narrow
+  // `modes` to the union, so the assertion is necessary here. The
+  // `permissionMediation.test.ts` capability-suite asserts the
+  // modes list is exhaustive over `PermissionPolicy`, providing
+  // the runtime guarantee.
+  const validSet: ReadonlySet<string> = new Set<string>(
+    SERVE_CAPABILITY_REGISTRY.permission_mediation.modes,
+  );
   if (
     policyConfig.permissionStrategy !== undefined &&
     !validSet.has(policyConfig.permissionStrategy)

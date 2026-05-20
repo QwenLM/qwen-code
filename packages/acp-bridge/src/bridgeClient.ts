@@ -20,7 +20,14 @@ import type {
 import type { BridgeEvent, EventBus } from './eventBus.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
-import type { MultiClientPermissionMediator } from './permissionMediator.js';
+// Wenshao review #4335 / 3272581569 — narrowed from the concrete
+// `MultiClientPermissionMediator` to the sub-interface this class
+// actually uses (`request` only). The bridge factory still
+// constructs the full `MultiClientPermissionMediator` (it needs
+// `peekSessionFor` / `pendingCount` / `forgetSession`); structural
+// typing lets us pass the same instance here without a cast.
+// Test stubs no longer have to fake all 6 mediator members.
+import type { PermissionMediator } from './permission.js';
 import type {
   PermissionRequestRecord,
   PermissionResolution,
@@ -47,13 +54,15 @@ function resolutionToAcpResponse(
   return { outcome: { outcome: 'cancelled' } };
 }
 
-/**
- * Bounded duplicate-vote cache. Stores only requestId/sessionId/outcome, so
- * 512 records stays small while covering normal UI reconnect/race windows.
- * Exported because `createHttpAcpBridge` factory's `resolvedPermissions`
- * map uses this cap.
- */
-export const MAX_RESOLVED_PERMISSION_RECORDS = 512;
+// Wenshao review #4335 / 3272581548 — `MAX_RESOLVED_PERMISSION_RECORDS`,
+// `PendingPermission`, and `PermissionResolutionRecord` were removed
+// from this file. The mediator now owns all pending+resolved state
+// (`permissionMediator.ts:77` declares its own MAX constant; line 319
+// declares its own differently-shaped `PermissionResolutionRecord`),
+// so the pre-F3 inline definitions here had become dead code with
+// stale JSDoc that referenced deleted closures (`registerPending`,
+// `resolvedPermissions` map). httpAcpBridge.ts re-exports were
+// dropped in the same commit.
 
 /**
  * PR 14b fix #1 (codex review round 1): bounded buffering for ACP
@@ -125,38 +134,6 @@ function sliceLineRange(
   }
   // Trim the trailing `\n` so the slice mirrors `lines.slice(...).join('\n')`.
   return content.slice(offset, end > offset ? end - 1 : end);
-}
-
-/**
- * Pending permission request awaiting a client vote. Exported because
- * the factory's `registerPending` closure passed into `BridgeClient`
- * constructs these.
- */
-export interface PendingPermission {
-  requestId: string;
-  sessionId: string;
-  resolve: (resp: RequestPermissionResponse) => void;
-  /**
-   * BkwQI: the option IDs the agent originally offered to clients in
-   * the `permission_request` event. `respondToPermission` validates
-   * the voter's `optionId` against this set so an authenticated
-   * client can't smuggle in a hidden outcome (e.g.
-   * `ProceedAlwaysProject` when the prompt's
-   * `hideAlwaysAllow` / forced-ask policy intentionally omitted it).
-   * Stored as a Set for O(1) membership check.
-   */
-  allowedOptionIds: ReadonlySet<string>;
-}
-
-/**
- * Record of an already-resolved permission vote. Used by the factory's
- * bounded duplicate-vote cache so a re-vote on the same requestId
- * within the cache window returns the prior outcome instead of 404.
- */
-export interface PermissionResolutionRecord {
-  requestId: string;
-  sessionId: string;
-  outcome: RequestPermissionResponse['outcome'];
 }
 
 /**
@@ -235,7 +212,7 @@ export class BridgeClient implements Client {
      * fan-out live inside the mediator. Replaces the pre-F3
      * `registerPending` / `rollbackPending` callbacks.
      */
-    private readonly mediator: MultiClientPermissionMediator,
+    private readonly mediator: Pick<PermissionMediator, 'request'>,
     /**
      * Bd1yh: wall-clock ms before `requestPermission` resolves as
      * cancelled if no client vote arrives. 0 = disabled. Prevents

@@ -1979,6 +1979,52 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.forbiddenVotes[31]!.requestId).toBe('req-34');
     });
 
+    // Wenshao review #4335 / 3272576003 — terminal events
+    // (session_died / session_closed / client_evicted / stream_error)
+    // must drop forbiddenVotes + forbiddenVoteCount alongside the
+    // existing pendingPermissions / permissionVoteProgress reset.
+    // Pre-fix the rejection history would persist on a dead session
+    // and adapters reading view state would render stale data.
+    it.each([
+      ['session_died', { sessionId: 'sess-1', reason: 'dead' }],
+      [
+        'session_closed',
+        { sessionId: 'sess-1', reason: 'client_close' as const },
+      ],
+      [
+        'client_evicted',
+        { sessionId: 'sess-1', clientId: 'c', reason: 'too-slow' },
+      ],
+      ['stream_error', { sessionId: 'sess-1', error: 'broken' }],
+    ])(
+      'reducer clears forbiddenVotes + forbiddenVoteCount on %s (#4335 / 3272576003)',
+      (terminalType, terminalData) => {
+        const state = reduceDaemonSessionEvents([
+          {
+            id: 1,
+            v: 1,
+            type: 'permission_forbidden',
+            data: {
+              requestId: 'req-1',
+              sessionId: 'sess-1',
+              clientId: 'rejected',
+              reason: 'designated_mismatch',
+            },
+          },
+          {
+            id: 2,
+            v: 1,
+            type: terminalType,
+            data: terminalData,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+        ]);
+        expect(state.forbiddenVotes).toEqual([]);
+        expect(state.forbiddenVoteCount).toBe(0);
+        expect(state.alive).toBe(false);
+      },
+    );
+
     // Wenshao review #4335 / 3270622311 — the SSE envelope's
     // `originatorClientId` (= prompt originator per F3 N3) must reach
     // view state. Pre-fix, the reducer copied only `event.data` and

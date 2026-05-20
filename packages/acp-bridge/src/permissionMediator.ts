@@ -1068,12 +1068,25 @@ export class MultiClientPermissionMediator implements PermissionMediator {
   /**
    * Settle a pending entry. Cleanup order is hardened (N2 invariant):
    *   1. clearTimeout (so a timer can never fire on a half-cleaned entry).
-   *   2. Delete from `pending` and write to `resolved` (state first).
+   *   2. Delete from `pending` (state-first half — entry no longer
+   *      reachable for new votes).
    *   3. emit wire `permission_resolved` (best-effort — emit failures
-   *      do not block the Promise settle).
-   *   4. audit.recordResolved (best-effort, same).
-   *   5. Settle the Promise (LAST — callbacks running re-entrantly
+   *      do not block the Promise settle). MUST come before step 4
+   *      so a re-entrant subscriber synchronously casting another
+   *      vote during emit sees `pending === undefined && resolved
+   *      === undefined` (silent false), matching pre-F3 ordering.
+   *      See I5 (Commit 3 review) inline comment below.
+   *   4. write to `resolved` (the second half of state move — late
+   *      voters arriving after this see `permission_already_resolved`).
+   *   5. audit.recordResolved (best-effort, same).
+   *   6. Settle the Promise (LAST — callbacks running re-entrantly
    *      see consistent state).
+   *
+   * Wenshao review #4335 / 3272581553 — pre-fix the spec bundled
+   * "delete pending + write resolved" into step 2 ahead of emit,
+   * which contradicted the code (and the I5 comment). The fix
+   * splits the two halves of the state move around the emit so
+   * the spec faithfully describes the ordering invariant.
    *
    * @param resolverClientId  pre-F3 wire compat (O8 invariant): the
    *   `permission_resolved` SSE frame stamps this as
@@ -1185,23 +1198,6 @@ export class MultiClientPermissionMediator implements PermissionMediator {
   }
 
   /**
-   * Run an audit-publisher call defensively. The audit ring is
-   * best-effort observability — a publisher exception (ring full,
-   * host bug, transient I/O) MUST NOT throw out of `request()`,
-   * `vote()`, or the timer callback. Without this guard, the
-   * Promise the agent is awaiting would be left unsettled and the
-   * pending entry would leak.
-   *
-   * Single helper used at all five audit call sites so the
-   * "audit is best-effort" invariant is uniformly enforced (the
-   * pre-fix asymmetric `try/catch` at 2 of 5 sites was a real
-   * silent-failure hole; see Commit 1 review notes).
-   *
-   * I4 (Commit 3 review) — log unexpected throws as `console.error`
-   * so audit-publisher bugs are visible without breaking the
-   * Promise-settle invariant.
-   */
-  /**
    * DeepSeek review #4335 / 3271627457 — emit a stderr breadcrumb
    * for every vote rejection (the three forbidden paths in
    * voteDesignated / voteConsensus / voteLocalOnly). Mirrors the
@@ -1237,6 +1233,24 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     }
   }
 
+  /**
+   * Run an audit-publisher call defensively. The audit ring is
+   * best-effort observability — a publisher exception (ring full,
+   * host bug, transient I/O) MUST NOT throw out of `request()`,
+   * `vote()`, or the timer callback. Without this guard, the
+   * Promise the agent is awaiting would be left unsettled and the
+   * pending entry would leak.
+   *
+   * Single helper used at all five audit call sites so the
+   * "audit is best-effort" invariant is uniformly enforced (the
+   * pre-fix asymmetric `try/catch` at 2 of 5 sites was a real
+   * silent-failure hole; see Commit 1 review notes).
+   *
+   * Wenshao review #4335 / 3272567323 — JSDoc was previously
+   * stacked above `writeForbiddenStderr` so IDE hover and API
+   * doc generation showed the wrong attribution. Moved adjacent
+   * to its actual definition.
+   */
   private safeAudit(fn: () => void): void {
     try {
       fn();

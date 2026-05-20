@@ -2273,7 +2273,15 @@ function parseClientIdHeader(
  * (missing socket, non-string) returns `false`, gating votes
  * conservatively rather than admitting them.
  */
-function detectFromLoopback(req: import('express').Request): boolean {
+// Wenshao review #4335 / 3272581557 — exported for unit testing.
+// supertest in the existing server tests always connects from
+// `127.0.0.1`, so the prefix-match logic for `127.x`-beyond-`.0.0.1`,
+// `::1`, `::ffff:127.*`, and the fail-closed non-string branch had
+// no direct test. The factored-out helper takes a minimal shape so
+// tests can exercise it without spinning up Express.
+export function detectFromLoopback(req: {
+  socket?: { remoteAddress?: string | undefined };
+}): boolean {
   const addr = req.socket?.remoteAddress;
   if (typeof addr !== 'string') return false;
   // IPv6 loopback (single literal).
