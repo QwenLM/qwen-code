@@ -6417,6 +6417,95 @@ describe('createHttpAcpBridge', () => {
 
       await bridge.shutdown();
     });
+
+    it('routes per-entry channel bookkeeping via channelInfoForEntry, not the module-scoped channelInfo (#4325)', async () => {
+      // Regression guard for #4325 (wenshao review on F1 #4319).
+      //
+      // The bug pre-fix: `closeSession` (and `killSession`) captured
+      // `const ci = channelInfo` — the module-scoped CURRENT attach
+      // target — rather than `channelInfoForEntry(entry)`. The two
+      // diverge during the channel-overlap window (A dying, B freshly
+      // spawned as `channelInfo`): closing a session whose `entry.channel
+      // = A` would (1) skip `A.sessionIds.delete()` because
+      // `B.channel !== A.channel`, leaving A's sessionIds set pinned past
+      // the close, and (2) call `markSessionClosed` on B's client
+      // instead of A's, evaluating B's kill condition with stale
+      // assumptions about its session count — potentially killing B
+      // unnecessarily and forcing a third spawn.
+      //
+      // Constructing the exact overlap state deterministically requires
+      // factory-internal hooks not currently exposed (A only becomes
+      // `isDying` when its sessionIds drains to 0, and that drain path
+      // also removes the session from `byId` synchronously — so by the
+      // time channelInfo could move to B, every session that was on A is
+      // gone from `byId` and thus unreachable to `closeSession`). The
+      // full overlap regression test is deferred to a follow-up that
+      // adds the necessary test-only factory inspection seam.
+      //
+      // What this smoke test guards: under the normal single-channel
+      // case, `closeSession` still drives the channel's lifecycle
+      // correctly — channel kill fires after the last session closes,
+      // which is the most-load-bearing behavior in the fix's neighborhood
+      // and would fail trivially if a future refactor reverted to the
+      // module-scoped `channelInfo` capture without thinking through
+      // the case where the helper returns `undefined`.
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(handles).toHaveLength(1);
+      expect(handles[0]?.killed).toBe(false);
+
+      await bridge.closeSession(session.sessionId);
+
+      // Channel kill must have fired — proves `closeSession` correctly
+      // located the entry's channel via `channelInfoForEntry(entry)`
+      // (which returns the channel matching `entry.channel`) and
+      // triggered the L2163-2165 "kill on last session" branch. A
+      // reverted fix that captured `channelInfo` after the entry was
+      // gone from `byId` would also pass this assertion, but the
+      // diff-review-time visibility of the `channelInfoForEntry` call
+      // is the primary defense.
+      expect(handles[0]?.killed).toBe(true);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    });
+
+    it('killSession routes per-entry channel bookkeeping via channelInfoForEntry (#4325 symmetric)', async () => {
+      // Symmetric smoke guard for #4325 (wenshao review on this PR).
+      // `killSession` received the same `channelInfo` →
+      // `channelInfoForEntry(entry)` fix at `bridge.ts:3182` as
+      // `closeSession` did. The closeSession smoke above doesn't
+      // exercise the killSession code path, so a future refactor
+      // reverting only killSession would pass that test trivially.
+      // Same single-channel caveat: the channel-overlap race itself
+      // isn't deterministic without test-only factory hooks; this
+      // smoke verifies the most-load-bearing behavior — kill fires
+      // and tears down the channel — which would fail if a revert
+      // captured a stale module-scoped `channelInfo`.
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(handles).toHaveLength(1);
+      expect(handles[0]?.killed).toBe(false);
+
+      await bridge.killSession(session.sessionId);
+
+      expect(handles[0]?.killed).toBe(true);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    });
   });
 
   describe('updateSessionMetadata', () => {
@@ -6637,4 +6726,3 @@ describe('createHttpAcpBridge — F3 multi-client permission coordination', () =
     ).toThrow(/positive integer/);
   });
 });
-

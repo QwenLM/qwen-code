@@ -2124,7 +2124,46 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             : ''),
       );
       if (defaultEntry === entry) defaultEntry = undefined;
-      const ci = channelInfo;
+      // #4325 fix: resolve the channel via `channelInfoForEntry(entry)`
+      // (search `aliveChannels` for the entry's actual channel) instead
+      // of the module-scoped `channelInfo` (the CURRENT attach target).
+      // The two diverge during the channel-overlap window — A dying,
+      // B freshly spawned as `channelInfo` — where capturing
+      // `channelInfo` would (1) skip the `sessionIds.delete()` since
+      // `B.channel !== entry.channel`, leaving A's `sessionIds` set
+      // pinned past the close, and (2) call `markSessionClosed` on
+      // **B**'s client instead of **A**'s, evaluating B's kill
+      // condition with stale assumptions about its session count.
+      // Other session methods in this file already use the helper
+      // (`setSessionApprovalMode`, `requestSessionStatus`); this
+      // brings closeSession in line.
+      //
+      // HAZARD(#4325): the regression test for this fix
+      // (`httpAcpBridge.test.ts` ~L6421) is single-channel smoke ONLY —
+      // a revert that reintroduces the module-scoped `channelInfo`
+      // capture WILL NOT fail any existing test, because the
+      // overlap-race state isn't deterministically constructable
+      // without factory-internal hooks. Code-review-time visibility
+      // of the `channelInfoForEntry(entry)` call here is the primary
+      // defense against accidental revert. Don't refactor away the
+      // helper call without first landing the deterministic overlap
+      // test (deferred follow-up).
+      const ci = channelInfoForEntry(entry);
+      if (!ci) {
+        // Diagnostic visibility (#4334 wenshao review DWrbr): when the
+        // entry's channel has already been torn down out-of-band, the
+        // cleanup branches below all short-circuit silently. The
+        // "closing session" log at the top of this method fires
+        // regardless, so the close *call* is visible — but the fact
+        // that channel-side bookkeeping was skipped is not. Sibling
+        // methods (e.g. `requestSessionStatus`) surface this as
+        // `SessionNotFoundError`; `closeSession` is intentionally
+        // idempotent so we just log instead of throwing.
+        writeStderrLine(
+          `qwen serve: closeSession channelInfoForEntry returned undefined ` +
+            `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
+        );
+      }
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
@@ -3172,7 +3211,29 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Detach from the channel. The channel dies only when its LAST
       // session leaves — other sessions on the same channel keep
       // running.
-      const ci = channelInfo;
+      //
+      // #4325 fix: same channel-overlap fix as in `closeSession` above.
+      // `channelInfoForEntry(entry)` returns the entry's actual
+      // channel rather than the module-scoped `channelInfo` (current
+      // attach target), preventing the "kill operates on the freshly-
+      // spawned channel B instead of the dying channel A" cascade
+      // during the overlap window.
+      //
+      // HAZARD(#4325): see the matching block in `closeSession`. The
+      // regression test for this fix is single-channel smoke and
+      // would NOT fail if this line reverts to `channelInfo`. Keep
+      // `channelInfoForEntry(entry)` until the deterministic overlap
+      // test lands.
+      const ci = channelInfoForEntry(entry);
+      if (!ci) {
+        // Same diagnostic as `closeSession` (#4334 wenshao review
+        // DWrbr) — when the entry's channel is already gone, the
+        // cleanup below short-circuits silently; surface that.
+        writeStderrLine(
+          `qwen serve: killSession channelInfoForEntry returned undefined ` +
+            `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
+        );
+      }
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
