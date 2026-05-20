@@ -23,6 +23,9 @@ const {
   mockWriteCodingPlanConfig,
   mockWriteModelProvidersConfig,
   mockClearPersistedAuth,
+  mockApplyProviderInstallPlanToFile,
+  mockSnapshotSettingsForRollback,
+  mockRestoreSettingsSnapshot,
   slashCommandNotificationCallbackRef,
   endTurnCallbackRef,
   streamChunkCallbackRef,
@@ -77,6 +80,11 @@ const {
   mockWriteCodingPlanConfig: vi.fn(() => ({})),
   mockWriteModelProvidersConfig: vi.fn(),
   mockClearPersistedAuth: vi.fn(),
+  mockApplyProviderInstallPlanToFile: vi.fn().mockResolvedValue(undefined),
+  mockSnapshotSettingsForRollback: vi.fn<() => Record<string, unknown> | null>(
+    () => null,
+  ),
+  mockRestoreSettingsSnapshot: vi.fn(),
   slashCommandNotificationCallbackRef: {
     current: undefined as
       | ((event: {
@@ -166,9 +174,9 @@ vi.mock('../../services/settingsWriter.js', () => ({
   writeModelProvidersConfig: mockWriteModelProvidersConfig,
   readQwenSettingsForVSCode: mockReadQwenSettingsForVSCode,
   clearPersistedAuth: mockClearPersistedAuth,
-  applyProviderInstallPlanToFile: vi.fn().mockResolvedValue(undefined),
-  snapshotSettingsForRollback: vi.fn().mockReturnValue(null),
-  restoreSettingsSnapshot: vi.fn(),
+  applyProviderInstallPlanToFile: mockApplyProviderInstallPlanToFile,
+  snapshotSettingsForRollback: mockSnapshotSettingsForRollback,
+  restoreSettingsSnapshot: mockRestoreSettingsSnapshot,
 }));
 
 vi.mock('../../services/qwenAgentManager.js', () => ({
@@ -1682,6 +1690,128 @@ describe('Notification & dot indicator', () => {
     expect(mockShowInformationMessage).toHaveBeenCalledWith(
       'Qwen Code: Waiting for your input.',
       'Show',
+    );
+  });
+});
+
+describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSnapshotSettingsForRollback.mockReturnValue(null);
+  });
+
+  // Minimal real-ish provider config + inputs so the real buildInstallPlan
+  // (core is not mocked beyond Storage) produces a valid plan.
+  const providerConfig = {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    protocol: 'openai',
+    baseUrl: 'https://api.deepseek.com',
+    envKey: 'DEEPSEEK_API_KEY',
+    models: [{ id: 'deepseek-v4-flash' }],
+    modelNamePrefix: 'DeepSeek',
+  } as unknown as Parameters<WebViewProvider['handleAuthInteractive']>[0];
+  const inputs = {
+    baseUrl: 'https://api.deepseek.com',
+    apiKey: 'sk-bad-key',
+    modelIds: ['deepseek-v4-flash'],
+  } as unknown as Parameters<WebViewProvider['handleAuthInteractive']>[1];
+
+  function makeProvider() {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    // Avoid touching the real webview pipe.
+    (
+      provider as unknown as { sendMessageToWebView: () => void }
+    ).sendMessageToWebView = vi.fn();
+    return provider;
+  }
+
+  it('restores the snapshot when the reconnect leaves authState !== true', async () => {
+    const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
+    mockSnapshotSettingsForRollback.mockReturnValue(snapshot);
+
+    const provider = makeProvider();
+    // doInitializeAgentConnection runs but the backend rejects the key, so
+    // authState stays false.
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+        authState: boolean;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = false;
+    });
+
+    await (
+      provider as unknown as {
+        handleAuthInteractive: (c: unknown, i: unknown) => Promise<void>;
+      }
+    ).handleAuthInteractive(providerConfig, inputs);
+
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledTimes(1);
+    expect(mockRestoreSettingsSnapshot).toHaveBeenCalledWith(snapshot);
+  });
+
+  it('does NOT restore when the reconnect authenticates (authState === true)', async () => {
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      env: { OPENAI_API_KEY: 'sk-old' },
+    });
+
+    const provider = makeProvider();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+        authState: boolean;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = true;
+    });
+
+    await (
+      provider as unknown as {
+        handleAuthInteractive: (c: unknown, i: unknown) => Promise<void>;
+      }
+    ).handleAuthInteractive(providerConfig, inputs);
+
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('swallows a rollback write failure so the authError message still sends', async () => {
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      env: { OPENAI_API_KEY: 'sk-old' },
+    });
+    // restore itself throws (e.g. EPERM on Windows renameSync).
+    mockRestoreSettingsSnapshot.mockImplementation(() => {
+      throw new Error('EPERM: rename failed');
+    });
+
+    const provider = makeProvider();
+    const sendToWebView = (
+      provider as unknown as { sendMessageToWebView: ReturnType<typeof vi.fn> }
+    ).sendMessageToWebView;
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+        authState: boolean;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = false;
+    });
+
+    await expect(
+      (
+        provider as unknown as {
+          handleAuthInteractive: (c: unknown, i: unknown) => Promise<void>;
+        }
+      ).handleAuthInteractive(providerConfig, inputs),
+    ).resolves.toBeUndefined();
+
+    // The rollback throw must not prevent the user-facing authError.
+    expect(sendToWebView).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'authError' }),
     );
   });
 });

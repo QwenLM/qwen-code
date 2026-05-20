@@ -1335,6 +1335,19 @@ export class WebViewProvider {
     // without this a rejected key would persist and every VS Code restart
     // would keep retrying it.
     const rollbackSnapshot = snapshotSettingsForRollback();
+    // restoreSettingsSnapshot → writeSettings can itself throw (EPERM on
+    // Windows renameSync, disk full, EACCES). Never let a rollback failure
+    // mask the original auth error or skip the user-facing error message.
+    const safeRollback = () => {
+      try {
+        restoreSettingsSnapshot(rollbackSnapshot);
+      } catch (rollbackErr) {
+        console.error(
+          '[WebViewProvider] settings rollback failed:',
+          rollbackErr,
+        );
+      }
+    };
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
@@ -1366,7 +1379,7 @@ export class WebViewProvider {
       } else {
         // Auth failed against the live backend — roll the bad credentials
         // back off disk so a restart doesn't keep retrying them.
-        restoreSettingsSnapshot(rollbackSnapshot);
+        safeRollback();
         this.sendMessageToWebView({
           type: 'authError',
           data: {
@@ -1381,8 +1394,9 @@ export class WebViewProvider {
       // A throw can land here after the plan committed but before/while
       // reconnecting — restore the snapshot so partial/bad state doesn't
       // linger. (Redundant but harmless if the plan's own rollback already
-      // ran: it just rewrites the same pre-state.)
-      restoreSettingsSnapshot(rollbackSnapshot);
+      // ran: it just rewrites the same pre-state.) safeRollback swallows a
+      // rollback throw so it can't pre-empt the authError message below.
+      safeRollback();
       this.sendMessageToWebView({
         type: 'authError',
         data: { message: `Configuration failed: ${errorMsg}` },

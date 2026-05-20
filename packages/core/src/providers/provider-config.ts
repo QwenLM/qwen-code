@@ -368,11 +368,20 @@ export function providerMatchesCredentials(
       } catch (err) {
         // A throw here is a programming error in the provider's envKey fn,
         // not an expected "no match" — surface it so a custom provider
-        // silently vanishing from /doctor / system-info has a trace.
+        // silently vanishing from /doctor / system-info has a trace. Log
+        // only the host (a custom baseUrl can embed credentials like
+        // https://user:sk-secret@host) and the error message, not the raw
+        // error object / full URL.
+        let safeHost: string;
+        try {
+          safeHost = new URL(baseUrl).hostname;
+        } catch {
+          safeHost = '[invalid]';
+        }
         // eslint-disable-next-line no-console -- diagnostic for a misconfigured provider
         console.warn(
-          `[providerMatchesCredentials] envKey(${proto}, ${baseUrl}) threw; skipping this protocol:`,
-          err,
+          `[providerMatchesCredentials] envKey(${proto}, ${safeHost}) threw; skipping this protocol:`,
+          err instanceof Error ? err.message : String(err),
         );
       }
     }
