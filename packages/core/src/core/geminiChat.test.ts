@@ -4093,21 +4093,22 @@ describe('GeminiChat', async () => {
       expect((fr?.response as { error?: string })?.error).toBe('custom reason');
     });
 
-    it('does NOT synthesize when the real functionResponse lives in a non-adjacent later user turn', () => {
-      // Regression for the qwen-latest-series-invite-beta-v28 thread on
-      // PR #4176: shape `[user, model[fc], user[text], user[fr_real]]`
-      // arises when the user aborts a long-running tool, types a
-      // follow-up text turn, and then the React scheduler's late
-      // submitQuery appends the real tool_result as a SEPARATE user
-      // entry. The repair pass previously checked only history[i+1]
-      // (the immediate next turn) — the real fr at history[i+2] was
-      // invisible, so the repair synthesized a duplicate `error` fr for
-      // a callId that already had a real result. The downstream dedup
-      // in `useGeminiStream.handleCompletedTools` then dropped the REAL
-      // tool_result on the next submission (its callId was now
-      // "already in history" because of the synthetic), and the model
-      // only ever saw the error placeholder — silently swapping a real
-      // success for an error.
+    it('hoists the real functionResponse from a non-adjacent later user turn into the adjacent one', () => {
+      // Regression for the gpt-5.5 thread on PR #4176: shape
+      // `[user, model[fc], user[text], user[fr_real]]` arises when the
+      // user aborts a long-running tool, types a follow-up text turn,
+      // and then the React scheduler's late submitQuery appends the
+      // real tool_result as a SEPARATE user entry.
+      //
+      // Forward scanning alone (qwen-latest-series-invite-beta-v28
+      // thread, fixed in commit 2880de577) prevents the *synthesis*
+      // duplicate, but the wire layout is still
+      // `model[tool_use] → user[text] → user[tool_result]`, which
+      // Anthropic-compatible backends reject because the tool_result
+      // is not at the head of the IMMEDIATELY following user message.
+      // The repair must MOVE the real fr from history[3] into
+      // history[2] (before the text part) so the wire format becomes
+      // `model[tool_use] → user[tool_result, text]`.
       chat.setHistory([
         { role: 'user', parts: [{ text: 'open /tmp/long.txt' }] },
         {
@@ -4139,29 +4140,33 @@ describe('GeminiChat', async () => {
 
       const result = chat.repairOrphanedToolUseTurns();
 
-      // No synthesis: the real fr at history[3] satisfies the model[fc]
-      // at history[1].
+      // No synthesis (the fr is real, just relocated) — `injected`
+      // stays empty so the React scheduler dedup doesn't see it as a
+      // synthesized callId.
       expect(result.injected).toEqual([]);
       const history = chat.getHistory();
-      // History shape is unchanged: 4 entries, no inserted synthetic.
-      expect(history.length).toBe(4);
-      expect(history[3]!.parts![0]!.functionResponse?.response).toEqual({
+      // History is now 3 entries: the source turn for the hoisted fr
+      // had only the one fr part, so it becomes empty and is removed.
+      expect(history.length).toBe(3);
+      // Real fr now at the head of the immediate next user turn,
+      // before the text part, satisfying the wire-format invariant.
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe(
+        'call_nonadjacent_real',
+      );
+      expect(history[2]!.parts![0]!.functionResponse?.response).toEqual({
         output: 'real file contents',
       });
-      // The follow-up text turn is untouched (no synthetic fr hoisted
-      // into it — confirms the forward-scan fix, not just a no-op
-      // synthesis).
-      expect(history[2]!.parts).toEqual([
-        { text: 'never mind, do something else' },
-      ]);
+      expect(history[2]!.parts![1]).toEqual({
+        text: 'never mind, do something else',
+      });
     });
 
-    it('still synthesizes for a partial mismatch when forward scan misses one callId', () => {
-      // Counterpart to the above: when the real fr only covers SOME
-      // of the callIds in a parallel tool_use, the missing ones must
-      // still get synthetic error fr's hoisted onto the immediate next
-      // user turn (preserving the existing parallel-tool_use behavior).
-      // Confirms the forward-scan didn't accidentally over-collect.
+    it('synthesizes missing fr AND hoists real fr in a parallel tool_use mismatch', () => {
+      // Counterpart to the hoist case: when the real fr only covers
+      // SOME callIds in a parallel tool_use, and the real one is in a
+      // non-adjacent later user turn, BOTH fix-ups apply on the same
+      // model turn — synthesize the missing callId AND hoist the real
+      // fr from the non-adjacent location into the adjacent turn.
       chat.setHistory([
         { role: 'user', parts: [{ text: 'fan out two reads' }] },
         {
@@ -4192,17 +4197,73 @@ describe('GeminiChat', async () => {
 
       const result = chat.repairOrphanedToolUseTurns();
 
-      // cid_a satisfied by real fr at history[3]; cid_b missing →
-      // synthetic for cid_b only.
+      // cid_b synthesized (no real fr anywhere). cid_a is hoisted, not
+      // synthesized — `injected` only contains the synthetic.
       expect(result.injected).toEqual([{ callId: 'cid_b', name: 'read_file' }]);
       const history = chat.getHistory();
+      // The non-adjacent turn that held cid_a's real fr is now empty
+      // and removed → 3 entries instead of the original 4.
+      expect(history.length).toBe(3);
+      // Adjacent user turn now leads with the synthesized fr_b, then
+      // the hoisted real fr_a, then the text. Both tool_results sit
+      // at the head, satisfying the Anthropic wire-format invariant.
+      const adjacentParts = history[2]!.parts!;
+      expect(adjacentParts[0]!.functionResponse?.id).toBe('cid_b');
+      expect(
+        (adjacentParts[0]!.functionResponse?.response as { error?: string })
+          ?.error,
+      ).toBeDefined();
+      expect(adjacentParts[1]!.functionResponse?.id).toBe('cid_a');
+      expect(adjacentParts[1]!.functionResponse?.response).toEqual({
+        output: 'real for a',
+      });
+      expect(adjacentParts[2]).toEqual({ text: 'follow up' });
+    });
+
+    it('hoists real fr but preserves the source user turn when it carries other content', () => {
+      // Edge case for the hoist path: if the source turn for the real
+      // fr ALSO carries text (or any non-fr part), removing the fr
+      // alone must NOT delete the turn — the remaining text is the
+      // user's real message and must be preserved at its original
+      // position. Confirms the empty-turn cleanup only deletes turns
+      // whose parts list goes to zero after the splice.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'kick off' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { id: 'cid_mix', name: 'read_file', args: {} },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'never mind' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_mix',
+                name: 'read_file',
+                response: { output: 'data' },
+              },
+            },
+            { text: 'thanks anyway' },
+          ],
+        },
+      ]);
+
+      const result = chat.repairOrphanedToolUseTurns();
+
+      expect(result.injected).toEqual([]);
+      const history = chat.getHistory();
+      // The source turn lost its fr but kept its trailing text, so
+      // history is still 4 entries — the source turn survives as a
+      // text-only user message.
       expect(history.length).toBe(4);
-      // Synthetic for cid_b hoisted into history[2] (immediate next
-      // user turn) before the text part.
-      expect(history[2]!.parts![0]!.functionResponse?.id).toBe('cid_b');
-      expect(history[2]!.parts![1]).toEqual({ text: 'follow up' });
-      // Real fr for cid_a still at history[3], untouched.
-      expect(history[3]!.parts![0]!.functionResponse?.id).toBe('cid_a');
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe('cid_mix');
+      expect(history[2]!.parts![1]).toEqual({ text: 'never mind' });
+      expect(history[3]!.parts).toEqual([{ text: 'thanks anyway' }]);
     });
   });
 
@@ -4502,6 +4563,112 @@ describe('GeminiChat', async () => {
         .map((p) => ('text' in p ? ((p as { text?: string }).text ?? '') : ''))
         .join('');
       expect(mergedText).toBe('BCD');
+    });
+
+    it('flushes the JSONL record when escalated stream throws mid-tool_use (qwen-latest-series-invite-beta-v28 thread on PR #4176)', async () => {
+      // Critical regression for the max-tokens escalation path:
+      // 1) initial stream succeeds with text + MAX_TOKENS → triggers
+      //    escalation, no partial set, deferred record clean.
+      // 2) escalated stream throws AFTER yielding a functionCall chunk
+      //    → processStreamResponse pushes a partial model[fc] into
+      //    `this.history` and stashes a NEW `pendingPartialAssistantRecord`.
+      // 3) The throw escapes through the for-await on the escalated
+      //    stream, propagates past the (now-passed) retry loop, and
+      //    lands in the outer `finally` block.
+      //
+      // BEFORE the fix: the flush only ran BEFORE the escalation block,
+      // so the new record set in step 2 was never appended to JSONL —
+      // live history disagreed with disk; `--resume` rehydrated a
+      // truncated transcript and `repairOrphanedToolUseTurnsInHistory`
+      // had nothing to repair, leaving the React scheduler's late real
+      // result as a permanent orphan.
+      //
+      // AFTER the fix: the flush is in `finally`, so the record lands
+      // on disk regardless of which stream raised.
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+
+      // Stream 1: text + MAX_TOKENS (success, triggers escalation).
+      // Stream 2: yields a functionCall chunk THEN throws — simulates a
+      // mid-tool_use stream cut on the escalated request.
+      const streams = [
+        makeStream([makeChunk([{ text: 'partial answer' }], 'MAX_TOKENS')]),
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call_escalation_throw',
+                        name: 'read_file',
+                        args: { path: '/tmp/escalated.txt' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw new Error('synthetic mid-tool_use cut on escalated stream');
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'kick off' },
+        'prompt-escalation-flush',
+      );
+
+      // Consume the stream and expect the synthetic mid-tool_use error
+      // to escape (escalation errors do not retry).
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toThrow(/synthetic mid-tool_use cut/);
+
+      // In-memory: the partial functionCall pushed by the escalated
+      // processStreamResponse must be in history.
+      const history = chatWithRecording.getHistory();
+      const partialModel = history.findLast((h) => h.role === 'model');
+      expect(
+        partialModel?.parts?.some(
+          (p) => p.functionCall?.id === 'call_escalation_throw',
+        ),
+      ).toBe(true);
+
+      // JSONL: at least one record must mention the partial functionCall
+      // (the escalation throw flushed it). Without the finally-block
+      // flush, this assertion would fail and the durable transcript
+      // would silently lose a tool_use that's still live in memory.
+      const recordedHasPartial = recordAssistantTurn.mock.calls.some((call) => {
+        const message = (
+          call[0] as {
+            message?: Array<{ functionCall?: { id?: string } }>;
+          }
+        )?.message;
+        return message?.some(
+          (p) => p.functionCall?.id === 'call_escalation_throw',
+        );
+      });
+      expect(recordedHasPartial).toBe(true);
     });
   });
 

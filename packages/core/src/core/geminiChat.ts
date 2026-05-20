@@ -397,16 +397,38 @@ const ORPHAN_TOOL_USE_REPAIR_REASON =
 
 /**
  * Walk `history` left-to-right and close every dangling tool_use ↔ tool_result
- * pair by synthesizing a `functionResponse` with an `error` field for any
- * `functionCall` part whose `id` is not echoed back in the immediately
- * following user turn.
+ * pair so the wire format the next API call sees is always
+ * `model[fc] → user[fr]` with the `fr` blocks at the head of the immediately
+ * following user turn. Two fix-ups can run for each `model[functionCall]`:
+ *
+ *  - SYNTHESIZE: for any `functionCall.id` not echoed back by ANY of the
+ *    consecutive user turns that follow it (up to the next model turn or
+ *    end-of-history), insert a synthetic `functionResponse` carrying an
+ *    `error` field — the close analogue of upstream Claude Code's
+ *    `yieldMissingToolResultBlocks` (`query.ts:123-149`).
+ *  - HOIST: for any `functionCall.id` whose real `functionResponse` lives in
+ *    a non-adjacent following user turn (typical shape:
+ *    `model[fc], user[text], user[fr_real]` — produced when a user aborts a
+ *    long-running tool, types a follow-up, and the React scheduler's late
+ *    `submitQuery` appends the real `fr` as a SEPARATE user entry), MOVE the
+ *    real `fr` part out of its original turn into the adjacent one. Without
+ *    hoisting, the synthesis pass correctly skips the call (a real `fr`
+ *    exists somewhere later) but the wire layout still serializes
+ *    `model[tool_use] → user[text] → user[tool_result]`, which
+ *    Anthropic-compatible backends reject with "tool_use_id ... must have a
+ *    corresponding tool_use block in the previous message". gpt-5.5 review
+ *    thread on PR #4176.
  *
  * Mutates `history` in place and returns the set of injected `(callId, name)`
  * tuples so callers (the React tool scheduler) can dedupe a real `tool_result`
- * if the in-flight tool completes after the repair.
+ * if the in-flight tool completes after the repair. Hoisted ids are NOT in
+ * the returned list — the real `fr` is already present in history, so the
+ * scheduler's existing history-based dedup handles them without extra entries.
  *
- * The synthesis target follows this rule:
- *  - If the next entry is a `user` turn → append synthetic parts to it.
+ * The injection target for synthesized parts follows this rule:
+ *  - If the next entry is a `user` turn → insert synthetic parts at the head
+ *    (before any non-`functionResponse` parts; after any pre-existing real
+ *    `functionResponse` parts so caller-supplied ordering is preserved).
  *  - If the next entry is a `model` turn or end-of-history → insert a new
  *    `user` turn between them carrying just the synthetic parts.
  *
@@ -442,81 +464,149 @@ export function repairOrphanedToolUseTurns(
     if (expected.size === 0) continue;
 
     // Scan forward across EVERY consecutive user turn until the next
-    // non-user (model) entry, gathering all functionResponse ids. The
-    // real tool_result for this model[fc] may live in a non-adjacent
-    // user turn — common shape: user aborts a long-running tool, types
-    // a follow-up text turn, then the React scheduler's late
-    // submitQuery appends the real `user[fr]` as a SEPARATE turn,
-    // producing `model[fc], user[text], user[fr_real]`. Without
-    // forward scanning, `matched` would be empty (only `user[text]`
-    // visited), the repair would synthesize an `error` `functionResponse`
-    // for a callId that already has a real result downstream, and the
-    // `handleCompletedTools` dedup would then drop the REAL result on
-    // the next submission (callId already in history → submit skipped),
-    // so the model only ever sees the synthetic error placeholder.
-    // (qwen-latest-series-invite-beta-v28 thread on PR #4176.)
-    const matched = new Set<string>();
+    // non-user (model) entry, recording (id → location) for every
+    // functionResponse part. The real tool_result for this model[fc]
+    // may live in a non-adjacent user turn — common shape: user aborts
+    // a long-running tool, types a follow-up text turn, then the React
+    // scheduler's late submitQuery appends the real `user[fr]` as a
+    // SEPARATE user entry, producing `model[fc], user[text], user[fr_real]`.
+    //
+    // We need the full location (turn index + part index) for two
+    // reasons:
+    //  - synthesis: skip ids that already have a real fr SOMEWHERE so we
+    //    don't plant a duplicate `error` placeholder. Without this, the
+    //    `handleCompletedTools` history-based dedup would then drop the
+    //    REAL result on the next submission (callId already in history
+    //    via the synthetic), and the model would only ever see the error.
+    //  - hoist: ids matched in a NON-adjacent later user turn must be
+    //    physically moved into history[i+1] (before non-fr parts) so the
+    //    wire format stays `model[tool_use] → user[tool_result, ...]`.
+    //    Anthropic-compatible backends require the tool_result blocks at
+    //    the head of the immediately following user message, otherwise
+    //    they reject with "tool_use_id ... must have a corresponding
+    //    tool_use block in the previous message". gpt-5.5 review thread
+    //    on PR #4176.
+    const matched = new Map<
+      string,
+      { turnIdx: number; partIdx: number; part: Part }
+    >();
     let scanIdx = i + 1;
     while (scanIdx < history.length && history[scanIdx]?.role === 'user') {
-      for (const part of history[scanIdx].parts ?? []) {
+      const parts = history[scanIdx].parts ?? [];
+      for (let pIdx = 0; pIdx < parts.length; pIdx++) {
+        const part = parts[pIdx];
         const id = part.functionResponse?.id;
-        if (id) matched.add(id);
+        if (id && !matched.has(id)) {
+          matched.set(id, { turnIdx: scanIdx, partIdx: pIdx, part });
+        }
       }
       scanIdx++;
     }
 
-    const missing = [...expected.entries()].filter(([id]) => !matched.has(id));
-    if (missing.length === 0) continue;
+    const synthesizeIds: Array<[string, string]> = [];
+    const hoistLocations: Array<{
+      turnIdx: number;
+      partIdx: number;
+      part: Part;
+    }> = [];
+    for (const [id, name] of expected) {
+      const loc = matched.get(id);
+      if (!loc) {
+        synthesizeIds.push([id, name]);
+      } else if (loc.turnIdx !== i + 1) {
+        hoistLocations.push(loc);
+      }
+      // else: already in the immediate next user turn — wire format ok.
+    }
+    if (synthesizeIds.length === 0 && hoistLocations.length === 0) continue;
 
-    const next = history[i + 1];
-
-    const syntheticParts: Part[] = missing.map(([callId, name]) => ({
+    const syntheticParts: Part[] = synthesizeIds.map(([callId, name]) => ({
       functionResponse: {
         id: callId,
         name,
         response: { error: reason },
       },
     }));
+    // Hoisted parts come from REAL tool_results elsewhere in history.
+    // We capture references first, then splice them out below in
+    // descending order so earlier removals don't shift later indices.
+    const hoistedParts: Part[] = hoistLocations.map((loc) => loc.part);
+    // Synthetics first, then hoisted. Order between synthetic and
+    // hoisted is internal — backends just need ALL tool_results at the
+    // head of the user turn, regardless of order among themselves.
+    const partsToInject: Part[] = [...syntheticParts, ...hoistedParts];
 
+    // Remove hoisted parts from their original turns. Sort by
+    // (turnIdx desc, partIdx desc) so each splice operates on stable
+    // indices for everything still to be removed.
+    const removalOrder = [...hoistLocations].sort((a, b) => {
+      if (a.turnIdx !== b.turnIdx) return b.turnIdx - a.turnIdx;
+      return b.partIdx - a.partIdx;
+    });
+    for (const loc of removalOrder) {
+      const turnParts = history[loc.turnIdx].parts;
+      if (turnParts) turnParts.splice(loc.partIdx, 1);
+    }
+    // Drop any user turn within the scan range (i+2 .. scanIdx-1) that
+    // is now empty because we extracted its only fr part(s). Walk back
+    // to front so removals don't shift remaining indices. The
+    // immediately-adjacent turn at i+1 is preserved even if empty —
+    // we'll rewrite its parts below. After this, scanIdx is no longer
+    // accurate; we rebind via `next` directly.
+    for (let j = scanIdx - 1; j > i + 1; j--) {
+      if (
+        history[j]?.role === 'user' &&
+        (history[j].parts?.length ?? 0) === 0
+      ) {
+        history.splice(j, 1);
+      }
+    }
+
+    const next = history[i + 1];
     if (next?.role === 'user') {
-      // Synthetic functionResponse parts MUST be placed before any
-      // non-functionResponse parts in the user turn. Anthropic-compatible
-      // backends reject a user message whose first content block isn't
-      // the tool_result that answers the immediately preceding tool_use
-      // ("tool result must follow tool use" / "tool_use_id ... must have
-      // a corresponding tool_use block in the previous message"). Common
-      // case after a Ctrl+Y race: the user's retry-prompt text was just
-      // pushed, so `next.parts = [text]`; appending the synthetic to the
-      // end would produce `[text, fr]` and re-trigger the wedge this PR
+      // Synthesized + hoisted functionResponse parts MUST be placed
+      // before any non-functionResponse parts in the user turn.
+      // Anthropic-compatible backends reject a user message whose first
+      // content block isn't the tool_result that answers the
+      // immediately preceding tool_use ("tool result must follow tool
+      // use" / "tool_use_id ... must have a corresponding tool_use
+      // block in the previous message"). Common case after a Ctrl+Y
+      // race: the user's retry-prompt text was just pushed, so
+      // `next.parts = [text]`; appending the synthetic to the end
+      // would produce `[text, fr]` and re-trigger the wedge this PR
       // is supposed to escape. Mirrors upstream Claude Code's
       // `hoistToolResults` (`utils/messages.ts`).
       //
       // CONSEQUENCE OF REMOVAL: dropping this hoist (e.g. naively
-      // `next.parts = [...existing, ...syntheticParts]`) re-introduces
+      // `next.parts = [...existing, ...partsToInject]`) re-introduces
       // the exact 400 "tool_use_id ... must have a corresponding tool_use
       // block in the previous message" the synthesis pass exists to
       // prevent. The whole repair becomes a no-op and the session stays
       // wedged. Do not "simplify" this branch.
       //
-      // Place synthetics AFTER any pre-existing functionResponse parts
-      // (real tool_results the user is supplying in the same turn) so
-      // their original ordering is preserved.
+      // Place new parts AFTER any pre-existing functionResponse parts
+      // (real tool_results the user already had at the head of this
+      // turn) so caller-supplied ordering is preserved.
       const existing = next.parts ?? [];
       const firstNonFr = existing.findIndex((part) => !part.functionResponse);
       const insertAt = firstNonFr === -1 ? existing.length : firstNonFr;
       next.parts = [
         ...existing.slice(0, insertAt),
-        ...syntheticParts,
+        ...partsToInject,
         ...existing.slice(insertAt),
       ];
     } else {
-      history.splice(i + 1, 0, { role: 'user', parts: syntheticParts });
+      history.splice(i + 1, 0, { role: 'user', parts: partsToInject });
       // Skip the freshly-inserted user turn so the outer loop doesn't
       // visit it as a model turn (it isn't) and stays linear-time.
       i++;
     }
 
-    for (const [callId, name] of missing) {
+    // Only synthesized ids feed dedup — hoisted ids reference real frs
+    // that were ALREADY in history before this pass and remain present
+    // (just relocated). The scheduler's history-based dedup will
+    // continue to handle those naturally on its next pass.
+    for (const [callId, name] of synthesizeIds) {
       injected.push({ callId, name });
     }
   }
@@ -930,7 +1020,25 @@ export class GeminiChat {
       // The React scheduler's late real result is then dedup'd against
       // chat.history in `useGeminiStream.handleCompletedTools` so the
       // synthetic doesn't collide with it on the wire.
-      repairOrphanedToolUseTurns(this.history);
+      //
+      // Diagnostic: log non-empty inline-repair results. The startChat()
+      // path logs synthesis events through `repairOrphanedToolUseTurnsInHistory`
+      // (`[REPAIR] Synthesized N functionResponse(s) ...`) and dedup events
+      // through `useGeminiStream.handleCompletedTools` (`[REPAIR] Dropping ...`),
+      // but this inline call site was previously silent — when a dedup-drop
+      // log shows up, investigators had no way to tell whether the
+      // synthetic was planted at session-load or at this per-send pass.
+      // Tag the log site so the lifecycle anchor is unambiguous.
+      const inlineRepair = repairOrphanedToolUseTurns(this.history);
+      if (inlineRepair.injected.length > 0) {
+        debugLogger.warn(
+          `[REPAIR] sendMessageStream inline pass synthesized ` +
+            `${inlineRepair.injected.length} functionResponse(s): ` +
+            inlineRepair.injected
+              .map((entry) => `${entry.name}(${entry.callId})`)
+              .join(', '),
+        );
+      }
       requestContents = this.getHistory(true);
     } catch (error) {
       if (userContentAdded) {
@@ -1034,6 +1142,28 @@ export class GeminiChat {
                 self.history[idx]?.role === 'model'
               ) {
                 self.history.splice(idx, 1);
+              } else {
+                // Marker was set but the entry it pointed at is gone or
+                // is no longer a `model` turn. Today this can't happen:
+                // every history-mutation path (clearHistory, addHistory,
+                // setHistory, truncateHistory, stripThoughtsFromHistory,
+                // stripOrphanedUserEntriesFromHistory) calls
+                // clearPendingPartialState() in lockstep, so the marker
+                // is null whenever the index basis is invalidated.
+                // Logging the mismatch makes the invariant observable —
+                // without this, a future caller that mutates history
+                // without resetting the marker would silently leave a
+                // stale partial in `this.history` (popPartialIfPushed
+                // skipping the splice) AND the field-level invariant
+                // that "marker non-null ⇒ a real partial sits at idx"
+                // would be quietly violated. With the warn, anyone
+                // investigating a stale-partial wedge sees a log line
+                // pointing straight at the offending caller.
+                debugLogger.warn(
+                  `[PARTIAL_POP] Splice skipped: idx=${idx}, ` +
+                    `historyLength=${self.history.length}, ` +
+                    `roleAtIdx=${self.history[idx]?.role ?? 'undefined'}`,
+                );
               }
               // Drop both markers in lockstep — the deferred chat-
               // recording record must be discarded alongside the
@@ -1125,6 +1255,21 @@ export class GeminiChat {
                     reactiveInfo.compressionStatus ===
                     CompressionStatus.COMPRESSED
                   ) {
+                    // Defense-in-depth no-op: tryCompress() succeeded
+                    // means it has already replaced this.history via
+                    // setHistory(), which calls clearPendingPartialState()
+                    // — so by the time we reach this line, the marker is
+                    // null and popPartialIfPushed splices nothing. We
+                    // keep the call as a uniformity assertion against
+                    // future refactors that might switch tryCompress to
+                    // an in-place mutation: in that world, the marker
+                    // would NOT be reset by setHistory and this call
+                    // becomes the only thing that drops the stale
+                    // partial before requestContents is rebuilt below.
+                    // Removing it would couple correctness to the
+                    // implementation detail "setHistory always clears
+                    // the marker", which the other retry branches don't
+                    // share.
                     popPartialIfPushed();
                     requestContents = self.getHistory(true);
                     debugLogger.info(
@@ -1235,29 +1380,6 @@ export class GeminiChat {
             }
             break;
           }
-        }
-
-        // The retry loop has settled: any partial that was rolled back
-        // had its stash cleared by `popPartialIfPushed`; any partial that
-        // survived (success break with no partial set, or unretryable
-        // break with the partial kept) is now durable in memory, so the
-        // deferred chat-recording append must finally land on disk.
-        // Without this flush the unretryable-break path persists the
-        // partial in `this.history` but the JSONL transcript silently
-        // drops it — `--resume` then loads a truncated transcript that
-        // doesn't match the live session shape, and the orphan-tool_use
-        // repair pass at session-load has nothing to repair.
-        if (self.pendingPartialAssistantRecord) {
-          self.chatRecordingService?.recordAssistantTurn(
-            self.pendingPartialAssistantRecord,
-          );
-          // Clear both fields in lockstep. The marker is no longer
-          // load-bearing past this point (its consumer is the for-loop
-          // catch above, which has exited), and the next
-          // sendMessageStream entry would clear it anyway — but pairing
-          // the reset preserves the "marker and stash are always set or
-          // cleared together" invariant the helper enforces.
-          self.clearPendingPartialState();
         }
 
         // Max output tokens escalation: if the retry loop succeeded with
@@ -1432,6 +1554,42 @@ export class GeminiChat {
         }
       } finally {
         streamDoneResolver!();
+        // Flush any deferred partial-tool_use record into the JSONL
+        // transcript. The retry loop and the post-loop max-tokens
+        // escalation block can BOTH leave one of these on the chat:
+        //
+        //  - Retry loop: any partial rolled back by popPartialIfPushed
+        //    has its stash cleared; any partial that survived (success
+        //    break with no partial set, or unretryable break with the
+        //    partial kept) leaves its record set so we record-and-clear
+        //    it here.
+        //  - Max-tokens escalation: the escalated stream re-enters
+        //    `processStreamResponse`, which sets a NEW
+        //    `pendingPartialAssistantRecord` if it errors mid-tool_use.
+        //    That throw propagates through the for-await above without
+        //    touching the (now-passed) retry-loop catch, so without a
+        //    flush in `finally` the partial would be live in
+        //    `this.history` (the escalated processStreamResponse already
+        //    pushed it) but absent from the JSONL transcript. `--resume`
+        //    would then rehydrate a truncated transcript whose live
+        //    history disagrees with disk, and
+        //    `repairOrphanedToolUseTurnsInHistory` would find nothing to
+        //    repair on load — the React scheduler's late real result
+        //    becomes a permanent orphan, reproducing the exact wedge
+        //    this PR prevents.
+        //
+        // Putting the flush in `finally` covers ALL throw paths
+        // (escalation, post-retry-loop `throw lastError`, the for-await
+        // consumer's `.return()` if it abandons the generator) and the
+        // normal completion path with a single statement. The marker
+        // and stash are dropped together to preserve the
+        // "marker non-null ⇔ stash non-null" invariant.
+        if (self.pendingPartialAssistantRecord) {
+          self.chatRecordingService?.recordAssistantTurn(
+            self.pendingPartialAssistantRecord,
+          );
+          self.clearPendingPartialState();
+        }
       }
     })();
   }
