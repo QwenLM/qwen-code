@@ -1012,6 +1012,26 @@ const SETTINGS_SCHEMA = {
           type: 'boolean',
           default: false,
         },
+        resourceAttributes: {
+          description:
+            'Static resource attributes attached to every span/log/metric exported via OTLP. Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version) are silently dropped with a warning.',
+          type: 'object',
+          additionalProperties: { type: 'string' },
+          default: {},
+        },
+        metrics: {
+          description: 'Per-signal cardinality controls for exported metrics.',
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            includeSessionId: {
+              description:
+                'Include session.id on every metric data point. WARNING: each CLI session creates a new value, causing unbounded metric time-series fan-out at the backend. Only enable for short-term debugging — spans and logs still carry session.id.',
+              type: 'boolean',
+              default: false,
+            },
+          },
+        },
       },
       additionalProperties: true,
     },

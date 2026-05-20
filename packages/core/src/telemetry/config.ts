@@ -7,6 +7,11 @@
 import type { TelemetrySettings } from '../config/config.js';
 import { FatalConfigError } from '../utils/errors.js';
 import { TelemetryTarget } from './index.js';
+import {
+  coerceStringResourceAttributes,
+  parseOtelResourceAttributes,
+  stripReservedResourceAttributes,
+} from './resource-attributes.js';
 
 /**
  * Parse a boolean environment flag. Accepts 'true'/'1' as true.
@@ -126,6 +131,35 @@ export async function resolveTelemetrySettings(options: {
     env['OTEL_EXPORTER_OTLP_METRICS_ENDPOINT'] ??
     settings.otlpMetricsEndpoint;
 
+  // Resource attributes: merge OTEL_RESOURCE_ATTRIBUTES (lowest), then
+  // settings.resourceAttributes (settings wins on key conflict). RESERVED
+  // keys (service.version) are stripped from both sources with a warning.
+  // OTEL_SERVICE_NAME is a standard escape hatch that overrides
+  // service.name from any other source.
+  const envResourceAttrs = stripReservedResourceAttributes(
+    parseOtelResourceAttributes(env['OTEL_RESOURCE_ATTRIBUTES']),
+    'OTEL_RESOURCE_ATTRIBUTES',
+  );
+  const settingsResourceAttrs = stripReservedResourceAttributes(
+    coerceStringResourceAttributes(settings.resourceAttributes),
+    'settings.telemetry.resourceAttributes',
+  );
+  const mergedResourceAttrs: Record<string, string> = {
+    ...envResourceAttrs,
+    ...settingsResourceAttrs,
+  };
+  if (env['OTEL_SERVICE_NAME']) {
+    mergedResourceAttrs['service.name'] = env['OTEL_SERVICE_NAME'];
+  }
+  const resourceAttributes = Object.keys(mergedResourceAttrs).length
+    ? mergedResourceAttrs
+    : undefined;
+
+  const metricsIncludeSessionId =
+    parseBooleanEnvFlag(env['QWEN_TELEMETRY_METRICS_INCLUDE_SESSION_ID']) ??
+    settings.metrics?.includeSessionId ??
+    false;
+
   return {
     enabled,
     target,
@@ -137,5 +171,7 @@ export async function resolveTelemetrySettings(options: {
     logPrompts,
     includeSensitiveSpanAttributes,
     outfile,
+    resourceAttributes,
+    metrics: { includeSessionId: metricsIncludeSessionId },
   };
 }

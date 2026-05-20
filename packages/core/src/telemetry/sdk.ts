@@ -153,11 +153,29 @@ export function initializeTelemetry(config: Config): void {
   }
 
   const debugLogger = createDebugLogger('OTEL');
+  // User-provided resource attributes (env + settings, already merged with
+  // RESERVED stripping and OTEL_SERVICE_NAME precedence in the resolver).
+  // We strip service.name/service.version here too as defense-in-depth, then
+  // re-apply runtime-controlled values on top.
+  const userAttrs = config.getTelemetryResourceAttributes() ?? {};
+  const userServiceName = userAttrs['service.name'];
+  // Strip keys we re-inject below (service.name, service.version) plus
+  // session.id, which never belongs on the Resource — Resource attributes
+  // auto-attach to every metric data point, which would bypass the metric
+  // cardinality toggle. The resolver normally drops session.id from user
+  // input already; this destructure is defense-in-depth for callers that
+  // bypass the resolver (e.g. direct Config construction in tests).
+  const {
+    'service.name': _ignoredServiceName,
+    'service.version': _ignoredServiceVersion,
+    'session.id': _ignoredSessionId,
+    ...nonReservedUserAttrs
+  } = userAttrs;
   const resource = resourceFromAttributes({
-    [SemanticResourceAttributes.SERVICE_NAME]: SERVICE_NAME,
+    ...nonReservedUserAttrs,
+    [SemanticResourceAttributes.SERVICE_NAME]: userServiceName ?? SERVICE_NAME,
     [SemanticResourceAttributes.SERVICE_VERSION]:
       config.getCliVersion() || 'unknown',
-    'session.id': config.getSessionId(),
   });
 
   const otlpEndpoint = config.getTelemetryOtlpEndpoint();

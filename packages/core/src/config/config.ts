@@ -304,6 +304,25 @@ export interface TelemetrySettings {
   logPrompts?: boolean;
   includeSensitiveSpanAttributes?: boolean;
   outfile?: string;
+  /**
+   * Static resource attributes attached to every span/log/metric exported via
+   * OTLP. Merged with `OTEL_RESOURCE_ATTRIBUTES`; settings win on key conflict.
+   * Reserved keys (`service.version`) are silently dropped.
+   */
+  resourceAttributes?: Record<string, string>;
+  /** Per-signal cardinality controls. */
+  metrics?: TelemetryMetricsSettings;
+}
+
+export interface TelemetryMetricsSettings {
+  /**
+   * Include `session.id` on every metric data point. Default: false.
+   *
+   * WARNING: each CLI session creates a new value, causing unbounded
+   * metric time-series fan-out at the backend. Only enable for
+   * short-term debugging — spans and logs still carry session.id.
+   */
+  includeSessionId?: boolean;
 }
 
 export interface OutputSettings {
@@ -987,6 +1006,8 @@ export class Config {
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
       outfile: params.telemetry?.outfile,
+      resourceAttributes: params.telemetry?.resourceAttributes,
+      metrics: params.telemetry?.metrics,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
@@ -2805,6 +2826,14 @@ export class Config {
 
   getTelemetryTarget(): TelemetryTarget {
     return this.telemetrySettings.target ?? DEFAULT_TELEMETRY_TARGET;
+  }
+
+  getTelemetryResourceAttributes(): Record<string, string> {
+    return this.telemetrySettings.resourceAttributes ?? {};
+  }
+
+  getTelemetryMetricsIncludeSessionId(): boolean {
+    return this.telemetrySettings.metrics?.includeSessionId ?? false;
   }
 
   getTelemetryOutfile(): string | undefined {
