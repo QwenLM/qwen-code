@@ -507,17 +507,25 @@ export function ModelDialog({
           } else {
             fastModel = selected;
           }
-          const scope = getPersistScopeForModelSelection(settings);
-          settings.setValue(scope, 'fastModel', fastModel);
-          // Sync the runtime Config so forked agents pick up the change immediately.
-          config?.setFastModel(fastModel);
-          uiState?.historyManager.addItem(
-            {
-              type: 'success',
-              text: `${t('Fast Model')}: ${fastModel}`,
-            },
-            Date.now(),
-          );
+          try {
+            const scope = getPersistScopeForModelSelection(settings);
+            settings.setValue(scope, 'fastModel', fastModel);
+            // Sync the runtime Config so forked agents pick up the change immediately.
+            config?.setFastModel(fastModel);
+            uiState?.historyManager.addItem(
+              {
+                type: 'success',
+                text: `${t('Fast Model')}: ${fastModel}`,
+              },
+              Date.now(),
+            );
+          } catch (e) {
+            const baseErrorMessage = e instanceof Error ? e.message : String(e);
+            setErrorMessage(
+              `Failed to set fast model to '${fastModel}'.\n\n${baseErrorMessage}`,
+            );
+            return;
+          }
           onClose();
           return;
         }

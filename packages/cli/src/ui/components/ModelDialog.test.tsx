@@ -867,6 +867,40 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('shows an error when fast model persistence fails', async () => {
+    const setFastModel = vi.fn();
+    const { props, mockSettings, queryByText } = renderComponent(
+      { isFastModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'gpt-4'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'gpt-4',
+            label: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setFastModel,
+      } as unknown as Partial<Config>,
+    );
+    vi.mocked(mockSettings.setValue).mockImplementation(() => {
+      throw new Error('Disk is read-only');
+    });
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await act(async () => {
+      await childOnSelect('gpt-4');
+    });
+
+    await waitFor(() => {
+      expect(queryByText(/Failed to set fast model to 'gpt-4'/)).not.toBeNull();
+      expect(queryByText(/Disk is read-only/)).not.toBeNull();
+    });
+    expect(setFastModel).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
   it('highlights the cross-auth row for a bare fast-model setting', () => {
     // `/model --fast deepseek-v4-flash` validates across all providers and
     // persists the bare model id. When the dialog re-opens, it must locate
