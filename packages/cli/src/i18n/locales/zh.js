@@ -81,6 +81,7 @@ export default {
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
   'for help on Qwen Code': '获取 Qwen Code 帮助',
   'show version info': '显示版本信息',
+  'show paths for current session files and logs': '显示当前会话文件和日志路径',
   'submit a bug report': '提交错误报告',
   Status: '状态',
 
