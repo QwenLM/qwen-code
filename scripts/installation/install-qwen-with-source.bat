@@ -221,7 +221,8 @@ set "QWEN_VALIDATE_NPM_REGISTRY=!NPM_REGISTRY!"
 set "QWEN_VALIDATE_INSTALL_BASE=!INSTALL_BASE!"
 set "QWEN_VALIDATE_INSTALL_DIR=!INSTALL_DIR!"
 set "QWEN_VALIDATE_INSTALL_BIN_DIR=!INSTALL_BIN_DIR!"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); foreach ($name in 'METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR') { $value = [Environment]::GetEnvironmentVariable('QWEN_VALIDATE_' + $name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }"
+set "QWEN_VALIDATE_SOURCE=!SOURCE!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); foreach ($name in 'METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR','SOURCE') { $value = [Environment]::GetEnvironmentVariable('QWEN_VALIDATE_' + $name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_VALIDATE_METHOD="
 set "QWEN_VALIDATE_MIRROR="
@@ -232,6 +233,7 @@ set "QWEN_VALIDATE_NPM_REGISTRY="
 set "QWEN_VALIDATE_INSTALL_BASE="
 set "QWEN_VALIDATE_INSTALL_DIR="
 set "QWEN_VALIDATE_INSTALL_BIN_DIR="
+set "QWEN_VALIDATE_SOURCE="
 if %PS_STATUS% NEQ 0 (
     echo ERROR: installer options contain unsafe command characters.
     exit /b 1
