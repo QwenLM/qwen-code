@@ -676,6 +676,22 @@ export class WriteFileTool
     return new WriteFileToolInvocation(this.config, params);
   }
 
+  override toAutoClassifierInput(
+    params: WriteFileToolParams,
+  ): Record<string, unknown> {
+    const content = params.content ?? '';
+    // 300-char window for the same reason as EditTool's projection —
+    // out-of-workspace writes need enough headroom for the classifier
+    // to spot a malicious registry / shell / env line hidden behind
+    // a benign prefix.
+    return {
+      file_path: params.file_path,
+      byte_count: Buffer.byteLength(content, 'utf8'),
+      content_preview: content.slice(0, 300),
+      content_truncated: content.length > 300,
+    };
+  }
+
   getModifyContext(
     _abortSignal: AbortSignal,
   ): ModifyContext<WriteFileToolParams> {

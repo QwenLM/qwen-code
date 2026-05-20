@@ -185,6 +185,11 @@
           "type": "string",
           "default": "Qwen Dark"
         },
+        "autoModeAcknowledged": {
+          "description": "True once the user has seen the first-time information message about the AUTO approval mode. Set automatically; not intended for manual configuration.",
+          "type": "boolean",
+          "default": false
+        },
         "statusLine": {
           "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
           "type": "object",
@@ -636,6 +641,39 @@
           "items": {
             "type": "string"
           }
+        },
+        "autoMode": {
+          "description": "Settings consumed by the AUTO approval mode classifier.",
+          "type": "object",
+          "properties": {
+            "hints": {
+              "description": "Natural-language hints injected into the classifier system prompt.",
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "description": "Natural-language descriptions of actions AUTO mode should allow.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "deny": {
+                  "description": "Natural-language descriptions of actions AUTO mode should block.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "environment": {
+              "description": "Environment / context lines injected into the classifier system prompt.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     },
@@ -713,11 +751,12 @@
           }
         },
         "approvalMode": {
-          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, yolo",
+          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, auto, yolo",
           "enum": [
             "plan",
             "default",
             "auto-edit",
+            "auto",
             "yolo"
           ],
           "default": "default"

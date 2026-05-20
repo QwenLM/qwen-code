@@ -849,6 +849,7 @@ function makeConfig(
     coreTools: string[];
     projectRoot: string;
     cwd: string;
+    approvalMode: string;
   }> = {},
 ): PermissionManagerConfig {
   return {
@@ -858,6 +859,7 @@ function makeConfig(
     getCoreTools: () => opts.coreTools,
     getProjectRoot: () => opts.projectRoot ?? '/project',
     getCwd: () => opts.cwd ?? '/project',
+    getApprovalMode: () => opts.approvalMode ?? 'default',
   };
 }
 
@@ -2185,5 +2187,140 @@ describe('PermissionManager.findMatchingDenyRule', () => {
     });
     // rule.raw preserves the original rule string as written in config
     expect(result).toBe('ShellTool');
+  });
+});
+
+// ─── AUTO mode dangerous-rule stash ────────────────────────────────────
+
+describe('PermissionManager — strip/restore for AUTO mode', () => {
+  it('strips Bash interpreter wildcards and stashes them', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(python:*)', 'Bash(git status)'],
+      }),
+    );
+    pm.initialize();
+
+    const stash = pm.stripDangerousRulesForAutoMode();
+    expect(stash.persistent).toHaveLength(1);
+    expect(stash.persistent[0].raw).toBe('Bash(python:*)');
+
+    // The safe rule remains: git status still auto-allowed.
+    return expect(
+      pm.evaluate({ toolName: 'run_shell_command', command: 'git status' }),
+    ).resolves.toBe('allow');
+  });
+
+  it('strips bare tool-level Bash allow', async () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash'] }),
+    );
+    pm.initialize();
+
+    // Before strip: any Bash command is auto-allowed.
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'rm -rf /',
+      }),
+    ).toBe('allow');
+
+    pm.stripDangerousRulesForAutoMode();
+
+    // After strip: Bash falls through to default (which AST analysis turns
+    // into ask for non-readonly commands).
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'rm -rf /',
+      }),
+    ).not.toBe('allow');
+  });
+
+  it('strips Agent / Skill any-allow rules', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Agent(coder)', 'Skill(pdf)', 'ReadFileTool'],
+      }),
+    );
+    pm.initialize();
+
+    const stash = pm.stripDangerousRulesForAutoMode();
+    expect(stash.persistent).toHaveLength(2);
+    expect(stash.persistent.map((r) => r.toolName).sort()).toEqual(
+      ['agent', 'skill'].sort(),
+    );
+    // Safe Read rule untouched.
+    expect(pm.getAllowRawStrings()).toEqual(['ReadFileTool']);
+  });
+
+  it('is idempotent — second strip returns the same stash without re-removal', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
+    );
+    pm.initialize();
+
+    const first = pm.stripDangerousRulesForAutoMode();
+    const second = pm.stripDangerousRulesForAutoMode();
+    expect(first).toBe(second);
+    expect(pm.getAllowRawStrings()).toEqual([]);
+  });
+
+  it('restoreDangerousRules reattaches stripped rules to their original scope', async () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
+    );
+    pm.initialize();
+
+    pm.stripDangerousRulesForAutoMode();
+    expect(pm.getAllowRawStrings()).toEqual([]);
+
+    pm.restoreDangerousRules();
+    expect(pm.getAllowRawStrings()).toEqual(['Bash(python:*)']);
+
+    // And the rule works again: python anything is auto-allowed.
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'python foo.py',
+      }),
+    ).toBe('allow');
+  });
+
+  it('never strips deny rules — user intent for deny is honored', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Bash', 'Agent'],
+        permissionsAllow: ['Bash(git log)'],
+      }),
+    );
+    pm.initialize();
+
+    pm.stripDangerousRulesForAutoMode();
+    // Bash deny still applies — no allow rule can override it after strip.
+    return expect(
+      pm.evaluate({ toolName: 'run_shell_command', command: 'git log' }),
+    ).resolves.toBe('deny');
+  });
+
+  it('auto-strips on initialize when approvalMode is "auto"', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(python:*)'],
+        approvalMode: 'auto',
+      }),
+    );
+    pm.initialize();
+    expect(pm.getAllowRawStrings()).toEqual([]);
+    expect(pm.getStrippedDangerousRules()?.persistent).toHaveLength(1);
+  });
+
+  it('does NOT auto-strip when approvalMode is the default', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
+    );
+    pm.initialize();
+    expect(pm.getAllowRawStrings()).toEqual(['Bash(python:*)']);
+    expect(pm.getStrippedDangerousRules()).toBeUndefined();
   });
 });

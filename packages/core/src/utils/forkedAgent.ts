@@ -476,10 +476,12 @@ export async function runForkedAgent(
   // wrapper's bound tools resolve `this.config.getPermissionManager()`
   // through the prototype chain to the scoped wrapper's own override,
   // while `this.config.getApprovalMode()` lands on YOLO.
-  const yoloConfig = await createApprovalModeOverride(
-    params.config,
-    ApprovalMode.YOLO,
-  );
+  const { config: yoloConfig, cleanup: restoreParentPM } =
+    await createApprovalModeOverride(params.config, ApprovalMode.YOLO);
+  // YOLO never triggers strip → restoreParentPM is a no-op. Kept for
+  // API symmetry with the other createApprovalModeOverride callers; if
+  // this function ever switches away from YOLO the lifecycle stays
+  // correct without further refactor.
   const filesTouched = new Set<string>();
 
   const emitter = new AgentEventEmitter();
@@ -567,5 +569,6 @@ export async function runForkedAgent(
       .getToolRegistry()
       .stop()
       .catch(() => {});
+    restoreParentPM();
   }
 }
