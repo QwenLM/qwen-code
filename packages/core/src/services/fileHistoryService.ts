@@ -10,6 +10,7 @@ import {
   chmod,
   copyFile,
   mkdir,
+  open,
   readFile,
   stat,
   unlink,
@@ -84,9 +85,15 @@ export interface TurnDiff {
     filesChanged: number;
     linesAdded: number;
     linesRemoved: number;
-    /** Number of candidate files dropped because the turn touched more
-     *  than `MAX_TURN_DIFF_FILES`. Mirrors the Current source's
-     *  `hiddenFileCount` so the dialog can show "…and N more". */
+    /** Upper bound on candidate files dropped because the turn touched
+     *  more than `MAX_TURN_DIFF_FILES`. It is intentionally counted at
+     *  the candidate layer (pre-diff) rather than the diff layer (post-
+     *  filter for unchanged), so a turn editing 600 files with cap 500
+     *  reports `filesOmitted = 100` regardless of how many of the
+     *  processed 500 turn out to have no actual change. Some of the
+     *  100 may also have had no change — we can't know without paying
+     *  the read the cap was specifically meant to avoid. Treat it as
+     *  "up to N more files were not surfaced". */
     filesOmitted: number;
   };
 }
@@ -313,9 +320,17 @@ async function computeDiffStatsForFile(
   return { filesChanged, insertions, deletions };
 }
 
+/** Discriminated-union outcome of an endpoint read. Adding an explicit
+ *  `kind` to every variant lets the compiler enforce branch coverage and
+ *  removes the manual `as` casts the previous shape forced on callers. */
 interface EndpointReadOk {
+  kind: 'ok';
   content: string;
   exists: boolean;
+}
+
+interface EndpointReadUnreadable {
+  kind: 'unreadable';
 }
 
 /** Sentinel returned when the underlying file is too large to read into memory
@@ -328,7 +343,10 @@ interface EndpointReadOversized {
   exists: boolean;
 }
 
-type EndpointRead = EndpointReadOk | 'unreadable' | EndpointReadOversized;
+type EndpointRead =
+  | EndpointReadOk
+  | EndpointReadUnreadable
+  | EndpointReadOversized;
 
 /**
  * Read one endpoint of a turn diff (either a snapshot backup or, when the
@@ -356,59 +374,62 @@ async function readEndpointContent(
   sessionId: string,
 ): Promise<EndpointRead> {
   if (worktreePath !== undefined) {
-    let size: number;
-    try {
-      const st = await stat(worktreePath);
-      size = st.size;
-    } catch (e: unknown) {
-      if (isENOENT(e)) {
-        // Genuine absence: file was deleted from the worktree.
-        return { content: '', exists: false };
-      }
-      // Permission/IO failure on stat — same semantics as a failed read.
-      debugLogger.error(
-        `FileHistory: live worktree stat failed for ${worktreePath}: ${e}`,
-      );
-      return 'unreadable';
-    }
-    if (size > MAX_DIFF_SIZE_BYTES) {
-      return { kind: 'oversized', exists: true };
-    }
-    try {
-      const text = await readFile(worktreePath, 'utf-8');
-      return { content: text, exists: true };
-    } catch (e: unknown) {
-      if (isENOENT(e)) {
-        // Raced with a delete after stat — treat as absence.
-        return { content: '', exists: false };
-      }
-      // Permission/IO/decode failure — the file IS there but unreadable.
-      // Collapsing this to "deleted" would synthesize a bogus removal hunk
-      // every time the dialog opens against a file with bad perms.
-      debugLogger.error(
-        `FileHistory: live worktree read failed for ${worktreePath}: ${e}`,
-      );
-      return 'unreadable';
-    }
+    return readPathWithSizeGuard(worktreePath, 'worktree');
   }
-  if (!backup) return { content: '', exists: false };
-  if (backup.backupFileName === null) return { content: '', exists: false };
+  if (!backup) return { kind: 'ok', content: '', exists: false };
+  if (backup.backupFileName === null) {
+    return { kind: 'ok', content: '', exists: false };
+  }
   const backupPath = resolveBackupPath(backup.backupFileName, sessionId);
-  // Same pre-read size guard on the backup branch: a backup made of a 2 GB
-  // file is just as fatal to allocate as the live one.
+  return readPathWithSizeGuard(backupPath, 'backup');
+}
+
+/**
+ * Stat-then-read against a single open file descriptor. Using `open()` +
+ * `fstat()` + `readFile({ fd })` closes the TOCTOU window that a separate
+ * `stat()` + `readFile()` pair would leave open: a concurrent `write_file`
+ * appending to the same path between the two syscalls would otherwise grow
+ * past `MAX_DIFF_SIZE_BYTES` and slip the OOM guard.
+ *
+ * Operating on the same inode also means the size we check matches the
+ * bytes we read — Node's `readFile(fd)` reads the underlying file from
+ * offset 0 regardless of how the path entry shifts in the meantime.
+ */
+async function readPathWithSizeGuard(
+  path: string,
+  kind: 'worktree' | 'backup',
+): Promise<EndpointRead> {
+  let fh: Awaited<ReturnType<typeof open>>;
   try {
-    const st = await stat(backupPath);
+    fh = await open(path, 'r');
+  } catch (e: unknown) {
+    if (isENOENT(e)) {
+      // Worktree: genuine deletion → absence. Backup: snapshot recorded a
+      // file we can no longer find → unreadable (lying about an empty
+      // before-state would synthesize a fake every-line-added hunk).
+      if (kind === 'worktree') {
+        return { kind: 'ok', content: '', exists: false };
+      }
+      return { kind: 'unreadable' };
+    }
+    debugLogger.error(`FileHistory: ${kind} open failed for ${path}: ${e}`);
+    return { kind: 'unreadable' };
+  }
+  try {
+    const st = await fh.stat();
     if (st.size > MAX_DIFF_SIZE_BYTES) {
       return { kind: 'oversized', exists: true };
     }
-  } catch {
-    // Fall through to readFileOrNull, which will return null and map to
-    // 'unreadable' below. We don't distinguish stat-vs-read failure modes
-    // here because both indicate the backup is gone or inaccessible.
+    try {
+      const text = await fh.readFile('utf-8');
+      return { kind: 'ok', content: text, exists: true };
+    } catch (e: unknown) {
+      debugLogger.error(`FileHistory: ${kind} read failed for ${path}: ${e}`);
+      return { kind: 'unreadable' };
+    }
+  } finally {
+    await fh.close().catch(() => undefined);
   }
-  const text = await readFileOrNull(backupPath);
-  if (text === null) return 'unreadable';
-  return { content: text, exists: true };
 }
 
 /**
@@ -905,7 +926,7 @@ export class FileHistoryService {
     // trustworthy "before" content — fabricating an empty string would
     // present every line as a fresh addition. Skip the row instead, but
     // log so a missing/permission-flipped backup leaves a trace.
-    if (beforeRead === 'unreadable') {
+    if (beforeRead.kind === 'unreadable') {
       debugLogger.warn(
         `FileHistory: skipping turn diff for ${trackingPath}: before backup unreadable`,
       );
@@ -915,7 +936,7 @@ export class FileHistoryService {
     const afterRead = afterFromWorktree
       ? await readEndpointContent(undefined, absoluteFilePath, this.sessionId)
       : await readEndpointContent(afterBackup, undefined, this.sessionId);
-    if (afterRead === 'unreadable') {
+    if (afterRead.kind === 'unreadable') {
       debugLogger.warn(
         `FileHistory: skipping turn diff for ${trackingPath}: after ${afterFromWorktree ? 'worktree' : 'backup'} unreadable`,
       );
@@ -926,22 +947,12 @@ export class FileHistoryService {
     // Bail before any content work so a 2 GB blob never lands in the heap;
     // we cannot compute precise +N/-M stats without reading, but the row
     // still shows up with the oversized badge and is treated correctly by
-    // the dialog (Enter is gated, hint surfaces "use git diff").
-    const beforeOversized =
-      typeof beforeRead === 'object' &&
-      'kind' in beforeRead &&
-      beforeRead.kind === 'oversized';
-    const afterOversized =
-      typeof afterRead === 'object' &&
-      'kind' in afterRead &&
-      afterRead.kind === 'oversized';
-    if (beforeOversized || afterOversized) {
-      const beforeExists = beforeOversized
-        ? (beforeRead as EndpointReadOversized).exists
-        : (beforeRead as EndpointReadOk).exists;
-      const afterExists = afterOversized
-        ? (afterRead as EndpointReadOversized).exists
-        : (afterRead as EndpointReadOk).exists;
+    // the dialog (Enter is gated, hint surfaces "use git diff"). The
+    // discriminated union (.kind) lets tsc narrow `.exists` access without
+    // any manual casts.
+    if (beforeRead.kind === 'oversized' || afterRead.kind === 'oversized') {
+      const beforeExists = beforeRead.exists;
+      const afterExists = afterRead.exists;
       return {
         filePath: trackingPath,
         hunks: [],
@@ -954,10 +965,9 @@ export class FileHistoryService {
       };
     }
 
-    const beforeContent = (beforeRead as EndpointReadOk).content;
-    const beforeExists = (beforeRead as EndpointReadOk).exists;
-    const afterContent = (afterRead as EndpointReadOk).content;
-    const afterExists = (afterRead as EndpointReadOk).exists;
+    // Both endpoints now narrow to EndpointReadOk.
+    const { content: beforeContent, exists: beforeExists } = beforeRead;
+    const { content: afterContent, exists: afterExists } = afterRead;
 
     if (beforeContent === afterContent && beforeExists === afterExists) {
       return null;

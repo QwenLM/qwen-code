@@ -258,12 +258,18 @@ export function DiffDialog({
   // sources, `getTurnDiff` reports `filesOmitted` when the turn touched
   // more files than `MAX_TURN_DIFF_FILES`. Surface either gap so capped
   // rows aren't indistinguishable from "everything fit".
+  //
+  // Semantic asymmetry: the Current count is exact (numstat is cheap so
+  // every change is counted before capping), while the turn count is an
+  // upper bound — some of the cap-dropped files may have been unchanged.
+  // The footer copy reflects that with "up to N more" for turn sources.
   const hiddenFileCount =
     activeSource?.kind === 'current'
       ? Math.max(0, stats.filesCount - files.length)
       : activeSource?.kind === 'turn'
         ? activeSource.entry.diff.stats.filesOmitted
         : 0;
+  const hiddenIsUpperBound = activeSource?.kind === 'turn';
 
   return (
     <Box
@@ -314,10 +320,15 @@ export function DiffDialog({
             {hiddenFileCount > 0 ? (
               <Text color={theme.text.secondary}>
                 {' '}
-                {t('…and {{n}} more (showing first {{shown}})', {
-                  n: String(hiddenFileCount),
-                  shown: String(files.length),
-                })}
+                {hiddenIsUpperBound
+                  ? t('…and up to {{n}} more (showing first {{shown}})', {
+                      n: String(hiddenFileCount),
+                      shown: String(files.length),
+                    })
+                  : t('…and {{n}} more (showing first {{shown}})', {
+                      n: String(hiddenFileCount),
+                      shown: String(files.length),
+                    })}
               </Text>
             ) : null}
           </>

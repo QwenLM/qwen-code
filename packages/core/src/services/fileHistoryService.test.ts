@@ -888,5 +888,75 @@ describe('FileHistoryService', () => {
       expect(entry!.linesAdded).toBe(0);
       expect(entry!.linesRemoved).toBe(0);
     });
+
+    // Regression for the live-worktree branch of the OOM guard: the
+    // previous oversized test compares two backups (both endpoints take
+    // the backup branch), so it never exercised `readPathWithSizeGuard`
+    // on the live worktree. This case has a single snapshot, so `after`
+    // is read from the live file — verifying `stat()` + open/fstat there.
+    it('flags oversized in the live-worktree branch (latest-turn endpoint)', async () => {
+      const file = join(projectDir, 'live-big.txt');
+      await writeFile(file, 'tiny seed\n');
+
+      // Single snapshot: turn 1 has no successor, so its `after`
+      // endpoint is the live worktree, not a backup.
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // Inflate past MAX_DIFF_SIZE_BYTES so the worktree-side guard
+      // trips during getTurnDiff.
+      await writeFile(file, 'x'.repeat(1_500_000));
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
+      expect(entry).toBeDefined();
+      expect(entry!.oversized).toBe(true);
+      expect(entry!.hunks).toEqual([]);
+      expect(entry!.linesAdded).toBe(0);
+      expect(entry!.linesRemoved).toBe(0);
+      // Worktree exists at read time → not flagged as a deletion.
+      expect(entry!.isDeleted).toBe(false);
+    });
+
+    // Mixed-size endpoint: only the `after` endpoint trips the cap. The
+    // discriminated union must still narrow `.exists` correctly when the
+    // two sides return different `kind`s.
+    it('handles mixed-size endpoints (small before, oversized after)', async () => {
+      const file = join(projectDir, 'mixed-big.txt');
+      await writeFile(file, 'tiny seed\n');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // Grow past cap *before* snapshot p2 captures it as a backup.
+      await writeFile(file, 'x'.repeat(1_500_000));
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
+      expect(entry).toBeDefined();
+      expect(entry!.oversized).toBe(true);
+      // Before existed (snapshot has tiny content), so it's neither new
+      // nor a deletion even though after is oversized.
+      expect(entry!.isNewFile).toBe(false);
+      expect(entry!.isDeleted).toBe(false);
+    });
+
+    // filesOmitted should be 0 in the happy-path cases and reflected on
+    // every TurnDiff (regression: a forgetten field default would let
+    // the dialog's truncation indicator stay silent under cap pressure).
+    it('reports stats.filesOmitted === 0 when below the per-turn cap', async () => {
+      const file = join(projectDir, 'omit-baseline.txt');
+      await writeFile(file, 'a\n');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'a\nb\n');
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      expect(turn1!.stats.filesOmitted).toBe(0);
+    });
   });
 });
