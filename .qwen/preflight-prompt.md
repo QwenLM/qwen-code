@@ -7,9 +7,11 @@ review needs to go**, by judging the change's **blast radius** — not its
 size. Then emit a strict JSON verdict.
 
 The output of this step routes the PR into one of four execution paths
-(ULTRA_LIGHT / LIGHT / STANDARD / DEEP). Your verdict can be later
-upgraded (never downgraded) by a shell-layer safety net (path-based hard
-rules in `.qwen/review-tier-rules.yml`).
+(ULTRA_LIGHT / LIGHT / STANDARD / DEEP). Maintainers can override your
+verdict by re-running with `@qwen /review --tier=...`, but the default
+flow trusts your judgment — there is no path-glob safety net behind
+you. Read the diff carefully and judge based on **content**, not file
+location heuristics.
 
 ---
 
@@ -54,7 +56,7 @@ ULTRA_LIGHT. A 5-line `auth/oauth.ts` PR is DEEP.
 | 1000 lines new `docs/users/getting-started.md`                       | ULTRA_LIGHT     | Pure docs. Size is irrelevant.                                                       |
 | 800 lines `package-lock.json` regeneration                           | ULTRA_LIGHT     | Lockfile churn; runtime risk is 0 if `package.json` itself didn't change.            |
 | 5 lines tweak in `packages/core/src/auth/oauth.ts`                   | DEEP            | `security_sensitive` = true. Size doesn't matter — auth needs full audit.            |
-| 30 lines edit in `.github/workflows/release.yml`                     | STANDARD (LLM); will be promoted to STANDARD by hard rule too | `build_or_release` = true. Even a tiny CI change can break the release flow.        |
+| 30 lines edit in `.github/workflows/release.yml`                     | STANDARD or DEEP | `build_or_release` = true. Tiny CI change can break the release flow; DEEP if the change touches secrets/permissions/release flow. |
 | 200 lines refactor inside `packages/cli/src/commands/foo.ts` only   | STANDARD        | Local but real code change; internal API; possible cross-file impact via callers.    |
 | 60 lines new `useFooHook` in `packages/cli/src/hooks/`               | LIGHT           | Self-contained, no high-risk dimension, no exports.                                  |
 | 400 lines new test file under `packages/core/src/__tests__/`         | LIGHT           | Tests don't ship; isolated; no runtime / dependency impact.                         |

@@ -67,7 +67,7 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 | **STANDARD** | 中等：跨多文件 / 同 package 内多模块 / 改了内部 API、但不触及上面 5 个 high-risk 维度 | 1 次单发（带结构化清单） | 否（除非 maintainer override） | ~3–6 min |
 | **DEEP** | 任一 high-risk 维度 = true OR 大幅跨 package 影响 OR `@qwen /review --deep` | 多次（agent fan-out） | 是 | ~10–25 min |
 
-> Size 在这个表里**不出现**。它只是 preflight LLM 拿到的输入信号之一。判定逻辑完全在 LLM + hard rule，不靠"size > N 自动升档"这种粗暴规则。
+> Size 在这个表里**不出现**。它只是 preflight LLM 拿到的输入信号之一。判定逻辑完全在 LLM 自身，**不再有 path-glob / keyword 安全网**（早期草稿设计过 `.qwen/review-tier-rules.yml`，后来意识到这与"用内容判 blast radius"的初衷相悖 —— path 也是机械启发式）。LLM 判错由 maintainer 用 `@qwen /review --tier=...` 显式纠正。
 >
 > 唯一例外：`size > 1500` 仍维持现有 size-gate 拒评（防止 PR 失控太大根本没法 review），但这是**预防滥用**，不是 tier 路由。
 
@@ -80,7 +80,7 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 | 1000 行新增 `docs/users/*.md` | DEEP（>500） | 0 | ULTRA_LIGHT |
 | 800 行 `package-lock.json` 更新 | DEEP | 0 | ULTRA_LIGHT |
 | 100 行 refactor `packages/core/src/auth/oauth.ts` | LIGHT | 极高（security）| DEEP |
-| 30 行改 `.github/workflows/release.yml` | ULTRA_LIGHT | 高（CI/CD）| STANDARD（hard rule 兜底）|
+| 30 行改 `.github/workflows/release.yml` | ULTRA_LIGHT | 高（CI/CD）| STANDARD 或 DEEP（看是否触及 secrets / 发布逻辑）|
 | 200 行改 `packages/cli/src/commands/foo.ts` 一个内部模块 | LIGHT | 中等 | STANDARD |
 
 这就是为什么 preflight **必须用 LLM 而不是纯 shell** —— LLM 看 diff 内容能判别这些区别，shell 看 size 不行。
@@ -188,7 +188,7 @@ GitHub event
 │  • 输入：PR 元信息 + diff 摘要 +  │
 │    review-rules.md               │
 │  • 输出：JSON {tier, ...}        │
-│  • shell 用 hard rule 强制兜底   │
+│  • shell 仅做 schema 校验 + 兜底 │
 └────────┬─────────────────────────┘
          ▼
    ┌─────┴─────┬───────────┬───────────┐
@@ -247,20 +247,16 @@ shell-only   单发 qwen   单发 qwen   bundled /review
 - shell 层用 `jq` 验证 schema：缺字段 / tier 非法 / blast_radius 不完整 → 视作 preflight 失败，走兜底（见 Failure modes）
 - `focus_areas`、`agents_to_run` 仅 STANDARD/DEEP 使用
 
-## Hard rule 兜底（shell 层强制）
+## 不引入 path-glob hard rule
 
-模型 verdict 之后、最终 tier 之前，shell 层做强制升档。这是 P7 的实现：
+早期草稿设计过 `.qwen/review-tier-rules.yml`，靠路径 + 关键字强制升档。**最终不做**。理由：
 
-| 触发条件 | 强制最低 tier |
-| --- | --- |
-| 路径匹配 `**/auth/**`、`**/credentials/**`、`**/secrets/**` | STANDARD |
-| 路径匹配 `.github/workflows/**` | STANDARD |
-| 路径匹配 `**/migrations/**`、`packages/**/schema/**` | DEEP |
-| diff 含 risk keyword（`token`、`secret`、`password`、`api_key` 等，全词匹配） | DEEP |
-| `changed_lines > 500` | DEEP（无论 preflight 怎么判） |
-| `changed_lines > 1500` | 维持现有 size-gate 拒评 |
+- preflight LLM 拿到的就是 PR diff 内容 —— blast radius 判断本就该从内容来，path 是机械启发式
+- 跟"size 暴力不科学"是同一个毛病：`packages/core/src/auth/oauth.ts` 里改个注释也强制 STANDARD？显然不该
+- path 列表会随项目演进腐败，维护成本随时间增长
+- LLM 判错由 maintainer 用 `@qwen /review --tier=deep` 显式纠正即可
 
-降档**绝不**应用 hard rule —— 即模型判 DEEP，shell 不能改成 LIGHT。
+唯一保留：现有 `size > 1500` 拒评（防止 PR 失控大到根本没法 review）。这与 tier 路由无关，是输入层防御。
 
 ## Failure modes
 
@@ -273,7 +269,6 @@ shell-only   单发 qwen   单发 qwen   bundled /review
 | preflight 模型超时（> 3 min） | tier = DEEP，留 warning（P7 保守） | 兜底 |
 | preflight 返回非 JSON | tier = DEEP，留 warning | 兜底 |
 | preflight 返回 JSON 但 schema 不完整（缺 tier 等） | tier = DEEP | 兜底 |
-| preflight 模型判 ULTRA_LIGHT 但 hard rule 升档 | 取 hard rule 结果 | 正常路径 |
 | preflight 模型判 DEEP 但 changed_lines > 1500 | size-gate 拒评，不进 preflight 后续 | 既有 |
 
 ### Review 执行阶段（G3 always-emit 落地）
@@ -303,27 +298,14 @@ shell-only   单发 qwen   单发 qwen   bundled /review
 
 ## Maintainer override
 
-三层 override：
+两层 override（path-glob 兜底层已砍掉）：
 
 | 层级 | 表达式 | 效果 |
 | --- | --- | --- |
 | 触发评论 | `@qwen /review --tier=ultra_light\|light\|standard\|deep` | 跳过 preflight，直接用指定 tier |
 | workflow_dispatch input | 新增 `tier_override` (auto / ultra_light / light / standard / deep) | 跳过 preflight |
-| 仓库规则 | `.qwen/review-rules.md` 加 path-level `tier-floor:` token | 强制路径最低 tier，对 preflight 透明 |
 
-`tier-floor:` 草案：
-
-```markdown
-<!-- in .qwen/review-rules.md -->
-## Tier Floor Overrides
-
-格式：`tier-floor:<tier>:<glob>`
-
-- `tier-floor:standard:packages/core/src/skills/bundled/review/**` — bundled skill 改动一律最低 STANDARD
-- `tier-floor:deep:packages/core/src/services/auth/**`             — auth 路径一律最低 DEEP
-```
-
-shell 解析时与 hard rule 合并，取 max(模型 verdict, hard rule, tier-floor)。
+shell 端最终 tier = override 值（若有）else preflight LLM verdict。
 
 ## 校准 loop
 
@@ -331,16 +313,16 @@ shell 解析时与 hard rule 合并，取 max(模型 verdict, hard rule, tier-fl
 
 ```
 Preflight verdict: STANDARD (rationale: ...)
-Hard rule applied: NONE
+Override applied: none
 Final tier: STANDARD
 Deep review verdict: APPROVE
 ```
 
 每周/每月维护者人工对照：
 
-- preflight 判 LIGHT 但实际 deep review 找出 P0/P1 的比例
-- preflight 判 DEEP 但实际仅 P3 finding 的比例（保守过度）
-- 调 preflight prompt + hard rule
+- preflight 判 LIGHT 但实际 deep review 找出 P0/P1 的比例（漏档）
+- preflight 判 DEEP 但实际仅 P3 finding 的比例（过度保守）
+- 调 preflight prompt（calibration 示例、conservative bias 措辞）
 
 > 校准数据存放位置见 §关键决策 D5：dedicated tracking issue 结构化评论。
 
@@ -367,10 +349,8 @@ Deep review verdict: APPROVE
     # 1. 加载 .qwen/preflight-prompt.md，注入 PR 上下文变量
     # 2. timeout 3m qwen --prompt "<filled prompt>" --output-format json
     # 3. jq 验证 schema: tier ∈ {ULTRA_LIGHT, LIGHT, STANDARD, DEEP}, blast_radius 完整
-    # 4. 加载 .qwen/review-tier-rules.yml，shell 算 hard rule tier
-    # 5. shell 算 tier-floor token from .qwen/review-rules.md
-    # 6. final_tier = max(model_tier, hard_rule_tier, tier_floor_tier)
-    # 7. 任何一步失败 → final_tier = DEEP（P7 保守）
+    # 4. final_tier = tier_override (if set) else preflight tier
+    # 5. 任何一步失败 → final_tier = DEEP（P7 保守）
     # 8. 写入 outputs: tier, focus_areas, agents_to_run, rationale
     # 9. ::notice:: 输出 verdict 供校准
     echo "::notice::Preflight tier=$final_tier (model=$model_tier, hard_rule=$hard_rule_tier, floor=$floor_tier)"
@@ -501,8 +481,8 @@ Deep review verdict: APPROVE
 
 | Phase | 范围 | 必须性 |
 | --- | --- | --- |
-| **A** | preflight wiring + 4-tier 路由 + hard rule + JSON schema 验证 + 保守 failure mode | **必须**（本 PR MVP） |
-| **B** | override 全套（`--tier=` slash flag、`tier_override` dispatch input、`tier-floor:` token） | 可并入或独立 |
+| **A** | preflight wiring + 4-tier 路由 + JSON schema 验证 + 保守 failure mode | **必须**（本 PR MVP） |
+| **B** | maintainer override（`--tier=` slash flag、`tier_override` dispatch input） | 可并入或独立 |
 | **C** | 校准 loop（::notice:: 输出 + 数据沉淀） | 独立 follow-up |
 
 ## 不做的事（避免范围漂移）
@@ -540,36 +520,22 @@ Deep review verdict: APPROVE
 - LIGHT prompt：要求最多 3 项 findings、简洁 markdown、不强制 P0–P3 结构
 - STANDARD prompt：要求 P0–P3 结构、Validation Evidence verdict（沿用 review-rules.md 既有约定）、cross-file 提示
 
-### D4 — Hard rule path glob 放独立 yaml 配置
+### D4 — 不引入 path-glob hard rule 文件（取消）
 
-新建 `.qwen/review-tier-rules.yml`，结构示例：
+早期草稿提议新建 `.qwen/review-tier-rules.yml` 做 path → min_tier 升档兜底。**最终决定不做**。
 
-```yaml
-# tier upgrade rules: any matching rule forces tier ≥ specified
-rules:
-  - paths: ['**/auth/**', '**/credentials/**', '**/secrets/**']
-    min_tier: STANDARD
-  - paths: ['.github/workflows/**']
-    min_tier: STANDARD
-  - paths: ['**/migrations/**', 'packages/**/schema/**']
-    min_tier: DEEP
-  - diff_contains_keywords: ['token', 'secret', 'password', 'api_key']
-    min_tier: DEEP
-  - changed_lines_gt: 500
-    min_tier: DEEP
-```
-
-- **理由**：path glob 列表随项目演进会增加；写在 workflow yaml 里会让 yaml 变臃肿
-- **理由**：YAML 天然适合"rule → min_tier"映射
-- **理由**：与 `.qwen/review-rules.md` 同目录，可以一起读完整套 review 行为约束
-- shell 端用 `yq` 读取（GitHub runner 默认安装）
+- **理由**：path 也是机械启发式 —— 跟"size 决定 tier"是同一类毛病；blast radius 应该从 diff 内容判断，path 只是个弱信号
+- **理由**：path 列表会随项目演进腐败，维护成本随时间增长
+- **理由**：preflight LLM 看到 diff 内容比看到 path 更准，重复防御不增加准确率
+- **理由**：LLM 判错由 maintainer 用 `@qwen /review --tier=deep` 显式纠正即可，成本可控
+- 后果：少 1 个文件、少 1 个 yq 依赖、shell 简化
 
 ### D5 — 校准数据沉淀位置：tracking issue 结构化评论
 
 每次 run 在 `$GITHUB_STEP_SUMMARY` 打 verdict（既有）；**另**在一个 dedicated issue（建议标题 `tracking: Qwen PR review calibration data`，labeled `qwen-review-calibration`）以结构化评论形式追加一行：
 
 ```
-| run_id | pr | preflight_tier | hard_rule | floor | final_tier | review_verdict | wall_time_s | model |
+| run_id | pr | preflight_tier | override | final_tier | review_verdict | wall_time_s | model |
 ```
 
 - **理由**：CI artifacts 跨 90 天就过期，metrics file commit 到 repo 会污染 history
@@ -583,7 +549,7 @@ rules:
 - **command-level**：`timeout 3m qwen ...` —— 保证 qwen 进程 3 min 后被 kill
 - **step-level**：`timeout-minutes: 5` —— 保证整个 step（含 shell 处理）5 min 后被 kill
 - **理由**：单靠 `timeout 3m`，若 qwen 之后的 jq / shell 处理卡住（极少见但可能 —— 比如解析超大 JSON），step 会无限挂；双层叠加最稳
-- **理由**：5 - 3 = 2 min 余量给 schema 验证、hard rule 计算、`gh` 调用等
+- **理由**：5 - 3 = 2 min 余量给 schema 验证、`gh` 调用等
 - 同样模式应用到 LIGHT (`timeout 3m` cmd + `timeout-minutes: 5` step)、STANDARD (`timeout 8m` cmd + `timeout-minutes: 10` step)、DEEP (`timeout 25m` cmd + `timeout-minutes: 30` step)
 
 ## 需要新增的仓库内文件清单
@@ -593,11 +559,9 @@ rules:
 | `.qwen/preflight-prompt.md` | preflight 模型的提示词 | D2 |
 | `.qwen/preflight-light-review-prompt.md` | LIGHT tier 的单发 review prompt | D3 |
 | `.qwen/preflight-standard-review-prompt.md` | STANDARD tier 的单发 review prompt | D3 |
-| `.qwen/review-tier-rules.yml` | hard rule path glob 与 keyword 配置 | D4 |
 | `scripts/parse-review-stream.js` | 累加式 stream-json 解析器（替换 workflow inline node 脚本） | §Failure modes 流式累加器 |
-| (修改) `.qwen/review-rules.md` | 加 `tier-floor:` token 段 | §Maintainer override |
 | (修改) `.github/workflows/qwen-code-pr-review.yml` | 加 preflight + 4 tier 执行 + 累加式解析 | §Workflow step 草稿 |
-| (修改) `.gitignore` | 已对 `.qwen/*` 例外 `review-rules.md`、`commands/`、`skills/`、`agents/`；需追加例外上述 4 个新文件 | 配套 |
+| (修改) `.gitignore` | 已对 `.qwen/*` 例外 `review-rules.md`、`commands/`、`skills/`、`agents/`；需追加例外上述 3 个新文件 | 配套 |
 
 ## 需要新增的仓库 vars / secrets
 
@@ -611,14 +575,14 @@ rules:
 
 - **AC1**：docs-only PR（如 #4327 同类 6 行 yaml）→ 路由到 ULTRA_LIGHT，wall time < 2 min
 - **AC2**：mid-size feature PR（200–500 行单模块）→ 路由到 STANDARD，wall time < 12 min
-- **AC3**：含 `**/auth/**` 改动的小 PR → hard rule 强制升 DEEP，不可被模型 verdict 降档
+- **AC3**：含 `**/auth/**` 改动的小 PR → preflight LLM 应该自行判 DEEP（要在 calibration 示例里强化此类 case）；若漏档，maintainer 可用 `@qwen /review --tier=deep` 补救
 - **AC4**：preflight 故意返回 garbage（mock 测试）→ 兜底走 DEEP，留 warning，不导致 job fail
 - **AC5**：existing fallback comment 路径在 STANDARD/DEEP 失败时仍能发出
 
 ## Open questions / 风险
 
-- **R1**：preflight 模型本身的可靠性 —— 便宜模型可能 JSON 结构不稳。需要在实现期 sample 试若干 PR 观察输出质量。
-- **R2**：hard rule glob 维护成本 —— 路径列表会随项目演进腐败。**缓解**：每次新加路径要求附 PR 说明 + 一周后回看是否触发。
+- **R1**：preflight 模型本身的可靠性 —— 便宜模型可能 JSON 结构不稳。需要在实现期 sample 试若干 PR 观察输出质量；不稳就回退到 deep review 模型 SKU。
+- **R2**：preflight 漏档 —— 模型可能把高风险 PR 误判为 LIGHT。**缓解**：calibration 示例里强化 high-blast-radius case；校准 loop 数据驱动 prompt 迭代；maintainer 可用 `@qwen /review --tier=deep` 显式补救。
 - **R3**：tier 升档的"棘轮效应" —— 用户感知 preflight 永远只升档不降档，长期可能不再信任。**缓解**：校准 loop 数据驱动 ablation，定期 review 是否过度保守。
 
 ---
