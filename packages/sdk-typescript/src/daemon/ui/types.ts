@@ -492,7 +492,33 @@ export type DaemonTranscriptBlock =
   | DaemonPermissionTranscriptBlock
   | DaemonStatusTranscriptBlock;
 
-export interface DaemonTranscriptState {
+/**
+ * PR-E sidechannel state — workspace / session state mirror that tracks
+ * non-chat events without polluting the chat-stream `blocks[]`.
+ */
+export interface DaemonTranscriptSidechannelState {
+  /**
+   * `toolCallId` of the tool currently in `running` / `in_progress` /
+   * `pending`. Updated by the reducer when a `tool.update` event arrives;
+   * cleared when the tool terminates. Used by UI to show a "正在运行 X tool"
+   * status header without scanning `blocks[]`.
+   */
+  currentToolCallId?: string;
+  /**
+   * Approval mode for the current session, mirrored from
+   * `session.approval_mode.changed` events. Renderers use this to badge
+   * the input area ("plan" / "default" / "auto-edit" / "yolo").
+   */
+  approvalMode?: string;
+  /**
+   * Per-tool progress map, keyed by `toolCallId`. Populated by future
+   * `tool.progress` events (daemon-side emission pending — the SDK is
+   * ready to consume the field shape today).
+   */
+  toolProgress: Record<string, { ratio?: number; step?: string }>;
+}
+
+export interface DaemonTranscriptState extends DaemonTranscriptSidechannelState {
   blocks: DaemonTranscriptBlock[];
   lastEventId?: number;
   activeUserBlockId?: string;

@@ -12,7 +12,10 @@ export {
   formatBlockTimestamp,
   rebuildDaemonTranscriptBlockIndex,
   reduceDaemonTranscriptEvents,
+  selectApprovalMode,
+  selectCurrentTool,
   selectPendingPermissionBlocks,
+  selectToolProgress,
   selectTranscriptBlocks,
   selectTranscriptBlocksOrderedByEventId,
 } from './transcript.js';

@@ -1951,3 +1951,239 @@ describe('daemon UI time schema (PR-B)', () => {
     expect(formatted).toContain('March');
   });
 });
+
+describe('daemon UI reducer state machine (PR-E)', () => {
+  it('tracks currentToolCallId as tools enter and leave in-flight', async () => {
+    const { selectCurrentTool } = await import('../../src/daemon/ui/index.js');
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            title: 'long task',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    expect(state.currentToolCallId).toBe('call-1');
+    expect(selectCurrentTool(state)).toMatchObject({
+      kind: 'tool',
+      toolCallId: 'call-1',
+      status: 'running',
+    });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-1',
+            status: 'completed',
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+    expect(state.currentToolCallId).toBeUndefined();
+    expect(selectCurrentTool(state)).toBeUndefined();
+  });
+
+  it('mirrors approval mode from session.approval_mode.changed event', async () => {
+    const { selectApprovalMode } = await import('../../src/daemon/ui/index.js');
+    let state = createDaemonTranscriptState({ now: 1 });
+    expect(selectApprovalMode(state)).toBeUndefined();
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'approval_mode_changed',
+        data: {
+          sessionId: 's',
+          previous: 'default',
+          next: 'plan',
+          persisted: false,
+        },
+      } as never),
+      { now: 2 },
+    );
+    expect(state.approvalMode).toBe('plan');
+    expect(selectApprovalMode(state)).toBe('plan');
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'approval_mode_changed',
+        data: {
+          sessionId: 's',
+          previous: 'plan',
+          next: 'yolo',
+          persisted: true,
+        },
+      } as never),
+      { now: 3 },
+    );
+    expect(selectApprovalMode(state)).toBe('yolo');
+  });
+
+  it('propagates cancellation to in-flight tool blocks on assistant.done with reason=cancelled', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    // Two tools in flight + one already completed
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        ...normalizeDaemonEvent({
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'a',
+              title: 'A',
+              status: 'running',
+            },
+          },
+        } as never),
+        ...normalizeDaemonEvent({
+          id: 2,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'b',
+              title: 'B',
+              status: 'pending',
+            },
+          },
+        } as never),
+        ...normalizeDaemonEvent({
+          id: 3,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'c',
+              title: 'C',
+              status: 'completed',
+            },
+          },
+        } as never),
+      ],
+      { now: 2 },
+    );
+
+    // Cancel — propagation should mark a/b as cancelled, leave c untouched.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.done', reason: 'cancelled' }],
+      { now: 3 },
+    );
+
+    const toolBlocks = state.blocks.filter(
+      (b): b is Extract<DaemonTranscriptBlock, { kind: 'tool' }> =>
+        b.kind === 'tool',
+    );
+    const a = toolBlocks.find((b) => b.toolCallId === 'a')!;
+    const b = toolBlocks.find((b2) => b2.toolCallId === 'b')!;
+    const c = toolBlocks.find((b3) => b3.toolCallId === 'c')!;
+    expect(a.status).toBe('cancelled');
+    expect(b.status).toBe('cancelled');
+    expect(c.status).toBe('completed');
+    expect(state.currentToolCallId).toBeUndefined();
+  });
+
+  it('forward-compat: unknown tool status does NOT clear currentToolCallId', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'a',
+            title: 'A',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    expect(state.currentToolCallId).toBe('a');
+
+    // Daemon emits a future 'paused' status the SDK doesn't know.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'a',
+            status: 'paused',
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+    // currentToolCallId should remain — unknown status is forward-compat.
+    expect(state.currentToolCallId).toBe('a');
+  });
+
+  it('explicit assistant.done without reason does NOT propagate cancellation', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        ...normalizeDaemonEvent({
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'a',
+              title: 'A',
+              status: 'running',
+            },
+          },
+        } as never),
+      ],
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.done', reason: 'end_turn' }],
+      { now: 3 },
+    );
+    const toolBlock = state.blocks.find(
+      (b): b is Extract<DaemonTranscriptBlock, { kind: 'tool' }> =>
+        b.kind === 'tool',
+    )!;
+    expect(toolBlock.status).toBe('running');
+    expect(state.currentToolCallId).toBe('a');
+  });
+});

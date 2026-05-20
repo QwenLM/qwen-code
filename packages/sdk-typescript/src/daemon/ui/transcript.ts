@@ -33,11 +33,41 @@ export function createDaemonTranscriptState(
     toolBlockByCallId: {},
     trimmedToolNotificationByCallId: {},
     permissionBlockByRequestId: {},
+    // PR-E sidechannel: track current tool / approval mode / progress
+    toolProgress: {},
     nextOrdinal: 1,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? DEFAULT_MAX_BLOCKS,
   };
 }
+
+/**
+ * Tool statuses that count as "in-flight" — when one of these is set, the
+ * tool block is considered active and `state.currentToolCallId` mirrors
+ * its id. Closed list; daemon-side may emit other status values (e.g.,
+ * future `'paused'`) — those are NOT treated as in-flight here.
+ */
+const IN_FLIGHT_TOOL_STATUSES: ReadonlySet<string> = new Set([
+  'pending',
+  'confirming',
+  'running',
+  'in_progress',
+]);
+
+/**
+ * Tool statuses that terminate the in-flight phase. Any other status
+ * (including unknown future ones) keeps the tool considered in-flight,
+ * which is the forward-compat-friendly default — the alternative would
+ * silently mark unknown states as terminal.
+ */
+const TERMINAL_TOOL_STATUSES: ReadonlySet<string> = new Set([
+  'completed',
+  'success',
+  'failed',
+  'error',
+  'canceled',
+  'cancelled',
+]);
 
 export function appendLocalUserTranscriptMessage(
   state: DaemonTranscriptState,
@@ -97,6 +127,13 @@ function applyDaemonTranscriptEvent(
       break;
     case 'assistant.done':
       finishAssistant(next);
+      // PR-E cancellation propagation: when the assistant turn was
+      // cancelled, any in-flight tool block whose status the daemon
+      // never updated to a terminal state would otherwise spin forever.
+      // Force them to 'cancelled' so renderers can clear spinners.
+      if (event.reason === 'cancelled') {
+        propagateCancellationToInFlightTools(next);
+      }
       break;
     case 'thought.text.delta':
       appendTextDelta(
@@ -140,8 +177,12 @@ function applyDaemonTranscriptEvent(
     // chat-stream transcript stays focused on user/assistant/tool/shell/
     // permission content. PRs in the C/D series may opt some of these
     // into transcript projection as structured non-chat blocks.
-    case 'session.metadata.changed':
     case 'session.approval_mode.changed':
+      // PR-E sidechannel: mirror the new approval mode onto state so
+      // renderers don't have to walk events.
+      next.approvalMode = event.next;
+      break;
+    case 'session.metadata.changed':
     case 'session.available_commands':
     case 'workspace.memory.changed':
     case 'workspace.agent.changed':
@@ -266,6 +307,7 @@ function upsertToolBlock(
     if (event.rawOutput !== undefined) existing.rawOutput = event.rawOutput;
     if (event.toolName) existing.toolName = event.toolName;
     if (event.toolKind) existing.toolKind = event.toolKind;
+    updateCurrentToolPointer(state, event.toolCallId, event.status);
     return;
   }
 
@@ -297,7 +339,52 @@ function upsertToolBlock(
   };
   appendBlock(state, block);
   state.toolBlockByCallId[event.toolCallId] = block.id;
+  updateCurrentToolPointer(state, event.toolCallId, event.status);
   clearActiveText(state);
+}
+
+/**
+ * PR-E: maintain `state.currentToolCallId`. Sets when tool enters in-flight
+ * status; clears when tool enters terminal status; leaves untouched for
+ * unknown statuses (forward-compat).
+ */
+function updateCurrentToolPointer(
+  state: DaemonTranscriptState,
+  toolCallId: string,
+  status: string | undefined,
+): void {
+  if (status === undefined) return;
+  if (IN_FLIGHT_TOOL_STATUSES.has(status)) {
+    state.currentToolCallId = toolCallId;
+    return;
+  }
+  if (TERMINAL_TOOL_STATUSES.has(status)) {
+    if (state.currentToolCallId === toolCallId) {
+      state.currentToolCallId = undefined;
+    }
+    return;
+  }
+  // Unknown status (forward-compat): leave pointer as-is.
+}
+
+/**
+ * PR-E cancellation propagation: walk every tool block whose status is
+ * still in-flight and force it to `'cancelled'`. Triggered when
+ * `assistant.done.reason === 'cancelled'` since the daemon does not
+ * guarantee a terminal `tool_call_update` for every in-flight tool when
+ * the parent prompt is cancelled.
+ */
+function propagateCancellationToInFlightTools(
+  state: DaemonTranscriptState,
+): void {
+  for (const blockId of Object.values(state.toolBlockByCallId)) {
+    const block = getWritableBlockById(state, blockId);
+    if (!block || block.kind !== 'tool') continue;
+    if (!IN_FLIGHT_TOOL_STATUSES.has(block.status)) continue;
+    block.status = 'cancelled';
+    block.updatedAt = state.now;
+  }
+  state.currentToolCallId = undefined;
 }
 
 function appendShellBlock(
@@ -646,6 +733,52 @@ export function selectTranscriptBlocksOrderedByEventId(
   state: DaemonTranscriptState,
 ): readonly DaemonTranscriptBlock[] {
   return [...state.blocks].sort(compareBlocksByEventOrder);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * PR-E selectors — sidechannel state queries
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Return the currently-running tool block, or `undefined` when no tool is
+ * in flight. Used by UI to render a "正在运行 X" header without scanning
+ * `blocks[]`.
+ */
+export function selectCurrentTool(
+  state: DaemonTranscriptState,
+): Extract<DaemonTranscriptBlock, { kind: 'tool' }> | undefined {
+  const id = state.currentToolCallId;
+  if (!id) return undefined;
+  const blockId = state.toolBlockByCallId[id];
+  if (!blockId || blockId === TRIMMED_TOOL_BLOCK_ID) return undefined;
+  const index = state.blockIndexById[blockId];
+  if (index === undefined) return undefined;
+  const block = state.blocks[index];
+  return block?.kind === 'tool' ? block : undefined;
+}
+
+/**
+ * Approval mode currently active for the session, mirrored from
+ * `session.approval_mode.changed` events. `undefined` until the daemon
+ * emits at least one change event.
+ */
+export function selectApprovalMode(
+  state: DaemonTranscriptState,
+): string | undefined {
+  return state.approvalMode;
+}
+
+/**
+ * Per-tool progress query. Returns `undefined` if no progress has been
+ * recorded for the given toolCallId. The shape `{ ratio?, step? }` matches
+ * the eventual `tool.progress` event payload (daemon-side emission
+ * pending — SDK is ready to consume).
+ */
+export function selectToolProgress(
+  state: DaemonTranscriptState,
+  toolCallId: string,
+): { ratio?: number; step?: string } | undefined {
+  return state.toolProgress[toolCallId];
 }
 
 function compareBlocksByEventOrder(
