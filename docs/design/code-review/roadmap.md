@@ -44,11 +44,11 @@
 
 ## 与 PR 合规门禁（pr-gate）的关系
 
-本 roadmap 只覆盖 **AI review 自身**的演进路线。**PR 合规门禁**（title / body 必填段 / size 上限 / lint / test）是正交的另一条线，由独立 workflow `pr-gate.yml` 负责，设计见 [`../pr-gate-plan.md`](../pr-gate-plan.md)（位于 `docs/design/`，非本 `code-review/` 目录）。
+本 roadmap 只覆盖 **AI review 自身**的演进路线。**PR 合规门禁**（title / body 必填段 / size 上限 / lint / test）是正交的另一条线，由独立 workflow `pr-gate.yml` 负责，设计见 [`../pr-gate-plan.md`](../pr-gate-plan.md)。
 
 **核心定位**：AI review **永远不应作为 merge gate**。本 roadmap 中所有阶段（Phase 1-7）产出的 AI review 都是 *informational only*。合并门禁由 `pr-gate.yml` 提供。
 
-两条线**可并行推进**，互不阻塞：
+`pr-gate.yml` 已与本 roadmap 的 Phase 4 (Preflight) 一起在本 PR 实施（共享 codex/preflight-triage 分支），但**评审上是两条独立可拆分线**：
 
 ```
 合规门禁线：    pr-gate.yml (title/body/size) ─────┐

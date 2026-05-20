@@ -1,0 +1,274 @@
+name: 'PR Gate'
+
+# Fast deterministic merge-blocking checks. Each job emits an independent
+# named status check that Branch Protection references as Required.
+#
+# Sibling workflow `qwen-code-pr-review.yml` provides the (slow, advisory)
+# AI review — it is intentionally NOT required for merge. See
+# docs/design/pr-gate-plan.md for the full design rationale.
+#
+# Triggers:
+#  - pull_request (not pull_request_target): all three jobs only read PR
+#    metadata, no secrets needed. Fork PRs trigger normally and produce
+#    status checks the maintainer can see before merge.
+#  - 'edited' is critical: when the contributor edits the PR title or
+#    body to fix a failed check, the workflow re-runs and updates the
+#    check status. Without 'edited', a failed PR Title / PR Template
+#    check would stay red forever even after correction.
+
+on:
+  pull_request:
+    types: ['opened', 'edited', 'synchronize', 'ready_for_review', 'reopened']
+    branches: ['main', 'release/**']
+
+permissions:
+  contents: 'read'
+  pull-requests: 'write'   # write so pr-size can manage size/* labels
+
+# Cancel earlier in-flight runs on the same PR when a new event arrives.
+# 'edited' events can fire frequently while the contributor iterates on
+# the description — no point keeping stale runs around.
+concurrency:
+  group: 'pr-gate-${{ github.event.pull_request.number }}'
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    name: 'PR Title'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 2
+    steps:
+      # action-semantic-pull-request validates that PR title follows
+      # Conventional Commits (https://www.conventionalcommits.org/).
+      # SHA-pinned per repo convention (matches qwen-code-pr-review.yml).
+      - name: 'Validate PR title (Conventional Commits)'
+        uses: 'amannn/action-semantic-pull-request@0723387faaf9b38adef4775cd42cfd5155ed6017' # v5.5.3
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            chore
+            ci
+            build
+            revert
+          requireScope: false
+          subjectPattern: '^.{1,72}$'
+          subjectPatternError: 'PR title subject (the part after `type:`) must be between 1 and 72 characters. Got: "{subject}".'
+          # 'wip:' is a common dev marker for in-progress PRs — accept it
+          # but the rest of the gate (or maintainer) will block actual merge.
+          wip: true
+
+  pr-template:
+    name: 'PR Template'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 2
+    steps:
+      - name: 'Validate PR body has required sections'
+        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea' # v7.0.1
+        with:
+          script: |
+            const body = context.payload.pull_request.body || '';
+            const errors = [];
+
+            // Required sections (must literally appear as headers).
+            const requiredSections = [
+              {
+                marker: '## Summary',
+                name: 'Summary',
+                hint: 'Describe what this PR does and why, in 1-3 sentences.',
+              },
+              {
+                marker: '## Validation',
+                name: 'Validation',
+                hint: 'Provide reviewer-facing evidence: commands run, observed output, logs, screenshots, GIFs, or test reports. Saying "tested locally" alone is not enough.',
+              },
+              {
+                marker: '## Linked Issues',
+                name: 'Linked Issues',
+                hint: 'List linked issues (e.g. `Fixes #123`, `Refs #456`) or write `N/A` if intentionally none.',
+              },
+            ];
+            for (const s of requiredSections) {
+              if (!body.includes(s.marker)) {
+                errors.push(`Missing "${s.name}" section.\n  → ${s.hint}`);
+              }
+            }
+
+            // Validation must have substantive content, not just the
+            // template's empty bullet placeholders.
+            //
+            // The repo's template (.github/PULL_REQUEST_TEMPLATE.md) ships
+            // with bullets like `- Commands run:` and `- Expected result:`
+            // that contain no real content after the colon. A naive length
+            // check would let these slip through. So we strip:
+            //   1. HTML comments
+            //   2. Code fences (empty AND containing the "# paste …" comment)
+            //   3. Bullet lines whose content after the colon is empty
+            //      (i.e. the template's untouched placeholders)
+            //   4. Bullet lines whose value is just a bracketed example
+            //      like `- Foo: [paste here]`
+            // and require ≥20 chars of substantive remainder.
+            const validationIdx = body.indexOf('## Validation');
+            if (validationIdx !== -1) {
+              const after = body.slice(validationIdx + '## Validation'.length);
+              const nextHeaderIdx = after.search(/\n## /);
+              const validationSection = nextHeaderIdx === -1
+                ? after
+                : after.slice(0, nextHeaderIdx);
+
+              const stripped = validationSection
+                .replace(/<!--[\s\S]*?-->/g, '')   // HTML comments
+                .replace(/```[\s\S]*?```/g, '')    // code fences (any content)
+                .split('\n')
+                .filter((line) => {
+                  const t = line.trim();
+                  if (!t) return false;
+                  // Template-only bullet: "- LABEL:" with nothing after.
+                  if (/^[-*]\s+[^:]+:\s*$/.test(t)) return false;
+                  // Bullet with only a placeholder-style value like
+                  // "- Foo: <something>" or "- Foo: [paste …]" or "- Foo: TBD".
+                  if (/^[-*]\s+[^:]+:\s*(<[^>]+>|\[[^\]]+\]|TBD|N\/A?|todo|tbd)\s*$/i.test(t)) {
+                    return false;
+                  }
+                  return true;
+                })
+                .join('\n')
+                .trim();
+
+              if (stripped.length < 20) {
+                errors.push(
+                  'Validation section looks like the unfilled template ' +
+                  '(empty bullets / no real evidence after the colons).\n' +
+                  '  → Fill in actual commands, output, screenshots, or test reports.'
+                );
+              }
+            }
+
+            if (errors.length > 0) {
+              const formatted = errors.map(e => `• ${e}`).join('\n\n');
+              core.setFailed(
+                `PR description is incomplete:\n\n${formatted}\n\n` +
+                'Edit your PR description to match the template at ' +
+                '`.github/PULL_REQUEST_TEMPLATE.md` and the check will re-run automatically.'
+              );
+            }
+
+  pr-size:
+    name: 'PR Size'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 3
+    steps:
+      - name: 'Compute size and label'
+        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea' # v7.0.1
+        with:
+          script: |
+            // Pull the full file list (up to 3 pages * 100 = 300 files;
+            // anything beyond that is itself a sign of too-large PR).
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                per_page: 100,
+              },
+              (response) => response.data,
+            );
+
+            // Exclude files whose churn is not a meaningful review burden.
+            // Keep this list intentionally tight — every entry should
+            // correspond to "auto-generated or pure prose" content.
+            const ignored = [
+              /(?:^|\/)package-lock\.json$/,
+              /(?:^|\/)pnpm-lock\.yaml$/,
+              /(?:^|\/)yarn\.lock$/,
+              /\.generated\./,
+              /\.snap$/,                                 // jest snapshot
+              /^docs\//,                                 // docs prose
+              /^docs-site\//,
+              /\.md$/,                                   // markdown anywhere
+              /^integration-tests\/fixtures\//,
+              /^packages\/.+\/__snapshots__\//,
+            ];
+            const meaningful = files.filter((f) =>
+              !ignored.some((re) => re.test(f.filename))
+            );
+            const totalChanges = meaningful.reduce(
+              (sum, f) => sum + (f.additions || 0) + (f.deletions || 0),
+              0,
+            );
+            const totalFiles = meaningful.length;
+
+            // Tier mapping. XL is the blocking tier.
+            const tier =
+              totalChanges <= 10 ? 'XS'
+              : totalChanges <= 100 ? 'S'
+              : totalChanges <= 500 ? 'M'
+              : totalChanges <= 1500 ? 'L'
+              : 'XL';
+
+            core.info(
+              `PR size: ${totalChanges} meaningful lines across ${totalFiles} files → size/${tier}`
+            );
+
+            // Manage labels: remove any stale size/* label, add the new one.
+            const existingLabels =
+              (context.payload.pull_request.labels || []).map((l) => l.name);
+            const desired = `size/${tier}`;
+            for (const old of existingLabels.filter((n) => /^size\//.test(n))) {
+              if (old !== desired) {
+                await github.rest.issues
+                  .removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.issue.number,
+                    name: old,
+                  })
+                  .catch(() => { /* label may already be gone */ });
+              }
+            }
+            if (!existingLabels.includes(desired)) {
+              await github.rest.issues
+                .addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  labels: [desired],
+                })
+                .catch((err) => {
+                  // Adding a non-existent label fails; this is non-fatal,
+                  // the maintainer just needs to pre-create the label set.
+                  core.warning(
+                    `Could not add label '${desired}': ${err.message}. ` +
+                    'Create the size/{XS,S,M,L,XL} labels in the repo to enable.'
+                  );
+                });
+            }
+
+            // Block merge when XL.
+            if (tier === 'XL') {
+              core.setFailed(
+                `PR is too large: ${totalChanges} meaningful lines across ${totalFiles} files ` +
+                '(threshold: 1500).\n\n' +
+                'Please split this PR into smaller, independently reviewable PRs. ' +
+                'Suggestions:\n' +
+                '  • Separate refactors from feature changes.\n' +
+                '  • Split by module/package or by concern.\n' +
+                '  • Ship test scaffolding in its own PR, then the implementation.\n\n' +
+                'Lockfile, docs, snapshot, and generated-file changes are already excluded ' +
+                'from this count. If the count still seems off, check ' +
+                '`.github/workflows/pr-gate.yml` for the exclusion list.'
+              );
+            } else if (tier === 'L') {
+              core.warning(
+                `PR is large (${totalChanges} lines). Merge is allowed, but consider splitting ` +
+                'next time for easier review.'
+              );
+            }

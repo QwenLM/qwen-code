@@ -359,16 +359,16 @@ jobs:
 
           if [ "$changed_lines" -gt "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" ]; then
             # Size > AI-review threshold: skip AI review but DO NOT post a
-            # blocking comment. Merge-blocking by size is the job of
-            # pr-gate.yml (PR Size check). This step is informational only.
-            # See docs/design/pr-gate-plan.md Phase B.
+            # blocking comment. Merge-blocking by oversized PR is the job
+            # of the sibling workflow `pr-gate.yml` (PR Size check). This
+            # step is informational only. See docs/design/pr-gate-plan.md.
             write_output "should_review=false"
-            echo "::notice::PR size ($changed_lines lines) exceeds AI-review threshold ($QWEN_PR_REVIEW_MAX_CHANGED_LINES). Skipping AI review. The pr-gate.yml 'PR Size' check is responsible for blocking oversized PRs from merging."
+            echo "::notice::PR size ($changed_lines lines) exceeds AI-review threshold ($QWEN_PR_REVIEW_MAX_CHANGED_LINES). Skipping AI review; pr-gate.yml 'PR Size' check handles merge-blocking for oversized PRs."
             {
               printf '### Qwen PR review skipped (PR too large for AI review)\n\n'
               printf 'PR size: %s lines across %s files (threshold %s).\n\n' \
                 "$changed_lines" "$changed_files" "$QWEN_PR_REVIEW_MAX_CHANGED_LINES"
-              printf 'Skipped automated AI review. Merge-blocking by size is handled by `pr-gate.yml` (PR Size check) — see that workflow for the actual size compliance gate.\n'
+              printf 'Skipped automated AI review. Merge-blocking by size is handled by `pr-gate.yml` (PR Size check).\n'
             } >> "$GITHUB_STEP_SUMMARY"
           else
             write_output "should_review=true"

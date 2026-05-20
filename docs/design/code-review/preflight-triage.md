@@ -20,7 +20,7 @@
 
 合规门禁的完整 plan 见 [`pr-gate-plan.md`](../pr-gate-plan.md)（不在 `code-review/` 目录下，位于 `docs/design/`）。本文档只覆盖 AI review 自身的 tier 路由设计。
 
-> 实施层面影响：`qwen-code-pr-review.yml` 中现有的 `Check PR size` step **不应再发 "PR too large" 评论阻断合并** —— 该职责移交 `pr-gate.yml` 的 `PR Size` job。本 workflow 在 size 超限时只需**内部跳过 AI review**，不影响合并状态。详见 [`pr-gate-plan.md`](../pr-gate-plan.md) Phase B。
+> 实施层面：`qwen-code-pr-review.yml` 中 `Check PR size` step **不再发 "PR too large" 评论阻断合并**（已在本 PR 改完），阻断职责由 `pr-gate.yml` 的 `PR Size` job 承担。size 超限时本 workflow 只**内部跳过 AI review**，不影响合并状态。`pr-gate.yml` 与本设计一起在 codex/preflight-triage 分支落地。
 
 ## 问题陈述
 
