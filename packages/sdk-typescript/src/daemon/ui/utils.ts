@@ -102,11 +102,11 @@ const controlCharactersPattern = new RegExp(
 );
 
 const oscSequencePattern = new RegExp(
-  `${escapeChar}\\][\\s\\S]*?(?:${bell}|${escapeChar}\\\\)`,
+  `${escapeChar}\\][^${bell}${escapeChar}]*(?:${bell}|${escapeChar}\\\\)`,
   'g',
 );
 const dcsSequencePattern = new RegExp(
-  `${escapeChar}P[\\s\\S]*?${escapeChar}\\\\`,
+  `${escapeChar}P[^${escapeChar}]*${escapeChar}\\\\`,
   'g',
 );
 const csiSequencePattern = new RegExp(`${escapeChar}\\[[0-?]*[ -/]*[@-~]`, 'g');

@@ -169,6 +169,10 @@ export function DaemonSessionProvider({
             }
           }
           if (!disposed && !abort.signal.aborted) {
+            store.dispatch({
+              type: 'status',
+              text: 'SSE stream ended',
+            });
             session = undefined;
             sessionRef.current = undefined;
           }
@@ -261,9 +265,17 @@ export function DaemonSessionProvider({
   const actions = useMemo<DaemonUiSessionActions>(
     () => ({
       async sendPrompt(text: string): Promise<PromptResult> {
-        const session = requireSession(sessionRef.current);
+        const session = requireSessionForAction(
+          store,
+          sessionRef.current,
+          'Prompt failed',
+        );
         if (promptBusyRef.current) {
-          throw new Error('A prompt is already in progress');
+          throw dispatchActionError(
+            store,
+            'Prompt failed',
+            'A prompt is already in progress',
+          );
         }
         promptBusyRef.current = true;
         const promptAbort = new AbortController();
@@ -276,17 +288,9 @@ export function DaemonSessionProvider({
             },
             promptAbort.signal,
           );
-          store.dispatch({ type: 'assistant.done', reason: result.stopReason });
           return result;
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          store.dispatch({
-            type: 'error',
-            text: `Prompt failed: ${message}`,
-            recoverable: true,
-          });
-          throw error;
+          throw dispatchActionError(store, 'Prompt failed', error);
         } finally {
           if (promptAbortRef.current === promptAbort) {
             promptAbortRef.current = undefined;
@@ -295,18 +299,46 @@ export function DaemonSessionProvider({
         }
       },
       async cancel(): Promise<void> {
-        await requireSession(sessionRef.current).cancel();
+        promptAbortRef.current?.abort();
+        promptAbortRef.current = undefined;
+        promptBusyRef.current = false;
+        const session = requireSessionForAction(
+          store,
+          sessionRef.current,
+          'Cancel failed',
+        );
+        try {
+          await session.cancel();
+        } catch (error) {
+          throw dispatchActionError(store, 'Cancel failed', error);
+        }
       },
       async setModel(modelId: string): Promise<SetModelResult> {
-        return await requireSession(sessionRef.current).setModel(modelId);
+        const session = requireSessionForAction(
+          store,
+          sessionRef.current,
+          'Set model failed',
+        );
+        try {
+          return await session.setModel(modelId);
+        } catch (error) {
+          throw dispatchActionError(store, 'Set model failed', error);
+        }
       },
       async respondToPermission(
         requestId: string,
         response: PermissionResponse,
       ): Promise<boolean> {
-        return await requireSession(
+        const session = requireSessionForAction(
+          store,
           sessionRef.current,
-        ).respondToSessionPermission(requestId, response);
+          'Permission response failed',
+        );
+        try {
+          return await session.respondToSessionPermission(requestId, response);
+        } catch (error) {
+          throw dispatchActionError(store, 'Permission response failed', error);
+        }
       },
     }),
     [store],
@@ -378,13 +410,29 @@ export function useDaemonConnection(): DaemonConnectionState {
   return connection;
 }
 
-function requireSession(
+function requireSessionForAction(
+  store: DaemonTranscriptStore,
   session: DaemonSessionClient | undefined,
+  action: string,
 ): DaemonSessionClient {
   if (!session) {
-    throw new Error('Daemon session is not connected');
+    throw dispatchActionError(store, action, 'Daemon session is not connected');
   }
   return session;
+}
+
+function dispatchActionError(
+  store: DaemonTranscriptStore,
+  action: string,
+  error: unknown,
+): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  store.dispatch({
+    type: 'error',
+    text: `${action}: ${message}`,
+    recoverable: true,
+  });
+  return error instanceof Error ? error : new Error(message);
 }
 
 function getReconnectDelayMs(

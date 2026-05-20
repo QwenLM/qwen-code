@@ -85,8 +85,18 @@ export function transcriptBlockToTerminalText(
 }
 
 function assertNever(value: never): string {
-  void value;
-  return '';
+  const variant = value as { kind?: unknown; type?: unknown };
+  const name =
+    typeof variant.type === 'string'
+      ? variant.type
+      : typeof variant.kind === 'string'
+        ? variant.kind
+        : 'unknown';
+  return terminalLine(
+    'error',
+    `Unhandled daemon terminal event: ${name}`,
+    '31',
+  );
 }
 
 function terminalLine(label: string, text: string, sgr: string): string {

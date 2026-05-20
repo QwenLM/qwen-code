@@ -17,6 +17,7 @@ import type {
 import { createDaemonToolPreview } from './toolPreview.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
+const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
 
 export function createDaemonTranscriptState(
   opts: DaemonTranscriptReducerOptions = {},
@@ -126,7 +127,7 @@ function applyDaemonTranscriptEvent(
       appendStatusBlock(next, event.type, event.text, event);
       break;
     default:
-      break;
+      assertNever(event);
   }
 }
 
@@ -188,6 +189,7 @@ function upsertToolBlock(
   event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
 ): void {
   const existingId = state.toolBlockByCallId[event.toolCallId];
+  if (existingId === TRIMMED_TOOL_BLOCK_ID) return;
   const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'tool') {
     if (event.title !== undefined) existing.title = event.title;
@@ -240,7 +242,11 @@ function appendShellBlock(
 ): void {
   if (!event.text) return;
   const last = state.blocks[state.blocks.length - 1];
-  if (last?.kind === 'shell' && last.stream === event.stream) {
+  if (
+    last?.kind === 'shell' &&
+    event.stream !== undefined &&
+    last.stream === event.stream
+  ) {
     const writable = getWritableBlockById(state, last.id);
     if (writable?.kind === 'shell') {
       writable.text += event.text;
@@ -374,7 +380,7 @@ function cloneTranscriptState(
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? state.maxBlocks,
     blocks: [...state.blocks],
-    blockIndexById: rebuildDaemonTranscriptBlockIndex(state.blocks),
+    blockIndexById: { ...state.blockIndexById },
     toolBlockByCallId: { ...state.toolBlockByCallId },
     permissionBlockByRequestId: { ...state.permissionBlockByRequestId },
   };
@@ -389,7 +395,9 @@ function trimTranscriptState(
   state.blocks = blocks;
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(blocks);
   for (const [toolCallId, blockId] of Object.entries(state.toolBlockByCallId)) {
-    if (!keptIds.has(blockId)) delete state.toolBlockByCallId[toolCallId];
+    if (!keptIds.has(blockId)) {
+      state.toolBlockByCallId[toolCallId] = TRIMMED_TOOL_BLOCK_ID;
+    }
   }
   for (const [requestId, blockId] of Object.entries(
     state.permissionBlockByRequestId,
@@ -453,4 +461,8 @@ function clearActiveText(state: DaemonTranscriptState): void {
   finishAssistant(state);
   state.activeUserBlockId = undefined;
   state.activeThoughtBlockId = undefined;
+}
+
+function assertNever(value: never): void {
+  void value;
 }
