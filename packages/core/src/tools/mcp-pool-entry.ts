@@ -190,6 +190,16 @@ export class PoolEntry {
     // into `localStatus` so subsequent `aggregateStatusByName` calls
     // surface accurate state. Filter by serverName; ignore removal
     // notifications (`status === undefined` after disable/uninstall).
+    //
+    // F2 (#4175 commit 6 review fix — wenshao W2): the module-level
+    // `serverStatuses` map is shared across all entries for the same
+    // `serverName`. When two entries A and B share a name (different
+    // fingerprints — e.g. divergent OAuth tokens), entry A's
+    // transport error writes DISCONNECTED to the shared map, and B's
+    // listener fires with that status — corrupting B's `localStatus`
+    // even though B's transport is healthy. Cross-check the incoming
+    // `status` against `this.client.getStatus()` (per-entry truth)
+    // so a sibling's status write doesn't bleed into our state.
     this.statusChangeListener = (name, status) => {
       if (name !== this.serverName) return;
       if (status === undefined) return;
@@ -197,6 +207,7 @@ export class PoolEntry {
         this.suppressNextStatusEcho = false;
         return;
       }
+      if (this.client.getStatus() !== status) return;
       if (status === this.localStatus) return;
       this.localStatus = status;
       // Do NOT call updateGlobalStatus here — it would loop back via
@@ -491,6 +502,20 @@ export class PoolEntry {
         `Cannot restart PoolEntry ${this.id} in state ${this.state}`,
       );
     }
+    // F2 (#4175 commit 6 review fix — wenshao W4): restart supersedes
+    // drain. Pre-fix the entry could be in `'draining'` state (refs
+    // hit 0, 30s grace running) when `restartByName` arrived; the
+    // drain timer would fire during the `await client.disconnect()`
+    // yield and call `forceShutdown('drain_timer')`, which removes
+    // the entry from `pool.entries` and detaches subscribers. Then
+    // `doRestart` resumes with `await client.connect()` spawning a
+    // fresh subprocess that's orphaned — pool no longer holds it.
+    // Cancel the drain timer + transition draining→active so the
+    // restart sequence completes atomically.
+    this.cancelDrainTimer();
+    if (this.state === 'draining') {
+      this.state = 'active';
+    }
     const oldGen = this._generation;
     this._generation += 1;
     this.emit({
@@ -499,6 +524,28 @@ export class PoolEntry {
       generation: oldGen,
       reason: 'restart',
     });
+    // F2 (#4175 commit 6 review fix — wenshao W3): sweep descendant
+    // pids BEFORE `client.disconnect()`. Pre-fix `client.disconnect`
+    // only killed the wrapper (npx / uvx / pnpm dlx), letting the
+    // actual MCP server grandchild survive as an orphan. Every
+    // restart-via-HTTP-route call leaked one+ orphan process; over
+    // hours of daemon uptime with periodic restarts the workspace
+    // gradually exhausts PIDs / FDs / memory. Mirror the sweep that
+    // `forceShutdown` performs (best-effort; per-pid failures
+    // tolerated by sigtermPids).
+    try {
+      const rootPid = this.client.getTransportPid?.();
+      if (rootPid !== undefined) {
+        const descendants = await listDescendantPids(rootPid);
+        if (descendants.length > 0) {
+          sigtermPids(descendants);
+        }
+      }
+    } catch (err) {
+      debugLogger.debug(
+        `Restart pid sweep (best-effort) failed for ${this.id}: ${String(err)}`,
+      );
+    }
     try {
       await this.client.disconnect();
     } catch (err) {

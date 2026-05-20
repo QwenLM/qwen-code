@@ -225,10 +225,19 @@ export class McpTransportPool {
         serverName,
         cfg,
       );
-      this.indexAttach(sessionId, id);
-      return existing.attach(sessionId, view, {
+      // F2 (#4175 commit 6 review fix — wenshao W10): index update
+      // happens AFTER `attach` succeeds. Pre-fix the order was
+      // reversed; an `attach` rejection (e.g., entry transitioned
+      // to `closed`/`failed` between the `entries.get` check and the
+      // `attach` call) left a stale `sessionToEntries[sessionId]`
+      // mapping with no matching `entry.refs.has(sessionId)` —
+      // `releaseSession` would later iterate the stale id and call
+      // `entry.detach` on a non-attached session.
+      const conn = existing.attach(sessionId, view, {
         release: () => this.release(id, sessionId),
       });
+      this.indexAttach(sessionId, id);
+      return conn;
     }
 
     // F2 (#4175 commit 6): workspace budget check pre-spawn. The
@@ -294,10 +303,12 @@ export class McpTransportPool {
       serverName,
       cfg,
     );
-    this.indexAttach(sessionId, id);
-    return entry.attach(sessionId, view, {
+    // W10 fix: same attach-then-index ordering as the fast path above.
+    const conn = entry.attach(sessionId, view, {
       release: () => this.release(id, sessionId),
     });
+    this.indexAttach(sessionId, id);
+    return conn;
   }
 
   /**
@@ -625,7 +636,23 @@ export class McpTransportPool {
       // markActive is mostly assignment + updateGlobalStatus, but
       // a listener could throw). Catches both pre- and post-set
       // failure modes uniformly.
+      //
+      // F2 (#4175 commit 6 review fix — wenshao W1): also call
+      // `entry.forceShutdown('manual')` to remove the
+      // `statusChangeListener` that the `PoolEntry` constructor
+      // registered. Pre-fix every spawn failure leaked one listener
+      // permanently — module-level `serverStatuses` notifications
+      // would still fire on the orphan listener, slowly degrading
+      // status-update latency over the daemon's lifetime. Wrap in
+      // try/catch because the entry is in an inconsistent state
+      // (state machine never reached `active`); errors are
+      // non-actionable here.
       this.entries.delete(id);
+      try {
+        await entry.forceShutdown('manual');
+      } catch {
+        /* best effort — entry never reached active state */
+      }
       try {
         await client.disconnect();
       } catch {
@@ -742,6 +769,17 @@ export class McpTransportPool {
         },
       });
     } catch (err) {
+      // F2 (#4175 commit 6 review fix — wenshao W14): same listener-
+      // leak as the pooled spawn-failure path (W1). The unpooled
+      // entry's ctor also registered a `statusChangeListener` via
+      // `addMCPStatusChangeListener`, and only `forceShutdown`
+      // removes it. Pre-fix every unpooled connect/discover failure
+      // leaked one listener permanently.
+      try {
+        await entry.forceShutdown('manual');
+      } catch {
+        /* best effort — entry never reached active state */
+      }
       try {
         await client.disconnect();
       } catch {
@@ -760,7 +798,12 @@ export class McpTransportPool {
 export interface McpPoolSnapshot {
   /** Total CONNECTED clients across all entries. */
   total: number;
-  /** Live subprocess count (stdio + websocket entries that are CONNECTED). */
+  /**
+   * Live local-subprocess count — stdio entries that are CONNECTED.
+   * Websocket transports dial a (potentially remote) MCP server over
+   * the network and don't spawn a local OS child, so they're
+   * deliberately excluded (per wenshao R4 review fold-in in commit 5).
+   */
   subprocessCount: number;
   /** Per-server entry details. */
   byName: Record<

@@ -2842,8 +2842,34 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // event types keeps `KnownDaemonEvent` schema additive — clients
       // gated only on `entryCount > 1` get accurate per-entry signals
       // without a new event type.
+      // F2 (#4175 commit 6 review fix — wenshao W15): the response
+      // arrives as untyped JSON from `info.connection.extMethod(...)`
+      // — a buggy/out-of-sync ACP child returning a malformed shape
+      // (e.g. `entries` is a string, or per-entry objects miss
+      // `entryIndex`) would otherwise crash this route with a
+      // TypeError. Add a runtime shape check and degrade-with-error
+      // for entries that don't match the typed wire contract.
       if ('entries' in response) {
-        for (const entry of response.entries) {
+        const entries = Array.isArray(response.entries) ? response.entries : [];
+        if (!Array.isArray(response.entries)) {
+          writeStderrLine(
+            `qwen serve: pool restart response carried 'entries' field ` +
+              `but it is not an array (server=${response.serverName}); ` +
+              `treating as empty.`,
+          );
+        }
+        for (const entry of entries) {
+          if (
+            typeof entry !== 'object' ||
+            entry === null ||
+            typeof (entry as { entryIndex?: unknown }).entryIndex !== 'number'
+          ) {
+            writeStderrLine(
+              `qwen serve: skipping malformed pool restart entry ` +
+                `(server=${response.serverName}): ${JSON.stringify(entry)}`,
+            );
+            continue;
+          }
           if (entry.restarted) {
             broadcastWorkspaceEvent({
               type: 'mcp_server_restarted',

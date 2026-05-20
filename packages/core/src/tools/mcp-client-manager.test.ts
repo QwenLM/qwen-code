@@ -82,6 +82,65 @@ describe('McpClientManager', () => {
     expect(McpClient).not.toHaveBeenCalled();
   });
 
+  it('serializes concurrent discovery passes via mutex (F2 commit 6 W6)', async () => {
+    // Wenshao W6 review fold-in: pre-fix two concurrent
+    // `discoverAllMcpTools[Incremental]` invocations could both see
+    // `pooledConnections.has(name) === false` and both call
+    // `pool.acquire`, with the second `set(name, conn2)` silently
+    // overwriting the first → conn1 leaked. Mutex ensures the second
+    // caller awaits the first promise.
+    let resolveAcquire: (() => void) | undefined;
+    const blockedAcquire = new Promise<void>((resolve) => {
+      resolveAcquire = resolve;
+    });
+    const acquireSpy = vi.fn().mockImplementation(async () => {
+      await blockedAcquire;
+      return {
+        release: vi.fn(),
+        on: vi.fn(),
+        id: 'srv::abc',
+        serverName: 'srv',
+        entryIndex: 0,
+      };
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    const p1 = manager.discoverAllMcpTools(mockConfig);
+    const p2 = manager.discoverAllMcpTools(mockConfig);
+    // Both passes block on the in-flight `pool.acquire`. Pre-fix
+    // each pass would call `acquire` independently → 2 calls.
+    // Post-fix the second pass awaits the same `discoveryInFlight`
+    // promise → still 1 call.
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+    resolveAcquire?.();
+    await Promise.all([p1, p2]);
+    // After both resolve, total acquire count is still 1 — mutex
+    // prevented the second pass from re-acquiring the same server.
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('falls back to per-session McpClient spawn when no pool injected (backward compat)', async () => {
     // The 70+ existing tests already assert this implicitly. This
     // adds an explicit assertion so future refactors that flip the

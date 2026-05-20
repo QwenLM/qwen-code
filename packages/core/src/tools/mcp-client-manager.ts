@@ -486,6 +486,17 @@ export class McpClientManager {
     string,
     import('./mcp-pool-entry.js').PooledConnection
   >();
+  /**
+   * F2 (#4175 commit 6 review fix — wenshao W6): re-entrancy guard
+   * for `discoverAllMcpToolsViaPool`. Two passes interleaving (full
+   * + incremental, or two incrementals) could see
+   * `pooledConnections.has(name) === false` simultaneously and both
+   * call `pool.acquire`, with the second `set(name, conn2)` silently
+   * overwriting the first → conn1 leaks (refcount never reaches 0,
+   * drain timer never fires). The mutex serializes passes; a second
+   * caller awaits the same promise and sees the resolved state.
+   */
+  private discoveryInFlight?: Promise<void>;
 
   constructor(
     config: Config,
@@ -1364,7 +1375,24 @@ export class McpClientManager {
    * only need to drop the manager's own pool refs because cross-
    * session pool entries still belong to the pool.
    */
-  private async discoverAllMcpToolsViaPool(cliConfig: Config): Promise<void> {
+  private discoverAllMcpToolsViaPool(cliConfig: Config): Promise<void> {
+    // Re-entrancy guard (W6): if a pass is in flight, return the
+    // same promise so the caller awaits the in-flight resolution
+    // instead of triggering a parallel pass that races on
+    // `pooledConnections`. Cleanup runs in `.finally` so the next
+    // call (after this pass completes) starts fresh.
+    if (this.discoveryInFlight) return this.discoveryInFlight;
+    this.discoveryInFlight = this.runDiscoverAllMcpToolsViaPool(
+      cliConfig,
+    ).finally(() => {
+      this.discoveryInFlight = undefined;
+    });
+    return this.discoveryInFlight;
+  }
+
+  private async runDiscoverAllMcpToolsViaPool(
+    cliConfig: Config,
+  ): Promise<void> {
     if (!this.pool) return; // unreachable; caller already gates
     this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
     // F2 (#4175 commit 6): bracket the pass with the pool's budget
@@ -1457,6 +1485,25 @@ export class McpClientManager {
               this.toolRegistry,
               promptRegistry,
             );
+            // F2 (#4175 commit 6 review fix — wenshao W5): subscribe
+            // to entry-level events so a `'failed'` event (entry's
+            // restart hit reconnect-budget exhaustion → terminal
+            // failure → entry removed from `pool.entries`) evicts our
+            // stale handle. Pre-fix the manager held the dead handle
+            // forever; subsequent discovery passes saw
+            // `pooledConnections.has(name)` and skipped re-acquiring,
+            // permanently losing the server's tools for the session.
+            // Cleanup is idempotent — a second `'failed'` event on
+            // the same id is a no-op via the `get(name) === conn`
+            // guard, and `releaseAllPooledConnections` / `stop` also
+            // call `conn.release()` independently.
+            conn.on('event', (e) => {
+              if (e.kind === 'failed') {
+                if (this.pooledConnections.get(name) === conn) {
+                  this.pooledConnections.delete(name);
+                }
+              }
+            });
             this.pooledConnections.set(name, conn);
           } catch (err) {
             // Pool acquire failure for one server is non-fatal for

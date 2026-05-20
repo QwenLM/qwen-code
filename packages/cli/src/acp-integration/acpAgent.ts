@@ -382,7 +382,25 @@ function parsePooledTransports(
  */
 function parsePoolDrainMs(envValue: string | undefined): number {
   if (!envValue) return 30_000;
-  const n = Number.parseInt(envValue, 10);
+  // F2 (#4175 commit 6 review fix — wenshao W9): reject input that
+  // contains anything other than digits. Pre-fix `Number.parseInt`
+  // accepted `'30000ms'`, `'30000abc'`, etc. (silently truncating to
+  // 30000), so an operator hand-editing env vars with a unit
+  // suffix or typo would get a value that "looks parsed" but
+  // actually represents a misconfiguration. Strict regex prevents
+  // both classes; on rejection we log a stderr warning AND fall
+  // back to the default rather than raising at boot (boot-fatal
+  // would be more aggressive than the rest of `qwen serve`'s
+  // env-validation surface, which uniformly degrades-with-warning).
+  const trimmed = envValue.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    process.stderr.write(
+      `qwen serve: QWEN_SERVE_MCP_POOL_DRAIN_MS=${JSON.stringify(envValue)} ` +
+        `is not a valid integer; using default 30000ms.\n`,
+    );
+    return 30_000;
+  }
+  const n = Number.parseInt(trimmed, 10);
   if (!Number.isFinite(n)) return 30_000;
   return Math.min(600_000, Math.max(1_000, n));
 }
