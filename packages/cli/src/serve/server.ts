@@ -33,6 +33,7 @@ import { isServeDebugMode } from './debugMode.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
+  CancelSentinelCollisionError,
   createHttpAcpBridge,
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -41,6 +42,8 @@ import {
   MAX_WORKSPACE_PATH_LENGTH,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  PermissionForbiddenError,
+  PermissionPolicyNotImplementedError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -553,6 +556,13 @@ export function createServeApp(
       // #3803 §02: surface the bound workspace so clients can detect
       // mismatch pre-flight and omit `cwd` on `POST /session`.
       workspaceCwd: boundWorkspace,
+      // #4175 F3 Commit 6 — active mediation policy under the
+      // `policy` namespace. Distinct from the `permission_mediation`
+      // capability `modes` list (build-supported set). SDK clients
+      // pre-flight the active strategy and render the matching UX
+      // (e.g. consensus shows partial-vote progress, designated
+      // disables the vote button for non-originators).
+      policy: { permission: bridge.permissionPolicy },
     };
     res.status(200).json(envelope);
   });
@@ -1564,13 +1574,26 @@ export function createServeApp(
     if (response === undefined) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+    // F3 Commit 2: thread the kernel-stamped peer-IP loopback bit
+    // through the bridge context so the `local-only` policy can gate
+    // votes by transport. We always pass a context (even when no
+    // header was supplied) so `fromLoopback` reaches the mediator —
+    // the prior gating shape (`clientId !== undefined ? { clientId }
+    // : undefined`) would silently drop the loopback bit for
+    // anonymous loopback voters, which is the exact `local-only`
+    // happy path.
+    const fromLoopback = detectFromLoopback(req);
+    const context = {
+      ...(clientId !== undefined ? { clientId } : {}),
+      fromLoopback,
+    };
     let accepted: boolean;
     try {
       accepted = bridge.respondToSessionPermission(
         sessionId,
         requestId,
         response,
-        clientId !== undefined ? { clientId } : undefined,
+        context,
       );
     } catch (err) {
       sendPermissionVoteError(res, err, {
@@ -1596,13 +1619,15 @@ export function createServeApp(
     if (response === undefined) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+    // Same F3 Commit 2 rationale as the session-scoped route above.
+    const fromLoopback = detectFromLoopback(req);
+    const context = {
+      ...(clientId !== undefined ? { clientId } : {}),
+      fromLoopback,
+    };
     let accepted: boolean;
     try {
-      accepted = bridge.respondToPermission(
-        requestId,
-        response,
-        clientId !== undefined ? { clientId } : undefined,
-      );
+      accepted = bridge.respondToPermission(requestId, response, context);
     } catch (err) {
       sendPermissionVoteError(res, err, {
         route: 'POST /permission/:requestId',
@@ -2126,6 +2151,35 @@ function parseClientIdHeader(
 }
 
 /**
+ * #4175 F3 Commit 2 — kernel-stamped peer-IP loopback set used by the
+ * `local-only` permission policy to gate vote routes. IPv4
+ * `127.0.0.1`, IPv6 `::1`, and the dual-stack form `::ffff:127.0.0.1`
+ * Node prints when an IPv4 client hits an IPv6 listener.
+ */
+const LOOPBACK_REMOTE_ADDRS: ReadonlySet<string> = new Set([
+  '127.0.0.1',
+  '::1',
+  '::ffff:127.0.0.1',
+]);
+
+/**
+ * #4175 F3 Commit 2 — decide whether a permission vote arrived from a
+ * loopback peer.
+ *
+ * **Security**: this function reads `req.socket.remoteAddress` only.
+ * It does NOT consult `X-Forwarded-For` or any HTTP header — those
+ * are forgeable, and `local-only` is meant to be a strong gate that
+ * trusts the kernel-stamped peer IP. Operators who want
+ * loopback-equivalent treatment for a reverse-proxied daemon should
+ * use a dedicated daemon process instead, or pick `designated`
+ * policy where loopback identity is irrelevant.
+ */
+function detectFromLoopback(req: import('express').Request): boolean {
+  const addr = req.socket?.remoteAddress;
+  return typeof addr === 'string' && LOOPBACK_REMOTE_ADDRS.has(addr);
+}
+
+/**
  * #4282 fold-in 1 (gpt-5.5 C2). Workspace-level mutation routes validate
  * the parsed `X-Qwen-Client-Id` against `bridge.knownClientIds()` so the
  * `originatorClientId` stamped onto fan-out events is grounded in a
@@ -2313,6 +2367,45 @@ function sendPermissionVoteError(
       code: 'invalid_option_id',
       requestId: err.requestId,
       optionId: err.optionId,
+    });
+    return;
+  }
+  // F3 Commit 2 — designated voter mismatch / `local-only` remote
+  // rejection. 403 because the request is well-formed and the voter
+  // was authenticated; the policy refuses their vote.
+  if (err instanceof PermissionForbiddenError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'permission_forbidden',
+      requestId: err.requestId,
+      sessionId: err.sessionId,
+      reason: err.reason,
+    });
+    return;
+  }
+  // F3 Commit 2 — operator configured a permission policy whose
+  // implementation has not landed in this build yet. 501 (not 500)
+  // so the SDK can render "your daemon is older than your settings
+  // expect; upgrade" rather than a generic Internal Server Error.
+  if (err instanceof PermissionPolicyNotImplementedError) {
+    res.status(501).json({
+      error: err.message,
+      code: 'permission_policy_not_implemented',
+      policy: err.policy,
+    });
+    return;
+  }
+  // F3 Commit 2 — agent declared an `allowedOptionIds` set that
+  // includes the cancel-vote sentinel. This is a contract violation
+  // between agent and daemon (not a client mistake), so 500 is the
+  // right shape; structured `code` lets the SDK distinguish from
+  // unrelated 500s.
+  if (err instanceof CancelSentinelCollisionError) {
+    res.status(500).json({
+      error: err.message,
+      code: 'cancel_sentinel_collision',
+      requestId: err.requestId,
+      sentinel: err.sentinel,
     });
     return;
   }

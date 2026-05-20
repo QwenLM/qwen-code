@@ -6602,3 +6602,39 @@ describe('createHttpAcpBridge', () => {
     });
   });
 });
+
+// ============================================================
+// F3 Commit 8 — bridge-level integration for the multi-client
+// permission mediator. Mediator unit tests cover strategy logic
+// (35 tests in `permissionMediator.test.ts`); these exercise the
+// HTTP-bridge surface specifically:
+//   - `bridge.permissionPolicy` accessor wired through the mediator
+//   - F3 BridgeOptions validation (positive-integer quorum)
+// ============================================================
+describe('createHttpAcpBridge — F3 multi-client permission coordination', () => {
+  it('exposes the active permission policy through bridge.permissionPolicy (default first-responder)', () => {
+    const bridge = makeBridge({});
+    expect(bridge.permissionPolicy).toBe('first-responder');
+  });
+
+  it('reflects the configured policy when BridgeOptions.permissionPolicy is set', () => {
+    const bridge = makeBridge({ permissionPolicy: 'consensus' });
+    expect(bridge.permissionPolicy).toBe('consensus');
+  });
+
+  it('throws on non-positive-integer permissionConsensusQuorum', () => {
+    expect(() =>
+      makeBridge({
+        permissionPolicy: 'consensus',
+        permissionConsensusQuorum: 0,
+      }),
+    ).toThrow(/positive integer/);
+    expect(() =>
+      makeBridge({
+        permissionPolicy: 'consensus',
+        permissionConsensusQuorum: 1.5,
+      }),
+    ).toThrow(/positive integer/);
+  });
+});
+

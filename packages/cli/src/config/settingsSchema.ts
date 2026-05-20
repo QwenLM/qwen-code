@@ -1668,6 +1668,56 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  policy: {
+    type: 'object',
+    label: 'Daemon Policy',
+    category: 'Daemon',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Daemon multi-client coordination policies. Tool-level allow/deny rules ' +
+      'live under `permissions`; this section is for runtime mediation behavior ' +
+      'between concurrent HTTP clients sharing one `qwen serve` daemon.',
+    showInDialog: false,
+    properties: {
+      permissionStrategy: {
+        type: 'enum',
+        label: 'Permission Mediation Policy',
+        category: 'Daemon',
+        requiresRestart: true,
+        default: 'first-responder',
+        description:
+          'How permission requests resolve when multiple clients are attached. ' +
+          '`first-responder` (default) = any client decides, first wins. ' +
+          '`designated` = only the prompt originator decides; falls back to ' +
+          'first-responder if originator is anonymous. ' +
+          '`consensus` = N-of-M voters must agree (default N=floor(M/2)+1). ' +
+          '`local-only` = only loopback clients can decide. ' +
+          'Requires daemon restart — F3 v1 reads this once at boot.',
+        showInDialog: true,
+        options: [
+          { value: 'first-responder', label: 'First Responder' },
+          { value: 'designated', label: 'Designated Originator' },
+          { value: 'consensus', label: 'Consensus Quorum' },
+          { value: 'local-only', label: 'Local Only' },
+        ],
+      },
+      consensusQuorum: {
+        type: 'number',
+        label: 'Consensus Quorum Override',
+        category: 'Daemon',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        description:
+          'Optional fixed quorum size for consensus policy. Capped at M ' +
+          '(count of registered voters at request issue time) to prevent ' +
+          'unreachable quorum. Unset = floor(M/2)+1. ' +
+          'Requires daemon restart — F3 v1 reads this once at boot.',
+        showInDialog: false,
+      },
+    },
+  },
+
   mcp: {
     type: 'object',
     label: 'MCP',

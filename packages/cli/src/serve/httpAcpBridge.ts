@@ -91,6 +91,10 @@ export {
   WorkspaceInitRaceError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  // #4175 F3 — multi-client permission coordination errors.
+  CancelSentinelCollisionError,
+  PermissionForbiddenError,
+  PermissionPolicyNotImplementedError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 export {

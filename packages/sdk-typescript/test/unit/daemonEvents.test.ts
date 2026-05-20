@@ -1695,4 +1695,293 @@ describe('PR 21 — auth device-flow events', () => {
       expect(next.lastToolToggle?.originatorClientId).toBe('data-client');
     });
   });
+
+  // F3 Commit 7 — multi-client permission coordination event reducer
+  // tests. Covers permission_partial_vote / permission_forbidden plus
+  // the side-effect that resolved/already_resolved events clear
+  // `permissionVoteProgress` for the matching requestId.
+  describe('F3 permission coordination events', () => {
+    it('narrows permission_partial_vote and permission_forbidden via asKnownDaemonEvent', () => {
+      const partial = asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'permission_partial_vote',
+        data: {
+          requestId: 'req-1',
+          sessionId: 'sess-1',
+          votesReceived: 1,
+          votesNeeded: 1,
+          quorum: 2,
+          optionTallies: { proceed_once: 1 },
+        },
+      });
+      expect(partial?.type).toBe('permission_partial_vote');
+
+      const forbidden = asKnownDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'permission_forbidden',
+        data: {
+          requestId: 'req-1',
+          sessionId: 'sess-1',
+          clientId: 'client_B',
+          reason: 'designated_mismatch',
+        },
+        originatorClientId: 'client_A',
+      });
+      expect(forbidden?.type).toBe('permission_forbidden');
+    });
+
+    it('rejects malformed permission_partial_vote (negative tally)', () => {
+      expect(
+        asKnownDaemonEvent({
+          id: 3,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: -1 },
+          },
+        }),
+      ).toBeUndefined();
+    });
+
+    it('rejects malformed permission_forbidden (unknown reason)', () => {
+      expect(
+        asKnownDaemonEvent({
+          id: 4,
+          v: 1,
+          type: 'permission_forbidden',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            reason: 'unauthorized',
+          },
+        }),
+      ).toBeUndefined();
+    });
+
+    it('reducer accumulates permission_partial_vote into permissionVoteProgress', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_request',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            toolCall: {},
+            options: [{ optionId: 'proceed_once' }],
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+      ]);
+      expect(state.permissionVoteProgress['req-1']).toMatchObject({
+        votesReceived: 1,
+        votesNeeded: 1,
+        quorum: 2,
+        optionTallies: { proceed_once: 1 },
+      });
+      expect(Object.keys(state.pendingPermissions)).toEqual(['req-1']);
+    });
+
+    it('reducer clears permissionVoteProgress on permission_resolved', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_request',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            toolCall: {},
+            options: [{ optionId: 'proceed_once' }],
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+        {
+          id: 3,
+          v: 1,
+          type: 'permission_resolved',
+          data: {
+            requestId: 'req-1',
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          },
+        },
+      ]);
+      expect(state.permissionVoteProgress).toEqual({});
+      expect(state.pendingPermissions).toEqual({});
+    });
+
+    it('reducer clears permissionVoteProgress on permission_already_resolved', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_request',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            toolCall: {},
+            options: [{ optionId: 'proceed_once' }],
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+        {
+          id: 3,
+          v: 1,
+          type: 'permission_already_resolved',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          },
+        },
+      ]);
+      expect(state.permissionVoteProgress).toEqual({});
+    });
+
+    it('reducer appends permission_forbidden to bounded forbiddenVotes', () => {
+      const events: DaemonEvent[] = [];
+      for (let i = 0; i < 35; i++) {
+        events.push({
+          id: 100 + i,
+          v: 1,
+          type: 'permission_forbidden',
+          data: {
+            requestId: `req-${i}`,
+            sessionId: 'sess-1',
+            clientId: `client_${i}`,
+            reason: 'designated_mismatch',
+          },
+          originatorClientId: 'prompt-originator',
+        });
+      }
+      const state = reduceDaemonSessionEvents(events);
+      // Ring is bounded at 32; total count tracks all events.
+      expect(state.forbiddenVotes.length).toBe(32);
+      expect(state.forbiddenVoteCount).toBe(35);
+      // FIFO eviction — the first 3 entries should have been evicted.
+      expect(state.forbiddenVotes[0]!.requestId).toBe('req-3');
+      expect(state.forbiddenVotes[31]!.requestId).toBe('req-34');
+    });
+
+    it('partial_vote → resolved ordering (M=2 N=2 quorum scenario)', () => {
+      // F3 N3 ordering invariant — partial_vote frames precede the
+      // resolved frame for the same requestId.
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_request',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            toolCall: {},
+            options: [{ optionId: 'proceed_once' }],
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'req-1',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+        {
+          id: 3,
+          v: 1,
+          type: 'permission_resolved',
+          data: {
+            requestId: 'req-1',
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          },
+        },
+      ]);
+      // Reducer end-state: pending cleared, vote progress cleared.
+      expect(state.permissionVoteProgress).toEqual({});
+      expect(state.pendingPermissions).toEqual({});
+    });
+
+    it('rejects malformed permission_partial_vote payload via unrecognizedKnownEventCount counter', () => {
+      // The reducer's `narrow then no-op` path: when the event type IS
+      // in `KNOWN_EVENT_TYPES` but its data fails the type-guard
+      // (e.g. missing required fields, negative tally), the reducer
+      // bumps `unrecognizedKnownEventCount` rather than crashing.
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 9,
+        v: 1,
+        type: 'permission_partial_vote',
+        data: { malformed: true },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.permissionVoteProgress).toEqual({});
+    });
+
+    it('forward-compat: emits unknown event types fall through silently (no counter bump)', () => {
+      // R3-11 (final review fold-in) — true forward-compat path. The
+      // reducer's `unrecognizedKnownEventCount` only fires for types
+      // that ARE in `KNOWN_EVENT_TYPES` (i.e. the daemon and SDK
+      // agree on the type but disagree on the shape). For unknown
+      // types — e.g. a future daemon emitting `permission_unknown_v2`
+      // before the SDK ships support — the reducer must silently
+      // ignore (track only `lastEventId`) so the SDK can keep
+      // streaming through unknown events without piling up false
+      // unrecognized-known counts.
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 99,
+        v: 1,
+        type: 'permission_unknown_v2_future',
+        data: { whatever: 'shape' },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(0);
+      expect(state.lastEventId).toBe(99);
+    });
+  });
 });

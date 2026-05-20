@@ -175,6 +175,27 @@ export interface CapabilitiesEnvelope {
    * shape. The post-§02 server code here always populates it.
    */
   workspaceCwd?: string;
+  /**
+   * #4175 F3 Commit 6 — daemon-policy namespace. Active values for
+   * cross-cutting daemon coordination policies that don't fit on a
+   * per-feature flag. Today only `permission` is populated (active
+   * `PermissionMediator` strategy); future entries (e.g. `network`,
+   * `audit`) extend the namespace without polluting the top-level
+   * envelope. Optional / additive — daemons predating F3 omit it.
+   */
+  policy?: {
+    /**
+     * Active permission mediation policy. Distinct from the
+     * `permission_mediation` capability `modes` list, which
+     * advertises the build-supported set; this field tells clients
+     * which one is currently in effect.
+     */
+    permission?:
+      | 'first-responder'
+      | 'designated'
+      | 'consensus'
+      | 'local-only';
+  };
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

@@ -13,6 +13,8 @@
 
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { ChannelFactory } from './channel.js';
+import type { PermissionPolicy } from './permission.js';
+import type { PermissionAuditPublisher } from './permissionMediator.js';
 import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 
@@ -276,4 +278,42 @@ export interface BridgeOptions {
    * IDE keep working without depending on `cli/src/serve/fs/`.
    */
   fileSystem?: BridgeFileSystem;
+  /**
+   * #4175 F3 Commit 2 — active permission mediation policy for the
+   * `MultiClientPermissionMediator`. When omitted, defaults to
+   * `'first-responder'` (the pre-F3 behavior — any validated voter
+   * wins immediately). The bridge captures this once at construction
+   * time; `runQwenServe` reads it from `settings.policy.
+   * permissionStrategy` and the mediator snapshots it onto every
+   * pending entry at issue time so live-reload of settings does not
+   * change the rules under in-flight requests.
+   */
+  permissionPolicy?: PermissionPolicy;
+  /**
+   * #4175 F3 Commit 2 — optional fixed quorum for `consensus` policy.
+   * MUST be a positive integer if provided; the F3 settings layer
+   * validates this and fails startup on non-integer / non-positive
+   * values. Capped at `M = votersAtIssue.size` at request time to
+   * prevent unreachable quorum. Unset → `floor(M/2) + 1` (default
+   * majority).
+   */
+  permissionConsensusQuorum?: number;
+  /**
+   * #4175 F3 Commit 2 — injection seam for the permission audit
+   * publisher. Tests pass a recording stub.
+   *
+   * **When omitted**: the bridge allocates an internal
+   * `PermissionAuditRing` (default capacity 512) and wires
+   * `createPermissionAuditPublisher` to write into it. The ring is
+   * held inside the bridge factory's closure for future query-route
+   * extraction; it is NOT currently exposed on the `HttpAcpBridge`
+   * interface. (`createNoOpPermissionAuditPublisher` exists for
+   * embedded callers who really want a no-op; pass it explicitly.)
+   *
+   * Either way, `recordTimeout` calls receive a stderr breadcrumb
+   * before being forwarded to the configured publisher so operators
+   * tailing daemon stderr always see permission timeouts (preserves
+   * pre-F3 visibility — see `httpAcpBridge.ts` for the wrapper).
+   */
+  permissionAudit?: PermissionAuditPublisher;
 }

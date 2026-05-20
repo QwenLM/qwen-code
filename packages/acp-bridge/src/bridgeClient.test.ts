@@ -43,20 +43,31 @@ import type { BridgeFileSystem } from './bridgeFileSystem.js';
 
 /**
  * Minimal-stub constructor for a `BridgeClient` whose only purpose is
- * to exercise `writeTextFile` / `readTextFile`. The 6 callback args
+ * to exercise `writeTextFile` / `readTextFile`. The 5 callback args
  * before `fileSystem` are filled with thrower-defaults so any test
  * that accidentally hits the permission path (instead of the fs path)
- * fails loudly instead of silently.
+ * fails loudly instead of silently. F3 Commit 3 replaced the pre-F3
+ * `registerPending` + `rollbackPending` callbacks with a single
+ * `MultiClientPermissionMediator` reference; the test stub provides
+ * a thrower-Mediator that fails any unexpected `request()` /
+ * `vote()` / `forgetSession()` call.
  */
 function makeClient(fileSystem?: BridgeFileSystem): BridgeClient {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run in fs-path tests');
   };
+  const throwerMediator = {
+    policy: 'first-responder',
+    request: noPermissionFlow,
+    vote: noPermissionFlow,
+    forgetSession: noPermissionFlow,
+    peekSessionFor: noPermissionFlow,
+    pendingCount: 0,
+  } as never;
   return new BridgeClient(
     noPermissionFlow as never, // resolveEntry
     noPermissionFlow as never, // resolvePendingRestoreEvents
-    noPermissionFlow, // registerPending
-    noPermissionFlow, // rollbackPending
+    throwerMediator, // mediator (F3 Commit 3)
     0, // permissionTimeoutMs (disabled)
     Infinity, // maxPendingPerSession (disabled)
     fileSystem,

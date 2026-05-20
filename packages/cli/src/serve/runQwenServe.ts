@@ -340,49 +340,90 @@ export async function runQwenServe(
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
   };
 
-  // #4282 fold-in 5 (Codex P2-1). Snapshot the workspace's preferred
-  // context filename at boot. The daemon parent doesn't go through
-  // `loadCliConfig` (it spawns an ACP child that does), so the
-  // process-global `getCurrentGeminiMdFilename()` stays on the
-  // default `QWEN.md` even when the workspace has
-  // `context.fileName: 'AGENTS.md'`. Reading merged settings here
-  // and forwarding to the bridge ensures `POST /workspace/init`
-  // writes the same file the ACP child reads. Settings changes made
-  // after daemon boot need a daemon restart to take effect — this
-  // value rarely changes, and a snapshot avoids re-reading on every
-  // init request.
-  //
-  // #4297 fold-in 2 (copilot S2): only accept string-typed values.
-  // Hand-edited `settings.json` could land an object / number /
-  // nested array in `context.fileName`; the previous `String(...)`
-  // coerce would have produced a literal `"[object Object]"`
-  // filename. Falling back to `undefined` makes the bridge use its
-  // own `getCurrentGeminiMdFilename()` default — a sane recovery
-  // posture that keeps the daemon alive instead of writing a
-  // garbage filename.
-  //
-  // #4297 fold-in 7 (qwen-latest critical, addresses #3262625091):
-  // wrap the boot-time `loadSettings` read in try/catch. A
-  // corrupted, malformed, or temporarily unreadable
-  // `settings.json` (partial write by a concurrent editor,
-  // permission denied, transient disk IO) used to throw
-  // synchronously and BLOCK DAEMON BOOT. Pre-PR this never
-  // happened because `loadSettings` was called lazily inside
-  // request handlers (which had their own error handling). We
-  // catch + log + fall back to the bridge's default filename so
-  // the daemon stays bootable.
+  // #4282 fold-in 5 + F3 Commit 5: read settings once at boot for
+  // both the workspace context filename (Codex P2-1) and the new
+  // F3 policy fields (permissionStrategy / consensusQuorum). Wrap
+  // in try/catch (#4297 fold-in 7) so a corrupted settings.json
+  // doesn't block daemon boot — context filename falls back to the
+  // bridge's default; policy validation rethrows because invalid
+  // policy is an explicit operator misconfiguration.
   let contextFilenameForInit: string | undefined;
+  let permissionPolicy:
+    | 'first-responder'
+    | 'designated'
+    | 'consensus'
+    | 'local-only'
+    | undefined;
+  let permissionConsensusQuorum: number | undefined;
+  const VALID_PERMISSION_POLICIES = new Set([
+    'first-responder',
+    'designated',
+    'consensus',
+    'local-only',
+  ]);
   try {
     const bootSettings = loadSettings(boundWorkspace);
     contextFilenameForInit = extractContextFilename(
       bootSettings.merged.context?.fileName,
     );
+    const policyConfig =
+      (bootSettings.merged as {
+        policy?: {
+          permissionStrategy?: string;
+          consensusQuorum?: number;
+        };
+      }).policy ?? {};
+    if (
+      policyConfig.permissionStrategy !== undefined &&
+      !VALID_PERMISSION_POLICIES.has(policyConfig.permissionStrategy)
+    ) {
+      throw new Error(
+        `qwen serve: invalid policy.permissionStrategy ` +
+          `"${String(policyConfig.permissionStrategy)}"; must be one of ` +
+          `${Array.from(VALID_PERMISSION_POLICIES).join(', ')}`,
+      );
+    }
+    if (
+      policyConfig.consensusQuorum !== undefined &&
+      (!Number.isInteger(policyConfig.consensusQuorum) ||
+        policyConfig.consensusQuorum < 1)
+    ) {
+      throw new Error(
+        `qwen serve: invalid policy.consensusQuorum ` +
+          `${String(policyConfig.consensusQuorum)}; must be a positive integer`,
+      );
+    }
+    if (
+      policyConfig.consensusQuorum !== undefined &&
+      policyConfig.permissionStrategy !== 'consensus'
+    ) {
+      writeStderrLine(
+        'qwen serve: policy.consensusQuorum is set but ' +
+          'policy.permissionStrategy is not "consensus"; the override will ' +
+          'be ignored.',
+      );
+    }
+    permissionPolicy = policyConfig.permissionStrategy as
+      | 'first-responder'
+      | 'designated'
+      | 'consensus'
+      | 'local-only'
+      | undefined;
+    permissionConsensusQuorum = policyConfig.consensusQuorum;
   } catch (err) {
+    // F3 invariant: invalid policy values must fail startup loudly.
+    // Distinguishable: our Error messages are prefixed `qwen serve:
+    // invalid policy.*`.
+    if (err instanceof Error && err.message.includes('invalid policy.')) {
+      throw err;
+    }
+    // All other settings-read failures (corrupted JSON, transient
+    // disk IO) fall back to defaults so the daemon stays bootable.
     writeStderrLine(
-      `qwen serve: could not read settings for context.fileName ` +
-        `(${err instanceof Error ? err.message : String(err)}); ` +
-        `falling back to the daemon's default context filename. ` +
-        `Restart with a valid settings.json to use a custom name.`,
+      `qwen serve: could not read settings for context.fileName / ` +
+        `policy.* (${err instanceof Error ? err.message : String(err)}); ` +
+        `falling back to defaults. Restart with a valid settings.json ` +
+        `to apply context.fileName / policy.* overrides.`,
     );
   }
 
@@ -395,6 +436,14 @@ export async function runQwenServe(
         : {}),
       boundWorkspace,
       childEnvOverrides,
+      // F3 Commit 5 — wire the validated policy/quorum from
+      // settings into the bridge. Bridge factory does its own
+      // defensive `Number.isInteger` recheck on the quorum so a
+      // direct embedder can't bypass our validation.
+      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+      ...(permissionConsensusQuorum !== undefined
+        ? { permissionConsensusQuorum }
+        : {}),
       // #4175 PR 22b/2: inject the daemon-host status provider so the
       // bridge can pull env / preflight cells through a typed seam
       // instead of importing daemon-host helpers directly. Production
