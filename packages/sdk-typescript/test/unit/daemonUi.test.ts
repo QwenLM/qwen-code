@@ -2563,3 +2563,225 @@ describe('daemon UI render contract (PR-D)', () => {
     expect(html).not.toContain('<b>');
   });
 });
+
+describe('daemon UI tool preview taxonomy — long-tail kinds (PR-F)', () => {
+  it('detects subagent_delegation from Anthropic-style Task tool', () => {
+    const preview = createDaemonToolPreview(
+      {
+        subagent_type: 'code-reviewer',
+        prompt: 'Review the auth module',
+        description: 'Security review',
+      },
+      { toolName: 'Task' },
+    );
+    expect(preview).toMatchObject({
+      kind: 'subagent_delegation',
+      agentName: 'code-reviewer',
+      task: 'Review the auth module',
+    });
+  });
+
+  it('detects search from grep-style toolName + results array', () => {
+    const preview = createDaemonToolPreview(
+      {
+        query: 'TODO',
+        results: ['src/foo.ts:12', 'src/bar.ts:45', 'src/baz.ts:78'],
+      },
+      { toolName: 'grep' },
+    );
+    expect(preview).toMatchObject({
+      kind: 'search',
+      query: 'TODO',
+      resultCount: 3,
+    });
+    expect((preview as { top?: string[] }).top).toEqual([
+      'src/foo.ts:12',
+      'src/bar.ts:45',
+      'src/baz.ts:78',
+    ]);
+  });
+
+  it('detects search with object-shaped results', () => {
+    const preview = createDaemonToolPreview(
+      {
+        query: 'auth',
+        resultCount: 12,
+        matches: [
+          { path: 'src/auth.ts', text: 'export function auth() {' },
+          { path: 'tests/auth.test.ts', text: 'describe(...)' },
+        ],
+      },
+      { toolName: 'ripgrep' },
+    );
+    expect(preview).toMatchObject({
+      kind: 'search',
+      query: 'auth',
+      resultCount: 12,
+    });
+    expect((preview as { top?: string[] }).top).toContain('src/auth.ts');
+  });
+
+  it('detects image_generation from dalle-style toolName + prompt', () => {
+    const preview = createDaemonToolPreview(
+      {
+        prompt: 'A purple sunset over mountains',
+        model: 'dall-e-3',
+        url: 'https://cdn.example.com/img.png',
+      },
+      { toolName: 'dalle3_generate' },
+    );
+    expect(preview).toMatchObject({
+      kind: 'image_generation',
+      prompt: 'A purple sunset over mountains',
+      model: 'dall-e-3',
+      thumbnailUrl: 'https://cdn.example.com/img.png',
+    });
+  });
+
+  it('detects code_block from explicit language + code', () => {
+    const preview = createDaemonToolPreview(
+      {
+        language: 'typescript',
+        code: 'const x: number = 1;',
+        origin: 'src/example.ts:42',
+      },
+      { toolName: 'snippet' },
+    );
+    expect(preview).toMatchObject({
+      kind: 'code_block',
+      language: 'typescript',
+      origin: 'src/example.ts:42',
+    });
+  });
+
+  it('detects code_block from REPL toolName even without explicit language', () => {
+    const preview = createDaemonToolPreview(
+      { code: 'print("hi")' },
+      { toolName: 'python_repl' },
+    );
+    expect(preview).toMatchObject({
+      kind: 'code_block',
+      code: 'print("hi")',
+    });
+  });
+
+  it('detects tabular from explicit columns + rows shape', () => {
+    const preview = createDaemonToolPreview({
+      columns: ['name', 'age', 'role'],
+      rows: [
+        ['Alice', '30', 'engineer'],
+        ['Bob', '25', 'designer'],
+      ],
+    });
+    expect(preview).toMatchObject({
+      kind: 'tabular',
+      columns: ['name', 'age', 'role'],
+      rows: [
+        ['Alice', '30', 'engineer'],
+        ['Bob', '25', 'designer'],
+      ],
+    });
+  });
+
+  it('detects tabular from legacy data: Array<Record<>> shape', () => {
+    const preview = createDaemonToolPreview({
+      data: [
+        { name: 'Alice', age: 30 },
+        { name: 'Bob', age: 25 },
+      ],
+    });
+    expect(preview).toMatchObject({
+      kind: 'tabular',
+      columns: ['name', 'age'],
+    });
+    expect((preview as { rows: unknown[] }).rows.length).toBe(2);
+  });
+
+  it('caps tabular rows at 50 and stamps totalRows', () => {
+    const data = Array.from({ length: 200 }, (_, i) => ({
+      id: i,
+      name: `row-${i}`,
+    }));
+    const preview = createDaemonToolPreview({ data });
+    expect(preview).toMatchObject({
+      kind: 'tabular',
+      totalRows: 200,
+    });
+    expect((preview as { rows: unknown[] }).rows.length).toBe(50);
+  });
+
+  it('subagent_delegation wins over file_diff for Task tool delegating an edit', async () => {
+    // Task tool with payload that LOOKS like a file edit (path + oldText/
+    // newText) — but the toolName is Task, so subagent wins.
+    const preview = createDaemonToolPreview(
+      {
+        subagent_type: 'edit-helper',
+        prompt: 'Edit foo.ts',
+        path: '/work/foo.ts',
+        oldText: 'a',
+        newText: 'b',
+      },
+      { toolName: 'Task' },
+    );
+    expect(preview.kind).toBe('subagent_delegation');
+  });
+
+  it('search preview renders to GFM markdown with bullet list', async () => {
+    const { daemonToolPreviewToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const md = daemonToolPreviewToMarkdown({
+      kind: 'search',
+      query: 'TODO',
+      resultCount: 3,
+      top: ['src/a.ts', 'src/b.ts'],
+    });
+    expect(md).toContain('**Search**');
+    expect(md).toContain('TODO');
+    expect(md).toContain('3 results');
+    expect(md).toContain('- src/a.ts');
+  });
+
+  it('tabular preview renders to GFM markdown table', async () => {
+    const { daemonToolPreviewToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const md = daemonToolPreviewToMarkdown({
+      kind: 'tabular',
+      columns: ['name', 'age'],
+      rows: [
+        ['Alice', '30'],
+        ['Bob', '25'],
+      ],
+    });
+    expect(md).toContain('| name | age |');
+    expect(md).toContain('| --- | --- |');
+    expect(md).toContain('| Alice | 30 |');
+  });
+
+  it('image_generation renders with embedded markdown image', async () => {
+    const { daemonToolPreviewToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const md = daemonToolPreviewToMarkdown({
+      kind: 'image_generation',
+      prompt: 'A sunset',
+      thumbnailUrl: 'https://cdn.example.com/x.png',
+    });
+    expect(md).toContain('![image](https://cdn.example.com/x.png)');
+    expect(md).toContain('A sunset');
+  });
+
+  it('subagent_delegation renders with delegate header + task quote', async () => {
+    const { daemonToolPreviewToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const md = daemonToolPreviewToMarkdown({
+      kind: 'subagent_delegation',
+      agentName: 'reviewer',
+      task: 'Review the PR',
+    });
+    expect(md).toContain('**Delegate → `reviewer`**');
+    expect(md).toContain('> Review the PR');
+  });
+});

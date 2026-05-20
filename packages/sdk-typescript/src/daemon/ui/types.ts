@@ -417,6 +417,51 @@ export type DaemonToolPreview =
       argsSummary?: string;
     }
   | {
+      kind: 'code_block';
+      /** Programming language identifier for syntax highlighting (best-effort). */
+      language?: string;
+      /** Code body. Renderers fence with triple-backtick markdown. */
+      code: string;
+      /** Optional file path / origin label, e.g., `path/to/file.ts:42`. */
+      origin?: string;
+    }
+  | {
+      kind: 'search';
+      /** Query string the tool sent. */
+      query: string;
+      /** Match count from `resultCount` / `total` / `results.length`. */
+      resultCount?: number;
+      /** Up to 5 top result lines (paths, snippets). */
+      top?: ReadonlyArray<string>;
+    }
+  | {
+      kind: 'tabular';
+      /** Column headers. Empty array when daemon doesn't stamp columns. */
+      columns: ReadonlyArray<string>;
+      /** Row values aligned with `columns`. Capped at 50 rows to bound payload. */
+      rows: ReadonlyArray<ReadonlyArray<string>>;
+      /** Total row count if rows are truncated; undefined when full. */
+      totalRows?: number;
+    }
+  | {
+      kind: 'image_generation';
+      /** Prompt that produced the image. */
+      prompt: string;
+      /** Optional thumbnail / URL for inline preview. */
+      thumbnailUrl?: string;
+      /** Optional model id (e.g., `dall-e-3`, `qwen-image`). */
+      model?: string;
+    }
+  | {
+      kind: 'subagent_delegation';
+      /** Sub-agent name receiving the delegation. */
+      agentName: string;
+      /** Task description / prompt sent to the sub-agent. */
+      task: string;
+      /** Optional parent delegation id for chained subagents. */
+      parentDelegationId?: string;
+    }
+  | {
       kind: 'key_value';
       rows: Array<{ label: string; value: string }>;
     }

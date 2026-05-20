@@ -175,6 +175,69 @@ export function daemonToolPreviewToMarkdown(
       ]
         .filter(Boolean)
         .join('\n');
+    case 'code_block':
+      return [
+        preview.origin ? `_${preview.origin}_` : null,
+        '```' + (preview.language ?? ''),
+        cap(preview.code),
+        '```',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    case 'search': {
+      const lines = [
+        `**Search** \`${preview.query}\``,
+        preview.resultCount !== undefined
+          ? `_${preview.resultCount} result${preview.resultCount === 1 ? '' : 's'}_`
+          : null,
+      ];
+      if (preview.top && preview.top.length > 0) {
+        for (const result of preview.top) {
+          lines.push(`- ${result}`);
+        }
+      }
+      return lines.filter(Boolean).join('\n');
+    }
+    case 'tabular': {
+      if (preview.columns.length === 0) return '_(empty table)_';
+      const headerRow = `| ${preview.columns.join(' | ')} |`;
+      const sepRow = `| ${preview.columns.map(() => '---').join(' | ')} |`;
+      const bodyRows = preview.rows.map(
+        (row) =>
+          `| ${preview.columns
+            .map((_, idx) => cap(String(row[idx] ?? '')).replace(/\|/g, '\\|'))
+            .join(' | ')} |`,
+      );
+      const lines = [headerRow, sepRow, ...bodyRows];
+      if (preview.totalRows !== undefined && preview.totalRows > preview.rows.length) {
+        lines.push(
+          `_… ${preview.totalRows - preview.rows.length} more row(s) not shown_`,
+        );
+      }
+      return lines.join('\n');
+    }
+    case 'image_generation':
+      return [
+        `**Image generation**`,
+        `> ${cap(preview.prompt)}`,
+        preview.model ? `_model: ${preview.model}_` : null,
+        preview.thumbnailUrl
+          ? `![image](${opts.sanitizeUrls ? sanitizeUrl(preview.thumbnailUrl) : preview.thumbnailUrl})`
+          : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+    case 'subagent_delegation':
+      return [
+        `**Delegate → \`${preview.agentName}\`**`,
+        '',
+        `> ${cap(preview.task)}`,
+        preview.parentDelegationId
+          ? `_(chained from ${preview.parentDelegationId})_`
+          : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
     case 'key_value':
       return preview.rows
         .map((row) => `- **${row.label}:** ${cap(row.value)}`)
@@ -273,6 +336,33 @@ function daemonToolPreviewToPlainText(preview: DaemonToolPreview): string {
       return `${preview.method ?? 'GET'} ${preview.url}`;
     case 'mcp_invocation':
       return `${preview.serverId}::${preview.toolName}${preview.argsSummary ? ` (${preview.argsSummary})` : ''}`;
+    case 'code_block':
+      return preview.origin ? `[${preview.origin}]\n${preview.code}` : preview.code;
+    case 'search':
+      return [
+        `search: ${preview.query}`,
+        preview.resultCount !== undefined ? `(${preview.resultCount} results)` : null,
+        ...(preview.top ?? []).map((r) => `  ${r}`),
+      ]
+        .filter(Boolean)
+        .join('\n');
+    case 'tabular': {
+      if (preview.columns.length === 0) return '(empty table)';
+      const lines = [preview.columns.join('\t')];
+      for (const row of preview.rows) {
+        lines.push(
+          preview.columns.map((_, idx) => String(row[idx] ?? '')).join('\t'),
+        );
+      }
+      if (preview.totalRows !== undefined && preview.totalRows > preview.rows.length) {
+        lines.push(`... ${preview.totalRows - preview.rows.length} more row(s)`);
+      }
+      return lines.join('\n');
+    }
+    case 'image_generation':
+      return `image: "${preview.prompt}"${preview.model ? ` (${preview.model})` : ''}`;
+    case 'subagent_delegation':
+      return `delegate to ${preview.agentName}: ${preview.task}`;
     case 'key_value':
       return preview.rows.map((r) => `${r.label}: ${r.value}`).join('\n');
     case 'generic':

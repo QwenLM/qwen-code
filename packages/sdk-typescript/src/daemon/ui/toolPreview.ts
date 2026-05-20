@@ -50,11 +50,23 @@ export function createDaemonToolPreview(
     return { kind: 'ask_user_question', questions: askUserQuestions };
   }
 
-  // PR-C: try specific tool-shape detectors before falling back to
+  // PR-C / PR-F: try specific tool-shape detectors before falling back to
   // generic command / key_value detection. Detector order matters —
   // most specific wins.
   const mcpPreview = detectMcpInvocation(input, opts);
   if (mcpPreview) return mcpPreview;
+
+  // PR-F detectors (subagent_delegation / search / image_generation
+  // before file_diff because some sub-agent tool calls embed file ops
+  // in their payload — provenance still wins for MCP though).
+  const subagent = detectSubagentDelegation(input, opts);
+  if (subagent) return subagent;
+
+  const search = detectSearch(input, opts);
+  if (search) return search;
+
+  const imageGeneration = detectImageGeneration(input, opts);
+  if (imageGeneration) return imageGeneration;
 
   const fileDiff = detectFileDiff(input);
   if (fileDiff) return fileDiff;
@@ -64,6 +76,12 @@ export function createDaemonToolPreview(
 
   const webFetch = detectWebFetch(input);
   if (webFetch) return webFetch;
+
+  const codeBlock = detectCodeBlock(input, opts);
+  if (codeBlock) return codeBlock;
+
+  const tabular = detectTabular(input);
+  if (tabular) return tabular;
 
   if (isRecord(input)) {
     const command = getFirstString(input, ['command', 'cmd']);
@@ -291,4 +309,232 @@ function collectPreviewRows(
     });
   }
   return rows;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * PR-F detectors — long-tail preview kinds
+ * ──────────────────────────────────────────────────────────────────────── */
+
+const MAX_TABULAR_ROWS = 50;
+const MAX_SEARCH_TOP_RESULTS = 5;
+
+/**
+ * Detect sub-agent delegation. Matches toolName containing "delegate" /
+ * "subagent" / "spawn-task" / "Task" (Anthropic-style) plus an explicit
+ * agent name or prompt-like field.
+ */
+function detectSubagentDelegation(
+  input: unknown,
+  opts: { title?: string; toolName?: string; toolKind?: string },
+): DaemonToolPreview | undefined {
+  const toolName = opts.toolName ?? '';
+  const looksLikeDelegate =
+    /(?:^|_)(?:delegate|subagent|spawn[_-]?task|task)$/i.test(toolName) ||
+    /agent/i.test(opts.toolKind ?? '');
+  if (!looksLikeDelegate) return undefined;
+  if (!isRecord(input)) return undefined;
+  const agentName = getFirstString(input, [
+    'subagent_type',
+    'agent',
+    'agentName',
+    'agent_name',
+    'subagent',
+  ]);
+  const task = getFirstString(input, [
+    'prompt',
+    'task',
+    'description',
+    'instruction',
+    'query',
+  ]);
+  if (!agentName && !task) return undefined;
+  const parentDelegationId = getFirstString(input, [
+    'parentDelegationId',
+    'parent_delegation_id',
+    'parent_id',
+  ]);
+  return {
+    kind: 'subagent_delegation',
+    agentName: agentName ?? 'subagent',
+    task: task ?? '(no task description)',
+    ...(parentDelegationId ? { parentDelegationId } : {}),
+  };
+}
+
+/**
+ * Detect search / grep tools. Requires a `query` / `pattern` / `search`
+ * field plus tool name hinting at search, OR an explicit result count.
+ */
+function detectSearch(
+  input: unknown,
+  opts: { title?: string; toolName?: string; toolKind?: string },
+): DaemonToolPreview | undefined {
+  if (!isRecord(input)) return undefined;
+  const query = getFirstString(input, ['query', 'pattern', 'search', 'q']);
+  if (!query) return undefined;
+  const toolName = opts.toolName ?? '';
+  const looksLikeSearch =
+    /(grep|search|find|ripgrep|rg|glob|lookup)/i.test(toolName) ||
+    typeof input['resultCount'] === 'number' ||
+    Array.isArray(input['results']) ||
+    Array.isArray(input['matches']);
+  if (!looksLikeSearch) return undefined;
+  const resultCount =
+    typeof input['resultCount'] === 'number'
+      ? (input['resultCount'] as number)
+      : typeof input['total'] === 'number'
+        ? (input['total'] as number)
+        : Array.isArray(input['results'])
+          ? (input['results'] as unknown[]).length
+          : Array.isArray(input['matches'])
+            ? (input['matches'] as unknown[]).length
+            : undefined;
+  let top: string[] | undefined;
+  const rawResults =
+    (input['results'] as unknown) ?? (input['matches'] as unknown);
+  if (Array.isArray(rawResults)) {
+    top = rawResults
+      .slice(0, MAX_SEARCH_TOP_RESULTS)
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (isRecord(item)) {
+          return (
+            getFirstString(item, ['path', 'file', 'name', 'title', 'text']) ??
+            stringifyJson(item).slice(0, 120)
+          );
+        }
+        return String(item);
+      })
+      .filter(Boolean);
+    if (top.length === 0) top = undefined;
+  }
+  return {
+    kind: 'search',
+    query,
+    ...(resultCount !== undefined ? { resultCount } : {}),
+    ...(top ? { top } : {}),
+  };
+}
+
+/**
+ * Detect image generation tools. Matches toolName like `image` / `diffusion`
+ * / `dalle` / `imagen` / `flux` plus a `prompt` field.
+ */
+function detectImageGeneration(
+  input: unknown,
+  opts: { title?: string; toolName?: string; toolKind?: string },
+): DaemonToolPreview | undefined {
+  const toolName = opts.toolName ?? '';
+  const looksLikeImageGen =
+    /(image[_-]?gen|generate[_-]?image|diffusion|dalle|imagen|flux|stable[_-]?diffusion|midjourney|sora)/i.test(
+      toolName,
+    );
+  if (!looksLikeImageGen) return undefined;
+  if (!isRecord(input)) return undefined;
+  const prompt = getFirstString(input, ['prompt', 'description', 'query']);
+  if (!prompt) return undefined;
+  const thumbnailUrl = getFirstString(input, [
+    'thumbnailUrl',
+    'thumbnail',
+    'url',
+    'imageUrl',
+    'preview',
+  ]);
+  const model = getFirstString(input, ['model', 'modelId', 'model_name']);
+  return {
+    kind: 'image_generation',
+    prompt,
+    ...(thumbnailUrl ? { thumbnailUrl } : {}),
+    ...(model ? { model } : {}),
+  };
+}
+
+/**
+ * Detect code-block style output. Matches an explicit `code` / `language`
+ * pair (often used by REPL / formatter / generator tools), or a `language`
+ * + `text` combo. Heuristic-only — falls through when ambiguous.
+ */
+function detectCodeBlock(
+  input: unknown,
+  opts: { title?: string; toolName?: string; toolKind?: string },
+): DaemonToolPreview | undefined {
+  if (!isRecord(input)) return undefined;
+  const code = getFirstString(input, ['code', 'snippet', 'source']);
+  if (!code) return undefined;
+  const language = getFirstString(input, [
+    'language',
+    'lang',
+    'codeLanguage',
+    'syntax',
+  ]);
+  // Require either an explicit language OR a tool name that suggests
+  // code (formatter/repl/generator) to avoid grabbing every `code: '...'`
+  // field on unrelated tools.
+  const toolName = opts.toolName ?? '';
+  const codeTool = /(repl|format|prettier|eslint|tsc|compile|exec[_-]?code)/i.test(
+    toolName,
+  );
+  if (!language && !codeTool) return undefined;
+  const origin = getFirstString(input, ['origin', 'source_location', 'path']);
+  return {
+    kind: 'code_block',
+    code,
+    ...(language ? { language } : {}),
+    ...(origin ? { origin } : {}),
+  };
+}
+
+/**
+ * Detect tabular output. Matches `columns: string[]` + `rows: unknown[][]`
+ * exact shape, or `data: Array<Record<string, unknown>>` legacy shape.
+ */
+function detectTabular(input: unknown): DaemonToolPreview | undefined {
+  if (!isRecord(input)) return undefined;
+  // Strict shape: columns + rows
+  const explicitColumns = input['columns'];
+  const explicitRows = input['rows'];
+  if (Array.isArray(explicitColumns) && Array.isArray(explicitRows)) {
+    const columns = explicitColumns
+      .filter((c): c is string => typeof c === 'string')
+      .slice(0, 30);
+    if (columns.length === 0) return undefined;
+    const rows = explicitRows
+      .slice(0, MAX_TABULAR_ROWS)
+      .map((row) =>
+        Array.isArray(row)
+          ? row.map((cell) =>
+              typeof cell === 'string' ? cell : stringifyJson(cell).slice(0, 80),
+            )
+          : [],
+      );
+    return {
+      kind: 'tabular',
+      columns,
+      rows,
+      ...(explicitRows.length > rows.length
+        ? { totalRows: explicitRows.length }
+        : {}),
+    };
+  }
+  // Legacy shape: array of objects (each row a record). Infer columns from
+  // the first row's keys.
+  const data = input['data'] ?? input['records'];
+  if (Array.isArray(data) && data.length > 0 && isRecord(data[0])) {
+    const columns = Object.keys(data[0] as Record<string, unknown>).slice(0, 30);
+    if (columns.length === 0) return undefined;
+    const rows = data.slice(0, MAX_TABULAR_ROWS).map((row) => {
+      const r = row as Record<string, unknown>;
+      return columns.map((col) => {
+        const v = r[col];
+        return typeof v === 'string' ? v : stringifyJson(v).slice(0, 80);
+      });
+    });
+    return {
+      kind: 'tabular',
+      columns,
+      rows,
+      ...(data.length > rows.length ? { totalRows: data.length } : {}),
+    };
+  }
+  return undefined;
 }
