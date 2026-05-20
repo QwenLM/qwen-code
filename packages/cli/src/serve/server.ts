@@ -134,6 +134,17 @@ export function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
  * The audit-emit defaults to `createDefaultFsAuditEmit()` (the
  * throttled stderr warning) when not provided.
  */
+/**
+ * Module-scoped once-per-process guard for the `createServeApp`
+ * default-trust stderr warning (#4334 wenshao review DWrbn). Without
+ * this, `server.test.ts`'s ~25 `createServeApp` calls would flood
+ * stderr with identical lines, masking genuine failures in CI logs.
+ * Module scope (not closure-per-app) is intentional — the warning is
+ * a *posture* statement about this binary, not about each individual
+ * createServeApp instance.
+ */
+let warnedDefaultTrust = false;
+
 export function resolveBridgeFsFactory(input: {
   boundWorkspace: string;
   injected?: WorkspaceFileSystemFactory;
@@ -304,7 +315,14 @@ export function createServeApp(
   // Suppress the warning when `deps.bridge` is provided — that embed
   // owns its own fileSystem wiring (the default adapter never runs) so
   // the warning's claim about ACP writes rejecting would be false.
-  if (!deps.fsFactory && !deps.bridge) {
+  //
+  // Throttled to fire ONCE per process (#4334 wenshao review DWrbn):
+  // `server.test.ts` calls `createServeApp` ~25 times and the
+  // unthrottled warning floods stderr, masking genuine failures in CI
+  // output. Operators see the warning the first time and can take
+  // action; subsequent calls don't add information.
+  if (!deps.fsFactory && !deps.bridge && !warnedDefaultTrust) {
+    warnedDefaultTrust = true;
     process.stderr.write(
       'qwen serve: createServeApp default fsFactory uses trusted=false ' +
         '— agent ACP writeTextFile calls will reject with untrusted_workspace. ' +

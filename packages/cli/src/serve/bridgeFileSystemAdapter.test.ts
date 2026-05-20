@@ -368,30 +368,37 @@ describe('createBridgeFileSystemAdapter', () => {
   });
 
   describe('boundary enforcement', () => {
-    it('rejects writes outside the bound workspace', async () => {
+    it('rejects writes outside the bound workspace with path_outside_workspace', async () => {
+      // wenshao #4334 review (DWrbl): bare `.rejects.toThrow()` would
+      // also pass on an incidental OS-level EACCES (e.g. CI container
+      // refusing /etc/passwd) or any future refactor that throws a
+      // different error class before the boundary check runs. Pin the
+      // specific FsError.kind so the test verifies boundary
+      // enforcement is what rejects, not an accident.
       const adapter = createBridgeFileSystemAdapter(
         buildFactory({ trusted: true }),
       );
-      // `/etc/passwd` is outside any tmpdir-based workspace.
-      await expect(
-        adapter.writeText({
+      const err = await adapter
+        .writeText({
           path: '/etc/passwd',
           content: 'pwned',
           sessionId: 'sess:test',
-        }),
-      ).rejects.toThrow();
+        })
+        .catch((e: unknown) => e);
+      expect((err as { kind?: string }).kind).toBe('path_outside_workspace');
     });
 
-    it('rejects reads outside the bound workspace', async () => {
+    it('rejects reads outside the bound workspace with path_outside_workspace', async () => {
       const adapter = createBridgeFileSystemAdapter(
         buildFactory({ trusted: true }),
       );
-      await expect(
-        adapter.readText({
+      const err = await adapter
+        .readText({
           path: '/etc/passwd',
           sessionId: 'sess:test',
-        }),
-      ).rejects.toThrow();
+        })
+        .catch((e: unknown) => e);
+      expect((err as { kind?: string }).kind).toBe('path_outside_workspace');
     });
   });
 

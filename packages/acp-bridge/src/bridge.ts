@@ -2139,6 +2139,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // helper call without first landing the deterministic overlap
       // test (deferred follow-up).
       const ci = channelInfoForEntry(entry);
+      if (!ci) {
+        // Diagnostic visibility (#4334 wenshao review DWrbr): when the
+        // entry's channel has already been torn down out-of-band, the
+        // cleanup branches below all short-circuit silently. The
+        // "closing session" log at the top of this method fires
+        // regardless, so the close *call* is visible — but the fact
+        // that channel-side bookkeeping was skipped is not. Sibling
+        // methods (e.g. `requestSessionStatus`) surface this as
+        // `SessionNotFoundError`; `closeSession` is intentionally
+        // idempotent so we just log instead of throwing.
+        writeStderrLine(
+          `qwen serve: closeSession channelInfoForEntry returned undefined ` +
+            `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
+        );
+      }
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
@@ -3197,6 +3212,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `channelInfoForEntry(entry)` until the deterministic overlap
       // test lands.
       const ci = channelInfoForEntry(entry);
+      if (!ci) {
+        // Same diagnostic as `closeSession` (#4334 wenshao review
+        // DWrbr) — when the entry's channel is already gone, the
+        // cleanup below short-circuits silently; surface that.
+        writeStderrLine(
+          `qwen serve: killSession channelInfoForEntry returned undefined ` +
+            `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
+        );
+      }
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }

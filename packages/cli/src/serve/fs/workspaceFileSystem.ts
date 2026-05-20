@@ -144,8 +144,22 @@ export interface ReadBytesOutcome {
  */
 export type WriteMode = 'create' | 'replace' | 'overwrite';
 
+/**
+ * Subset of `WriteMode` that `writeTextAtomic` accepts. `'overwrite'`
+ * is intentionally excluded: the helper underneath
+ * (`atomicWriteTextResolvedFile`) supports it for the `writeTextOverwrite`
+ * method, but `writeTextAtomic`'s `existingMeta`-detection +
+ * `created`-derivation branches assume 'create' | 'replace' shape.
+ * Narrowing here prevents callers from writing
+ * `writeTextAtomic(p, c, {mode: 'overwrite'})` and hitting the runtime
+ * `parse_error` from `validateWriteTextAtomicOptions` — TypeScript
+ * catches it at compile time and points at the right alternative
+ * (`writeTextOverwrite`).
+ */
+export type AtomicWriteMode = Exclude<WriteMode, 'overwrite'>;
+
 export interface WriteTextAtomicOptions extends WriteTextFileOptions {
-  mode: WriteMode;
+  mode: AtomicWriteMode;
   expectedHash?: ContentHash;
   lineEnding?: 'crlf' | 'lf';
 }
