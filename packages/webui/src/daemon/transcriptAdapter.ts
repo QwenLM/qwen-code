@@ -5,6 +5,8 @@
  */
 
 import {
+  daemonBlockToMarkdown,
+  daemonToolPreviewToMarkdown,
   isDaemonUiSensitiveKey,
   sanitizeDaemonTerminalText,
   type DaemonTranscriptBlock,
@@ -18,9 +20,35 @@ import type {
   ToolCallStatus,
 } from '../components/toolcalls/shared/index.js';
 
+export interface DaemonTranscriptAdapterOptions {
+  /**
+   * When true, user/assistant/thought block content is projected via the
+   * SDK's `daemonBlockToMarkdown` helper instead of raw sanitized text.
+   * This gives the WebUI's markdown renderer (markdown-it) richer
+   * formatting — bold "You" labels, thought blockquotes, structured
+   * permission lists.
+   *
+   * Default: `false` — preserves the legacy plain-text behavior.
+   * Pass `true` to opt into the PR-D render contract.
+   */
+  useMarkdown?: boolean;
+  /**
+   * When true, tool block `details`/`rawOutput` is enriched with the
+   * preview's markdown projection (file_diff fenced as diff, mcp_invocation
+   * as server::tool, tabular as GFM table). Renderers that already have
+   * structured renderers for each preview kind should leave this `false`.
+   *
+   * Default: `false`.
+   */
+  enrichToolDetailsWithPreview?: boolean;
+}
+
 export function daemonTranscriptToUnifiedMessages(
   blocks: readonly DaemonTranscriptBlock[],
+  options: DaemonTranscriptAdapterOptions = {},
 ): UnifiedMessage[] {
+  const useMarkdown = options.useMarkdown ?? false;
+  const enrichToolDetails = options.enrichToolDetailsWithPreview ?? false;
   const visibleBlocks = blocks.filter((block) => block.kind !== 'debug');
   return visibleBlocks.flatMap((block, index, arr): UnifiedMessage[] => {
     const prev = arr[index - 1];
@@ -36,7 +64,9 @@ export function daemonTranscriptToUnifiedMessages(
             id: block.id,
             type: 'user',
             timestamp,
-            content: sanitizeDisplayText(block.text),
+            content: useMarkdown
+              ? sanitizeDisplayText(daemonBlockToMarkdown(block))
+              : sanitizeDisplayText(block.text),
             isFirst,
             isLast,
           },
@@ -47,7 +77,9 @@ export function daemonTranscriptToUnifiedMessages(
             id: block.id,
             type: 'assistant',
             timestamp,
-            content: sanitizeDisplayText(block.text),
+            content: useMarkdown
+              ? sanitizeDisplayText(daemonBlockToMarkdown(block))
+              : sanitizeDisplayText(block.text),
             isFirst,
             isLast,
           },
@@ -58,7 +90,9 @@ export function daemonTranscriptToUnifiedMessages(
             id: block.id,
             type: 'thinking',
             timestamp,
-            content: sanitizeDisplayText(block.text),
+            content: useMarkdown
+              ? sanitizeDisplayText(daemonBlockToMarkdown(block))
+              : sanitizeDisplayText(block.text),
             isFirst,
             isLast,
           },
@@ -69,7 +103,7 @@ export function daemonTranscriptToUnifiedMessages(
             id: block.id,
             type: 'tool_call',
             timestamp,
-            toolCall: daemonToolBlockToToolCallData(block),
+            toolCall: daemonToolBlockToToolCallData(block, enrichToolDetails),
             isFirst,
             isLast,
           },
@@ -164,7 +198,15 @@ export function daemonTranscriptToUnifiedMessages(
 
 function daemonToolBlockToToolCallData(
   block: DaemonToolTranscriptBlock,
+  enrichDetails: boolean = false,
 ): ToolCallData {
+  // When enrichDetails is true, surface the preview's markdown projection
+  // as part of the tool card content. This lets renderers without
+  // per-preview-kind components still show file_diff / mcp_invocation /
+  // tabular previews in a useful form.
+  const previewMarkdown = enrichDetails
+    ? sanitizeDisplayText(daemonToolPreviewToMarkdown(block.preview))
+    : undefined;
   return {
     toolCallId: block.toolCallId,
     kind: block.toolKind ?? block.toolName ?? 'tool',
@@ -174,7 +216,7 @@ function daemonToolBlockToToolCallData(
       | object
       | string
       | undefined,
-    rawOutput: sanitizeDaemonValue(block.rawOutput),
+    rawOutput: previewMarkdown ?? sanitizeDaemonValue(block.rawOutput),
     ...(block.content !== undefined
       ? { content: normalizeToolContent(block.content) }
       : {}),
@@ -217,7 +259,7 @@ function normalizePermissionStatus(
   resolved: string | undefined,
 ): ToolCallStatus {
   if (!resolved) return 'pending';
-  const [primary = '', ...detailParts] = resolved.toLowerCase().split(':');
+  const [primary = ''] = resolved.toLowerCase().split(':');
   switch (primary) {
     case 'cancel':
     case 'cancelled':
@@ -251,8 +293,8 @@ function normalizePermissionStatus(
       return 'completed';
     case 'selected':
       // A selected option resolves the prompt even when the option id is a
-      // domain value like a city name rather than allow/deny terminology.
-      return classifyPermissionToken(detailParts.join(':')) ?? 'completed';
+      // domain value like a city name or an option id containing deny/cancel.
+      return 'completed';
     default:
       return classifyPermissionToken(primary) ?? 'failed';
   }
