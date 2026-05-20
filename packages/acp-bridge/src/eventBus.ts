@@ -357,6 +357,45 @@ export class EventBus {
     this.subs.add(sub);
 
     if (opts.lastEventId !== undefined) {
+      // Detect ring eviction on resume (#4175 F4 prereq, Ilya0527
+      // issue #15): if the earliest event still in the ring has
+      // `id > lastEventId + 1`, then events between `lastEventId + 1`
+      // and `earliestInRing - 1` were evicted before the consumer
+      // reconnected — the consumer's reducer has a gap it doesn't
+      // know about. Pre-fix the resume silently succeeded ("you
+      // caught up!") even though the SDK reducer's state was now
+      // diverged from the daemon's truth.
+      //
+      // Emit `state_resync_required` as a TERMINAL synthetic frame
+      // (no `id` — same pattern as `client_evicted` so it doesn't
+      // burn a slot in the per-session monotonic sequence other
+      // subscribers observe). The SDK reducer treats this as "your
+      // state is stale; call loadSession before applying any further
+      // deltas" — see `awaitingResync` flag in the SDK reducer.
+      //
+      // Replay continues after the resync frame (per design): the
+      // SDK reducer will auto-skip delta application until
+      // loadSession clears the flag, but the frames stay on the
+      // wire so SDK has the option to compute a "what you missed"
+      // diff later. This is network-friendly (no extra reconnect)
+      // and matches the existing `client_evicted` semantics
+      // (terminal-on-close, but consumer can still drain queued
+      // frames first).
+      const earliestInRing = this.ring[0]?.id;
+      if (
+        earliestInRing !== undefined &&
+        earliestInRing > opts.lastEventId + 1
+      ) {
+        queue.forcePush({
+          v: EVENT_SCHEMA_VERSION,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: opts.lastEventId,
+            earliestAvailableId: earliestInRing,
+          },
+        });
+      }
       // Force-push replay frames so they bypass the per-subscriber size
       // cap. The cap protects against a slow live consumer; replay is
       // already historical and silently dropping it would undermine the

@@ -274,13 +274,21 @@ describe('EventBus', () => {
     // A `lastEventId: 0` resume with a queue cap larger than the ring
     // collects exactly 8000 live frames; ids start at 2 because id=1
     // was the one shifted out of the ring.
+    //
+    // #4175 F4 prereq: `lastEventId: 0` + earliest-id-in-ring = 2
+    // crosses the eviction-detection threshold (earliest > last + 1),
+    // so an extra synthetic `state_resync_required` frame is emitted
+    // FIRST. The filter below restricts to live ids, which excludes
+    // the synthetic (no id), so the original "8000 live frames"
+    // invariant is preserved.
     const abort = new AbortController();
     const iter = bus.subscribe({
       lastEventId: 0,
       maxQueued: 9000,
       signal: abort.signal,
     });
-    const events = await collect(iter, 8000);
+    // Collect 8001 frames now: 1 synthetic resync + 8000 live.
+    const events = await collect(iter, 8001);
     abort.abort();
     const liveIds = events
       .filter((e) => e.id !== undefined)
@@ -288,6 +296,8 @@ describe('EventBus', () => {
     expect(liveIds).toHaveLength(8000);
     expect(liveIds[0]).toBe(2);
     expect(liveIds[liveIds.length - 1]).toBe(8001);
+    // The synthetic resync frame is the first one.
+    expect(events[0]?.type).toBe('state_resync_required');
   });
 
   it('eviction detaches the abort listener from a stalled consumer (BmJT1)', async () => {
@@ -480,9 +490,138 @@ describe('EventBus', () => {
     const out: BridgeEvent[] = [];
     for await (const e of iter) {
       out.push(e);
-      if (out.length === 3) break;
+      // After the state_resync_required frame (synthetic) + 3 replay
+      // frames, we're done.
+      if (out.length === 4) break;
     }
-    expect(out.map((e) => e.id)).toEqual([3, 4, 5]);
+    // First frame is the synthetic state_resync_required (no id).
+    expect(out[0]?.type).toBe('state_resync_required');
+    expect(out[0]?.id).toBeUndefined();
+    // Then the 3 surviving ring frames.
+    expect(out.slice(1).map((e) => e.id)).toEqual([3, 4, 5]);
     abort.abort();
+  });
+
+  describe('state_resync_required (#4175 F4 prereq, Ilya0527 issue #15)', () => {
+    it('emits state_resync_required when lastEventId is past the ring head', async () => {
+      // Setup: ring holds 3, ids 1..5 published → ring contains [3,4,5].
+      // Consumer reconnects with Last-Event-ID: 1 → events 2 was evicted.
+      // Daemon must emit state_resync_required FIRST so SDK reducer
+      // knows its state is stale before applying any replay frames.
+      const bus = new EventBus(3);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 1,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        if (out.length === 4) break;
+      }
+      // First frame is the resync terminal (synthetic, no id).
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(out[0]?.id).toBeUndefined();
+      const data = out[0]?.data as {
+        reason: string;
+        lastDeliveredId: number;
+        earliestAvailableId: number;
+      };
+      expect(data.reason).toBe('ring_evicted');
+      expect(data.lastDeliveredId).toBe(1);
+      expect(data.earliestAvailableId).toBe(3); // event 2 was evicted
+      // Replay continues after the resync frame (per design — SDK can
+      // compute "what you missed" diff later) — so we still get the
+      // 3 surviving ring frames.
+      expect(out.slice(1).map((e) => e.id)).toEqual([3, 4, 5]);
+      abort.abort();
+    });
+
+    it('does NOT emit state_resync_required when lastEventId is in the ring', async () => {
+      // Consumer's lastEventId is well within the ring → no gap → no
+      // resync needed.
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 2,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        if (out.length === 3) break;
+      }
+      // No resync frame — just the 3 replay frames (ids 3, 4, 5).
+      expect(out.map((e) => e.id)).toEqual([3, 4, 5]);
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      abort.abort();
+    });
+
+    it('does NOT emit state_resync_required at the exact boundary (lastEventId === earliest - 1)', async () => {
+      // Boundary: ring's earliest id is N, lastEventId is N-1.
+      // No gap → no resync. Off-by-one guard.
+      const bus = new EventBus(3);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      // Ring is now [3, 4, 5]. lastEventId=2 means "I have 1 and 2";
+      // next expected is 3, which IS in the ring. No gap.
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 2,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        if (out.length === 3) break;
+      }
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      expect(out.map((e) => e.id)).toEqual([3, 4, 5]);
+      abort.abort();
+    });
+
+    it('does NOT emit state_resync_required when ring is empty', async () => {
+      // No publishes yet → earliestInRing is undefined → resync check
+      // skipped. Subscriber just waits for live events.
+      const bus = new EventBus(10);
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 5,
+        signal: abort.signal,
+      });
+      // Publish one live event AFTER subscribe to confirm the stream works.
+      setTimeout(() => bus.publish({ type: 'foo', data: 1 }), 0);
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        if (out.length === 1) break;
+      }
+      // No resync frame — just the one live event.
+      expect(out[0]?.type).toBe('foo');
+      expect(out[0]?.id).toBe(1);
+      abort.abort();
+    });
+
+    it('does NOT emit state_resync_required when no lastEventId is provided (fresh subscribe)', async () => {
+      // First-time subscriber has no prior state to resync — resync
+      // would be meaningless. Check the no-lastEventId branch is
+      // skipped entirely.
+      const bus = new EventBus(3);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({ signal: abort.signal });
+      // Live-only — publish one event after subscribe to give the
+      // iterator something to yield.
+      setTimeout(() => bus.publish({ type: 'foo', data: 99 }), 0);
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        if (out.length === 1) break;
+      }
+      expect(out[0]?.type).toBe('foo');
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      abort.abort();
+    });
   });
 });

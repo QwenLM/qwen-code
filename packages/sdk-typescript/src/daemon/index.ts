@@ -51,6 +51,10 @@ export type {
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonControlEvent,
+  // #4175 F4 prereq (Ilya0527 issue #15) — daemon-emitted resync
+  // signal for SSE reconnects past the ring eviction boundary.
+  DaemonStateResyncRequiredData,
+  DaemonStateResyncRequiredEvent,
   DaemonMcpServerRestartedData,
   DaemonMcpServerRestartedEvent,
   DaemonMcpServerRestartRefusedData,

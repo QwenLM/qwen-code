@@ -2192,4 +2192,204 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.lastEventId).toBe(99);
     });
   });
+
+  describe('state_resync_required (#4175 F4 prereq, Ilya0527 issue #15)', () => {
+    it('sets awaitingResync + records the resync data when daemon emits state_resync_required', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'state_resync_required',
+        data: {
+          reason: 'ring_evicted',
+          lastDeliveredId: 5,
+          earliestAvailableId: 12,
+        },
+      });
+      expect(state.awaitingResync).toBe(true);
+      expect(state.resyncRequiredCount).toBe(1);
+      expect(state.lastResyncRequired).toEqual({
+        reason: 'ring_evicted',
+        lastDeliveredId: 5,
+        earliestAvailableId: 12,
+      });
+    });
+
+    it('auto-skips delta events (session_update) while awaitingResync is true', () => {
+      // Step 1: daemon emits resync → flag set.
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      // Step 2: subsequent session_update would normally set
+      // `lastSessionUpdate` — but awaitingResync auto-skips it.
+      const skipped = reduceDaemonSessionEvent(afterResync, {
+        id: 13,
+        v: 1,
+        type: 'session_update',
+        data: { sessionId: 's-X', phase: 'prompting' },
+      });
+      // lastSessionUpdate unchanged (skipped), lastEventId DID advance.
+      expect(skipped.lastSessionUpdate).toBeUndefined();
+      expect(skipped.lastEventId).toBe(13);
+      expect(skipped.awaitingResync).toBe(true);
+    });
+
+    it('auto-skips permission_request while awaitingResync (no pendingPermissions mutation)', () => {
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      const skipped = reduceDaemonSessionEvent(afterResync, {
+        id: 13,
+        v: 1,
+        type: 'permission_request',
+        data: {
+          requestId: 'req-stale',
+          sessionId: 's-1',
+          toolCall: {
+            toolCallId: 'tc-1',
+            status: 'pending',
+            title: 'Read /etc/passwd',
+          },
+          options: [
+            {
+              optionId: 'allow_once',
+              name: 'Allow once',
+              kind: 'allow_once',
+            },
+          ],
+        },
+      });
+      // pendingPermissions stays empty — the permission_request was
+      // applied to stale state and we can't trust which permissions
+      // are still pending until loadSession recovery.
+      expect(skipped.pendingPermissions).toEqual({});
+    });
+
+    it('still applies terminal events (session_died) while awaitingResync', () => {
+      // Critical: a session that DIES while in resync limbo must still
+      // be observable as dead. Otherwise UIs would render "loading
+      // resync state…" indefinitely while the underlying session is
+      // gone.
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      const dead = reduceDaemonSessionEvent(afterResync, {
+        id: 14,
+        v: 1,
+        type: 'session_died',
+        data: { sessionId: 's-1', reason: 'channel_closed' },
+      });
+      expect(dead.alive).toBe(false);
+      expect(dead.terminalEvent?.type).toBe('session_died');
+      // awaitingResync stays set (the consumer never recovered from
+      // resync — the session just died first). The terminal event
+      // takes precedence for UI rendering.
+      expect(dead.awaitingResync).toBe(true);
+    });
+
+    it('still applies stream_error while awaitingResync', () => {
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      const errored = reduceDaemonSessionEvent(afterResync, {
+        v: 1,
+        type: 'stream_error',
+        data: { error: 'transport gone' },
+      });
+      expect(errored.alive).toBe(false);
+      expect(errored.streamError).toEqual({ error: 'transport gone' });
+    });
+
+    it('reseeding view state via createDaemonSessionViewState clears awaitingResync (consumer recovery)', () => {
+      // Consumer recovery path: after observing awaitingResync, call
+      // loadSession (out of band) and reconstruct view state. The
+      // fresh state has the flag back to false.
+      const stale = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'state_resync_required',
+        data: {
+          reason: 'ring_evicted',
+          lastDeliveredId: 5,
+          earliestAvailableId: 12,
+        },
+      });
+      expect(stale.awaitingResync).toBe(true);
+      // Consumer calls loadSession + builds fresh state from result.
+      const recovered = createDaemonSessionViewState({
+        sessionId: 's-1',
+        lastEventId: 20,
+      });
+      expect(recovered.awaitingResync).toBe(false);
+      expect(recovered.resyncRequiredCount).toBe(0);
+    });
+
+    it('a second state_resync_required increments resyncRequiredCount', () => {
+      // Repeated reconnect past the ring boundary — counter accumulates.
+      let state = createDaemonSessionViewState();
+      state = reduceDaemonSessionEvent(state, {
+        v: 1,
+        type: 'state_resync_required',
+        data: {
+          reason: 'ring_evicted',
+          lastDeliveredId: 5,
+          earliestAvailableId: 12,
+        },
+      });
+      state = reduceDaemonSessionEvent(state, {
+        v: 1,
+        type: 'state_resync_required',
+        data: {
+          reason: 'ring_evicted',
+          lastDeliveredId: 20,
+          earliestAvailableId: 100,
+        },
+      });
+      expect(state.resyncRequiredCount).toBe(2);
+      expect(state.lastResyncRequired?.lastDeliveredId).toBe(20);
+    });
+
+    it('rejects malformed state_resync_required payload via unrecognizedKnownEventCount', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'state_resync_required',
+        data: { reason: 'ring_evicted' }, // missing lastDeliveredId/earliestAvailableId
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.awaitingResync).toBe(false);
+    });
+  });
 });
