@@ -29,12 +29,14 @@ describe('NotebookEditTool', () => {
   let fileReadCache: FileReadCache;
   let config: Config;
   let tool: NotebookEditTool;
+  let mockFileHistoryService: { trackEdit: ReturnType<typeof vi.fn> };
   const abortSignal = new AbortController().signal;
 
   beforeEach(() => {
     CommitAttributionService.resetInstance();
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-edit-test-'));
     fileReadCache = new FileReadCache();
+    mockFileHistoryService = { trackEdit: vi.fn() };
     config = {
       getTargetDir: () => tempDir,
       getProjectRoot: () => tempDir,
@@ -45,6 +47,7 @@ describe('NotebookEditTool', () => {
       getFileSystemService: () => new StandardFileSystemService(),
       getDefaultFileEncoding: () => 'utf-8',
       getFileReadCache: () => fileReadCache,
+      getFileHistoryService: () => mockFileHistoryService,
       getFileReadCacheDisabled: () => false,
       getGeminiClient: vi.fn(),
       getBaseLlmClient: vi.fn(),
@@ -445,7 +448,8 @@ describe('NotebookEditTool', () => {
     }).execute(abortSignal);
 
     expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
-    expect(result.llmContent).toContain('has not been fully read');
+    expect(result.llmContent).toContain('too large for cell-level editing');
+    expect(result.llmContent).not.toContain('without offset or limit');
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -522,19 +526,57 @@ describe('NotebookEditTool', () => {
   });
 
   it('keeps invalid original notebook errors structured for user-modified content', async () => {
-    const invalidPath = path.join(tempDir, 'bad-original.ipynb');
+    const invalidPath = writeNotebook('bad-original.ipynb', {
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    seedNotebookRead(invalidPath);
+    const originalParams = {
+      notebook_path: invalidPath,
+      cell_id: 'a',
+      new_source: 'x = 2',
+    };
+    const modifyContext = tool.getModifyContext(abortSignal);
+    const currentContent =
+      await modifyContext.getCurrentContent(originalParams);
+    const proposedContent =
+      await modifyContext.getProposedContent(originalParams);
+    const updatedParams = modifyContext.createUpdatedParams(
+      currentContent,
+      proposedContent,
+      originalParams,
+    );
     fs.writeFileSync(invalidPath, 'not json', 'utf-8');
     seedNotebookRead(invalidPath);
 
-    const result = await buildInvocation({
-      notebook_path: invalidPath,
-      edit_mode: 'insert',
-      new_source: 'x = 1',
-      modified_by_user: true,
-      modified_notebook_content: JSON.stringify({ cells: [], metadata: {} }),
-    }).execute(abortSignal);
+    const result = await buildInvocation(
+      structuredClone(updatedParams),
+    ).execute(abortSignal);
 
     expect(result.error?.type).toBe(ToolErrorType.NOTEBOOK_INVALID_JSON);
+  });
+
+  it('rejects direct attempts to set internal modified notebook content params', () => {
+    const filePath = writeNotebook('injected-modified-content.ipynb', {
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+
+    expect(() =>
+      tool.build({
+        notebook_path: filePath,
+        cell_id: 'a',
+        new_source: 'x = 2',
+        modified_notebook_content: JSON.stringify({
+          cells: [],
+          metadata: {},
+        }),
+      } as Parameters<NotebookEditTool['build']>[0]),
+    ).toThrow(/additional properties|modified_notebook_content/i);
   });
 
   it('rejects qwenignored notebooks during validation', () => {
@@ -600,7 +642,9 @@ describe('NotebookEditTool', () => {
       originalParams,
     );
 
-    const result = await buildInvocation(updatedParams).execute(abortSignal);
+    const result = await buildInvocation(
+      structuredClone(updatedParams),
+    ).execute(abortSignal);
 
     expect(result.error).toBeUndefined();
     const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
@@ -670,5 +714,45 @@ describe('NotebookEditTool', () => {
       CommitAttributionService.getInstance().getFileAttribution(filePath);
     expect(attribution).toBeDefined();
     expect(attribution!.aiContribution).toBeGreaterThan(0);
+    expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+  });
+
+  it('tracks file history before the final freshness check', async () => {
+    const filePath = writeNotebook('history-before-check.ipynb', {
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+    mockFileHistoryService.trackEdit.mockImplementation(async () => {
+      fs.writeFileSync(
+        filePath,
+        JSON.stringify(
+          {
+            nbformat: 4,
+            nbformat_minor: 5,
+            cells: [
+              { cell_type: 'code', id: 'a', source: ['x = 100'], metadata: {} },
+            ],
+            metadata: {},
+          },
+          null,
+          1,
+        ),
+        'utf-8',
+      );
+    });
+
+    const result = await buildInvocation({
+      notebook_path: filePath,
+      cell_id: 'a',
+      new_source: 'x = 2',
+    }).execute(abortSignal);
+
+    expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+    expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+    const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    expect(updated.cells[0].source).toEqual(['x = 100']);
   });
 });

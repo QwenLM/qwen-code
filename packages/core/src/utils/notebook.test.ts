@@ -479,6 +479,21 @@ describe('notebook utilities', () => {
     expect(serialized.endsWith('\n')).toBe(false);
   });
 
+  it('should preserve compact notebook JSON when serializing after edits', () => {
+    const raw = JSON.stringify({
+      cells: [{ cell_type: 'markdown', source: '# Title', metadata: {} }],
+      metadata: {},
+    });
+    const notebook = parseNotebook(raw);
+    notebook.cells[0]!.source = '# Updated';
+
+    const format = inferNotebookJsonFormat(raw);
+    const serialized = serializeNotebook(notebook, format);
+
+    expect(format).toEqual({ indent: undefined, trailingNewline: false });
+    expect(serialized).toBe(JSON.stringify(notebook));
+  });
+
   it('should infer inserted source style from adjacent cells', () => {
     const notebook = parseNotebook(
       JSON.stringify({
@@ -540,5 +555,14 @@ describe('notebook utilities', () => {
     expect(() => parseNotebook(JSON.stringify({ metadata: {} }))).toThrow(
       'missing cells array',
     );
+  });
+
+  it('should reject non-object notebook cells', () => {
+    expect(() =>
+      parseNotebook(JSON.stringify({ cells: [null], metadata: {} })),
+    ).toThrow('cell at index 0 is not an object');
+    expect(() =>
+      parseNotebook(JSON.stringify({ cells: ['not a cell'], metadata: {} })),
+    ).toThrow('cell at index 0 is not an object');
   });
 });

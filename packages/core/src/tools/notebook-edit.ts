@@ -69,9 +69,12 @@ export interface NotebookEditToolParams {
   new_source?: string;
   cell_type?: EditableNotebookCellType;
   edit_mode?: NotebookEditMode;
-  modified_by_user?: boolean;
-  ai_proposed_content?: string;
-  modified_notebook_content?: string;
+}
+
+interface NotebookEditModifyMetadata {
+  modifiedByUser?: boolean;
+  aiProposedContent?: string;
+  modifiedNotebookContent?: string;
 }
 
 interface NotebookEditResult {
@@ -377,6 +380,19 @@ async function checkPriorNotebookRead(
     return { ok: true };
   }
 
+  if (
+    status.state === 'fresh' &&
+    status.entry.lastReadAt !== undefined &&
+    !status.entry.lastReadWasFull
+  ) {
+    return rejectNotebookPriorRead(notebookPath, 'truncated-cache-entry', {
+      ok: false,
+      type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      rawMessage: `Notebook ${notebookPath} is too large for cell-level editing because its rendered output was truncated when read. Reduce the notebook output size or split the notebook before editing cells.`,
+      displayMessage: 'notebook too large for cell-level editing.',
+    });
+  }
+
   if (status.state === 'stale') {
     return rejectNotebookPriorRead(notebookPath, 'stale-cache-entry', {
       ok: false,
@@ -401,6 +417,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
   constructor(
     private readonly config: Config,
     params: NotebookEditToolParams,
+    private readonly modifyMetadata?: NotebookEditModifyMetadata,
   ) {
     super(params);
   }
@@ -507,11 +524,11 @@ class NotebookEditInvocation extends BaseToolInvocation<
     }
 
     try {
-      if (this.params.modified_notebook_content !== undefined) {
+      if (this.modifyMetadata?.modifiedNotebookContent !== undefined) {
         return {
           ...prepareModifiedNotebookContent(
             originalContent,
-            this.params.modified_notebook_content,
+            this.modifyMetadata.modifiedNotebookContent,
             this.params,
           ),
           originalContent,
@@ -559,23 +576,31 @@ class NotebookEditInvocation extends BaseToolInvocation<
       };
     }
 
-    const writeDecision = await checkPriorNotebookRead(
-      this.config,
-      this.params.notebook_path,
-      { expectExisting: true },
-    );
-    if (!writeDecision.ok) {
-      return {
-        llmContent: writeDecision.rawMessage,
-        returnDisplay: `Error: ${writeDecision.displayMessage}`,
-        error: {
-          message: writeDecision.rawMessage,
-          type: writeDecision.type,
-        },
-      };
-    }
-
     try {
+      try {
+        await this.config
+          .getFileHistoryService()
+          .trackEdit(this.params.notebook_path);
+      } catch {
+        // File history is best-effort; never block core tool operations.
+      }
+
+      const writeDecision = await checkPriorNotebookRead(
+        this.config,
+        this.params.notebook_path,
+        { expectExisting: true },
+      );
+      if (!writeDecision.ok) {
+        return {
+          llmContent: writeDecision.rawMessage,
+          returnDisplay: `Error: ${writeDecision.displayMessage}`,
+          error: {
+            message: writeDecision.rawMessage,
+            type: writeDecision.type,
+          },
+        };
+      }
+
       await this.config.getFileSystemService().writeTextFile({
         path: this.params.notebook_path,
         content: prepared.updatedContent,
@@ -586,7 +611,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
         },
       });
 
-      if (!this.params.modified_by_user) {
+      if (!this.modifyMetadata?.modifiedByUser) {
         CommitAttributionService.getInstance().recordEdit(
           this.params.notebook_path,
           prepared.originalContent,
@@ -626,7 +651,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
       const diffStat = getDiffStat(
         fileName,
         prepared.originalContent,
-        this.params.ai_proposed_content ?? prepared.updatedContent,
+        this.modifyMetadata?.aiProposedContent ?? prepared.updatedContent,
         prepared.updatedContent,
       );
 
@@ -651,7 +676,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
       };
 
       const llmContent =
-        this.params.modified_notebook_content !== undefined
+        this.modifyMetadata?.modifiedNotebookContent !== undefined
           ? `Notebook ${this.params.notebook_path} has been updated. Notebook content was modified by the user before approval; the final saved notebook may differ from the original ${prepared.mode} cell ${prepared.editedCellId} proposal.`
           : `Notebook ${this.params.notebook_path} has been updated. ${prepared.mode} cell ${prepared.editedCellId}.${
               prepared.mode === 'delete'
@@ -682,6 +707,14 @@ export class NotebookEditTool
   implements ModifiableDeclarativeTool<NotebookEditToolParams>
 {
   static readonly Name = ToolNames.NOTEBOOK_EDIT;
+  private readonly modifyMetadataByParams = new WeakMap<
+    NotebookEditToolParams,
+    NotebookEditModifyMetadata
+  >();
+  private readonly modifyMetadataByKey = new Map<
+    string,
+    NotebookEditModifyMetadata[]
+  >();
 
   constructor(private readonly config: Config) {
     super(
@@ -719,6 +752,7 @@ export class NotebookEditTool
           },
         },
         required: ['notebook_path'],
+        additionalProperties: false,
         type: 'object',
       },
     );
@@ -769,7 +803,70 @@ export class NotebookEditTool
   protected createInvocation(
     params: NotebookEditToolParams,
   ): ToolInvocation<NotebookEditToolParams, ToolResult> {
-    return new NotebookEditInvocation(this.config, params);
+    return new NotebookEditInvocation(
+      this.config,
+      params,
+      this.consumeModifyMetadata(params),
+    );
+  }
+
+  private getModifyMetadataKey(params: NotebookEditToolParams): string {
+    return JSON.stringify({
+      notebook_path: unescapePath(params.notebook_path.trim()),
+      cell_id: params.cell_id,
+      new_source: params.new_source,
+      cell_type: params.cell_type,
+      edit_mode: params.edit_mode,
+    });
+  }
+
+  private rememberModifyMetadata(
+    params: NotebookEditToolParams,
+    metadata: NotebookEditModifyMetadata,
+  ): void {
+    this.modifyMetadataByParams.set(params, metadata);
+    const key = this.getModifyMetadataKey(params);
+    const queue = this.modifyMetadataByKey.get(key) ?? [];
+    queue.push(metadata);
+    this.modifyMetadataByKey.set(key, queue);
+  }
+
+  private consumeModifyMetadata(
+    params: NotebookEditToolParams,
+  ): NotebookEditModifyMetadata | undefined {
+    const metadata = this.modifyMetadataByParams.get(params);
+    if (metadata) {
+      this.modifyMetadataByParams.delete(params);
+      this.removeQueuedModifyMetadata(params, metadata);
+      return metadata;
+    }
+
+    const key = this.getModifyMetadataKey(params);
+    const queue = this.modifyMetadataByKey.get(key);
+    const queuedMetadata = queue?.shift();
+    if (queue && queue.length === 0) {
+      this.modifyMetadataByKey.delete(key);
+    }
+    return queuedMetadata;
+  }
+
+  private removeQueuedModifyMetadata(
+    params: NotebookEditToolParams,
+    metadata: NotebookEditModifyMetadata,
+  ): void {
+    const key = this.getModifyMetadataKey(params);
+    const queue = this.modifyMetadataByKey.get(key);
+    if (!queue) {
+      return;
+    }
+
+    const index = queue.indexOf(metadata);
+    if (index !== -1) {
+      queue.splice(index, 1);
+    }
+    if (queue.length === 0) {
+      this.modifyMetadataByKey.delete(key);
+    }
   }
 
   getModifyContext(
@@ -807,7 +904,8 @@ export class NotebookEditTool
         modifiedProposedContent: string,
         originalParams: NotebookEditToolParams,
       ): NotebookEditToolParams => {
-        let aiProposedContent = originalParams.ai_proposed_content;
+        let aiProposedContent =
+          this.modifyMetadataByParams.get(originalParams)?.aiProposedContent;
         if (aiProposedContent === undefined) {
           try {
             aiProposedContent = applyNotebookEdit(
@@ -818,12 +916,15 @@ export class NotebookEditTool
             aiProposedContent = modifiedProposedContent;
           }
         }
-        return {
+        const updatedParams: NotebookEditToolParams = {
           ...originalParams,
-          ai_proposed_content: aiProposedContent,
-          modified_by_user: true,
-          modified_notebook_content: modifiedProposedContent,
         };
+        this.rememberModifyMetadata(updatedParams, {
+          aiProposedContent,
+          modifiedByUser: true,
+          modifiedNotebookContent: modifiedProposedContent,
+        });
+        return updatedParams;
       },
     };
   }

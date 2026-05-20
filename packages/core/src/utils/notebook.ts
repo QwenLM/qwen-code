@@ -86,7 +86,7 @@ export interface NotebookReadResult {
 }
 
 export interface NotebookJsonFormat {
-  indent: number;
+  indent?: number;
   trailingNewline: boolean;
 }
 
@@ -105,13 +105,20 @@ export function parseNotebook(content: string): NotebookContent {
     throw new Error('Invalid notebook: missing cells array');
   }
 
+  for (let i = 0; i < notebook.cells.length; i++) {
+    const cell = notebook.cells[i];
+    if (!cell || typeof cell !== 'object' || Array.isArray(cell)) {
+      throw new Error(`Invalid notebook: cell at index ${i} is not an object`);
+    }
+  }
+
   return notebook;
 }
 
 export function inferNotebookJsonFormat(content: string): NotebookJsonFormat {
   const lineMatch = content.match(/\n( +)"/);
   return {
-    indent: lineMatch?.[1]?.length ?? 0,
+    indent: lineMatch?.[1]?.length,
     trailingNewline: content.endsWith('\n'),
   };
 }
