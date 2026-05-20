@@ -17,6 +17,7 @@ import type {
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
+import { RequestError } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
@@ -34,6 +35,67 @@ import type {
 } from './permission.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { writeStderrLine } from './internal/stderrLine.js';
+
+/**
+ * Duck-type check for `FsError` from `cli/src/serve/fs/errors.ts`
+ * (#4175 F4 prereq — Codex review on #4360 round 2). FsError lives
+ * in the `cli` package, but this class lives in `acp-bridge` — a
+ * direct `import { FsError }` would invert the dependency. We use
+ * the same `.name`-based duck typing that `mapDomainErrorToErrorKind`
+ * (status.ts) already applies to `TrustGateError` / `SkillError`
+ * for the same cross-package bundling reason.
+ *
+ * Without this preservation: when the `BridgeFileSystem` adapter
+ * throws an `FsError` (e.g. `kind: 'untrusted_workspace'`, `kind:
+ * 'symlink_escape'`, `kind: 'file_too_large'`), the ACP SDK's
+ * default RPC error path serializes only `error.message` as
+ * "Internal error" — the structured `kind` / `status` / `hint` are
+ * lost on the wire. SDK consumers downstream can no longer dispatch
+ * typed UI (auth retry vs file picker vs proxy hint) without
+ * regex-matching the human-readable message.
+ *
+ * With this preservation: the bridge boundary catches FsError,
+ * rethrows as ACP `RequestError(-32603, message, {errorKind, hint,
+ * status})`. The agent's RPC client receives `data.errorKind` and
+ * can branch on the closed-enum kind. JSON-RPC code stays at
+ * internal-error (-32603) since the bridge can't reliably map
+ * FsError.kind to a JSON-RPC error code shape — the structured
+ * `data` field is what carries semantic information for SDK
+ * consumers.
+ */
+interface FsErrorShape {
+  name: 'FsError';
+  message: string;
+  kind: string;
+  status?: number;
+  hint?: string;
+}
+
+function isFsErrorShape(err: unknown): err is FsErrorShape {
+  return (
+    err instanceof Error &&
+    err.name === 'FsError' &&
+    typeof (err as { kind?: unknown }).kind === 'string'
+  );
+}
+
+/**
+ * Rethrow an FsError as a structured ACP `RequestError` so the
+ * agent's RPC client sees `data.errorKind` / `data.hint` /
+ * `data.status` rather than just the human-readable message.
+ * Non-FsError errors are rethrown unchanged — the default ACP
+ * serialization is fine for unstructured errors.
+ */
+function preserveFsErrorOverAcp(err: unknown): never {
+  if (isFsErrorShape(err)) {
+    throw new RequestError(-32603, err.message, {
+      errorKind: err.kind,
+      ...(err.hint !== undefined ? { hint: err.hint } : {}),
+      ...(err.status !== undefined ? { status: err.status } : {}),
+    });
+  }
+  throw err;
+}
 
 /**
  * #4175 F3 Commit 3 — translate the mediator's internal
@@ -647,7 +709,17 @@ export class BridgeClient implements Client {
     // injection and fall through to the inline path so pre-F1 behavior
     // is preserved verbatim where no adapter has been wired.
     if (this.fileSystem) {
-      return this.fileSystem.writeText(params);
+      // #4175 F4 prereq — preserve FsError structure over ACP wire
+      // (Codex review on #4360 round 2). Without this catch, an
+      // `FsError({kind:'untrusted_workspace'})` from the adapter
+      // would land at the agent as `{code:-32603, message:...}` with
+      // the kind/status/hint stripped. See `preserveFsErrorOverAcp`
+      // for the cross-package duck-typing rationale.
+      try {
+        return await this.fileSystem.writeText(params);
+      } catch (err) {
+        preserveFsErrorOverAcp(err);
+      }
     }
     // Stage 1 known divergence: this raw `fs.writeFile` reimplements file
     // I/O instead of delegating to core's filesystem service. The
@@ -795,7 +867,13 @@ export class BridgeClient implements Client {
     // Mode A + channels + IDE companion fall through to the inline
     // proxy below.
     if (this.fileSystem) {
-      return this.fileSystem.readText(params);
+      // #4175 F4 prereq — preserve FsError structure over ACP wire.
+      // See sibling block in `writeTextFile` for rationale.
+      try {
+        return await this.fileSystem.readText(params);
+      } catch (err) {
+        preserveFsErrorOverAcp(err);
+      }
     }
     // Reject obviously-degenerate `limit` up front. Without this,
     // `sliceLineRange` hits the `end < start` path and returns an
