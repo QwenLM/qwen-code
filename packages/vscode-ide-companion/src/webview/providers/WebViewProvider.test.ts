@@ -1854,4 +1854,43 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
       expect.objectContaining({ type: 'authError' }),
     );
   });
+
+  it('rolls back + reports authError when doInitializeAgentConnection throws (outer catch)', async () => {
+    // The outer catch handles unexpected exceptions (disk errors, partial
+    // writes) — the path where rollback is most likely to also be needed.
+    const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
+    mockSnapshotSettingsForRollback.mockReturnValue(snapshot);
+
+    const provider = makeProvider();
+    const sendToWebView = (
+      provider as unknown as { sendMessageToWebView: ReturnType<typeof vi.fn> }
+    ).sendMessageToWebView;
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      throw new Error('disk exploded mid-reconnect');
+    });
+
+    await expect(
+      (
+        provider as unknown as {
+          handleAuthInteractive: (c: unknown, i: unknown) => Promise<void>;
+        }
+      ).handleAuthInteractive(providerConfig, inputs),
+    ).resolves.toBeUndefined();
+
+    // (1) snapshot restored, (2) authError with "Configuration failed",
+    // (3) resolved without throwing (asserted above).
+    expect(mockRestoreSettingsSnapshot).toHaveBeenCalledWith(snapshot);
+    expect(sendToWebView).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'authError',
+        data: expect.objectContaining({
+          message: expect.stringContaining('Configuration failed'),
+        }),
+      }),
+    );
+  });
 });
