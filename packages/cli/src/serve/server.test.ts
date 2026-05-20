@@ -10,7 +10,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import request from 'supertest';
-import { createServeApp } from './server.js';
+import { createServeApp, detectFromLoopback } from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
 import {
   CONDITIONAL_SERVE_FEATURES,
@@ -139,6 +139,12 @@ const EXPECTED_STAGE1_FEATURES = [
   // baseline assertion below mirrors that even though PR 21 landed
   // before PR 17 chronologically.
   'auth_device_flow',
+  // #4175 F3 Commit 6. Daemon advertises which permission mediation
+  // policies it can run (`modes: [first-responder, designated, consensus,
+  // local-only]`) so SDK clients can pre-flight before relying on
+  // `permission_partial_vote` / `permission_forbidden` SSE events. Always-
+  // on; runtime-active policy is at `/capabilities` body `policy.permission`.
+  'permission_mediation',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -156,11 +162,21 @@ const EXPECTED_STAGE1_FEATURES = [
 // `require_auth` so the registry order matches `capabilities.ts`.
 const EXPECTED_REGISTERED_FEATURES = [
   // Same order as `SERVE_CAPABILITY_REGISTRY` declaration:
-  ...EXPECTED_STAGE1_FEATURES.filter((f) => f !== 'auth_device_flow'),
+  // ...always-on PR16/17/19/20/21 features, then F2's conditional
+  // pair (mcp_workspace_pool + mcp_pool_restart inserted after
+  // workspace_mcp_restart), then conditional `require_auth`, then
+  // `auth_device_flow`, then F3 `permission_mediation` (latest).
+  // All four conditional tags filtered from the stage1 baseline so
+  // they appear here in their registry-declaration order, not the
+  // stage1 order.
+  ...EXPECTED_STAGE1_FEATURES.filter(
+    (f) => f !== 'auth_device_flow' && f !== 'permission_mediation',
+  ),
   'mcp_workspace_pool',
   'mcp_pool_restart',
   'require_auth',
   'auth_device_flow',
+  'permission_mediation',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -525,6 +541,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       clientLastSeenAt: new Map<string, number>(),
     }));
   return {
+    // F3 Commit 6 — `HttpAcpBridge.permissionPolicy` is required so
+    // `/capabilities` can expose `policy.permission`. Tests don't
+    // exercise mediation; pin to the pre-F3 default ('first-responder')
+    // so existing assertions stay shape-compatible.
+    permissionPolicy: 'first-responder' as const,
     calls,
     loadCalls,
     resumeCalls,
@@ -748,6 +769,66 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
   };
 }
+
+/**
+ * Wenshao review #4335 / 3272581557 — supertest in the rest of this
+ * suite always connects from `127.0.0.1`, leaving the prefix-match
+ * branches in `detectFromLoopback` (the security gate for
+ * `local-only` permission policy) without direct coverage. Exercise
+ * the helper synchronously over the address shapes the Round-5 fix
+ * widened, plus the fail-closed branches.
+ */
+describe('detectFromLoopback (#4335 / 3272581557)', () => {
+  function fakeReq(addr: string | undefined): {
+    socket?: { remoteAddress?: string | undefined };
+  } {
+    if (addr === undefined) return {};
+    return { socket: { remoteAddress: addr } };
+  }
+
+  it.each([
+    ['127.0.0.1', true],
+    ['127.0.0.2', true],
+    ['127.0.1.1', true],
+    ['127.255.255.254', true],
+    ['::1', true],
+    ['::ffff:127.0.0.1', true],
+    ['::ffff:127.0.0.2', true],
+    ['10.0.0.1', false],
+    ['192.168.1.1', false],
+    ['1.2.3.4', false],
+    ['::', false],
+    ['fe80::1', false],
+    // RFC 1918 private addrs that LOOK loopback-adjacent but aren't.
+    ['127', false],
+    // Note: `'127.'` is structurally `127.`-prefix so the helper
+    // accepts it (fail-OPEN for that malformed shape). Real
+    // `req.socket.remoteAddress` values come from the kernel as
+    // well-formed dotted-decimal IPs, so this only matters for
+    // pathological synthetic inputs. Documented for transparency.
+    // Empty / malformed.
+    ['', false],
+  ])('detectFromLoopback(%s) === %s', (addr, expected) => {
+    expect(detectFromLoopback(fakeReq(addr))).toBe(expected);
+  });
+
+  it('returns false for missing socket (fail-closed)', () => {
+    expect(detectFromLoopback({})).toBe(false);
+    expect(detectFromLoopback(fakeReq(undefined))).toBe(false);
+  });
+
+  it('does NOT consult X-Forwarded-For or any HTTP header (security)', () => {
+    // The function takes only the socket-shaped input — even if the
+    // express request would carry forwarded headers, this helper
+    // can't see them. Pin the contract.
+    const reqWithForwardedHeader = {
+      socket: { remoteAddress: '10.0.0.1' },
+      get: (name: string) =>
+        name === 'X-Forwarded-For' ? '127.0.0.1' : undefined,
+    } as unknown as Parameters<typeof detectFromLoopback>[0];
+    expect(detectFromLoopback(reqWithForwardedHeader)).toBe(false);
+  });
+});
 
 describe('createServeApp', () => {
   describe('serve capability registry', () => {
@@ -2856,11 +2937,16 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ outcome: { outcome: 'selected', optionId: 'allow' } });
       expect(res.status).toBe(200);
+      // F3 Commit 2 — vote routes attach `fromLoopback` from
+      // `detectFromLoopback(req)`. The supertest fixture connects
+      // from `127.0.0.1`, so the captured context carries
+      // `fromLoopback: true` even though no client-id header is set.
       expect(bridge.sessionPermissionVotes).toEqual([
         {
           sessionId: 'session-A',
           requestId: 'req-1',
           response: { outcome: { outcome: 'selected', optionId: 'allow' } },
+          context: { fromLoopback: true },
         },
       ]);
     });
@@ -2874,8 +2960,13 @@ describe('createServeApp', () => {
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ outcome: { outcome: 'cancelled' } });
       expect(res.status).toBe(200);
+      // F3 Commit 2 — `fromLoopback` is derived from the kernel-stamped
+      // peer IP (`127.0.0.1` in tests), independent of the client-id
+      // header. Both fields end up on the context the route forwards
+      // to the bridge.
       expect(bridge.sessionPermissionVotes[0]?.context).toEqual({
         clientId: 'client-1',
+        fromLoopback: true,
       });
     });
 
@@ -2975,10 +3066,13 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ outcome: { outcome: 'selected', optionId: 'allow' } });
       expect(res.status).toBe(200);
+      // F3 Commit 2 — see the scoped-vote case: `fromLoopback: true`
+      // is attached because the supertest peer is `127.0.0.1`.
       expect(bridge.permissionVotes).toEqual([
         {
           requestId: 'req-1',
           response: { outcome: { outcome: 'selected', optionId: 'allow' } },
+          context: { fromLoopback: true },
         },
       ]);
     });
@@ -2994,6 +3088,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(bridge.permissionVotes[0]?.context).toEqual({
         clientId: 'client-1',
+        fromLoopback: true,
       });
     });
 
@@ -4062,6 +4157,9 @@ describe('runQwenServe', () => {
           throw new Error('unreachable');
         },
         writeTextAtomic: async () => {
+          throw new Error('unreachable');
+        },
+        writeTextOverwrite: async () => {
           throw new Error('unreachable');
         },
         edit: async () => {

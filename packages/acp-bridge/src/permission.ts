@@ -108,6 +108,19 @@ export type PermissionVoteOutcome =
   | { readonly kind: 'already_resolved'; readonly resolvedOptionId: string }
   | {
       readonly kind: 'forbidden';
+      /**
+       * `designated_mismatch` fires for both:
+       *   - `designated` policy: voter `clientId` is not the prompt
+       *     `originatorClientId`.
+       *   - `consensus` policy: voter `clientId` is undefined OR not
+       *     in the issue-time `votersAtIssue` snapshot. Overloaded
+       *     here to keep the contract closed; future versions may
+       *     widen this union with a more specific reason if SDK
+       *     consumers need to distinguish.
+       *
+       * `remote_not_allowed` fires under `local-only` policy when
+       * `vote.fromLoopback === false`.
+       */
       readonly reason: 'designated_mismatch' | 'remote_not_allowed';
     }
   | { readonly kind: 'unknown_request' };

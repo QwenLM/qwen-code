@@ -201,6 +201,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // status route (extension data on `/capabilities` would inflate the
   // descriptor shape; we keep the registry uniform).
   auth_device_flow: { since: 'v1' },
+  // #4175 F3 (Commit 6). Daemon advertises which permission mediation
+  // policies it can run. Clients introspect `modes` to discover the
+  // closed set of strategies before relying on `permission_partial_vote`
+  // / `permission_forbidden` SSE events. The active policy for THIS
+  // daemon is exposed in the `/capabilities` envelope's
+  // `policy.permission` field — the mode list here is the
+  // build-supported set, distinct from runtime configuration.
+  permission_mediation: {
+    since: 'v1',
+    modes: ['first-responder', 'designated', 'consensus', 'local-only'],
+  },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;

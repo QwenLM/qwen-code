@@ -59,21 +59,39 @@ export interface BridgeFileSystem {
   readText(params: ReadTextFileRequest): Promise<ReadTextFileResponse>;
 
   /**
-   * Atomically replace `params.path` with `params.content`. Adapter
-   * MUST preserve mode/owner where possible, resolve symlinks
-   * before write, and reject paths outside the bound workspace.
-   * Returns the ACP-shaped empty response on success.
+   * Atomically replace `params.path` with `params.content`. Returns
+   * the ACP-shaped empty response on success; throws an `FsError`
+   * (classified downstream by `mapDomainErrorToErrorKind`) on
+   * boundary, trust, or I/O failure.
    *
-   * Adapter MUST replicate the inline proxy's defenses:
-   *   - Write-then-rename atomicity (avoid truncation on
-   *     SIGKILL / OOM mid-write).
-   *   - Dangling-symlink → write through to the symlink's intended
-   *     target (don't replace the symlink with a regular file).
-   *   - Preserve target mode bits + owner/group where the daemon
-   *     has permission.
-   *   - Default to `0o600` for newly-created files (NOT umask
-   *     defaults — the inline `mode` arg bypasses umask for
-   *     atomicity of secret writes).
+   * Adapter MUST provide:
+   *   - **Write-then-rename atomicity** — a SIGKILL / OOM mid-write
+   *     does NOT leave the target truncated.
+   *   - **Target mode preservation** — editing a `0o600` secret
+   *     keeps it at `0o600`; an executable `+x` bit is retained.
+   *   - **`0o600` default for new files** — NOT umask defaults (the
+   *     write syscall's `mode` arg bypasses umask). This is the
+   *     security posture for agent-driven writes where the agent's
+   *     intent about the file's audience is unknown.
+   *   - **Symlink rejection** — paths whose target is a symlink
+   *     surface `symlink_escape`. This is a **divergence from the
+   *     pre-F1 inline `BridgeClient.writeTextFile` proxy** which
+   *     resolved symlinks and wrote through to their target;
+   *     production now matches the more conservative PR 18 +
+   *     HTTP `POST /file` posture (PR 20). Agents that previously
+   *     relied on writing through symlinked dotfiles will need
+   *     to address the resolved path directly.
+   *   - **Workspace boundary enforcement** — paths outside the
+   *     bound workspace surface `path_outside_workspace`.
+   *
+   * Owner/group preservation is best-effort and platform-dependent
+   * (POSIX `chown` requires root for cross-user changes; Windows
+   * lacks the concept entirely). The contract does NOT require it.
+   *
+   * The serve-side adapter satisfies this via
+   * `WorkspaceFileSystem.writeTextOverwrite` — the PR 18 primitive
+   * that does atomic tmp+rename with mode preservation + `0o600`
+   * default + symlink reject inside a per-path lock.
    */
   writeText(params: WriteTextFileRequest): Promise<WriteTextFileResponse>;
 }

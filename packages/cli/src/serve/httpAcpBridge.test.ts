@@ -2710,6 +2710,117 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('returns false (not InvalidClientIdError) when session exists but requestId is unknown and clientId is unregistered (#4335 / 3271978329 / 3272493792 / 3273077272)', async () => {
+      // Wenshao review #4335 / 3271978329 (Critical) — error
+      // precedence regression: the session-scoped vote route must
+      // return `false` (→ 404) when the requestId isn't known to
+      // the mediator, BEFORE validating `context.clientId`.
+      // Without this guard a probe could fabricate a requestId,
+      // supply an arbitrary `X-Qwen-Client-Id`, and distinguish
+      // "this clientId is registered to this session" (proceeds
+      // past resolveTrustedClientId then returns false → 404) from
+      // "this clientId is not registered" (InvalidClientIdError →
+      // 400) — a session-membership oracle.
+      //
+      // Wenshao review #4335 / 3272493792 — explicit test for the
+      // fix from Round 7 so a future refactor can't silently
+      // remove the short-circuit.
+      //
+      // Wenshao review #4335 / 3273077272 — also assert the stderr
+      // breadcrumb that Round 8 promoted from debug-gated to
+      // unconditional (`writeStderrLine`). Pinning the log call
+      // means a future refactor that drops or downgrades the line
+      // is caught even when the return value still happens to be
+      // false for some other reason.
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const { bridge, session } = await setupForPermission();
+
+        // Session exists, requestId is unknown, clientId is fake.
+        // The bridge MUST return false; pre-fix it threw
+        // InvalidClientIdError (400).
+        const result = bridge.respondToSessionPermission(
+          session.sessionId,
+          'unknown-req-id',
+          { outcome: { outcome: 'cancelled' } },
+          { clientId: 'fabricated-client-id' },
+        );
+        expect(result).toBe(false);
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('rejected permission vote'),
+        );
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('unknown-req-id'),
+        );
+
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('rejects cancel sentinel injection via {selected,"__cancelled__"} (#4335 / 3271420267)', async () => {
+      // wenshao/qwen-latest review #4335 (3271420267) — the most
+      // security-critical guard in this PR. The mediator recognizes
+      // CANCEL_VOTE_SENTINEL ('__cancelled__') BEFORE validating the
+      // option against allowedOptionIds, so a wire client sending
+      // `{outcome:'selected', optionId:'__cancelled__'}` could
+      // bypass ALL policy dispatch (designated/consensus/local-only)
+      // and resolve the request as cancelled. The bridge guards
+      // against this by throwing InvalidPermissionOptionError
+      // BEFORE forwarding to mediator.vote — without a test, a
+      // future refactor could silently remove the check.
+      const { bridge, session, conn } = await setupForPermission();
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+      const respPromise = (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'rm -rf /' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+        ],
+      });
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      const payload = next.value!.data as { requestId: string };
+
+      // Wire-injected sentinel via `selected` outcome — must
+      // throw InvalidPermissionOptionError before reaching the
+      // mediator.
+      expect(() =>
+        bridge.respondToSessionPermission(
+          session.sessionId,
+          payload.requestId,
+          {
+            outcome: { outcome: 'selected', optionId: '__cancelled__' },
+          },
+        ),
+      ).toThrow(InvalidPermissionOptionError);
+
+      // Pending was preserved — a legitimate vote still resolves.
+      expect(bridge.pendingPermissionCount).toBe(1);
+      bridge.respondToSessionPermission(session.sessionId, payload.requestId, {
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+      const response = (await respPromise) as {
+        outcome: { outcome: string; optionId?: string };
+      };
+      expect(response.outcome.outcome).toBe('selected');
+      expect(response.outcome.optionId).toBe('allow');
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
     it('rejects votes whose optionId was not in the agent-offered set (BkwQI)', async () => {
       // BkwQI: bridge.respondToPermission validates the voter's
       // `optionId` against the original `options` the agent sent.
@@ -3104,13 +3215,28 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
-    it('rejects unknown permission votes with unregistered client ids', async () => {
+    it('returns false uniformly for unknown permission votes regardless of clientId registration (#4335 / 3272493777)', async () => {
+      // Wenshao review #4335 / 3272493777 — error precedence: an
+      // unknown requestId must return `false` (→ 404) regardless of
+      // whether the supplied `clientId` is registered in any
+      // session. The previous PR #4231 boundary returned 400 for
+      // unregistered clientIds and 404 for registered ones, which
+      // turned out to be a cross-session client-registration
+      // oracle: a remote prober posting `POST /permission/<bogus>`
+      // with various `X-Qwen-Client-Id` headers could distinguish
+      // "this clientId is registered in some active session" (404)
+      // from "not registered anywhere" (400). The session-scoped
+      // route's matching fix landed in Round 7 (#3271978329); this
+      // pins the symmetric posture for the legacy route and
+      // explicitly inverts the assertion the pre-Round-7 test used
+      // to make.
       const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-      expect(() =>
+      // Unregistered clientId — must NOT throw; uniform `false`.
+      expect(
         bridge.respondToPermission(
           'does-not-exist',
           {
@@ -3118,7 +3244,8 @@ describe('createHttpAcpBridge', () => {
           },
           { clientId: 'client-not-issued' },
         ),
-      ).toThrow(InvalidClientIdError);
+      ).toBe(false);
+      // Registered clientId — also `false`.
       expect(
         bridge.respondToPermission(
           'does-not-exist',
@@ -3127,6 +3254,12 @@ describe('createHttpAcpBridge', () => {
           },
           { clientId: session.clientId },
         ),
+      ).toBe(false);
+      // No clientId at all — `false` (unchanged behavior).
+      expect(
+        bridge.respondToPermission('does-not-exist', {
+          outcome: { outcome: 'cancelled' },
+        }),
       ).toBe(false);
 
       await bridge.shutdown();
@@ -6417,6 +6550,95 @@ describe('createHttpAcpBridge', () => {
 
       await bridge.shutdown();
     });
+
+    it('routes per-entry channel bookkeeping via channelInfoForEntry, not the module-scoped channelInfo (#4325)', async () => {
+      // Regression guard for #4325 (wenshao review on F1 #4319).
+      //
+      // The bug pre-fix: `closeSession` (and `killSession`) captured
+      // `const ci = channelInfo` — the module-scoped CURRENT attach
+      // target — rather than `channelInfoForEntry(entry)`. The two
+      // diverge during the channel-overlap window (A dying, B freshly
+      // spawned as `channelInfo`): closing a session whose `entry.channel
+      // = A` would (1) skip `A.sessionIds.delete()` because
+      // `B.channel !== A.channel`, leaving A's sessionIds set pinned past
+      // the close, and (2) call `markSessionClosed` on B's client
+      // instead of A's, evaluating B's kill condition with stale
+      // assumptions about its session count — potentially killing B
+      // unnecessarily and forcing a third spawn.
+      //
+      // Constructing the exact overlap state deterministically requires
+      // factory-internal hooks not currently exposed (A only becomes
+      // `isDying` when its sessionIds drains to 0, and that drain path
+      // also removes the session from `byId` synchronously — so by the
+      // time channelInfo could move to B, every session that was on A is
+      // gone from `byId` and thus unreachable to `closeSession`). The
+      // full overlap regression test is deferred to a follow-up that
+      // adds the necessary test-only factory inspection seam.
+      //
+      // What this smoke test guards: under the normal single-channel
+      // case, `closeSession` still drives the channel's lifecycle
+      // correctly — channel kill fires after the last session closes,
+      // which is the most-load-bearing behavior in the fix's neighborhood
+      // and would fail trivially if a future refactor reverted to the
+      // module-scoped `channelInfo` capture without thinking through
+      // the case where the helper returns `undefined`.
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(handles).toHaveLength(1);
+      expect(handles[0]?.killed).toBe(false);
+
+      await bridge.closeSession(session.sessionId);
+
+      // Channel kill must have fired — proves `closeSession` correctly
+      // located the entry's channel via `channelInfoForEntry(entry)`
+      // (which returns the channel matching `entry.channel`) and
+      // triggered the L2163-2165 "kill on last session" branch. A
+      // reverted fix that captured `channelInfo` after the entry was
+      // gone from `byId` would also pass this assertion, but the
+      // diff-review-time visibility of the `channelInfoForEntry` call
+      // is the primary defense.
+      expect(handles[0]?.killed).toBe(true);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    });
+
+    it('killSession routes per-entry channel bookkeeping via channelInfoForEntry (#4325 symmetric)', async () => {
+      // Symmetric smoke guard for #4325 (wenshao review on this PR).
+      // `killSession` received the same `channelInfo` →
+      // `channelInfoForEntry(entry)` fix at `bridge.ts:3182` as
+      // `closeSession` did. The closeSession smoke above doesn't
+      // exercise the killSession code path, so a future refactor
+      // reverting only killSession would pass that test trivially.
+      // Same single-channel caveat: the channel-overlap race itself
+      // isn't deterministic without test-only factory hooks; this
+      // smoke verifies the most-load-bearing behavior — kill fires
+      // and tears down the channel — which would fail if a revert
+      // captured a stale module-scoped `channelInfo`.
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(handles).toHaveLength(1);
+      expect(handles[0]?.killed).toBe(false);
+
+      await bridge.killSession(session.sessionId);
+
+      expect(handles[0]?.killed).toBe(true);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    });
   });
 
   describe('updateSessionMetadata', () => {
@@ -6600,5 +6822,40 @@ describe('createHttpAcpBridge', () => {
 
       await bridge.shutdown();
     });
+  });
+});
+
+// ============================================================
+// F3 Commit 8 — bridge-level integration for the multi-client
+// permission mediator. Mediator unit tests cover strategy logic
+// (35 tests in `permissionMediator.test.ts`); these exercise the
+// HTTP-bridge surface specifically:
+//   - `bridge.permissionPolicy` accessor wired through the mediator
+//   - F3 BridgeOptions validation (positive-integer quorum)
+// ============================================================
+describe('createHttpAcpBridge — F3 multi-client permission coordination', () => {
+  it('exposes the active permission policy through bridge.permissionPolicy (default first-responder)', () => {
+    const bridge = makeBridge({});
+    expect(bridge.permissionPolicy).toBe('first-responder');
+  });
+
+  it('reflects the configured policy when BridgeOptions.permissionPolicy is set', () => {
+    const bridge = makeBridge({ permissionPolicy: 'consensus' });
+    expect(bridge.permissionPolicy).toBe('consensus');
+  });
+
+  it('throws on non-positive-integer permissionConsensusQuorum', () => {
+    expect(() =>
+      makeBridge({
+        permissionPolicy: 'consensus',
+        permissionConsensusQuorum: 0,
+      }),
+    ).toThrow(/positive integer/);
+    expect(() =>
+      makeBridge({
+        permissionPolicy: 'consensus',
+        permissionConsensusQuorum: 1.5,
+      }),
+    ).toThrow(/positive integer/);
   });
 });

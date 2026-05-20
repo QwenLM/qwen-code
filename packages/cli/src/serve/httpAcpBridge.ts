@@ -39,15 +39,13 @@
 
 export { createHttpAcpBridge } from '@qwen-code/acp-bridge/bridge';
 export { defaultSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
-export {
-  BridgeClient,
-  MAX_RESOLVED_PERMISSION_RECORDS,
-} from '@qwen-code/acp-bridge/bridgeClient';
-export type {
-  BridgeClientSessionEntry,
-  PendingPermission,
-  PermissionResolutionRecord,
-} from '@qwen-code/acp-bridge/bridgeClient';
+// Wenshao review #4335 / 3272581548 — `MAX_RESOLVED_PERMISSION_RECORDS`,
+// `PendingPermission`, `PermissionResolutionRecord` re-exports
+// removed alongside the source definitions in bridgeClient.ts.
+// The mediator now owns pending+resolved state and declares its own
+// (differently-shaped) cap + record types in `permissionMediator.ts`.
+export { BridgeClient } from '@qwen-code/acp-bridge/bridgeClient';
+export type { BridgeClientSessionEntry } from '@qwen-code/acp-bridge/bridgeClient';
 
 export type {
   AcpChannel,
@@ -91,6 +89,10 @@ export {
   WorkspaceInitRaceError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  // #4175 F3 — multi-client permission coordination errors.
+  CancelSentinelCollisionError,
+  PermissionForbiddenError,
+  PermissionPolicyNotImplementedError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 export {

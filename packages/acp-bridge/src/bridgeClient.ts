@@ -19,15 +19,50 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
+import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
+// Wenshao review #4335 / 3272581569 — narrowed from the concrete
+// `MultiClientPermissionMediator` to the sub-interface this class
+// actually uses (`request` only). The bridge factory still
+// constructs the full `MultiClientPermissionMediator` (it needs
+// `peekSessionFor` / `pendingCount` / `forgetSession`); structural
+// typing lets us pass the same instance here without a cast.
+// Test stubs no longer have to fake all 6 mediator members.
+import type { PermissionMediator } from './permission.js';
+import type {
+  PermissionRequestRecord,
+  PermissionResolution,
+} from './permission.js';
+import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 
 /**
- * Bounded duplicate-vote cache. Stores only requestId/sessionId/outcome, so
- * 512 records stays small while covering normal UI reconnect/race windows.
- * Exported because `createHttpAcpBridge` factory's `resolvedPermissions`
- * map uses this cap.
+ * #4175 F3 Commit 3 — translate the mediator's internal
+ * `PermissionResolution` to the ACP-shaped `RequestPermissionResponse`
+ * the agent expects. Voter-cancel (mediator returns
+ * `{kind:'cancelled', reason:'agent_cancelled'}` from the sentinel
+ * path) and timeout / session-closed all project to the same
+ * `{outcome: 'cancelled'}` shape — the ACP wire frame doesn't
+ * distinguish them. The audit log carries `decisionReason.type`
+ * for forensic discrimination.
  */
-export const MAX_RESOLVED_PERMISSION_RECORDS = 512;
+function resolutionToAcpResponse(
+  resolution: PermissionResolution,
+): RequestPermissionResponse {
+  if (resolution.kind === 'option') {
+    return { outcome: { outcome: 'selected', optionId: resolution.optionId } };
+  }
+  return { outcome: { outcome: 'cancelled' } };
+}
+
+// Wenshao review #4335 / 3272581548 — `MAX_RESOLVED_PERMISSION_RECORDS`,
+// `PendingPermission`, and `PermissionResolutionRecord` were removed
+// from this file. The mediator now owns all pending+resolved state
+// (`permissionMediator.ts:77` declares its own MAX constant; line 319
+// declares its own differently-shaped `PermissionResolutionRecord`),
+// so the pre-F3 inline definitions here had become dead code with
+// stale JSDoc that referenced deleted closures (`registerPending`,
+// `resolvedPermissions` map). httpAcpBridge.ts re-exports were
+// dropped in the same commit.
 
 /**
  * PR 14b fix #1 (codex review round 1): bounded buffering for ACP
@@ -102,38 +137,6 @@ function sliceLineRange(
 }
 
 /**
- * Pending permission request awaiting a client vote. Exported because
- * the factory's `registerPending` closure passed into `BridgeClient`
- * constructs these.
- */
-export interface PendingPermission {
-  requestId: string;
-  sessionId: string;
-  resolve: (resp: RequestPermissionResponse) => void;
-  /**
-   * BkwQI: the option IDs the agent originally offered to clients in
-   * the `permission_request` event. `respondToPermission` validates
-   * the voter's `optionId` against this set so an authenticated
-   * client can't smuggle in a hidden outcome (e.g.
-   * `ProceedAlwaysProject` when the prompt's
-   * `hideAlwaysAllow` / forced-ask policy intentionally omitted it).
-   * Stored as a Set for O(1) membership check.
-   */
-  allowedOptionIds: ReadonlySet<string>;
-}
-
-/**
- * Record of an already-resolved permission vote. Used by the factory's
- * bounded duplicate-vote cache so a re-vote on the same requestId
- * within the cache window returns the prior outcome instead of 404.
- */
-export interface PermissionResolutionRecord {
-  requestId: string;
-  sessionId: string;
-  outcome: RequestPermissionResponse['outcome'];
-}
-
-/**
  * Minimal session-entry shape `BridgeClient` reads via its
  * `resolveEntry` callback. Defined here (rather than importing the
  * factory's richer `SessionEntry`) to keep the bridge package free of
@@ -201,25 +204,29 @@ export class BridgeClient implements Client {
     private readonly resolvePendingRestoreEvents: (
       sessionId?: string,
     ) => EventBus | undefined,
-    private readonly registerPending: (pending: PendingPermission) => void,
     /**
-     * Roll back a `registerPending` call when the subsequent publish
-     * fails (closed bus). Resolves the pending promise as cancelled
-     * and removes it from the daemon-wide maps so a late
-     * `respondToPermission` for this id returns 404 cleanly.
+     * #4175 F3 Commit 3 — the multi-client permission coordinator.
+     * Owns ALL pending + resolved permission state; this client just
+     * plumbs `requestPermission` into `mediator.request` and forwards
+     * the resolution to the agent. Strategy dispatch and audit/emit
+     * fan-out live inside the mediator. Replaces the pre-F3
+     * `registerPending` / `rollbackPending` callbacks.
      */
-    private readonly rollbackPending: (requestId: string) => void,
+    private readonly mediator: Pick<PermissionMediator, 'request'>,
     /**
      * Bd1yh: wall-clock ms before `requestPermission` resolves as
      * cancelled if no client vote arrives. 0 = disabled. Prevents
      * the per-session FIFO `promptQueue` from poisoning forever
-     * when no SSE subscriber is connected.
+     * when no SSE subscriber is connected. Forwarded directly to
+     * `mediator.request`; the mediator owns the timer.
      */
     private readonly permissionTimeoutMs: number,
     /**
      * Bd1z5: per-session cap on in-flight permissions. New requests
      * past this cap resolve as cancelled with a stderr warning.
-     * Infinity = disabled.
+     * Infinity = disabled. The bridge keeps `entry.pendingPermissionIds`
+     * as a fast cap-check index; the mediator is still the source of
+     * truth for the pending registry.
      */
     private readonly maxPendingPerSession: number,
     /**
@@ -236,24 +243,13 @@ export class BridgeClient implements Client {
     private readonly fileSystem?: BridgeFileSystem,
   ) {}
 
-  // FIXME(stage-1.5, chiga0 finding 3):
-  // The first-responder permission flow here is a third permission
-  // model in the codebase (alongside ACP `requestPermission` direct
-  // and stream-json `ControlDispatcher`). Stage 1.5 should lift
-  // "permission request lifecycle" into a `PermissionMediator`
-  // interface with strategy-pluggable policies (`first-responder` |
-  // `designated` | `consensus` | `local-only`) so all four
-  // agent-exposing surfaces share one lifecycle. This is also the
-  // closure point for the prior chiga0 audit Risk 2 (first-responder
-  // lacks an authorization model). Reference:
-  // https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
   async requestPermission(
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
     const entry = this.resolveEntry(params.sessionId);
     if (!entry) return { outcome: { outcome: 'cancelled' } };
 
-    // Bd1z5: per-session cap. Reject before registering so we never
+    // Bd1z5: per-session cap. Reject before issuing so we never
     // grow `pendingPermissionIds` past the limit.
     if (entry.pendingPermissionIds.size >= this.maxPendingPerSession) {
       writeStderrLine(
@@ -264,87 +260,70 @@ export class BridgeClient implements Client {
       return { outcome: { outcome: 'cancelled' } };
     }
 
-    const requestId = randomUUID();
-    return await new Promise<RequestPermissionResponse>((resolve) => {
-      let settled = false;
-      let timer: NodeJS.Timeout | undefined;
-      const settleOnce = (response: RequestPermissionResponse) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        resolve(response);
-      };
+    // BkwQI: snapshot the option-id set the agent is offering for
+    // this prompt. The mediator validates the voter's `optionId`
+    // against this set so a malicious client can't forge an option
+    // (e.g. `ProceedAlways*`) the agent intentionally hid.
+    const allowedOptionIds = new Set(
+      params.options.map((o: { optionId?: unknown }) =>
+        String(o.optionId ?? ''),
+      ),
+    );
+    allowedOptionIds.delete('');
 
-      // BkwQI: snapshot the option-id set the agent is offering for
-      // this prompt. `respondToPermission` checks the voter's
-      // `optionId` against this set so a malicious client can't
-      // forge an option (e.g. `ProceedAlways*`) the agent
-      // intentionally hid.
-      const allowedOptionIds = new Set(
-        params.options.map((o: { optionId?: unknown }) =>
-          String(o.optionId ?? ''),
-        ),
-      );
-      allowedOptionIds.delete('');
-      this.registerPending({
+    // F3 final-pass review fold-in — pre-flight the cancel-vote
+    // sentinel collision BEFORE publishing the `permission_request`
+    // SSE event. The mediator also checks defensively at issue
+    // time, but if we publish first and the mediator throws, SSE
+    // subscribers see an orphan event with no resolution.
+    const requestId = randomUUID();
+    if (allowedOptionIds.has(CANCEL_VOTE_SENTINEL)) {
+      throw new CancelSentinelCollisionError(requestId, CANCEL_VOTE_SENTINEL);
+    }
+
+    // Publish AFTER the collision check so a violating agent never
+    // leaves an orphan `permission_request` on the SSE bus. If the
+    // bus is closed (shutdown race), bail before touching the
+    // mediator. The mediator's N1 invariant (synchronous register
+    // inside the Promise executor) protects against the
+    // forgetSession-races-with-issue case ONLY when register runs;
+    // refusing to enter the mediator on a publish-failure is the
+    // symmetric defense for the publish-failure case.
+    const published = entry.events.publish({
+      type: 'permission_request',
+      data: {
         requestId,
         sessionId: entry.sessionId,
-        resolve: settleOnce,
-        allowedOptionIds,
-      });
-      // `publish()` returns `undefined` on a closed bus — the
-      // shutdown path closes per-session buses BEFORE awaiting
-      // `channel.kill()`, leaving a small window where the agent
-      // can still issue `requestPermission`. If we registered the
-      // pending entry above but the publish fails, no SSE
-      // subscriber will ever see the request → no client can vote
-      // → the pending promise never resolves → agent's
-      // `requestPermission` hangs forever (a real bug, not a
-      // theoretical one — the daemon's shutdown.kill() loop awaits
-      // each child, and a child stuck waiting on permission would
-      // pin shutdown until the kill timer expires).
-      //
-      // Resolve as `cancelled` immediately if the bus rejected
-      // the publish. Mirrors the orphan-permission handling in
-      // `registerPending` itself for the entry-already-gone case.
-      const published = entry.events.publish({
-        type: 'permission_request',
-        data: {
-          requestId,
-          sessionId: entry.sessionId,
-          toolCall: params.toolCall,
-          options: params.options,
-        },
-        ...(entry.activePromptOriginatorClientId
-          ? { originatorClientId: entry.activePromptOriginatorClientId }
-          : {}),
-      });
-      if (!published) {
-        // Roll back the pending registration and resolve cancelled.
-        this.rollbackPending(requestId);
-        return;
-      }
-
-      // Bd1yh: arm the deadline AFTER publish so we don't fire-and-
-      // cancel a no-subscriber request before the bus even saw it.
-      // When the deadline fires, roll back the pending (so a late
-      // vote returns 404) and resolve as cancelled (unwinding the
-      // agent's awaiting promise so the per-session FIFO can drain).
-      if (this.permissionTimeoutMs > 0) {
-        timer = setTimeout(() => {
-          if (settled) return;
-          writeStderrLine(
-            `qwen serve: session ${entry.sessionId} permission ` +
-              `${requestId} timed out after ${this.permissionTimeoutMs}ms ` +
-              `(no client voted) — resolving as cancelled.`,
-          );
-          this.rollbackPending(requestId);
-        }, this.permissionTimeoutMs);
-        if (typeof timer === 'object' && timer && 'unref' in timer) {
-          (timer as { unref: () => void }).unref();
-        }
-      }
+        toolCall: params.toolCall,
+        options: params.options,
+      },
+      ...(entry.activePromptOriginatorClientId
+        ? { originatorClientId: entry.activePromptOriginatorClientId }
+        : {}),
     });
+    if (!published) return { outcome: { outcome: 'cancelled' } };
+
+    // Cap-index add happens AFTER publish-success so a publish-fail
+    // path doesn't need to roll back. The mediator's
+    // `forgetSession` is the only thing that drains this index (via
+    // the bridge's `cancelPendingForSession`).
+    entry.pendingPermissionIds.add(requestId);
+    try {
+      const record: PermissionRequestRecord = {
+        requestId,
+        sessionId: entry.sessionId,
+        originatorClientId: entry.activePromptOriginatorClientId,
+        allowedOptionIds,
+        issuedAtMs: Date.now(),
+      };
+      const resolution = await this.mediator.request(
+        record,
+        this.permissionTimeoutMs,
+      );
+      return resolutionToAcpResponse(resolution);
+    } finally {
+      entry.pendingPermissionIds.delete(requestId);
+    }
   }
 
   async sessionUpdate(params: SessionNotification): Promise<void> {

@@ -28,11 +28,13 @@ import {
   type DeviceFlowPublicView,
 } from './auth/deviceFlow.js';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
+import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
+  CancelSentinelCollisionError,
   createHttpAcpBridge,
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -41,6 +43,8 @@ import {
   MAX_WORKSPACE_PATH_LENGTH,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  PermissionForbiddenError,
+  PermissionPolicyNotImplementedError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -109,6 +113,53 @@ export function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
       );
     }
   };
+}
+
+/**
+ * Shared `WorkspaceFileSystemFactory` construction used by both
+ * `runQwenServe` and `createServeApp`'s default bridge wiring.
+ * Centralizes the "use the injected factory if provided, otherwise
+ * build one with the given trust + audit-emit posture" logic so a
+ * future change to one call site doesn't silently diverge the other
+ * (#4334 DWcK4 review fold-in).
+ *
+ * Trust is intentionally a **required** parameter — the two call
+ * sites have different correct defaults and centralizing only the
+ * construction shape (not the policy) prevents accidental coupling:
+ *   - `runQwenServe` defaults to `trusted: true` (production daemon
+ *     boots up trusted; an explicit `deps.trustedWorkspace: false`
+ *     overrides for sandboxed runs).
+ *   - `createServeApp` defaults to `trusted: false` (test-safe;
+ *     direct embeds — IDE companions, hosted daemons — must
+ *     explicitly opt in to writes via `deps.fsFactory` or by
+ *     injecting their own `deps.bridge`).
+ *
+ * The audit-emit defaults to `createDefaultFsAuditEmit()` (the
+ * throttled stderr warning) when not provided.
+ */
+/**
+ * Module-scoped once-per-process guard for the `createServeApp`
+ * default-trust stderr warning (#4334 wenshao review DWrbn). Without
+ * this, `server.test.ts`'s ~25 `createServeApp` calls would flood
+ * stderr with identical lines, masking genuine failures in CI logs.
+ * Module scope (not closure-per-app) is intentional — the warning is
+ * a *posture* statement about this binary, not about each individual
+ * createServeApp instance.
+ */
+let warnedDefaultTrust = false;
+
+export function resolveBridgeFsFactory(input: {
+  boundWorkspace: string;
+  injected?: WorkspaceFileSystemFactory;
+  trusted: boolean;
+  emit?: (event: BridgeEvent) => void;
+}): WorkspaceFileSystemFactory {
+  if (input.injected) return input.injected;
+  return createWorkspaceFileSystemFactory({
+    boundWorkspace: input.boundWorkspace,
+    trusted: input.trusted,
+    emit: input.emit ?? createDefaultFsAuditEmit(),
+  });
 }
 
 export interface ServeAppDeps {
@@ -240,6 +291,52 @@ export function createServeApp(
   const boundWorkspace =
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  // F1 follow-up (#4319): construct `fsFactory` BEFORE the bridge so
+  // the bridge can wire it through `BridgeFileSystem` for ACP-side
+  // writeTextFile / readTextFile calls. Symmetric with
+  // `runQwenServe.ts` — without this wiring, direct embeds / tests
+  // that don't inject `deps.bridge` would silently lose the PR 18
+  // defensive fs layer for agent-triggered fs (the inline raw-fs
+  // proxy in `BridgeClient` would still run, bypassing trust /
+  // TOCTOU / audit). Default trust here is `false` (test-safe) to
+  // match the existing `createServeApp` posture below.
+  //
+  // Behavior change warning for embed consumers (#4334 wenshao review):
+  // pre-this-PR, ACP writeTextFile went through `BridgeClient`'s inline
+  // proxy which had no trust gate, so embeds calling `createServeApp`
+  // without providing `deps.fsFactory` had agent writes always succeed.
+  // Now those writes will reject with `untrusted_workspace` unless the
+  // embed either (a) provides its own `deps.fsFactory` with `trusted:
+  // true`, (b) provides its own `deps.bridge` (which controls its own
+  // `BridgeFileSystem` wiring and bypasses the default adapter), or
+  // (c) explicitly accepts the trust-gate-default posture for its
+  // hosting environment. Warn loudly so the asymmetry is visible to
+  // operators rather than appearing as opaque agent-side write failures.
+  // `runQwenServe.ts` consumers are unaffected — that path constructs
+  // `fsFactory` with `trusted: true` by default.
+  //
+  // Suppress the warning when `deps.bridge` is provided — that embed
+  // owns its own fileSystem wiring (the default adapter never runs) so
+  // the warning's claim about ACP writes rejecting would be false.
+  //
+  // Throttled to fire ONCE per process (#4334 wenshao review DWrbn):
+  // `server.test.ts` calls `createServeApp` ~25 times and the
+  // unthrottled warning floods stderr, masking genuine failures in CI
+  // output. Operators see the warning the first time and can take
+  // action; subsequent calls don't add information.
+  if (!deps.fsFactory && !deps.bridge && !warnedDefaultTrust) {
+    warnedDefaultTrust = true;
+    process.stderr.write(
+      'qwen serve: createServeApp default fsFactory uses trusted=false ' +
+        '— agent ACP writeTextFile calls will reject with untrusted_workspace. ' +
+        'Inject deps.fsFactory (with explicit trust) or deps.bridge to override.\n',
+    );
+  }
+  const fsFactory = resolveBridgeFsFactory({
+    boundWorkspace,
+    ...(deps.fsFactory ? { injected: deps.fsFactory } : {}),
+    trusted: false,
+  });
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -260,6 +357,10 @@ export function createServeApp(
       // here preserves byte-for-byte route output on the default
       // bridge construction path.
       statusProvider: createDaemonStatusProvider(),
+      // F1 follow-up (#4319): wire the WorkspaceFileSystem adapter so
+      // ACP writeTextFile / readTextFile pick up trust / TOCTOU /
+      // audit. See `bridgeFileSystemAdapter.ts`.
+      fileSystem: createBridgeFileSystemAdapter(fsFactory),
     });
 
   // Allow same-origin requests from the demo page. Browsers send an
@@ -303,13 +404,12 @@ export function createServeApp(
   // audit destination — `runQwenServe` will inject one whose
   // `trusted` mirrors `Config.isTrustedFolder()` and whose `emit`
   // plumbs into the per-session EventBus once PR 19/20 lands.
-  const fsFactory: WorkspaceFileSystemFactory =
-    deps.fsFactory ??
-    createWorkspaceFileSystemFactory({
-      boundWorkspace,
-      trusted: false,
-      emit: createDefaultFsAuditEmit(),
-    });
+  //
+  // F1 follow-up (#4319): the `fsFactory` is now constructed earlier
+  // (above the bridge) so the bridge can wire it into the
+  // `BridgeFileSystem` seam for ACP fs methods. Re-using the same
+  // instance for HTTP fs routes + ACP fs ensures a single operator
+  // audit stream covers both surfaces.
   // Park the factory on `app.locals` so PR 19/20 route handlers can
   // pick it up via `req.app.locals.fsFactory` without re-threading
   // the value through every handler signature, and so PR 18 tests
@@ -560,6 +660,13 @@ export function createServeApp(
       // #3803 §02: surface the bound workspace so clients can detect
       // mismatch pre-flight and omit `cwd` on `POST /session`.
       workspaceCwd: boundWorkspace,
+      // #4175 F3 Commit 6 — active mediation policy under the
+      // `policy` namespace. Distinct from the `permission_mediation`
+      // capability `modes` list (build-supported set). SDK clients
+      // pre-flight the active strategy and render the matching UX
+      // (e.g. consensus shows partial-vote progress, designated
+      // disables the vote button for non-originators).
+      policy: { permission: bridge.permissionPolicy },
     };
     res.status(200).json(envelope);
   });
@@ -1603,13 +1710,26 @@ export function createServeApp(
     if (response === undefined) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+    // F3 Commit 2: thread the kernel-stamped peer-IP loopback bit
+    // through the bridge context so the `local-only` policy can gate
+    // votes by transport. We always pass a context (even when no
+    // header was supplied) so `fromLoopback` reaches the mediator —
+    // the prior gating shape (`clientId !== undefined ? { clientId }
+    // : undefined`) would silently drop the loopback bit for
+    // anonymous loopback voters, which is the exact `local-only`
+    // happy path.
+    const fromLoopback = detectFromLoopback(req);
+    const context = {
+      ...(clientId !== undefined ? { clientId } : {}),
+      fromLoopback,
+    };
     let accepted: boolean;
     try {
       accepted = bridge.respondToSessionPermission(
         sessionId,
         requestId,
         response,
-        clientId !== undefined ? { clientId } : undefined,
+        context,
       );
     } catch (err) {
       sendPermissionVoteError(res, err, {
@@ -1635,13 +1755,15 @@ export function createServeApp(
     if (response === undefined) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+    // Same F3 Commit 2 rationale as the session-scoped route above.
+    const fromLoopback = detectFromLoopback(req);
+    const context = {
+      ...(clientId !== undefined ? { clientId } : {}),
+      fromLoopback,
+    };
     let accepted: boolean;
     try {
-      accepted = bridge.respondToPermission(
-        requestId,
-        response,
-        clientId !== undefined ? { clientId } : undefined,
-      );
+      accepted = bridge.respondToPermission(requestId, response, context);
     } catch (err) {
       sendPermissionVoteError(res, err, {
         route: 'POST /permission/:requestId',
@@ -2165,6 +2287,52 @@ function parseClientIdHeader(
 }
 
 /**
+ * #4175 F3 Commit 2 — decide whether a permission vote arrived from a
+ * loopback peer.
+ *
+ * Per RFC 1122 the entire `127.0.0.0/8` block is loopback (and the
+ * IPv4-mapped IPv6 form `::ffff:127.0.0.0/104` mirrors that). IPv6
+ * loopback is `::1` (single literal). Wenshao review #4335 /
+ * 3271185597 — the previous exact-match Set of three literals
+ * (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`) silently fail-CLOSED
+ * on legitimate non-`.0.0.1` loopback addresses (`127.0.0.2`,
+ * `127.0.1.1`, etc.), causing unexpected `remote_not_allowed`
+ * rejections under `local-only` policy. Switched to a prefix
+ * test so the entire `/8` and its dual-stack mirror are accepted.
+ *
+ * **Security**: this function reads `req.socket.remoteAddress` only.
+ * It does NOT consult `X-Forwarded-For` or any HTTP header — those
+ * are forgeable, and `local-only` is meant to be a strong gate that
+ * trusts the kernel-stamped peer IP. Operators who want
+ * loopback-equivalent treatment for a reverse-proxied daemon should
+ * use a dedicated daemon process instead, or pick `designated`
+ * policy where loopback identity is irrelevant.
+ *
+ * Direction is fail-CLOSED: an unrecognized `remoteAddress` shape
+ * (missing socket, non-string) returns `false`, gating votes
+ * conservatively rather than admitting them.
+ */
+// Wenshao review #4335 / 3272581557 — exported for unit testing.
+// supertest in the existing server tests always connects from
+// `127.0.0.1`, so the prefix-match logic for `127.x`-beyond-`.0.0.1`,
+// `::1`, `::ffff:127.*`, and the fail-closed non-string branch had
+// no direct test. The factored-out helper takes a minimal shape so
+// tests can exercise it without spinning up Express.
+export function detectFromLoopback(req: {
+  socket?: { remoteAddress?: string | undefined };
+}): boolean {
+  const addr = req.socket?.remoteAddress;
+  if (typeof addr !== 'string') return false;
+  // IPv6 loopback (single literal).
+  if (addr === '::1') return true;
+  // IPv4 loopback: 127.0.0.0/8.
+  if (addr.startsWith('127.')) return true;
+  // IPv4-mapped IPv6 loopback: ::ffff:127.0.0.0/104.
+  if (addr.startsWith('::ffff:127.')) return true;
+  return false;
+}
+
+/**
  * #4282 fold-in 1 (gpt-5.5 C2). Workspace-level mutation routes validate
  * the parsed `X-Qwen-Client-Id` against `bridge.knownClientIds()` so the
  * `originatorClientId` stamped onto fan-out events is grounded in a
@@ -2352,6 +2520,45 @@ function sendPermissionVoteError(
       code: 'invalid_option_id',
       requestId: err.requestId,
       optionId: err.optionId,
+    });
+    return;
+  }
+  // F3 Commit 2 — designated voter mismatch / `local-only` remote
+  // rejection. 403 because the request is well-formed and the voter
+  // was authenticated; the policy refuses their vote.
+  if (err instanceof PermissionForbiddenError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'permission_forbidden',
+      requestId: err.requestId,
+      sessionId: err.sessionId,
+      reason: err.reason,
+    });
+    return;
+  }
+  // F3 Commit 2 — operator configured a permission policy whose
+  // implementation has not landed in this build yet. 501 (not 500)
+  // so the SDK can render "your daemon is older than your settings
+  // expect; upgrade" rather than a generic Internal Server Error.
+  if (err instanceof PermissionPolicyNotImplementedError) {
+    res.status(501).json({
+      error: err.message,
+      code: 'permission_policy_not_implemented',
+      policy: err.policy,
+    });
+    return;
+  }
+  // F3 Commit 2 — agent declared an `allowedOptionIds` set that
+  // includes the cancel-vote sentinel. This is a contract violation
+  // between agent and daemon (not a client mistake), so 500 is the
+  // right shape; structured `code` lets the SDK distinguish from
+  // unrelated 500s.
+  if (err instanceof CancelSentinelCollisionError) {
+    res.status(500).json({
+      error: err.message,
+      code: 'cancel_sentinel_collision',
+      requestId: err.requestId,
+      sentinel: err.sentinel,
     });
     return;
   }
