@@ -300,20 +300,24 @@ export interface BridgeOptions {
   permissionConsensusQuorum?: number;
   /**
    * #4175 F3 Commit 2 — injection seam for the permission audit
-   * publisher. Tests pass a recording stub.
+   * publisher.
    *
-   * **When omitted**: the bridge allocates an internal
-   * `PermissionAuditRing` (default capacity 512) and wires
-   * `createPermissionAuditPublisher` to write into it. The ring is
-   * held inside the bridge factory's closure for future query-route
-   * extraction; it is NOT currently exposed on the `HttpAcpBridge`
-   * interface. (`createNoOpPermissionAuditPublisher` exists for
-   * embedded callers who really want a no-op; pass it explicitly.)
+   * **When omitted**: the bridge falls back to
+   * `createNoOpPermissionAuditPublisher` so embedded callers (and
+   * the bridge unit-test suite) can run the mediator without an
+   * audit consumer.
    *
-   * Either way, `recordTimeout` calls receive a stderr breadcrumb
-   * before being forwarded to the configured publisher so operators
-   * tailing daemon stderr always see permission timeouts (preserves
-   * pre-F3 visibility — see `httpAcpBridge.ts` for the wrapper).
+   * **In production** (`qwen serve`), `runQwenServe.ts` allocates a
+   * `PermissionAuditRing` (default capacity 512), wraps it with
+   * `createPermissionAuditPublisher`, and passes the result here.
+   * The ring stays alive for the lifetime of the daemon so a future
+   * `GET /workspace/permission/audit` route (out of F3 v1 scope)
+   * can lift it out for query.
+   *
+   * Permission timeouts also produce a stderr breadcrumb directly
+   * from the mediator's timer callback (independent of this
+   * publisher) so operators tailing daemon stderr always see
+   * timeouts even when the audit publisher is the no-op fallback.
    */
   permissionAudit?: PermissionAuditPublisher;
 }

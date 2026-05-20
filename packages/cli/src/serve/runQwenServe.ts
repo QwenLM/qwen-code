@@ -18,6 +18,10 @@ import {
 } from './httpAcpBridge.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
+import {
+  createPermissionAuditPublisher,
+  PermissionAuditRing,
+} from './permissionAudit.js';
 import { createDefaultFsAuditEmit, createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
 import {
@@ -367,12 +371,14 @@ export async function runQwenServe(
       bootSettings.merged.context?.fileName,
     );
     const policyConfig =
-      (bootSettings.merged as {
-        policy?: {
-          permissionStrategy?: string;
-          consensusQuorum?: number;
-        };
-      }).policy ?? {};
+      (
+        bootSettings.merged as {
+          policy?: {
+            permissionStrategy?: string;
+            consensusQuorum?: number;
+          };
+        }
+      ).policy ?? {};
     if (
       policyConfig.permissionStrategy !== undefined &&
       !VALID_PERMISSION_POLICIES.has(policyConfig.permissionStrategy)
@@ -427,6 +433,20 @@ export async function runQwenServe(
     );
   }
 
+  // F3 Commit 2 — allocate the audit ring + publisher in the daemon
+  // host (here) rather than inside the bridge factory, because the
+  // ring is the seam future PRs will lift up to expose `GET
+  // /workspace/permission/audit`. Wenshao review #4335 (3270622298 /
+  // 3270622304): without this wiring all 5 audit record types were
+  // silently dropped through `createNoOpPermissionAuditPublisher`,
+  // and the timeout breadcrumb the bridge JSDoc promised never
+  // existed. The mediator now writes a stderr line on each timeout
+  // (preserving pre-F3 visibility) and forwards the entry to this
+  // ring for the future query route.
+  const permissionAuditRing = new PermissionAuditRing();
+  const permissionAuditPublisher = createPermissionAuditPublisher({
+    ring: permissionAuditRing,
+  });
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -444,6 +464,7 @@ export async function runQwenServe(
       ...(permissionConsensusQuorum !== undefined
         ? { permissionConsensusQuorum }
         : {}),
+      permissionAudit: permissionAuditPublisher,
       // #4175 PR 22b/2: inject the daemon-host status provider so the
       // bridge can pull env / preflight cells through a typed seam
       // instead of importing daemon-host helpers directly. Production

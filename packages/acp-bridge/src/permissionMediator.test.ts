@@ -476,6 +476,37 @@ describe('MultiClientPermissionMediator — timeout', () => {
 
     expect(calls.some((c) => c.kind === 'timeout')).toBe(false);
   });
+
+  // Wenshao review #4335 / 3270622304 — pre-F3 wrote a stderr line on
+  // every permission timeout; F3's mediator timer must preserve that
+  // breadcrumb so operators tailing daemon stderr still see timeouts
+  // even when the audit publisher is the no-op fallback (embedded
+  // callers / unit tests).
+  it('writes a stderr breadcrumb when the timer fires', async () => {
+    const writes: string[] = [];
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: string | Uint8Array): boolean => {
+        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+    try {
+      const { mediator } = makeMediator();
+      const record = makeRecord();
+      const promise = mediator.request(record, 5_000);
+      vi.advanceTimersByTime(5_000);
+      await promise;
+
+      const breadcrumb = writes.find((w) =>
+        w.includes('timed out after 5000ms'),
+      );
+      expect(breadcrumb).toBeDefined();
+      expect(breadcrumb).toContain('req-1');
+      expect(breadcrumb).toContain('sess-1');
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
 });
 
 describe('MultiClientPermissionMediator — peekSessionFor', () => {
@@ -531,9 +562,7 @@ describe('MultiClientPermissionMediator — designated', () => {
       kind: 'forbidden',
       reason: 'designated_mismatch',
     });
-    expect(events.map((e) => e.event.type)).toEqual([
-      'permission_forbidden',
-    ]);
+    expect(events.map((e) => e.event.type)).toEqual(['permission_forbidden']);
     expect(events[0]!.event.data).toEqual({
       requestId: 'req-1',
       sessionId: 'sess-1',
@@ -691,12 +720,8 @@ describe('MultiClientPermissionMediator — consensus', () => {
     const record = makeRecord();
     const promise = mediator.request(record, 5_000);
 
-    mediator.vote(
-      makeVote({ clientId: 'client_A', optionId: 'proceed_once' }),
-    );
-    mediator.vote(
-      makeVote({ clientId: 'client_B', optionId: 'proceed_once' }),
-    );
+    mediator.vote(makeVote({ clientId: 'client_A', optionId: 'proceed_once' }));
+    mediator.vote(makeVote({ clientId: 'client_B', optionId: 'proceed_once' }));
     mediator.vote(
       makeVote({ clientId: 'client_C', optionId: 'proceed_always' }),
     );
@@ -856,9 +881,7 @@ describe('MultiClientPermissionMediator — local-only', () => {
       kind: 'forbidden',
       reason: 'remote_not_allowed',
     });
-    expect(events.map((e) => e.event.type)).toEqual([
-      'permission_forbidden',
-    ]);
+    expect(events.map((e) => e.event.type)).toEqual(['permission_forbidden']);
     expect(events[0]!.event.data).toEqual({
       requestId: 'req-1',
       sessionId: 'sess-1',

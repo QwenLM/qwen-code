@@ -396,6 +396,23 @@ export class MultiClientPermissionMediator implements PermissionMediator {
           // a fresh request for a stale-timer fire on the old one.
           if (this.pending.get(record.requestId) !== pending) return;
           const firedAtMs = this.deps.now();
+          // F3 Commit 2 — restore pre-F3 stderr breadcrumb (wenshao
+          // review #4335 / 3270622304). Pre-F3 wrote "timed out
+          // after Xms" directly to daemon stderr; F3 delegated to
+          // the audit publisher, but production audit can still be
+          // a no-op for embedded callers, so emit the breadcrumb
+          // here unconditionally. Wrapped in try/catch because
+          // process.stderr.write can synchronously throw on EPIPE
+          // (closed stderr) — losing observability is preferable
+          // to crashing the daemon's timer queue.
+          try {
+            process.stderr.write(
+              `qwen serve: permission ${record.requestId} ` +
+                `(session ${record.sessionId}) timed out after ${timeoutMs}ms\n`,
+            );
+          } catch {
+            // Stderr unavailable — drop the breadcrumb and continue.
+          }
           this.safeAudit(() => this.deps.audit.recordTimeout(record));
           this.resolveEntry(
             pending,
@@ -844,9 +861,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     return Math.max(quorum - max, 1);
   }
 
-  private optionTalliesFor(
-    pending: MediatorPending,
-  ): Record<string, number> {
+  private optionTalliesFor(pending: MediatorPending): Record<string, number> {
     const out: Record<string, number> = {};
     for (const [optionId, set] of pending.tallies) {
       out[optionId] = set.size;
