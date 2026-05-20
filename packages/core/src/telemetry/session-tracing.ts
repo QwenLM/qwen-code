@@ -137,14 +137,44 @@ function sweepStaleSpans(now: number): void {
         // garbage-collected by the TTL safety net" from "deliberately
         // ended without setting status / attrs" (#4321 review).
         const ageMs = now - ctx.startTime;
-        ctx.span.setAttributes({
-          'qwen-code.span.ttl_expired': true,
-          'qwen-code.span.duration_ms': ageMs,
-        });
+        const toolName = ctx.attributes['tool.name'];
+        const callId = ctx.attributes['tool.call_id'];
+        // setAttributes and span.end() are wrapped separately so a
+        // setAttributes throw can't prevent the span from being ended
+        // (#4321 review-3 wenshao Suggestion). For blocked_on_user
+        // spans, also stamp the canonical decision/source taxonomy so
+        // dashboards filtering by `decision: 'aborted'` count
+        // walk-aways consistently with explicit user aborts.
+        try {
+          ctx.span.setAttributes({
+            'qwen-code.span.ttl_expired': true,
+            'qwen-code.span.duration_ms': ageMs,
+            ...(ctx.type === 'tool.blocked_on_user'
+              ? {
+                  decision: 'aborted',
+                  source: 'system',
+                }
+              : {}),
+          });
+        } catch {
+          // OTel errors must not prevent span.end() from running.
+        }
+        // Include tool name + call_id so the log is actionable in
+        // production without a trace-backend lookup (review-3).
+        const ctxLabel =
+          toolName && callId
+            ? `${ctx.type} (tool.name=${toolName}, tool.call_id=${callId})`
+            : ctx.type;
         debugLogger.warn(
-          `Stale ${ctx.type} span ended by TTL safety net (age=${ageMs}ms, spanId=${spanId})`,
+          `Stale ${ctxLabel} span ended by TTL safety net (age=${ageMs}ms, spanId=${spanId})`,
         );
-        ctx.span.end();
+        try {
+          ctx.span.end();
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to end stale span ${spanId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
       activeSpans.delete(spanId);
       strongSpans.delete(spanId);
@@ -163,6 +193,22 @@ function ensureCleanupInterval(): void {
 
 function getSpanId(span: Span): string {
   return span.spanContext().spanId || '';
+}
+
+const SPAN_ERROR_MAX_BYTES = 1024;
+
+/**
+ * Bound the size of error strings written to span attributes / status
+ * messages. Hook server responses, raw exception stacks, or malicious
+ * inputs can be unbounded; some OTel backends drop the entire span when
+ * any field exceeds their limit. 1KB is small enough to fit any
+ * sensible error and large enough that operators rarely need to look
+ * up the raw payload (#4321 review-3 wenshao Critical).
+ */
+function truncateSpanError(s: string): string {
+  return s.length > SPAN_ERROR_MAX_BYTES
+    ? s.slice(0, SPAN_ERROR_MAX_BYTES) + '…[truncated]'
+    : s;
 }
 
 function getTracer() {
@@ -302,7 +348,8 @@ export function endLLMRequestSpan(
       if (metadata.outputTokens !== undefined)
         endAttributes['output_tokens'] = metadata.outputTokens;
       endAttributes['success'] = metadata.success;
-      if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+      if (metadata.error !== undefined)
+        endAttributes['error'] = truncateSpanError(metadata.error);
     }
 
     spanCtx.span.setAttributes(endAttributes);
@@ -312,7 +359,9 @@ export function endLLMRequestSpan(
     } else {
       spanCtx.span.setStatus({
         code: SpanStatusCode.ERROR,
-        message: metadata.error ?? 'unknown error',
+        message: metadata.error
+          ? truncateSpanError(metadata.error)
+          : 'unknown error',
       });
     }
   } catch (error) {
@@ -409,7 +458,8 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
     if (metadata) {
       if (metadata.success !== undefined)
         endAttributes['success'] = metadata.success;
-      if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+      if (metadata.error !== undefined)
+        endAttributes['error'] = truncateSpanError(metadata.error);
     }
 
     spanCtx.span.setAttributes(endAttributes);
@@ -420,7 +470,9 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
       } else {
         spanCtx.span.setStatus({
           code: SpanStatusCode.ERROR,
-          message: metadata.error ?? 'tool error',
+          message: metadata.error
+            ? truncateSpanError(metadata.error)
+            : 'tool error',
         });
       }
     }
@@ -506,7 +558,8 @@ export function endToolExecutionSpan(
     if (metadata) {
       if (metadata.success !== undefined)
         endAttributes['success'] = metadata.success;
-      if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+      if (metadata.error !== undefined)
+        endAttributes['error'] = truncateSpanError(metadata.error);
     }
 
     spanCtx.span.setAttributes(endAttributes);
@@ -521,7 +574,9 @@ export function endToolExecutionSpan(
       } else {
         spanCtx.span.setStatus({
           code: SpanStatusCode.ERROR,
-          message: metadata.error ?? 'tool execution error',
+          message: metadata.error
+            ? truncateSpanError(metadata.error)
+            : 'tool execution error',
         });
       }
     }
@@ -751,7 +806,8 @@ export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
         endAttributes['block_type'] = metadata.blockType;
       if (metadata.hasAdditionalContext !== undefined)
         endAttributes['has_additional_context'] = metadata.hasAdditionalContext;
-      if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+      if (metadata.error !== undefined)
+        endAttributes['error'] = truncateSpanError(metadata.error);
     }
 
     spanCtx.span.setAttributes(endAttributes);
@@ -759,7 +815,7 @@ export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
     if (metadata?.error !== undefined) {
       spanCtx.span.setStatus({
         code: SpanStatusCode.ERROR,
-        message: metadata.error,
+        message: truncateSpanError(metadata.error),
       });
     }
   } catch (error) {

@@ -701,6 +701,19 @@ interface ToolBatch {
 }
 
 /**
+ * State for the per-batch signal.abort listener registered in
+ * `_schedule`. Shared by every callId in the batch so finalize hooks
+ * can remove the listener once the last live entry drains, regardless
+ * of whether finalization happens synchronously inside `_schedule`,
+ * later via `handleConfirmationResponse`, or via `executeSingleToolCall`.
+ */
+interface BatchAbortState {
+  signal: AbortSignal;
+  onAbort: () => void;
+  callIds: Set<string>;
+}
+
+/**
  * Returns true if a scheduled tool call can safely execute concurrently
  * with other safe tools (no side effects, no shared mutable state).
  */
@@ -773,6 +786,13 @@ export class CoreToolScheduler {
   // the scheduler's lifetime (the 30-min TTL ends the underlying spans
   // but cannot reach these scheduler-local Maps; #4321 review).
   private blockedSpans = new Map<string, Span>();
+  // Per-batch abort-listener state. callIdToBatch maps each callId added
+  // during a `_schedule` invocation to its shared BatchAbortState; when
+  // `finalize{Tool,Blocked}Span` removes the last live callId of a
+  // batch, we strip the abort listener off the signal so long-lived
+  // sessions reusing the same AbortSignal don't accumulate listeners
+  // and trip Node's MaxListenersExceededWarning (#4321 review-3).
+  private callIdToBatch = new Map<string, BatchAbortState>();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
@@ -1037,6 +1057,7 @@ export class CoreToolScheduler {
     if (!span) return;
     this.toolSpans.delete(callId);
     endToolSpan(span);
+    this.releaseBatchListenerIfDrained(callId);
   }
 
   /**
@@ -1054,6 +1075,32 @@ export class CoreToolScheduler {
     if (!span) return;
     this.blockedSpans.delete(callId);
     endToolBlockedOnUserSpan(span, { decision, source });
+    // Don't release the batch listener here — the tool span often
+    // outlives the blocked span (proceed → execute), so finalizeToolSpan
+    // is the canonical drain point. The blocked span's release runs
+    // through the same path on terminal states (cancel/error finalize
+    // both spans together).
+  }
+
+  /**
+   * Hook called by finalizeToolSpan when a callId drains from the
+   * scheduler-local maps. If this was the last live callId of its batch,
+   * remove the abort listener so the AbortSignal doesn't accumulate
+   * listeners across many `_schedule` calls in a long-lived session
+   * (#4321 review-3 wenshao Critical).
+   */
+  private releaseBatchListenerIfDrained(callId: string): void {
+    const batch = this.callIdToBatch.get(callId);
+    if (!batch) return;
+    this.callIdToBatch.delete(callId);
+    batch.callIds.delete(callId);
+
+    // Any other callId in the batch still in toolSpans/blockedSpans?
+    // If yes, the listener still has work to do. If no, drop it.
+    for (const id of batch.callIds) {
+      if (this.toolSpans.has(id) || this.blockedSpans.has(id)) return;
+    }
+    batch.signal.removeEventListener('abort', batch.onAbort);
   }
 
   /**
@@ -1090,13 +1137,22 @@ export class CoreToolScheduler {
     const ids = Array.from(callIds);
     setTimeout(() => {
       for (const callId of ids) {
-        if (this.blockedSpans.has(callId)) {
-          this.finalizeBlockedSpan(callId, 'aborted', 'system');
-        }
-        const span = this.toolSpans.get(callId);
-        if (span) {
-          setToolSpanCancelled(span);
-          this.finalizeToolSpan(callId);
+        // Per-callId try/catch so one bad finalize doesn't silently skip
+        // remaining entries — the timer callback would otherwise surface
+        // an unhandled exception (#4321 review-3 wenshao Suggestion).
+        try {
+          if (this.blockedSpans.has(callId)) {
+            this.finalizeBlockedSpan(callId, 'aborted', 'system');
+          }
+          const span = this.toolSpans.get(callId);
+          if (span) {
+            setToolSpanCancelled(span);
+            this.finalizeToolSpan(callId);
+          }
+        } catch (e) {
+          debugLogger.warn(
+            `drainSpansForBatch: failed to drain ${callId}: ${e instanceof Error ? e.message : String(e)}`,
+          );
         }
       }
     }, 0);
@@ -1115,6 +1171,23 @@ export class CoreToolScheduler {
    * throws internally so this branch is unreachable, but the pattern
    * future-proofs the lifecycle if that contract changes.
    */
+  /**
+   * Shared toEndMeta callback for the 4 PostToolUseFailure hook fire
+   * sites. Each was previously inlined as a byte-identical lambda; the
+   * helper avoids drift between cancel-vs-error and abort-vs-non-abort
+   * branches and keeps protocol changes (e.g. new metadata fields) in
+   * one place (#4321 review-3 wenshao Suggestion).
+   */
+  private postToolUseFailureEndMeta = (
+    r: Awaited<ReturnType<typeof safelyFirePostToolUseFailureHook>>,
+  ): HookSpanMetadata =>
+    r.hookError
+      ? { success: false, error: r.hookError }
+      : {
+          success: true,
+          hasAdditionalContext: !!r.additionalContext,
+        };
+
   private async withHookSpan<T>(
     opts: StartHookSpanOptions,
     fn: () => Promise<T>,
@@ -1452,14 +1525,20 @@ export class CoreToolScheduler {
       this.toolCalls = this.toolCalls.concat(newToolCalls);
       this.notifyToolCallsUpdate();
 
-      // Track every callId whose tool span is opened in this batch so we
-      // can drain stragglers on signal.abort. Necessary for the
-      // walk-away-during-awaiting_approval scenario: the session-tracing
-      // TTL cleans up the underlying spans but cannot reach the
-      // scheduler-local toolSpans/blockedSpans Maps (#4321 review).
-      const batchCallIds = new Set<string>();
-      const onAbort = () => this.drainSpansForBatch(batchCallIds);
-      signal.addEventListener('abort', onAbort, { once: true });
+      // Per-batch abort-listener state. Shared by every callId added in
+      // this `_schedule` invocation. The listener drains scheduler-local
+      // Maps on a real abort (walk-away-during-awaiting_approval), and is
+      // automatically released by `releaseBatchListenerIfDrained` from
+      // inside `finalizeToolSpan` when the batch's last live callId
+      // drains — keeping listener growth bounded across long sessions
+      // even when batches mix synchronous and awaiting_approval flows
+      // (#4321 review-3 wenshao Critical).
+      const batchState: BatchAbortState = {
+        signal,
+        onAbort: () => this.drainSpansForBatch(batchState.callIds),
+        callIds: new Set<string>(),
+      };
+      signal.addEventListener('abort', batchState.onAbort, { once: true });
 
       for (const toolCall of newToolCalls) {
         if (toolCall.status !== 'validating') {
@@ -1488,7 +1567,8 @@ export class CoreToolScheduler {
           tool_name: canonicalName,
         });
         this.toolSpans.set(reqInfo.callId, toolSpan);
-        batchCallIds.add(reqInfo.callId);
+        batchState.callIds.add(reqInfo.callId);
+        this.callIdToBatch.set(reqInfo.callId, batchState);
 
         try {
           if (signal.aborted) {
@@ -1736,6 +1816,26 @@ export class CoreToolScheduler {
               continue;
             }
 
+            // Re-check signal.aborted between the for-loop entry guard and
+            // here: `evaluatePermissionFlow`, `getConfirmationDetails`, and
+            // `firePermissionRequestHook` are all `await` points that can
+            // resolve normally even after the signal aborted. Without this
+            // re-check we'd open `awaiting_approval` + a blocked span on
+            // an already-aborted signal — drainSpansForBatch (deferred via
+            // setTimeout(0)) may have already fired by then, so the new
+            // entries would never be drained (#4321 review-3 wenshao
+            // Critical).
+            if (signal.aborted) {
+              this.setStatusInternal(
+                reqInfo.callId,
+                'cancelled',
+                'Tool call cancelled by user.',
+              );
+              setToolSpanCancelled(toolSpan);
+              this.finalizeToolSpan(reqInfo.callId);
+              continue;
+            }
+
             // Allow IDE to resolve confirmation
             this.openIdeDiffIfEnabled(
               confirmationDetails,
@@ -1840,24 +1940,12 @@ export class CoreToolScheduler {
       }
       await this.attemptExecutionOfScheduledCalls(signal);
       void this.checkAndNotifyCompletion();
-
-      // Drop the abort listener early when the batch is fully drained
-      // (no awaiting_approval entries left). Long-lived sessions reuse
-      // the same AbortSignal across many _schedule calls; without this
-      // cleanup, every batch leaves a one-shot listener behind and
-      // Node's MaxListenersExceededWarning trips around the 10th batch.
-      // Listeners that still cover awaiting_approval entries stay
-      // attached — the user's eventual confirmation closes the spans
-      // (handleConfirmationResponse → finalize{Blocked,Tool}Span), and
-      // the listener becomes a no-op when it later fires; or it
-      // auto-removes via `{ once: true }` on real abort (#4321
-      // review-2 wenshao Suggestion).
-      const stillLive = Array.from(batchCallIds).some(
-        (id) => this.toolSpans.has(id) || this.blockedSpans.has(id),
-      );
-      if (!stillLive) {
-        signal.removeEventListener('abort', onAbort);
-      }
+      // Listener removal happens inside `finalizeToolSpan` →
+      // `releaseBatchListenerIfDrained` for every callId, so we don't
+      // need a duplicate cleanup here. That path also covers the
+      // exception case (this method's outer try/catch finalizes spans
+      // before re-throwing), satisfying the
+      // "stillLive cleanup not in finally" concern from review-3.
     } finally {
       this.isScheduling = false;
     }
@@ -2484,13 +2572,7 @@ export class CoreToolScheduler {
                 true,
                 this.config.getApprovalMode(),
               ),
-            (r) =>
-              r.hookError
-                ? { success: false, error: r.hookError }
-                : {
-                    success: true,
-                    hasAdditionalContext: !!r.additionalContext,
-                  },
+            this.postToolUseFailureEndMeta,
           );
 
           // Append additional context from hook if provided
@@ -2726,13 +2808,7 @@ export class CoreToolScheduler {
                 false,
                 this.config.getApprovalMode(),
               ),
-            (r) =>
-              r.hookError
-                ? { success: false, error: r.hookError }
-                : {
-                    success: true,
-                    hasAdditionalContext: !!r.additionalContext,
-                  },
+            this.postToolUseFailureEndMeta,
           );
 
           // Append additional context from hook if provided
@@ -2801,13 +2877,7 @@ export class CoreToolScheduler {
                 true,
                 this.config.getApprovalMode(),
               ),
-            (r) =>
-              r.hookError
-                ? { success: false, error: r.hookError }
-                : {
-                    success: true,
-                    hasAdditionalContext: !!r.additionalContext,
-                  },
+            this.postToolUseFailureEndMeta,
           );
 
           // Append additional context from hook if provided
@@ -2845,13 +2915,7 @@ export class CoreToolScheduler {
                 false,
                 this.config.getApprovalMode(),
               ),
-            (r) =>
-              r.hookError
-                ? { success: false, error: r.hookError }
-                : {
-                    success: true,
-                    hasAdditionalContext: !!r.additionalContext,
-                  },
+            this.postToolUseFailureEndMeta,
           );
 
           // Append additional context from hook if provided

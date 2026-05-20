@@ -5042,6 +5042,203 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(blockedSpan?.blockedMetadata?.decision).toBe('aborted');
     expect(blockedSpan?.blockedMetadata?.source).toBe('system');
   });
+
+  it('handleConfirmationResponse outer catch routes aborted-signal throw to aborted/system (#4321)', async () => {
+    // Companion to the existing rethrow test — covers the OTHER branch
+    // of the catch, where signal.aborted is true at throw time. Without
+    // this assertion, dropping the abort branch would silently
+    // misattribute the throw as 'error'/'tool_exception'.
+    toolSpanRecords.length = 0;
+    const { scheduler, onToolCallsUpdate } = buildApprovalScheduler({});
+    const abortController = new AbortController();
+    await scheduler.schedule(
+      [
+        {
+          callId: 'rethrow-aborted-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-rethrow-aborted',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
+
+    abortController.abort();
+    const boom = new Error('originalOnConfirm boom while aborted');
+    const throwingOnConfirm = async () => {
+      throw boom;
+    };
+    await expect(
+      scheduler.handleConfirmationResponse(
+        'rethrow-aborted-1',
+        throwingOnConfirm,
+        ToolConfirmationOutcome.ProceedOnce,
+        abortController.signal,
+      ),
+    ).rejects.toBe(boom);
+
+    const blockedSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.blocked_on_user',
+    );
+    expect(blockedSpan?.blockedMetadata?.decision).toBe('aborted');
+    expect(blockedSpan?.blockedMetadata?.source).toBe('system');
+    // Tool span lands UNSET (setToolSpanCancelled), failure_kind is the
+    // cancelled-marker rather than tool_exception.
+    const toolSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.mockEditTool',
+    );
+    expect(toolSpan?.statusCalls).toContainEqual({
+      code: SpanStatusCode.UNSET,
+    });
+    expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe('cancelled');
+  });
+
+  it('ModifyWithEditor !editorType stamps modify_with_editor_unavailable on tool span (#4321)', async () => {
+    // The bail-out path warns to debug logs; the telemetry attribute
+    // is the production-visible signal. Assert it's set on the live
+    // tool span when the editor is unavailable, and that the tool
+    // remains in awaiting_approval (no premature finalize).
+    //
+    // The branch only fires if the tool implements
+    // ModifiableDeclarativeTool (`getModifyContext` member). Wrap the
+    // existing MockEditTool with a `getModifyContext` shim so the
+    // scheduler's `isModifiableDeclarativeTool` check passes.
+    toolSpanRecords.length = 0;
+    const mockEditTool = Object.assign(new MockEditTool(), {
+      getModifyContext: () => ({
+        getFilePath: () => '/tmp/test.txt',
+        getCurrentContent: async () => 'old',
+        getProposedContent: async () => 'new',
+        createUpdatedParams: () => ({}),
+      }),
+    });
+    const mockToolRegistry = {
+      getTool: () => mockEditTool,
+      ensureTool: async () => mockEditTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => mockEditTool,
+      getToolByDisplayName: () => mockEditTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({}),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate,
+      // No editor configured.
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'modify-no-editor-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-modify-no-editor',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ModifyWithEditor,
+    );
+
+    const toolSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.mockEditTool',
+    );
+    expect(
+      toolSpan?.spanAttributes['qwen-code.tool.modify_with_editor_unavailable'],
+    ).toBe(true);
+    // Span stays open — user can recover via Cancel/Proceed.
+    expect(toolSpan?.ended).toBe(false);
+  });
+
+  it('per-batch abort listener removed when batch fully drains synchronously (#4321)', async () => {
+    // Long-running sessions reuse the same AbortSignal across many
+    // _schedule calls. The release-on-finalize hook in
+    // releaseBatchListenerIfDrained must drop the listener once the
+    // last live batch entry drains, otherwise listeners accumulate
+    // and Node.js trips MaxListenersExceededWarning. Use Node's
+    // EventEmitter API surface on AbortSignal to count listeners.
+    toolSpanRecords.length = 0;
+    const { scheduler } = buildScheduler({});
+    const abortController = new AbortController();
+    const listenersBefore = (
+      abortController.signal as unknown as {
+        listenerCount?: (e: string) => number;
+      }
+    ).listenerCount?.('abort');
+    await scheduler.schedule(
+      [
+        {
+          callId: 'listener-drain-1',
+          name: 'mockTool',
+          args: { input: 'ok' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-listener-drain',
+        },
+      ],
+      abortController.signal,
+    );
+
+    // Tool ran fully synchronously (auto-approved), so its tool span
+    // finalized inside _schedule → releaseBatchListenerIfDrained ran.
+    const listenersAfter = (
+      abortController.signal as unknown as {
+        listenerCount?: (e: string) => number;
+      }
+    ).listenerCount?.('abort');
+    if (listenersBefore !== undefined && listenersAfter !== undefined) {
+      expect(listenersAfter).toBe(listenersBefore);
+    }
+    // Map drain side-assertion: callIdToBatch must be empty too.
+    expect(
+      (
+        scheduler as unknown as {
+          callIdToBatch: Map<string, unknown>;
+        }
+      ).callIdToBatch.size,
+    ).toBe(0);
+  });
 });
 
 // Integration tests for the fire* functions
