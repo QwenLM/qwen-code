@@ -90,13 +90,7 @@ export function getDirPathCompletions(partialArg: string): CommandCompletionItem
         isDirectory: true,
       }))
       .slice(0, 8);
-      .slice(0, 8);
   } catch {
-    return [];
-  }
-      const results = getDirPathCompletions('/nonexistent/path/that/does/not/exist/');
-      expect(results).toEqual([]);
-    });
     return [];
   }
 }
