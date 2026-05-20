@@ -35,6 +35,17 @@ export type {
   DaemonRenderOptions,
 } from './render.js';
 export {
+  DAEMON_UI_CONFORMANCE_FIXTURES,
+  runAdapterConformanceSuite,
+} from './conformance.js';
+export type {
+  ConformanceFailure,
+  ConformanceSuiteResult,
+  DaemonUiAdapterUnderTest,
+  DaemonUiConformanceFixture,
+  RunConformanceOptions,
+} from './conformance.js';
+export {
   extractContentPart,
   getOutputText,
   isSensitiveKey as isDaemonUiSensitiveKey,

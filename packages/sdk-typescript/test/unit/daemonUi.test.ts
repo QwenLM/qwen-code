@@ -2785,3 +2785,141 @@ describe('daemon UI tool preview taxonomy — long-tail kinds (PR-F)', () => {
     expect(md).toContain('> Review the PR');
   });
 });
+
+describe('daemon UI adapter conformance framework (PR-G)', () => {
+  it('runs the built-in fixture corpus against SDK reference adapter (markdown projection)', async () => {
+    const {
+      runAdapterConformanceSuite,
+      reduceDaemonTranscriptEvents: reduce,
+      createDaemonTranscriptState: create,
+      daemonBlockToMarkdown,
+    } = await import('../../src/daemon/ui/index.js');
+
+    // Reference adapter: use SDK's reducer + markdown render helper.
+    const result = runAdapterConformanceSuite({
+      reduce(events) {
+        return reduce(create({ now: 1 }), events, { now: 2 });
+      },
+      renderToText(state) {
+        const s = state as {
+          blocks: ReadonlyArray<Parameters<typeof daemonBlockToMarkdown>[0]>;
+        };
+        return s.blocks.map((b) => daemonBlockToMarkdown(b)).join('\n\n');
+      },
+    });
+
+    expect(result.total).toBeGreaterThan(0);
+    expect(result.failed).toEqual([]);
+    expect(result.passed).toBe(result.total);
+  });
+
+  it('failed fixtures surface missing + leaked phrases for debugging', async () => {
+    const { runAdapterConformanceSuite, DAEMON_UI_CONFORMANCE_FIXTURES } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    // Buggy adapter that produces empty string — should fail every fixture
+    // that has any `expectedContains`.
+    const result = runAdapterConformanceSuite({
+      reduce() {
+        return null;
+      },
+      renderToText() {
+        return '';
+      },
+    });
+    expect(result.failed.length).toBeGreaterThan(0);
+    // Each failure surfaces the missing phrases from its fixture.
+    const fixturesWithExpect = DAEMON_UI_CONFORMANCE_FIXTURES.filter(
+      (fx) => fx.expectedContains.length > 0,
+    );
+    expect(result.failed.length).toBe(fixturesWithExpect.length);
+    for (const failure of result.failed) {
+      expect(failure.missingPhrases.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('detects redaction violations (leaked phrases in malformed-payload fixture)', async () => {
+    const { runAdapterConformanceSuite } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    // Buggy adapter that dumps raw event data including secrets.
+    const result = runAdapterConformanceSuite(
+      {
+        reduce(events) {
+          return events;
+        },
+        renderToText(state) {
+          // Stringify raw events — leaks `data` payload including secrets.
+          return JSON.stringify(state);
+        },
+      },
+      { only: ['malformed-payload-redaction'] },
+    );
+    expect(result.failed.length).toBe(1);
+    expect(result.failed[0]!.leakedPhrases).toContain(
+      'must-not-leak-malformed-payload',
+    );
+  });
+
+  it('respects only / skip filter options', async () => {
+    const { runAdapterConformanceSuite } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const result = runAdapterConformanceSuite(
+      {
+        reduce() {
+          return null;
+        },
+        renderToText() {
+          return '';
+        },
+      },
+      { only: ['simple-chat'] },
+    );
+    expect(result.total).toBe(1);
+    expect(result.failed.length).toBe(1);
+    expect(result.failed[0]!.fixture).toBe('simple-chat');
+  });
+
+  it('skip excludes named fixtures', async () => {
+    const {
+      runAdapterConformanceSuite,
+      DAEMON_UI_CONFORMANCE_FIXTURES,
+    } = await import('../../src/daemon/ui/index.js');
+    const result = runAdapterConformanceSuite(
+      {
+        reduce() {
+          return null;
+        },
+        renderToText() {
+          return '';
+        },
+      },
+      { skip: ['simple-chat'] },
+    );
+    expect(result.total).toBe(DAEMON_UI_CONFORMANCE_FIXTURES.length - 1);
+    expect(result.failed.find((f) => f.fixture === 'simple-chat')).toBeUndefined();
+  });
+
+  it('plain-text reference adapter also conforms to corpus', async () => {
+    const {
+      runAdapterConformanceSuite,
+      reduceDaemonTranscriptEvents: reduce,
+      createDaemonTranscriptState: create,
+      daemonBlockToPlainText,
+    } = await import('../../src/daemon/ui/index.js');
+
+    const result = runAdapterConformanceSuite({
+      reduce(events) {
+        return reduce(create({ now: 1 }), events, { now: 2 });
+      },
+      renderToText(state) {
+        const s = state as {
+          blocks: ReadonlyArray<Parameters<typeof daemonBlockToPlainText>[0]>;
+        };
+        return s.blocks.map((b) => daemonBlockToPlainText(b)).join('\n');
+      },
+    });
+    expect(result.failed).toEqual([]);
+  });
+});
