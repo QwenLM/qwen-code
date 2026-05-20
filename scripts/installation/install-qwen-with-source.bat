@@ -613,6 +613,13 @@ if !ERRORLEVEL! NEQ 0 (
 if exist "!OLD_INSTALL_DIR!" rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
 
 set "PATH=!INSTALL_BIN_DIR!;!PATH!"
+if exist "!INSTALL_DIR!\offline-license\license.json" (
+    set "QWEN_HOME_DIR=!QWEN_HOME!"
+    if "!QWEN_HOME_DIR!"=="" set "QWEN_HOME_DIR=!USERPROFILE!\.qwen"
+    if not exist "!QWEN_HOME_DIR!" mkdir "!QWEN_HOME_DIR!"
+    copy /Y "!INSTALL_DIR!\offline-license\license.json" "!QWEN_HOME_DIR!\license.json" >nul
+    if exist "!INSTALL_DIR!\offline-license\public-key.pem" copy /Y "!INSTALL_DIR!\offline-license\public-key.pem" "!QWEN_HOME_DIR!\public-key.pem" >nul
+)
 call :CreateSourceJson
 if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
 

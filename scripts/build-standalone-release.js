@@ -15,6 +15,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { writeSha256Sums } from './create-standalone-package.js';
+import { formatStandaloneArchiveName } from './create-standalone-package.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -86,6 +87,7 @@ async function main() {
         nodeDistUrl,
         nodeVersion,
         outDir,
+        licenseFile: args.licenseFile,
         releaseVersion: args.version,
         runtimeDir,
         checksums,
@@ -93,7 +95,7 @@ async function main() {
     }
 
     await writeSha256Sums(outDir);
-    assertStandaloneOutput(outDir);
+    assertStandaloneOutput(outDir, args.licenseFile);
   } finally {
     fs.rmSync(runtimeDir, { recursive: true, force: true });
   }
@@ -109,6 +111,7 @@ async function packageTarget({
   nodeArchiveExtension,
   nodeDistUrl,
   nodeVersion,
+  licenseFile,
   outDir,
   releaseVersion,
   runtimeDir,
@@ -132,6 +135,9 @@ async function packageTarget({
   ];
   if (releaseVersion) {
     args.push('--version', releaseVersion);
+  }
+  if (licenseFile) {
+    args.push('--license-file', licenseFile);
   }
 
   execFileSync(process.execPath, args, {
@@ -188,7 +194,7 @@ async function sha256File(filePath) {
   return hash.digest('hex');
 }
 
-function assertStandaloneOutput(outDir) {
+function assertStandaloneOutput(outDir, licenseFile) {
   const checksumPath = path.join(outDir, 'SHA256SUMS');
   if (!fs.existsSync(checksumPath)) {
     fail(`Standalone SHA256SUMS was not created at ${checksumPath}`);
@@ -201,9 +207,13 @@ function assertStandaloneOutput(outDir) {
     .map((line) => line.trim().split(/\s+/, 2)[1]?.replace(/^\*/, ''))
     .filter(Boolean)
     .sort();
-  const expectedArchiveNames = RELEASE_TARGETS.map(
-    ({ qwenTarget }) =>
-      `qwen-code-${qwenTarget}.${qwenTarget === 'win-x64' ? 'zip' : 'tar.gz'}`,
+  const license = licenseFile ? readOfflineLicense(licenseFile) : undefined;
+  const expectedArchiveNames = RELEASE_TARGETS.map(({ qwenTarget }) =>
+    formatStandaloneArchiveName({
+      license,
+      outputExtension: qwenTarget === 'win-x64' ? 'zip' : 'tar.gz',
+      target: qwenTarget,
+    }),
   ).sort();
   const missing = expectedArchiveNames.filter(
     (archiveName) => !archiveNames.includes(archiveName),
@@ -235,6 +245,7 @@ function assertStandaloneOutput(outDir) {
 function parseArgs(argv) {
   const args = {
     help: false,
+    licenseFile: undefined,
     nodeVersion: undefined,
     outDir: undefined,
     runtimeDir: undefined,
@@ -250,6 +261,10 @@ function parseArgs(argv) {
         break;
       case '--node-version':
         args.nodeVersion = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--license-file':
+        args.licenseFile = readOptionValue(argv, index, arg);
         index += 1;
         break;
       case '--out-dir':
@@ -280,6 +295,21 @@ function readOptionValue(argv, index, optionName) {
   return value;
 }
 
+function readOfflineLicense(licensePath) {
+  const parsed = JSON.parse(fs.readFileSync(licensePath, 'utf8'));
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    !parsed.payload ||
+    typeof parsed.payload.customerId !== 'string' ||
+    typeof parsed.payload.expiresAt !== 'string'
+  ) {
+    fail(`Invalid offline license file: ${licensePath}`);
+  }
+
+  return parsed;
+}
+
 function printUsage() {
   console.log(`
 Usage:
@@ -287,6 +317,7 @@ Usage:
 
 Options:
   --version VERSION      Release version written to standalone manifests.
+  --license-file PATH    Signed customer license JSON to inject.
   --out-dir PATH         Output directory. Defaults to dist/standalone.
   --runtime-dir PATH     Temporary Node.js runtime download directory.
   --node-version VERSION Node.js version to download. Defaults to current Node.

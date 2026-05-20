@@ -36,6 +36,14 @@ GitHub releases publish these standalone archives:
 - `qwen-code-win-x64.zip`
 - `SHA256SUMS`
 
+Offline customer deliveries may also include customer-specific archive names
+such as `qwen-code-<customer>-linux-x64-YYYYMMDD.tar.gz` plus a matching
+`*.delivery.json` file. Those packages bundle:
+
+- `offline-license/license.json`
+- `offline-license/public-key.pem`
+- `OFFLINE_LICENSE.md`
+
 Archive layout:
 
 ```text

@@ -238,8 +238,9 @@ describe('standalone release packaging', () => {
     expect(releaseScript).toContain('nodeArchiveExtension');
     expect(releaseScript).toContain('fs.createReadStream');
     expect(releaseScript).toContain('expectedArchiveNames');
-    expect(releaseScript).toContain('qwen-code-${qwenTarget}');
+    expect(releaseScript).toContain('formatStandaloneArchiveName');
     expect(releaseScript).toContain('scripts/create-standalone-package.js');
+    expect(releaseScript).toContain('--license-file');
     expect(releaseScript).toContain('--skip-checksums');
     expect(releaseScript).toContain('writeSha256Sums(outDir)');
   });
@@ -253,6 +254,7 @@ describe('standalone release packaging', () => {
 
     expect(output).toContain('package:standalone:release');
     expect(output).toContain('--node-version VERSION');
+    expect(output).toContain('--license-file PATH');
   });
 
   it('parses Node.js SHASUMS entries', async () => {
@@ -377,6 +379,114 @@ describe('standalone release packaging', () => {
       }
     }
   }, 30_000);
+
+  itOnUnix(
+    'injects a customer offline license into a standalone archive',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+      try {
+        const outDir = path.join(tmpDir, 'out');
+        const licensePath = writeFakeOfflineLicense(
+          tmpDir,
+          'gov-customer-a',
+          '2099-01-01T00:00:00.000Z',
+        );
+
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            'linux-x64',
+            '--node-archive',
+            createFakeNodeArchive(tmpDir),
+            '--out-dir',
+            outDir,
+            '--version',
+            '0.0.0-test',
+            '--license-file',
+            licensePath,
+          ],
+          { stdio: 'pipe' },
+        );
+
+        const archive = path.join(
+          outDir,
+          'qwen-code-gov-customer-a-linux-x64-20990101.tar.gz',
+        );
+        const extractDir = path.join(tmpDir, 'extract');
+        mkdirSync(extractDir, { recursive: true });
+        execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+          stdio: 'ignore',
+        });
+
+        expect(
+          readScript(
+            path.join(
+              extractDir,
+              'qwen-code',
+              'offline-license',
+              'license.json',
+            ),
+          ),
+        ).toContain('"customerId": "gov-customer-a"');
+        expect(
+          readScript(path.join(extractDir, 'qwen-code', 'OFFLINE_LICENSE.md')),
+        ).toContain('qwen');
+        expect(
+          JSON.parse(
+            readScript(path.join(extractDir, 'qwen-code', 'manifest.json')),
+          ).offlineLicense,
+        ).toMatchObject({
+          customerId: 'gov-customer-a',
+          expiresAt: '2099-01-01T00:00:00.000Z',
+          seats: 5,
+        });
+        expect(
+          JSON.parse(
+            readScript(
+              path.join(
+                outDir,
+                'qwen-code-gov-customer-a-linux-x64-20990101.delivery.json',
+              ),
+            ),
+          ),
+        ).toMatchObject({
+          archive: 'qwen-code-gov-customer-a-linux-x64-20990101.tar.gz',
+          customerId: 'gov-customer-a',
+          target: 'linux-x64',
+          expiresAt: '2099-01-01T00:00:00.000Z',
+        });
+        expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
+          'qwen-code-gov-customer-a-linux-x64-20990101.tar.gz',
+        );
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        if (createdDist) {
+          rmSync('dist', { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it('sanitizes customer IDs before naming licensed archives', async () => {
+    const { formatStandaloneArchiveName } = await import(
+      pathToFileURL(path.resolve('scripts/create-standalone-package.js')).href
+    );
+
+    expect(
+      formatStandaloneArchiveName({
+        license: {
+          customerId: 'customer/a../b',
+          expiresAt: '2099-01-01T00:00:00.000Z',
+        },
+        outputExtension: 'tar.gz',
+        target: 'linux-x64',
+      }),
+    ).toBe('qwen-code-customer-a-b-linux-x64-20990101.tar.gz');
+  });
 
   itOnUnix('dereferences safe Node.js runtime symlinks', () => {
     const createdDist = ensureMinimalDist();
@@ -528,6 +638,8 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('Optional Native Modules');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
+    expect(guide).toContain('offline-license/license.json');
+    expect(guide).toContain('*.delivery.json');
   });
 });
 
@@ -568,6 +680,42 @@ describe('Linux/macOS installer end-to-end', () => {
       }
     },
   );
+
+  itOnUnix('installs bundled offline license into QWEN_HOME', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const licensePath = writeFakeOfflineLicense(
+        tmpDir,
+        'gov-customer-a',
+        '2099-01-01T00:00:00.000Z',
+      );
+      const archive = packageFakeStandalone(
+        tmpDir,
+        {},
+        { licenseFile: licensePath },
+      );
+      const qwenHome = path.join(tmpDir, 'qwen-home');
+
+      runUnixInstaller(
+        archive,
+        path.join(tmpDir, 'install'),
+        path.join(tmpDir, 'home'),
+        'standalone',
+        { QWEN_HOME: qwenHome },
+      );
+
+      expect(readScript(path.join(qwenHome, 'license.json'))).toContain(
+        '"customerId": "gov-customer-a"',
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      if (createdDist) {
+        rmSync('dist', { recursive: true, force: true });
+      }
+    }
+  });
 
   itOnUnix('shell-quotes custom install paths in the generated wrapper', () => {
     const createdDist = ensureMinimalDist();
@@ -965,6 +1113,7 @@ function ensureMinimalDist() {
     return false;
   }
 
+  mkdirSync('dist/chunks', { recursive: true });
   mkdirSync('dist/vendor', { recursive: true });
   mkdirSync('dist/bundled/qc-helper/docs', { recursive: true });
   writeFileSync('dist/cli.js', 'console.log("qwen");\n');
@@ -1125,25 +1274,72 @@ function extractZipForTest(archive, destination) {
   });
 }
 
-function packageFakeStandalone(tmpDir, nodeArchiveOptions = {}) {
+function packageFakeStandalone(
+  tmpDir,
+  nodeArchiveOptions = {},
+  packageOptions = {},
+) {
   const outDir = path.join(tmpDir, 'out');
   mkdirSync(outDir, { recursive: true });
-  execFileSync(
-    'node',
-    [
-      'scripts/create-standalone-package.js',
-      '--target',
-      'linux-x64',
-      '--node-archive',
-      createFakeNodeArchive(tmpDir, nodeArchiveOptions),
-      '--out-dir',
-      outDir,
-      '--version',
-      '0.0.0-smoke',
-    ],
-    { stdio: 'pipe' },
+  const args = [
+    'scripts/create-standalone-package.js',
+    '--target',
+    'linux-x64',
+    '--node-archive',
+    createFakeNodeArchive(tmpDir, nodeArchiveOptions),
+    '--out-dir',
+    outDir,
+    '--version',
+    '0.0.0-smoke',
+  ];
+  if (packageOptions.licenseFile) {
+    args.push('--license-file', packageOptions.licenseFile);
+  }
+  execFileSync('node', args, { stdio: 'pipe' });
+  return path.join(
+    outDir,
+    packageOptions.licenseFile
+      ? 'qwen-code-gov-customer-a-linux-x64-20990101.tar.gz'
+      : 'qwen-code-linux-x64.tar.gz',
   );
-  return path.join(outDir, 'qwen-code-linux-x64.tar.gz');
+}
+
+function writeFakeOfflineLicense(
+  tmpDir,
+  customerId,
+  expiresAt,
+  activationHash = 'activation-code-from-vendor',
+) {
+  const publicKeyPem = [
+    '-----BEGIN PUBLIC KEY-----',
+    'TEST-KEY',
+    '-----END PUBLIC KEY-----',
+    '',
+  ].join('\n');
+  const licensePath = path.join(tmpDir, `${customerId}.license.json`);
+  writeFileSync(
+    licensePath,
+    JSON.stringify(
+      {
+        version: 1,
+        payload: {
+          customerId,
+          expiresAt,
+          seats: 5,
+          features: ['agent-cli'],
+          activationHash,
+        },
+        signature: {
+          algorithm: 'ed25519',
+          value: 'fake-signature',
+        },
+        publicKeyPem,
+      },
+      null,
+      2,
+    ) + '\n',
+  );
+  return licensePath;
 }
 
 function runUnixInstaller(
