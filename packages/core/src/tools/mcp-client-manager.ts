@@ -1372,6 +1372,20 @@ export class McpClientManager {
             );
             return;
           }
+          // F2 (#4175 commit 4 self-review fix): SDK MCP servers MUST
+          // stay on the legacy McpClientManager path because their
+          // `sendSdkMcpMessage` callback is bound per-session in this
+          // manager's ctor, but the workspace-shared pool was
+          // constructed in `QwenAgent` ctor without it. Routing SDK
+          // MCP through `pool.acquire` would yield an McpClient with
+          // `sendSdkMcpMessage: undefined`, breaking SDK MCP server
+          // tool calls. The legacy path below preserves the
+          // per-session callback wiring and SDK servers continue to
+          // work bit-for-bit identically to pre-F2 daemon mode.
+          if (isSdkMcpServerConfig(config)) {
+            await this.discoverMcpToolsForServer(name, cliConfig);
+            return;
+          }
           try {
             const conn = await this.pool!.acquire(
               name,
