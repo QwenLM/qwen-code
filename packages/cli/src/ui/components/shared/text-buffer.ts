@@ -2241,6 +2241,17 @@ export function useTextBuffer({
         editorArgs = [filePath];
         editorSource = 'opts';
         if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
+          if (/["|]/.test(editorCmd)) {
+            debugLogger.error(
+              `[useTextBuffer] opts.editor command contains unsafe characters: ${editorCmd}`,
+            );
+            try {
+              fs.rmdirSync(tmpDir);
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
           useShell = true;
         }
       } else {
@@ -2266,9 +2277,15 @@ export function useTextBuffer({
           editorArgs = [filePath];
           if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
             if (/["|]/.test(editorCmd)) {
-              throw new Error(
-                `Editor command from environment contains unsafe characters: ${editorCmd}`,
+              debugLogger.error(
+                `[useTextBuffer] Editor command from environment contains unsafe characters: ${editorCmd}`,
               );
+              try {
+                fs.rmdirSync(tmpDir);
+              } catch {
+                /* ignore */
+              }
+              return;
             }
             useShell = true;
           }
@@ -2289,6 +2306,9 @@ export function useTextBuffer({
         fs.writeFileSync(filePath, text, { encoding: 'utf8', mode: 0o600 });
         setRawMode?.(false);
 
+        debugLogger.warn(
+          `[useTextBuffer] launching external editor (cmd=${editorCmd}, shell=${useShell}, source=${editorSource}, file=${filePath})`,
+        );
         const { status, error, signal } = spawnSync(editorCmd, editorArgs, {
           stdio: 'inherit',
           shell: useShell,
@@ -2314,8 +2334,11 @@ export function useTextBuffer({
       } finally {
         try {
           if (wasRaw) setRawMode?.(true);
-        } catch {
-          /* stdin may have been destroyed while the editor was open */
+        } catch (rawErr) {
+          debugLogger.error(
+            '[useTextBuffer] failed to restore raw mode after external editor',
+            rawErr,
+          );
         }
         try {
           fs.unlinkSync(filePath);

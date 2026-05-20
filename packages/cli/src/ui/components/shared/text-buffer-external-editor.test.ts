@@ -609,7 +609,7 @@ describe('openInExternalEditor', () => {
     expect(result.current.text).toBe('original');
   });
 
-  it('should quote editorCmd when shell mode is enabled', async () => {
+  it('should quote editorCmd and args with shell:true when shell mode is enabled', async () => {
     const origPlatform = process.platform;
     const origVISUAL = process.env['VISUAL'];
     Object.defineProperty(process, 'platform', { value: 'win32' });
@@ -628,8 +628,113 @@ describe('openInExternalEditor', () => {
         await result.current.openInExternalEditor();
       });
 
-      const spawnCmd = mockSpawnSync.mock.calls[0]?.[0] as string;
-      expect(spawnCmd).toBe('"C:\\Program Files\\Code\\code.cmd"');
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        '"C:\\Program Files\\Code\\code.cmd"',
+        expect.arrayContaining([expect.stringMatching(/^".*"$/)]),
+        expect.objectContaining({ shell: true }),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { value: origPlatform });
+      if (origVISUAL === undefined) delete process.env['VISUAL'];
+      else process.env['VISUAL'] = origVISUAL;
+    }
+  });
+
+  it('should use opts.editor when provided', async () => {
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor({ editor: 'nano' });
+    });
+
+    expect(mockGetExternalEditorCommand).not.toHaveBeenCalled();
+    expect(mockSpawnSync).toHaveBeenCalledWith(
+      'nano',
+      expect.arrayContaining([expect.stringMatching(/\.txt$/)]),
+      expect.objectContaining({ stdio: 'inherit', shell: false }),
+    );
+  });
+
+  it('should enable shell mode for .cmd opts.editor on Windows', async () => {
+    const origPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+
+    try {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'hello',
+          viewport,
+          isValidPath: () => false,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.openInExternalEditor({ editor: 'C:\\editor.cmd' });
+      });
+
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        '"C:\\editor.cmd"',
+        expect.arrayContaining([expect.stringMatching(/^".*"$/)]),
+        expect.objectContaining({ shell: true }),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { value: origPlatform });
+    }
+  });
+
+  it('should reject opts.editor with unsafe characters on Windows', async () => {
+    const origPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+
+    try {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'hello',
+          viewport,
+          isValidPath: () => false,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.openInExternalEditor({ editor: 'evil"|cmd.cmd' });
+      });
+
+      expect(mockSpawnSync).not.toHaveBeenCalled();
+      expect(result.current.text).toBe('hello');
+      expect(fs.rmdirSync).toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process, 'platform', { value: origPlatform });
+    }
+  });
+
+  it('should reject env-var .cmd with unsafe characters on Windows', async () => {
+    const origPlatform = process.platform;
+    const origVISUAL = process.env['VISUAL'];
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    process.env['VISUAL'] = 'evil"cmd.cmd';
+
+    try {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'hello',
+          viewport,
+          isValidPath: () => false,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.openInExternalEditor();
+      });
+
+      expect(mockSpawnSync).not.toHaveBeenCalled();
+      expect(result.current.text).toBe('hello');
+      expect(fs.rmdirSync).toHaveBeenCalled();
     } finally {
       Object.defineProperty(process, 'platform', { value: origPlatform });
       if (origVISUAL === undefined) delete process.env['VISUAL'];
