@@ -123,26 +123,39 @@ let lastInteractionCtx: SpanContext | undefined;
 let cleanupIntervalStarted = false;
 const SPAN_TTL_MS = 30 * 60 * 1000;
 
+function sweepStaleSpans(now: number): void {
+  const cutoff = now - SPAN_TTL_MS;
+  for (const [spanId, weakRef] of activeSpans) {
+    const ctx = weakRef.deref();
+    if (ctx === undefined) {
+      activeSpans.delete(spanId);
+      strongSpans.delete(spanId);
+    } else if (ctx.startTime < cutoff) {
+      if (!ctx.ended) {
+        ctx.ended = true;
+        // Mark the span so backends can distinguish "abandoned and
+        // garbage-collected by the TTL safety net" from "deliberately
+        // ended without setting status / attrs" (#4321 review).
+        const ageMs = now - ctx.startTime;
+        ctx.span.setAttributes({
+          'qwen-code.span.ttl_expired': true,
+          'qwen-code.span.duration_ms': ageMs,
+        });
+        debugLogger.warn(
+          `Stale ${ctx.type} span ended by TTL safety net (age=${ageMs}ms, spanId=${spanId})`,
+        );
+        ctx.span.end();
+      }
+      activeSpans.delete(spanId);
+      strongSpans.delete(spanId);
+    }
+  }
+}
+
 function ensureCleanupInterval(): void {
   if (cleanupIntervalStarted) return;
   cleanupIntervalStarted = true;
-  const interval = setInterval(() => {
-    const cutoff = Date.now() - SPAN_TTL_MS;
-    for (const [spanId, weakRef] of activeSpans) {
-      const ctx = weakRef.deref();
-      if (ctx === undefined) {
-        activeSpans.delete(spanId);
-        strongSpans.delete(spanId);
-      } else if (ctx.startTime < cutoff) {
-        if (!ctx.ended) {
-          ctx.ended = true;
-          ctx.span.end();
-        }
-        activeSpans.delete(spanId);
-        strongSpans.delete(spanId);
-      }
-    }
-  }, 60_000);
+  const interval = setInterval(() => sweepStaleSpans(Date.now()), 60_000);
   if (typeof interval.unref === 'function') {
     interval.unref();
   }
@@ -783,4 +796,13 @@ export function clearSessionTracingForTesting(): void {
   interactionSequence = 0;
   lastInteractionCtx = undefined;
   clearDetailedSpanState();
+}
+
+/**
+ * Test-only: invoke the TTL sweep with a synthetic `now`. Lets tests
+ * exercise the stale-span path without waiting 30 minutes or stubbing
+ * setInterval globally.
+ */
+export function runTTLSweepForTesting(now: number): void {
+  sweepStaleSpans(now);
 }

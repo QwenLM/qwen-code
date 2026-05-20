@@ -138,6 +138,7 @@ import {
   endHookSpan,
   getActiveInteractionSpan,
   clearSessionTracingForTesting,
+  runTTLSweepForTesting,
 } from './session-tracing.js';
 
 function createMockConfig(
@@ -934,6 +935,41 @@ describe('session-tracing', () => {
 
       mockState.throwOnSetAttributes = false;
       endToolSpan(toolSpan, { success: true });
+    });
+  });
+
+  describe('TTL safety net (#4321 review)', () => {
+    it('marks stale spans with ttl_expired + duration_ms before ending them', () => {
+      const toolSpan = startToolSpan('staleTool');
+      const record = mockSpans.find((s) => s.name === 'qwen-code.tool')!;
+
+      // 31 minutes after the span started — past the 30-min TTL.
+      const staleNow = Date.now() + 31 * 60 * 1000;
+      runTTLSweepForTesting(staleNow);
+
+      expect(record.ended).toBe(true);
+      // Without the sentinel attrs, operators couldn't tell a TTL-aborted
+      // span from a deliberately-ended span that lost attribution.
+      expect(record.attributes['qwen-code.span.ttl_expired']).toBe(true);
+      expect(
+        record.attributes['qwen-code.span.duration_ms'] as number,
+      ).toBeGreaterThanOrEqual(31 * 60 * 1000 - 1000);
+
+      // Calling endToolSpan after the TTL fires must still be safe — span
+      // already ended, attempt is a no-op.
+      endToolSpan(toolSpan, { success: false });
+    });
+
+    it('does not mark spans that were ended before TTL expiry', () => {
+      const toolSpan = startToolSpan('liveTool');
+      const record = mockSpans.find((s) => s.name === 'qwen-code.tool')!;
+
+      // End normally, then run a sweep. The span is already ended → the
+      // sweep must not retroactively stamp ttl_expired on it.
+      endToolSpan(toolSpan, { success: true });
+      runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
+
+      expect(record.attributes['qwen-code.span.ttl_expired']).toBeUndefined();
     });
   });
 });

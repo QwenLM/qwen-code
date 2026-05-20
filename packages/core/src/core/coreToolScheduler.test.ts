@@ -4632,6 +4632,226 @@ describe('CoreToolScheduler telemetry spans', () => {
       'non_interactive_denied',
     );
   });
+
+  it('PermissionRequest hook deny path emits failure_kind=permission_hook_denied (#4321)', async () => {
+    // _schedule line ~1683: when firePermissionRequestHook returns
+    // hasDecision=true with shouldAllow=false, the scheduler tags the
+    // span with permission_hook_denied. Without this regression test,
+    // dropping setToolSpanFailure on this branch would silently lose
+    // hook-denial attribution for operators.
+    toolSpanRecords.length = 0;
+    const tool = new MockEditTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'permission-request',
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            decision: { behavior: 'deny', message: 'policy says no' },
+          },
+        },
+      }),
+    };
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({}),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(messageBus),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+    } as unknown as Config;
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'permhook-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-permhook',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const toolSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.mockEditTool',
+    );
+    expect(toolSpan?.ended).toBe(true);
+    expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(
+      'permission_hook_denied',
+    );
+  });
+
+  it('background-agent auto-deny emits failure_kind=background_agent_denied (#4321)', async () => {
+    // _schedule line ~1697: getShouldAvoidPermissionPrompts() === true
+    // forces an auto-deny because background agents have no UI to prompt
+    // on. This branch is otherwise untested — a regression dropping the
+    // setToolSpanFailure call would silently lose attribution for a key
+    // deployment mode.
+    toolSpanRecords.length = 0;
+    const tool = new MockEditTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({}),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getShouldAvoidPermissionPrompts: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'bgagent-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-bgagent',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const toolSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.mockEditTool',
+    );
+    expect(toolSpan?.ended).toBe(true);
+    expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(
+      'background_agent_denied',
+    );
+  });
+
+  it('signal.abort drains scheduler-local toolSpans + blockedSpans Maps (#4321)', async () => {
+    // The 30-min TTL in session-tracing.ts ends underlying spans but
+    // cannot reach the scheduler-local toolSpans/blockedSpans Maps. If
+    // the signal aborts while a tool is awaiting_approval (user walked
+    // away, session abort), the per-batch listener registered in
+    // _schedule must drain both Maps so they don't grow unbounded.
+    toolSpanRecords.length = 0;
+    const { scheduler, onToolCallsUpdate } = buildApprovalScheduler({});
+    const abortController = new AbortController();
+    await scheduler.schedule(
+      [
+        {
+          callId: 'abort-drain-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-abort-drain',
+        },
+      ],
+      abortController.signal,
+    );
+
+    // Wait until the call is awaiting_approval — both Maps populated.
+    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
+    expect(
+      (scheduler as unknown as { toolSpans: Map<string, unknown> }).toolSpans
+        .size,
+    ).toBe(1);
+    expect(
+      (scheduler as unknown as { blockedSpans: Map<string, unknown> })
+        .blockedSpans.size,
+    ).toBe(1);
+
+    // Abort the signal — the listener registered in _schedule schedules
+    // the drain via setTimeout(0). Flush macrotasks so it runs before
+    // assertions.
+    abortController.abort();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(
+      (scheduler as unknown as { toolSpans: Map<string, unknown> }).toolSpans
+        .size,
+    ).toBe(0);
+    expect(
+      (scheduler as unknown as { blockedSpans: Map<string, unknown> })
+        .blockedSpans.size,
+    ).toBe(0);
+
+    const blockedSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.blocked_on_user',
+    );
+    expect(blockedSpan?.ended).toBe(true);
+    expect(blockedSpan?.blockedMetadata?.decision).toBe('aborted');
+    expect(blockedSpan?.blockedMetadata?.source).toBe('system');
+
+    const toolSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.mockEditTool',
+    );
+    expect(toolSpan?.ended).toBe(true);
+  });
 });
 
 // Integration tests for the fire* functions

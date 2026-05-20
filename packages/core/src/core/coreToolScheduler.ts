@@ -768,10 +768,10 @@ export class CoreToolScheduler {
   // awaiting_approval phase. ModifyWithEditor stays inside one span until
   // the user makes a final decision (#3731 Phase 2).
   //
-  // No global signal.aborted listener: if a session aborts mid-prompt, the
-  // span is cleaned up by the 30-min TTL safety net in session-tracing.ts.
-  // We accept the bounded leak in exchange for not threading listener-
-  // cleanup state through this class.
+  // Map drain on signal.abort: see drainSpansForBatch — without it,
+  // entries leaked across awaiting-approval-then-abort would persist for
+  // the scheduler's lifetime (the 30-min TTL ends the underlying spans
+  // but cannot reach these scheduler-local Maps; #4321 review).
   private blockedSpans = new Map<string, Span>();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
@@ -1065,6 +1065,41 @@ export class CoreToolScheduler {
    */
   private getBlockedSource(): ToolBlockedSource {
     return this.config.getIdeMode?.() ? 'ide' : 'cli';
+  }
+
+  /**
+   * Drain any tool/blocked spans associated with `callIds` that are still
+   * live in the scheduler-local maps. Called on signal.abort for spans
+   * that no other code path will finalize (e.g. user walks away from
+   * awaiting_approval and the session aborts).
+   *
+   * Deferred to a macrotask so existing finalize paths that await on the
+   * SAME aborted signal — explicit user Cancel via
+   * `handleConfirmationResponse`, mid-execution `setToolSpanCancelled`
+   * inside `_executeToolCallBody` — win the race and set the canonical
+   * decision/status before this safety-net drain runs. By the time the
+   * timer fires, those paths have removed the entries from the Maps and
+   * the drain is a no-op for the common cases. Only the genuine
+   * walk-away-then-abort case survives to be drained here.
+   *
+   * Idempotent for callIds whose spans were already finalized by a normal
+   * path — `finalizeBlockedSpan` / `finalizeToolSpan` are no-ops on
+   * missing entries.
+   */
+  private drainSpansForBatch(callIds: Iterable<string>): void {
+    const ids = Array.from(callIds);
+    setTimeout(() => {
+      for (const callId of ids) {
+        if (this.blockedSpans.has(callId)) {
+          this.finalizeBlockedSpan(callId, 'aborted', 'system');
+        }
+        const span = this.toolSpans.get(callId);
+        if (span) {
+          setToolSpanCancelled(span);
+          this.finalizeToolSpan(callId);
+        }
+      }
+    }, 0);
   }
 
   /**
@@ -1408,6 +1443,15 @@ export class CoreToolScheduler {
       this.toolCalls = this.toolCalls.concat(newToolCalls);
       this.notifyToolCallsUpdate();
 
+      // Track every callId whose tool span is opened in this batch so we
+      // can drain stragglers on signal.abort. Necessary for the
+      // walk-away-during-awaiting_approval scenario: the session-tracing
+      // TTL cleans up the underlying spans but cannot reach the
+      // scheduler-local toolSpans/blockedSpans Maps (#4321 review).
+      const batchCallIds = new Set<string>();
+      const onAbort = () => this.drainSpansForBatch(batchCallIds);
+      signal.addEventListener('abort', onAbort, { once: true });
+
       for (const toolCall of newToolCalls) {
         if (toolCall.status !== 'validating') {
           continue;
@@ -1431,6 +1475,7 @@ export class CoreToolScheduler {
           call_id: reqInfo.callId,
         });
         this.toolSpans.set(reqInfo.callId, toolSpan);
+        batchCallIds.add(reqInfo.callId);
 
         try {
           if (signal.aborted) {
@@ -2155,7 +2200,10 @@ export class CoreToolScheduler {
     // so the success path still produces telemetry.
     let toolSpan = this.toolSpans.get(callId);
     if (!toolSpan) {
-      toolSpan = startToolSpan(toolName, {
+      // canonicalToolName matches the _schedule path so dashboards
+      // grouping by span name don't see two entries for migrated/MCP tools
+      // when this defensive fallback fires (#4321 review).
+      toolSpan = startToolSpan(canonicalToolName(toolName), {
         'tool.call_id': callId,
         call_id: callId, // legacy alias — see _schedule for context
       });
