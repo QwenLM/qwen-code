@@ -378,10 +378,14 @@ export function providerMatchesCredentials(
         } catch {
           safeHost = '[invalid]';
         }
+        // Log only the error's class name, not its message: a user-defined
+        // envKey fn could throw `new Error(\`bad config: ${apiKey}\`)` and the
+        // message would leak the key into extension-host logs.
         // eslint-disable-next-line no-console -- diagnostic for a misconfigured provider
         console.warn(
-          `[providerMatchesCredentials] envKey(${proto}, ${safeHost}) threw; skipping this protocol:`,
-          err instanceof Error ? err.message : String(err),
+          `[providerMatchesCredentials] envKey(${proto}, ${safeHost}) threw (${
+            err instanceof Error ? err.constructor.name : typeof err
+          }); skipping this protocol`,
         );
       }
     }

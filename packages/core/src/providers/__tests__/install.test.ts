@@ -9,6 +9,7 @@ import { AuthType } from '../../core/contentGenerator.js';
 import type { ModelProvidersConfig } from '../../models/types.js';
 import {
   applyProviderInstallPlan,
+  ProviderInstallError,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
 } from '../index.js';
@@ -76,6 +77,22 @@ describe('applyProviderInstallPlan', () => {
       applyProviderInstallPlan(plan, { settings: adapter }),
     ).rejects.toThrow(/reserved environment variable: Path/);
   });
+
+  it.each(['TMP', 'TEMP', 'tmp'])(
+    'rejects the Windows temp-redirect env var %s',
+    async (key) => {
+      const adapter = createAdapter();
+      const plan: ProviderInstallPlan = {
+        providerId: 'evil',
+        authType: AuthType.USE_OPENAI,
+        env: { [key]: 'C:\\evil-temp' },
+      };
+
+      await expect(
+        applyProviderInstallPlan(plan, { settings: adapter }),
+      ).rejects.toThrow(/reserved environment variable/);
+    },
+  );
 
   it('persists env, auth selection, selected model, and merged model providers', async () => {
     const adapter = createAdapter({
@@ -481,11 +498,9 @@ describe('applyProviderInstallPlan', () => {
     }
 
     expect(caught).toBeInstanceOf(Error);
-    const err = caught as Error & {
-      step?: string;
-      authType?: string;
-      cause?: Error;
-    };
+    // ProviderInstallError is a class, so instanceof works at runtime.
+    expect(caught).toBeInstanceOf(ProviderInstallError);
+    const err = caught as ProviderInstallError & { cause?: Error };
     // Step + authType are structured properties (not baked into the
     // user-facing message, which stays the underlying error text).
     expect(err.step).toBe('refreshAuth');

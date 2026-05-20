@@ -28,6 +28,8 @@ const DENY_ENV_KEYS = new Set([
   'PATH',
   'HOME',
   'TMPDIR',
+  'TMP', // Windows temp redirect
+  'TEMP', // Windows temp redirect
 ]);
 
 // ---------------------------------------------------------------------------
@@ -99,10 +101,26 @@ export interface ApplyProviderInstallPlanResult {
  * `step` and `authType` properties carry diagnostic context, and `cause`
  * preserves the original error (so callers matching on `err.code` still work
  * via the chain).
+ *
+ * A class (not an interface) so `err instanceof ProviderInstallError` works
+ * at runtime — an interface would erase at compile time and silently always
+ * be false.
  */
-export interface ProviderInstallError extends Error {
-  step: string;
-  authType: AuthType;
+export class ProviderInstallError extends Error {
+  readonly step: string;
+  readonly authType: AuthType;
+
+  constructor(
+    message: string,
+    step: string,
+    authType: AuthType,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = 'ProviderInstallError';
+    this.step = step;
+    this.authType = authType;
+  }
 }
 
 export async function applyProviderInstallPlan(
@@ -265,11 +283,8 @@ export async function applyProviderInstallPlan(
     // (callers show error.message verbatim) while letting devs read
     // error.step / error.authType and the original error.cause off the chain.
     const errMsg = error instanceof Error ? error.message : String(error);
-    const annotated = new Error(errMsg, {
+    throw new ProviderInstallError(errMsg, currentStep, plan.authType, {
       cause: error instanceof Error ? error : undefined,
-    }) as ProviderInstallError;
-    annotated.step = currentStep;
-    annotated.authType = plan.authType;
-    throw annotated;
+    });
   }
 }

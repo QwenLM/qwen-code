@@ -73,7 +73,7 @@ export {
 // Install logic
 export {
   applyProviderInstallPlan,
+  ProviderInstallError,
   type ApplyProviderInstallPlanOptions,
   type ApplyProviderInstallPlanResult,
-  type ProviderInstallError,
 } from './install.js';

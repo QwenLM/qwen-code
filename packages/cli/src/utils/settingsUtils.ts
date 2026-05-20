@@ -414,7 +414,7 @@ export function setNestedPropertyForce(
   value: unknown,
 ): void {
   const keys = path.split('.');
-  // Refuse prototype-chain segments (see UNSAFE_PATH_SEGMENTS). Silent skip
+  // Refuse prototype-chain segments (see pathHasUnsafeSegment). Silent skip
   // rather than throw: callers iterate user data and a poisoned key should
   // be ignored, not crash the operation.
   if (pathHasUnsafeSegment(keys)) return;
@@ -438,7 +438,7 @@ export function setNestedPropertySafe(
   value: unknown,
 ): void {
   const keys = path.split('.');
-  // Refuse prototype-chain segments (see UNSAFE_PATH_SEGMENTS).
+  // Refuse prototype-chain segments (see pathHasUnsafeSegment).
   if (pathHasUnsafeSegment(keys)) return;
   const lastKey = keys.pop();
   if (!lastKey) return;
