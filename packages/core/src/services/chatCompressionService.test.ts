@@ -1899,6 +1899,82 @@ describe('ChatCompressionService', () => {
         expect(newHistory[i].role).not.toBe(newHistory[i - 1].role);
       }
     });
+
+    it('preserves trailing model+funcCall under hard-rescue (force=true + trigger=auto)', async () => {
+      // Hard-rescue fires from inside sendMessageStream() BEFORE the pending
+      // userContent (a funcResponse) is pushed onto history. At that moment
+      // the trailing model+funcCall is ACTIVE, not orphaned — its matching
+      // funcResponse is sitting in the pending message about to be appended.
+      //
+      // Pre-fix, the service's orphan-strip predicate gated on `force` alone,
+      // which meant hard-rescue (force=true, trigger='auto') was conflated
+      // with manual /compress and stripped the active funcCall — corrupting
+      // tool-call/response pairing on the next API send. Fix: gate the strip
+      // on `trigger === 'manual'` so only the explicit user-initiated
+      // /compress path performs the orphan cleanup.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'Fix all TypeScript errors.' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'glob', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'glob',
+                response: { result: 'files...' },
+              },
+            },
+          ],
+        },
+        // The hard-rescue moment: this funcCall is active (the matching
+        // funcResponse is in the pending userContent, not in history yet).
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'readFile', args: {} } }],
+        },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        800,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'gemini-pro',
+        contextWindowSize: 1000,
+      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        text: 'state snapshot summary',
+        usage: {
+          promptTokenCount: 2000,
+          candidatesTokenCount: 50,
+          totalTokenCount: 2050,
+        },
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText: mockGenerateContent,
+      } as unknown as BaseLlmClient);
+
+      const result = await service.compress(mockChat, {
+        promptId: mockPromptId,
+        force: true,
+        trigger: 'auto', // hard-rescue explicitly signals automatic intent
+        model: mockModel,
+        config: mockConfig,
+        consecutiveFailures: 0,
+        originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      });
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      // The active funcCall must survive in the post-compression history so
+      // the about-to-be-pushed funcResponse has its matching tool_use.
+      const newHistory = result.newHistory!;
+      const last = newHistory[newHistory.length - 1];
+      expect(last.role).toBe('model');
+      expect(last.parts?.some((p) => p.functionCall)).toBe(true);
+    });
   });
 
   describe('tool-loop subagent absorption', () => {

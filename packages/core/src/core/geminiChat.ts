@@ -777,6 +777,14 @@ export class GeminiChat {
         {
           pendingUserMessage: userContent,
           precomputedEffectiveTokens: effectiveTokens,
+          // Hard-rescue is force=true to bypass the cheap-gate breaker
+          // but it's an AUTOMATIC trigger. Explicit trigger='auto' tells
+          // the service to skip the manual-only orphan-strip that would
+          // otherwise drop the active funcCall whose matching
+          // funcResponse is sitting in `pendingUserMessage` waiting to
+          // be pushed. Without this, hard-rescue mid tool-use loop
+          // corrupts the next API request's tool-call/response pairing.
+          trigger: shouldForceFromHard ? 'auto' : undefined,
         },
       );
 

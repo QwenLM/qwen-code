@@ -413,18 +413,26 @@ export class ChatCompressionService {
       }
     }
 
-    // For manual /compress (force=true), if the last message is an orphaned model
-    // funcCall (agent interrupted/crashed before the response arrived), strip it
-    // before computing the split point. After stripping, the history ends cleanly
-    // (typically with a user funcResponse) and findCompressSplitPoint handles it
-    // through its normal logic — no special-casing needed.
+    // Only manual `/compress` (trigger='manual') performs the orphan-strip:
+    // if the chat was interrupted with a trailing model funcCall whose
+    // funcResponse never arrived, the user-initiated /compress between
+    // turns can safely drop it before computing the split point.
     //
-    // auto-compress (force=false) must NOT strip: it fires inside
-    // sendMessageStream() before the matching funcResponse is pushed onto the
+    // Both automatic paths (trigger='auto') — cheap-gate (force=false) AND
+    // hard-rescue (force=true) — must NOT strip. They fire inside
+    // sendMessageStream() BEFORE the pending funcResponse is pushed onto
     // history, so the trailing funcCall is still active, not orphaned.
+    //
+    // Gating on `trigger === 'manual'` instead of `force` disambiguates
+    // "user wants this compressed now, history can be mutated" from
+    // "automatic compression mid-turn, history snapshot is live state and
+    // must be preserved verbatim". Earlier the predicate used `force`,
+    // which is correct for manual /compress (force=true, trigger='manual')
+    // but conflated hard-rescue (force=true, trigger='auto') and silently
+    // stripped active funcCalls there.
     const lastMessage = curatedHistory[curatedHistory.length - 1];
     const hasOrphanedFuncCall =
-      force &&
+      compactTrigger === 'manual' &&
       lastMessage?.role === 'model' &&
       lastMessage.parts?.some((p) => !!p.functionCall);
     const historyForSplit = hasOrphanedFuncCall

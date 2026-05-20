@@ -1049,7 +1049,9 @@ export class Config {
       // eslint-disable-next-line no-console
       console.warn(
         '[qwen-code] chatCompression.contextPercentageThreshold has been removed ' +
-          'and is now controlled by built-in thresholds. Setting will be ignored.',
+          'and is now controlled by built-in thresholds. Setting will be ignored. ' +
+          'Remove this key from your settings.json to silence this warning; ' +
+          'see docs/users/configuration/settings.md for current compaction behavior.',
       );
     }
     this.chatCompression = params.chatCompression;
