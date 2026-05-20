@@ -8,6 +8,7 @@ import { useMemo } from 'react';
 import {
   type EditorType,
   isValidEditorType,
+  allowEditorTypeInSandbox,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -21,6 +22,12 @@ export function usePreferredEditor(): EditorType | undefined {
     if (raw && !isValidEditorType(raw)) {
       debugLogger.warn(
         `[usePreferredEditor] invalid preferredEditor value "${raw}", ignoring`,
+      );
+      return undefined;
+    }
+    if (isValidEditorType(raw) && !allowEditorTypeInSandbox(raw)) {
+      debugLogger.warn(
+        `[usePreferredEditor] editor "${raw}" is not allowed in sandbox mode, ignoring`,
       );
       return undefined;
     }

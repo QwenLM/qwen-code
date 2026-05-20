@@ -2265,6 +2265,11 @@ export function useTextBuffer({
             (process.platform === 'win32' ? 'notepad' : 'vi');
           editorArgs = [filePath];
           if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
+            if (/["|]/.test(editorCmd)) {
+              throw new Error(
+                `Editor command from environment contains unsafe characters: ${editorCmd}`,
+              );
+            }
             useShell = true;
           }
         }
