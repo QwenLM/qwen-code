@@ -444,13 +444,44 @@ export class PoolEntry {
     for (const [sid] of this.subscribers) {
       this.detach(sid);
     }
-    // F2 commit 3: SIGTERM descendant processes BEFORE disconnecting
-    // the MCP client. Wrapper processes (`npx`, `uvx`, `pnpm dlx`)
-    // spawn the actual server as a grandchild; killing only the
-    // wrapper via `client.disconnect()` would leak the real server.
-    // Best-effort: pid lookup returns undefined for remote transports
-    // or already-exited stdio children; sigtermPids tolerates per-
-    // pid failures (ESRCH for already-dead pids).
+    // F2 commit 3 + commit 6 wenshao W37: SIGTERM descendant
+    // processes + disconnect via the shared `sweepAndDisconnect`
+    // helper. Wrapper processes (`npx`, `uvx`, `pnpm dlx`) spawn the
+    // actual server as a grandchild; killing only the wrapper via
+    // `client.disconnect()` alone would leak the real server. The
+    // helper unifies the sweep+disconnect pattern across
+    // `forceShutdown` AND `doRestart` (both pre- and failure-
+    // paths) so future changes to either step happen in one place.
+    await this.sweepAndDisconnect(reason);
+    // state already set to 'closed' synchronously above (wenshao C4 fix).
+    this.localStatus = MCPServerStatus.DISCONNECTED;
+    // Suppress the listener echo from our own write (wenshao C6).
+    this.suppressNextStatusEcho = true;
+    this.updateGlobalStatus();
+    this.onClosed(this.id);
+  }
+
+  /**
+   * F2 (#4175 commit 6 review fix — wenshao W37): shared sweep +
+   * disconnect helper used by `forceShutdown` AND `doRestart` (both
+   * pre-call and failure path). Pre-fix the same try/catch pair was
+   * duplicated 3 ways with different log levels — drift target.
+   *
+   * Order matters: descendant pids SIGTERMed BEFORE
+   * `client.disconnect()` so wrapper grandchildren (`npx`, `uvx`,
+   * `pnpm dlx`) get killed before their parent's transport closes.
+   * Best-effort throughout: per-pid failures tolerated by
+   * `sigtermPids`'s ESRCH-tolerant loop; pid lookup returns
+   * undefined for remote transports / already-exited stdio children.
+   *
+   * Log levels (wenshao W35 fold-in): pid-sweep failure at `warn`
+   * (operator should investigate orphan-process pressure);
+   * disconnect failure at `error` (a stuck disconnect is rarer and
+   * usually indicates a transport bug worth surfacing). Pre-W35
+   * `doRestart` had logged both at `debug` — production
+   * observability gap that masked PID exhaustion.
+   */
+  private async sweepAndDisconnect(reason: string): Promise<void> {
     try {
       const rootPid = this.client.getTransportPid?.();
       if (rootPid !== undefined) {
@@ -465,7 +496,9 @@ export class PoolEntry {
       }
     } catch (err) {
       debugLogger.warn(
-        `Descendant pid sweep failed for ${this.id}: ${String(err)}. Proceeding with disconnect.`,
+        `Descendant pid sweep failed for ${this.id} (${reason}): ${String(
+          err,
+        )}. Proceeding with disconnect.`,
       );
     }
     try {
@@ -475,12 +508,6 @@ export class PoolEntry {
         `client.disconnect failed for ${this.id} (${reason}): ${String(err)}`,
       );
     }
-    // state already set to 'closed' synchronously above (wenshao C4 fix).
-    this.localStatus = MCPServerStatus.DISCONNECTED;
-    // Suppress the listener echo from our own write (wenshao C6).
-    this.suppressNextStatusEcho = true;
-    this.updateGlobalStatus();
-    this.onClosed(this.id);
   }
 
   /**
@@ -502,17 +529,25 @@ export class PoolEntry {
         `Cannot restart PoolEntry ${this.id} in state ${this.state}`,
       );
     }
-    // F2 (#4175 commit 6 review fix — wenshao W4): restart supersedes
-    // drain. Pre-fix the entry could be in `'draining'` state (refs
-    // hit 0, 30s grace running) when `restartByName` arrived; the
-    // drain timer would fire during the `await client.disconnect()`
-    // yield and call `forceShutdown('drain_timer')`, which removes
-    // the entry from `pool.entries` and detaches subscribers. Then
-    // `doRestart` resumes with `await client.connect()` spawning a
-    // fresh subprocess that's orphaned — pool no longer holds it.
-    // Cancel the drain timer + transition draining→active so the
-    // restart sequence completes atomically.
+    // F2 (#4175 commit 6 review fix — wenshao W4 + W31): restart
+    // supersedes drain. Pre-fix the entry could be in `'draining'`
+    // state (refs=0, both `drainTimer` AND `maxIdleTimer` running)
+    // when `restartByName` arrived; either timer firing during
+    // `doRestart`'s awaits would call `forceShutdown` → entry
+    // removed from `pool.entries`, subscribers detached. Then
+    // `doRestart` resumes with `client.connect()` spawning a fresh
+    // subprocess the pool no longer tracks. W4 cancelled
+    // `drainTimer`; W31 caught the `maxIdleTimer` sibling miss —
+    // its fire-action's `refs.size > 0` check still fails when refs
+    // are 0 mid-restart. Cancel BOTH timers + reset `firstIdleAt`
+    // so a future detach starts a fresh idle window, and transition
+    // `'draining' → 'active'` so the restart completes atomically.
     this.cancelDrainTimer();
+    if (this.maxIdleTimer) {
+      clearTimeout(this.maxIdleTimer);
+      this.maxIdleTimer = undefined;
+    }
+    this.firstIdleAt = undefined;
     if (this.state === 'draining') {
       this.state = 'active';
     }
@@ -524,35 +559,14 @@ export class PoolEntry {
       generation: oldGen,
       reason: 'restart',
     });
-    // F2 (#4175 commit 6 review fix — wenshao W3): sweep descendant
-    // pids BEFORE `client.disconnect()`. Pre-fix `client.disconnect`
-    // only killed the wrapper (npx / uvx / pnpm dlx), letting the
-    // actual MCP server grandchild survive as an orphan. Every
-    // restart-via-HTTP-route call leaked one+ orphan process; over
-    // hours of daemon uptime with periodic restarts the workspace
-    // gradually exhausts PIDs / FDs / memory. Mirror the sweep that
-    // `forceShutdown` performs (best-effort; per-pid failures
-    // tolerated by sigtermPids).
-    try {
-      const rootPid = this.client.getTransportPid?.();
-      if (rootPid !== undefined) {
-        const descendants = await listDescendantPids(rootPid);
-        if (descendants.length > 0) {
-          sigtermPids(descendants);
-        }
-      }
-    } catch (err) {
-      debugLogger.debug(
-        `Restart pid sweep (best-effort) failed for ${this.id}: ${String(err)}`,
-      );
-    }
-    try {
-      await this.client.disconnect();
-    } catch (err) {
-      debugLogger.debug(
-        `Restart disconnect (best-effort) failed for ${this.id}: ${String(err)}`,
-      );
-    }
+    // F2 (#4175 commit 6 review fix — wenshao W3 + W37): sweep +
+    // disconnect via the shared `sweepAndDisconnect` helper. Pre-fix
+    // (W3) `client.disconnect` alone killed only the wrapper (npx /
+    // uvx / pnpm dlx), letting the actual MCP server grandchild
+    // survive as an orphan. The helper mirrors `forceShutdown`'s
+    // sweep + disconnect with identical log levels (warn for sweep
+    // failures, error for disconnect failures — W35 fold-in).
+    await this.sweepAndDisconnect('restart');
     // F2 (#4175 commit 4 review fix — wenshao C3): wrap connect +
     // discover in try/catch. Pre-fix a thrown `client.connect()` or
     // `client.discoverAndReturn()` propagated up to `restartByName`
@@ -574,6 +588,15 @@ export class PoolEntry {
       debugLogger.error(
         `Restart of ${this.id} failed at connect/discover: ${String(err)}. Transitioning to 'failed'.`,
       );
+      // F2 (#4175 commit 6 review fix — wenshao W32): the failure
+      // catch previously skipped the descendant pid sweep, leaving
+      // grandchildren of the partially-spawned new transport (npx /
+      // uvx wrappers that finished the prelude before connect or
+      // discover threw) as orphans. `sweepAndDisconnect` here
+      // targets the NEW transport's pid (the OLD transport was
+      // already disconnected pre-attempt). Best-effort; per-pid
+      // failures tolerated by sigtermPids inside the helper.
+      await this.sweepAndDisconnect('restart_failed');
       this.state = 'failed';
       this.localStatus = MCPServerStatus.DISCONNECTED;
       this.suppressNextStatusEcho = true;
@@ -602,6 +625,21 @@ export class PoolEntry {
     if (oldGen + 1 !== this._generation) {
       debugLogger.debug(
         `Restart of ${this.id} superseded by newer generation; discarding stale snapshot`,
+      );
+      return;
+    }
+    // F2 (#4175 commit 6 review fix — wenshao W34): state guard
+    // after the generation guard. If `forceShutdown` ran during any
+    // of `doRestart`'s awaits (e.g., a `drainAll` mid-restart on
+    // shutdown, or a sibling restart that triggered a transient
+    // close), the entry is in `'closed'` / `'failed'` — writing
+    // CONNECTED + emitting `reconnected` on a pool-evicted zombie
+    // entry would leave subscribers thinking they're attached to a
+    // healthy connection. Drop the snapshot and exit silently.
+    if (this.state === 'closed' || this.state === 'failed') {
+      debugLogger.debug(
+        `Restart of ${this.id} completed but entry is ${this.state}; ` +
+          `discarding snapshot (entry was force-shut-down mid-restart).`,
       );
       return;
     }

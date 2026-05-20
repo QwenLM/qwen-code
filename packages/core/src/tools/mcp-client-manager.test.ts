@@ -142,6 +142,100 @@ describe('McpClientManager', () => {
     expect(acquireSpy).toHaveBeenCalledTimes(2);
   });
 
+  it('routes incremental discovery through the pool when injected (F2 commit 4 C7 / W38)', async () => {
+    // Wenshao W38 review fold-in: the C7 fix added the pool gate to
+    // `discoverAllMcpToolsIncremental` (the default progressive-mode
+    // boot path) but no test covered it — only `discoverAllMcpTools`
+    // had pool-routing coverage. A regression that misplaced or
+    // removed the gate would silently bypass the pool during daemon
+    // boot, spawning N per-session McpClient processes instead of
+    // sharing one pool entry. This mirrors the existing "routes
+    // discovery through the pool" test but exercises the
+    // `discoverAllMcpToolsIncremental` path.
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+    expect(McpClient).not.toHaveBeenCalled();
+  });
+
+  it('disconnectServer releases pooled connection in pool mode (F2 commit 4 / W39)', async () => {
+    // Wenshao W39 review fold-in: the manager's `disconnectServer`
+    // pool-mode branch (`pooledConnections.get(name).release()` +
+    // `pooledConnections.delete(name)`) had no test coverage. If the
+    // release call is missing/broken, the pool entry's refcount
+    // never reaches 0, the drain timer never fires, and the shared
+    // subprocess leaks for the daemon's lifetime. This test wires a
+    // pool fake, populates `pooledConnections` via discovery, then
+    // asserts `disconnectServer` calls `release()` and removes the
+    // map entry.
+    const releaseSpy = vi.fn();
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: releaseSpy,
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      { removeMcpToolsByServer: vi.fn() } as unknown as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(releaseSpy).not.toHaveBeenCalled();
+    await manager.disconnectServer('srv');
+    expect(releaseSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('serializes concurrent discovery passes via mutex (F2 commit 6 W6)', async () => {
     // Wenshao W6 review fold-in: pre-fix two concurrent
     // `discoverAllMcpTools[Incremental]` invocations could both see

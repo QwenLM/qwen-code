@@ -362,8 +362,12 @@ export class McpTransportPool {
   /**
    * Restart all pool entries matching `serverName`, or just the one
    * with `entryIndex` if specified (V21-3). Runs in parallel via
-   * `Promise.allSettled`; returns per-entry results so the caller
-   * can surface per-entry success/failure (§13.1 restart route).
+   * `Promise.all` with per-entry try/catch (rejections never escape);
+   * returns per-entry results so the caller can surface per-entry
+   * success/failure (§13.1 restart route). W36 doc fix: previous
+   * docstring named `Promise.allSettled`, but the implementation
+   * actually uses `Promise.all` — the per-entry try/catch makes
+   * Promise.all safe but the docstring was misleading.
    */
   async restartByName(
     serverName: string,

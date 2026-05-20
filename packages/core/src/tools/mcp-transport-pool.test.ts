@@ -306,6 +306,39 @@ describe('McpTransportPool', () => {
       const results = await pool.restartByName('nonexistent');
       expect(results).toEqual([]);
     });
+
+    it('restart fans out updated tool snapshot to attached subscribers (F2 commit 5 R3 / W40)', async () => {
+      // Wenshao W40 review fold-in: the R3 fix (commit 5) added a
+      // post-restart fan-out that iterates `entry.subscribers` and
+      // calls `view.applyTools(this.toolsSnapshot)` /
+      // `view.applyPrompts(...)` so attached sessions pick up the
+      // new snapshot. No test verified the fan-out; a regression
+      // dropping the loop would leave sessions holding stale
+      // pre-restart tool registrations — exactly the bug R3 fixed.
+      // Assert by counting `removeMcpToolsByServer` calls on the
+      // session registry (SessionMcpView's `applyTools` removes
+      // existing tools then re-registers).
+      mockMcpSuccess({ toolNames: ['original'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      // Initial attach calls applyTools once → one removeMcpToolsByServer.
+      const initialRemoveCalls = (
+        r.tools.removeMcpToolsByServer as ReturnType<typeof vi.fn>
+      ).mock.calls.length;
+      expect(initialRemoveCalls).toBeGreaterThanOrEqual(1);
+      const results = await pool.restartByName('srv');
+      expect(results[0].restarted).toBe(true);
+      // Post-restart fan-out → additional applyTools call → one more
+      // removeMcpToolsByServer (R3 contract: subscribers see the new
+      // snapshot via direct `view.applyTools` invocation, not via
+      // event subscription).
+      const finalRemoveCalls = (
+        r.tools.removeMcpToolsByServer as ReturnType<typeof vi.fn>
+      ).mock.calls.length;
+      expect(finalRemoveCalls).toBeGreaterThan(initialRemoveCalls);
+    });
   });
 
   describe('getSnapshot', () => {
