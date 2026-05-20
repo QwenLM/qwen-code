@@ -37,8 +37,7 @@ vi.mock('node:fs', async (importOriginal) => {
     mkdtempSync: vi.fn().mockReturnValue('/tmp/qwen-edit-mock'),
     writeFileSync: vi.fn(),
     readFileSync: vi.fn().mockReturnValue('edited text'),
-    unlinkSync: vi.fn(),
-    rmdirSync: vi.fn(),
+    rmSync: vi.fn(),
   };
   return {
     ...actual,
@@ -69,8 +68,7 @@ describe('openInExternalEditor', () => {
     (fs.mkdtempSync as Mock).mockReturnValue('/tmp/qwen-edit-mock');
     (fs.writeFileSync as Mock).mockImplementation(() => {});
     (fs.readFileSync as Mock).mockReturnValue('edited text');
-    (fs.unlinkSync as Mock).mockImplementation(() => {});
-    (fs.rmdirSync as Mock).mockImplementation(() => {});
+    (fs.rmSync as Mock).mockImplementation(() => {});
     mockSpawnSync.mockReturnValue({ status: 0, error: null });
     mockGetExternalEditorCommand.mockReturnValue(null);
   });
@@ -129,7 +127,7 @@ describe('openInExternalEditor', () => {
       await result.current.openInExternalEditor();
     });
 
-    expect(fs.unlinkSync).toHaveBeenCalled();
+    expect(fs.rmSync).toHaveBeenCalled();
   });
 
   it('should clean up temp file when writeFileSync throws', async () => {
@@ -149,7 +147,7 @@ describe('openInExternalEditor', () => {
       await result.current.openInExternalEditor();
     });
 
-    expect(fs.unlinkSync).toHaveBeenCalled();
+    expect(fs.rmSync).toHaveBeenCalled();
     expect(mockSpawnSync).not.toHaveBeenCalled();
   });
 
@@ -281,7 +279,7 @@ describe('openInExternalEditor', () => {
       await result.current.openInExternalEditor();
     });
 
-    expect(fs.unlinkSync).toHaveBeenCalled();
+    expect(fs.rmSync).toHaveBeenCalled();
     expect(result.current.text).toBe('hello');
   });
 
@@ -524,8 +522,10 @@ describe('openInExternalEditor', () => {
       await result.current.openInExternalEditor();
     });
 
-    expect(fs.unlinkSync).toHaveBeenCalledWith(expectedTmpFile);
-    expect(fs.rmdirSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock');
+    expect(fs.rmSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock', {
+      recursive: true,
+      force: true,
+    });
   });
 
   it('should normalize CRLF to LF in editor output', async () => {
@@ -564,12 +564,12 @@ describe('openInExternalEditor', () => {
     });
 
     expect(result.current.text).toBe('original');
-    expect(fs.unlinkSync).toHaveBeenCalled();
+    expect(fs.rmSync).toHaveBeenCalled();
   });
 
-  it('should still rmdirSync when unlinkSync throws', async () => {
-    (fs.unlinkSync as Mock).mockImplementation(() => {
-      throw new Error('ENOENT');
+  it('should not propagate when rmSync cleanup throws (e.g. EPERM)', async () => {
+    (fs.rmSync as Mock).mockImplementation(() => {
+      throw new Error('EPERM');
     });
 
     const { result } = renderHook(() =>
@@ -584,7 +584,11 @@ describe('openInExternalEditor', () => {
       await result.current.openInExternalEditor();
     });
 
-    expect(fs.rmdirSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock');
+    expect(fs.rmSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock', {
+      recursive: true,
+      force: true,
+    });
+    expect(result.current.text).toBe('edited text');
   });
 
   it('should abort gracefully when mkdtempSync fails', async () => {
@@ -707,7 +711,10 @@ describe('openInExternalEditor', () => {
 
       expect(mockSpawnSync).not.toHaveBeenCalled();
       expect(result.current.text).toBe('hello');
-      expect(fs.rmdirSync).toHaveBeenCalled();
+      expect(fs.rmSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock', {
+        recursive: true,
+        force: true,
+      });
     } finally {
       Object.defineProperty(process, 'platform', { value: origPlatform });
     }
@@ -829,7 +836,10 @@ describe('openInExternalEditor', () => {
 
       expect(mockSpawnSync).not.toHaveBeenCalled();
       expect(result.current.text).toBe('hello');
-      expect(fs.rmdirSync).toHaveBeenCalled();
+      expect(fs.rmSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock', {
+        recursive: true,
+        force: true,
+      });
     } finally {
       Object.defineProperty(process, 'platform', { value: origPlatform });
       if (origVISUAL === undefined) delete process.env['VISUAL'];

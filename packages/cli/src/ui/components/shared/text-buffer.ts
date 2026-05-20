@@ -2246,7 +2246,7 @@ export function useTextBuffer({
               `[useTextBuffer] opts.editor command contains unsafe characters: ${editorCmd}`,
             );
             try {
-              fs.rmdirSync(tmpDir);
+              fs.rmSync(tmpDir, { recursive: true, force: true });
             } catch {
               /* ignore */
             }
@@ -2281,7 +2281,7 @@ export function useTextBuffer({
                 `[useTextBuffer] Editor command from environment contains unsafe characters: ${editorCmd}`,
               );
               try {
-                fs.rmdirSync(tmpDir);
+                fs.rmSync(tmpDir, { recursive: true, force: true });
               } catch {
                 /* ignore */
               }
@@ -2341,14 +2341,12 @@ export function useTextBuffer({
           );
         }
         try {
-          fs.unlinkSync(filePath);
+          // recursive+force handles leftover swap files (.swp) from vim/neovim.
+          // On Windows, EPERM/EBUSY from locked files may still cause a partial
+          // delete — the catch below keeps it non-fatal.
+          fs.rmSync(tmpDir, { recursive: true, force: true });
         } catch {
-          /* ignore */
-        }
-        try {
-          fs.rmdirSync(tmpDir);
-        } catch {
-          /* ignore */
+          /* best-effort cleanup */
         }
       }
     },
@@ -2698,7 +2696,7 @@ export interface TextBuffer {
   }) => void;
   /**
    * Opens the current buffer contents in an external editor.  Resolution
-   * order: `/editor` preference → `$VISUAL` → `$EDITOR` → `vi`.
+   * order: `/editor` preference → `$VISUAL` → `$EDITOR` → platform default (`vi` on Unix, `notepad` on Windows).
    *
    * The undo snapshot is created *after* the editor exits and only when
    * the content actually changed, so one `undo()` reverts the entire edit.
