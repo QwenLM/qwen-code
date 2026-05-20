@@ -18,12 +18,11 @@
 import {
   createDebugLogger,
   detectRuntime,
+  getAllProviderBaseUrls,
   getOrCreateSharedDispatcher,
   redactProxyCredentials,
 } from '@qwen-code/qwen-code-core';
 import { fetch as undiciFetch } from 'undici';
-
-import { getAllProviderBaseUrls } from '../auth/allProviders.js';
 
 const debugLogger = createDebugLogger('PRECONNECT');
 

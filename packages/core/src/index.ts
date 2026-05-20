@@ -128,6 +128,12 @@ export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 
 // ============================================================================
+// Providers
+// ============================================================================
+
+export * from './providers/index.js';
+
+// ============================================================================
 // Services
 // ============================================================================
 
