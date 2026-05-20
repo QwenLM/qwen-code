@@ -161,6 +161,7 @@ const HOSTED_INSTALLATION_OUTPUT_NAMES = new Set([
 
 const ARG_DEFS = {
   '--out-dir': { key: 'outDir', type: 'value' },
+  '--version': { key: 'version', type: 'value' },
 };
 
 if (isMainModule(import.meta.url)) {
@@ -182,7 +183,7 @@ async function main() {
   const outDir = path.resolve(
     args.outDir || path.join(rootDir, 'dist', 'installation'),
   );
-  await buildHostedInstallationAssets(outDir);
+  await buildHostedInstallationAssets(outDir, { version: args.version });
 }
 
 function printUsage() {
@@ -192,12 +193,16 @@ Stages hosted installer entrypoint assets for CDN/OSS upload.
 
 Options:
   --out-dir PATH        Output directory. Defaults to dist/installation.
+  --version VERSION     Stamp the release version into copied installers so
+                        they default to installing that version instead of
+                        'latest'. Should match the release tag (e.g. v1.2.3).
   -h, --help            Show this help message.
 `);
 }
 
 async function buildHostedInstallationAssets(outDir, options = {}) {
   const root = options.root || rootDir;
+  const version = options.version || undefined;
   fs.mkdirSync(outDir, { recursive: true });
   assertNoUnexpectedHostedFiles(outDir);
 
@@ -210,6 +215,9 @@ async function buildHostedInstallationAssets(outDir, options = {}) {
 
     const destination = path.join(outDir, asset.output);
     copyHostedInstallationAsset(source, destination, asset);
+    if (version) {
+      stampVersionInAsset(destination, asset.output, version);
+    }
     if (asset.mode !== undefined) {
       fs.chmodSync(destination, asset.mode);
     }
@@ -238,6 +246,41 @@ function copyHostedInstallationAsset(source, destination, asset) {
   }
 
   fs.copyFileSync(source, destination);
+}
+
+/**
+ * Replaces the default 'latest' version in a copied installer asset with the
+ * given release version so the hosted installer installs the tagged version.
+ *
+ * @param {string} filePath - Path to the copied asset on disk.
+ * @param {string} assetName - Logical asset name (e.g. 'install-qwen-standalone.sh').
+ * @param {string} version - Release version to stamp (e.g. 'v1.2.3' or '1.2.3').
+ */
+function stampVersionInAsset(filePath, assetName, version) {
+  const replacements = {
+    'install-qwen-standalone.sh': {
+      from: 'VERSION="${QWEN_INSTALL_VERSION:-latest}"',
+      to: `VERSION="\${QWEN_INSTALL_VERSION:-${version}}"`,
+    },
+    'install-qwen-standalone.bat': {
+      from: 'set "VERSION=latest"',
+      to: `set "VERSION=${version}"`,
+    },
+  };
+
+  const replacement = replacements[assetName];
+  if (!replacement) {
+    return;
+  }
+
+  let contents = fs.readFileSync(filePath, 'utf8');
+  if (!contents.includes(replacement.from)) {
+    fail(
+      `Cannot stamp version in ${assetName}: expected default version pattern not found`,
+    );
+  }
+  contents = contents.replace(replacement.from, replacement.to);
+  fs.writeFileSync(filePath, contents);
 }
 
 function assertHostedInstallerSource(source, output) {

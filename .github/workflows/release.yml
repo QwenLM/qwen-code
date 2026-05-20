@@ -390,7 +390,9 @@ jobs:
         run: 'npm run verify:installation-release -- --dir dist/standalone'
 
       - name: 'Package Hosted Installation Assets'
-        run: 'npm run package:hosted-installation -- --out-dir dist/installation'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: 'npm run package:hosted-installation -- --out-dir dist/installation --version "${RELEASE_VERSION}"'
 
       - name: 'Install ossutil'
         if: |-
