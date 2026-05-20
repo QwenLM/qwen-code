@@ -366,21 +366,26 @@ export class EventBus {
       // caught up!") even though the SDK reducer's state was now
       // diverged from the daemon's truth.
       //
-      // Emit `state_resync_required` as a TERMINAL synthetic frame
-      // (no `id` — same pattern as `client_evicted` so it doesn't
-      // burn a slot in the per-session monotonic sequence other
-      // subscribers observe). The SDK reducer treats this as "your
-      // state is stale; call loadSession before applying any further
-      // deltas" — see `awaitingResync` flag in the SDK reducer.
+      // Emit `state_resync_required` as an id-less synthetic frame
+      // (no `id` — same no-burn pattern as `client_evicted`, so it
+      // doesn't occupy a slot in the per-session monotonic sequence
+      // other subscribers observe). **Unlike `client_evicted`, the
+      // stream stays OPEN after this frame** — the resync frame is
+      // emitted FIRST (before replay), and replay + live frames
+      // continue flowing afterward. The SDK reducer treats this as
+      // "your state is stale; call loadSession before applying any
+      // further deltas" — see `awaitingResync` flag in the SDK
+      // reducer. Wenshao review (#4360) corrected the prior wording
+      // that called this "TERMINAL" — that's misleading for oncall;
+      // `client_evicted` is genuinely terminal (closes stream),
+      // `state_resync_required` is recovery-oriented (keeps stream
+      // open).
       //
       // Replay continues after the resync frame (per design): the
       // SDK reducer will auto-skip delta application until
       // loadSession clears the flag, but the frames stay on the
       // wire so SDK has the option to compute a "what you missed"
-      // diff later. This is network-friendly (no extra reconnect)
-      // and matches the existing `client_evicted` semantics
-      // (terminal-on-close, but consumer can still drain queued
-      // frames first).
+      // diff later. This is network-friendly (no extra reconnect).
       const earliestInRing = this.ring[0]?.id;
       if (
         earliestInRing !== undefined &&

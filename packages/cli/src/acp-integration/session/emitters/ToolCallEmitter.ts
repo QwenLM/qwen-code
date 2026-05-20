@@ -205,9 +205,11 @@ export class ToolCallEmitter extends BaseEmitter {
    *   - `subagentMeta` present → `'subagent'` (a Task tool / Codex
    *     subagent / etc. wrapping its own tool calls)
    *   - toolName matches `mcp__<server>__<tool>` → `'mcp'` with
-   *     `serverId: <server>`. Naming convention from `@qwen-code/core/
-   *     mcp-tool` — mirrors the SDK's same heuristic fallback so SDK
-   *     consumers stay consistent with daemon classification.
+   *     `serverId: <server>`. Naming convention from
+   *     `packages/core/src/tools/mcp-tool.ts` in the
+   *     `@qwen-code/qwen-code-core` package — mirrors the SDK's same
+   *     heuristic fallback so SDK consumers stay consistent with
+   *     daemon classification.
    *   - everything else → `'builtin'`
    *
    * Static + pure so it can be unit-tested without an emitter

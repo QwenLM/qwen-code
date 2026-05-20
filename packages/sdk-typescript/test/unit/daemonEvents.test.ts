@@ -2334,6 +2334,66 @@ describe('PR 21 — auth device-flow events', () => {
       expect(errored.streamError).toEqual({ error: 'transport gone' });
     });
 
+    it('still applies session_closed while awaitingResync (wenshao #4360 review)', () => {
+      // session_closed is in RESYNC_PASSTHROUGH_TYPES alongside
+      // session_died — terminal session lifecycle signals must still
+      // surface even when the consumer is in resync limbo. Otherwise
+      // a session that closes during resync would silently keep
+      // `alive: true` in view state and the UI would render "loading
+      // resync state…" indefinitely.
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      const closed = reduceDaemonSessionEvent(afterResync, {
+        id: 15,
+        v: 1,
+        type: 'session_closed',
+        data: { sessionId: 's-1', reason: 'client_initiated' },
+      });
+      expect(closed.alive).toBe(false);
+      expect(closed.terminalEvent?.type).toBe('session_closed');
+      // awaitingResync stays set (consumer never recovered) — the
+      // terminal event takes precedence for UI rendering but the
+      // resync flag remains as observability state.
+      expect(closed.awaitingResync).toBe(true);
+    });
+
+    it('still applies client_evicted while awaitingResync (wenshao #4360 review)', () => {
+      // client_evicted is the 5th member of RESYNC_PASSTHROUGH_TYPES.
+      // It happens when the subscriber's queue overflows (the daemon
+      // closes the stream after force-pushing the synthetic frame).
+      // Even in resync limbo, the SDK must see the eviction so the
+      // adapter can stop pretending the stream is alive.
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      const evicted = reduceDaemonSessionEvent(afterResync, {
+        v: 1,
+        type: 'client_evicted',
+        data: { reason: 'queue_overflow', droppedAfter: 17 },
+      });
+      expect(evicted.alive).toBe(false);
+      expect(evicted.terminalEvent?.type).toBe('client_evicted');
+    });
+
     it('reseeding view state via createDaemonSessionViewState clears awaitingResync (consumer recovery)', () => {
       // Consumer recovery path: after observing awaitingResync, call
       // loadSession (out of band) and reconstruct view state. The

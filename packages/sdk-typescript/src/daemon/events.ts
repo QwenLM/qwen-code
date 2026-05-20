@@ -6,6 +6,7 @@
 
 import type {
   DaemonEvent,
+  DaemonErrorKind,
   DaemonMcpTransport,
   PermissionOutcome,
 } from './types.js';
@@ -232,16 +233,23 @@ export interface DaemonStreamErrorData {
   error: string;
   /**
    * #4175 F4 prereq (chiga0 issue #19 P0). Classified error kind from
-   * the daemon's `mapDomainErrorToErrorKind` — one of the 7-value
-   * closed enum (`init_timeout` / `protocol_error` / `missing_binary`
-   * / `auth_env_error` / `blocked_egress` / `missing_file` /
-   * `parse_error`). Absent for unclassified errors — the daemon omits
-   * the field rather than stamping a meaningless value. UI consumers
-   * key on this for typed retry / remediation rendering (retry on
-   * init_timeout vs install on missing_binary, etc.) instead of
-   * regex-matching the `error` string.
+   * the daemon's `mapDomainErrorToErrorKind` — typed as the closed
+   * `DaemonErrorKind` enum (currently 8 values: `missing_binary` /
+   * `blocked_egress` / `auth_env_error` / `init_timeout` /
+   * `protocol_error` / `missing_file` / `parse_error` /
+   * `budget_exhausted`) with a `(string & {})` widening for forward-
+   * compat. A future daemon may emit additional kinds (e.g.
+   * `stat_failed` already exists on the daemon's `SERVE_ERROR_KINDS`
+   * but is not yet mirrored on this SDK constant) — the union shape
+   * preserves IDE autocomplete on the known values while accepting
+   * forward-compat strings without a type error. Absent for
+   * unclassified errors — the daemon omits the field rather than
+   * stamping a meaningless value. UI consumers key on this for typed
+   * retry / remediation rendering (retry on init_timeout vs install
+   * on missing_binary, etc.) instead of regex-matching the `error`
+   * string.
    */
-  errorKind?: string;
+  errorKind?: DaemonErrorKind | (string & {});
   [key: string]: unknown;
 }
 

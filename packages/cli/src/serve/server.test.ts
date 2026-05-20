@@ -4667,7 +4667,11 @@ describe('GET /session/:id/events (SSE)', () => {
     const bridge = fakeBridge({
       async *subscribeImpl(_sessionId, _opts) {
         yield { id: 1, v: 1, type: 'session_update', data: 'first' };
-        throw new BridgeTimeoutError('initialize timed out');
+        // `BridgeTimeoutError(label, timeoutMs)` — 2 positional args
+        // (wenshao #4360 review). The resulting message is
+        // `"HttpAcpBridge initialize timed out after 5000ms"` which
+        // satisfies the `.toContain('timed out')` assertion below.
+        throw new BridgeTimeoutError('initialize', 5000);
       },
     });
     handle = await runQwenServe(

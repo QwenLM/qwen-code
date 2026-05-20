@@ -2559,13 +2559,28 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // ordering and "X minutes ago" UIs use the server's clock rather than
   // each client's drifting local clock. Stamped at the wire boundary
   // (NOT at EventBus.publish) so the in-memory `BridgeEvent` type stays
-  // unchanged and internal consumers don't see `_meta`. Pre-existing
-  // `_meta` keys on the event (e.g. tool_call carries `_meta.toolName` /
-  // `_meta.timestamp` from ToolCallEmitter) are preserved by spreading
-  // first. SDK consumers read via the 3-location probe in
-  // `extractServerTimestamp` (sdk-typescript) — `_meta.serverTimestamp`
-  // is one of the supported locations; the other two stay free for
-  // future use.
+  // unchanged and internal consumers don't see `_meta`.
+  //
+  // **Where `_meta` lives**: this code merges with `event._meta` at the
+  // BridgeEvent top level. **No current producer in the daemon sets
+  // `_meta` at the top level** — wenshao #4360 review noted that
+  // ToolCallEmitter's `_meta` lives nested at `event.data._meta` (the
+  // ACP `session/update` payload's own metadata), and `bridgeClient.ts`
+  // publishes via `events.publish({ type: 'session_update', data:
+  // params })` so the emitter's `_meta` stays inside `data`. The
+  // top-level merge here is a **forward-compat escape hatch** — if a
+  // future emitter ever wants to stamp envelope-level metadata, it can
+  // do so via `_meta` and this spread preserves it. Today
+  // `existingMeta` is always `undefined` in production and the spread
+  // is a no-op merge with `{}`.
+  //
+  // SDK consumer plan: a 3-location probe (event.serverTimestamp /
+  // event._meta.serverTimestamp / event.data._meta.serverTimestamp)
+  // is planned in chiga0's separate PR #4353 (not yet merged into
+  // `daemon_mode_b_main`). When that ships, SDK readers find this
+  // field at the `_meta.serverTimestamp` location. Until then this
+  // stamp is daemon-side only; SDK consumers can read it through an
+  // `as any` cast or wait for #4353.
   const existingMeta = (event as { _meta?: Record<string, unknown> })._meta;
   const stamped = {
     ...event,

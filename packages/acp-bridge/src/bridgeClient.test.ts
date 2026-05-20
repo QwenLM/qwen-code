@@ -272,6 +272,27 @@ describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {
       expect(err.data).toBeUndefined();
     });
 
+    it('readTextFile passes non-FsError errors through unchanged (wenshao #4360 review)', async () => {
+      // Symmetric guard for the read-side `preserveFsErrorOverAcp`
+      // call. The write- and read-side catch blocks are independent
+      // try/catch wrappers in `bridgeClient.ts`; if a future refactor
+      // diverges them (e.g. adds Error-wrapping to one but not the
+      // other), this test catches the read-side regression.
+      const readText = vi.fn(async (): Promise<ReadTextFileResponse> => {
+        throw new Error('generic read failure');
+      });
+      const client = makeClient({ writeText: vi.fn(), readText });
+
+      const err = (await client
+        .readTextFile({ path: '/x', sessionId: 'sess:test' })
+        .catch((e) => e)) as Error & { code?: number; data?: unknown };
+
+      expect(err.name).toBe('Error');
+      expect(err.message).toBe('generic read failure');
+      expect(err.code).toBeUndefined();
+      expect(err.data).toBeUndefined();
+    });
+
     it('preserves hint field when present on the FsError', async () => {
       const writeText = vi.fn(async (): Promise<WriteTextFileResponse> => {
         throw makeFsError(
