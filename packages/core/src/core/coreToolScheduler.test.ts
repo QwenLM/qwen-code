@@ -225,6 +225,10 @@ vi.mock('../telemetry/session-tracing.js', () => ({
   startLLMRequestSpan: vi.fn(),
   endLLMRequestSpan: vi.fn(),
   clearSessionTracingForTesting: vi.fn(),
+  // truncateSpanError is exported from session-tracing and used in
+  // setToolSpanFailure to bound status messages. The real implementation
+  // is a pure utility function — passthrough is fine for tests.
+  truncateSpanError: (s: string): string => s,
 }));
 
 vi.mock('fs/promises', () => ({

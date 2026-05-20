@@ -211,7 +211,7 @@ const SPAN_ERROR_MAX_CHARS = 1024;
  * ~32KB), so we keep the simpler char-count bound rather than paying
  * the encoder cost on every endXSpan (review-4 follow-up).
  */
-function truncateSpanError(s: string): string {
+export function truncateSpanError(s: string): string {
   return s.length > SPAN_ERROR_MAX_CHARS
     ? s.slice(0, SPAN_ERROR_MAX_CHARS) + '…[truncated]'
     : s;

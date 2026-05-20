@@ -89,6 +89,7 @@ import {
   endHookSpan,
   addToolInputAttributes,
   addToolResultAttributes,
+  truncateSpanError,
   type ToolBlockedDecision,
   type ToolBlockedSource,
   type StartHookSpanOptions,
@@ -159,9 +160,14 @@ function setToolSpanFailure(
   } catch {
     // OTel errors must not block the failure status update.
   }
+  // Bound the status message size at this single ingress point so every
+  // setToolSpanFailure caller is protected — multiple call sites pass
+  // raw error.message which can be unbounded (#4321 review-5 wenshao
+  // Suggestion). Static-constant callers see no change since their
+  // messages are well under 1024 chars.
   safeSetStatus(span, {
     code: SpanStatusCode.ERROR,
-    message,
+    message: truncateSpanError(message),
   });
 }
 
@@ -1946,6 +1952,17 @@ export class CoreToolScheduler {
       // exception case (this method's outer try/catch finalizes spans
       // before re-throwing), satisfying the
       // "stillLive cleanup not in finally" concern from review-3.
+      //
+      // Edge case: if every newToolCall was non-validating (all failed
+      // pre-validation — invalid params, tool not registered, etc.),
+      // batchState.callIds stays empty and no finalizeToolSpan call
+      // ever fires for this batch. Drop the listener here so the
+      // signal doesn't accumulate dead listeners across many such
+      // batches in a daemon session (#4321 review-5 wenshao
+      // Suggestion).
+      if (batchState.callIds.size === 0) {
+        signal.removeEventListener('abort', batchState.onAbort);
+      }
     } finally {
       this.isScheduling = false;
     }
@@ -2007,6 +2024,14 @@ export class CoreToolScheduler {
         }
       }
       this.finalizeToolSpan(callId);
+      // Surface the failure in application logs even though we re-throw.
+      // The trace backend captures it via the span, but operators
+      // grepping logs by callId would otherwise see nothing if the
+      // caller doesn't log the rejection itself (#4321 review-5
+      // wenshao Suggestion).
+      debugLogger.warn(
+        `handleConfirmationResponse failed for ${callId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
       throw error;
     }
   }

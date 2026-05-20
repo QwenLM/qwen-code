@@ -151,6 +151,7 @@ export {
   startHookSpan,
   endHookSpan,
   getActiveInteractionSpan,
+  truncateSpanError,
 } from './session-tracing.js';
 export type {
   StartInteractionOptions,

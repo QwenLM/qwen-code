@@ -139,6 +139,7 @@ import {
   getActiveInteractionSpan,
   clearSessionTracingForTesting,
   runTTLSweepForTesting,
+  truncateSpanError,
 } from './session-tracing.js';
 
 function createMockConfig(
@@ -970,6 +971,54 @@ describe('session-tracing', () => {
       runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
 
       expect(record.attributes['qwen-code.span.ttl_expired']).toBeUndefined();
+    });
+
+    it('stamps decision=aborted/source=system on TTL-expired blocked_on_user spans', () => {
+      // The blocked-span branch in sweepStaleSpans tags the canonical
+      // taxonomy so dashboards filtering by `decision: 'aborted'` count
+      // walk-aways alongside explicit user aborts.
+      const toolSpan = startToolSpan('blockedStaleParent');
+      const blockedSpan = startToolBlockedOnUserSpan(toolSpan, {
+        tool_name: 'blockedStaleParent',
+      });
+      const blockedRecord = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.blocked_on_user',
+      )!;
+
+      runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
+
+      expect(blockedRecord.ended).toBe(true);
+      expect(blockedRecord.attributes['qwen-code.span.ttl_expired']).toBe(true);
+      expect(blockedRecord.attributes['decision']).toBe('aborted');
+      expect(blockedRecord.attributes['source']).toBe('system');
+
+      // Cleanup the still-active tool span.
+      endToolBlockedOnUserSpan(blockedSpan);
+      endToolSpan(toolSpan, { success: false });
+    });
+  });
+
+  describe('truncateSpanError (#4321 review)', () => {
+    it('returns short strings unchanged', () => {
+      expect(truncateSpanError('short message')).toBe('short message');
+      expect(truncateSpanError('')).toBe('');
+    });
+
+    it('truncates strings over 1024 chars and appends a sentinel suffix', () => {
+      const oversized = 'a'.repeat(2000);
+      const truncated = truncateSpanError(oversized);
+      expect(truncated.length).toBeLessThan(oversized.length);
+      expect(truncated.endsWith('…[truncated]')).toBe(true);
+      expect(truncated.startsWith('a'.repeat(1024))).toBe(true);
+    });
+
+    it('does not double-suffix already-truncated input', () => {
+      // Hard guarantee: the sentinel is only appended when the input
+      // exceeds the cap. A short string with the suffix already present
+      // would NOT pass back through truncate at production sites — but
+      // sanity-check the boundary anyway.
+      const exactlyAtCap = 'b'.repeat(1024);
+      expect(truncateSpanError(exactlyAtCap)).toBe(exactlyAtCap);
     });
   });
 });
