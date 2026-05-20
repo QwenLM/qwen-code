@@ -9,6 +9,13 @@ import {
   type ServeFeature,
   type ServeProtocolVersions,
 } from './capabilities.js';
+// Wenshao review #4335 / 3271978342 — import the canonical
+// `PermissionPolicy` union from acp-bridge instead of inlining
+// the four string literals below. Without the import, adding a
+// 5th policy literal upstream would silently widen the union
+// over there while this envelope kept accepting only the older
+// 4-literal narrower set, with no compiler error to flag the drift.
+import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 
 /**
  * Stage 1 daemon mode shape.
@@ -175,6 +182,23 @@ export interface CapabilitiesEnvelope {
    * shape. The post-§02 server code here always populates it.
    */
   workspaceCwd?: string;
+  /**
+   * #4175 F3 Commit 6 — daemon-policy namespace. Active values for
+   * cross-cutting daemon coordination policies that don't fit on a
+   * per-feature flag. Today only `permission` is populated (active
+   * `PermissionMediator` strategy); future entries (e.g. `network`,
+   * `audit`) extend the namespace without polluting the top-level
+   * envelope. Optional / additive — daemons predating F3 omit it.
+   */
+  policy?: {
+    /**
+     * Active permission mediation policy. Distinct from the
+     * `permission_mediation` capability `modes` list, which
+     * advertises the build-supported set; this field tells clients
+     * which one is currently in effect.
+     */
+    permission?: PermissionPolicy;
+  };
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

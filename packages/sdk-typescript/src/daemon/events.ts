@@ -51,6 +51,15 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'workspace_initialized',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
+  // #4175 F3 (Commit 7) — multi-client permission coordination events.
+  // `permission_partial_vote` only fires under `consensus` policy;
+  // `permission_forbidden` fires under `designated` (originator
+  // mismatch), `consensus` (anonymous voter or not-in-snapshot), and
+  // `local-only` (remote voter). Pre-flight on the
+  // `permission_mediation` capability tag before relying on either —
+  // daemons predating F3 omit both event types.
+  'permission_partial_vote',
+  'permission_forbidden',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -93,6 +102,61 @@ export interface DaemonPermissionAlreadyResolvedData {
   requestId: string;
   sessionId: string;
   outcome: PermissionOutcome;
+  [key: string]: unknown;
+}
+
+/**
+ * F3 Commit 7. `permission_partial_vote` SSE frame fired by the
+ * `consensus` policy on every recorded non-resolving vote. The
+ * snapshot at `GET /workspace/mcp` (etc.) does NOT carry vote-progress
+ * state; SDK consumers reconstruct it from this stream.
+ *
+ * `votesNeeded` = `quorum - max(tally per option)`, clamped to ≥1.
+ * `optionTallies` is a per-option count; the leading option is the
+ * one with the highest tally (ties broken by first-cast order at the
+ * mediator level — not directly reflected here).
+ */
+export interface DaemonPermissionPartialVoteData {
+  requestId: string;
+  sessionId: string;
+  votesReceived: number;
+  votesNeeded: number;
+  quorum: number;
+  optionTallies: Record<string, number>;
+  /**
+   * Wenshao review #4335 / 3270622311. Stamped from the SSE
+   * envelope's `originatorClientId` (= prompt originator per F3 N3)
+   * by the session reducer's `mergeOriginator` step so view-state
+   * consumers can attribute the partial vote to the prompting
+   * client without retaining the original event.
+   */
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * F3 Commit 7. `permission_forbidden` SSE frame fired when a vote is
+ * rejected by the active policy. `clientId` is the rejected voter
+ * (omitted when anonymous); `reason` is the closed contract enum.
+ *
+ * The frame's top-level `originatorClientId` (on the wrapping
+ * `DaemonEvent`, not in `data`) stamps the prompt originator — NOT
+ * the rejected voter — per the F3 N3 invariant. Cross-reference
+ * `data.clientId` for voter attribution.
+ */
+export interface DaemonPermissionForbiddenData {
+  requestId: string;
+  sessionId: string;
+  clientId?: string;
+  reason: 'designated_mismatch' | 'remote_not_allowed';
+  /**
+   * Wenshao review #4335 / 3270622311. Stamped from the SSE
+   * envelope's `originatorClientId` (= prompt originator per F3 N3)
+   * by the session reducer's `mergeOriginator` step. Distinct from
+   * `clientId` (the rejected voter's id) — both are useful and
+   * neither subsumes the other.
+   */
+  originatorClientId?: string;
   [key: string]: unknown;
 }
 
@@ -421,6 +485,14 @@ export type DaemonPermissionAlreadyResolvedEvent = DaemonEventEnvelope<
   'permission_already_resolved',
   DaemonPermissionAlreadyResolvedData
 >;
+export type DaemonPermissionPartialVoteEvent = DaemonEventEnvelope<
+  'permission_partial_vote',
+  DaemonPermissionPartialVoteData
+>;
+export type DaemonPermissionForbiddenEvent = DaemonEventEnvelope<
+  'permission_forbidden',
+  DaemonPermissionForbiddenData
+>;
 export type DaemonModelSwitchedEvent = DaemonEventEnvelope<
   'model_switched',
   DaemonModelSwitchedData
@@ -530,6 +602,8 @@ export type DaemonControlEvent =
   | DaemonPermissionRequestEvent
   | DaemonPermissionResolvedEvent
   | DaemonPermissionAlreadyResolvedEvent
+  | DaemonPermissionPartialVoteEvent
+  | DaemonPermissionForbiddenEvent
   | DaemonApprovalModeChangedEvent
   | DaemonToolToggledEvent
   | DaemonWorkspaceInitializedEvent
@@ -668,7 +742,40 @@ export interface DaemonSessionViewState {
   lastMcpRestart?: DaemonMcpServerRestartedData;
   mcpRestartRefusedCount: number;
   lastMcpRestartRefused?: DaemonMcpServerRestartRefusedData;
+  /**
+   * F3 Commit 7. Per-pending consensus vote progress, keyed by
+   * `requestId`. Updated on every `permission_partial_vote` frame;
+   * cleared when the corresponding `permission_resolved` /
+   * `permission_already_resolved` arrives. Daemons running
+   * non-consensus policies never populate this map.
+   */
+  permissionVoteProgress: Record<string, DaemonPermissionPartialVoteData>;
+  /**
+   * F3 Commit 7. Bounded history of recent `permission_forbidden`
+   * events on this session — first 32 retained, oldest evicted on
+   * overflow. Adapters use this to render "client X tried to vote
+   * but was rejected" notices for the session.
+   */
+  forbiddenVotes: readonly DaemonPermissionForbiddenData[];
+  /**
+   * F3 Commit 7. Total `permission_forbidden` event count this
+   * stream has observed (including ones evicted from
+   * `forbiddenVotes`).
+   */
+  forbiddenVoteCount: number;
 }
+
+/**
+ * F3 Commit 7. Bound on `forbiddenVotes` retention. Half of
+ * `MAX_PENDING_PER_SESSION` (64) — forbidden votes are
+ * observability records, not pending state, so we keep the smaller
+ * bound to avoid blowing the SDK heap on a session that's getting
+ * spammed with rejected votes (e.g. an attacker probing
+ * `local-only` from a remote IP). Operators with full audit needs
+ * should subscribe to the daemon-side audit ring, not the SDK
+ * reducer's bounded history.
+ */
+const MAX_FORBIDDEN_VOTES_PER_SESSION = 32;
 
 export function createDaemonSessionViewState(
   seed: Partial<DaemonSessionViewState> = {},
@@ -711,6 +818,9 @@ export function createDaemonSessionViewState(
     lastMcpRestart: seed.lastMcpRestart,
     mcpRestartRefusedCount: seed.mcpRestartRefusedCount ?? 0,
     lastMcpRestartRefused: seed.lastMcpRestartRefused,
+    permissionVoteProgress: { ...seed.permissionVoteProgress },
+    forbiddenVotes: seed.forbiddenVotes ? [...seed.forbiddenVotes] : [],
+    forbiddenVoteCount: seed.forbiddenVoteCount ?? 0,
   };
 }
 
@@ -747,6 +857,14 @@ export function asKnownDaemonEvent(
     case 'permission_already_resolved':
       return isPermissionAlreadyResolvedData(event.data)
         ? (event as DaemonPermissionAlreadyResolvedEvent)
+        : undefined;
+    case 'permission_partial_vote':
+      return isPermissionPartialVoteData(event.data)
+        ? (event as DaemonPermissionPartialVoteEvent)
+        : undefined;
+    case 'permission_forbidden':
+      return isPermissionForbiddenData(event.data)
+        ? (event as DaemonPermissionForbiddenEvent)
         : undefined;
     case 'model_switched':
       return isModelSwitchedData(event.data)
@@ -887,9 +1005,18 @@ export function reduceDaemonSessionEvent(
       };
     }
     case 'permission_resolved': {
+      // Wenshao review #4335 / 3271041465 — even on the unmatched
+      // path (SDK reconnected mid-permission and missed
+      // `permission_request`), clear any orphan progress entry that
+      // a `permission_partial_vote` may have left behind. Otherwise
+      // `permissionVoteProgress[requestId]` persists until session
+      // end. The matched path also clears it (below).
+      const permissionVoteProgress = { ...base.permissionVoteProgress };
+      delete permissionVoteProgress[event.data.requestId];
       if (!(event.data.requestId in base.pendingPermissions)) {
         return {
           ...base,
+          permissionVoteProgress,
           unmatchedPermissionResolutionCount:
             base.unmatchedPermissionResolutionCount + 1,
           lastUnmatchedPermissionResolutionId: event.data.requestId,
@@ -897,12 +1024,18 @@ export function reduceDaemonSessionEvent(
       }
       const pendingPermissions = { ...base.pendingPermissions };
       delete pendingPermissions[event.data.requestId];
-      return { ...base, pendingPermissions };
+      return { ...base, pendingPermissions, permissionVoteProgress };
     }
     case 'permission_already_resolved': {
+      // Wenshao review #4335 / 3271041465 — same as above:
+      // unconditionally clear any orphan progress entry on the
+      // unmatched / matched paths.
+      const permissionVoteProgress = { ...base.permissionVoteProgress };
+      delete permissionVoteProgress[event.data.requestId];
       if (!(event.data.requestId in base.pendingPermissions)) {
         return {
           ...base,
+          permissionVoteProgress,
           unmatchedPermissionResolutionCount:
             base.unmatchedPermissionResolutionCount + 1,
           lastUnmatchedPermissionResolutionId: event.data.requestId,
@@ -910,7 +1043,51 @@ export function reduceDaemonSessionEvent(
       }
       const pendingPermissions = { ...base.pendingPermissions };
       delete pendingPermissions[event.data.requestId];
-      return { ...base, pendingPermissions };
+      return { ...base, pendingPermissions, permissionVoteProgress };
+    }
+    case 'permission_partial_vote': {
+      // F3 Commit 7 — accumulate consensus vote progress. If the
+      // requestId isn't in `pendingPermissions` (race / replay
+      // misalignment because the SDK reconnected mid-permission and
+      // missed `permission_request`), still record progress here.
+      // Wenshao review #4335 / 3271041465 — both `permission_resolved`
+      // and `permission_already_resolved` reducer cases above now
+      // unconditionally clear any orphan `permissionVoteProgress`
+      // entry, so a missed-request reconnect is recovered as soon
+      // as the corresponding resolution frame arrives.
+      //
+      // Wenshao review #4335 / 3270622311: stamp the envelope's
+      // `originatorClientId` (prompt originator per N3) onto the
+      // stored data so view-state consumers can attribute the
+      // partial vote to the prompting client. Mirrors the
+      // `mergeOriginator` pattern used by approval-mode / tool-
+      // toggle / workspace-init / mcp-restart reducer cases.
+      return {
+        ...base,
+        permissionVoteProgress: {
+          ...base.permissionVoteProgress,
+          [event.data.requestId]: mergeOriginator(event.data, event),
+        },
+      };
+    }
+    case 'permission_forbidden': {
+      // F3 Commit 7 — append to bounded history and bump count.
+      // Wenshao review #4335 / 3270622311: same mergeOriginator
+      // treatment as the partial-vote case above. `event.data` carries
+      // the BLOCKED voter's clientId; the envelope's
+      // `originatorClientId` carries the prompt originator. Both are
+      // useful — consumers reading view state need the prompt
+      // originator without having to keep the original event around.
+      const next = base.forbiddenVotes.slice();
+      next.push(mergeOriginator(event.data, event));
+      while (next.length > MAX_FORBIDDEN_VOTES_PER_SESSION) {
+        next.shift();
+      }
+      return {
+        ...base,
+        forbiddenVotes: next,
+        forbiddenVoteCount: base.forbiddenVoteCount + 1,
+      };
     }
     case 'model_switched':
       return {
@@ -932,6 +1109,14 @@ export function reduceDaemonSessionEvent(
         alive: false,
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
+        permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — terminal
+        // events must also drop `forbiddenVotes` history so adapters
+        // reading view state for a dead session don't render stale
+        // rejection data. Pre-fix only `pendingPermissions` /
+        // `permissionVoteProgress` were cleared.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
       };
     case 'session_closed':
       return {
@@ -940,6 +1125,10 @@ export function reduceDaemonSessionEvent(
         alive: false,
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
+        permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — see session_died.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
       };
     case 'session_metadata_updated':
       return {
@@ -953,6 +1142,10 @@ export function reduceDaemonSessionEvent(
         alive: false,
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
+        permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — see session_died.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
       };
     case 'slow_client_warning':
       // Non-terminal: warning precedes eviction but doesn't close
@@ -971,6 +1164,10 @@ export function reduceDaemonSessionEvent(
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         streamError: event.data,
         pendingPermissions: {},
+        permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — see session_died.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
       };
     case 'mcp_budget_warning':
       // Non-terminal: budget pressure is a status signal, not a stream
@@ -1365,6 +1562,68 @@ function isPermissionAlreadyResolvedData(
     isNonEmptyString(value['sessionId']) &&
     isPermissionOutcome(value['outcome'])
   );
+}
+
+function isPermissionPartialVoteData(
+  value: unknown,
+): value is DaemonPermissionPartialVoteData {
+  // PR #4335 review fold-in (Copilot finding): use `isFiniteNumber`
+  // (and integer + non-negative checks) for tally counters so
+  // malformed frames carrying NaN / Infinity / fractional values are
+  // rejected and counted via `unrecognizedKnownEventCount` instead of
+  // landing in reducer state. Matches the validation posture of the
+  // sibling `isMcpBudgetWarningData` / `isSlowClientWarningData` helpers.
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['requestId']) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !isFiniteNumber(value['votesReceived']) ||
+    !isFiniteNumber(value['votesNeeded']) ||
+    !isFiniteNumber(value['quorum']) ||
+    !Number.isInteger(value['votesReceived']) ||
+    !Number.isInteger(value['votesNeeded']) ||
+    !Number.isInteger(value['quorum']) ||
+    (value['votesReceived'] as number) < 0 ||
+    (value['votesNeeded'] as number) < 0 ||
+    (value['quorum'] as number) < 1 ||
+    !isRecord(value['optionTallies'])
+  ) {
+    return false;
+  }
+  // Validate the optionTallies map values are non-negative integers.
+  for (const tally of Object.values(
+    value['optionTallies'] as Record<string, unknown>,
+  )) {
+    if (typeof tally !== 'number' || !Number.isInteger(tally) || tally < 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isPermissionForbiddenData(
+  value: unknown,
+): value is DaemonPermissionForbiddenData {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['requestId']) ||
+    !isNonEmptyString(value['sessionId'])
+  ) {
+    return false;
+  }
+  const reason = value['reason'];
+  if (reason !== 'designated_mismatch' && reason !== 'remote_not_allowed') {
+    return false;
+  }
+  // `clientId` is optional but if present must be a non-empty string.
+  const clientId = value['clientId'];
+  if (
+    clientId !== undefined &&
+    (typeof clientId !== 'string' || clientId.length === 0)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function isModelSwitchedData(value: unknown): value is DaemonModelSwitchedData {

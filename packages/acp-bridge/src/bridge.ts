@@ -14,7 +14,6 @@ import {
 import type {
   CancelNotification,
   PromptRequest,
-  RequestPermissionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
@@ -47,6 +46,13 @@ import {
   SessionLimitExceededError,
   WorkspaceMismatchError,
   InvalidClientIdError,
+  // Mediator's `vote()` validates `optionId ∈ allowedOptionIds`,
+  // but the bridge ALSO throws `InvalidPermissionOptionError`
+  // pre-mediator when a wire client tries to inject the cancel
+  // sentinel via a `selected` outcome (wenshao review #4335 /
+  // 3271185588 — without this guard, a wire-supplied
+  // `optionId === CANCEL_VOTE_SENTINEL` would short-circuit all
+  // policy dispatch).
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   WorkspaceInitConflictError,
@@ -68,12 +74,14 @@ import type {
 import type { BridgeOptions } from './bridgeOptions.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
+import { BridgeClient } from './bridgeClient.js';
 import {
-  BridgeClient,
-  MAX_RESOLVED_PERMISSION_RECORDS,
-  type PendingPermission,
-  type PermissionResolutionRecord,
-} from './bridgeClient.js';
+  CANCEL_VOTE_SENTINEL,
+  createNoOpPermissionAuditPublisher,
+  MultiClientPermissionMediator,
+  type PermissionAuditPublisher,
+} from './permissionMediator.js';
+import { PermissionForbiddenError } from './bridgeErrors.js';
 
 /**
  * Stage 1 HTTP→ACP bridge factory + supporting helpers, lifted from
@@ -505,11 +513,57 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // daemon. Cleared in the `finally` of the creator.
   let inFlightChannelSpawn: Promise<ChannelInfo> | undefined;
   const byId = new Map<string, SessionEntry>();
-  // Daemon-wide pending permission table; requestIds are UUIDs so collisions
-  // across sessions are infeasible in practice.
-  const pendingPermissions = new Map<string, PendingPermission>();
-  const resolvedPermissions = new Map<string, PermissionResolutionRecord>();
-  const resolvedPermissionOrder: string[] = [];
+  // F3 Commit 3 — pending + resolved permission state lifted to
+  // `MultiClientPermissionMediator` (constructed below). The bridge
+  // keeps `entry.pendingPermissionIds: Set<string>` on each
+  // SessionEntry as a fast cap-check index; the mediator is the
+  // single source of truth for the actual pending registry and the
+  // duplicate-vote LRU.
+
+  // Validate the optional consensus quorum override defensively at
+  // construction. The settings layer (Commit 5) is the primary
+  // enforcement point, but the bridge also rejects malformed values
+  // here so a buggy host wiring path can't NaN-poison the mediator.
+  const permissionConsensusQuorum = opts.permissionConsensusQuorum;
+  if (
+    permissionConsensusQuorum !== undefined &&
+    (!Number.isInteger(permissionConsensusQuorum) ||
+      permissionConsensusQuorum < 1)
+  ) {
+    throw new Error(
+      `BridgeOptions.permissionConsensusQuorum must be a positive integer; ` +
+        `got ${String(permissionConsensusQuorum)}`,
+    );
+  }
+
+  // Build the mediator before the BridgeClient so the agent's
+  // `requestPermission` callback can hand the record straight in.
+  // Audit publisher fallback: when the host doesn't supply one
+  // (cli/serve/runQwenServe.ts wraps a real `PermissionAuditRing`
+  // backed publisher in production), we use the canonical no-op
+  // fallback so the mediator can still run for embedded callers /
+  // tests without an audit consumer.
+  const permissionAudit: PermissionAuditPublisher =
+    opts.permissionAudit ?? createNoOpPermissionAuditPublisher();
+  const permissionMediator = new MultiClientPermissionMediator(
+    opts.permissionPolicy ?? 'first-responder',
+    {
+      emit: (sessionId, event) => {
+        const sessionEntry = byId.get(sessionId);
+        sessionEntry?.events.publish(event);
+      },
+      audit: permissionAudit,
+      ...(permissionConsensusQuorum !== undefined
+        ? { consensusQuorum: permissionConsensusQuorum }
+        : {}),
+      now: () => Date.now(),
+      votersForSession: (sessionId) => {
+        const sessionEntry = byId.get(sessionId);
+        if (!sessionEntry) return new Set<string>();
+        return new Set(sessionEntry.clientIds.keys());
+      },
+    },
+  );
   // Set by `shutdown()` so any in-flight `spawnOrAttach` that was
   // dispatched on an existing connection AFTER the shutdown snapshot
   // taken in `shutdown()` fails fast instead of creating a child the
@@ -600,102 +654,26 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     return clientId;
   };
 
-  const resolveAnyTrustedClientId = (clientId: string): string => {
-    for (const entry of byId.values()) {
-      if (entry.clientIds.has(clientId)) return clientId;
-    }
-    throw new InvalidClientIdError('unknown', clientId);
-  };
+  // Wenshao review #4335 / 3272493777 — `resolveAnyTrustedClientId`
+  // helper removed alongside its sole call site in
+  // `respondToPermission`. The function ranged across all live
+  // sessions to validate a clientId, which created a cross-session
+  // client-registration oracle when used in the unknown-requestId
+  // path. The session-scoped `resolveTrustedClientId` (defined
+  // above) is the correct primitive — it scopes to a single
+  // session and is never called on the unknown-requestId path
+  // after Round 7+8.
 
-  const registerPending = (p: PendingPermission) => {
-    const entry = byId.get(p.sessionId);
-    if (!entry) {
-      // The session was torn down (channel.exited, killSession, shutdown)
-      // between when the agent decided to ask for permission and when the
-      // request reached this function. There's no SessionEntry to chain
-      // the requestId onto and no SSE bus to publish `permission_request`
-      // — nobody can vote, so the permission would hang the agent's
-      // `requestPermission` forever. Resolve immediately as cancelled to
-      // unwind the agent side; matches the shutdown / killSession path.
-      p.resolve({ outcome: { outcome: 'cancelled' } });
-      return;
-    }
-    pendingPermissions.set(p.requestId, p);
-    entry.pendingPermissionIds.add(p.requestId);
-  };
-
-  const rememberResolvedPermission = (record: PermissionResolutionRecord) => {
-    if (!resolvedPermissions.has(record.requestId)) {
-      resolvedPermissionOrder.push(record.requestId);
-    }
-    resolvedPermissions.set(record.requestId, record);
-    while (resolvedPermissionOrder.length > MAX_RESOLVED_PERMISSION_RECORDS) {
-      const oldest = resolvedPermissionOrder.shift();
-      if (oldest !== undefined) resolvedPermissions.delete(oldest);
-    }
-  };
-
-  const publishPermissionAlreadyResolved = (
-    record: PermissionResolutionRecord,
-  ) => {
-    const entry = byId.get(record.sessionId);
-    if (!entry) return;
-    try {
-      writeServeDebugLine(
-        `permission ${JSON.stringify(record.requestId)} ` +
-          `for session ${JSON.stringify(record.sessionId)} was already ` +
-          'resolved; publishing duplicate-vote notification.',
-      );
-      entry.events.publish({
-        type: 'permission_already_resolved',
-        data: {
-          requestId: record.requestId,
-          sessionId: record.sessionId,
-          outcome: record.outcome,
-        },
-      });
-    } catch {
-      writeServeDebugLine(
-        `skipped duplicate-vote notification for permission ` +
-          `${JSON.stringify(record.requestId)} during shutdown.`,
-      );
-    }
-  };
-
-  /** Resolve a single pending request and clean up its bookkeeping. */
-  const resolvePending = (
-    requestId: string,
-    response: RequestPermissionResponse,
-    originatorClientId?: string,
-  ): boolean => {
-    const pending = pendingPermissions.get(requestId);
-    if (!pending) return false;
-    pendingPermissions.delete(requestId);
-    const entry = byId.get(pending.sessionId);
-    if (entry) {
-      entry.pendingPermissionIds.delete(requestId);
-      // Fan-out a follow-up event so other clients update their UI when the
-      // race is decided. Best-effort — failure to publish (e.g. bus closed
-      // mid-shutdown) doesn't block resolution.
-      try {
-        entry.events.publish({
-          type: 'permission_resolved',
-          data: { requestId, outcome: response.outcome },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-      } catch {
-        /* bus closed during shutdown */
-      }
-    }
-    rememberResolvedPermission({
-      requestId,
-      sessionId: pending.sessionId,
-      outcome: response.outcome,
-    });
-    pending.resolve(response);
-    return true;
-  };
-
+  // F3 Commit 3 — `registerPending` / `rollbackPending` /
+  // `rememberResolvedPermission` / `publishPermissionAlreadyResolved`
+  // / `resolvePending` were lifted into
+  // `MultiClientPermissionMediator`. The mediator owns the pending
+  // registry, the resolved-LRU, the per-session timer, and the
+  // wire-event emit fan-out. The bridge talks to it through three
+  // narrow surfaces: `mediator.request` (issue), `mediator.vote`
+  // (resolve from a route), and `mediator.forgetSession` (cleanup
+  // on session teardown).
+  //
   /**
    * Get-or-create the daemon's single `qwen --acp` channel (#3803 §02).
    * N sessions multiplex onto it via `connection.newSession()`.
@@ -738,11 +716,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         },
         (sessionId) =>
           sessionId ? pendingRestoreEvents.get(sessionId) : undefined,
-        registerPending,
-        (rid) =>
-          // Roll back a register-then-publish-failed pending so the agent
-          // doesn't hang waiting on a vote nobody can see.
-          resolvePending(rid, { outcome: { outcome: 'cancelled' } }),
+        permissionMediator,
         permissionTimeoutMs,
         maxPendingPerSession,
         // #4175 PR F1 step 5: forward the optional `BridgeFileSystem`
@@ -1148,13 +1122,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
    * agent forward anyway.
    */
   const cancelPendingForSession = (sessionId: string) => {
-    const entry = byId.get(sessionId);
-    if (!entry) return;
-    // Snapshot ids — resolvePending mutates the underlying set.
-    const ids = Array.from(entry.pendingPermissionIds);
-    for (const id of ids) {
-      resolvePending(id, { outcome: { outcome: 'cancelled' } });
-    }
+    // F3 N5 invariant — mediator first (it cancels each pending,
+    // emits `permission_resolved`, writes audit, settles the
+    // Promise), THEN clear the bridge's fast cap-check index.
+    permissionMediator.forgetSession(sessionId);
+    byId.get(sessionId)?.pendingPermissionIds.clear();
   };
 
   /**
@@ -1679,7 +1651,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     get pendingPermissionCount() {
-      return pendingPermissions.size;
+      return permissionMediator.pendingCount;
+    },
+
+    get permissionPolicy() {
+      return permissionMediator.policy;
     },
 
     async loadSession(req) {
@@ -2021,83 +1997,165 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     respondToPermission(requestId, response, context) {
-      const pending = pendingPermissions.get(requestId);
-      let originatorClientId: string | undefined;
-      if (context?.clientId !== undefined && !pending) {
-        resolveAnyTrustedClientId(context.clientId);
-      } else if (pending && context?.clientId !== undefined) {
-        const entry = byId.get(pending.sessionId);
-        if (entry) {
-          originatorClientId = resolveTrustedClientId(entry, context.clientId);
-        } else {
-          resolveAnyTrustedClientId(context.clientId);
-        }
-      }
-      if (!pending) {
-        const record = resolvedPermissions.get(requestId);
-        if (record) {
-          publishPermissionAlreadyResolved(record);
-        }
+      // F3 Commit 3 — legacy workspace-level vote route. Look up the
+      // session via mediator's resolved+pending peek, forward to
+      // session-scoped handler if both ids agree.
+      const sessionId = permissionMediator.peekSessionFor(requestId);
+      // I4 (Commit 3 review) — also check `byId.has(sessionId)`. The
+      // mediator's resolved LRU survives session teardown by design;
+      // `respondToSessionPermission` would throw `SessionNotFoundError`
+      // once `byId.delete(sessionId)` ran. Pre-F3 returned a clean
+      // false → 404 for this case; preserve.
+      if (sessionId === undefined || !byId.has(sessionId)) {
+        // Wenshao review #4335 / 3272493777 — the PR #4231 security
+        // boundary that previously called `resolveAnyTrustedClientId`
+        // here was inverted: it returned 400 for unregistered
+        // clientIds and 404 for registered ones, creating a
+        // cross-session client-registration oracle. A remote prober
+        // posting `POST /permission/<fabricated-id>` with various
+        // X-Qwen-Client-Id headers could distinguish "this clientId
+        // is registered in some active session" (404) from "not
+        // registered anywhere" (400). The session-scoped route at
+        // `respondToSessionPermission` already short-circuits to
+        // `false` BEFORE clientId validation when the requestId is
+        // unknown (Round 7 / 3271978329); applying the same
+        // posture here closes the oracle on the legacy route.
+        //
+        // Wenshao review #4335 / 3273077256 — symmetric observability:
+        // the session-scoped sibling writes an unconditional stderr
+        // breadcrumb on its analogous unknown-requestId rejection
+        // (Round 8 / 3272493792). Match that posture here so an
+        // operator tailing daemon stderr sees both routes' 404s
+        // without needing QWEN_SERVE_DEBUG=1.
+        writeStderrLine(
+          `qwen serve: legacy permission vote ${JSON.stringify(requestId)} ` +
+            `has no live session (peek returned ${JSON.stringify(sessionId)}); ` +
+            `returning 404.`,
+        );
         return false;
       }
-      // BkwQI: validate the voter's optionId against the original
-      // options the agent advertised. The route already enforces
-      // "non-empty string" structurally; this layer enforces
-      // semantic membership in the agent-published set so a
-      // malicious client can't forge hidden outcomes (e.g.
-      // `ProceedAlways*` when the prompt's `hideAlwaysAllow`
-      // policy intentionally suppressed them).
-      if (response.outcome.outcome === 'selected') {
-        if (!pending.allowedOptionIds.has(response.outcome.optionId)) {
-          throw new InvalidPermissionOptionError(
-            requestId,
-            response.outcome.optionId,
-          );
-        }
-      }
-      return resolvePending(requestId, response, originatorClientId);
+      return this.respondToSessionPermission(
+        sessionId,
+        requestId,
+        response,
+        context,
+      );
     },
 
     respondToSessionPermission(sessionId, requestId, response, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      const pending = pendingPermissions.get(requestId);
-      if (!pending) {
-        const record = resolvedPermissions.get(requestId);
-        if (record?.sessionId === sessionId) {
-          resolveTrustedClientId(entry, context?.clientId);
-          publishPermissionAlreadyResolved(record);
-        } else if (record) {
-          writeServeDebugLine(
-            `rejected permission vote ${JSON.stringify(requestId)} ` +
-              `for session ${JSON.stringify(sessionId)}; request belongs to ` +
-              `session ${JSON.stringify(record.sessionId)}.`,
-          );
-        }
-        return false;
-      }
-      if (pending.sessionId !== sessionId) {
+      // C1 (Commit 3 review) — preserve pre-F3 cross-session reject
+      // semantics: a vote whose requestId belongs to a DIFFERENT
+      // session must return false (→ 404) WITHOUT validating
+      // `context.clientId` against this session's registry.
+      const actualSessionId = permissionMediator.peekSessionFor(requestId);
+      if (actualSessionId !== undefined && actualSessionId !== sessionId) {
         writeServeDebugLine(
           `rejected permission vote ${JSON.stringify(requestId)} ` +
             `for session ${JSON.stringify(sessionId)}; request belongs to ` +
-            `session ${JSON.stringify(pending.sessionId)}.`,
+            `session ${JSON.stringify(actualSessionId)}.`,
         );
         return false;
       }
-      const originatorClientId = resolveTrustedClientId(
-        entry,
-        context?.clientId,
-      );
+      // Wenshao review #4335 / 3271978329 (Critical) — error precedence:
+      // when `peekSessionFor` returns `undefined` (timed out / LRU-
+      // evicted / never registered), pre-F3 returned `false` (→ 404)
+      // BEFORE any clientId validation. Without this explicit guard,
+      // execution falls through to `resolveTrustedClientId` which
+      // throws `InvalidClientIdError` (→ 400) when the caller's
+      // `X-Qwen-Client-Id` isn't registered, leaking session-exists
+      // information: a probe with a fabricated clientId could
+      // distinguish "session exists with these clients" (400) from
+      // "no such request" (404). Match pre-F3 by short-circuiting
+      // here.
+      //
+      // Wenshao review #4335 / 3272493792 — observability: the
+      // forbidden-vote paths in the mediator write unconditional
+      // stderr breadcrumbs (`writeForbiddenStderr`), but this
+      // security-sensitive guard previously logged only via the
+      // debug-gated `writeServeDebugLine`. Promote to an
+      // unconditional `writeStderrLine` so operators tailing
+      // stderr at 3 AM can correlate unexpected 404s without
+      // having to reboot with `QWEN_SERVE_DEBUG=1`.
+      if (actualSessionId === undefined) {
+        writeStderrLine(
+          `qwen serve: rejected permission vote ${JSON.stringify(requestId)} ` +
+            `for session ${JSON.stringify(sessionId)}; mediator has no ` +
+            `pending or resolved record (unknown / timed out / LRU-evicted).`,
+        );
+        return false;
+      }
+      // requestId matches THIS session — only now validate clientId.
+      // `resolveTrustedClientId` throws `InvalidClientIdError`
+      // (mapped to 400 by the route) when the supplied id isn't in
+      // `entry.clientIds`.
+      const trustedClientId = resolveTrustedClientId(entry, context?.clientId);
+      // F3 voter cancel sentinel: when the ACP body is
+      // `{outcome: 'cancelled'}`, the wire frame doesn't carry an
+      // `optionId`. Map it to the mediator-internal sentinel so
+      // the mediator can resolve the pending as cancelled
+      // regardless of the active policy.
+      //
+      // Wenshao review #4335 / 3271185588 (Critical) — the mediator
+      // recognizes `CANCEL_VOTE_SENTINEL` BEFORE validating the
+      // option against `allowedOptionIds`, so a wire client sending
+      // `{outcome: 'selected', optionId: '__cancelled__'}` would
+      // short-circuit all policy dispatch (designated originator
+      // check / consensus quorum / local-only loopback gate). The
+      // mediator's JSDoc warns that callers MUST NOT forward this
+      // case from the wire; enforce the precondition here. The
+      // collision-defense at request issue time
+      // (`CancelSentinelCollisionError`) already prevents agents
+      // from advertising the sentinel as an option, so this guard
+      // closes the only remaining vector.
       if (
         response.outcome.outcome === 'selected' &&
-        !pending.allowedOptionIds.has(response.outcome.optionId)
+        response.outcome.optionId === CANCEL_VOTE_SENTINEL
       ) {
-        throw new InvalidPermissionOptionError(
-          requestId,
-          response.outcome.optionId,
-        );
+        throw new InvalidPermissionOptionError(requestId, CANCEL_VOTE_SENTINEL);
       }
-      return resolvePending(requestId, response, originatorClientId);
+      const optionId =
+        response.outcome.outcome === 'selected'
+          ? response.outcome.optionId
+          : CANCEL_VOTE_SENTINEL;
+      const outcome = permissionMediator.vote({
+        requestId,
+        sessionId,
+        clientId: trustedClientId,
+        optionId,
+        receivedAtMs: Date.now(),
+        fromLoopback: context?.fromLoopback ?? false,
+      });
+      switch (outcome.kind) {
+        case 'resolved':
+          return true;
+        case 'recorded':
+          // Consensus-policy intermediate vote.
+          return true;
+        case 'already_resolved':
+          // Mediator already emitted `permission_already_resolved`.
+          return false;
+        case 'unknown_request':
+          writeServeDebugLine(
+            `rejected permission vote ${JSON.stringify(requestId)} ` +
+              `for session ${JSON.stringify(sessionId)}; mediator has no ` +
+              `pending or resolved record.`,
+          );
+          return false;
+        case 'forbidden':
+          throw new PermissionForbiddenError(
+            requestId,
+            sessionId,
+            outcome.reason,
+          );
+        default: {
+          const _exhaustive: never = outcome;
+          throw new Error(
+            `unreachable PermissionVoteOutcome: ${JSON.stringify(_exhaustive)}`,
+          );
+        }
+      }
     },
 
     async closeSession(sessionId, context) {
@@ -2157,9 +2215,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
-      for (const id of Array.from(entry.pendingPermissionIds)) {
-        resolvePending(id, { outcome: { outcome: 'cancelled' } });
-      }
+      // F3 Commit 3 — mediator-driven cancel cascade replaces the
+      // pre-F3 per-id resolvePending loop. Same effect (each pending
+      // settles as cancelled, SSE permission_resolved emits, audit
+      // records); state lives in the mediator now.
+      permissionMediator.forgetSession(sessionId);
+      entry.pendingPermissionIds.clear();
       byId.delete(sessionId);
       // PR 14b fix (codex round 5): tombstone the closed sessionId
       // so any late `extNotification` from the (now-defunct) child
@@ -3230,11 +3291,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // subsequent load/resume of the same persisted id. See the
       // matching guard in BridgeClient.bufferEarlyEvent.
       ci?.client.markSessionClosed(sessionId);
-      // Resolve any still-pending permission as cancelled (matches the
-      // shutdown path) so callers awaiting requestPermission unwind.
-      for (const id of Array.from(entry.pendingPermissionIds)) {
-        resolvePending(id, { outcome: { outcome: 'cancelled' } });
-      }
+      // F3 Commit 3 — mediator-driven cancel cascade.
+      permissionMediator.forgetSession(sessionId);
+      entry.pendingPermissionIds.clear();
       // Publish `session_died` BEFORE closing the bus. After the eager
       // `byId.delete` above, the channel.exited handler's
       // `byId.get(...)` returns undefined so the automatic publish
@@ -3364,17 +3423,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // state and not attach).
       const channels = Array.from(aliveChannels);
       for (const ci of channels) ci.isDying = true;
-      // Resolve every still-pending permission as cancelled before clearing
-      // the maps so callers awaiting `requestPermission` unwind cleanly.
+      // F3 Commit 3 — drain mediator pending state before clearing
+      // byId so awaiting `requestPermission` callers unwind. Each
+      // `forgetSession` settles all matching pending as
+      // session_closed; the bridge's per-entry index gets cleared
+      // alongside.
       for (const e of entries) {
-        const ids = Array.from(e.pendingPermissionIds);
-        for (const id of ids) {
-          resolvePending(id, { outcome: { outcome: 'cancelled' } });
-        }
+        permissionMediator.forgetSession(e.sessionId);
+        e.pendingPermissionIds.clear();
       }
       defaultEntry = undefined;
       byId.clear();
-      pendingPermissions.clear();
       // Publish a terminal `session_died` BEFORE closing each bus so SSE
       // subscribers can distinguish "daemon shut down" from a transient
       // network error and don't sit indefinitely retrying. The

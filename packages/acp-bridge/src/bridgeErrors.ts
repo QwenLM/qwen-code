@@ -172,6 +172,97 @@ export class InvalidSessionMetadataError extends Error {
 }
 
 /**
+ * #4175 F3. Thrown by `MultiClientPermissionMediator.vote` when the
+ * active policy is wired into the schema/registry but the mediator
+ * implementation has not been built yet.
+ *
+ * **Currently unreachable in production** — F3 Commit 4 implemented
+ * all 4 policies in the frozen `PermissionPolicy` union. The class +
+ * route-level 501 mapping in `server.ts:sendPermissionVoteError` are
+ * RETAINED as forward-compat infrastructure: when a future PR adds a
+ * 5th policy literal to `PermissionPolicy` and lands its mediator
+ * implementation across multiple commits, the intermediate-build
+ * stub can throw this typed error and the operator gets a clean 501
+ * instead of a generic 500.
+ *
+ * Routes map this to HTTP 501 with a structured body so SDK clients
+ * can render "your daemon is older than your settings expect;
+ * upgrade".
+ */
+export class PermissionPolicyNotImplementedError extends Error {
+  readonly policy: string;
+  constructor(policy: string) {
+    super(
+      `Permission policy "${policy}" is declared in the contract but ` +
+        'not yet implemented in this daemon build.',
+    );
+    this.name = 'PermissionPolicyNotImplementedError';
+    this.policy = policy;
+  }
+}
+
+/**
+ * #4175 F3 Commit 1. Thrown by `MultiClientPermissionMediator.request`
+ * when an agent-declared `allowedOptionIds` set contains the
+ * cancel-vote sentinel string. The bridge maps voter cancel intent
+ * to that exact `optionId`; if the agent legitimately uses it as
+ * an option label, the mediator can no longer disambiguate. We
+ * fail loudly at request issue time so the operator sees a clear
+ * misconfiguration rather than the silent "voter approval was
+ * treated as cancel" semantic flip.
+ *
+ * Routes map this to HTTP 500 — it represents a contract violation
+ * between agent and daemon, not a client mistake.
+ */
+export class CancelSentinelCollisionError extends Error {
+  readonly requestId: string;
+  readonly sentinel: string;
+  constructor(requestId: string, sentinel: string) {
+    super(
+      `Permission ${requestId}: agent-declared optionId set contains ` +
+        `the cancel-vote sentinel "${sentinel}", which would prevent ` +
+        'the daemon from disambiguating cancel intent from a real vote.',
+    );
+    this.name = 'CancelSentinelCollisionError';
+    this.requestId = requestId;
+    this.sentinel = sentinel;
+  }
+}
+
+/**
+ * #4175 F3 Commit 2. Thrown by `bridge.respondToSessionPermission` /
+ * `bridge.respondToPermission` when the active permission policy
+ * rejects the vote (designated voter mismatch, or remote vote under
+ * `local-only`). The bridge converts the mediator's
+ * `PermissionVoteOutcome { kind: 'forbidden', reason: ... }` into
+ * this typed error so the route layer can map to HTTP 403 without
+ * pattern-matching on the error message.
+ *
+ * `reason` is forwarded verbatim from the mediator's outcome so SDK
+ * clients can render a precise UI ("you weren't designated to
+ * approve" vs "this daemon only accepts loopback approvals").
+ */
+export class PermissionForbiddenError extends Error {
+  readonly requestId: string;
+  readonly sessionId: string;
+  readonly reason: 'designated_mismatch' | 'remote_not_allowed';
+  constructor(
+    requestId: string,
+    sessionId: string,
+    reason: 'designated_mismatch' | 'remote_not_allowed',
+  ) {
+    super(
+      `Permission ${requestId} on session ${sessionId}: ` +
+        `vote rejected by policy (${reason}).`,
+    );
+    this.name = 'PermissionForbiddenError';
+    this.requestId = requestId;
+    this.sessionId = sessionId;
+    this.reason = reason;
+  }
+}
+
+/**
  * #4175 Wave 4 PR 17. Thrown by `initWorkspace` when the target file
  * already exists with non-whitespace content and the caller did not
  * pass `force: true`. Translated to HTTP 409 by the route. The

@@ -2710,6 +2710,117 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('returns false (not InvalidClientIdError) when session exists but requestId is unknown and clientId is unregistered (#4335 / 3271978329 / 3272493792 / 3273077272)', async () => {
+      // Wenshao review #4335 / 3271978329 (Critical) — error
+      // precedence regression: the session-scoped vote route must
+      // return `false` (→ 404) when the requestId isn't known to
+      // the mediator, BEFORE validating `context.clientId`.
+      // Without this guard a probe could fabricate a requestId,
+      // supply an arbitrary `X-Qwen-Client-Id`, and distinguish
+      // "this clientId is registered to this session" (proceeds
+      // past resolveTrustedClientId then returns false → 404) from
+      // "this clientId is not registered" (InvalidClientIdError →
+      // 400) — a session-membership oracle.
+      //
+      // Wenshao review #4335 / 3272493792 — explicit test for the
+      // fix from Round 7 so a future refactor can't silently
+      // remove the short-circuit.
+      //
+      // Wenshao review #4335 / 3273077272 — also assert the stderr
+      // breadcrumb that Round 8 promoted from debug-gated to
+      // unconditional (`writeStderrLine`). Pinning the log call
+      // means a future refactor that drops or downgrades the line
+      // is caught even when the return value still happens to be
+      // false for some other reason.
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const { bridge, session } = await setupForPermission();
+
+        // Session exists, requestId is unknown, clientId is fake.
+        // The bridge MUST return false; pre-fix it threw
+        // InvalidClientIdError (400).
+        const result = bridge.respondToSessionPermission(
+          session.sessionId,
+          'unknown-req-id',
+          { outcome: { outcome: 'cancelled' } },
+          { clientId: 'fabricated-client-id' },
+        );
+        expect(result).toBe(false);
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('rejected permission vote'),
+        );
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('unknown-req-id'),
+        );
+
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('rejects cancel sentinel injection via {selected,"__cancelled__"} (#4335 / 3271420267)', async () => {
+      // wenshao/qwen-latest review #4335 (3271420267) — the most
+      // security-critical guard in this PR. The mediator recognizes
+      // CANCEL_VOTE_SENTINEL ('__cancelled__') BEFORE validating the
+      // option against allowedOptionIds, so a wire client sending
+      // `{outcome:'selected', optionId:'__cancelled__'}` could
+      // bypass ALL policy dispatch (designated/consensus/local-only)
+      // and resolve the request as cancelled. The bridge guards
+      // against this by throwing InvalidPermissionOptionError
+      // BEFORE forwarding to mediator.vote — without a test, a
+      // future refactor could silently remove the check.
+      const { bridge, session, conn } = await setupForPermission();
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+      const respPromise = (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'rm -rf /' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+        ],
+      });
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      const payload = next.value!.data as { requestId: string };
+
+      // Wire-injected sentinel via `selected` outcome — must
+      // throw InvalidPermissionOptionError before reaching the
+      // mediator.
+      expect(() =>
+        bridge.respondToSessionPermission(
+          session.sessionId,
+          payload.requestId,
+          {
+            outcome: { outcome: 'selected', optionId: '__cancelled__' },
+          },
+        ),
+      ).toThrow(InvalidPermissionOptionError);
+
+      // Pending was preserved — a legitimate vote still resolves.
+      expect(bridge.pendingPermissionCount).toBe(1);
+      bridge.respondToSessionPermission(session.sessionId, payload.requestId, {
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+      const response = (await respPromise) as {
+        outcome: { outcome: string; optionId?: string };
+      };
+      expect(response.outcome.outcome).toBe('selected');
+      expect(response.outcome.optionId).toBe('allow');
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
     it('rejects votes whose optionId was not in the agent-offered set (BkwQI)', async () => {
       // BkwQI: bridge.respondToPermission validates the voter's
       // `optionId` against the original `options` the agent sent.
@@ -3104,13 +3215,28 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
-    it('rejects unknown permission votes with unregistered client ids', async () => {
+    it('returns false uniformly for unknown permission votes regardless of clientId registration (#4335 / 3272493777)', async () => {
+      // Wenshao review #4335 / 3272493777 — error precedence: an
+      // unknown requestId must return `false` (→ 404) regardless of
+      // whether the supplied `clientId` is registered in any
+      // session. The previous PR #4231 boundary returned 400 for
+      // unregistered clientIds and 404 for registered ones, which
+      // turned out to be a cross-session client-registration
+      // oracle: a remote prober posting `POST /permission/<bogus>`
+      // with various `X-Qwen-Client-Id` headers could distinguish
+      // "this clientId is registered in some active session" (404)
+      // from "not registered anywhere" (400). The session-scoped
+      // route's matching fix landed in Round 7 (#3271978329); this
+      // pins the symmetric posture for the legacy route and
+      // explicitly inverts the assertion the pre-Round-7 test used
+      // to make.
       const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-      expect(() =>
+      // Unregistered clientId — must NOT throw; uniform `false`.
+      expect(
         bridge.respondToPermission(
           'does-not-exist',
           {
@@ -3118,7 +3244,8 @@ describe('createHttpAcpBridge', () => {
           },
           { clientId: 'client-not-issued' },
         ),
-      ).toThrow(InvalidClientIdError);
+      ).toBe(false);
+      // Registered clientId — also `false`.
       expect(
         bridge.respondToPermission(
           'does-not-exist',
@@ -3127,6 +3254,12 @@ describe('createHttpAcpBridge', () => {
           },
           { clientId: session.clientId },
         ),
+      ).toBe(false);
+      // No clientId at all — `false` (unchanged behavior).
+      expect(
+        bridge.respondToPermission('does-not-exist', {
+          outcome: { outcome: 'cancelled' },
+        }),
       ).toBe(false);
 
       await bridge.shutdown();
@@ -6689,5 +6822,40 @@ describe('createHttpAcpBridge', () => {
 
       await bridge.shutdown();
     });
+  });
+});
+
+// ============================================================
+// F3 Commit 8 — bridge-level integration for the multi-client
+// permission mediator. Mediator unit tests cover strategy logic
+// (35 tests in `permissionMediator.test.ts`); these exercise the
+// HTTP-bridge surface specifically:
+//   - `bridge.permissionPolicy` accessor wired through the mediator
+//   - F3 BridgeOptions validation (positive-integer quorum)
+// ============================================================
+describe('createHttpAcpBridge — F3 multi-client permission coordination', () => {
+  it('exposes the active permission policy through bridge.permissionPolicy (default first-responder)', () => {
+    const bridge = makeBridge({});
+    expect(bridge.permissionPolicy).toBe('first-responder');
+  });
+
+  it('reflects the configured policy when BridgeOptions.permissionPolicy is set', () => {
+    const bridge = makeBridge({ permissionPolicy: 'consensus' });
+    expect(bridge.permissionPolicy).toBe('consensus');
+  });
+
+  it('throws on non-positive-integer permissionConsensusQuorum', () => {
+    expect(() =>
+      makeBridge({
+        permissionPolicy: 'consensus',
+        permissionConsensusQuorum: 0,
+      }),
+    ).toThrow(/positive integer/);
+    expect(() =>
+      makeBridge({
+        permissionPolicy: 'consensus',
+        permissionConsensusQuorum: 1.5,
+      }),
+    ).toThrow(/positive integer/);
   });
 });
