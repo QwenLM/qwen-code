@@ -416,8 +416,7 @@ const ORPHAN_TOOL_USE_REPAIR_REASON =
  *    exists somewhere later) but the wire layout still serializes
  *    `model[tool_use] → user[text] → user[tool_result]`, which
  *    Anthropic-compatible backends reject with "tool_use_id ... must have a
- *    corresponding tool_use block in the previous message". gpt-5.5 review
- *    thread on PR #4176.
+ *    corresponding tool_use block in the previous message".
  *
  * Mutates `history` in place and returns the set of injected `(callId, name)`
  * tuples so callers (the React tool scheduler) can dedupe a real `tool_result`
@@ -441,6 +440,242 @@ const ORPHAN_TOOL_USE_REPAIR_REASON =
  * already present in history). See PR review thread on #4176 for the full
  * race-class analysis.
  */
+/** Location of a `functionResponse` part within `history`. */
+interface FrLocation {
+  turnIdx: number;
+  partIdx: number;
+  part: Part;
+}
+
+/**
+ * Output of the scan phase for a single `model[functionCall]` turn at
+ * `modelIdx`. `expected` maps each `functionCall.id` to its tool name,
+ * `matched` maps that same id to ALL locations of matching
+ * `functionResponse` parts across the consecutive user turns that
+ * follow, and `scanEnd` is one past the last user turn visited.
+ */
+interface ScanResult {
+  modelIdx: number;
+  expected: Map<string, string>;
+  matched: Map<string, FrLocation[]>;
+  scanEnd: number;
+}
+
+/**
+ * Output of the decision phase for one scanned model turn. Encodes
+ * exactly which mutations the next phase should apply:
+ *  - `synthesizeIds`: ids that have no matching fr anywhere — synthesize an
+ *    `error` `functionResponse` for each.
+ *  - `hoistedParts`: parts to MOVE into the adjacent user turn (the
+ *    canonical survivor for each id whose fr lives in a non-adjacent
+ *    later turn).
+ *  - `removalTargets`: parts to SPLICE out of `history` — covers both
+ *    hoist survivors (so they only remain in the new location) and
+ *    duplicate copies of any id.
+ *  - `droppedDuplicates`: callIds whose duplicates we removed; returned
+ *    by the function so callers can log the cleanup.
+ */
+interface RepairPlan {
+  modelIdx: number;
+  scanEnd: number;
+  synthesizeIds: Array<[string, string]>;
+  hoistedParts: Part[];
+  removalTargets: Array<{ turnIdx: number; partIdx: number }>;
+  droppedDuplicates: Array<{ callId: string; name: string }>;
+}
+
+/**
+ * SCAN PHASE — collect `expected` from the `model[functionCall]` turn
+ * at `modelIdx` and `matched` from every consecutive user turn that
+ * follows. Pure read; no mutation.
+ *
+ * Storing ALL locations (not just the first) is load-bearing for the
+ * duplicate case: if the same callId is echoed back more than once
+ * across the consecutive user turns (e.g.
+ * `model[fc id=cid], user[text], user[fr cid], user[fr cid]` — possible
+ * when the React scheduler retries the late `submitQuery` and a
+ * duplicate fr lands), hoisting only the first would leave the
+ * duplicate behind. The wire payload then serializes
+ *   `model[tool_use] -> user[tool_result] -> user[tool_result]`
+ * and the backend rejects the trailing block as an orphan
+ * ("tool_use_id ... must have a corresponding tool_use block in the
+ * previous message").
+ */
+function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
+  const expected = new Map<string, string>();
+  for (const part of history[modelIdx]?.parts ?? []) {
+    const fc = part.functionCall;
+    if (fc?.id) expected.set(fc.id, fc.name ?? 'unknown');
+  }
+
+  const matched = new Map<string, FrLocation[]>();
+  let scanIdx = modelIdx + 1;
+  while (scanIdx < history.length && history[scanIdx]?.role === 'user') {
+    const parts = history[scanIdx].parts ?? [];
+    for (let pIdx = 0; pIdx < parts.length; pIdx++) {
+      const part = parts[pIdx];
+      const id = part.functionResponse?.id;
+      if (id) {
+        const list = matched.get(id);
+        if (list) list.push({ turnIdx: scanIdx, partIdx: pIdx, part });
+        else matched.set(id, [{ turnIdx: scanIdx, partIdx: pIdx, part }]);
+      }
+    }
+    scanIdx++;
+  }
+
+  return { modelIdx, expected, matched, scanEnd: scanIdx };
+}
+
+/**
+ * DECISION PHASE — classify each expected callId into synthesize /
+ * hoist / skip-already-adjacent, and collect every duplicate copy for
+ * removal. Pure compute; no mutation. The plan returned here drives
+ * the mutation phase exactly.
+ *
+ * Classification rules per callId:
+ *   - No matching fr anywhere     → SYNTHESIZE an error fr.
+ *   - First match adjacent (modelIdx+1) → SKIP relocation. (Duplicates,
+ *     if any, are still removed below.)
+ *   - First match non-adjacent    → HOIST: move the canonical part into
+ *     the adjacent user turn; remove the original location.
+ * In all matched cases, drop EVERY duplicate beyond the first so the
+ * wire payload contains exactly one fr per call.
+ */
+function planRepair(scan: ScanResult): RepairPlan {
+  const synthesizeIds: Array<[string, string]> = [];
+  const hoistedParts: Part[] = [];
+  const removalTargets: Array<{ turnIdx: number; partIdx: number }> = [];
+  const droppedDuplicates: Array<{ callId: string; name: string }> = [];
+
+  const adjacentIdx = scan.modelIdx + 1;
+  for (const [id, name] of scan.expected) {
+    const locations = scan.matched.get(id);
+    if (!locations || locations.length === 0) {
+      synthesizeIds.push([id, name]);
+      continue;
+    }
+    // First copy is the canonical survivor — payloads should be
+    // identical for the same callId; if they differ, the wire is
+    // already corrupt and the backend rejects regardless.
+    const survivor = locations[0]!;
+    if (survivor.turnIdx !== adjacentIdx) {
+      hoistedParts.push(survivor.part);
+      removalTargets.push({
+        turnIdx: survivor.turnIdx,
+        partIdx: survivor.partIdx,
+      });
+    }
+    for (let k = 1; k < locations.length; k++) {
+      removalTargets.push({
+        turnIdx: locations[k]!.turnIdx,
+        partIdx: locations[k]!.partIdx,
+      });
+      droppedDuplicates.push({ callId: id, name });
+    }
+  }
+
+  return {
+    modelIdx: scan.modelIdx,
+    scanEnd: scan.scanEnd,
+    synthesizeIds,
+    hoistedParts,
+    removalTargets,
+    droppedDuplicates,
+  };
+}
+
+/**
+ * MUTATION PHASE — apply the plan to `history` in place. Returns the
+ * number of new user turns inserted before `modelIdx + 1` (currently
+ * always 0 or 1), which the caller uses to advance its forward-walk
+ * cursor past anything the loop should not revisit.
+ *
+ * Order matters here:
+ *  1. Splice removal targets in (turnIdx desc, partIdx desc) so earlier
+ *     removals don't shift indices for later ones.
+ *  2. Drop user turns within `[modelIdx + 2, scanEnd)` that are now
+ *     empty after the splice. Walk back-to-front for the same reason.
+ *     The immediately-adjacent turn (`modelIdx + 1`) is preserved even
+ *     if empty — we rewrite its parts in step 3.
+ *  3. Inject `[...synthetic, ...hoisted]` at the head of the adjacent
+ *     user turn (before any non-fr parts) OR insert a new user turn
+ *     between `modelIdx` and whatever follows.
+ *
+ * Anthropic-compatible backends require the tool_result blocks at the
+ * head of the immediately following user message; appending instead
+ * (`[text, fr]`) re-triggers the 400 the synthesis pass exists to
+ * escape. Mirrors upstream Claude Code's `hoistToolResults`.
+ *
+ * CONSEQUENCE OF REMOVAL of the head-insert: dropping this hoist (e.g.
+ * naively `next.parts = [...existing, ...partsToInject]`) re-introduces
+ * the "tool_use_id ... must have a corresponding tool_use block in the
+ * previous message" 400 the synthesis pass exists to prevent. Do not
+ * "simplify" this branch.
+ */
+function applyRepair(
+  history: Content[],
+  plan: RepairPlan,
+  reason: string,
+): { insertedBefore: number } {
+  if (plan.synthesizeIds.length === 0 && plan.removalTargets.length === 0) {
+    return { insertedBefore: 0 };
+  }
+
+  const syntheticParts: Part[] = plan.synthesizeIds.map(([callId, name]) => ({
+    functionResponse: { id: callId, name, response: { error: reason } },
+  }));
+  const partsToInject: Part[] = [...syntheticParts, ...plan.hoistedParts];
+
+  // (1) Splice removal targets, descending so indices stay valid.
+  const removals = [...plan.removalTargets].sort((a, b) => {
+    if (a.turnIdx !== b.turnIdx) return b.turnIdx - a.turnIdx;
+    return b.partIdx - a.partIdx;
+  });
+  for (const loc of removals) {
+    const turnParts = history[loc.turnIdx].parts;
+    if (turnParts) turnParts.splice(loc.partIdx, 1);
+  }
+
+  // (2) Drop now-empty user turns within [modelIdx + 2, scanEnd).
+  // Preserve the adjacent turn even if empty — we'll rewrite it
+  // below.
+  const adjacentIdx = plan.modelIdx + 1;
+  for (let j = plan.scanEnd - 1; j > adjacentIdx; j--) {
+    if (history[j]?.role === 'user' && (history[j].parts?.length ?? 0) === 0) {
+      history.splice(j, 1);
+    }
+  }
+
+  // (3) Place new parts at the head of the adjacent user turn, OR
+  // insert a fresh user turn between this model turn and whatever
+  // follows.
+  const next = history[adjacentIdx];
+  if (next?.role === 'user') {
+    const existing = next.parts ?? [];
+    const firstNonFr = existing.findIndex((part) => !part.functionResponse);
+    const insertAt = firstNonFr === -1 ? existing.length : firstNonFr;
+    next.parts = [
+      ...existing.slice(0, insertAt),
+      ...partsToInject,
+      ...existing.slice(insertAt),
+    ];
+    return { insertedBefore: 0 };
+  }
+  history.splice(adjacentIdx, 0, { role: 'user', parts: partsToInject });
+  return { insertedBefore: 1 };
+}
+
+/**
+ * Forward-walk `history`, planning and applying the repair for each
+ * `model[functionCall]` turn in turn. Iteration is index-based and the
+ * cursor advances by the count of user turns inserted ahead of it so
+ * a freshly-injected turn isn't re-visited.
+ *
+ * Splitting scan / decision / mutation into separate functions keeps
+ * each phase auditable in isolation — index drift can only happen in
+ * `applyRepair`, the only function that mutates `history`.
+ */
 export function repairOrphanedToolUseTurns(
   history: Content[],
   reason: string = ORPHAN_TOOL_USE_REPAIR_REASON,
@@ -449,217 +684,30 @@ export function repairOrphanedToolUseTurns(
   droppedDuplicates: Array<{ callId: string; name: string }>;
 } {
   const injected: Array<{ callId: string; name: string }> = [];
-  // Duplicates removed during the cleanup pass (any callId that had
-  // more than one `functionResponse` echo across the consecutive
-  // user turns). Returned alongside `injected` so call sites can log
-  // the cleanup — without this, a duplicate-only repair (no
-  // synthesis, no hoist) leaves zero diagnostic trail and a future
-  // callId-collision bug in the resolver could silently drop the
-  // wrong fr with no breadcrumb pointing here.
-  // qwen-latest-series-invite-beta-v34 thread on PR #4176.
   const droppedDuplicates: Array<{ callId: string; name: string }> = [];
 
-  // Forward walk: i mutates as we splice, so use index-based iteration
-  // and skip the freshly-inserted user turn to avoid re-scanning it.
   for (let i = 0; i < history.length; i++) {
-    const turn = history[i];
-    if (turn.role !== 'model') continue;
+    if (history[i].role !== 'model') continue;
 
-    // Collect (id → name) for every functionCall in this model turn.
-    const expected = new Map<string, string>();
-    for (const part of turn.parts ?? []) {
-      const fc = part.functionCall;
-      if (fc?.id) {
-        expected.set(fc.id, fc.name ?? 'unknown');
-      }
-    }
-    if (expected.size === 0) continue;
+    const scan = scanModelTurn(history, i);
+    if (scan.expected.size === 0) continue;
 
-    // Scan forward across EVERY consecutive user turn until the next
-    // non-user (model) entry, recording (id → location) for every
-    // functionResponse part. The real tool_result for this model[fc]
-    // may live in a non-adjacent user turn — common shape: user aborts
-    // a long-running tool, types a follow-up text turn, then the React
-    // scheduler's late submitQuery appends the real `user[fr]` as a
-    // SEPARATE user entry, producing `model[fc], user[text], user[fr_real]`.
-    //
-    // We need the full location (turn index + part index) for two
-    // reasons:
-    //  - synthesis: skip ids that already have a real fr SOMEWHERE so we
-    //    don't plant a duplicate `error` placeholder. Without this, the
-    //    `handleCompletedTools` history-based dedup would then drop the
-    //    REAL result on the next submission (callId already in history
-    //    via the synthetic), and the model would only ever see the error.
-    //  - hoist: ids matched in a NON-adjacent later user turn must be
-    //    physically moved into history[i+1] (before non-fr parts) so the
-    //    wire format stays `model[tool_use] → user[tool_result, ...]`.
-    //    Anthropic-compatible backends require the tool_result blocks at
-    //    the head of the immediately following user message, otherwise
-    //    they reject with "tool_use_id ... must have a corresponding
-    //    tool_use block in the previous message". gpt-5.5 review thread
-    //    on PR #4176.
-    // Collect EVERY (turnIdx, partIdx, part) for every functionResponse
-    // we encounter, keyed by id. Storing all locations (not just the
-    // first) is load-bearing for the duplicate case: if the same callId
-    // is echoed back more than once across the consecutive user turns
-    // (e.g. `model[fc id=cid], user[text], user[fr cid], user[fr cid]`
-    // — possible when the React scheduler retries the late submitQuery
-    // and a duplicate fr lands), hoisting only the first leaves the
-    // duplicate(s) behind in a non-adjacent later user turn. The wire
-    // payload then serializes
-    //   `model[tool_use] -> user[tool_result] -> user[tool_result]`
-    // and the backend rejects the trailing block as an orphan
-    // ("tool_use_id ... must have a corresponding tool_use block in the
-    // previous message"), so the session stays wedged for the same 400
-    // class this repair pass exists to escape. We MUST drop every
-    // duplicate; the survivor at history[i+1] is whichever copy we
-    // hoist, and the rest are erased. (gpt-5.5 thread on PR #4176.)
-    const matched = new Map<
-      string,
-      Array<{ turnIdx: number; partIdx: number; part: Part }>
-    >();
-    let scanIdx = i + 1;
-    while (scanIdx < history.length && history[scanIdx]?.role === 'user') {
-      const parts = history[scanIdx].parts ?? [];
-      for (let pIdx = 0; pIdx < parts.length; pIdx++) {
-        const part = parts[pIdx];
-        const id = part.functionResponse?.id;
-        if (id) {
-          const list = matched.get(id);
-          if (list) list.push({ turnIdx: scanIdx, partIdx: pIdx, part });
-          else matched.set(id, [{ turnIdx: scanIdx, partIdx: pIdx, part }]);
-        }
-      }
-      scanIdx++;
+    const plan = planRepair(scan);
+    if (plan.synthesizeIds.length === 0 && plan.removalTargets.length === 0) {
+      continue;
     }
 
-    const synthesizeIds: Array<[string, string]> = [];
-    const hoistedParts: Part[] = [];
-    // Removal targets cover BOTH:
-    //  - the survivor's original location for ids being hoisted (we
-    //    move it into history[i+1])
-    //  - every duplicate copy of an id (hoisted or already-adjacent)
-    // For an id whose canonical fr is already in history[i+1] but has
-    // duplicates further down, we don't hoist (no relocation needed)
-    // but we still must drop the duplicates so the wire format only
-    // contains one fr per call.
-    const allRemovalTargets: Array<{ turnIdx: number; partIdx: number }> = [];
-    for (const [id, name] of expected) {
-      const locations = matched.get(id);
-      if (!locations || locations.length === 0) {
-        synthesizeIds.push([id, name]);
-        continue;
-      }
-      // Pick the first location's part as the canonical survivor (any
-      // copy works — the response payload should be identical for the
-      // same callId; if they differ the wire is already corrupt and the
-      // backend will reject regardless).
-      const survivor = locations[0]!;
-      if (survivor.turnIdx !== i + 1) {
-        // Hoist: the canonical part needs to move into history[i+1].
-        hoistedParts.push(survivor.part);
-        allRemovalTargets.push({
-          turnIdx: survivor.turnIdx,
-          partIdx: survivor.partIdx,
-        });
-      }
-      // else: canonical already adjacent — no relocation.
-      // Either way, drop EVERY duplicate beyond the first.
-      for (let k = 1; k < locations.length; k++) {
-        allRemovalTargets.push({
-          turnIdx: locations[k]!.turnIdx,
-          partIdx: locations[k]!.partIdx,
-        });
-        droppedDuplicates.push({ callId: id, name });
-      }
-    }
-    if (synthesizeIds.length === 0 && allRemovalTargets.length === 0) continue;
-
-    const syntheticParts: Part[] = synthesizeIds.map(([callId, name]) => ({
-      functionResponse: {
-        id: callId,
-        name,
-        response: { error: reason },
-      },
-    }));
-    // Synthetics first, then hoisted. Order between synthetic and
-    // hoisted is internal — backends just need ALL tool_results at the
-    // head of the user turn, regardless of order among themselves.
-    const partsToInject: Part[] = [...syntheticParts, ...hoistedParts];
-
-    // Remove every removal target (hoist survivors + all duplicates).
-    // Sort by (turnIdx desc, partIdx desc) so each splice operates on
-    // stable indices for everything still to be removed.
-    allRemovalTargets.sort((a, b) => {
-      if (a.turnIdx !== b.turnIdx) return b.turnIdx - a.turnIdx;
-      return b.partIdx - a.partIdx;
-    });
-    for (const loc of allRemovalTargets) {
-      const turnParts = history[loc.turnIdx].parts;
-      if (turnParts) turnParts.splice(loc.partIdx, 1);
-    }
-    // Drop any user turn within the scan range (i+2 .. scanIdx-1) that
-    // is now empty because we extracted its only fr part(s). Walk back
-    // to front so removals don't shift remaining indices. The
-    // immediately-adjacent turn at i+1 is preserved even if empty —
-    // we'll rewrite its parts below. After this, scanIdx is no longer
-    // accurate; we rebind via `next` directly.
-    for (let j = scanIdx - 1; j > i + 1; j--) {
-      if (
-        history[j]?.role === 'user' &&
-        (history[j].parts?.length ?? 0) === 0
-      ) {
-        history.splice(j, 1);
-      }
-    }
-
-    const next = history[i + 1];
-    if (next?.role === 'user') {
-      // Synthesized + hoisted functionResponse parts MUST be placed
-      // before any non-functionResponse parts in the user turn.
-      // Anthropic-compatible backends reject a user message whose first
-      // content block isn't the tool_result that answers the
-      // immediately preceding tool_use ("tool result must follow tool
-      // use" / "tool_use_id ... must have a corresponding tool_use
-      // block in the previous message"). Common case after a Ctrl+Y
-      // race: the user's retry-prompt text was just pushed, so
-      // `next.parts = [text]`; appending the synthetic to the end
-      // would produce `[text, fr]` and re-trigger the wedge this PR
-      // is supposed to escape. Mirrors upstream Claude Code's
-      // `hoistToolResults` (`utils/messages.ts`).
-      //
-      // CONSEQUENCE OF REMOVAL: dropping this hoist (e.g. naively
-      // `next.parts = [...existing, ...partsToInject]`) re-introduces
-      // the exact 400 "tool_use_id ... must have a corresponding tool_use
-      // block in the previous message" the synthesis pass exists to
-      // prevent. The whole repair becomes a no-op and the session stays
-      // wedged. Do not "simplify" this branch.
-      //
-      // Place new parts AFTER any pre-existing functionResponse parts
-      // (real tool_results the user already had at the head of this
-      // turn) so caller-supplied ordering is preserved.
-      const existing = next.parts ?? [];
-      const firstNonFr = existing.findIndex((part) => !part.functionResponse);
-      const insertAt = firstNonFr === -1 ? existing.length : firstNonFr;
-      next.parts = [
-        ...existing.slice(0, insertAt),
-        ...partsToInject,
-        ...existing.slice(insertAt),
-      ];
-    } else {
-      history.splice(i + 1, 0, { role: 'user', parts: partsToInject });
-      // Skip the freshly-inserted user turn so the outer loop doesn't
-      // visit it as a model turn (it isn't) and stays linear-time.
-      i++;
-    }
-
-    // Only synthesized ids feed dedup — hoisted ids reference real frs
-    // that were ALREADY in history before this pass and remain present
-    // (just relocated). The scheduler's history-based dedup will
-    // continue to handle those naturally on its next pass.
-    for (const [callId, name] of synthesizeIds) {
+    const { insertedBefore } = applyRepair(history, plan, reason);
+    // Only synthesized ids feed `injected` — hoisted ids reference real
+    // frs that were ALREADY in history before this pass (just
+    // relocated), so the scheduler's dedup naturally handles them.
+    for (const [callId, name] of plan.synthesizeIds) {
       injected.push({ callId, name });
     }
+    droppedDuplicates.push(...plan.droppedDuplicates);
+    // Advance past any freshly-inserted user turn so the outer loop
+    // doesn't revisit it. Keeps the walk linear-time.
+    i += insertedBefore;
   }
 
   return { injected, droppedDuplicates };
@@ -749,7 +797,7 @@ export class GeminiChat {
    * JSONL transcript keeps the failed attempt even though live history
    * dropped it — `--resume` rehydrates the failed `model[functionCall]`
    * turn and the resumed model context picks up a tool_use the in-session
-   * run intentionally discarded (yiliang114 repro on PR #4176).
+   * run intentionally discarded.
    *
    * Lifecycle is paired with `pendingPartialAssistantTurnIndex`:
    *  - Set together on stream-error + hasToolCall + hasContent.
@@ -1093,7 +1141,6 @@ export class GeminiChat {
       if (inlineRepair.droppedDuplicates.length > 0) {
         // Symmetrical with the synthesis log: a duplicate-only repair
         // (no synthesis, no hoist) here would otherwise be silent.
-        // qwen-latest-series-invite-beta-v34 thread on PR #4176.
         debugLogger.warn(
           `[REPAIR] sendMessageStream inline pass dropped ` +
             `${inlineRepair.droppedDuplicates.length} duplicate ` +
@@ -1429,10 +1476,8 @@ export class GeminiChat {
             // defense-in-depth: a future error class that should consume
             // its own content-retry budget but NOT the transient one
             // could be threaded through here without re-deriving the
-            // popPartialIfPushed sequence. Reviewer thread on PR #4176
-            // (qwen-latest-series-invite-beta-v34) flagged the absence
-            // of a test — there is no reachable test path until the
-            // predicates diverge.
+            // popPartialIfPushed sequence. No reachable test path until
+            // the predicates diverge.
             const isContentError = error instanceof InvalidStreamError;
             if (isContentError) {
               if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
@@ -1596,7 +1641,7 @@ export class GeminiChat {
               // user turn. The partial-push markers are also cleared
               // in lockstep so the outer `finally` JSONL flush can't
               // resurrect a partial we just deleted from live history.
-              // qwen-latest-series-invite-beta-v34 thread on PR #4176.
+              //
               // Index-checked pop instead of a positional `pop()` so
               // we match the diagnostic standard set by
               // `popPartialIfPushed` above (splice at `idx` + warn on
@@ -1612,7 +1657,6 @@ export class GeminiChat {
               // markers for the actual partial — leaving it
               // permanently stranded with no log trail. The warn
               // makes any future violation visible immediately.
-              // qwen-latest-series-invite-beta-v34 thread on PR #4176.
               const expectedIdx = self.pendingPartialAssistantTurnIndex;
               const lastIdx = self.history.length - 1;
               if (
@@ -1728,13 +1772,20 @@ export class GeminiChat {
           // `this.history`, so live behavior is unaffected; only the
           // disk transcript loses this turn (eventual consistency
           // restored on the next successful flush of any other turn).
-          // qwen-latest-series-invite-beta-v34 thread on PR #4176.
           try {
             self.chatRecordingService?.recordAssistantTurn(
               self.pendingPartialAssistantRecord,
             );
           } catch (recordErr) {
-            debugLogger.warn(
+            // Error-level (not warn): a persistent JSONL write failure
+            // (disk full, permission, serialization) silently loses
+            // every deferred partial after this point — exactly the
+            // class of failure that warrants monitoring attention.
+            // Transient failures still bubble through as a single
+            // error per occurrence; if logs are spammed it's an
+            // operational signal that the recording layer is broken,
+            // not noise.
+            debugLogger.error(
               '[PARTIAL_FLUSH] Failed to persist deferred JSONL record: ' +
                 (recordErr instanceof Error
                   ? recordErr.message
@@ -1863,7 +1914,6 @@ export class GeminiChat {
    * (recursive `structuredClone` over every part, including large tool
    * outputs) on every batch and visibly stall the React UI thread on
    * long sessions (200+ entries with sizable tool results).
-   * qwen-latest-series-invite-beta-v34 thread on PR #4176.
    */
   getHistoryFunctionResponseIds(): Set<string> {
     const ids = new Set<string>();
@@ -1911,17 +1961,19 @@ export class GeminiChat {
     // attempt's `model[functionCall]` would survive into the retry,
     // and a successful retry's response would land as a SECOND
     // consecutive model turn (the wedge this whole subsystem exists
-    // to prevent). The warn below makes that coupling observable —
+    // to prevent). The log below makes that coupling observable —
     // anyone investigating a stale-partial bug will see this log line
-    // pointing straight at the offending caller, instead of having to
-    // trace through the marker lifecycle blind.
+    // pointing straight at the offending caller. Error-level (not
+    // warn) because this is a true invariant violation: the existing
+    // call graph cannot legitimately hit this branch, so any
+    // occurrence is a real bug in a future caller, not noise.
     if (
       this.pendingPartialAssistantTurnIndex !== null ||
       this.pendingPartialAssistantRecord !== null
     ) {
-      debugLogger.warn(
-        'addHistory called while a partial-push marker is active — ' +
-          'clearing it. This is unexpected during an active sendMessageStream ' +
+      debugLogger.error(
+        '[INVARIANT_VIOLATION] addHistory called while a partial-push ' +
+          'marker is active — clearing it. This is unexpected during an active sendMessageStream ' +
           'and likely indicates a new caller violating the between-sends ' +
           'invariant. See comment at GeminiChat.addHistory for context.',
       );
@@ -2204,7 +2256,7 @@ export class GeminiChat {
         // partial that survives in-memory. Without this, retry-success
         // leaves a failed `model[functionCall]` durable in JSONL and
         // `--resume` rehydrates a turn the live session correctly
-        // discarded (yiliang114 PR #4176 repro).
+        // discarded.
         this.pendingPartialAssistantRecord = recordArgs;
       } else {
         this.chatRecordingService?.recordAssistantTurn(recordArgs);
@@ -2243,7 +2295,6 @@ export class GeminiChat {
       // sharing the single binding eliminates drift risk if one gate is
       // tightened without the other and the JSONL recording silently
       // desyncs from in-memory history.
-      // qwen-latest-series-invite-beta-v34 thread on PR #4176.
       if (willPersistToHistory) {
         this.history.push({
           role: 'model',

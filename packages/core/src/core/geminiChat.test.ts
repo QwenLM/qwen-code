@@ -2223,7 +2223,7 @@ describe('GeminiChat', async () => {
     });
   });
 
-  describe('getHistoryFunctionResponseIds (qwen-latest-series-invite-beta-v34 thread on PR #4176)', () => {
+  describe('getHistoryFunctionResponseIds', () => {
     // Walk-only accessor used by `useGeminiStream.handleCompletedTools`
     // for the dedup pass. The whole point of this method is to avoid
     // the multi-millisecond `structuredClone` hit that
@@ -2602,11 +2602,11 @@ describe('GeminiChat', async () => {
     });
 
     it('rolls back the partial assistant turn when a retryable error fires after a tool_use chunk', async () => {
-      // Regression for the case @yiliang114 reproduced on #4176: stream
-      // attempt 1 yields a `functionCall` (which triggers the partial-
-      // history push in `processStreamResponse`), then the SAME stream
-      // throws a retryable error (e.g. a TPM 429 `StreamContentError`).
-      // The outer retry loop must drop the partial before issuing the
+      // Regression for a stream attempt that yields a `functionCall`
+      // (which triggers the partial-history push in
+      // `processStreamResponse`), then throws a retryable error (e.g.
+      // a TPM 429 `StreamContentError`). The outer retry loop must
+      // drop the partial before issuing the
       // retry — otherwise the retry's response lands as a SECOND
       // consecutive `model` entry and the failed-attempt `tool_use`
       // becomes orphan on the wire (invalid alternation +
@@ -2682,7 +2682,7 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('rolls back the partial assistant turn when an InvalidStreamError fires after a tool_use chunk on the transient-stream retry budget (qwen-latest-series-invite-beta-v34 thread on PR #4176)', async () => {
+    it('rolls back the partial assistant turn when an InvalidStreamError fires after a tool_use chunk on the transient-stream retry budget', async () => {
       // Counterpart to the rate-limit rollback above. The
       // transient-stream retry budget (NO_FINISH_REASON /
       // NO_RESPONSE_TEXT) has its own popPartialIfPushed call site —
@@ -2771,10 +2771,9 @@ describe('GeminiChat', async () => {
     // `popPartialIfPushed()` call there is preserved as
     // defense-in-depth for a future error class that should diverge
     // the predicates; see the comment block at that call site for
-    // the full analysis. qwen-latest-series-invite-beta-v34 thread
-    // on PR #4176.
+    // the full analysis.
 
-    it('rolls back the chat-recording entry too when the retry succeeds (yiliang114 PR #4176 follow-up)', async () => {
+    it('rolls back the chat-recording entry too when the retry succeeds', async () => {
       // The in-memory rollback test above asserts `this.history` ends
       // clean after a retry-success. This test asserts the same about
       // chat-recording JSONL: the failed attempt's `recordAssistantTurn`
@@ -4025,7 +4024,7 @@ describe('GeminiChat', async () => {
     });
   });
 
-  describe('partial-push marker invariants on history mutation (qwen-latest-series-invite-beta-v34 thread on PR #4176)', () => {
+  describe('partial-push marker invariants on history mutation', () => {
     // The whole partial-push lifecycle relies on the invariant
     //   "every history-mutation method clears the partial-push markers"
     // — six sites enforce it (clearHistory, addHistory, setHistory,
@@ -4499,15 +4498,14 @@ describe('GeminiChat', async () => {
     });
 
     it('hoists the real functionResponse from a non-adjacent later user turn into the adjacent one', () => {
-      // Regression for the gpt-5.5 thread on PR #4176: shape
-      // `[user, model[fc], user[text], user[fr_real]]` arises when the
-      // user aborts a long-running tool, types a follow-up text turn,
-      // and then the React scheduler's late submitQuery appends the
-      // real tool_result as a SEPARATE user entry.
+      // Regression for the shape
+      // `[user, model[fc], user[text], user[fr_real]]` — arises when
+      // the user aborts a long-running tool, types a follow-up text
+      // turn, and the React scheduler's late submitQuery then appends
+      // the real tool_result as a SEPARATE user entry.
       //
-      // Forward scanning alone (qwen-latest-series-invite-beta-v28
-      // thread, fixed in commit 2880de577) prevents the *synthesis*
-      // duplicate, but the wire layout is still
+      // Forward scanning alone prevents the *synthesis* duplicate,
+      // but the wire layout is still
       // `model[tool_use] → user[text] → user[tool_result]`, which
       // Anthropic-compatible backends reject because the tool_result
       // is not at the head of the IMMEDIATELY following user message.
@@ -4671,7 +4669,7 @@ describe('GeminiChat', async () => {
       expect(history[3]!.parts).toEqual([{ text: 'thanks anyway' }]);
     });
 
-    it('drops duplicate functionResponse entries for the same callId across user turns (gpt-5.5 thread on PR #4176)', () => {
+    it('drops duplicate functionResponse entries for the same callId across user turns', () => {
       // Critical regression: when the same callId is echoed back more
       // than once (e.g. the React scheduler retries the late submitQuery
       // after the orphan repair already planted one, or two parallel
@@ -5007,7 +5005,7 @@ describe('GeminiChat', async () => {
       expect(lastEntry.parts!.length).toBeGreaterThan(0);
     });
 
-    it('should pop both the partial model turn AND the recovery user message when recovery throws after a functionCall (qwen-latest-series-invite-beta-v34 thread on PR #4176)', async () => {
+    it('should pop both the partial model turn AND the recovery user message when recovery throws after a functionCall', async () => {
       // Critical regression for the recovery catch's pop ordering.
       // When the recovery stream yields a `functionCall` chunk and
       // then throws, `processStreamResponse` pushes a partial `model`
@@ -5200,7 +5198,7 @@ describe('GeminiChat', async () => {
       expect(mergedText).toBe('BCD');
     });
 
-    it('flushes the JSONL record when escalated stream throws mid-tool_use (qwen-latest-series-invite-beta-v28 thread on PR #4176)', async () => {
+    it('flushes the JSONL record when escalated stream throws mid-tool_use', async () => {
       // Critical regression for the max-tokens escalation path:
       // 1) initial stream succeeds with text + MAX_TOKENS → triggers
       //    escalation, no partial set, deferred record clean.

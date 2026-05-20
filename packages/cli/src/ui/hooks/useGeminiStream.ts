@@ -2048,38 +2048,16 @@ export const useGeminiStream = (
       // returns `structuredClone(this.history)`, which on long sessions
       // (200+ entries with sizable tool outputs) costs several ms on
       // the React UI thread and visibly stalls streaming when the
-      // dedup pass runs on every tool-completion batch. The
-      // `getHistoryFunctionResponseIds` accessor walks history in
-      // place and only collects the id strings we actually need.
-      // Guard the call: some test harnesses build a partial
-      // GeminiClient mock without it. Skipping dedup in that case is
-      // safe — tests that never set up the repair pre-condition run
-      // with the original (pre-dedup) submission shape. We fall back
-      // to the cloning getHistory() path for older mocks that only
-      // expose that method, so legacy tests stay green.
-      // qwen-latest-series-invite-beta-v34 thread on PR #4176.
-      let historyCallIdsWithResponse: Set<string>;
-      if (
-        geminiClient &&
-        typeof geminiClient.getHistoryFunctionResponseIds === 'function'
-      ) {
-        historyCallIdsWithResponse =
-          geminiClient.getHistoryFunctionResponseIds();
-      } else if (
-        geminiClient &&
-        typeof geminiClient.getHistory === 'function'
-      ) {
-        historyCallIdsWithResponse = new Set<string>();
-        for (const entry of geminiClient.getHistory()) {
-          if (entry.role !== 'user') continue;
-          for (const part of entry.parts ?? []) {
-            const id = part.functionResponse?.id;
-            if (id) historyCallIdsWithResponse.add(id);
-          }
-        }
-      } else {
-        historyCallIdsWithResponse = new Set<string>();
-      }
+      // dedup pass runs on every tool-completion batch.
+      // `getHistoryFunctionResponseIds` walks history in place and
+      // returns only the id Set this dispatcher needs. The
+      // GeminiClient implementation is mandatory — production and
+      // test mocks both expose it. Skip the dedup pass entirely if
+      // the client is missing (only happens in unit tests that
+      // construct a hook without a client).
+      const historyCallIdsWithResponse: Set<string> = geminiClient
+        ? geminiClient.getHistoryFunctionResponseIds()
+        : new Set<string>();
       const dedupedTools = completedAndReadyToSubmitTools.filter((tc) =>
         historyCallIdsWithResponse.has(tc.request.callId),
       );
@@ -2130,7 +2108,6 @@ export const useGeminiStream = (
       // matching `functionResponse` — the dedup block above already
       // called `markToolsAsSubmitted` for those, and re-dispatching
       // the same callIds here would queue an extra React render.
-      // qwen-latest-series-invite-beta-v34 thread on PR #4176.
       const clientTools = completedAndReadyToSubmitTools.filter(
         (t) =>
           t.request.isClientInitiated &&

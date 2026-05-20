@@ -323,8 +323,7 @@ export class GeminiClient {
    * tool outputs the clone is a multi-millisecond hit on the React UI
    * thread; running it on every tool-completion batch caused visible
    * frame drops during streaming. See
-   * `GeminiChat.getHistoryFunctionResponseIds` for the implementation
-   * and the qwen-latest-series-invite-beta-v34 thread on PR #4176.
+   * `GeminiChat.getHistoryFunctionResponseIds` for the implementation.
    */
   getHistoryFunctionResponseIds(): Set<string> {
     return this.getChat().getHistoryFunctionResponseIds();
@@ -414,7 +413,7 @@ export class GeminiClient {
       // repair function. Without this a duplicate-only repair (no
       // synthesis, no hoist) leaves zero diagnostic trail and a
       // future callId-collision bug would silently delete the
-      // wrong fr. qwen-latest-series-invite-beta-v34 thread on PR #4176.
+      // wrong fr.
       debugLogger.warn(
         `[REPAIR] Dropped ${result.droppedDuplicates.length} duplicate ` +
           `functionResponse(s) for callId(s): ${result.droppedDuplicates

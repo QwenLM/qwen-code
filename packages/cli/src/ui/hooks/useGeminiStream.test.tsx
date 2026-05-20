@@ -61,7 +61,6 @@ const MockedGeminiClientClass = vi.hoisted(() =>
     // fall through to the `structuredClone(getHistory())` slow path
     // and any regression in the fast path would silently route
     // production onto the expensive branch while CI stays green.
-    // deepseek-v4-pro thread on PR #4176.
     this.getHistoryFunctionResponseIds = vi
       .fn()
       .mockReturnValue(new Set<string>());
@@ -862,9 +861,9 @@ describe('useGeminiStream', () => {
 
     // The deduped tool DID run locally — `recordCompletedToolCall` must
     // still fire so toolCallCount / skillsModifiedInSession reflect it,
-    // even though the wire-side submission is dropped. (Regression guard
-    // for the gap mimo-v2.5-pro flagged: filtering deduped tools out of
-    // `geminiTools` without recording skipped the metric increment.)
+    // even though the wire-side submission is dropped. Regression guard:
+    // an earlier version filtered deduped tools out of `geminiTools`
+    // without recording, skipping the metric increment.
     expect(client.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {
       path: '/tmp/x.txt',
     });
@@ -879,10 +878,10 @@ describe('useGeminiStream', () => {
     // model-visible output — counting it via `recordCompletedToolCall`
     // (which increments toolCallCount and can flip
     // skillsModifiedInSession on a skill-write path) would inflate the
-    // metric for a call that never ran end-to-end. This test repros
-    // the deepseek-v4-pro thread on PR #4176: dedup must skip BOTH
-    // client-initiated (already skipped) AND cancelled tools, while
-    // still calling `markToolsAsSubmitted` so the scheduler unblocks.
+    // metric for a call that never ran end-to-end. Dedup must skip
+    // BOTH client-initiated (already skipped) AND cancelled tools,
+    // while still calling `markToolsAsSubmitted` so the scheduler
+    // unblocks.
     const cancelledDedupedTool = {
       request: {
         callId: 'call_dedup_cancelled',
@@ -1168,7 +1167,7 @@ describe('useGeminiStream', () => {
     releaseStream();
   });
 
-  it('handles a mixed batch (one deduped + one non-deduped) without double-counting telemetry (qwen-latest-series-invite-beta-v34 thread on PR #4176)', async () => {
+  it('handles a mixed batch (one deduped + one non-deduped) without double-counting telemetry', async () => {
     // The dedup filter on `geminiTools` (`!historyCallIdsWithResponse.has(callId)`)
     // is the only thing preventing double `recordCompletedToolCall`
     // for tools whose late real result lands AFTER the orphan-tool_use
