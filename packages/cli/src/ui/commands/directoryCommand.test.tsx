@@ -401,7 +401,9 @@ describe('getDirPathCompletions', () => {
         expect(suggestion.isDirectory).toBe(true);
         const sepRe = path.sep === '\\' ? '\\\\' : path.sep;
         expect(suggestion.value).toMatch(new RegExp(`${sepRe}su.+$`));
-        // Subdirectories like sub1/deep should also be included with their full path
+        // Only top-level directories matching the prefix are returned
+        const basename = path.basename(suggestion.value.slice(0, -1));
+        expect(basename).toMatch(/^su/);
         const dirname = path.dirname(suggestion.value);
         expect(dirname).toContain(tempTestDir);
       });
