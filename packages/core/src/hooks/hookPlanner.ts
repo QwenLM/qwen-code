@@ -61,10 +61,12 @@ export function getHookMatcherTarget(
     case HookEventName.TodoCreated:
     case HookEventName.TodoCompleted:
       return undefined;
-  }
 
-  const exhaustive: never = eventName;
-  return exhaustive;
+    default: {
+      const exhaustive: never = eventName;
+      return exhaustive;
+    }
+  }
 }
 
 /**
@@ -161,10 +163,12 @@ export class HookPlanner {
 
       case 'sessionTrigger':
         return this.matchesSessionTrigger(matcher, matcherTarget.target);
-    }
 
-    const exhaustive: never = matcherTarget.kind;
-    return exhaustive;
+      default: {
+        const exhaustive: never = matcherTarget.kind;
+        return exhaustive;
+      }
+    }
   }
 
   /**
