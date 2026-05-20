@@ -1827,12 +1827,14 @@ describe('ChatCompressionService', () => {
       expect(optionsArg.contents.length).toBe(history.length); // (history.length - 1) messages + 1 instruction
     });
 
-    it('compresses-most without orphaning when last entry is in-flight funcCall (auto-compress)', async () => {
-      // Auto-compress fires BEFORE the matching funcResponse is sent back to
-      // the model. The trailing funcCall must be retained (its response is
-      // coming); the in-flight fallback compresses everything safely before
-      // it. Pre-refactor this returned NOOP, leaving the chat to grow until
-      // it 400'd.
+    // Shared fixture for the two trailing-in-flight-funcCall scenarios below:
+    // both auto-compress (force=false) and hard-rescue (force=true,
+    // trigger='auto') see the same history snapshot — a tool loop where the
+    // last message is a model funcCall whose matching funcResponse is about
+    // to arrive in the pending userContent (not in history yet). The only
+    // thing that differs between the two tests is the `compress(...)` call
+    // options and the per-test assertions.
+    const setupInFlightFuncCallFixture = () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'Fix all TypeScript errors.' }] },
         {
@@ -1850,7 +1852,8 @@ describe('ChatCompressionService', () => {
             },
           ],
         },
-        // Pending funcCall: tool is currently executing, funcResponse is coming
+        // Trailing funcCall: matching funcResponse is in the pending
+        // userContent, not in history yet — active, not orphaned.
         {
           role: 'model',
           parts: [{ functionCall: { name: 'readFile', args: {} } }],
@@ -1876,6 +1879,17 @@ describe('ChatCompressionService', () => {
       vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
         generateText: mockGenerateContent,
       } as unknown as BaseLlmClient);
+
+      return { history, mockGenerateContent };
+    };
+
+    it('compresses-most without orphaning when last entry is in-flight funcCall (auto-compress)', async () => {
+      // Auto-compress fires BEFORE the matching funcResponse is sent back to
+      // the model. The trailing funcCall must be retained (its response is
+      // coming); the in-flight fallback compresses everything safely before
+      // it. Pre-refactor this returned NOOP, leaving the chat to grow until
+      // it 400'd.
+      const { mockGenerateContent } = setupInFlightFuncCallFixture();
 
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
@@ -1912,50 +1926,7 @@ describe('ChatCompressionService', () => {
       // tool-call/response pairing on the next API send. Fix: gate the strip
       // on `trigger === 'manual'` so only the explicit user-initiated
       // /compress path performs the orphan cleanup.
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'Fix all TypeScript errors.' }] },
-        {
-          role: 'model',
-          parts: [{ functionCall: { name: 'glob', args: {} } }],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: 'glob',
-                response: { result: 'files...' },
-              },
-            },
-          ],
-        },
-        // The hard-rescue moment: this funcCall is active (the matching
-        // funcResponse is in the pending userContent, not in history yet).
-        {
-          role: 'model',
-          parts: [{ functionCall: { name: 'readFile', args: {} } }],
-        },
-      ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        800,
-      );
-      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
-        model: 'gemini-pro',
-        contextWindowSize: 1000,
-      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
-
-      const mockGenerateContent = vi.fn().mockResolvedValue({
-        text: 'state snapshot summary',
-        usage: {
-          promptTokenCount: 2000,
-          candidatesTokenCount: 50,
-          totalTokenCount: 2050,
-        },
-      });
-      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
-        generateText: mockGenerateContent,
-      } as unknown as BaseLlmClient);
+      setupInFlightFuncCallFixture();
 
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
