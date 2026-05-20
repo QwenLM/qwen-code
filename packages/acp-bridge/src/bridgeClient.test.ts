@@ -40,6 +40,8 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { BridgeClient } from './bridgeClient.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
+import { CancelSentinelCollisionError } from './bridgeErrors.js';
+import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 
 /**
  * Minimal-stub constructor for a `BridgeClient` whose only purpose is
@@ -195,5 +197,71 @@ describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {
 
       expect(response.content).toBe('on-disk-content');
     });
+  });
+});
+
+/**
+ * Wenshao review #4335 / 3271978365 — `requestPermission`'s pre-publish
+ * `CancelSentinelCollisionError` guard prevents an orphan SSE
+ * `permission_request` event from being emitted when an agent's
+ * `allowedOptionIds` legitimately contains '__cancelled__'. The
+ * mediator-level test (`permissionMediator.test.ts:330`) covers the
+ * issue-time collision detection inside `mediator.request`, but
+ * BridgeClient layers a separate pre-publish check whose distinct
+ * purpose — preventing orphan SSE frames — needs its own test.
+ */
+describe('BridgeClient — requestPermission pre-publish collision guard', () => {
+  it('throws CancelSentinelCollisionError BEFORE publishing on the events bus', async () => {
+    // Arrange: a fake session entry whose `events.publish` is a spy.
+    // If the collision check ran AFTER publish, this would record a
+    // call and the assertion below would fail.
+    const publish = vi.fn().mockReturnValue(true);
+    const fakeEntry = {
+      sessionId: 'sess:test',
+      pendingPermissionIds: new Set<string>(),
+      events: { publish },
+      activePromptOriginatorClientId: undefined,
+    };
+
+    const noPermissionFlow = () => {
+      throw new Error('test: not reachable on collision-throw path');
+    };
+    const throwerMediator = {
+      policy: 'first-responder',
+      request: noPermissionFlow,
+      vote: noPermissionFlow,
+      forgetSession: noPermissionFlow,
+      peekSessionFor: noPermissionFlow,
+      pendingCount: 0,
+    } as never;
+    const client = new BridgeClient(
+      ((sid: string) => (sid === 'sess:test' ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      throwerMediator,
+      0,
+      Infinity,
+    );
+
+    // Act + Assert: a sentinel-colliding option causes the bridge
+    // client to throw before reaching publish.
+    await expect(
+      client.requestPermission({
+        sessionId: 'sess:test',
+        toolCall: { toolCallId: 'tc-1', title: 'rm -rf /' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          {
+            optionId: CANCEL_VOTE_SENTINEL,
+            name: 'Adversarial label',
+            kind: 'allow_once',
+          },
+        ],
+      }),
+    ).rejects.toThrow(CancelSentinelCollisionError);
+
+    // The crucial post-condition: no SSE frame went out.
+    expect(publish).not.toHaveBeenCalled();
+    // And the cap-index was never touched (only added AFTER publish).
+    expect(fakeEntry.pendingPermissionIds.size).toBe(0);
   });
 });

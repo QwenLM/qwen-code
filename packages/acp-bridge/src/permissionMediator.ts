@@ -451,6 +451,36 @@ export class MultiClientPermissionMediator implements PermissionMediator {
           // Stderr unavailable — silent drop.
         }
       }
+      // Wenshao review #4335 / 3271978356 — for even-sized voter
+      // sets the default formula `floor(M/2)+1` requires unanimity
+      // (M=2 → quorum=2; M=4 → quorum=3 majority; the surprise is
+      // M=2). An operator who picks consensus with two clients
+      // expecting a "majority of 2 = 1" decision actually gets
+      // unanimity — a split vote silently hangs until
+      // permissionTimeoutMs. Emit a one-time breadcrumb at issue
+      // time when the default quorum equals M and M >= 2 (i.e.
+      // unanimity required without explicit override). When the
+      // operator passed an explicit override, the cap-applied
+      // breadcrumb in `consensusQuorumFor` covers the equivalent
+      // case; this branch only fires for the default formula.
+      if (
+        policy === 'consensus' &&
+        this.deps.consensusQuorum === undefined &&
+        votersAtIssue.size >= 2 &&
+        Math.floor(votersAtIssue.size / 2) + 1 === votersAtIssue.size
+      ) {
+        try {
+          process.stderr.write(
+            `permissionMediator: consensus request ${record.requestId} ` +
+              `for session ${record.sessionId} requires unanimity ` +
+              `(votersAtIssue.size=${votersAtIssue.size}, default ` +
+              `quorum=floor(M/2)+1=${votersAtIssue.size}); split votes ` +
+              `will only resolve via permissionTimeoutMs (${timeoutMs}ms)\n`,
+          );
+        } catch {
+          // Stderr unavailable — silent drop.
+        }
+      }
       if (timeoutMs > 0) {
         pending.timer = setTimeout(() => {
           // Timer fires asynchronously — guard against the entry
@@ -871,6 +901,24 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     return outcome;
   }
 
+  /**
+   * Vote dispatch for `local-only` policy: only `fromLoopback: true`
+   * voters can resolve a permission.
+   *
+   * **Cancel-sentinel asymmetry** (wenshao review #4335 / 3271978336).
+   * `vote()` recognizes the cancel sentinel BEFORE calling this
+   * method (cross-policy escape hatch — see the
+   * `CANCEL_VOTE_SENTINEL` JSDoc for the rationale), so a remote
+   * voter under `local-only` CAN abort a pending permission via
+   * `{outcome:'cancelled'}` even though they cannot RESOLVE one. The
+   * settings-side description for `local-only` and the F3 plan call
+   * out this gap explicitly. Operators who want strict-cancel-too
+   * semantics must (a) deploy a dedicated daemon process at
+   * loopback bind, OR (b) wait for the follow-up PR that lifts
+   * cancel into per-policy gating; F3 v1 keeps the current
+   * cross-policy cancel for consistency with first-responder /
+   * designated / consensus.
+   */
   private voteLocalOnly(
     pending: MediatorPending,
     vote: PermissionVote,

@@ -1691,8 +1691,18 @@ const SETTINGS_SCHEMA = {
           '`first-responder` (default) = any client decides, first wins. ' +
           '`designated` = only the prompt originator decides; falls back to ' +
           'first-responder if originator is anonymous. ' +
-          '`consensus` = N-of-M voters must agree (default N=floor(M/2)+1). ' +
-          '`local-only` = only loopback clients can decide. ' +
+          'NOTE: client identity comes from self-declared X-Qwen-Client-Id ' +
+          'with no proof-of-possession (pair-token mechanism is a future PR), ' +
+          'so any client observing originatorClientId on SSE frames can ' +
+          'register with the same id and impersonate the originator. ' +
+          '`consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, ' +
+          'which means UNANIMITY for even M (e.g. M=2 → quorum=2, both must ' +
+          'agree); split votes resolve only via permissionTimeoutMs. ' +
+          '`local-only` = only loopback clients can RESOLVE; remote clients ' +
+          'can still ABORT a pending permission via the cancel sentinel ' +
+          '({outcome:"cancelled"}) — F3 v1 keeps cancel cross-policy for ' +
+          'consistency. Strict-cancel-too deployments need a dedicated ' +
+          'loopback-bound daemon. ' +
           'Requires daemon restart — F3 v1 reads this once at boot.',
         showInDialog: true,
         options: [

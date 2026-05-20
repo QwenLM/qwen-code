@@ -31,6 +31,23 @@ const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 
 /**
+ * Wenshao review #4335 / 3271978374 — boot-time policy validation
+ * errors. Replaces the previous substring-matching of "invalid
+ * policy." in error messages (fragile against unrelated errors
+ * happening to contain that phrase, and against future rewordings
+ * of the validation message). The catch block in `runQwenServe`
+ * matches with `instanceof InvalidPolicyConfigError` to distinguish
+ * operator-misconfiguration (rethrow → fail boot loudly) from
+ * settings-read failures (fall back to defaults).
+ */
+class InvalidPolicyConfigError extends Error {
+  override readonly name = 'InvalidPolicyConfigError';
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/**
  * Wrap raw IPv6 literals in brackets so the printed URL is a valid RFC 3986
  * authority. `host:port` is ambiguous when host contains `:`, so the URL
  * form requires `[host]:port` for IPv6. Pass-through for IPv4 and DNS
@@ -381,7 +398,7 @@ export async function runQwenServe(
       policyConfig.permissionStrategy !== undefined &&
       !VALID_PERMISSION_POLICIES.has(policyConfig.permissionStrategy)
     ) {
-      throw new Error(
+      throw new InvalidPolicyConfigError(
         `qwen serve: invalid policy.permissionStrategy ` +
           `"${String(policyConfig.permissionStrategy)}"; must be one of ` +
           `${Array.from(VALID_PERMISSION_POLICIES).join(', ')}`,
@@ -392,7 +409,7 @@ export async function runQwenServe(
       (!Number.isInteger(policyConfig.consensusQuorum) ||
         policyConfig.consensusQuorum < 1)
     ) {
-      throw new Error(
+      throw new InvalidPolicyConfigError(
         `qwen serve: invalid policy.consensusQuorum ` +
           `${String(policyConfig.consensusQuorum)}; must be a positive integer`,
       );
@@ -416,9 +433,11 @@ export async function runQwenServe(
     permissionConsensusQuorum = policyConfig.consensusQuorum;
   } catch (err) {
     // F3 invariant: invalid policy values must fail startup loudly.
-    // Distinguishable: our Error messages are prefixed `qwen serve:
-    // invalid policy.*`.
-    if (err instanceof Error && err.message.includes('invalid policy.')) {
+    // Wenshao review #4335 / 3271978374 — discriminate by error class
+    // rather than substring-matching the message; a future reworded
+    // validation string would have silently downgraded operator
+    // misconfiguration to "fall back to defaults" without this.
+    if (err instanceof InvalidPolicyConfigError) {
       throw err;
     }
     // All other settings-read failures (corrupted JSON, transient

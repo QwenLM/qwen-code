@@ -327,6 +327,65 @@ describe('MultiClientPermissionMediator — voter cancel sentinel', () => {
     ).not.toThrow();
   });
 
+  // Wenshao review #4335 / 3271978359 — the existing
+  // `resolves cancelled on cancel sentinel regardless of policy`
+  // test uses a voter (`client_A`) that would be ACCEPTED by every
+  // policy: it's the prompt originator under designated and is in
+  // votersAtIssue under consensus. The cross-policy guarantee only
+  // matters for voters who would otherwise be REJECTED — these two
+  // adversarial cases lock in the cross-policy escape hatch
+  // semantics described on the CANCEL_VOTE_SENTINEL JSDoc.
+  it('cancel sentinel resolves under `designated` even when voter is NOT the originator', async () => {
+    const { mediator, events } = makeMediator('designated');
+    const record = makeRecord(); // originator = 'client_A'
+    const promise = mediator.request(record, 5_000);
+
+    // A normal `proceed_once` vote from client_B would be
+    // forbidden:designated_mismatch — but cancel must still resolve.
+    const outcome = mediator.vote(
+      makeVote({ clientId: 'client_B', optionId: CANCEL_VOTE_SENTINEL }),
+    );
+    expect(outcome).toEqual({
+      kind: 'resolved',
+      resolvedOptionId: CANCEL_VOTE_SENTINEL,
+    });
+    const resolution = await promise;
+    expect(resolution).toEqual({
+      kind: 'cancelled',
+      reason: 'agent_cancelled',
+    });
+    expect(events.map((e) => e.event.type)).toEqual(['permission_resolved']);
+  });
+
+  it('cancel sentinel resolves under `consensus` even when voter is NOT in votersAtIssue', async () => {
+    const { mediator, events } = makeMediator(
+      'consensus',
+      // votersAtIssue snapshot does NOT contain client_late_join
+      new Set(['client_A', 'client_B']),
+    );
+    const record = makeRecord();
+    const promise = mediator.request(record, 5_000);
+
+    // A normal `proceed_once` vote from a non-snapshot voter would
+    // be forbidden:designated_mismatch — but cancel must still resolve.
+    const outcome = mediator.vote(
+      makeVote({
+        clientId: 'client_late_join',
+        optionId: CANCEL_VOTE_SENTINEL,
+      }),
+    );
+    expect(outcome).toEqual({
+      kind: 'resolved',
+      resolvedOptionId: CANCEL_VOTE_SENTINEL,
+    });
+    const resolution = await promise;
+    expect(resolution).toEqual({
+      kind: 'cancelled',
+      reason: 'agent_cancelled',
+    });
+    expect(events.map((e) => e.event.type)).toEqual(['permission_resolved']);
+  });
+
   it('rejects request() at issue time when allowedOptionIds collides with cancel sentinel', () => {
     // Collision defense (Commit 1 review I1): if the agent's allow
     // set legitimately contains '__cancelled__', the mediator can no

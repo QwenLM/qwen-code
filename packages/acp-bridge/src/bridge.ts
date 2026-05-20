@@ -2038,10 +2038,29 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         );
         return false;
       }
-      // requestId is unknown OR matches THIS session — only now
-      // validate clientId. `resolveTrustedClientId` throws
-      // `InvalidClientIdError` (mapped to 400 by the route) when
-      // the supplied id isn't in `entry.clientIds`.
+      // Wenshao review #4335 / 3271978329 (Critical) — error precedence:
+      // when `peekSessionFor` returns `undefined` (timed out / LRU-
+      // evicted / never registered), pre-F3 returned `false` (→ 404)
+      // BEFORE any clientId validation. Without this explicit guard,
+      // execution falls through to `resolveTrustedClientId` which
+      // throws `InvalidClientIdError` (→ 400) when the caller's
+      // `X-Qwen-Client-Id` isn't registered, leaking session-exists
+      // information: a probe with a fabricated clientId could
+      // distinguish "session exists with these clients" (400) from
+      // "no such request" (404). Match pre-F3 by short-circuiting
+      // here.
+      if (actualSessionId === undefined) {
+        writeServeDebugLine(
+          `rejected permission vote ${JSON.stringify(requestId)} ` +
+            `for session ${JSON.stringify(sessionId)}; mediator has no ` +
+            `pending or resolved record.`,
+        );
+        return false;
+      }
+      // requestId matches THIS session — only now validate clientId.
+      // `resolveTrustedClientId` throws `InvalidClientIdError`
+      // (mapped to 400 by the route) when the supplied id isn't in
+      // `entry.clientIds`.
       const trustedClientId = resolveTrustedClientId(entry, context?.clientId);
       // F3 voter cancel sentinel: when the ACP body is
       // `{outcome: 'cancelled'}`, the wire frame doesn't carry an

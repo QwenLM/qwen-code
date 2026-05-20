@@ -9,6 +9,13 @@ import {
   type ServeFeature,
   type ServeProtocolVersions,
 } from './capabilities.js';
+// Wenshao review #4335 / 3271978342 — import the canonical
+// `PermissionPolicy` union from acp-bridge instead of inlining
+// the four string literals below. Without the import, adding a
+// 5th policy literal upstream would silently widen the union
+// over there while this envelope kept accepting only the older
+// 4-literal narrower set, with no compiler error to flag the drift.
+import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 
 /**
  * Stage 1 daemon mode shape.
@@ -190,11 +197,7 @@ export interface CapabilitiesEnvelope {
      * advertises the build-supported set; this field tells clients
      * which one is currently in effect.
      */
-    permission?:
-      | 'first-responder'
-      | 'designated'
-      | 'consensus'
-      | 'local-only';
+    permission?: PermissionPolicy;
   };
 }
 
