@@ -78,6 +78,11 @@ export type {
   DaemonPermissionOption,
   DaemonPermissionAlreadyResolvedData,
   DaemonPermissionAlreadyResolvedEvent,
+  // #4175 F3 Commit 7 — multi-client permission coordination push events.
+  DaemonPermissionForbiddenData,
+  DaemonPermissionForbiddenEvent,
+  DaemonPermissionPartialVoteData,
+  DaemonPermissionPartialVoteEvent,
   DaemonPermissionRequestData,
   DaemonPermissionRequestEvent,
   DaemonPermissionResolvedData,

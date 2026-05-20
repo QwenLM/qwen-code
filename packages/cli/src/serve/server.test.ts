@@ -139,6 +139,12 @@ const EXPECTED_STAGE1_FEATURES = [
   // baseline assertion below mirrors that even though PR 21 landed
   // before PR 17 chronologically.
   'auth_device_flow',
+  // #4175 F3 Commit 6. Daemon advertises which permission mediation
+  // policies it can run (`modes: [first-responder, designated, consensus,
+  // local-only]`) so SDK clients can pre-flight before relying on
+  // `permission_partial_vote` / `permission_forbidden` SSE events. Always-
+  // on; runtime-active policy is at `/capabilities` body `policy.permission`.
+  'permission_mediation',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -149,9 +155,14 @@ const EXPECTED_STAGE1_FEATURES = [
 // matches the real ordering.
 const EXPECTED_REGISTERED_FEATURES = [
   // Same order as `SERVE_CAPABILITY_REGISTRY` declaration:
-  ...EXPECTED_STAGE1_FEATURES.filter((f) => f !== 'auth_device_flow'),
+  // ...always-on PR16/17/19/20/21 features, then conditional `require_auth`,
+  // then `auth_device_flow`, then F3 `permission_mediation` (latest).
+  ...EXPECTED_STAGE1_FEATURES.filter(
+    (f) => f !== 'auth_device_flow' && f !== 'permission_mediation',
+  ),
   'require_auth',
   'auth_device_flow',
+  'permission_mediation',
 ] as const;
 
 interface FakeBridgeOpts {

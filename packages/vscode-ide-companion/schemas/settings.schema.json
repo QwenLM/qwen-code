@@ -752,6 +752,26 @@
         }
       }
     },
+    "policy": {
+      "description": "Daemon multi-client coordination policies. Tool-level allow/deny rules live under `permissions`; this section is for runtime mediation behavior between concurrent HTTP clients sharing one `qwen serve` daemon.",
+      "type": "object",
+      "properties": {
+        "permissionStrategy": {
+          "description": "How permission requests resolve when multiple clients are attached. `first-responder` (default) = any client decides, first wins. `designated` = only the prompt originator decides; falls back to first-responder if originator is anonymous. `consensus` = N-of-M voters must agree (default N=floor(M/2)+1). `local-only` = only loopback clients can decide. Requires daemon restart — F3 v1 reads this once at boot. Options: first-responder, designated, consensus, local-only",
+          "enum": [
+            "first-responder",
+            "designated",
+            "consensus",
+            "local-only"
+          ],
+          "default": "first-responder"
+        },
+        "consensusQuorum": {
+          "description": "Optional fixed quorum size for consensus policy. Capped at M (count of registered voters at request issue time) to prevent unreachable quorum. Unset = floor(M/2)+1. Requires daemon restart — F3 v1 reads this once at boot.",
+          "type": "number"
+        }
+      }
+    },
     "mcp": {
       "description": "Settings for Model Context Protocol (MCP) servers.",
       "type": "object",
