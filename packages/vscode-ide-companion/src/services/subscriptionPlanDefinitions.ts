@@ -69,7 +69,7 @@ export interface SubscriptionPlanDefinition<
   description: string;
   envKey: string;
   modelNamePrefix: string;
-  authEventType: 'coding-plan';
+  authEventType: 'coding-plan' | 'token-plan';
   metadataKey: string;
   endpoint?: string;
   documentationUrl?: string;
@@ -86,7 +86,7 @@ export interface SubscriptionPlanConfig {
   displayName: string;
   title: string;
   description: string;
-  authEventType: 'coding-plan';
+  authEventType: 'coding-plan' | 'token-plan';
   envKey: string;
   metadataKey: string;
   template: CodingPlanTemplate;
@@ -181,7 +181,7 @@ const TOKEN_PLAN: SubscriptionPlanDefinition<'token'> = {
     'For teams and companies · Usage-based billing with dedicated endpoint',
   envKey: TOKEN_PLAN_ENV_KEY,
   modelNamePrefix: 'ModelStudio Token Plan',
-  authEventType: 'coding-plan',
+  authEventType: 'token-plan',
   metadataKey: 'tokenPlan',
   endpoint:
     'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',

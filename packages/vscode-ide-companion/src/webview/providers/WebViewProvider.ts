@@ -1151,6 +1151,12 @@ export class WebViewProvider {
             target,
           ),
         );
+      } else if (
+        qwenSettings.provider !== 'coding-plan' &&
+        config.get<string | undefined>('codingPlanRegion') !== undefined
+      ) {
+        // Clear stale codingPlanRegion when provider is not coding-plan
+        updates.push(config.update('codingPlanRegion', undefined, target));
       }
 
       if (updates.length === 0) {
