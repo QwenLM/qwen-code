@@ -26,6 +26,7 @@ import {
   createForkedChat,
   runForkedAgent,
 } from '../utils/forkedAgent.js';
+import { createChildAbortController } from '../utils/abortController.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
 
 // ---------------------------------------------------------------------------
@@ -96,7 +97,7 @@ export async function startSpeculation(
     throw new Error('CacheSafeParams not available for speculation');
   }
 
-  const abortController = new AbortController();
+  const abortController = createChildAbortController(parentSignal);
 
   // If parent was already aborted, return aborted state without starting loop
   if (parentSignal?.aborted) {
@@ -110,13 +111,6 @@ export async function startSpeculation(
       startTime: Date.now(),
       toolUseCount: 0,
     };
-  }
-
-  // Link to parent signal with cleanup to prevent memory leak (#20)
-  let parentAbortHandler: (() => void) | undefined;
-  if (parentSignal) {
-    parentAbortHandler = () => abortController.abort();
-    parentSignal.addEventListener('abort', parentAbortHandler, { once: true });
   }
 
   const overlayFs = new OverlayFs(config.getCwd());
@@ -176,10 +170,8 @@ export async function startSpeculation(
       await overlayFs.cleanup();
     })
     .finally(() => {
-      // Clean up parent signal listener (#20)
-      if (parentSignal && parentAbortHandler) {
-        parentSignal.removeEventListener('abort', parentAbortHandler);
-      }
+      // Reverse-cleanup detaches the parent-signal listener (#20).
+      abortController.abort();
     });
 
   return state;

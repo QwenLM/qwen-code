@@ -16,6 +16,7 @@ import { SpanStatusCode } from '@opentelemetry/api';
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
+import { createAbortController } from '../utils/abortController.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
@@ -970,7 +971,7 @@ export class GeminiClient {
         messageType === SendMessageType.Cron
       ) {
         if (this.config.getManagedAutoMemoryEnabled()) {
-          const recallAbortController = new AbortController();
+          const recallAbortController = createAbortController();
           const rawRecallPromise = this.config
             .getMemoryManager()
             .recall(this.config.getProjectRoot(), partToString(request), {

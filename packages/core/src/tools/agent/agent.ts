@@ -58,6 +58,10 @@ import type {
   AgentUsageEvent,
 } from '../../agents/runtime/agent-events.js';
 import { BuiltinAgentRegistry } from '../../subagents/builtin-agents.js';
+import {
+  createAbortController,
+  createChildAbortController,
+} from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import type { StopHookOutput } from '../../hooks/types.js';
@@ -1226,9 +1230,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           }
         }
 
-        // Create an independent AbortController — background agents
-        // survive ESC cancellation of the parent's current turn.
-        const bgAbortController = new AbortController();
+        // Independent AbortController — background agents survive ESC
+        // cancellation of the parent's current turn, so no parent linkage.
+        const bgAbortController = createAbortController();
 
         // Background agents have no UI, so interactive permission prompts must be
         // auto-denied rather than auto-approved (YOLO). PermissionRequest hooks
@@ -1579,17 +1583,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // ── Foreground (synchronous) execution path ────────────────
-      // Compose a child AbortController so the dialog's per-agent cancel
-      // can abort just this subagent without aborting the parent turn.
-      // Parent abort still propagates down (so ESC at the parent kills
-      // the subagent), but child abort does NOT propagate up.
-      const fgAbortController = new AbortController();
-      const onParentAbort = () => fgAbortController.abort();
-      if (signal?.aborted) {
-        fgAbortController.abort();
-      } else {
-        signal?.addEventListener('abort', onParentAbort, { once: true });
-      }
+      // Child AbortController so the dialog's per-agent cancel aborts only
+      // this subagent. Parent abort still propagates down (ESC at the parent
+      // kills the subagent); child abort does NOT propagate up.
+      const fgAbortController = createChildAbortController(signal);
 
       const fgHookOpts = { ...hookOpts, signal: fgAbortController.signal };
       const runFramed = () =>
@@ -1706,7 +1703,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       } finally {
         this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
         this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
-        signal?.removeEventListener('abort', onParentAbort);
+        // Reverse cleanup detaches our parent-signal listener.
+        fgAbortController.abort();
         cleanupOwnedMonitorNotifications();
         // Foreground entries leave the registry as soon as the tool-call
         // returns — the parent's tool-result is the durable record. Doing

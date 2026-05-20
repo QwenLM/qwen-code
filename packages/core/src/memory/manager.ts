@@ -39,6 +39,7 @@ import { randomUUID } from 'node:crypto';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { createAbortController } from '../utils/abortController.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   logMemoryDream,
@@ -933,7 +934,7 @@ export class MemoryManager {
     // missing-controller defensive warn-and-return-false path and the
     // model gets a phantom failure on a brand-new dream. Registering
     // first means any reentrant cancel sees a complete state.
-    const abortController = new AbortController();
+    const abortController = createAbortController();
     this.dreamAbortControllers.set(record.id, abortController);
     this.dreamInFlightByKey.set(dedupeKey, record.id);
     this.storeWith(record, {

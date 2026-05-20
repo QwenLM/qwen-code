@@ -17,6 +17,7 @@ import {
   createModelContent,
 } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { createAbortController } from '../utils/abortController.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
@@ -935,7 +936,7 @@ export class ChatRecordingService {
     if (!this.config.getFastModel()) return;
 
     this.autoTitleAttempts++;
-    const controller = new AbortController();
+    const controller = createAbortController();
     this.autoTitleController = controller;
 
     void (async () => {

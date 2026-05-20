@@ -49,6 +49,7 @@ import {
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { parse } from 'shell-quote';
+import { createAbortController } from '../utils/abortController.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   isShellCommandReadOnlyAST,
@@ -1449,7 +1450,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // ShellExecutionService detects the discriminated reason and
     // returns `result.promoted: true` instead of killing the child —
     // see #3842 / #3886 for the foundation.
-    const promoteAbortController = new AbortController();
+    const promoteAbortController = createAbortController();
     let combinedSignal = AbortSignal.any([
       signal,
       promoteAbortController.signal,
@@ -2134,7 +2135,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // SIGTERM → SIGKILL ourselves (mirroring the kill semantics
     // `ShellExecutionService.execute()`'s abort handler uses for the
     // non-promote path) and to mark the registry entry `cancelled`.
-    const entryAc = new AbortController();
+    const entryAc = createAbortController();
     const cancelChild = async () => {
       const pid = result.pid;
       if (pid !== undefined) {
@@ -2341,7 +2342,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // The `signal` parameter is still honored for the synchronous early
     // return below (don't even spawn if the agent already aborted), but
     // we deliberately do not forward it.
-    const entryAc = new AbortController();
+    const entryAc = createAbortController();
 
     const outputStream = fs.createWriteStream(outputPath, { flags: 'w' });
     // Without an 'error' listener, a write failure (disk full, permission

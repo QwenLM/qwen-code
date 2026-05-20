@@ -10,6 +10,10 @@ import { GitWorktreeService } from '../../services/gitWorktreeService.js';
 import { Storage } from '../../config/storage.js';
 import type { Config } from '../../config/config.js';
 import { getCoreSystemPrompt } from '../../core/prompts.js';
+import {
+  createAbortController,
+  createChildAbortController,
+} from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
@@ -302,7 +306,7 @@ export class ArenaManager {
     this.worktreeDirName = await this.deriveWorktreeDirName(this.sessionId);
     this.startedAt = Date.now();
     this.sessionStatus = ArenaSessionStatus.INITIALIZING;
-    this.masterAbortController = new AbortController();
+    this.masterAbortController = createAbortController();
 
     const sourceRepoPath = this.config.getWorkingDir();
     const arenaSettings = this.config.getAgentsSettings().arena;
@@ -814,7 +818,7 @@ export class ArenaManager {
         model,
         status: AgentStatus.INITIALIZING,
         worktree,
-        abortController: new AbortController(),
+        abortController: createChildAbortController(this.masterAbortController),
         agentSessionId: `${this.sessionId}#${agentId}`,
         stats: {
           rounds: 0,
