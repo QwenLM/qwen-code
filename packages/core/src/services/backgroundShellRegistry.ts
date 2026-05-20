@@ -18,12 +18,15 @@
  * status.
  */
 
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
+
+import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { escapeXml } from '../utils/xml.js';
-import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
 const MAX_NOTIFICATION_COMMAND_LENGTH = 80;
+export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
 
 /**
  * Strip C0 control characters (except tab) and C1 control characters from
@@ -44,6 +47,57 @@ function stripDisplayControlChars(text: string): string {
     out += text[i];
   }
   return out;
+}
+
+function stripOutputControlChars(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x09 || code === 0x0a || code === 0x0d) {
+      out += text[i];
+      continue;
+    }
+    if (code < 0x20) continue;
+    if (code >= 0x80 && code <= 0x9f) continue;
+    out += text[i];
+  }
+  return out;
+}
+
+function readOutputTail(
+  outputFile: string,
+): { text: string; truncated: boolean } | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(outputFile, 'r');
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size <= 0) return undefined;
+
+    const length = Math.min(stat.size, MAX_NOTIFICATION_OUTPUT_TAIL_BYTES);
+    const start = stat.size - length;
+    const buffer = Buffer.allocUnsafe(length);
+    const bytesRead = readSync(fd, buffer, 0, length, start);
+    const text = stripOutputControlChars(
+      buffer.subarray(0, bytesRead).toString('utf8'),
+    ).trimEnd();
+
+    if (!text) return undefined;
+    return {
+      text,
+      truncated: start > 0,
+    };
+  } catch (error) {
+    debugLogger.debug(`Failed to read shell output tail:`, error);
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
 }
 
 function truncateCommandForDisplay(command: string): string {
@@ -355,6 +409,12 @@ export class BackgroundShellRegistry {
     if (entry.error) {
       xmlParts.push(
         `<result>${escapeXml(stripDisplayControlChars(entry.error))}</result>`,
+      );
+    }
+    const outputTail = readOutputTail(entry.outputFile);
+    if (outputTail) {
+      xmlParts.push(
+        `<output-tail truncated="${outputTail.truncated ? 'true' : 'false'}">${escapeXml(outputTail.text)}</output-tail>`,
       );
     }
     xmlParts.push(

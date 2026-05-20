@@ -4,12 +4,33 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BackgroundShellRegistry,
+  MAX_NOTIFICATION_OUTPUT_TAIL_BYTES,
   MAX_RETAINED_TERMINAL_SHELLS,
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
+
+let tmpDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tmpDirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  tmpDirs = [];
+});
+
+function makeOutputFile(content: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'qwen-shell-notification-'));
+  tmpDirs.push(dir);
+  const file = join(dir, 'shell.output');
+  writeFileSync(file, content);
+  return file;
+}
 
 function makeEntry(
   overrides: Partial<ShellTaskRegistration> = {},
@@ -191,13 +212,14 @@ describe('BackgroundShellRegistry', () => {
     it('emits one task-notification when a shell completes', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
+      const outputPath = makeOutputFile('first line\nfinal result\n');
       reg.setNotificationCallback(callback);
       reg.register(
         makeEntry({
           shellId: 'a',
           command: 'npm test',
           cwd: '/repo',
-          outputPath: '/tmp/shell-output.log',
+          outputPath,
           pid: 1234,
         }),
       );
@@ -216,8 +238,9 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain('<pid>1234</pid>');
       expect(modelText).toContain('<exit-code>0</exit-code>');
       expect(modelText).toContain(
-        '<output-file>/tmp/shell-output.log</output-file>',
+        '<output-tail truncated="false">first line\nfinal result</output-tail>',
       );
+      expect(modelText).toContain(`<output-file>${outputPath}</output-file>`);
       expect(meta).toEqual({
         shellId: 'a',
         status: 'completed',
@@ -251,6 +274,25 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain(
         '<output-file>/tmp/out&amp;err.log</output-file>',
       );
+    });
+
+    it('limits output-tail to the retained byte budget', () => {
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      const outputPath = makeOutputFile(
+        'prefix-' +
+          'a'.repeat(MAX_NOTIFICATION_OUTPUT_TAIL_BYTES) +
+          '\nlast line\n',
+      );
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a', outputPath }));
+
+      reg.complete('a', 0, 2000);
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain('<output-tail truncated="true">');
+      expect(modelText).toContain('last line</output-tail>');
+      expect(modelText).not.toContain('prefix-');
     });
 
     it('does not emit more than once for late terminal transitions', () => {
