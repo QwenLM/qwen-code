@@ -19,9 +19,40 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeXml } from '../utils/xml.js';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
+const MAX_NOTIFICATION_COMMAND_LENGTH = 80;
+
+/**
+ * Strip C0 control characters (except tab) and C1 control characters from
+ * terminal/UI display strings. Shell commands and errors are usually
+ * user-authored, but this keeps escape sequences out of the visible
+ * notification surface if a caller passes unsanitized text.
+ */
+function stripDisplayControlChars(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x09) {
+      out += text[i];
+      continue;
+    }
+    if (code < 0x20) continue;
+    if (code >= 0x80 && code <= 0x9f) continue;
+    out += text[i];
+  }
+  return out;
+}
+
+function truncateCommandForDisplay(command: string): string {
+  const normalized = stripDisplayControlChars(command).replace(/\s+/g, ' ');
+  if (normalized.length <= MAX_NOTIFICATION_COMMAND_LENGTH) {
+    return normalized;
+  }
+  return normalized.slice(0, MAX_NOTIFICATION_COMMAND_LENGTH - 3) + '...';
+}
 
 /**
  * Cap on how many terminal (completed/failed/cancelled) entries the
@@ -100,6 +131,18 @@ export type ShellTaskRegistration = Omit<
 /** Fires when a new entry is registered. */
 export type BackgroundShellRegisterCallback = (entry: ShellTask) => void;
 
+export interface ShellNotificationMeta {
+  shellId: string;
+  status: BackgroundShellStatus;
+  exitCode?: number;
+}
+
+export type BackgroundShellNotificationCallback = (
+  displayText: string,
+  modelText: string,
+  meta: ShellNotificationMeta,
+) => void;
+
 /**
  * Fires on every status transition (running → terminal). Symmetric with
  * `BackgroundTaskRegistry.setStatusChangeCallback` so the same UI hook can
@@ -111,6 +154,7 @@ export class BackgroundShellRegistry {
   private readonly entries = new Map<string, ShellTask>();
 
   private registerCallback: BackgroundShellRegisterCallback | undefined;
+  private notificationCallback: BackgroundShellNotificationCallback | undefined;
   private statusChangeCallback: BackgroundShellStatusChangeCallback | undefined;
 
   /**
@@ -121,6 +165,12 @@ export class BackgroundShellRegistry {
    */
   setRegisterCallback(cb: BackgroundShellRegisterCallback | undefined): void {
     this.registerCallback = cb;
+  }
+
+  setNotificationCallback(
+    cb: BackgroundShellNotificationCallback | undefined,
+  ): void {
+    this.notificationCallback = cb;
   }
 
   /**
@@ -181,6 +231,7 @@ export class BackgroundShellRegistry {
     entry.status = 'completed';
     entry.exitCode = exitCode;
     entry.endTime = endTime;
+    this.emitNotification(entry);
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
   }
@@ -191,6 +242,7 @@ export class BackgroundShellRegistry {
     entry.status = 'failed';
     entry.error = error;
     entry.endTime = endTime;
+    this.emitNotification(entry);
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
   }
@@ -199,6 +251,7 @@ export class BackgroundShellRegistry {
     const entry = this.entries.get(shellId);
     if (!entry || entry.status !== 'running') return;
     this.settleAsCancelled(entry, endTime);
+    this.emitNotification(entry);
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
   }
@@ -266,6 +319,59 @@ export class BackgroundShellRegistry {
       this.statusChangeCallback(entry);
     } catch (error) {
       debugLogger.error('statusChange callback failed:', error);
+    }
+  }
+
+  private emitNotification(entry: ShellTask): void {
+    if (entry.notified) return;
+    entry.notified = true;
+
+    if (!this.notificationCallback) return;
+
+    const statusText =
+      entry.status === 'completed'
+        ? 'completed'
+        : entry.status === 'failed'
+          ? 'failed'
+          : 'was cancelled';
+    const commandLabel = truncateCommandForDisplay(entry.command);
+    const displayText = `Background shell "${commandLabel}" ${statusText}.`;
+
+    const xmlParts: string[] = [
+      '<task-notification>',
+      `<task-id>${escapeXml(entry.shellId)}</task-id>`,
+      '<kind>shell</kind>',
+      `<status>${escapeXml(entry.status)}</status>`,
+      `<summary>Shell command "${escapeXml(commandLabel)}" ${statusText}.</summary>`,
+      `<command>${escapeXml(entry.command)}</command>`,
+      `<cwd>${escapeXml(entry.cwd)}</cwd>`,
+    ];
+    if (entry.pid !== undefined) {
+      xmlParts.push(`<pid>${entry.pid}</pid>`);
+    }
+    if (entry.exitCode !== undefined) {
+      xmlParts.push(`<exit-code>${entry.exitCode}</exit-code>`);
+    }
+    if (entry.error) {
+      xmlParts.push(
+        `<result>${escapeXml(stripDisplayControlChars(entry.error))}</result>`,
+      );
+    }
+    xmlParts.push(
+      `<output-file>${escapeXml(entry.outputFile)}</output-file>`,
+      '</task-notification>',
+    );
+
+    const meta: ShellNotificationMeta = {
+      shellId: entry.shellId,
+      status: entry.status,
+      exitCode: entry.exitCode,
+    };
+
+    try {
+      this.notificationCallback(displayText, xmlParts.join('\n'), meta);
+    } catch (error) {
+      debugLogger.error('Failed to emit shell notification:', error);
     }
   }
 

@@ -154,6 +154,7 @@ describe('useGeminiStream', () => {
   let mockScheduleToolCalls: Mock;
   let mockCancelAllToolCalls: Mock;
   let mockMarkToolsAsSubmitted: Mock;
+  let mockBackgroundShellRegistry: { setNotificationCallback: Mock };
   let handleAtCommandSpy: MockInstance;
 
   beforeEach(() => {
@@ -181,6 +182,9 @@ describe('useGeminiStream', () => {
       apiKey: 'test-key',
       vertexai: false,
       authType: AuthType.USE_GEMINI,
+    };
+    mockBackgroundShellRegistry = {
+      setNotificationCallback: vi.fn(),
     };
 
     mockConfig = {
@@ -230,6 +234,7 @@ describe('useGeminiStream', () => {
       getBackgroundTaskRegistry: vi.fn(() => ({
         setNotificationCallback: vi.fn(),
       })),
+      getBackgroundShellRegistry: vi.fn(() => mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn(() => ({
         setNotificationCallback: vi.fn(),
       })),
@@ -355,6 +360,44 @@ describe('useGeminiStream', () => {
       client,
     };
   };
+
+  it('queues background shell terminal notifications for the model loop', async () => {
+    const { mockSendMessageStream } = renderTestHook();
+    const displayText = 'Background shell "npm test" completed.';
+    const modelText =
+      '<task-notification>\n<kind>shell</kind>\n<status>completed</status>\n</task-notification>';
+
+    await waitFor(() => {
+      expect(
+        mockBackgroundShellRegistry.setNotificationCallback,
+      ).toHaveBeenCalledWith(expect.any(Function));
+    });
+
+    const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+      .calls[0][0] as (displayText: string, modelText: string) => void;
+
+    act(() => {
+      callback(displayText, modelText);
+    });
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: displayText },
+        expect.any(Number),
+      );
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        modelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Notification,
+          notificationDisplayText: displayText,
+        }),
+      );
+    });
+  });
 
   it('should not submit tool responses if not all tool calls are completed', () => {
     const toolCalls: TrackedToolCall[] = [

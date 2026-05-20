@@ -187,6 +187,123 @@ describe('BackgroundShellRegistry', () => {
     });
   });
 
+  describe('notifications', () => {
+    it('emits one task-notification when a shell completes', () => {
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      reg.register(
+        makeEntry({
+          shellId: 'a',
+          command: 'npm test',
+          cwd: '/repo',
+          outputPath: '/tmp/shell-output.log',
+          pid: 1234,
+        }),
+      );
+
+      reg.complete('a', 0, 2000);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      const [displayText, modelText, meta] = callback.mock.calls[0];
+      expect(displayText).toBe('Background shell "npm test" completed.');
+      expect(modelText).toContain('<task-notification>');
+      expect(modelText).toContain('<task-id>a</task-id>');
+      expect(modelText).toContain('<kind>shell</kind>');
+      expect(modelText).toContain('<status>completed</status>');
+      expect(modelText).toContain('<command>npm test</command>');
+      expect(modelText).toContain('<cwd>/repo</cwd>');
+      expect(modelText).toContain('<pid>1234</pid>');
+      expect(modelText).toContain('<exit-code>0</exit-code>');
+      expect(modelText).toContain(
+        '<output-file>/tmp/shell-output.log</output-file>',
+      );
+      expect(meta).toEqual({
+        shellId: 'a',
+        status: 'completed',
+        exitCode: 0,
+      });
+    });
+
+    it('escapes XML and strips display control characters on failure', () => {
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      reg.register(
+        makeEntry({
+          shellId: 'a&b',
+          command: 'echo "<script>"',
+          cwd: '/repo&work',
+          outputPath: '/tmp/out&err.log',
+        }),
+      );
+
+      reg.fail('a&b', 'bad <thing>\x1B[31m', 2000);
+
+      const [displayText, modelText] = callback.mock.calls[0];
+      expect(displayText).toBe('Background shell "echo "<script>"" failed.');
+      expect(modelText).toContain('<task-id>a&amp;b</task-id>');
+      expect(modelText).toContain(
+        '<command>echo &quot;&lt;script&gt;&quot;</command>',
+      );
+      expect(modelText).toContain('<cwd>/repo&amp;work</cwd>');
+      expect(modelText).toContain('<result>bad &lt;thing&gt;[31m</result>');
+      expect(modelText).toContain(
+        '<output-file>/tmp/out&amp;err.log</output-file>',
+      );
+    });
+
+    it('does not emit more than once for late terminal transitions', () => {
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a' }));
+
+      reg.complete('a', 0, 2000);
+      reg.fail('a', 'late failure', 3000);
+      reg.cancel('a', 4000);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits until cancel() to notify after requestCancel()', () => {
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a' }));
+
+      reg.requestCancel('a');
+
+      expect(callback).not.toHaveBeenCalled();
+
+      reg.cancel('a', 2000);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      const [displayText, modelText, meta] = callback.mock.calls[0];
+      expect(displayText).toBe('Background shell "sleep 60" was cancelled.');
+      expect(modelText).toContain('<status>cancelled</status>');
+      expect(meta).toEqual({
+        shellId: 'a',
+        status: 'cancelled',
+        exitCode: undefined,
+      });
+    });
+
+    it('does not emit notifications from abortAll shutdown cleanup', () => {
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.register(makeEntry({ shellId: 'b' }));
+
+      reg.abortAll();
+
+      expect(callback).not.toHaveBeenCalled();
+      expect(reg.get('a')!.notified).toBe(false);
+      expect(reg.get('b')!.notified).toBe(false);
+    });
+  });
+
   describe('requestCancel', () => {
     it('aborts the signal but leaves status running and endTime undefined', () => {
       const reg = new BackgroundShellRegistry();
