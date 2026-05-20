@@ -341,4 +341,85 @@ describe('McpTransportPool', () => {
       expect(pool.getSnapshot().total).toBe(0);
     });
   });
+
+  describe('workspace budget integration (F2 commit 6)', () => {
+    it('refuses acquire past cap under enforce mode and records the refusal', async () => {
+      mockMcpSuccess();
+      const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
+      const onEvent = vi.fn();
+      const budget = new WorkspaceMcpBudget({
+        clientBudget: 2,
+        mode: 'enforce',
+        onEvent,
+      });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions({ budget }));
+      const r = mkSessionRegistries();
+      const cfgA = new MCPServerConfig('node', ['-a']);
+      const cfgB = new MCPServerConfig('node', ['-b']);
+      const cfgC = new MCPServerConfig('node', ['-c']);
+      await pool.acquire('srvA', cfgA, 's1', r.tools, r.prompts);
+      await pool.acquire('srvB', cfgB, 's1', r.tools, r.prompts);
+      // Third name exceeds the cap → BudgetExhaustedError.
+      await expect(
+        pool.acquire('srvC', cfgC, 's1', r.tools, r.prompts),
+      ).rejects.toThrow(/budget exhausted/i);
+      // Pool's spawn dedup is keyed by id, so the refusal records a
+      // refusal entry on the budget controller.
+      expect(budget.getRefusedServerNames()).toContain('srvC');
+    });
+
+    it('releases the slot when the only entry for a name closes', async () => {
+      mockMcpSuccess();
+      const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
+      const budget = new WorkspaceMcpBudget({
+        clientBudget: 1,
+        mode: 'enforce',
+      });
+      const pool = new McpTransportPool(
+        cliConfig,
+        mkPoolOptions({ budget, drainDelayMs: 1 }),
+      );
+      const r = mkSessionRegistries();
+      const cfg = new MCPServerConfig('node');
+      const conn = await pool.acquire('srvA', cfg, 's1', r.tools, r.prompts);
+      expect(budget.getReservedSlots()).toEqual(['srvA']);
+      conn.release();
+      // Drain timer (1ms) needs to fire to actually close the entry.
+      await vi.advanceTimersByTimeAsync(50);
+      expect(budget.getReservedSlots()).toEqual([]);
+    });
+
+    it('rolls back the slot reservation on spawn failure', async () => {
+      // Mock connect to throw → entry never reaches `markActive`,
+      // pool's `entries.delete(id)` runs in the catch block.
+      const failingClient = {
+        connect: vi.fn().mockRejectedValue(new Error('boom')),
+        disconnect: vi.fn(),
+        close: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        failingClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn().mockResolvedValue(undefined),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+      const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
+      const budget = new WorkspaceMcpBudget({
+        clientBudget: 1,
+        mode: 'enforce',
+      });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions({ budget }));
+      const r = mkSessionRegistries();
+      const cfg = new MCPServerConfig('node');
+      await expect(
+        pool.acquire('srvA', cfg, 's1', r.tools, r.prompts),
+      ).rejects.toThrow();
+      // The slot was reserved pre-spawn, then released because spawn
+      // failed and no other entry holds the name. A subsequent
+      // acquire should succeed without hitting the cap.
+      expect(budget.getReservedSlots()).toEqual([]);
+    });
+  });
 });

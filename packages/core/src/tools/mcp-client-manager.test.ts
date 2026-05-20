@@ -42,6 +42,12 @@ describe('McpClientManager', () => {
     const fakePool = {
       acquire: acquireSpy,
       releaseSession: vi.fn(),
+      // F2 (#4175 commit 6): pool exposes `getBudget()` so the
+      // manager's `discoverAllMcpToolsViaPool` can bracket the pass
+      // with `beginBulkPass` / `endBulkPass`. The fake returns
+      // undefined to disable the bulk-pass scope (no budget is
+      // wired in this test path).
+      getBudget: vi.fn().mockReturnValue(undefined),
     } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
     const mockConfig = {
       isTrustedFolder: () => true,

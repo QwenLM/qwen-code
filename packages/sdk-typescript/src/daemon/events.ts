@@ -178,6 +178,17 @@ export interface DaemonMcpBudgetWarningData {
   budget: number;
   thresholdRatio: 0.75;
   mode: 'warn' | 'enforce';
+  /**
+   * F2 (#4175 commit 6): scope of the budget event. Absent on
+   * pre-F2 daemons (means `'session'`) and on F2 daemons running with
+   * `--no-mcp-pool` or without a configured budget. `'workspace'`
+   * indicates the event was fired by the pool's
+   * `WorkspaceMcpBudget` and fanned out simultaneously to every
+   * attached session — so the SDK reducer's `mcpBudgetWarningCount`
+   * will increment in lockstep across all sessions on this
+   * connection. Use `isWorkspaceScopedBudgetEvent` to branch.
+   */
+  scope?: 'workspace' | 'session';
   [key: string]: unknown;
 }
 
@@ -207,6 +218,17 @@ export interface DaemonMcpChildRefusedBatchData {
   liveCount: number;
   reservedCount: number;
   mode: 'enforce';
+  /**
+   * F2 (#4175 commit 6): same `scope` semantics as
+   * `DaemonMcpBudgetWarningData.scope`. Absent on pre-F2 daemons
+   * (means `'session'`); `'workspace'` when fired by the pool's
+   * workspace-scoped budget. Workspace-scoped refused_batch events
+   * fan out to every attached session, so SDK consumers tracking
+   * refusal counts across sessions on the same connection should
+   * gate on `scope` when reconciling event-driven state with the
+   * snapshot route's `refusedServerNames`.
+   */
+  scope?: 'workspace' | 'session';
   [key: string]: unknown;
 }
 
@@ -754,6 +776,33 @@ export function isDaemonEventType<TType extends KnownDaemonEvent['type']>(
 ): event is Extract<KnownDaemonEvent, { type: TType }> {
   const known = asKnownDaemonEvent(event);
   return known?.type === type;
+}
+
+/**
+ * F2 (#4175 commit 6): branch on whether an MCP guardrail event is
+ * scoped to the entire workspace (one shared budget across all
+ * sessions on this daemon's connection) or per-session (legacy PR 14
+ * v1 path; one budget per ACP child). SDK reducers maintain a single
+ * counter (`mcpBudgetWarningCount` / `mcpChildRefusedBatchCount`)
+ * regardless of scope, but UI consumers rendering "this workspace
+ * just hit budget pressure" vs "this session just got refused" can
+ * use this helper to disambiguate.
+ *
+ * Returns `true` only when the event carries an explicit
+ * `scope === 'workspace'`. Pre-F2 daemons and F2 daemons running
+ * with `--no-mcp-pool` / no configured budget keep the field absent
+ * (semantically `'session'`); this helper returns `false` for both
+ * cases so existing UI logic ("treat all events as per-session")
+ * keeps working without a code change.
+ *
+ * Accepts both `mcp_budget_warning` and `mcp_child_refused_batch`
+ * data shapes — the only two events that carry the `scope` field
+ * today.
+ */
+export function isWorkspaceScopedBudgetEvent(
+  data: DaemonMcpBudgetWarningData | DaemonMcpChildRefusedBatchData,
+): boolean {
+  return data.scope === 'workspace';
 }
 
 export function asKnownDaemonEvent(

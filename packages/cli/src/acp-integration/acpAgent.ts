@@ -24,12 +24,15 @@ import {
   McpTransportPool,
   POOLED_TRANSPORTS_DEFAULT,
   SessionEndReason,
+  WorkspaceMcpBudget,
 } from '@qwen-code/qwen-code-core';
 import type {
   ApprovalMode,
   Config,
   ConversationRecord,
   DeviceAuthorizationData,
+  McpBudgetEvent,
+  McpBudgetMode,
   McpTransportKind,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -384,6 +387,54 @@ function parsePoolDrainMs(envValue: string | undefined): number {
   return Math.min(600_000, Math.max(1_000, n));
 }
 
+/**
+ * F2 (#4175 commit 6): construct the workspace-scoped MCP budget
+ * controller from the daemon's env vars (`QWEN_SERVE_MCP_CLIENT_BUDGET`,
+ * `QWEN_SERVE_MCP_BUDGET_MODE`). Returns `undefined` when budget is
+ * unset OR resolves to `off` mode — both signal "no enforcement", and
+ * the pool's snapshot path should treat the controller as absent so
+ * the legacy per-session cell shape remains. Mirrors
+ * `McpClientManager`'s constructor-time budget resolution to keep
+ * env-var behavior identical between pool and non-pool modes.
+ *
+ * The pool is responsible for invoking `tryReserve`/`release`; this
+ * helper just produces the controller and wires the event callback.
+ * `onEvent` is invoked with the workspace-scoped budget event; the
+ * callback (typically `QwenAgent.broadcastBudgetEvent`) fans it out
+ * to every attached session.
+ */
+function createWorkspaceMcpBudget(
+  onEvent: (event: McpBudgetEvent) => void,
+): WorkspaceMcpBudget | undefined {
+  const rawBudget = process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+  const rawMode = process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
+  const budget =
+    rawBudget !== undefined && rawBudget !== ''
+      ? Number.parseInt(rawBudget, 10)
+      : undefined;
+  const mode: McpBudgetMode = (() => {
+    if (rawMode === 'enforce' || rawMode === 'warn' || rawMode === 'off') {
+      return rawMode;
+    }
+    return budget !== undefined && Number.isFinite(budget) && budget > 0
+      ? 'warn'
+      : 'off';
+  })();
+  if (
+    mode === 'off' ||
+    budget === undefined ||
+    !Number.isFinite(budget) ||
+    budget <= 0
+  ) {
+    return undefined;
+  }
+  return new WorkspaceMcpBudget({
+    clientBudget: budget,
+    mode,
+    onEvent,
+  });
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
@@ -404,6 +455,16 @@ class QwenAgent implements Agent {
    * Pool is workspace-bound via `this.config.getWorkspaceContext()`.
    */
   private readonly mcpPool?: McpTransportPool;
+
+  /**
+   * F2 (#4175 commit 6): workspace-scoped MCP budget controller.
+   * Constructed alongside `mcpPool` when `--mcp-client-budget=N` is
+   * configured. Pool delegates `tryReserve` / `release` to this
+   * controller so the cap caps the workspace, not each session.
+   * `undefined` when no budget is configured OR when the pool kill
+   * switch is on.
+   */
+  private readonly workspaceMcpBudget?: WorkspaceMcpBudget;
 
   getActiveSessions(): Session[] {
     return [...this.sessions.values()];
@@ -448,7 +509,23 @@ class QwenAgent implements Agent {
     // `--no-mcp-pool` is passed at daemon startup.
     if (process.env['QWEN_SERVE_NO_MCP_POOL'] === '1') {
       this.mcpPool = undefined;
+      this.workspaceMcpBudget = undefined;
     } else {
+      // F2 (#4175 commit 6): construct the workspace-scoped budget
+      // controller when `--mcp-client-budget=N` was set at boot. The
+      // ACP child receives the value via env var (set by the daemon
+      // parent in `runQwenServe.ts`), the same path the pre-F2
+      // per-session McpClientManager reads from. With the pool
+      // active, this controller's accounting REPLACES per-session
+      // copies — 4 sessions × budget=2 caps the workspace at 2,
+      // not 8 (per design §11). Budget event delivery uses
+      // `broadcastBudgetEvent` to fan out to every attached session
+      // via SSE notifications; if no sessions are attached at fire
+      // time, the event is dropped (snapshot still carries the
+      // hysteresis state for clients that reconnect).
+      this.workspaceMcpBudget = createWorkspaceMcpBudget((event) => {
+        this.broadcastBudgetEvent(event);
+      });
       this.mcpPool = new McpTransportPool(this.config, {
         workspaceContext: this.config.getWorkspaceContext(),
         debugMode: this.config.getDebugMode(),
@@ -464,7 +541,56 @@ class QwenAgent implements Agent {
         drainDelayMs: parsePoolDrainMs(
           process.env['QWEN_SERVE_MCP_POOL_DRAIN_MS'],
         ),
+        budget: this.workspaceMcpBudget,
       });
+    }
+  }
+
+  /**
+   * F2 (#4175 commit 6): expose pool's workspace-scoped budget
+   * controller for snapshot builders. Returns `undefined` when the
+   * pool is disabled (`QWEN_SERVE_NO_MCP_POOL=1`) OR no
+   * `--mcp-client-budget` was configured (controller not constructed).
+   */
+  getWorkspaceMcpBudget(): WorkspaceMcpBudget | undefined {
+    return this.workspaceMcpBudget;
+  }
+
+  /**
+   * F2 (#4175 commit 6): fan-out a workspace-scoped MCP budget event
+   * to every active session's SSE bus. Replaces the per-session
+   * `setMcpBudgetEventCallback` wiring in `newSessionConfig` for
+   * pool-mode daemons — the pool's `WorkspaceMcpBudget` fires once,
+   * this method sends one `extNotification` per attached session.
+   * Each notification is independently fire-and-forget (a mid-flight
+   * ACP disconnect on one session must not sink delivery to siblings).
+   */
+  private broadcastBudgetEvent(event: McpBudgetEvent): void {
+    // The QwenAgent's `this.connection` is the single ACP channel to
+    // the daemon. The daemon's bridge `bridgeClient.extNotification`
+    // resolves the per-session SSE bus from the `sessionId` field of
+    // each notification — so we send N notifications (one per active
+    // session id) over the same connection. Each notification is
+    // independently fire-and-forget; a mid-flight ACP disconnect
+    // shouldn't sink delivery to siblings.
+    for (const sid of this.sessions.keys()) {
+      void this.connection
+        .extNotification('qwen/notify/session/mcp-budget-event', {
+          v: 1,
+          sessionId: sid,
+          // F2 (#4175 commit 6): tag every workspace-scoped event so
+          // SDK reducers can branch via `isWorkspaceScopedBudgetEvent`.
+          // Per-session legacy events keep `scope` absent (means
+          // 'session'), preserving the additive-protocol contract.
+          scope: 'workspace' as const,
+          ...event,
+        })
+        .catch((err: unknown) => {
+          debugLogger.debug(
+            `MCP workspace budget event delivery to session ${sid} failed ` +
+              `(kind=${event.kind}): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
     }
   }
 
@@ -888,32 +1014,50 @@ class QwenAgent implements Agent {
       // `getToolRegistry()` and `getMcpClientManager()` are best-effort
       // — older test stubs or partially-initialized configs may not
       // expose them; in that case we fall back to "no budget surface".
+      //
+      // F2 (#4175 commit 6): when the workspace-scoped budget
+      // controller is active, prefer its accounting — clientCount /
+      // clientBudget / budgetMode come from the workspace budget
+      // (one cap across all sessions) and the snapshot cell carries
+      // `scope: 'workspace'`. Manager fall-back keeps the legacy
+      // per-session cell shape for daemons without a configured
+      // budget OR with the kill switch on.
       let clientCount: number | undefined;
       let clientBudget: number | undefined;
       let budgetMode: ServeMcpBudgetMode | undefined;
       let refusedSet: ReadonlySet<string> = new Set<string>();
-      try {
-        const manager = config.getToolRegistry()?.getMcpClientManager();
-        if (manager) {
-          const accounting = manager.getMcpClientAccounting();
-          clientCount = accounting.total;
-          clientBudget = manager.getMcpClientBudget();
-          budgetMode = manager.getMcpBudgetMode();
-          refusedSet = new Set(accounting.refusedServerNames);
+      let budgetCellScope: 'workspace' | 'session' = 'session';
+      const wsBudget = this.workspaceMcpBudget;
+      if (wsBudget !== undefined) {
+        budgetCellScope = 'workspace';
+        clientCount = wsBudget.getReservedCount();
+        clientBudget = wsBudget.getBudget();
+        budgetMode = this.coerceBudgetMode(wsBudget.getMode());
+        refusedSet = new Set(wsBudget.getRefusedServerNames());
+      } else {
+        try {
+          const manager = config.getToolRegistry()?.getMcpClientManager();
+          if (manager) {
+            const accounting = manager.getMcpClientAccounting();
+            clientCount = accounting.total;
+            clientBudget = manager.getMcpClientBudget();
+            budgetMode = manager.getMcpBudgetMode();
+            refusedSet = new Set(accounting.refusedServerNames);
+          }
+        } catch (err) {
+          // Accounting failure must not crash the snapshot — the per-
+          // server data is still useful even without budget overlay.
+          // PR 14 fix (review #4247 wenshao S7a): bumped from
+          // `debugLogger.debug` to stderr `process.stderr.write` so a
+          // production daemon emits a visible warning when accounting
+          // breaks. `debugLogger.debug` is gated on the operator
+          // having set debug=true, which makes silent slot-leak / type-
+          // mismatch failures invisible in real deployments.
+          process.stderr.write(
+            `qwen serve: getMcpClientAccounting failed: ` +
+              `${err instanceof Error ? err.message : String(err)}\n`,
+          );
         }
-      } catch (err) {
-        // Accounting failure must not crash the snapshot — the per-
-        // server data is still useful even without budget overlay.
-        // PR 14 fix (review #4247 wenshao S7a): bumped from
-        // `debugLogger.debug` to stderr `process.stderr.write` so a
-        // production daemon emits a visible warning when accounting
-        // breaks. `debugLogger.debug` is gated on the operator
-        // having set debug=true, which makes silent slot-leak / type-
-        // mismatch failures invisible in real deployments.
-        process.stderr.write(
-          `qwen serve: getMcpClientAccounting failed: ` +
-            `${err instanceof Error ? err.message : String(err)}\n`,
-        );
       }
 
       return {
@@ -1011,6 +1155,7 @@ class QwenAgent implements Agent {
                 Array.from(refusedSet).filter(
                   (n) => !config.isMcpServerDisabled(n),
                 ).length,
+                budgetCellScope,
               ),
             }
           : {}),
@@ -1060,6 +1205,7 @@ class QwenAgent implements Agent {
     budget: number | undefined,
     mode: ServeMcpBudgetMode,
     refusedCount: number,
+    scope: 'workspace' | 'session' = 'session',
   ): ServeMcpBudgetStatusCell[] {
     // PR 14 fix (review #4247): when no `--mcp-client-budget` is
     // configured the manager resolves to `mode: 'off'`. The protocol
@@ -1091,12 +1237,14 @@ class QwenAgent implements Agent {
     }
     const cell: ServeMcpBudgetStatusCell = {
       kind: 'mcp_budget',
-      // PR 14 v1: per-session, not per-workspace. Each ACP session has
-      // its own `Config`/`McpClientManager` (via `newSessionConfig`)
-      // and reads `QWEN_SERVE_MCP_CLIENT_BUDGET` independently.
-      // Snapshot shows the bootstrap session's view. Wave 5 PR 23
-      // shared MCP pool will graduate this to `'workspace'`.
-      scope: 'session',
+      // F2 (#4175 commit 6): `scope` graduates from 'session' to
+      // 'workspace' when `QwenAgent.workspaceMcpBudget` is active —
+      // the cap covers the whole workspace, not each ACP session
+      // independently. Daemons running with `--no-mcp-pool` or with
+      // budget unset keep the legacy `'session'` scope. SDK consumers
+      // narrow via `isWorkspaceScopedBudgetEvent` for events; the
+      // snapshot route surfaces the same `scope` value here.
+      scope,
       status,
       liveCount,
       mode,
@@ -1106,6 +1254,18 @@ class QwenAgent implements Agent {
     if (errorKind) cell.errorKind = errorKind;
     if (hint) cell.hint = hint;
     return [cell];
+  }
+
+  /**
+   * F2 (#4175 commit 6): map the core `McpBudgetMode` enum to the
+   * status protocol's `ServeMcpBudgetMode`. The two are wire-compat
+   * 1:1 today (`'enforce' | 'warn' | 'off'`); this helper exists so
+   * a future divergence (e.g. an `'audit'` mode added on the core
+   * side before the protocol catches up) doesn't break the snapshot
+   * builder via a TS structural-narrowing surprise.
+   */
+  private coerceBudgetMode(mode: McpBudgetMode): ServeMcpBudgetMode {
+    return mode;
   }
 
   private errorCell(
@@ -2217,7 +2377,19 @@ class QwenAgent implements Agent {
       typeof config.getSessionId === 'function'
         ? config.getSessionId()
         : undefined;
+    // F2 (#4175 commit 6): when the workspace-scoped budget controller
+    // is active, the pool's `WorkspaceMcpBudget` fires events at
+    // workspace level and `broadcastBudgetEvent` fans them to every
+    // attached session. Skipping the per-session manager callback
+    // here prevents double-firing (manager's inline state machine is
+    // dormant in pool mode anyway, but defensively skipping the
+    // callback also avoids any future wiring that might re-activate
+    // it). Daemons without a configured budget — or running with the
+    // pool kill switch — keep the per-session callback so legacy
+    // `scope: 'session'` events still fan out via the ACP child path.
+    const skipPerSessionBudgetCallback = this.workspaceMcpBudget !== undefined;
     if (
+      !skipPerSessionBudgetCallback &&
       typeof config.setMcpBudgetEventCallback === 'function' &&
       wiredSessionId !== undefined
     ) {

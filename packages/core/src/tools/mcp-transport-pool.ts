@@ -29,6 +29,12 @@ import { SessionMcpView } from './session-mcp-view.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ToolRegistry } from './tool-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import type { WorkspaceMcpBudget } from './mcp-workspace-budget.js';
+// F2 (#4175 commit 6): same `BudgetExhaustedError` thrown by the
+// per-session McpClientManager, re-used at the pool's acquire site
+// so SDK consumers see the same error class regardless of which path
+// (manager or pool) actually enforced the cap.
+import { BudgetExhaustedError } from './mcp-client-manager.js';
 
 const debugLogger = createDebugLogger('McpPool');
 
@@ -53,6 +59,18 @@ export interface McpTransportPoolOptions {
   drainDelayMs?: number;
   /** Override per-entry options (rare; usually defaults are sufficient). */
   entryOptions?: (transport: McpTransportKind) => PoolEntryOptions;
+  /**
+   * F2 (#4175 commit 6): optional workspace-scoped budget controller.
+   * When present, pool's `acquire` consults `tryReserve` pre-spawn
+   * (refused → `BudgetExhaustedError` after `recordRefusal`) and
+   * pool releases the slot when an entry transitions to `closed`
+   * with no sibling entry sharing the same `serverName`. Absent →
+   * pool runs unbounded (the per-session `McpClientManager`'s budget
+   * machinery is dormant in pool mode anyway, so absent here means
+   * "no enforcement at all" — operators get this when
+   * `--mcp-client-budget` was not configured).
+   */
+  budget?: WorkspaceMcpBudget;
 }
 
 /**
@@ -98,9 +116,10 @@ export class McpTransportPool {
    */
   private readonly nextIndexByName = new Map<string, number>();
   private readonly opts: Required<
-    Omit<McpTransportPoolOptions, 'sendSdkMcpMessage'>
+    Omit<McpTransportPoolOptions, 'sendSdkMcpMessage' | 'budget'>
   > & {
     sendSdkMcpMessage?: SendSdkMcpMessage;
+    budget?: WorkspaceMcpBudget;
   };
 
   /**
@@ -120,7 +139,17 @@ export class McpTransportPool {
       pooledTransports: options.pooledTransports ?? POOLED_TRANSPORTS_DEFAULT,
       drainDelayMs: options.drainDelayMs ?? 30_000,
       entryOptions: options.entryOptions ?? defaultPoolEntryOptions,
+      budget: options.budget,
     };
+  }
+
+  /**
+   * F2 (#4175 commit 6): expose the budget controller for snapshot
+   * builders + status routes. Returns `undefined` when no budget was
+   * configured at boot (operator omitted `--mcp-client-budget`).
+   */
+  getBudget(): WorkspaceMcpBudget | undefined {
+    return this.opts.budget;
   }
 
   /**
@@ -177,13 +206,55 @@ export class McpTransportPool {
       });
     }
 
+    // F2 (#4175 commit 6): workspace budget check pre-spawn. The
+    // budget reserves by NAME (not ConnectionId) so divergent
+    // fingerprints for the same name share one slot — matches PR 14
+    // v1's "configured server slots" semantic. Same-name spawn
+    // already in flight is gated by `spawnInFlight` below; this
+    // guard catches the case where a NEW name would push past the
+    // cap. Refused under enforce mode → record + throw
+    // BudgetExhaustedError so the caller (`McpClientManager.discoverAllMcpToolsViaPool`)
+    // can surface the refusal in its standard catch path.
+    if (this.opts.budget !== undefined) {
+      const reservation = this.opts.budget.tryReserve(serverName);
+      if (reservation === 'refused') {
+        const transport = mcpTransportOf(cfg);
+        this.opts.budget.recordRefusal(serverName, transport);
+        throw new BudgetExhaustedError(
+          serverName,
+          this.opts.budget.getBudget() ?? 0,
+          this.opts.budget.getReservedCount(),
+        );
+      }
+      // 'reserved' or 'already_held' both proceed — `already_held`
+      // means same-name divergent-fingerprint or a reconnect-after-
+      // drain. Either way no slot is newly consumed.
+    }
+
     // In-flight path: another acquire for the same key is already
     // spawning the entry. Await its completion, then attach.
     let inFlight = this.spawnInFlight.get(id);
     if (!inFlight) {
-      inFlight = this.spawnEntry(serverName, cfg, id).finally(() => {
-        this.spawnInFlight.delete(id);
-      });
+      inFlight = this.spawnEntry(serverName, cfg, id)
+        .catch((err) => {
+          // F2 (#4175 commit 6): roll back the slot reservation on
+          // spawn failure (V21-4) so a transient connect failure
+          // doesn't leak the slot until daemon restart.
+          if (this.opts.budget !== undefined) {
+            // Only release if no other entry for this name exists —
+            // matches the close-path bookkeeping at `entryClosed`.
+            const stillHasEntries = [...this.entries.values()].some(
+              (e) => e.serverName === serverName,
+            );
+            if (!stillHasEntries) {
+              this.opts.budget.release(serverName);
+            }
+          }
+          throw err;
+        })
+        .finally(() => {
+          this.spawnInFlight.delete(id);
+        });
       this.spawnInFlight.set(id, inFlight);
     }
     const entry = await inFlight;
@@ -475,7 +546,25 @@ export class McpTransportPool {
       client,
       this.cliConfig,
       entryOpts,
-      (closedId) => this.entries.delete(closedId),
+      // F2 (#4175 commit 6): when an entry transitions to terminal
+      // `closed` / `failed`, release its budget slot — but ONLY if
+      // no sibling entry shares the same `serverName` (multi-
+      // fingerprint case where two divergent OAuth headers spawned
+      // two entries; either entry closing alone shouldn't free the
+      // shared name's slot). The pool tracks slot ownership by
+      // NAME, mirroring `WorkspaceMcpBudget.tryReserve` semantics.
+      (closedId) => {
+        const closing = this.entries.get(closedId);
+        this.entries.delete(closedId);
+        if (closing && this.opts.budget !== undefined) {
+          const siblings = [...this.entries.values()].some(
+            (e) => e.serverName === closing.serverName,
+          );
+          if (!siblings) {
+            this.opts.budget.release(closing.serverName);
+          }
+        }
+      },
       (name) => this.aggregateStatusByName(name),
     );
 

@@ -87,6 +87,7 @@ export * from './tools/mcp-transport-pool.js';
 export * from './tools/mcp-pool-key.js';
 export * from './tools/mcp-pool-events.js';
 export * from './tools/mcp-pool-entry.js';
+export * from './tools/mcp-workspace-budget.js';
 export * from './tools/session-mcp-view.js';
 export * from './tools/mcp-tool.js';
 export * from './tools/read-file.js';

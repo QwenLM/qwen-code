@@ -1367,6 +1367,13 @@ export class McpClientManager {
   private async discoverAllMcpToolsViaPool(cliConfig: Config): Promise<void> {
     if (!this.pool) return; // unreachable; caller already gates
     this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
+    // F2 (#4175 commit 6): bracket the pass with the pool's budget
+    // bulk-pass scope so per-server BudgetExhaustedError refusals
+    // accumulate into ONE coalesced `refused_batch` event at end of
+    // pass — matches PR 14b's per-pass contract for the snapshot
+    // route AND the typed push event consumers depend on.
+    const poolBudget = this.pool.getBudget();
+    poolBudget?.beginBulkPass();
     try {
       const sessionId = this.cliConfig.getSessionId();
       const promptRegistry = this.cliConfig.getPromptRegistry();
@@ -1458,14 +1465,29 @@ export class McpClientManager {
             // error logger; status snapshot reflects reality via the
             // global `serverStatuses` Map (pool's
             // `aggregateStatusByName` keeps it consistent).
-            debugLogger.error(
-              `Pool acquire failed for ${name}: ${getErrorMessage(err)}`,
-            );
+            //
+            // F2 (#4175 commit 6): `BudgetExhaustedError` from the
+            // pool's pre-spawn budget gate is not a "failure" — the
+            // refusal was deliberate, already recorded by the pool's
+            // `recordRefusal`, and will surface as a `refused_batch`
+            // event at end of pass. Log at debug to avoid flooding
+            // operators with one error per refused server.
+            if (err instanceof BudgetExhaustedError) {
+              debugLogger.debug(
+                `Pool refused acquire for ${name} (budget exhausted, ` +
+                  `budget=${err.budget}, reservedCount=${err.reservedCount})`,
+              );
+            } else {
+              debugLogger.error(
+                `Pool acquire failed for ${name}: ${getErrorMessage(err)}`,
+              );
+            }
           }
         },
       );
       await Promise.all(acquirePromises);
     } finally {
+      poolBudget?.endBulkPass();
       this.discoveryState = MCPDiscoveryState.COMPLETED;
       this.eventEmitter?.emit('mcp-client-update', this.clients);
     }
