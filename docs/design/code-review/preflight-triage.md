@@ -40,18 +40,50 @@
 
 ## Tier 模型
 
-按 PR 的实际审查需要分四档。每档对应**不同的执行路径**，不是"同一流程跑不同参数"。
+按 PR 的实际**影响面（blast radius）**分四档。每档对应**不同的执行路径**，不是"同一流程跑不同参数"。
 
-### 概览表
+> **关键设计原则：tier 不由 size 决定**。1000 行的文档 PR 和 5 行改 `auth/oauth.ts` 是两种完全不同的"小改动" / "大改动"。size 只是 preflight LLM 拿来做 blast-radius 判断时的一个**辅助信号**，不是 primary criterion。
 
-| Tier | 典型触发 | 是否调 LLM | 是否调 bundled skill | 目标耗时 |
+### 决策的真正维度（blast radius）
+
+preflight LLM 看 PR diff，对以下维度打布尔分：
+
+| 维度 | 描述 |
+| --- | --- |
+| `user_facing` | 改动是否会被终端用户感知（CLI 输出、API 行为、文案）|
+| `security_sensitive` | 是否触及 auth / secrets / 权限 / 加密 / 输入校验 |
+| `public_api` | 是否改 npm 包导出 / SDK 公开 API / CLI flag 签名 |
+| `build_or_release` | 是否改构建 / 发布 / CI / 部署管道 |
+| `data_path` | 是否改持久化层 / schema / migration / 数据格式 |
+
+加上影响面**广度**信号（跨多少 module / package、是否触及 hot code path），preflight LLM 综合判 tier。
+
+### Tier 概览表
+
+| Tier | 典型 blast radius 画像 | 是否调 LLM | 是否调 bundled skill | 目标耗时 |
 | --- | --- | --- | --- | --- |
-| **ULTRA_LIGHT** | docs-only / lockfile / 仅 CI 配置 + 行数 ≤ 30 | 否（仅 preflight 本身那次） | 否 | ~30s–1 min |
-| **LIGHT** | 单模块 + 行数 ≤ 100 + 无 high-risk path | 1 次单发 | 否 | ~1–2 min |
-| **STANDARD** | 中等改动 ≤ 500 行 + 最多 1–2 类影响面 | 1 次单发（带结构化清单） | 否（除非 maintainer override） | ~3–6 min |
-| **DEEP** | 任一 high-risk 信号 / > 500 行 / `@qwen /review --deep` | 多次（agent fan-out） | 是 | ~10–25 min |
+| **ULTRA_LIGHT** | 几乎为 0：纯文档 / lockfile / 单测 fixture / formatting-only / 不影响运行时的资源文件 | 否（preflight 本身那次不算）| 否 | ~30s–1 min |
+| **LIGHT** | 低且本地：单模块、不导出、无 security/release/API 信号、无跨文件影响 | 1 次单发 | 否 | ~1–2 min |
+| **STANDARD** | 中等：跨多文件 / 同 package 内多模块 / 改了内部 API、但不触及上面 5 个 high-risk 维度 | 1 次单发（带结构化清单） | 否（除非 maintainer override） | ~3–6 min |
+| **DEEP** | 任一 high-risk 维度 = true OR 大幅跨 package 影响 OR `@qwen /review --deep` | 多次（agent fan-out） | 是 | ~10–25 min |
+
+> Size 在这个表里**不出现**。它只是 preflight LLM 拿到的输入信号之一。判定逻辑完全在 LLM + hard rule，不靠"size > N 自动升档"这种粗暴规则。
+>
+> 唯一例外：`size > 1500` 仍维持现有 size-gate 拒评（防止 PR 失控太大根本没法 review），但这是**预防滥用**，不是 tier 路由。
 
 > Tier 名称是稳定 contract，对外（CI summary、`@qwen /review --tier=...`）都用这些字符串。
+
+### 反例：纯 size 路由会错判什么
+
+| PR 描述 | 纯 size 路由会判 | 真实 blast radius | 正确 tier |
+| --- | --- | --- | --- |
+| 1000 行新增 `docs/users/*.md` | DEEP（>500） | 0 | ULTRA_LIGHT |
+| 800 行 `package-lock.json` 更新 | DEEP | 0 | ULTRA_LIGHT |
+| 100 行 refactor `packages/core/src/auth/oauth.ts` | LIGHT | 极高（security）| DEEP |
+| 30 行改 `.github/workflows/release.yml` | ULTRA_LIGHT | 高（CI/CD）| STANDARD（hard rule 兜底）|
+| 200 行改 `packages/cli/src/commands/foo.ts` 一个内部模块 | LIGHT | 中等 | STANDARD |
+
+这就是为什么 preflight **必须用 LLM 而不是纯 shell** —— LLM 看 diff 内容能判别这些区别，shell 看 size 不行。
 
 ### 设计要点（与上一版的差别）
 
