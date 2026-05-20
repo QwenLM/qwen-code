@@ -1348,6 +1348,18 @@ export class WebViewProvider {
         );
       }
     };
+    // Tear down an agent left holding rejected/partial credentials in memory
+    // so a subsequent chat message doesn't hit a stale-credential error that
+    // looks unrelated to this auth failure; the next /auth reconnects clean.
+    const disconnectStaleAgent = () => {
+      if (!this.agentInitialized) return;
+      try {
+        this.agentManager.disconnect();
+      } catch (e) {
+        console.log('[WebViewProvider] Error disconnecting after rollback:', e);
+      }
+      this.agentInitialized = false;
+    };
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
@@ -1378,23 +1390,10 @@ export class WebViewProvider {
         });
       } else {
         // Auth failed against the live backend — roll the bad credentials
-        // back off disk so a restart doesn't keep retrying them.
+        // back off disk so a restart doesn't keep retrying them, and tear
+        // down the agent still holding the rejected key in memory.
         safeRollback();
-        // The agent process spawned above is still connected with the
-        // rejected key in memory. Disconnect it so a subsequent chat
-        // message doesn't hit a stale-credential error that looks unrelated
-        // to this auth failure; the next /auth attempt reconnects cleanly.
-        if (this.agentInitialized) {
-          try {
-            this.agentManager.disconnect();
-          } catch (e) {
-            console.log(
-              '[WebViewProvider] Error disconnecting after rollback:',
-              e,
-            );
-          }
-          this.agentInitialized = false;
-        }
+        disconnectStaleAgent();
         this.sendMessageToWebView({
           type: 'authError',
           data: {
@@ -1411,7 +1410,12 @@ export class WebViewProvider {
       // linger. (Redundant but harmless if the plan's own rollback already
       // ran: it just rewrites the same pre-state.) safeRollback swallows a
       // rollback throw so it can't pre-empt the authError message below.
+      // doInitializeAgentConnection may have partially initialized the agent
+      // (agentInitialized=true) before throwing, so disconnect it too —
+      // mirrors the else-branch so a half-connected stale-credential agent
+      // doesn't linger.
       safeRollback();
+      disconnectStaleAgent();
       this.sendMessageToWebView({
         type: 'authError',
         data: { message: `Configuration failed: ${errorMsg}` },

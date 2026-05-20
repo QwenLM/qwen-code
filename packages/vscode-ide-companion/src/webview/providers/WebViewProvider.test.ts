@@ -1855,7 +1855,7 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
     );
   });
 
-  it('rolls back + reports authError when doInitializeAgentConnection throws (outer catch)', async () => {
+  it('rolls back + disconnects + reports authError when doInitializeAgentConnection throws (outer catch)', async () => {
     // The outer catch handles unexpected exceptions (disk errors, partial
     // writes) — the path where rollback is most likely to also be needed.
     const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
@@ -1865,11 +1865,19 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
     const sendToWebView = (
       provider as unknown as { sendMessageToWebView: ReturnType<typeof vi.fn> }
     ).sendMessageToWebView;
+    const disconnect = vi.fn();
+    (
+      provider as unknown as { agentManager: { disconnect: () => void } }
+    ).agentManager = { disconnect } as never;
     (
       provider as unknown as {
         doInitializeAgentConnection: () => Promise<void>;
       }
     ).doInitializeAgentConnection = vi.fn(async () => {
+      // Partial init: agent process spawned (agentInitialized=true) then a
+      // post-connect step throws.
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized =
+        true;
       throw new Error('disk exploded mid-reconnect');
     });
 
@@ -1881,9 +1889,14 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
       ).handleAuthInteractive(providerConfig, inputs),
     ).resolves.toBeUndefined();
 
-    // (1) snapshot restored, (2) authError with "Configuration failed",
-    // (3) resolved without throwing (asserted above).
+    // (1) snapshot restored, (2) the half-connected stale-credential agent is
+    // torn down, (3) authError with "Configuration failed", (4) resolved
+    // without throwing (asserted above).
     expect(mockRestoreSettingsSnapshot).toHaveBeenCalledWith(snapshot);
+    expect(disconnect).toHaveBeenCalled();
+    expect(
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized,
+    ).toBe(false);
     expect(sendToWebView).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'authError',
