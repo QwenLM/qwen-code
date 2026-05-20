@@ -1045,9 +1045,12 @@ export default {
   'Switch the model for this session (--default to persist, --fast for suggestion model).':
     'Switch the model for this session (--default to persist, --fast for suggestion model).',
   'Default model': 'Default model',
+  'session only': 'session only',
   'Persist the selected model as the default':
     'Persist the selected model as the default',
   'Usage: /model --default <model-id>': 'Usage: /model --default <model-id>',
+  'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
+    'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Set a lighter model for prompt suggestions and speculative execution',
   'Content generator configuration not available.':

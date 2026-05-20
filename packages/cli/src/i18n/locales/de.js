@@ -1902,6 +1902,16 @@ export default {
   'Ref:': 'Referenz:',
   'Skills:': 'Fähigkeiten:',
   remote: 'entfernt',
+  'Switch the model for this session (--default to persist, --fast for suggestion model).':
+    'Modell für diese Sitzung wechseln (--default zum Speichern, --fast für das Vorschlagsmodell).',
+  'Default model': 'Standardmodell',
+  'session only': 'nur diese Sitzung',
+  'Persist the selected model as the default':
+    'Ausgewähltes Modell als Standard speichern',
+  'Usage: /model --default <model-id>':
+    'Verwendung: /model --default <modell-id>',
+  'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
+    'Aktuelles Modell: {{model}}\nVerwenden Sie "/model <model-id>", um das Modell zu wechseln (nur diese Sitzung), "/model --default <model-id>" zum Speichern oder "/model --fast <model-id>" zum Festlegen des schnellen Modells.',
   '中国 (China)': 'China',
   '中国 (China) - 阿里云百炼': 'China - 阿里云百炼',
 };

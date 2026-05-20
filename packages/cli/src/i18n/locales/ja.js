@@ -1667,6 +1667,15 @@ export default {
   // === Same-as-English optimization ===
   ' (not in model registry)': '（モデルレジストリにありません）',
   'Attribution: commit': 'コミットの帰属表示',
+  'Switch the model for this session (--default to persist, --fast for suggestion model).':
+    'このセッションのモデルを切り替えます（--default で永続化、--fast で提案モデルを設定）。',
+  'Default model': 'デフォルトモデル',
+  'session only': 'このセッションのみ',
+  'Persist the selected model as the default':
+    '選択したモデルをデフォルトとして保存',
+  'Usage: /model --default <model-id>': '使い方: /model --default <model-id>',
+  'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
+    '現在のモデル: {{model}}\n"/model <model-id>" でモデルを切り替え（このセッションのみ）、"/model --default <model-id>" で保存、"/model --fast <model-id>" で高速モデルを設定します。',
   '中国 (China)': '中国',
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
 };

@@ -1878,6 +1878,16 @@ export default {
   // === Same-as-English optimization ===
   ' (not in model registry)': ' (не в реестре моделей)',
   'start server': 'запустить сервер',
+  'Switch the model for this session (--default to persist, --fast for suggestion model).':
+    'Переключить модель для этой сессии (--default для сохранения, --fast для модели подсказок).',
+  'Default model': 'Модель по умолчанию',
+  'session only': 'только эта сессия',
+  'Persist the selected model as the default':
+    'Сохранить выбранную модель как модель по умолчанию',
+  'Usage: /model --default <model-id>':
+    'Использование: /model --default <model-id>',
+  'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
+    'Текущая модель: {{model}}\nИспользуйте "/model <model-id>" для переключения модели (только эта сессия), "/model --default <model-id>" для сохранения или "/model --fast <model-id>" для быстрой модели.',
   '中国 (China)': 'Китай',
   '中国 (China) - 阿里云百炼': 'Китай - 阿里云百炼',
 };

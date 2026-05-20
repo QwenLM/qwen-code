@@ -889,8 +889,11 @@ export default {
   'Switch the model for this session (--default to persist, --fast for suggestion model).':
     '切換此會話的模型（--default 可持久化，--fast 可設置建議模型）',
   'Default model': '預設模型',
+  'session only': '僅此會話',
   'Persist the selected model as the default': '將所選模型持久化為預設模型',
   'Usage: /model --default <model-id>': '用法：/model --default <模型 ID>',
+  'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
+    '目前模型：{{model}}\n使用 "/model <model-id>" 切換模型（僅此會話），使用 "/model --default <model-id>" 持久化，或使用 "/model --fast <model-id>" 設定快速模型。',
   'Set a lighter model for prompt suggestions and speculative execution':
     '設置用於輸入建議和推測執行的輕量模型',
   'Content generator configuration not available.': '內容生成器配置不可用',

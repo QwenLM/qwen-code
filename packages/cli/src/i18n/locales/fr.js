@@ -1896,5 +1896,15 @@ export default {
   Auto: 'Automatique',
   Tokens: 'Jetons',
   tokens: 'jetons',
+  'Switch the model for this session (--default to persist, --fast for suggestion model).':
+    'Changer le modèle pour cette session (--default pour persister, --fast pour le modèle de suggestion).',
+  'Default model': 'Modèle par défaut',
+  'session only': 'session uniquement',
+  'Persist the selected model as the default':
+    'Persister le modèle sélectionné comme modèle par défaut',
+  'Usage: /model --default <model-id>':
+    'Utilisation : /model --default <id-modèle>',
+  'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
+    'Modèle actuel : {{model}}\nUtilisez "/model <model-id>" pour changer de modèle (session uniquement), "/model --default <model-id>" pour le persister, ou "/model --fast <model-id>" pour définir le modèle rapide.',
   '中国 (China)': 'Chine',
 };

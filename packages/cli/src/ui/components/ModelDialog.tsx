@@ -108,7 +108,7 @@ function persistAuthTypeSelection(
   settings.setValue(scope, 'security.auth.selectedType', authType);
 }
 
-interface HandleModelSwitchSuccessParams {
+interface LogModelSwitchResultParams {
   uiState: UIState | null;
   after: ContentGeneratorConfig | undefined;
   effectiveAuthType: AuthType | undefined;
@@ -116,13 +116,13 @@ interface HandleModelSwitchSuccessParams {
   isRuntime: boolean;
 }
 
-function handleModelSwitchSuccess({
+function logModelSwitchResult({
   uiState,
   after,
   effectiveAuthType,
   effectiveModelId,
   isRuntime,
-}: HandleModelSwitchSuccessParams): void {
+}: LogModelSwitchResultParams): void {
   const baseUrl = after?.baseUrl ?? t('(default)');
   const maskedKey = maskApiKey(after?.apiKey);
   uiState?.historyManager.addItem(
@@ -448,9 +448,12 @@ export function ModelDialog({
           } catch (e) {
             const baseErrorMessage = e instanceof Error ? e.message : String(e);
             setErrorMessage(
-              `Failed to set default model to '${highlightedEntry.model.id}'.\n\n${baseErrorMessage}`,
+              `Switched to '${highlightedEntry.model.id}' for this session, but failed to persist as default.\n\n${baseErrorMessage}`,
             );
+            return;
           }
+
+          onClose();
         })();
       }
     },
@@ -568,7 +571,7 @@ export function ModelDialog({
         return;
       }
 
-      handleModelSwitchSuccess({
+      logModelSwitchResult({
         uiState,
         after,
         effectiveAuthType,

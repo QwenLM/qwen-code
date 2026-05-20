@@ -1858,6 +1858,15 @@ export default {
   'Manage extension settings': 'Gestionar la configuració de les extensions',
   'Desc:': 'Descripció:',
   'Ref:': 'Referència:',
+  'Switch the model for this session (--default to persist, --fast for suggestion model).':
+    "Canvia el model d'aquesta sessió (--default per persistir, --fast per al model de suggeriments).",
+  'Default model': 'Model predeterminat',
+  'session only': 'només aquesta sessió',
+  'Persist the selected model as the default':
+    'Persistir el model seleccionat com a predeterminat',
+  'Usage: /model --default <model-id>': 'Ús: /model --default <id-del-model>',
+  'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
+    'Model actual: {{model}}\nUseu "/model <model-id>" per canviar de model (només aquesta sessió), "/model --default <model-id>" per persistir-lo, o "/model --fast <model-id>" per definir el model ràpid.',
   '中国 (China)': 'Xina',
   '中国 (China) - 阿里云百炼': 'Xina - 阿里云百炼',
 };

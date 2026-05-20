@@ -326,7 +326,7 @@ describe('<ModelDialog />', () => {
         AuthType.USE_OPENAI,
       );
     });
-    expect(props.onClose).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
   it('blocks setting qwen-oauth as default with "d" (discontinued)', async () => {
@@ -377,6 +377,43 @@ describe('<ModelDialog />', () => {
       shift: false,
       paste: false,
       sequence: '\x04',
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it('ignores Meta+D for setting the highlighted model as default', () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+
+    const { props, mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType,
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'd',
+      ctrl: false,
+      meta: true,
+      shift: false,
+      paste: false,
+      sequence: 'd',
     });
 
     expect(mockSettings.setValue).not.toHaveBeenCalled();
@@ -573,7 +610,9 @@ describe('<ModelDialog />', () => {
 
     await waitFor(() => {
       expect(
-        queryByText(/Failed to set default model to 'gpt-4'/),
+        queryByText(
+          /Switched to 'gpt-4' for this session, but failed to persist as default/,
+        ),
       ).not.toBeNull();
       expect(queryByText(/Disk is read-only/)).not.toBeNull();
     });

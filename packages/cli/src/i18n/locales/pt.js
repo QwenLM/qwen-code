@@ -1889,6 +1889,15 @@ export default {
   Status: 'Estado',
   'Status:': 'Estado:',
   Use: 'Uso',
+  'Switch the model for this session (--default to persist, --fast for suggestion model).':
+    'Trocar o modelo desta sessão (--default para persistir, --fast para o modelo de sugestões).',
+  'Default model': 'Modelo padrão',
+  'session only': 'somente nesta sessão',
+  'Persist the selected model as the default':
+    'Persistir o modelo selecionado como padrão',
+  'Usage: /model --default <model-id>': 'Uso: /model --default <id-do-modelo>',
+  'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
+    'Modelo atual: {{model}}\nUse "/model <model-id>" para trocar de modelo (somente nesta sessão), "/model --default <model-id>" para persistir, ou "/model --fast <model-id>" para definir o modelo rápido.',
   '中国 (China)': 'China',
   '中国 (China) - 阿里云百炼': 'China - 阿里云百炼',
 };

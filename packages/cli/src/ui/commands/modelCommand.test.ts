@@ -183,7 +183,7 @@ describe('modelCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Model: qwen-max',
+      content: 'Model: qwen-max (session only)',
     });
   });
 
@@ -217,6 +217,11 @@ describe('modelCommand', () => {
       AuthType.USE_OPENAI,
       'gpt-4',
       undefined,
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI,
     );
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
@@ -572,7 +577,7 @@ describe('modelCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Model: gpt-4',
+      content: 'Model: gpt-4 (session only)',
     });
   });
 
@@ -757,7 +762,7 @@ describe('modelCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Model: --fast-model',
+      content: 'Model: --fast-model (session only)',
     });
   });
 

@@ -335,7 +335,8 @@ export const modelCommand: SlashCommand = {
         content:
           (isDefaultModelCommand ? t('Default model') : t('Model')) +
           ': ' +
-          effectiveModelName,
+          effectiveModelName +
+          (isDefaultModelCommand ? '' : ` (${t('session only')})`),
       };
     }
 
@@ -354,11 +355,10 @@ export const modelCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content:
-          `Current model: ${currentModel}\n` +
-          'Use "/model <model-id>" to switch models (session only), ' +
-          '"/model --default <model-id>" to persist, or ' +
-          '"/model --fast <model-id>" to set the fast model.',
+        content: t(
+          'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.',
+          { model: currentModel },
+        ),
       };
     }
 
