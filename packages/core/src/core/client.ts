@@ -303,7 +303,7 @@ export class GeminiClient {
 
   getHistoryShallow(curated: boolean = false): Content[] {
     const chat = this.getChat();
-    return chat.getHistoryShallow(curated);
+    return chat.getHistoryShallow?.(curated) ?? chat.getHistory(curated);
   }
 
   getHistoryTail(count: number, curated: boolean = false): Content[] {
@@ -314,19 +314,43 @@ export class GeminiClient {
     count: number,
     curated: boolean = false,
   ): Content[] {
-    return this.getChat().getHistoryTailShallow(count, curated);
+    const chat = this.getChat();
+    return (
+      chat.getHistoryTailShallow?.(count, curated) ??
+      chat.getHistoryTail?.(count, curated) ??
+      chat.getHistory(curated).slice(-count)
+    );
   }
 
   private peekLastHistoryEntry(): Content | undefined {
-    return this.getChat().peekLastHistoryEntry();
+    const chat = this.getChat();
+    return chat.peekLastHistoryEntry?.() ?? chat.getHistory().at(-1);
   }
 
   private getHistoryLength(): number {
-    return this.getChat().getHistoryLength();
+    const chat = this.getChat();
+    return chat.getHistoryLength?.() ?? chat.getHistory().length;
   }
 
   private getLastModelMessageText(): string | undefined {
-    return this.getChat().getLastModelMessageText();
+    const chat = this.getChat();
+    if (chat.getLastModelMessageText) {
+      return chat.getLastModelMessageText();
+    }
+    const history = chat.getHistoryShallow?.() ?? chat.getHistory();
+    for (let i = history.length - 1; i >= 0; i--) {
+      const message = history[i];
+      if (message?.role !== 'model') continue;
+      const text =
+        message.parts
+          ?.filter(
+            (part): part is { text: string } => typeof part.text === 'string',
+          )
+          .map((part) => part.text)
+          .join('') ?? '';
+      return text || undefined;
+    }
+    return undefined;
   }
 
   /**
@@ -2023,7 +2047,7 @@ export class GeminiClient {
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const chat = this.getChat();
-      const compressedHistory = chat.getHistoryShallow();
+      const compressedHistory = chat.getHistoryShallow?.() ?? chat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
       if (
         !this.lastSessionStartContext &&
