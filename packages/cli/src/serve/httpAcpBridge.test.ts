@@ -6475,6 +6475,37 @@ describe('createHttpAcpBridge', () => {
 
       await bridge.shutdown();
     });
+
+    it('killSession routes per-entry channel bookkeeping via channelInfoForEntry (#4325 symmetric)', async () => {
+      // Symmetric smoke guard for #4325 (wenshao review on this PR).
+      // `killSession` received the same `channelInfo` →
+      // `channelInfoForEntry(entry)` fix at `bridge.ts:3182` as
+      // `closeSession` did. The closeSession smoke above doesn't
+      // exercise the killSession code path, so a future refactor
+      // reverting only killSession would pass that test trivially.
+      // Same single-channel caveat: the channel-overlap race itself
+      // isn't deterministic without test-only factory hooks; this
+      // smoke verifies the most-load-bearing behavior — kill fires
+      // and tears down the channel — which would fail if a revert
+      // captured a stale module-scoped `channelInfo`.
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(handles).toHaveLength(1);
+      expect(handles[0]?.killed).toBe(false);
+
+      await bridge.killSession(session.sessionId);
+
+      expect(handles[0]?.killed).toBe(true);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    });
   });
 
   describe('updateSessionMetadata', () => {

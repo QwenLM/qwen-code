@@ -185,6 +185,25 @@ describe('createBridgeFileSystemAdapter', () => {
         /ENOENT/,
       );
     });
+
+    it('reads still succeed under trusted=false (read is not gated)', async () => {
+      // Parity check (per wenshao review on #4334): the writeText
+      // trust-gate test above covers the deny posture, but the
+      // adapter must NOT extend that gate to reads — PR 18's trust
+      // gate is write-only. Without this assertion, a future refactor
+      // that mistakenly gates reads would only fail HTTP-fs tests, not
+      // adapter ones.
+      const target = path.join(tmpDir, 'readable.txt');
+      await fsp.writeFile(target, 'visible-content', 'utf8');
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: false }),
+      );
+      const response = await adapter.readText({
+        path: target,
+        sessionId: 'sess:test',
+      });
+      expect(response.content).toBe('visible-content');
+    });
   });
 
   describe('readText', () => {

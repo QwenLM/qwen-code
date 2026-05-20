@@ -536,6 +536,72 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect(access).toBeDefined();
   });
 
+  it('writeTextOverwrite succeeds over an existing >MAX_READ_BYTES file', async () => {
+    // wenshao #4334 review: the meta-read inside writeTextOverwrite is
+    // best-effort (only used for encoding / BOM / line-ending hints).
+    // A `file_too_large` thrown by `readExistingTextMeta` must NOT
+    // block the overwrite — pre-PR the inline `BridgeClient` proxy
+    // never read the existing file, so overwriting a 1 MiB log via
+    // the agent was always supported. Regression guard for that.
+    const { MAX_READ_BYTES } = await import('./policy.js');
+    const target = path.join(h.workspace, 'big-existing.log');
+    await fsp.writeFile(target, 'a'.repeat(MAX_READ_BYTES + 1024));
+    const r = await h.fs.resolve('big-existing.log', 'write');
+    const out = await h.fs.writeTextOverwrite(r, 'tiny');
+    expect(out.created).toBe(false);
+    expect(await fsp.readFile(target, 'utf-8')).toBe('tiny');
+  });
+
+  it('writeTextOverwrite succeeds over an existing binary file', async () => {
+    // Sibling of the >MAX_READ_BYTES regression: existing binary
+    // content makes `readExistingTextMeta` throw `binary_file`. The
+    // overwrite must still succeed since the new content is text and
+    // ACP semantics is "just write".
+    const target = path.join(h.workspace, 'binary-existing.bin');
+    const buf = Buffer.alloc(64);
+    buf[5] = 0; // null byte → looksBinary()
+    await fsp.writeFile(target, buf);
+    const r = await h.fs.resolve('binary-existing.bin', 'write');
+    const out = await h.fs.writeTextOverwrite(r, 'now-text');
+    expect(out.created).toBe(false);
+    expect(await fsp.readFile(target, 'utf-8')).toBe('now-text');
+  });
+
+  it('writeTextOverwrite rejects a directory target with parse_error', async () => {
+    // wenshao #4334 review sub-bullet: `assertAtomicTargetPrecondition`
+    // throws `parse_error` for non-regular files in the 'overwrite'
+    // branch (parity with 'replace'). Pin it so a future refactor that
+    // accidentally relaxes that branch (e.g. by treating a directory
+    // as "missing target → create") is caught.
+    const dir = path.join(h.workspace, 'a-dir');
+    await fsp.mkdir(dir);
+    const r = await h.fs.resolve('a-dir', 'write');
+    const err = await h.fs
+      .writeTextOverwrite(r, 'noop')
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+
+  it('writeTextAtomic rejects mode="overwrite" with parse_error (internal-only)', async () => {
+    // wenshao #4334 review: `'overwrite'` is a `WriteMode` value but
+    // `writeTextAtomic`'s `existingMeta` branch only reads metadata for
+    // `'replace'` AND its `created` outcome is hard-coded to `opts.mode
+    // === 'create'`. A direct caller of `writeTextAtomic({mode:
+    // 'overwrite'})` would silently drop CRLF on Windows files and
+    // report `created: false` for new files. The validator explicitly
+    // rejects this combination so the only supported path for
+    // unconditional-overwrite semantics is the dedicated
+    // `writeTextOverwrite()` method (which handles both correctly).
+    const r = await h.fs.resolve('atomic-overwrite-reject.txt', 'write');
+    const err = await h.fs
+      .writeTextAtomic(r, 'x', { mode: 'overwrite' as never })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+    expect((err as Error).message).toMatch(/writeTextOverwrite/);
+  });
+
   it('edits an existing file by replacing oldText with newText', async () => {
     const target = path.join(h.workspace, 'config.txt');
     await fsp.writeFile(target, 'foo=1\nbar=2\n');

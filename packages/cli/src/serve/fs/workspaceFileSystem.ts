@@ -836,6 +836,20 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       const out = await this.deps.pathLocks.runExclusive(
         p as string,
         async () => {
+          // Determine `created` from a stat — NOT from whether the meta
+          // read succeeded. The meta read is best-effort and can fail
+          // on existing files (file_too_large, binary_file); those still
+          // count as "the target existed", so `created: false`.
+          // ENOENT here means "no entry at the target" → `created: true`.
+          let targetExisted = false;
+          try {
+            await fsp.lstat(p as string);
+            targetExisted = true;
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+              throw err;
+            }
+          }
           // Best-effort read of existing meta so we preserve detected
           // encoding / BOM / line-ending across overwrites — matches the
           // posture of `writeTextAtomic({mode:'replace'})` whose existing
@@ -846,8 +860,24 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           try {
             existingMeta = await readExistingTextMeta(p);
           } catch (err) {
-            // ENOENT (lstat) is the new-file path; bubble everything else.
-            if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+            // The meta read is best-effort — we only need it to preserve
+            // encoding / BOM / line-ending hints across overwrites. The
+            // overwrite itself never needs the existing content, so any
+            // failure to read it must NOT block the write:
+            //   - ENOENT       → new file, no meta to preserve (UTF-8/LF defaults)
+            //   - file_too_large → existing is >256 KiB; fall back to defaults
+            //   - binary_file   → existing is binary; text meta is meaningless
+            // Pre-PR, ACP `BridgeClient.writeTextFile` never read the
+            // existing file at all, so a 1 MiB log or binary config could
+            // always be overwritten by an agent. Bubbling `file_too_large`
+            // or `binary_file` here would silently regress that.
+            const code = (err as NodeJS.ErrnoException)?.code;
+            const kind = (err as { kind?: string })?.kind;
+            if (
+              code !== 'ENOENT' &&
+              kind !== 'file_too_large' &&
+              kind !== 'binary_file'
+            ) {
               throw err;
             }
           }
@@ -875,7 +905,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             matchedIgnore: meta.matchedIgnore,
           });
           return {
-            created: existingMeta === undefined,
+            created: !targetExisted,
             sizeBytes: result.sizeBytes,
             hash: result.hash,
             meta,
@@ -1246,14 +1276,20 @@ interface AtomicWriteTextOutcome {
 }
 
 function validateWriteTextAtomicOptions(opts: WriteTextAtomicOptions): void {
-  if (
-    opts.mode !== 'create' &&
-    opts.mode !== 'replace' &&
-    opts.mode !== 'overwrite'
-  ) {
+  // `'overwrite'` is intentionally rejected here even though the
+  // `WriteMode` union admits it. The `'overwrite'` variant skips the
+  // expectedHash CAS gate AND requires the caller to handle existing
+  // text-meta detection (encoding/BOM/line-ending preservation) and
+  // the `created` outcome flag — none of which `writeTextAtomic`'s
+  // existing branches do. Direct callers of `writeTextAtomic({mode:
+  // 'overwrite'})` would silently lose CRLF on Windows files and
+  // report `created: false` for new files. The dedicated
+  // `writeTextOverwrite()` method handles those correctly and is the
+  // only supported entry point for unconditional-overwrite semantics.
+  if (opts.mode !== 'create' && opts.mode !== 'replace') {
     throw new FsError(
       'parse_error',
-      'mode must be one of "create", "replace", "overwrite"',
+      'mode must be either "create" or "replace" (use writeTextOverwrite() for unconditional overwrites)',
     );
   }
   if (opts.expectedHash !== undefined && !isContentHash(opts.expectedHash)) {
@@ -1268,11 +1304,6 @@ function validateWriteTextAtomicOptions(opts: WriteTextAtomicOptions): void {
       'expectedHash is required when mode is "replace"',
     );
   }
-  // `'overwrite'` deliberately does NOT require expectedHash — it's the
-  // primitive for protocols (e.g. ACP `WriteTextFileRequest`) whose wire
-  // format has no client-side hash. expectedHash IS still accepted on
-  // overwrite, but callers that pass it should use `'replace'` instead
-  // since hash-mismatch detection is the whole point of that mode.
   if (
     opts.lineEnding !== undefined &&
     opts.lineEnding !== 'lf' &&

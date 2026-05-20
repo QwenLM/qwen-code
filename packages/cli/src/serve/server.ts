@@ -250,6 +250,26 @@ export function createServeApp(
   // proxy in `BridgeClient` would still run, bypassing trust /
   // TOCTOU / audit). Default trust here is `false` (test-safe) to
   // match the existing `createServeApp` posture below.
+  //
+  // Behavior change warning for embed consumers (#4334 wenshao review):
+  // pre-this-PR, ACP writeTextFile went through `BridgeClient`'s inline
+  // proxy which had no trust gate, so embeds calling `createServeApp`
+  // without providing `deps.fsFactory` had agent writes always succeed.
+  // Now those writes will reject with `untrusted_workspace` unless the
+  // embed either (a) provides its own `deps.fsFactory` with `trusted:
+  // true`, (b) provides its own `deps.bridge` (bypassing the default
+  // adapter wiring), or (c) explicitly accepts the trust-gate-default
+  // posture for its hosting environment. Warn loudly so the asymmetry
+  // is visible to operators rather than appearing as opaque agent-side
+  // write failures. `runQwenServe.ts` consumers are unaffected — that
+  // path constructs `fsFactory` with `trusted: true` by default.
+  if (!deps.fsFactory) {
+    process.stderr.write(
+      'qwen serve: createServeApp default fsFactory uses trusted=false ' +
+        '— agent ACP writeTextFile calls will reject with untrusted_workspace. ' +
+        'Inject deps.fsFactory (with explicit trust) or deps.bridge to override.\n',
+    );
+  }
   const fsFactory: WorkspaceFileSystemFactory =
     deps.fsFactory ??
     createWorkspaceFileSystemFactory({
