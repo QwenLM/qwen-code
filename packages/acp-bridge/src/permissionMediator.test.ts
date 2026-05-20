@@ -669,6 +669,52 @@ describe('MultiClientPermissionMediator — consensus', () => {
     await promise;
   });
 
+  // Wenshao review #4335 / 3271041464 — when a voter's idempotent
+  // re-vote attempts a different optionId, the audit ring must
+  // record the ORIGINALLY-voted option (the one in the tally), not
+  // the new attempt. Otherwise an operator reading the audit trail
+  // sees `client_A voted for option_B` while the tally has client_A
+  // in option_A's bucket — a misleading record of a vote that
+  // never counted.
+  it('records the original optionId in audit on idempotent re-vote (3271041464)', async () => {
+    const { mediator, calls } = makeMediator(
+      'consensus',
+      new Set(['client_A', 'client_B', 'client_C']),
+    );
+    const record = makeRecord();
+    const promise = mediator.request(record, 5_000);
+
+    // Original vote: client_A → proceed_once.
+    mediator.vote(makeVote({ clientId: 'client_A', optionId: 'proceed_once' }));
+
+    // Re-vote attempt: client_A → proceed_always (silently kept as
+    // proceed_once in the tally; SHOULD be audited as proceed_once).
+    mediator.vote(
+      makeVote({ clientId: 'client_A', optionId: 'proceed_always' }),
+    );
+
+    // Resolve to terminate the test cleanly.
+    mediator.vote(makeVote({ clientId: 'client_B', optionId: 'proceed_once' }));
+    await promise;
+
+    // Two `voted` audit calls fired (one per vote attempt). The
+    // first records the original option as cast; the second records
+    // the original option even though the wire attempt was different.
+    const votedCalls = calls.filter((c) => c.kind === 'voted');
+    expect(votedCalls).toHaveLength(3); // client_A original, client_A re-vote, client_B winning vote
+    // First call — straightforward: client_A cast proceed_once.
+    expect((votedCalls[0]!.args[1] as { optionId: string }).optionId).toBe(
+      'proceed_once',
+    );
+    // Second call — the idempotent re-vote case: the audit must show
+    // proceed_once (the option in the tally), NOT proceed_always
+    // (the attempted re-vote). This is the regression-guard the
+    // pre-fix code violated.
+    expect((votedCalls[1]!.args[1] as { optionId: string }).optionId).toBe(
+      'proceed_once',
+    );
+  });
+
   it('rejects anonymous voter with permission_forbidden', () => {
     const { mediator, events } = makeMediator(
       'consensus',

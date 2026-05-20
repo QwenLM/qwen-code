@@ -255,6 +255,26 @@ export interface MediatorDeps {
    * The bridge's torn-down-session race is short enough that this is
    * acceptable; document if a longer-window source of empty-voter
    * snapshots emerges.
+   *
+   * **Late-joiner timing window** (wenshao review #4335 / 3271041469).
+   * The bridge sequence is `entry.events.publish(...)` →
+   * (synchronous) → `await mediator.request(record, ...)`. The
+   * publish is synchronous (`EventBus.publish` returns after fanning
+   * to in-memory subscriber queues, no event-loop yield) and the
+   * mediator's Promise executor is also synchronous through this
+   * call (N1 invariant), so a NEW HTTP client cannot register its
+   * `clientId` on `entry.clientIds` between publish and snapshot.
+   * However, an SSE subscriber that connected BEFORE the publish but
+   * has NOT yet hit any session route (no `X-Qwen-Client-Id` known
+   * to the bridge) will not appear in the snapshot — `consensus`
+   * silently rejects its later vote as `forbidden`. UIs that surface
+   * the active voter set (eligible-voters chip) should treat
+   * `permission_request` as the authoritative cutoff, not subsequent
+   * client-identity registrations. F3 v1 does not surface
+   * `votersAtIssue` to the wire; future PRs that add an
+   * `eligibleVoters[]` field on `permission_request.data` should
+   * source it from the same snapshot to keep client-side and
+   * server-side membership decisions aligned.
    */
   votersForSession: (sessionId: string) => ReadonlySet<string>;
 }
@@ -704,14 +724,27 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     // option), keep the original. Return `recorded` with the current
     // votesNeeded; do NOT emit a partial_vote frame (the tally hasn't
     // changed).
-    for (const set of pending.tallies.values()) {
-      if (set.has(vote.clientId)) {
+    //
+    // Wenshao review #4335 / 3271041464 — the audit entry must
+    // reflect the ORIGINALLY-recorded optionId (the one in the
+    // tally), not the new attempt. Otherwise the audit ring shows
+    // `client_X voted for option_B` while the tally has client_X in
+    // option_A's bucket; an operator reading the ring would see a
+    // vote that never counted toward quorum. Look up the original
+    // option from the tally and substitute it into the audit
+    // record.
+    for (const [originalOptionId, set] of pending.tallies.entries()) {
+      if (vote.clientId !== undefined && set.has(vote.clientId)) {
         const outcome: PermissionVoteOutcome = {
           kind: 'recorded',
           votesNeeded: this.votesNeededFor(pending),
         };
         this.safeAudit(() =>
-          this.deps.audit.recordVoted(this.toRecord(pending), vote, outcome),
+          this.deps.audit.recordVoted(
+            this.toRecord(pending),
+            { ...vote, optionId: originalOptionId },
+            outcome,
+          ),
         );
         return outcome;
       }
@@ -968,13 +1001,27 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       this.deps.emit(sessionId, event);
     } catch (err) {
       // Emit failures (bus closed mid-shutdown) never block settle.
-      // I4 (Commit 3 review) — surface as a `console.error` breadcrumb
-      // so silent regressions in the host's emit path (e.g. a future
-      // contract violation that throws instead of returning undefined)
-      // don't disappear unnoticed.
-      process.stderr.write(
-        `permissionMediator: emit failed for session=${JSON.stringify(sessionId)} type=${JSON.stringify(event.type)}: ${stringifyError(err)}\n`,
-      );
+      // I4 (Commit 3 review) — surface as a stderr breadcrumb so
+      // silent regressions in the host's emit path (e.g. a future
+      // contract violation that throws instead of returning
+      // undefined) don't disappear unnoticed.
+      //
+      // Wenshao review #4335 / 3271041461 — the breadcrumb itself
+      // must be defensive. `process.stderr.write` can synchronously
+      // throw on EPIPE during daemon shutdown; if it does, the
+      // exception escapes `safeEmit` and propagates out of
+      // `resolveEntry`, leaving the pending Promise unsettled
+      // (request already deleted from `this.pending`). The agent
+      // would hang on `requestPermission` until the timeout fires.
+      // Mirror the timer callback's `try/catch` posture: losing
+      // observability is preferable to a stuck Promise.
+      try {
+        process.stderr.write(
+          `permissionMediator: emit failed for session=${JSON.stringify(sessionId)} type=${JSON.stringify(event.type)}: ${stringifyError(err)}\n`,
+        );
+      } catch {
+        // Stderr unavailable — drop the breadcrumb and continue.
+      }
     }
   }
 
@@ -999,9 +1046,18 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     try {
       fn();
     } catch (err) {
-      process.stderr.write(
-        `permissionMediator: audit publisher threw: ${stringifyError(err)}\n`,
-      );
+      // Wenshao review #4335 / 3271041461 — see the matching
+      // try/catch on the breadcrumb in `safeEmit`. The audit-failure
+      // breadcrumb must not itself crash the safe wrapper, or the
+      // `resolveEntry` cleanup ladder could leave the pending
+      // Promise unsettled.
+      try {
+        process.stderr.write(
+          `permissionMediator: audit publisher threw: ${stringifyError(err)}\n`,
+        );
+      } catch {
+        // Stderr unavailable — drop the breadcrumb and continue.
+      }
     }
   }
 

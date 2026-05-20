@@ -1005,9 +1005,18 @@ export function reduceDaemonSessionEvent(
       };
     }
     case 'permission_resolved': {
+      // Wenshao review #4335 / 3271041465 — even on the unmatched
+      // path (SDK reconnected mid-permission and missed
+      // `permission_request`), clear any orphan progress entry that
+      // a `permission_partial_vote` may have left behind. Otherwise
+      // `permissionVoteProgress[requestId]` persists until session
+      // end. The matched path also clears it (below).
+      const permissionVoteProgress = { ...base.permissionVoteProgress };
+      delete permissionVoteProgress[event.data.requestId];
       if (!(event.data.requestId in base.pendingPermissions)) {
         return {
           ...base,
+          permissionVoteProgress,
           unmatchedPermissionResolutionCount:
             base.unmatchedPermissionResolutionCount + 1,
           lastUnmatchedPermissionResolutionId: event.data.requestId,
@@ -1015,16 +1024,18 @@ export function reduceDaemonSessionEvent(
       }
       const pendingPermissions = { ...base.pendingPermissions };
       delete pendingPermissions[event.data.requestId];
-      // F3 Commit 7 — clear consensus vote progress for this requestId
-      // when the prompt resolves.
-      const permissionVoteProgress = { ...base.permissionVoteProgress };
-      delete permissionVoteProgress[event.data.requestId];
       return { ...base, pendingPermissions, permissionVoteProgress };
     }
     case 'permission_already_resolved': {
+      // Wenshao review #4335 / 3271041465 — same as above:
+      // unconditionally clear any orphan progress entry on the
+      // unmatched / matched paths.
+      const permissionVoteProgress = { ...base.permissionVoteProgress };
+      delete permissionVoteProgress[event.data.requestId];
       if (!(event.data.requestId in base.pendingPermissions)) {
         return {
           ...base,
+          permissionVoteProgress,
           unmatchedPermissionResolutionCount:
             base.unmatchedPermissionResolutionCount + 1,
           lastUnmatchedPermissionResolutionId: event.data.requestId,
@@ -1032,15 +1043,18 @@ export function reduceDaemonSessionEvent(
       }
       const pendingPermissions = { ...base.pendingPermissions };
       delete pendingPermissions[event.data.requestId];
-      const permissionVoteProgress = { ...base.permissionVoteProgress };
-      delete permissionVoteProgress[event.data.requestId];
       return { ...base, pendingPermissions, permissionVoteProgress };
     }
     case 'permission_partial_vote': {
       // F3 Commit 7 — accumulate consensus vote progress. If the
       // requestId isn't in `pendingPermissions` (race / replay
-      // misalignment), still record progress; the next
-      // `permission_resolved` will clear both.
+      // misalignment because the SDK reconnected mid-permission and
+      // missed `permission_request`), still record progress here.
+      // Wenshao review #4335 / 3271041465 — both `permission_resolved`
+      // and `permission_already_resolved` reducer cases above now
+      // unconditionally clear any orphan `permissionVoteProgress`
+      // entry, so a missed-request reconnect is recovered as soon
+      // as the corresponding resolution frame arrives.
       //
       // Wenshao review #4335 / 3270622311: stamp the envelope's
       // `originatorClientId` (prompt originator per N3) onto the

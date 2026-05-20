@@ -1881,6 +1881,79 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.permissionVoteProgress).toEqual({});
     });
 
+    // Wenshao review #4335 / 3271041465 — SDK reconnects mid-permission
+    // and misses `permission_request`, then sees `permission_partial_vote`
+    // (stored in permissionVoteProgress). When the matching
+    // `permission_resolved` arrives, the early-return path on
+    // unmatched requestId must STILL clear the orphan progress
+    // entry; otherwise it persists for the lifetime of the session.
+    it('reducer clears orphan permissionVoteProgress on unmatched permission_resolved (reconnect race)', () => {
+      const state = reduceDaemonSessionEvents([
+        // No permission_request — simulates a client that reconnected
+        // after the original prompt was dispatched.
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'orphan-req',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_resolved',
+          data: {
+            requestId: 'orphan-req',
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          },
+        },
+      ]);
+      // Pre-fix: permissionVoteProgress['orphan-req'] would still be
+      // populated because the resolved-handler early-returned without
+      // touching permissionVoteProgress. Post-fix: cleared.
+      expect(state.permissionVoteProgress).toEqual({});
+      // The unmatched-resolution counter still bumps; that signal
+      // remains valuable for diagnostics.
+      expect(state.unmatchedPermissionResolutionCount).toBe(1);
+      expect(state.lastUnmatchedPermissionResolutionId).toBe('orphan-req');
+    });
+
+    it('reducer clears orphan permissionVoteProgress on unmatched permission_already_resolved (reconnect race)', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_partial_vote',
+          data: {
+            requestId: 'orphan-req',
+            sessionId: 'sess-1',
+            votesReceived: 1,
+            votesNeeded: 1,
+            quorum: 2,
+            optionTallies: { proceed_once: 1 },
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'permission_already_resolved',
+          data: {
+            requestId: 'orphan-req',
+            sessionId: 'sess-1',
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          },
+        },
+      ]);
+      expect(state.permissionVoteProgress).toEqual({});
+      expect(state.unmatchedPermissionResolutionCount).toBe(1);
+    });
+
     it('reducer appends permission_forbidden to bounded forbiddenVotes', () => {
       const events: DaemonEvent[] = [];
       for (let i = 0; i < 35; i++) {
