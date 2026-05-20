@@ -1,25 +1,53 @@
-name: '🧐 Qwen Pull Request Review'
+name: 'Qwen Pull Request Review'
 
 on:
   pull_request_target:
-    types: ['opened']
-  pull_request_review_comment:
-    types: ['created']
-  pull_request_review:
-    types: ['submitted']
+    types: ['opened', 'reopened', 'ready_for_review', 'synchronize']
+  issue_comment:
+    types: ['created', 'edited']
   workflow_dispatch:
     inputs:
       pr_number:
         description: 'PR number to review'
         required: true
         type: 'number'
+      review_mode:
+        description: 'Run without posting comments, or publish a PR summary comment'
+        required: true
+        default: 'dry-run'
+        type: 'choice'
+        options:
+          - 'dry-run'
+          - 'comment'
+      additional_instructions:
+        description: 'Optional maintainer focus for this review'
+        required: false
+        type: 'string'
 
 jobs:
   review-pr:
+    # NOTE (intentional, current-phase safeguard): auto-triggers and the
+    # @qwen /review comment trigger are gated to OWNER/MEMBER/COLLABORATOR
+    # on purpose. This workflow runs under pull_request_target with
+    # repository secrets and a 5-30 min LLM deep review, so an open
+    # trigger would be a denial-of-wallet / abuse surface. External
+    # contributor PRs are still reviewable today — a maintainer comments
+    # `@qwen /review` on the PR. Broadening auto-trigger for community
+    # PRs (with per-author rate limiting) is deferred to a later phase,
+    # not dropped here. See docs/design/code-review/code-review-design.md.
+    #
+    # NOTE: contains() below is a substring match, so '@qwen /reviewer'
+    # (or any other suffix) also passes this gate. That's intentional:
+    # GHA expressions cannot anchor a regex here, and the
+    # 'Resolve PR context' shell step re-checks with a properly
+    # end-anchored awk/grep regex (@qwen /review($|[[:space:]])) and sets
+    # should_run_review=false on non-matches. The cost of the extra
+    # runner spin-up on a malformed mention is a few seconds and
+    # acceptable.
     if: |-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_target' &&
-       github.event.action == 'opened' &&
+       (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'ready_for_review' || github.event.action == 'synchronize') &&
        (github.event.pull_request.author_association == 'OWNER' ||
         github.event.pull_request.author_association == 'MEMBER' ||
         github.event.pull_request.author_association == 'COLLABORATOR')) ||
@@ -28,163 +56,593 @@ jobs:
         contains(github.event.comment.body, '@qwen /review') &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'COLLABORATOR')) ||
-      (github.event_name == 'pull_request_review_comment' &&
-        contains(github.event.comment.body, '@qwen /review') &&
-        (github.event.comment.author_association == 'OWNER' ||
-         github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'COLLABORATOR')) ||
-      (github.event_name == 'pull_request_review' &&
-        contains(github.event.review.body, '@qwen /review') &&
-        (github.event.review.author_association == 'OWNER' ||
-         github.event.review.author_association == 'MEMBER' ||
-         github.event.review.author_association == 'COLLABORATOR'))
-    timeout-minutes: 15
+         github.event.comment.author_association == 'COLLABORATOR'))
+    concurrency:
+      group: 'qwen-pr-review-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.pr_number }}'
+      cancel-in-progress: true
+    # 30 min was empirically too low: a full (no-cache) 9-agent deep
+    # review on a ~800-line PR exceeded it and the job was killed
+    # mid-review. Incremental (synchronize) reviews are far shorter, but
+    # opened/comment/dispatch run the full path. 60 min leaves headroom.
+    timeout-minutes: 60
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'read'
-      id-token: 'write'
+      # 'write' is required even though we only use `gh pr comment`: the gh
+      # CLI calls the GraphQL addComment mutation, which is gated on
+      # pull-requests write (not issues write — that path is for issue
+      # comments on non-PR issues). Validated by an empirical
+      # workflow_dispatch run that failed with
+      # "GraphQL: Resource not accessible by integration (addComment)".
       pull-requests: 'write'
       issues: 'write'
+    env:
+      GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+      OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+      QWEN_PR_REVIEW_MAX_CHANGED_LINES: "${{ vars.QWEN_PR_REVIEW_MAX_CHANGED_LINES || '1500' }}"
     steps:
-      - name: 'Checkout PR code'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
+      # Security: pull_request_target runs with repository secrets, so it
+      # MUST check out trusted base code (main), never the PR head.
+      # workflow_dispatch is maintainer-triggered, so it runs the
+      # dispatched ref's own code — this is the pre-merge dry-run path.
+      - name: 'Checkout review code'
+        uses: 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' # v4.2.2
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'
+          ref: "${{ github.event_name == 'workflow_dispatch' && github.ref || 'main' }}"
           fetch-depth: 0
 
-      - name: 'Get PR details (pull_request_target & workflow_dispatch)'
-        id: 'get_pr'
-        if: |-
-          ${{ github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch' }}
+      - name: 'Resolve PR context'
+        id: 'pr'
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          WORKFLOW_PR_NUMBER: '${{ github.event.inputs.pr_number }}'
+          WORKFLOW_REVIEW_MODE: '${{ github.event.inputs.review_mode }}'
+          WORKFLOW_ADDITIONAL_INSTRUCTIONS: '${{ github.event.inputs.additional_instructions }}'
         run: |-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            PR_NUMBER=${{ github.event.inputs.pr_number }}
-          else
-            PR_NUMBER=${{ github.event.pull_request.number }}
+          set -euo pipefail
+
+          additional_instructions=""
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              pr_number="$WORKFLOW_PR_NUMBER"
+              review_mode="${WORKFLOW_REVIEW_MODE:-dry-run}"
+              additional_instructions="${WORKFLOW_ADDITIONAL_INSTRUCTIONS:-}"
+              comment_body=""
+              ;;
+            pull_request_target)
+              pr_number="$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
+              review_mode="comment"
+              comment_body=""
+              ;;
+            issue_comment)
+              pr_number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
+              review_mode="comment"
+              comment_body="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
+              ;;
+            *)
+              echo "::error::Unsupported event: $EVENT_NAME"
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$pr_number" ] || [ "$pr_number" = "null" ]; then
+            echo "::error::Could not resolve pull request number"
+            exit 1
           fi
-          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          # Get PR details
-          PR_DATA=$(gh pr view $PR_NUMBER --json title,body,additions,deletions,changedFiles,baseRefName,headRefName)
-          echo "pr_data=$PR_DATA" >> "$GITHUB_OUTPUT"
-          # Get file changes
-          CHANGED_FILES=$(gh pr diff $PR_NUMBER --name-only)
-          echo "changed_files<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$CHANGED_FILES" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: 'Get PR details (issue_comment)'
-        id: 'get_pr_comment'
+          case "$review_mode" in
+            dry-run|comment)
+              ;;
+            *)
+              echo "::error::Unsupported review mode: $review_mode"
+              exit 1
+              ;;
+          esac
+
+          should_run_review="true"
+
+          # Use grep -qE with end-boundary so '@qwen /review' does not match
+          # '@qwen /reviewer' or similar variants.
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$EVENT_NAME" != "pull_request_target" ]; then
+            if printf '%s' "$comment_body" | grep -qE '@qwen /review($|[[:space:]])'; then
+              additional_instructions="$(
+                printf '%s' "$comment_body" |
+                  awk '
+                    BEGIN { found = 0 }
+                    !found {
+                      if (match($0, /@qwen \/review([[:space:]]|$)/)) {
+                        found = 1
+                        rest = substr($0, RSTART + RLENGTH)
+                        if (length(rest) > 0) print rest
+                      }
+                      next
+                    }
+                    { print }
+                  ' |
+                  sed 's/^[[:space:]]*//'
+              )"
+            else
+              should_run_review="false"
+            fi
+          fi
+          # Strip leading blank lines so the prompt doesn't start with an
+          # empty line when @qwen /review is on its own line.
+          additional_instructions="$(printf '%s' "$additional_instructions" | sed '/./,$!d')"
+          # Keep maintainer focus text from changing the slash-command flags.
+          additional_instructions="$(printf '%s' "$additional_instructions" | LC_ALL=C perl -0pe 's/(?<!\S)--comment(?!\S)/`--comment`/g')"
+          # Hard-cap to 2048 characters to keep prompt-injection surface
+          # bounded without using a pipe that can trip pipefail on SIGPIPE.
+          # Reviewers should keep instructions short.
+          additional_instructions="${additional_instructions:0:2048}"
+
+          # Build the review prompt for qwen-code-action.
+          # Pass the full PR URL so the skill can resolve owner/repo unambiguously.
+          #
+          # Intentionally NOT passing `/review --comment` even in comment mode:
+          # the bundled skill may submit an APPROVE review when no findings are
+          # found, and this workflow is comment-only (it posts the action
+          # summary itself below). The dry-run vs comment distinction is
+          # carried via $should_comment, not by changing the slash-command.
+          review_target="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/pull/${pr_number}"
+          review_prompt="/review $review_target"
+          if [ "$review_mode" = "comment" ]; then
+            should_comment="true"
+          else
+            should_comment="false"
+          fi
+
+          if [ -n "$additional_instructions" ]; then
+            review_prompt="$review_prompt
+
+            Additional reviewer focus: $additional_instructions"
+          fi
+
+          output_delimiter="QWEN_REVIEW_PROMPT_$(date +%s%N)"
+          {
+            echo "number=$pr_number"
+            echo "review_mode=$review_mode"
+            echo "should_comment=$should_comment"
+            echo "should_run_review=$should_run_review"
+            echo "review_prompt<<$output_delimiter"
+            printf '%s\n' "$review_prompt"
+            echo "$output_delimiter"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 'Check PR size'
+        id: 'size'
         if: |-
-          ${{ github.event_name == 'issue_comment' }}
+          steps.pr.outputs.should_run_review == 'true'
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          COMMENT_BODY: '${{ github.event.comment.body }}'
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
+          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
         run: |-
-          PR_NUMBER=${{ github.event.issue.number }}
-          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          # Extract additional instructions from comment
-          ADDITIONAL_INSTRUCTIONS=$(echo "$COMMENT_BODY" | sed 's/.*@qwen \/review//' | xargs)
-          echo "additional_instructions=$ADDITIONAL_INSTRUCTIONS" >> "$GITHUB_OUTPUT"
-          # Get PR details
-          PR_DATA=$(gh pr view $PR_NUMBER --json title,body,additions,deletions,changedFiles,baseRefName,headRefName)
-          echo "pr_data=$PR_DATA" >> "$GITHUB_OUTPUT"
-          # Get file changes
-          CHANGED_FILES=$(gh pr diff $PR_NUMBER --name-only)
-          echo "changed_files<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$CHANGED_FILES" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
 
-      - name: 'Run Qwen PR Review'
-        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+          write_output() {
+            echo "$1" >> "$GITHUB_OUTPUT"
+          }
+
+          if [ -z "${OPENAI_MODEL:-}" ]; then
+            echo "::error::Repository variable QWEN_PR_REVIEW_MODEL is required for this workflow (maps to env var OPENAI_MODEL)."
+            exit 1
+          fi
+
+          if ! printf '%s' "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" | grep -Eq '^[0-9]+$'; then
+            echo "::error::QWEN_PR_REVIEW_MAX_CHANGED_LINES must be an integer."
+            exit 1
+          fi
+
+          if [ "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" -lt 100 ] || [ "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" -gt 50000 ]; then
+            echo "::error::QWEN_PR_REVIEW_MAX_CHANGED_LINES must be between 100 and 50000 (got $QWEN_PR_REVIEW_MAX_CHANGED_LINES)."
+            exit 1
+          fi
+
+          pr_json="$(gh pr view "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json additions,deletions,changedFiles,title,baseRefName,baseRefOid,headRefName,headRefOid)"
+          additions="$(jq -r '.additions' <<< "$pr_json")"
+          deletions="$(jq -r '.deletions' <<< "$pr_json")"
+          changed_files="$(jq -r '.changedFiles' <<< "$pr_json")"
+          title="$(jq -r '.title' <<< "$pr_json")"
+          base_ref="$(jq -r '.baseRefName' <<< "$pr_json")"
+          base_sha="$(jq -r '.baseRefOid // ""' <<< "$pr_json")"
+          head_ref="$(jq -r '.headRefName' <<< "$pr_json")"
+          head_sha="$(jq -r '.headRefOid // ""' <<< "$pr_json")"
+          changed_lines=$((additions + deletions))
+
+          # Reject empty head_sha / base_sha early. Both are queried via
+          # gh pr view; an empty value almost always means gh pr view
+          # partially failed.
+          if [ -z "$head_sha" ]; then
+            echo "::error::Could not resolve PR head SHA via gh pr view --json headRefOid."
+            exit 1
+          fi
+          if [ -z "$base_sha" ]; then
+            echo "::error::Could not resolve PR base SHA via gh pr view --json baseRefOid."
+            exit 1
+          fi
+
+          # Compute the merge-base SHA, i.e., the commit where the PR's
+          # history forks from the base branch. The merge base is what the
+          # cache key must be scoped to, NOT baseRefOid.
+          #
+          # baseRefOid is the current tip of the base ref (e.g., main HEAD).
+          # That value can stay fixed across reviews even when the PR
+          # merges base into itself: if the author clicks "Update branch"
+          # while base hasn't moved, baseRefOid is unchanged but the PR's
+          # history now incorporates base's commits. A cache restored under
+          # baseRefOid would then let the bundled /review skill compute
+          # `git diff <oldHead>..<newHead>` across upstream commits the PR
+          # did not author. The merge base, in contrast, advances whenever
+          # base content enters the PR (Update branch, rebase onto newer
+          # base, or base retarget), which is exactly the boundary we
+          # want to invalidate the cache on.
+          #
+          # merge-base is best-effort: the compare endpoint can fail to
+          # resolve SHAs for fork PRs in the base repo's namespace. That
+          # must not abort the review (set -euo pipefail) — it only means
+          # the incremental cache can't be scoped this run, so we fall
+          # back to a full review rather than failing the job.
+          merge_base_sha="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${base_sha}...${head_sha}" \
+            --jq '.merge_base_commit.sha // ""' 2>/dev/null || true)"
+          if [ -z "$merge_base_sha" ]; then
+            echo "::warning::Could not resolve PR merge base; incremental cache will fall back to a full review this run."
+          fi
+
+          write_output "changed_lines=$changed_lines"
+          write_output "changed_files=$changed_files"
+          write_output "head_sha=$head_sha"
+          write_output "base_sha=$base_sha"
+          write_output "merge_base_sha=$merge_base_sha"
+          echo "Review target: PR #$PR_NUMBER"
+          echo "Review title: $title"
+          echo "Review branch: $base_ref ($base_sha) <- $head_ref ($head_sha)"
+          if [ -n "$merge_base_sha" ]; then
+            echo "Review merge base: $merge_base_sha"
+          else
+            echo "Review merge base: (unresolved; full review this run)"
+          fi
+          echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines changed lines)"
+
+          if [ "$changed_lines" -gt "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" ]; then
+            write_output "should_review=false"
+            {
+              printf 'This PR changes %s lines across %s files, which is above the current automated review threshold of %s changed lines.\n\n' \
+                "$changed_lines" "$changed_files" "$QWEN_PR_REVIEW_MAX_CHANGED_LINES"
+              printf 'Please consider splitting it into smaller, focused PRs before requesting a full Qwen Code review. Smaller PRs are easier to validate, easier to dogfood, and less likely to mix product direction, refactoring, and implementation details in one review.\n\n'
+              printf "_Qwen Code PR review did not run a detailed code review for this oversized changeset. Model configured for review: \`%s\`._\n" \
+                "$OPENAI_MODEL"
+            } > qwen-pr-review-size-comment.md
+            if [ "$SHOULD_COMMENT" = "true" ]; then
+              gh pr comment "$PR_NUMBER" \
+                --repo "$GITHUB_REPOSITORY" \
+                --body-file qwen-pr-review-size-comment.md
+            else
+              {
+                printf '### Qwen PR review dry run\n\n'
+                cat qwen-pr-review-size-comment.md
+                printf "\n\nReview mode: \`%s\`; no PR comments were posted.\n" "$REVIEW_MODE"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            write_output "should_review=true"
+          fi
+
+      # Restore the bundled /review skill's per-PR cache only on synchronize.
+      # The skill writes .qwen/review-cache/pr-<n>.json with the last reviewed
+      # commit SHA so subsequent runs can scope review to the incremental
+      # diff. Cache is intentionally NOT restored on opened/reopened (full
+      # review) or comment / workflow_dispatch (manual re-review must not
+      # short-circuit on "No new changes since last review"). See
+      # docs/design/code-review/code-review-design.md §增量评审与缓存.
+      #
+      # Cache key uses merge_base_sha + head_sha (not baseRefOid). The
+      # merge base advances whenever base content enters the PR — Update
+      # branch, rebase onto newer base, or base retarget — which are
+      # exactly the boundaries that should invalidate the cache. Pure
+      # author pushes leave the merge base alone, so the restore-keys
+      # prefix `qwen-review-<pr#>-<merge_base_sha>-` keeps matching and
+      # bundled /review can still scope to the incremental diff.
+      - name: 'Restore review cache'
+        id: 'restore-cache'
+        if: |-
+          steps.size.outputs.should_review == 'true' &&
+          github.event_name == 'pull_request_target' &&
+          github.event.action == 'synchronize'
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '.qwen/review-cache'
+          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
+          restore-keys: |
+            qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-
+
+      # @qwen-code/qwen-code requires Node >=22; runner default is 20
+      # (npm EBADENGINE). Pin Node 22 before installing/invoking qwen.
+      - name: 'Set up Node.js'
+        if: |-
+          steps.size.outputs.should_review == 'true'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v4
+        with:
+          node-version: '22'
+
+      # Cache the npm download cache so the global qwen-code install is
+      # offline-fast on subsequent runs (content-addressed; a stale key
+      # only misses the newest tarball, never serves wrong content).
+      - name: 'Cache npm for qwen-code install'
+        if: |-
+          steps.size.outputs.should_review == 'true'
+        uses: 'actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '~/.npm'
+          key: 'qwen-npm-global-${{ runner.os }}-v1'
+          restore-keys: |
+            qwen-npm-global-${{ runner.os }}-
+
+      # Direct invocation instead of QwenLM/qwen-code-action.
+      # The action wraps the CLI in `QWEN_RESPONSE=$(qwen ...)` command
+      # substitution, which buffers ALL stdout until the process exits —
+      # so a slow or stuck bundled /review produced zero observable
+      # output for the whole job and could not be diagnosed. Calling
+      # qwen ourselves and piping through `tee` streams progress to the
+      # live job log in real time, and an explicit `timeout` makes a
+      # stall fail fast with a clear error instead of a silent job kill.
+      # settings.json mirrors what the action wrote (folder trust off +
+      # yolo + sandbox off) so the bundled /review skill's full tool set
+      # runs non-interactively.
+      - name: 'Run Qwen Code Review'
+        id: 'review'
+        if: |-
+          steps.size.outputs.should_review == 'true'
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          PR_NUMBER: '${{ steps.get_pr.outputs.pr_number || steps.get_pr_comment.outputs.pr_number }}'
-          PR_DATA: '${{ steps.get_pr.outputs.pr_data || steps.get_pr_comment.outputs.pr_data }}'
-          CHANGED_FILES: '${{ steps.get_pr.outputs.changed_files || steps.get_pr_comment.outputs.changed_files }}'
-          ADDITIONAL_INSTRUCTIONS: '${{ steps.get_pr.outputs.additional_instructions || steps.get_pr_comment.outputs.additional_instructions }}'
-          REPOSITORY: '${{ github.repository }}'
-        with:
-          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-          settings_json: |-
-            {
-              "coreTools": [
-                "run_shell_command",
-                "write_file"
-              ],
-              "sandbox": false
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          REVIEW_PROMPT: '${{ steps.pr.outputs.review_prompt }}'
+          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
+        run: |-
+          set -euo pipefail
+
+          mkdir -p .qwen
+          cat > .qwen/settings.json <<'EOF'
+          {
+            "security": { "folderTrust": { "enabled": false } },
+            "tools": { "approvalMode": "yolo" },
+            "sandbox": false
+          }
+          EOF
+
+          # Intentionally @latest: this workflow is still in the Phase 1-3
+          # bundled-action rollout (see docs/design/code-review/roadmap.md)
+          # and we want every CI run to exercise the newest bundled /review
+          # skill while it stabilizes — pinning a version would freeze the
+          # in-progress skill iterations behind a manual bump PR. Once the
+          # workflow lands and the skill cadence slows, switch this to a
+          # pinned `@qwen-code/qwen-code@x.y.z` so the secret-bearing
+          # pull_request_target run can't be moved by a future package
+          # publish. Tracked as a follow-up; not blocking on this PR.
+          echo "::group::Install qwen-code"
+          npm install -g @qwen-code/qwen-code@latest
+          qwen --version
+          echo "::endgroup::"
+
+          # CI-lightweight steering applies to EVERY CI run (comment and
+          # dry-run): the full bundled /review (9 agents incl. Agent 7 =
+          # npm ci + whole-monorepo build/test) cannot finish a heavy PR
+          # within the job timeout, and the repo's own CI already
+          # builds/tests every PR, so Agent 7 is redundant here. The
+          # extra "do not post" clause is added only for dry-run.
+          # Prompt-level steering only — the bundled SKILL.md is unchanged.
+          #
+          # Validation Evidence verdict: the exact section name, PRESENT /
+          # MISSING semantics, and the verbatim advisory closing line all
+          # live in .qwen/review-rules.md ("Validation And Dogfooding").
+          # The bundled /review skill is expected to load that file, so the
+          # prompt only references it instead of restating the spec — that
+          # way edits to review-rules.md don't drift from the workflow.
+          prompt="${REVIEW_PROMPT}
+
+          CI LIGHTWEIGHT MODE — follow these execution constraints, they
+          override the skill's defaults for this run:
+          1. Do NOT run \`npm ci\`/install, build, or the test suite, and
+             do NOT launch Agent 7 (Build & Test). The repository's own
+             CI already builds and tests this PR; it is redundant here.
+          2. Run Agents 1-5 (Correctness, Security, Code Quality,
+             Performance, Test Coverage) and ONE consolidated audit
+             instead of the three separate 6a/6b/6c personas.
+          3. Skip the local linter/typecheck step (Step 3).
+          4. Apply the \`## Validation Evidence\` requirement defined in
+             .qwen/review-rules.md (section 'Validation And Dogfooding')
+             exactly as written there — same section title, same PRESENT/
+             MISSING verdict, same verbatim advisory closing line. Do not
+             paraphrase.
+          5. Produce the complete code review."
+          if [ "${SHOULD_COMMENT:-}" != "true" ]; then
+            prompt="${prompt}
+
+          DRY RUN: print the full review to stdout and do NOT post
+          anything to GitHub — no gh pr comment, no gh pr review, no
+          GitHub API writes, no inline comments. Output only; the
+          maintainer reads it from the CI log."
+          fi
+
+          out=qwen-review-stream.jsonl
+          # Plain `qwen ... | tee` does NOT stream: qwen is a Node CLI and
+          # Node full-buffers stdout when it is a pipe, so nothing shows
+          # until exit. `--output-format stream-json --include-partial-
+          # messages` is qwen's purpose-built incremental event stream —
+          # each event is written as it happens, so `tee` shows real
+          # progress in the live job log. `timeout` bounds a stall.
+          echo "::group::Qwen /review (live stream-json events)"
+          set +e
+          timeout 50m qwen --yolo \
+            --output-format stream-json --include-partial-messages \
+            --prompt "$prompt" 2>&1 | tee "$out"
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "::endgroup::"
+
+          # Extract the final assistant text from the stream for a
+          # human-readable summary (downstream comment step / artifact).
+          #
+          # Intentional simplification while debugging: this loop keeps
+          # overwriting `txt` on every assistant/message event so the file
+          # ends up with the LAST text segment seen. With
+          # --include-partial-messages enabled, intermediate progress lines
+          # land in the live job log (via `tee` above), which is exactly
+          # what we want to verify the review is actually running. The
+          # parsed-summary file only needs the final segment for the PR
+          # comment. If multi-turn assistant output ever becomes the norm,
+          # switch to a stop_reason / terminal-event filter and concatenate
+          # — but that costs the live-progress visibility we rely on for
+          # now, so this is staying simple until the skill stabilizes.
+          node -e '
+            const fs=require("fs");
+            const lines=fs.readFileSync(process.argv[1],"utf8").split(/\r?\n/);
+            let txt="";
+            for (const l of lines) {
+              if (!l.trim()) continue;
+              let e; try { e=JSON.parse(l); } catch { continue; }
+              const c=e?.message?.content;
+              if ((e.type==="assistant"||e.type==="message") && Array.isArray(c)) {
+                const t=c.filter(p=>p?.type==="text").map(p=>p.text).join("");
+                if (t) txt=t;
+              }
             }
-          prompt: |-
-            You are an expert code reviewer. You have access to shell commands to gather PR information and perform the review.
+            fs.writeFileSync("qwen-review-summary.md", txt || "(no assistant text parsed; see raw stream in the job log)");
+          ' "$out" || cp "$out" qwen-review-summary.md
 
-            IMPORTANT: Use the available shell commands to gather information. Do not ask for information to be provided.
+          echo "::group::Parsed review summary"
+          cat qwen-review-summary.md
+          echo "::endgroup::"
 
-            Start by running these commands to gather the required data:
-            1. Run: echo "$PR_DATA" to get PR details (JSON format)
-            2. Run: echo "$CHANGED_FILES" to get the list of changed files
-            3. Run: echo "$PR_NUMBER" to get the PR number
-            4. Run: echo "$ADDITIONAL_INSTRUCTIONS" to see any specific review instructions from the user
-            5. Run: gh pr diff $PR_NUMBER to see the full diff
-            6. For any specific files, use: cat filename, head -50 filename, or tail -50 filename
+          delimiter="QWEN_REVIEW_SUMMARY_$(openssl rand -hex 8)"
+          {
+            echo "summary<<$delimiter"
+            cat qwen-review-summary.md
+            echo ""
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
 
-            Additional Review Instructions:
-            If ADDITIONAL_INSTRUCTIONS contains text, prioritize those specific areas or focus points in your review.
-            Common instruction examples: "focus on security", "check performance", "review error handling", "check for breaking changes"
+          if [ "$status" -eq 124 ]; then
+            echo "::error::qwen /review exceeded the 50m step timeout."
+            exit 1
+          fi
+          exit "$status"
 
-            Once you have the information, provide a comprehensive code review by:
-            1. Writing your review to a file: write_file("review.md", "<your detailed review feedback here>")
-            2. Posting the review: gh pr comment $PR_NUMBER --body-file review.md --repo $REPOSITORY
+      - name: 'Post dry-run summary'
+        if: |-
+          steps.review.outcome == 'success' &&
+          steps.pr.outputs.should_comment != 'true'
+        env:
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+        run: |-
+          {
+            printf '### Qwen PR review dry run\n\n'
+            printf 'Completed review for PR #%s without posting PR comments.\n' "$PR_NUMBER"
+            printf '\nReview logs are available in this workflow run.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-            Review Areas:
-            - **Security**: Authentication, authorization, input validation, data sanitization
-            - **Performance**: Algorithms, database queries, caching, resource usage
-            - **Reliability**: Error handling, logging, testing coverage, edge cases
-            - **Maintainability**: Code structure, documentation, naming conventions
-            - **Functionality**: Logic correctness, requirements fulfillment
+      - name: 'Post review summary comment'
+        id: 'post-summary'
+        if: |-
+          steps.review.outcome == 'success' &&
+          steps.pr.outputs.should_comment == 'true'
+        env:
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          REVIEW_SUMMARY: '${{ steps.review.outputs.summary }}'
+        run: |-
+          set -euo pipefail
 
-            Output Format:
-            Structure your review using this exact format with markdown:
+          {
+            printf '## Qwen Code Review\n\n'
+            if [ -n "${REVIEW_SUMMARY:-}" ]; then
+              printf '%s\n' "${REVIEW_SUMMARY:0:60000}"
+              if [ "${#REVIEW_SUMMARY}" -gt 60000 ]; then
+                printf '\n\n_Review summary was truncated. See the workflow logs for the full output._\n'
+              fi
+            else
+              printf '_Qwen Code review completed, but no summary was captured. See the workflow logs for details._\n'
+            fi
+            # The single-quoted format string keeps literal backticks
+            # around %s and /review for the rendered Markdown; %s is a
+            # printf placeholder filled by the positional arg, so the
+            # single quotes are correct here.
+            # shellcheck disable=SC2016
+            printf '\n\n---\n_Reviewed by `%s` via Qwen Code `/review` (automated). Reply `@qwen /review` to re-run._\n' "${OPENAI_MODEL:-unknown}"
+          } > qwen-pr-review-summary-comment.md
 
-            ## 📋 Review Summary
-            Provide a brief 2-3 sentence overview of the PR and overall assessment.
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body-file qwen-pr-review-summary-comment.md
 
-            ## 🔍 General Feedback
-            - List general observations about code quality
-            - Mention overall patterns or architectural decisions
-            - Highlight positive aspects of the implementation
-            - Note any recurring themes across files
+      # Check the exact cache key after the review comment is delivered.
+      # lookup-only avoids downloading/restoring cache contents here; it only
+      # prevents actions/cache/save from attempting to create a key that already
+      # exists, which can happen on reruns of opened/reopened/ready_for_review
+      # where the pre-review restore step intentionally did not run.
+      - name: 'Check review cache key'
+        id: 'cache-lookup'
+        if: |-
+          steps.review.outcome == 'success' &&
+          steps.post-summary.outcome == 'success' &&
+          github.event_name == 'pull_request_target' &&
+          steps.size.outputs.head_sha != '' &&
+          steps.size.outputs.merge_base_sha != ''
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '.qwen/review-cache'
+          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
+          lookup-only: true
 
-            ## 🎯 Specific Feedback
-            Only include sections below that have actual issues. If there are no issues in a priority category, omit that entire section.
+      # Save cache only AFTER the review summary comment was successfully
+      # posted. Saving before publication would persist "this head was
+      # reviewed" state even if `gh pr comment` later failed (rate-limit,
+      # network, deleted PR, etc.) — the next synchronize would then
+      # restore the cache, bundled /review would short-circuit on
+      # "No new changes since last review" or scope to a tiny incremental
+      # diff, and the findings that never reached the PR would be lost.
+      # Gating on post-summary.outcome makes cache advancement track
+      # comment delivery, not just model success. The lookup step above skips
+      # duplicate exact-key saves on reruns.
+      - name: 'Save review cache'
+        if: |-
+          steps.review.outcome == 'success' &&
+          steps.post-summary.outcome == 'success' &&
+          github.event_name == 'pull_request_target' &&
+          steps.size.outputs.head_sha != '' &&
+          steps.size.outputs.merge_base_sha != '' &&
+          steps.cache-lookup.outputs.cache-hit != 'true'
+        uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '.qwen/review-cache'
+          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
 
-            ### 🔴 Critical
-            (Only include this section if there are critical issues)
-            Issues that must be addressed before merging (security vulnerabilities, breaking changes, major bugs):
-            - **File: `filename:line`** - Description of critical issue with specific recommendation
+      # Fires on either review-step failure OR post-summary failure, so a
+      # broken `gh pr comment` (permission gap, rate limit, transient
+      # network) still leaves a visible trace on the PR pointing reviewers
+      # at the workflow run. Without the post-summary branch a silent
+      # post-comment failure would look identical to "no review happened"
+      # from the PR's perspective.
+      - name: 'Post fallback comment on review failure'
+        if: |-
+          failure() &&
+          (steps.review.conclusion == 'failure' ||
+           steps.post-summary.conclusion == 'failure') &&
+          steps.pr.outputs.should_comment == 'true'
+        env:
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
 
-            ### 🟡 High
-            (Only include this section if there are high priority issues)
-            Important issues that should be addressed (performance problems, design flaws, significant bugs):
-            - **File: `filename:line`** - Description of high priority issue with suggested fix
-
-            ### 🟢 Medium
-            (Only include this section if there are medium priority issues)
-            Improvements that would enhance code quality (style issues, minor optimizations, better practices):
-            - **File: `filename:line`** - Description of medium priority improvement
-
-            ### 🔵 Low
-            (Only include this section if there are suggestions)
-            Nice-to-have improvements and suggestions (documentation, naming, minor refactoring):
-            - **File: `filename:line`** - Description of suggestion or enhancement
-
-            **Note**: If no specific issues are found in any category, simply state "No specific issues identified in this review."
-
-            ## ✅ Highlights
-            (Only include this section if there are positive aspects to highlight)
-            - Mention specific good practices or implementations
-            - Acknowledge well-written code sections
-            - Note improvements from previous versions
+          {
+            printf '_Qwen Code automated PR review did not complete successfully. See the workflow logs for details: %s_\n' "$RUN_URL"
+            printf "\nThis is an automated message; please retry by commenting \`@qwen /review\` once the underlying issue is resolved.\n"
+          } > qwen-pr-review-failure-comment.md
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body-file qwen-pr-review-failure-comment.md || true
