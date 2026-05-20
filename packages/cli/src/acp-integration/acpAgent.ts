@@ -4,12 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-
-  ApprovalMode,
-  Config,
-  ConversationRecord,
-  DeviceAuthorizationData,
+import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
