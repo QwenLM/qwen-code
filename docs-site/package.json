@@ -7,7 +7,7 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "link": "ln -s ../docs content",
+    "link": "rm -rf content && mkdir content && cp ../docs/index.md ../docs/_meta.ts content/ && cp -R ../docs/users ../docs/developers content/",
     "clean": "rm -rf .next",
     "dev": "npm run clean && next --turbopack",
     "test": "echo \"Error: no test specified\" && exit 1"

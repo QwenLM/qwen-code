@@ -17,13 +17,15 @@ npm install
 
 ### Setup Content
 
-Link the documentation content from the parent `docs` directory:
+Prepare the public documentation content from the parent `docs` directory:
 
 ```bash
 npm run link
 ```
 
-This creates a symbolic link from `../docs` to `content` in the project.
+This creates a `content` directory with copies of the public docs sections.
+Internal planning, design, and E2E notes remain outside the docs site content
+tree.
 
 ### Development
 
