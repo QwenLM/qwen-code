@@ -180,6 +180,9 @@ describe('Session', () => {
   let mockMonitorRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
   };
+  let mockBackgroundShellRegistry: {
+    setNotificationCallback: ReturnType<typeof vi.fn>;
+  };
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
@@ -214,6 +217,9 @@ describe('Session', () => {
       setNotificationCallback: vi.fn(),
     };
     mockMonitorRegistry = {
+      setNotificationCallback: vi.fn(),
+    };
+    mockBackgroundShellRegistry = {
       setNotificationCallback: vi.fn(),
     };
 
@@ -270,6 +276,9 @@ describe('Session', () => {
       getBackgroundTaskRegistry: vi
         .fn()
         .mockReturnValue(mockBackgroundTaskRegistry),
+      getBackgroundShellRegistry: vi
+        .fn()
+        .mockReturnValue(mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
     } as unknown as Config;
 
@@ -895,6 +904,107 @@ describe('Session', () => {
           source: 'background_notification',
         },
       );
+    });
+
+    it('drains background shell notifications through ACP after the prompt is idle', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'The shell finished successfully.' }],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background shell' }],
+      });
+
+      const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      callback(
+        'Background shell "npm test" completed.',
+        '<task-notification><kind>shell</kind></task-notification>',
+        {
+          shellId: 'shell-1',
+          status: 'completed',
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        'qwen3-code-plus',
+        {
+          message: [
+            {
+              text: '<task-notification><kind>shell</kind></task-notification>',
+            },
+          ],
+          config: { abortSignal: expect.any(AbortSignal) },
+        },
+        expect.stringMatching(/^test-session-id########notification\d+$/),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Background shell "npm test" completed.',
+          },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'shell-1',
+              status: 'completed',
+              kind: 'shell',
+              toolUseId: undefined,
+            },
+          },
+        },
+      });
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'The shell finished successfully.',
+          },
+          _meta: {
+            source: 'background_notification_response',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'shell-1',
+              status: 'completed',
+              kind: 'shell',
+              toolUseId: undefined,
+            },
+          },
+        },
+      });
     });
 
     it('continues ACP prompt ids after replaying resumed history', async () => {

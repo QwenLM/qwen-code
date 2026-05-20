@@ -134,9 +134,21 @@ interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor';
+  kind: 'agent' | 'monitor' | 'shell';
   toolUseId?: string;
 }
+
+type ShellNotificationRegistrar = {
+  setNotificationCallback?: (
+    cb:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: { shellId: string; status: string },
+        ) => void)
+      | undefined,
+  ) => void;
+};
 
 export function computeInitialTurnFromHistory(
   records: ChatRecord[],
@@ -1575,6 +1587,18 @@ export class Session implements SessionContext {
         status: meta.status,
         kind: 'monitor',
         toolUseId: meta.toolUseId,
+      });
+    });
+
+    const shellRegistry =
+      this.config.getBackgroundShellRegistry() as unknown as ShellNotificationRegistrar;
+    shellRegistry.setNotificationCallback?.((displayText, modelText, meta) => {
+      this.#enqueueBackgroundNotification({
+        displayText,
+        modelText,
+        taskId: meta.shellId,
+        status: meta.status,
+        kind: 'shell',
       });
     });
   }
