@@ -257,7 +257,7 @@ Overlapping small PR `#4268` model snapshot:
    show a persistent child-process memory owner. The dominant process is the
    main Node process.
 2. The local bundle run peaks around 0.36-0.41 GiB, not the earlier
-   0.85-1.06 GiB, because the matrix used a stripped temporary config. A
+   0.83-1.04 GiB, because the matrix used a stripped temporary config. A
    follow-up normal-config sanity check reproduced about 1.1 GiB tree RSS on
    both PATH `qwen` and local `dist/cli.js`, with the extra memory coming from
    child MCP/Node processes in the process tree.
