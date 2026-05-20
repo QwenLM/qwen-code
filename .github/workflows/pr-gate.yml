@@ -33,38 +33,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pr-title:
-    name: 'PR Title'
-    runs-on: 'ubuntu-latest'
-    timeout-minutes: 2
-    steps:
-      # action-semantic-pull-request validates that PR title follows
-      # Conventional Commits (https://www.conventionalcommits.org/).
-      # SHA-pinned per repo convention (matches qwen-code-pr-review.yml).
-      - name: 'Validate PR title (Conventional Commits)'
-        uses: 'amannn/action-semantic-pull-request@0723387faaf9b38adef4775cd42cfd5155ed6017' # v5.5.3
-        env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-        with:
-          types: |
-            feat
-            fix
-            docs
-            style
-            refactor
-            perf
-            test
-            chore
-            ci
-            build
-            revert
-          requireScope: false
-          subjectPattern: '^.{1,72}$'
-          subjectPatternError: 'PR title subject (the part after `type:`) must be between 1 and 72 characters. Got: "{subject}".'
-          # No WIP exemption: contributors who want to mark in-progress
-          # status should use the GitHub PR draft state instead (which
-          # the workflow gates already respect — pr-gate runs on
-          # ready_for_review and edited, so retitling is cheap).
+  # NOTE: a `pr-title` Conventional-Commits check used to live here. It was
+  # removed because the repo enforces commit-message format via local
+  # commit-msg hooks (so contributors hitting `git commit` are already
+  # caught on their own machine), and re-checking the same rule in CI just
+  # duplicates the gate without adding signal. PR title still becomes the
+  # squash-merge commit message; maintainers spot-check it at merge time.
+  # If we later see PRs with non-conforming titles slipping through, this
+  # job can be reintroduced (the action used was
+  # `amannn/action-semantic-pull-request` pinned to a SHA).
 
   pr-template:
     name: 'PR Template'

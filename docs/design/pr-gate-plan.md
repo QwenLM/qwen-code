@@ -3,7 +3,7 @@
 > 目标：为社区 PR 建立分层门禁体系，解耦快速合规检查与深度 AI review，确保每个 check 职责单一、失败信息清晰。
 >
 > **状态**：本设计已在本 PR（codex/preflight-triage 分支）落地。具体文件：
-> - `.github/workflows/pr-gate.yml` — 三个独立 job (PR Title / PR Template / PR Size)
+> - `.github/workflows/pr-gate.yml` — 两个独立 job (PR Template / PR Size)。PR Title (Conventional Commits) check 不做 —— 仓库已有本地 commit-msg hook 把住格式。
 > - `.github/PULL_REQUEST_TEMPLATE.md` — 仓库**已有**，结构与本 plan 兼容（`## Linked Issues / Bugs` 包含 `## Linked Issues` 子串），无需重写
 > - `.github/workflows/qwen-code-pr-review.yml` — Phase B 已应用：size 超限不再发"请拆分"评论，阻断职责完全交给 `pr-gate.yml`
 > - Branch Protection / CODEOWNERS — 在 Settings 配，不在代码里，详见下面 §Phase D
@@ -16,17 +16,19 @@
 |------|---------|
 | check 耦合 | size check 嵌在 `qwen-code-pr-review.yml` 内部，不是独立 status check；LLM 超时会连带 size 判断一起失败 |
 | 缺 PR body 校验 | 有 PR template 但没有 CI 强制校验；社区 PR 可以空着 Validation section 直接提交 |
-| 缺 PR title 规范 | 无 Conventional Commits 校验，changelog 生成和 git log 可读性依赖人工 |
 | 无独立 CODEOWNERS | 缺少自动 reviewer 分配 |
 | AI review 与合并阻断混淆 | qwen-code review 是辅助决策，不应作为 merge blocker，但目前没有明确区分 |
 
+> **本来还有 "PR title 规范" 这一项**，最终判定**不在 CI 层做**：仓库已通过本地 commit-msg hook 强制 Conventional Commits 格式，CI 重复校验只是冗余。维护者合并时仍可手动校对 PR title（squash-merge 时它会成为 main 上的 commit message）。
+
 ## 设计原则
 
-1. **快慢分离**：秒级门禁（title、body、size）与分钟级检查（lint、test、AI review）拆成不同 workflow
+1. **快慢分离**：秒级门禁（body、size）与分钟级检查（lint、test、AI review）拆成不同 workflow
 2. **职责单一**：每个 job 产出一个 named status check，Branch Protection 按 name 引用
 3. **失败可读**：社区贡献者看到具体哪项不过、怎么修，而不是笼统的 "review failed"
 4. **AI review 不阻断**：qwen-code review 作为 informational check，提供建议但不 block merge
 5. **渐进式**：先上无成本的 gate check，再逐步收紧
+6. **不重复本地已有的 gate**：commit-msg hook 已经把 Conventional Commits 格式管住了 → CI 层不再重复 PR Title 校验
 
 ## 整体架构
 
@@ -35,12 +37,12 @@
 │  Branch Protection / Rulesets (repo Settings)                │
 │                                                             │
 │  Required status checks (必须全绿才能 Merge):                │
-│    • "PR Title"        ← pr-gate.yml                        │
 │    • "PR Template"     ← pr-gate.yml                        │
 │    • "PR Size"         ← pr-gate.yml                        │
 │    • "Lint"            ← ci.yml                             │
 │    • "Test (ubuntu-latest, Node 22.x)" ← ci.yml            │
 │    • "CodeQL"          ← ci.yml                             │
+│  (PR title 格式 — 不在 CI；本地 commit-msg hook 已强制)      │
 │                                                             │
 │  Non-required (informational):                               │
 │    • "review-pr"       ← qwen-code-pr-review.yml            │
@@ -57,38 +59,11 @@
 
 ### Phase A：新增 `pr-gate.yml`（独立轻量门禁）
 
-新建 `.github/workflows/pr-gate.yml`，包含三个独立 job：
+新建 `.github/workflows/pr-gate.yml`，包含两个独立 job：
 
-#### Job 1: PR Title Check
+> ~~`Job 1: PR Title Check`~~ — **不做**。Conventional Commits 格式由仓库本地 commit-msg hook 强制，CI 层重复校验只是冗余。squash-merge 时 PR title 会成为 main 上的 commit message，维护者合并时手动确认即可。
 
-```yaml
-pr-title:
-  name: "PR Title"
-  runs-on: ubuntu-latest
-  steps:
-    - uses: amannn/action-semantic-pull-request@v6
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        types: |
-          feat
-          fix
-          docs
-          refactor
-          test
-          chore
-          ci
-          perf
-          build
-          revert
-        requireScope: false
-        subjectPattern: ^.{1,72}$
-        subjectPatternError: "PR 标题 subject 不能超过 72 字符"
-```
-
-**参考**：Nx (`nrwl/nx`) 的 `pr-title-validation.yml` 用同样方案。
-
-#### Job 2: PR Template Validation
+#### Job 1: PR Template Validation
 
 ```yaml
 pr-body:
@@ -142,7 +117,7 @@ pr-body:
 
 **参考**：React 的 `shared_check_maintainer.yml` 对 PR metadata 做类似的程序化校验。
 
-#### Job 3: PR Size Check
+#### Job 2: PR Size Check
 
 ```yaml
 pr-size:
@@ -250,7 +225,6 @@ docs/                       @QwenLM/qwen-code-maintainers
   - [x] Require review from Code Owners
 - [x] Require status checks to pass before merging
   - Required checks:
-    - `PR Title`
     - `PR Template`
     - `PR Size`
     - `Lint`

@@ -575,6 +575,67 @@ Deep review verdict: APPROVE
 - **R2**：preflight 漏档 —— 模型可能把高风险 PR 误判为 LIGHT。**缓解**：calibration 示例里强化 high-blast-radius case；校准 loop 数据驱动 prompt 迭代；maintainer 可用 `@qwen /review --tier=deep` 显式补救。
 - **R3**：tier 升档的"棘轮效应" —— 用户感知 preflight 永远只升档不降档，长期可能不再信任。**缓解**：校准 loop 数据驱动 ablation，定期 review 是否过度保守。
 
+## Rollback / Emergency Disable
+
+合入后如果 preflight 在生产中出问题（模型频繁判错 / API 限流 / SKU 失效 / cost 暴涨），maintainer 有三级降级路径，按"代价由小到大"排：
+
+### L1 — 跳过 preflight，全部走 deep review（最快、单点操作）
+
+适用：preflight 模型本身坏了（譬如 endpoint down、JSON 结构突然不稳），但 deep review 模型 SKU 还能用。
+
+操作：repo Settings → Secrets and variables → Actions → Variables，把 `QWEN_PR_PREFLIGHT_MODEL` **设为空字符串**（不是 "auto"，是空）。
+
+效果：`Preflight triage` step 仍会跑，但因为没有 `vars.QWEN_PR_PREFLIGHT_MODEL`，fallback 到 `vars.QWEN_PR_REVIEW_MODEL`（deep review 模型），等价于"用 deep model 跑 preflight"。Workflow step 会打 `::warning::` 提示这个 fallback。
+
+代价：preflight 阶段成本翻倍（用贵模型代替便宜模型），但行为正确。**对 PR 流影响为零**。
+
+### L2 — 跳过 preflight 决策本身，全部强制 DEEP（中等代价）
+
+适用：preflight 输出格式系统性偏差（譬如所有 PR 都被判 LIGHT，明显漏档），且 L1 没用（preflight 模型本身不是问题，是 prompt / 决策逻辑出问题）。
+
+操作（任选其一）：
+- **临时**：在 `.github/workflows/qwen-code-pr-review.yml` 里，把 `Compute effective tier` step 加一行 `tier="DEEP"` 强制写死
+- **手动**：每个 PR 由 maintainer 评论 `@qwen /review --tier=deep` 覆盖（对外部贡献者 PR 体验差）
+- **dispatch**：用 `workflow_dispatch` + `tier_override=deep` 触发（仅 maintainer，不影响自动 PR）
+
+代价：所有 PR 都走 bundled `/review` 9-agent 深审，回到 Phase 1-3 的耗时模式（6 行 PR 也跑 16 min；407 行 PR 撞 timeout）。**这是退到改造前的状态**，可工作但慢。
+
+### L3 — 彻底关掉 AI review（最重的杀招）
+
+适用：deep review 模型也挂了 / token 配额耗尽 / 临时止血。
+
+操作：repo Settings → Actions → 把 `qwen-code-pr-review.yml` 这个 workflow **disable**。GitHub UI 上每个 workflow 有 `...` 菜单可以单独 disable，不需要改代码。
+
+效果：`qwen-code-pr-review.yml` 不再运行，PR 上 **不再有任何 AI review 评论**。**`pr-gate.yml` 不受影响**，依然把 PR Template + PR Size 合规门禁挡住——即合规层完全不降级。
+
+代价：失去 AI advisory review；reviewer 全靠人工。但**合并门禁仍然有效**。
+
+### 不变量
+
+无论降到哪一级：
+- `pr-gate.yml` 的 PR Template + PR Size 门禁**始终生效**，PR 合规性不降级
+- `ci.yml` 的 lint / test / build / CodeQL **始终生效**
+- 合并 gate 完整性不依赖 AI review 任何一档
+
+### 选择决策树
+
+```
+preflight LLM 失败？
+  └─ 是 → 是不是只是 preflight 模型坏？
+            ├─ 是 → L1 (清空 PREFLIGHT_MODEL var)
+            └─ 否 → 是不是 prompt / 决策逻辑系统性出错？
+                      ├─ 是 → L2 (临时强制 tier=DEEP)
+                      └─ 否 (deep review 也挂) → L3 (disable workflow)
+```
+
+### 监控信号 → 降级触发条件
+
+- preflight step 连续 N=5 次 exit 非 0 → 触发 L1
+- maintainer 在 calibration 数据上看到 > 30% 的 PR 被 preflight 错判 → 评估 L2
+- API quota / cost dashboard 报警 → L3 直到调查清楚
+
+> 这套降级路径**不依赖任何即将到来的设计**（calibration、改 prompt、改 workflow）。所有 L1/L2/L3 都是**已实施代码的运行时配置**，maintainer 在 GitHub UI 操作即可，无需提 PR。
+
 ---
 
 > 草稿状态：本文档由今天的实测数据 + 讨论沉淀。下一步是把 §"待定决策" 敲定，然后进入 Phase A 实现。
