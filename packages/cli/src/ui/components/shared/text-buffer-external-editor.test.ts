@@ -692,33 +692,40 @@ describe('openInExternalEditor', () => {
     }
   });
 
-  it('should reject opts.editor with unsafe characters on Windows', async () => {
-    const origPlatform = process.platform;
-    Object.defineProperty(process, 'platform', { value: 'win32' });
+  it.each([
+    { char: '"', editor: 'evil"|cmd.cmd' },
+    { char: '%', editor: 'expand%PATH%.cmd' },
+    { char: '!', editor: 'delayed!var!.cmd' },
+  ])(
+    'should reject opts.editor with unsafe "$char" on Windows',
+    async ({ editor }) => {
+      const origPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'win32' });
 
-    try {
-      const { result } = renderHook(() =>
-        useTextBuffer({
-          initialText: 'hello',
-          viewport,
-          isValidPath: () => false,
-        }),
-      );
+      try {
+        const { result } = renderHook(() =>
+          useTextBuffer({
+            initialText: 'hello',
+            viewport,
+            isValidPath: () => false,
+          }),
+        );
 
-      await act(async () => {
-        await result.current.openInExternalEditor({ editor: 'evil"|cmd.cmd' });
-      });
+        await act(async () => {
+          await result.current.openInExternalEditor({ editor });
+        });
 
-      expect(mockSpawnSync).not.toHaveBeenCalled();
-      expect(result.current.text).toBe('hello');
-      expect(fs.rmSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock', {
-        recursive: true,
-        force: true,
-      });
-    } finally {
-      Object.defineProperty(process, 'platform', { value: origPlatform });
-    }
-  });
+        expect(mockSpawnSync).not.toHaveBeenCalled();
+        expect(result.current.text).toBe('hello');
+        expect(fs.rmSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock', {
+          recursive: true,
+          force: true,
+        });
+      } finally {
+        Object.defineProperty(process, 'platform', { value: origPlatform });
+      }
+    },
+  );
 
   it('should disable and restore raw mode around editor session', async () => {
     const mockSetRawMode = vi.fn();
@@ -743,6 +750,33 @@ describe('openInExternalEditor', () => {
     const falseIdx = mockSetRawMode.mock.calls.findIndex((c) => c[0] === false);
     const trueIdx = mockSetRawMode.mock.calls.findIndex((c) => c[0] === true);
     expect(falseIdx).toBeLessThan(trueIdx);
+  });
+
+  it('should restore raw mode even when editor fails', async () => {
+    const mockSetRawMode = vi.fn();
+    const mockStdin = { isRaw: true } as unknown as NodeJS.ReadStream;
+    mockSpawnSync.mockReturnValueOnce({ status: 1, error: null, signal: null });
+
+    const { result } = renderHook(() =>
+      useTextBuffer({
+        initialText: 'hello',
+        viewport,
+        isValidPath: () => false,
+        stdin: mockStdin,
+        setRawMode: mockSetRawMode,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.openInExternalEditor();
+    });
+
+    expect(mockSetRawMode).toHaveBeenCalledWith(false);
+    expect(mockSetRawMode).toHaveBeenCalledWith(true);
+    const falseIdx = mockSetRawMode.mock.calls.findIndex((c) => c[0] === false);
+    const trueIdx = mockSetRawMode.mock.calls.findIndex((c) => c[0] === true);
+    expect(falseIdx).toBeLessThan(trueIdx);
+    expect(result.current.text).toBe('hello');
   });
 
   it('should fall back to vi when VISUAL and EDITOR are unset on non-Windows', async () => {
@@ -815,35 +849,42 @@ describe('openInExternalEditor', () => {
     }
   });
 
-  it('should reject env-var .cmd with unsafe characters on Windows', async () => {
-    const origPlatform = process.platform;
-    const origVISUAL = process.env['VISUAL'];
-    Object.defineProperty(process, 'platform', { value: 'win32' });
-    process.env['VISUAL'] = 'evil"cmd.cmd';
+  it.each([
+    { char: '"', env: 'evil"cmd.cmd' },
+    { char: '%', env: 'expand%PATH%.cmd' },
+    { char: '!', env: 'delayed!var!.cmd' },
+  ])(
+    'should reject env-var .cmd with unsafe "$char" on Windows',
+    async ({ env }) => {
+      const origPlatform = process.platform;
+      const origVISUAL = process.env['VISUAL'];
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      process.env['VISUAL'] = env;
 
-    try {
-      const { result } = renderHook(() =>
-        useTextBuffer({
-          initialText: 'hello',
-          viewport,
-          isValidPath: () => false,
-        }),
-      );
+      try {
+        const { result } = renderHook(() =>
+          useTextBuffer({
+            initialText: 'hello',
+            viewport,
+            isValidPath: () => false,
+          }),
+        );
 
-      await act(async () => {
-        await result.current.openInExternalEditor();
-      });
+        await act(async () => {
+          await result.current.openInExternalEditor();
+        });
 
-      expect(mockSpawnSync).not.toHaveBeenCalled();
-      expect(result.current.text).toBe('hello');
-      expect(fs.rmSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock', {
-        recursive: true,
-        force: true,
-      });
-    } finally {
-      Object.defineProperty(process, 'platform', { value: origPlatform });
-      if (origVISUAL === undefined) delete process.env['VISUAL'];
-      else process.env['VISUAL'] = origVISUAL;
-    }
-  });
+        expect(mockSpawnSync).not.toHaveBeenCalled();
+        expect(result.current.text).toBe('hello');
+        expect(fs.rmSync).toHaveBeenCalledWith('/tmp/qwen-edit-mock', {
+          recursive: true,
+          force: true,
+        });
+      } finally {
+        Object.defineProperty(process, 'platform', { value: origPlatform });
+        if (origVISUAL === undefined) delete process.env['VISUAL'];
+        else process.env['VISUAL'] = origVISUAL;
+      }
+    },
+  );
 });
