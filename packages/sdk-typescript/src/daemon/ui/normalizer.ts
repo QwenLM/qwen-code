@@ -124,6 +124,11 @@ export function normalizeDaemonEvent(
           type: 'status',
           text: `${event.type} (unrecognized daemon event)`,
         },
+        {
+          ...base,
+          type: 'debug',
+          text: `${event.type}: ${stringifyJson(event.data)}`,
+        },
       ];
   }
 }

@@ -621,6 +621,10 @@ describe('daemon UI normalizer and transcript reducer', () => {
         type: 'status',
         text: 'mcp_budget_warning (unrecognized daemon event)',
       },
+      {
+        type: 'debug',
+        text: expect.stringContaining('secret') as string,
+      },
     ]);
   });
 
@@ -702,7 +706,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(stderr).toMatchObject({ type: 'shell.output', stream: 'stderr' });
   });
 
-  it('merges consecutive same-stream shell output blocks only', () => {
+  it('merges consecutive same-stream and streamless shell output blocks only', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
       [
@@ -718,8 +722,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks).toMatchObject([
       { kind: 'shell', text: 'out-1out-2', stream: 'stdout' },
       { kind: 'shell', text: 'err-1', stream: 'stderr' },
-      { kind: 'shell', text: 'unknown-1' },
-      { kind: 'shell', text: 'unknown-2' },
+      { kind: 'shell', text: 'unknown-1unknown-2' },
     ]);
   });
 
