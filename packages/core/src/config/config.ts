@@ -1060,10 +1060,8 @@ export class Config {
       console.warn(
         '[qwen-code] chatCompression.contextPercentageThreshold has been removed ' +
           'and is now controlled by built-in thresholds. Setting will be ignored. ' +
-          'Note: auto-compaction cannot currently be disabled — the old ' +
-          '"set threshold to 0 to disable" escape hatch is gone. If you need ' +
-          'to retain full history, use /clear between conversations or open ' +
-          'an issue describing your use case so we can consider a replacement.',
+          'To disable auto-compaction entirely, use chatCompression.disabled: true ' +
+          'in your settings (manual /compress and reactive overflow still work).',
       );
     }
     this.chatCompression = params.chatCompression;

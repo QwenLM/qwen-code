@@ -102,6 +102,21 @@ export function redactStructuredOutputArgsForRecording(
   };
 }
 
+/**
+ * Coerce a provider-supplied numeric usage field to a safe non-negative
+ * number. Drops NaN, Infinity, non-numbers, and negatives to 0 — every
+ * downstream consumer of these fields (cheap-gate threshold compare,
+ * cold-vs-steady-state estimator branch, hard-rescue trigger) assumes
+ * a finite non-negative count. A poisoned value silently disables the
+ * gate (`tokens >= NaN` is false) or fires it permanently
+ * (`Infinity >= hard`). (R11.1 / R12.1)
+ */
+function coerceUsageCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : 0;
+}
+
 function isCompressionFailureStatus(status: CompressionStatus): boolean {
   return (
     status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
@@ -1660,39 +1675,40 @@ export class GeminiChat {
       // Collect token usage for consolidated recording
       if (chunk.usageMetadata) {
         usageMetadata = chunk.usageMetadata;
+        // R12.1: every API-supplied numeric usage field goes through
+        // `coerceUsageCount`. Pre-R12.1 the prompt-count site relied on
+        // truthy-check only (`promptTokenCount || totalTokenCount`),
+        // which accepts negative numbers and Infinity; R11.1's
+        // `Number.isFinite` on candidates accepted negative values too
+        // (Number.isFinite(-1) is true). Single helper enforces the
+        // (finite ∧ >= 0) contract uniformly across all three sites.
+        //
         // Context usage tracks prompt size; output isn't in history yet.
-        const lastPromptTokenCount =
-          usageMetadata.promptTokenCount || usageMetadata.totalTokenCount;
-        if (lastPromptTokenCount) {
+        const promptCount =
+          coerceUsageCount(usageMetadata.promptTokenCount) ||
+          coerceUsageCount(usageMetadata.totalTokenCount);
+        if (promptCount) {
           // Always update the per-chat counter so this chat (including
           // subagents) can make its own compaction decisions.
-          this.lastPromptTokenCount = lastPromptTokenCount;
+          this.lastPromptTokenCount = promptCount;
           // R10.1: also capture the model's response size — it gets
           // appended to history immediately after this handler runs,
           // and the next turn's prompt-size estimate needs to add it
           // back since `lastPromptTokenCount` only reflects the input
           // sent on THIS turn.
-          //
-          // R11.1: use Number.isFinite so a hostile / buggy provider
-          // payload (NaN, Infinity, non-number) coerces to 0 instead
-          // of poisoning the field. `??` would let NaN through — and
-          // because `NaN >= hard` is always false, the propagated NaN
-          // would silently disable hard-tier rescue for the rest of
-          // the session.
-          this.lastCandidatesTokenCount = Number.isFinite(
+          this.lastCandidatesTokenCount = coerceUsageCount(
             usageMetadata.candidatesTokenCount,
-          )
-            ? (usageMetadata.candidatesTokenCount as number)
-            : 0;
+          );
           // Mirror to the global telemetry only when wired — subagents
           // pass `telemetryService=undefined` to keep their context usage
           // out of the main session's UI counters.
-          this.telemetryService?.setLastPromptTokenCount(lastPromptTokenCount);
+          this.telemetryService?.setLastPromptTokenCount(promptCount);
         }
-        if (usageMetadata.cachedContentTokenCount && this.telemetryService) {
-          this.telemetryService.setLastCachedContentTokenCount(
-            usageMetadata.cachedContentTokenCount,
-          );
+        const cachedCount = coerceUsageCount(
+          usageMetadata.cachedContentTokenCount,
+        );
+        if (cachedCount && this.telemetryService) {
+          this.telemetryService.setLastCachedContentTokenCount(cachedCount);
         }
       }
 

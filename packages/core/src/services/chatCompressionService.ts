@@ -23,6 +23,7 @@ import {
   resolveSlimmingConfig,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
+import { estimateContentTokens } from './tokenEstimation.js';
 
 /**
  * The fraction of the latest chat history to keep. A value of 0.3
@@ -120,6 +121,20 @@ const SNAPSHOT_REGEX = new RegExp(
   `[\\s\\S]*<${COMPRESSION_SNAPSHOT_TAG}>([\\s\\S]*?)</${COMPRESSION_SNAPSHOT_TAG}>`,
 );
 
+/**
+ * Process-wide throttle for the "auto-compaction disabled" warn. Lives
+ * at module scope because `ChatCompressionService` is constructed per
+ * `tryCompress` call, so an instance flag would warn on every send
+ * for the whole session. Reset by tests via `resetDisabledWarningForTests`.
+ * (R12.4)
+ */
+let disabledWarningEmitted = false;
+
+/** Test-only: reset the process-wide R12.4 throttle. */
+export function resetDisabledWarningForTests(): void {
+  disabledWarningEmitted = false;
+}
+
 export interface CompactionThresholds {
   /** Token count at which UI warn tier triggers. */
   readonly warn: number;
@@ -145,8 +160,27 @@ export interface CompactionThresholds {
  * of the window.
  *
  * Pure function — no I/O, no shared state — safe to call repeatedly.
+ *
+ * R12.2: a non-finite or non-positive `window` (e.g. an OpenAI-compat
+ * proxy returning `"context_window": null` → NaN; a misconfigured
+ * provider returning 0; a negative override) propagates NaN to all
+ * four returned fields. Every downstream `tokens < NaN` / `tokens >=
+ * NaN` comparison evaluates to `false`, silently disabling the entire
+ * three-tier gate (proactive + warn tip + hard rescue). Return
+ * `Infinity` for the threshold tiers so gate comparisons fall through
+ * to the NOOP-equivalent path (`tokens < Infinity` always true), and
+ * `effectiveWindow: 0` so any "window minus auto" derivations clamp
+ * to zero rather than poisoning their own math.
  */
 export function computeThresholds(window: number): CompactionThresholds {
+  if (!Number.isFinite(window) || window <= 0) {
+    return {
+      warn: Number.POSITIVE_INFINITY,
+      auto: Number.POSITIVE_INFINITY,
+      hard: Number.POSITIVE_INFINITY,
+      effectiveWindow: 0,
+    };
+  }
   const effectiveWindow = window - SUMMARY_RESERVE;
 
   const absAuto = effectiveWindow - AUTOCOMPACT_BUFFER;
@@ -350,7 +384,27 @@ export class ChatCompressionService {
     // asked or the process is at memory risk. Reactive overflow at
     // the API layer is still the last-ditch safety net. Replaces the
     // removed `contextPercentageThreshold: 0` escape hatch.
+    //
+    // R12.4: log once per process when the disable knob trips a NOOP
+    // so an oncall investigating "auto-compaction isn't running" can
+    // distinguish "user explicitly disabled it" from "system broken".
+    // Symmetric with R7.9's `breakerWarningEmitted` / R8.4's
+    // `budgetExhaustedWarningEmitted` throttles. Module-level flag so
+    // the warn fires on the first NOOP and stays silent thereafter,
+    // even across new `ChatCompressionService` instances (the service
+    // is constructed per `tryCompress` call).
     if (chatCompressionSettings?.disabled && !force && !bypassTokenThreshold) {
+      if (!disabledWarningEmitted) {
+        config
+          .getDebugLogger()
+          .warn(
+            '[chat-compression] auto-compaction is disabled via ' +
+              'chatCompression.disabled=true; skipping proactive + ' +
+              'hard-rescue paths. Manual /compress and reactive overflow ' +
+              'still work. (This message is logged once per process.)',
+          );
+        disabledWarningEmitted = true;
+      }
       return {
         newHistory: null,
         info: {
@@ -753,9 +807,17 @@ export class ChatCompressionService {
       // envelope. Using the raw API count inflates newTokenCount by
       // the scratchpad's share, which makes the next cheap-gate fire
       // earlier than it should. Scale by the char ratio so the
-      // bookkeeping reflects what we actually kept. Using the API count
-      // (rather than char/4 of the summary alone) preserves the
-      // provider's tokenizer fidelity for the snapshot portion.
+      // bookkeeping reflects what we actually kept.
+      //
+      // R12.3: pure scaling collapses to near-zero on extreme
+      // scratchpad/snapshot ratios (e.g. 200K scratchpad + 5K snapshot
+      // with 15K API tokens scales to ~375). The undercount makes the
+      // next cheap-gate think the new history is tiny, suppressing
+      // compression for many turns until reactive overflow recovers.
+      // Floor by `estimateContentTokens` on the persisted summary so
+      // the bookkeeping has a meaningful lower bound — `Math.max(api-
+      // scaled, char-based)` keeps API tokenizer fidelity when the
+      // scratchpad is reasonable and clamps when it isn't.
       if (
         typeof compressionInputTokenCount === 'number' &&
         compressionInputTokenCount > 0 &&
@@ -764,7 +826,7 @@ export class ChatCompressionService {
       ) {
         canCalculateNewTokenCount = true;
         const rawLen = rawSummaryText ? rawSummaryText.length : summary.length;
-        const persistedOutputTokens =
+        const scaledOutputTokens =
           rawLen > 0
             ? Math.max(
                 1,
@@ -773,6 +835,14 @@ export class ChatCompressionService {
                 ),
               )
             : compressionOutputTokenCount;
+        const charBasedFloor = estimateContentTokens(
+          [{ role: 'user', parts: [{ text: summary }] }],
+          slimmingConfig.imageTokenEstimate,
+        );
+        const persistedOutputTokens = Math.max(
+          scaledOutputTokens,
+          charBasedFloor,
+        );
         newTokenCount = Math.max(
           0,
           originalTokenCount -

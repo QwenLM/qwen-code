@@ -2703,6 +2703,71 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     expect(persistedOutputTokens).toBeGreaterThan(0);
     expect(persistedOutputTokens).toBeLessThan(apiOutputTokens * 0.5); // snapshot is ~25% of raw
   });
+
+  it('newTokenCount has a char-based floor preventing severe undercount on verbose scratchpads (R12.3)', async () => {
+    // R12.3: R8.7's pure-scaling formula collapses to near-zero when
+    // the scratchpad/snapshot ratio is extreme. Example from reviewer:
+    // rawLen=200K, summary=5K, apiOutput=15K → scaled = 375 tokens.
+    // That makes the cheap-gate think the new history is much smaller
+    // than it actually is, suppressing the NEXT compression for many
+    // turns. Floor to at least chars/4 of the persisted summary so
+    // the bookkeeping cannot fall below a meaningful lower bound.
+    const VERBOSE_SCRATCHPAD =
+      '<scratchpad>' + 'r'.repeat(200_000) + '</scratchpad>';
+    const SMALL_SNAPSHOT =
+      '<state_snapshot>' + 's'.repeat(5_000) + '</state_snapshot>';
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: `${VERBOSE_SCRATCHPAD}\n${SMALL_SNAPSHOT}`,
+      usage: {
+        promptTokenCount: 175_000,
+        candidatesTokenCount: 15_000, // ~50K scratchpad tokens + ~5K snapshot tokens
+        totalTokenCount: 190_000,
+      },
+    } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    const mockChat = {
+      getHistory: vi.fn().mockReturnValue(history),
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn(), info: vi.fn() }),
+    } as unknown as Config;
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    // The persisted summary is ~5025 chars → char-based estimate is
+    // ~5025/4 = 1257 tokens. The pure scaling formula would give
+    // 15000 * (5025/205033) ≈ 367 (the bug). With the floor, the
+    // bookkeeping must be at least the char-based estimate.
+    const persistedOutputTokens =
+      result.info.newTokenCount - 180_000 + (175_000 - 1000);
+    expect(persistedOutputTokens).toBeGreaterThanOrEqual(1000);
+  });
 });
 
 describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () => {
@@ -2892,6 +2957,24 @@ describe('computeThresholds', () => {
       const t = computeThresholds(w);
       expect(t.warn).toBeLessThanOrEqual(t.auto);
       expect(t.auto).toBeLessThanOrEqual(t.hard);
+    }
+  });
+
+  it('returns all-Infinity for non-finite or non-positive windows (R12.2)', () => {
+    // R12.2: an OpenAI-compat proxy returning `"context_window": null`
+    // would surface as `contextWindowSize: NaN`. Pre-R12.2,
+    // computeThresholds propagated NaN to all four fields → every
+    // downstream comparison (`tokens < NaN`) returned false → the
+    // ENTIRE three-tier gate (proactive + warn tip + hard rescue)
+    // silently disabled. Return Infinity for the threshold tiers so
+    // gate comparisons cleanly fall through to NOOP-equivalent paths
+    // rather than poisoning arithmetic.
+    for (const bad of [Number.NaN, 0, -1, -100_000, Number.NEGATIVE_INFINITY]) {
+      const t = computeThresholds(bad);
+      expect(t.warn).toBe(Number.POSITIVE_INFINITY);
+      expect(t.auto).toBe(Number.POSITIVE_INFINITY);
+      expect(t.hard).toBe(Number.POSITIVE_INFINITY);
+      expect(t.effectiveWindow).toBe(0);
     }
   });
 });

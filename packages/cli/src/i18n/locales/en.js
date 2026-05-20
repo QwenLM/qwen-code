@@ -1777,6 +1777,20 @@ export default {
   Used: 'Used',
   Free: 'Free',
   'Autocompact buffer': 'Autocompact buffer',
+  // Compaction-threshold section in /context output. Added in PR #4168
+  // alongside the three-tier ladder; ensure these keys appear in every
+  // locale to avoid mixed-language renders.
+  'Compaction thresholds': 'Compaction thresholds',
+  'Effective window': 'Effective window',
+  'Warn threshold': 'Warn threshold',
+  'Auto threshold': 'Auto threshold',
+  'Hard threshold': 'Hard threshold',
+  'window − {{reserve}} reserve': 'window − {{reserve}} reserve',
+  'Current tier': 'Current tier',
+  safe: 'safe',
+  warn: 'warn',
+  auto: 'auto',
+  hard: 'hard',
   'Usage by category': 'Usage by category',
   'System prompt': 'System prompt',
   'Built-in tools': 'Built-in tools',

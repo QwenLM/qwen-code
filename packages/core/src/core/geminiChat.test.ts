@@ -2165,6 +2165,45 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[0][1].force).toBe(false);
     });
 
+    it('suppresses hard-rescue entirely when chatCompression.disabled is true (R12.5)', async () => {
+      // R12.5: R11.4 added a source-level gate that skips hard-rescue
+      // when the user has explicitly disabled auto-compaction. The
+      // service-level gate handles the proactive cheap-gate (force=false);
+      // the hard-rescue path uses force=true to bypass the breaker, so
+      // it would otherwise sidestep the service gate. The R11.4 commit
+      // didn't add a regression-guard for this branch. A future
+      // refactor removing the source-level gate would silently let
+      // compliance/audit-mode sessions get force-compressed via rescue.
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        disabled: true,
+      });
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse(),
+      );
+
+      // Set lastPromptTokenCount above the 177K hard threshold so the
+      // rescue WOULD fire pre-R11.4. Verify it doesn't fire force=true.
+      chat.setLastPromptTokenCount(176_999);
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'should-not-rescue' },
+        'prompt-id-r12-5',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // The rescue must NOT call tryCompress with force=true. The
+      // proactive cheap-gate may still be called (gated separately at
+      // the service layer), but if it does it must be force=false.
+      const forcedCalls = compressSpy.mock.calls.filter((c) => c[1].force);
+      expect(forcedCalls).toHaveLength(0);
+    });
+
     // R7.11: hardRescueFailureCount budget — three branches the previous
     // round left untested. Without these, regressions to the counter
     // accounting (the "every failure-shape strikes the budget" guarantee
@@ -2508,6 +2547,68 @@ describe('GeminiChat', async () => {
       // Without the Number.isFinite guard, this would be NaN.
       expect(internals.lastCandidatesTokenCount).toBe(0);
       expect(Number.isFinite(internals.lastCandidatesTokenCount)).toBe(true);
+    });
+
+    it('rejects non-finite / negative values from EVERY API token-count capture site (R12.1 sibling sweep)', async () => {
+      // R12.1: R11.1 added a Number.isFinite guard to lastCandidatesTokenCount
+      // but left lastPromptTokenCount (assigned 3 lines above) accepting
+      // anything truthy. The Phase-3 audit matrix for "API value capture"
+      // surfaces 3 sites in total: promptTokenCount, candidatesTokenCount,
+      // and cachedContentTokenCount. All three need the same uniform
+      // coerce-to-0-on-non-finite-or-negative guard.
+      //
+      // Drive each pathological value (Infinity, NaN, negative) through
+      // promptTokenCount and assert the stored field is 0. Negative is
+      // important: `Number.isFinite(-1)` is true, so the guard must also
+      // include a `>= 0` check.
+      type ChatInternals = {
+        lastPromptTokenCount: number;
+        lastCandidatesTokenCount: number;
+      };
+      const internals = chat as unknown as ChatInternals;
+
+      for (const bad of [Number.POSITIVE_INFINITY, Number.NaN, -1, -1e9]) {
+        // Reset
+        internals.lastPromptTokenCount = 5000;
+        internals.lastCandidatesTokenCount = 500;
+
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'ok' }], role: 'model' },
+                  finishReason: 'STOP',
+                  index: 0,
+                  safetyRatings: [],
+                },
+              ],
+              usageMetadata: {
+                promptTokenCount: bad,
+                candidatesTokenCount: bad,
+                totalTokenCount: bad,
+              },
+              text: () => 'ok',
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: `r12-1-${String(bad)}` },
+          `prompt-r12-1-${String(bad)}`,
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+
+        // ALL capture sites must coerce. A `Number.isFinite`-only guard
+        // would let `-1` poison the prompt count.
+        expect(Number.isFinite(internals.lastPromptTokenCount)).toBe(true);
+        expect(internals.lastPromptTokenCount).toBeGreaterThanOrEqual(0);
+        expect(Number.isFinite(internals.lastCandidatesTokenCount)).toBe(true);
+        expect(internals.lastCandidatesTokenCount).toBeGreaterThanOrEqual(0);
+      }
     });
 
     it('budget-exhausted warn fires once per exhaustion, not on every send (R8.4)', async () => {
