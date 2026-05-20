@@ -112,6 +112,42 @@ export function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
   };
 }
 
+/**
+ * Shared `WorkspaceFileSystemFactory` construction used by both
+ * `runQwenServe` and `createServeApp`'s default bridge wiring.
+ * Centralizes the "use the injected factory if provided, otherwise
+ * build one with the given trust + audit-emit posture" logic so a
+ * future change to one call site doesn't silently diverge the other
+ * (#4334 DWcK4 review fold-in).
+ *
+ * Trust is intentionally a **required** parameter — the two call
+ * sites have different correct defaults and centralizing only the
+ * construction shape (not the policy) prevents accidental coupling:
+ *   - `runQwenServe` defaults to `trusted: true` (production daemon
+ *     boots up trusted; an explicit `deps.trustedWorkspace: false`
+ *     overrides for sandboxed runs).
+ *   - `createServeApp` defaults to `trusted: false` (test-safe;
+ *     direct embeds — IDE companions, hosted daemons — must
+ *     explicitly opt in to writes via `deps.fsFactory` or by
+ *     injecting their own `deps.bridge`).
+ *
+ * The audit-emit defaults to `createDefaultFsAuditEmit()` (the
+ * throttled stderr warning) when not provided.
+ */
+export function resolveBridgeFsFactory(input: {
+  boundWorkspace: string;
+  injected?: WorkspaceFileSystemFactory;
+  trusted: boolean;
+  emit?: (event: BridgeEvent) => void;
+}): WorkspaceFileSystemFactory {
+  if (input.injected) return input.injected;
+  return createWorkspaceFileSystemFactory({
+    boundWorkspace: input.boundWorkspace,
+    trusted: input.trusted,
+    emit: input.emit ?? createDefaultFsAuditEmit(),
+  });
+}
+
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: HttpAcpBridge;
@@ -275,13 +311,11 @@ export function createServeApp(
         'Inject deps.fsFactory (with explicit trust) or deps.bridge to override.\n',
     );
   }
-  const fsFactory: WorkspaceFileSystemFactory =
-    deps.fsFactory ??
-    createWorkspaceFileSystemFactory({
-      boundWorkspace,
-      trusted: false,
-      emit: createDefaultFsAuditEmit(),
-    });
+  const fsFactory = resolveBridgeFsFactory({
+    boundWorkspace,
+    ...(deps.fsFactory ? { injected: deps.fsFactory } : {}),
+    trusted: false,
+  });
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({

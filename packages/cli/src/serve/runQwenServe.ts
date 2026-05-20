@@ -19,12 +19,9 @@ import {
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
-import { createDefaultFsAuditEmit, createServeApp } from './server.js';
+import { createServeApp, resolveBridgeFsFactory } from './server.js';
 import type { ServeOptions } from './types.js';
-import {
-  createWorkspaceFileSystemFactory,
-  type WorkspaceFileSystemFactory,
-} from './fs/index.js';
+import type { WorkspaceFileSystemFactory } from './fs/index.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
@@ -396,13 +393,12 @@ export async function runQwenServe(
   // gate + audit machinery. See `bridgeFileSystemAdapter.ts` for the
   // translation layer.
   const trustedWorkspace = deps.trustedWorkspace ?? true;
-  const fsFactory =
-    deps.fsFactory ??
-    createWorkspaceFileSystemFactory({
-      boundWorkspace,
-      trusted: trustedWorkspace,
-      emit: deps.fsAuditEmit ?? createDefaultFsAuditEmit(),
-    });
+  const fsFactory = resolveBridgeFsFactory({
+    boundWorkspace,
+    ...(deps.fsFactory ? { injected: deps.fsFactory } : {}),
+    trusted: trustedWorkspace,
+    ...(deps.fsAuditEmit ? { emit: deps.fsAuditEmit } : {}),
+  });
 
   const bridge =
     deps.bridge ??

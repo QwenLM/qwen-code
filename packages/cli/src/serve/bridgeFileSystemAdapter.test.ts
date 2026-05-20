@@ -288,6 +288,67 @@ describe('createBridgeFileSystemAdapter', () => {
       expect(response.content).toBe('a\nb\nc\n');
     });
 
+    it('propagates file_too_large from wfs.readText through the adapter', async () => {
+      // DeepSeek #4334 review: read-side error propagation through the
+      // adapter is otherwise untested. Pin that PR 18's file-size cap
+      // surfaces to ACP callers as an `FsError({kind:'file_too_large'})`
+      // without being silently swallowed or wrapped.
+      const { MAX_READ_BYTES } = await import('./fs/policy.js');
+      const target = path.join(tmpDir, 'too-large.txt');
+      await fsp.writeFile(target, 'x'.repeat(MAX_READ_BYTES + 1024), 'utf8');
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+      const err = await adapter
+        .readText({ path: target, sessionId: 'sess:test' })
+        .catch((e: unknown) => e);
+      expect((err as { kind?: string }).kind).toBe('file_too_large');
+    });
+
+    it('propagates binary_file from wfs.readText through the adapter', async () => {
+      const target = path.join(tmpDir, 'image.bin');
+      const buf = Buffer.alloc(128);
+      buf[5] = 0; // null byte → looksBinary()
+      await fsp.writeFile(target, buf);
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+      const err = await adapter
+        .readText({ path: target, sessionId: 'sess:test' })
+        .catch((e: unknown) => e);
+      expect((err as { kind?: string }).kind).toBe('binary_file');
+    });
+
+    it('propagates symlink_escape from wfs.resolve when target is a symlink to outside', async () => {
+      // Symmetric with the boundary-enforcement read test above, but
+      // covers the symlink-specific rejection path rather than the
+      // raw "/etc/passwd"-style outside path. PR 18 + HTTP /file
+      // posture: reads through a symlink resolving outside the
+      // workspace get `symlink_escape`.
+      if (process.platform === 'win32') return;
+      const outsideTarget = path.join(tmpDir, '..', 'outside-link-target.txt');
+      await fsp.writeFile(outsideTarget, 'outside').catch(() => undefined);
+      try {
+        const link = path.join(tmpDir, 'link-out.txt');
+        await fsp.symlink(outsideTarget, link, 'file');
+        const adapter = createBridgeFileSystemAdapter(
+          buildFactory({ trusted: true }),
+        );
+        const err = await adapter
+          .readText({ path: link, sessionId: 'sess:test' })
+          .catch((e: unknown) => e);
+        // resolve() collapses symlinks → outside the workspace surfaces
+        // either `symlink_escape` or `path_outside_workspace` depending
+        // on whether resolve sees the link-collapse. Both are valid
+        // security signals; pin "not silently succeeded".
+        expect(['symlink_escape', 'path_outside_workspace']).toContain(
+          (err as { kind?: string }).kind,
+        );
+      } finally {
+        await fsp.unlink(outsideTarget).catch(() => undefined);
+      }
+    });
+
     it('drops non-positive line (zero) instead of forwarding parse_error', async () => {
       const target = path.join(tmpDir, 'zero-line.txt');
       await fsp.writeFile(target, 'x\ny\n', 'utf8');

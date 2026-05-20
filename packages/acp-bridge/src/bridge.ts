@@ -2127,6 +2127,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Other session methods in this file already use the helper
       // (`setSessionApprovalMode`, `requestSessionStatus`); this
       // brings closeSession in line.
+      //
+      // HAZARD(#4325): the regression test for this fix
+      // (`httpAcpBridge.test.ts` ~L6421) is single-channel smoke ONLY —
+      // a revert that reintroduces the module-scoped `channelInfo`
+      // capture WILL NOT fail any existing test, because the
+      // overlap-race state isn't deterministically constructable
+      // without factory-internal hooks. Code-review-time visibility
+      // of the `channelInfoForEntry(entry)` call here is the primary
+      // defense against accidental revert. Don't refactor away the
+      // helper call without first landing the deterministic overlap
+      // test (deferred follow-up).
       const ci = channelInfoForEntry(entry);
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
@@ -3179,6 +3190,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // attach target), preventing the "kill operates on the freshly-
       // spawned channel B instead of the dying channel A" cascade
       // during the overlap window.
+      //
+      // HAZARD(#4325): see the matching block in `closeSession`. The
+      // regression test for this fix is single-channel smoke and
+      // would NOT fail if this line reverts to `channelInfo`. Keep
+      // `channelInfoForEntry(entry)` until the deterministic overlap
+      // test lands.
       const ci = channelInfoForEntry(entry);
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);

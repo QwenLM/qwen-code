@@ -34,9 +34,24 @@
  *     `WriteTextFileRequest` wire shape).
  *   - For reads: `wfs.readText(resolved, { line, limit })` (PR 18's
  *     read path enforces size caps + line/limit windowing + audit)
- *   - Error propagation is by reference — the bridge's existing
- *     `mapDomainErrorToErrorKind` classifier downstream picks up
- *     `FsError` codes the same way it would for HTTP route errors
+ *   - Error propagation is by reference — `FsError` (PR 18's
+ *     boundary-error type, carrying a discriminator on `.kind`:
+ *     `untrusted_workspace` / `symlink_escape` / `file_too_large` /
+ *     etc.) is thrown unchanged through `BridgeClient`'s ACP
+ *     `writeTextFile` / `readTextFile` handlers and serialized to the
+ *     agent via the existing ACP error envelope. The classifier in
+ *     `@qwen-code/acp-bridge`'s `mapDomainErrorToErrorKind` does NOT
+ *     translate `FsError.kind` to `ServeErrorKind` — it only checks
+ *     `instanceof` / `.name` / `.code`. The `.kind` field rides
+ *     through on the error object itself; downstream consumers
+ *     reading the ACP error payload pick it up directly. HTTP route
+ *     errors take the same shape (`sendFsError` in `cli/src/serve/fs/
+ *     errors.ts` serializes the same `.kind`), so an SDK consumer
+ *     handling either surface keys on `.kind` either way.
+ *     Future PR: if `mapDomainErrorToErrorKind` should also map
+ *     `FsError.kind`, it'd need cross-package imports (FsError lives
+ *     in `cli/src/serve/fs`, classifier in `acp-bridge`) — handled
+ *     as a separate scope.
  *
  * Tests for this adapter live alongside the bridge integration
  * suite — they verify both the happy path (ACP write/read hits
