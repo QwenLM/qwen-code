@@ -25,6 +25,16 @@ export {
   transcriptBlockToTerminalText,
 } from './terminal.js';
 export {
+  daemonBlockToHtml,
+  daemonBlockToMarkdown,
+  daemonBlockToPlainText,
+  daemonToolPreviewToMarkdown,
+} from './render.js';
+export type {
+  DaemonHtmlRenderOptions,
+  DaemonRenderOptions,
+} from './render.js';
+export {
   extractContentPart,
   getOutputText,
   isSensitiveKey as isDaemonUiSensitiveKey,

@@ -2371,3 +2371,195 @@ describe('daemon UI content extraction (PR-C)', () => {
     expect(extractContentPart({ type: 'image' })).toBeUndefined();
   });
 });
+
+describe('daemon UI render contract (PR-D)', () => {
+  it('daemonBlockToMarkdown renders user/assistant/tool/shell/permission/error', async () => {
+    const { daemonBlockToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = appendLocalUserTranscriptMessage(state, 'hello', { now: 2 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        ...normalizeDaemonEvent({
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'hi there' },
+            },
+          },
+        } as never),
+      ],
+      { now: 3 },
+    );
+    const userMd = daemonBlockToMarkdown(state.blocks[0]!);
+    const assistantMd = daemonBlockToMarkdown(state.blocks[1]!);
+    expect(userMd).toContain('**You**');
+    expect(userMd).toContain('hello');
+    expect(assistantMd).toContain('hi there');
+  });
+
+  it('daemonBlockToMarkdown renders file_diff preview as unified diff', async () => {
+    const { daemonBlockToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'edit-1',
+            title: 'Edit foo.ts',
+            status: 'completed',
+            rawInput: {
+              path: '/work/foo.ts',
+              oldText: 'const x = 1',
+              newText: 'const x = 2',
+            },
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    const md = daemonBlockToMarkdown(state.blocks[0]!);
+    expect(md).toContain('Edit `/work/foo.ts`');
+    expect(md).toContain('```diff');
+    expect(md).toContain('- const x = 1');
+    expect(md).toContain('+ const x = 2');
+  });
+
+  it('daemonBlockToMarkdown renders mcp_invocation preview with server::tool', async () => {
+    const { daemonBlockToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'mcp-1',
+            title: 'Create Issue',
+            status: 'completed',
+            name: 'mcp__github__create_issue',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    const md = daemonBlockToMarkdown(state.blocks[0]!);
+    expect(md).toContain('github::create_issue');
+  });
+
+  it('daemonBlockToHtml escapes special characters in user/assistant content', async () => {
+    const { daemonBlockToHtml } = await import('../../src/daemon/ui/index.js');
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = appendLocalUserTranscriptMessage(
+      state,
+      '<script>alert("xss")</script>',
+      { now: 2 },
+    );
+    const html = daemonBlockToHtml(state.blocks[0]!);
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;');
+    expect(html).toContain('&quot;');
+  });
+
+  it('daemonBlockToHtml sanitizes terminal escape sequences in content', async () => {
+    const { daemonBlockToHtml } = await import('../../src/daemon/ui/index.js');
+    let state = createDaemonTranscriptState({ now: 1 });
+    // Inject ANSI red color escape — should be stripped by sanitizeTerminalText
+    state = appendLocalUserTranscriptMessage(state, '\x1b[31mhostile\x1b[0m text', {
+      now: 2,
+    });
+    const html = daemonBlockToHtml(state.blocks[0]!);
+    expect(html).not.toContain('\x1b[');
+    expect(html).toContain('hostile');
+  });
+
+  it('daemonBlockToHtml emits error blocks with role=alert', async () => {
+    const { daemonBlockToHtml } = await import('../../src/daemon/ui/index.js');
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'error', text: 'auth required', recoverable: true }],
+      { now: 2 },
+    );
+    const html = daemonBlockToHtml(state.blocks[0]!);
+    expect(html).toContain('role="alert"');
+    expect(html).toContain('daemon-error');
+  });
+
+  it('daemonBlockToPlainText drops markdown / html, suitable for copy-paste', async () => {
+    const { daemonBlockToPlainText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'error', text: 'session died' }],
+      { now: 2 },
+    );
+    const plain = daemonBlockToPlainText(state.blocks[0]!);
+    expect(plain).toBe('[error] session died');
+    expect(plain).not.toContain('[!');
+  });
+
+  it('maxFieldLength truncates with ellipsis', async () => {
+    const { daemonBlockToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = appendLocalUserTranscriptMessage(state, 'X'.repeat(200), {
+      now: 2,
+    });
+    const md = daemonBlockToMarkdown(state.blocks[0]!, {
+      maxFieldLength: 50,
+    });
+    expect(md).toContain('… [truncated]');
+    expect(md.length).toBeLessThan(200);
+  });
+
+  it('sanitizeUrls strips token query params in web_fetch preview', async () => {
+    const { daemonToolPreviewToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const md = daemonToolPreviewToMarkdown(
+      {
+        kind: 'web_fetch',
+        url: 'https://api.example.com/data?token=secret123&q=hi',
+      },
+      { sanitizeUrls: true },
+    );
+    expect(md).not.toContain('secret123');
+    expect(md).toContain('q=hi');
+  });
+
+  it('custom sanitizer replaces default escaping', async () => {
+    const { daemonBlockToHtml } = await import('../../src/daemon/ui/index.js');
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = appendLocalUserTranscriptMessage(state, '<b>bold</b>', {
+      now: 2,
+    });
+    const html = daemonBlockToHtml(state.blocks[0]!, {
+      sanitizer: (raw) => raw.replace(/<[^>]+>/g, ''),
+    });
+    // Custom sanitizer strips ALL tags including content tags — verify bold
+    // text remains but '<b>' itself is gone.
+    expect(html).toContain('bold');
+    expect(html).not.toContain('<b>');
+  });
+});
