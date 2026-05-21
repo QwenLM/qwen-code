@@ -6,8 +6,8 @@ scenario captures its tmux pane via `tmux pipe-pane -o 'cat >> <log>'`.
 ## Setup once
 
 ```sh
-# From repo root, the worktree path:
-WT=/Users/jinye.djy/Projects/qwen-code/.claude/worktrees/joyful-honking-melody
+# Point WT at your local checkout of the branch under review.
+WT=/path/to/qwen-code/worktree
 LOGDIR=$WT/docs/verification/abort-controller-refactor/logs
 mkdir -p "$LOGDIR"
 
@@ -22,25 +22,81 @@ For each scenario:
 ```sh
 tmux new-session -d -s qwen-verify-XX
 tmux pipe-pane -t qwen-verify-XX -o "cat >> $LOGDIR/XX-name.log"
-tmux send-keys -t qwen-verify-XX 'cd /path/to/your/test/workspace && exec node /Users/jinye.djy/Projects/qwen-code/.claude/worktrees/joyful-honking-melody/packages/cli/dist/index.js' C-m
+tmux send-keys -t qwen-verify-XX "cd /path/to/your/test/workspace && exec node $WT/packages/cli/dist/index.js" C-m
 tmux attach -t qwen-verify-XX
 ```
 
 Then drive the session manually per the matrix below. Hit `C-b d` to detach
 when done; `tmux kill-session -t qwen-verify-XX` to stop the pane.
 
-| #   | Scenario                              | Setup                                                             | Input prompt                                                                                                             | Expected user output                                                                                                                                             | Log file                                                                                 |
-| --- | ------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------- |
-| 00  | Baseline (PRE-fix)                    | Check out `main`, build, run with `NODE_OPTIONS=--trace-warnings` | Long 50-round mixed-tool session (shell + edit + grep + agent)                                                           | After ~30-40 rounds: `MaxListenersExceededWarning: ... 1500+ abort listeners added to [AbortSignal]` printed to stderr                                           | `00-baseline-reproduction.log`                                                           |
-| 01  | Long-session, DEBUG mode              | This branch, `NODE_OPTIONS=--trace-warnings DEBUG=1 qwen`         | Same 50-round script as #00                                                                                              | No `MaxListenersExceededWarning` printed; any other warnings still print                                                                                         | `01-long-session-debug.log`                                                              |
-| 02  | Long-session, prod mode               | This branch, `qwen` (no debug env)                                | Same 50-round script                                                                                                     | Clean output; temporary `console.error` probe inside the handler (added then removed) confirms filter fires                                                      | `02-long-session-prod.log`                                                               |
-| 03  | Ctrl-C mid-stream abort               | This branch, interactive                                          | Ask for a long generation (>30s). Press Ctrl-C mid-stream.                                                               | Stream stops within ~200ms, "Cancelled" banner shown, next prompt accepts input. `process._getActiveHandles()` count returns to baseline (use `:debug handles`). | `03-ctrlc-streaming.log`                                                                 |
-| 04  | Cancel long-running shell             | This branch                                                       | `Run \`sleep 60\` via the shell tool`. Cancel mid-execution.                                                             | Child process killed (`ps -ef                                                                                                                                    | grep sleep` returns nothing), tool result shows cancellation, agent accepts next prompt. | `04-shell-cancel.log` |
-| 05  | Subagent cancellation                 | This branch                                                       | Spawn a long agent task via the agent tool. Cancel from parent.                                                          | Subagent's in-flight tool calls abort, subagent's model stream stops, parent receives cancellation event.                                                        | `05-subagent-cancel.log`                                                                 |
-| 06  | Headless / non-interactive abort      | `qwen --prompt "do a long task"`, send `SIGINT` from outside      | (sent via `kill -INT <pid>`)                                                                                             | Clean shutdown, exit code 130, no warnings.                                                                                                                      | `06-headless-abort.log`                                                                  |
-| 07  | Background agent flow                 | Interactive                                                       | Spawn a background agent (`run_in_background: true`). Let it complete. Spawn a second one. Cancel the second mid-flight. | First agent completes normally; second aborts cleanly; no listener leak across the two.                                                                          | `07-background-agent.log`                                                                |
-| 08  | Memory baseline                       | `qwen --inspect` + attach Chrome devtools                         | 100-round session                                                                                                        | Heap snapshots at round 0/50/100. `AbortSignal` instance count and per-signal listener count stable (no monotonic growth).                                       | `08-memory-snapshots/`                                                                   |
-| 09  | Existing combinedAbortSignal consumer | Trigger an HTTP hook with both an external signal and timeout.    | (a) Cancel external signal mid-hook (b) Let timeout fire in a separate run                                               | Hook aborts cleanly in both cases; deprecation shim path is exercised.                                                                                           | `09-http-hook-shim.log`                                                                  |
+### 00 — Baseline (PRE-fix)
+
+- **Setup:** check out `main`, build, run with `NODE_OPTIONS=--trace-warnings`.
+- **Input:** long 50-round mixed-tool session (shell + edit + grep + agent).
+- **Expected:** after ~30–40 rounds, `MaxListenersExceededWarning: ... 1500+ abort listeners added to [AbortSignal]` printed to stderr.
+- **Log:** `00-baseline-reproduction.log`.
+
+### 01 — Long-session, DEBUG mode (this branch)
+
+- **Setup:** `NODE_OPTIONS=--trace-warnings DEBUG=1 qwen`.
+- **Input:** same 50-round script as #00.
+- **Expected:** no `MaxListenersExceededWarning` printed; any other warnings still print.
+- **Log:** `01-long-session-debug.log`.
+
+### 02 — Long-session, prod mode (this branch)
+
+- **Setup:** `qwen` (no debug env).
+- **Input:** same 50-round script.
+- **Expected:** clean output; a temporary `console.error` probe inside the handler (added then removed) confirms the filter fires.
+- **Log:** `02-long-session-prod.log`.
+
+### 03 — Ctrl-C mid-stream abort
+
+- **Setup:** this branch, interactive.
+- **Input:** ask for a long generation (>30s); press Ctrl-C mid-stream.
+- **Expected:** stream stops within ~200ms, "Cancelled" banner shown, next prompt accepts input. `process._getActiveHandles()` count returns to baseline (use `:debug handles`).
+- **Log:** `03-ctrlc-streaming.log`.
+
+### 04 — Cancel long-running shell
+
+- **Setup:** this branch.
+- **Input:** run `sleep 60` via the shell tool; cancel mid-execution.
+- **Expected:** child process killed (verify with `pgrep -f sleep` returning empty), tool result shows cancellation, agent accepts next prompt.
+- **Log:** `04-shell-cancel.log`.
+
+### 05 — Subagent cancellation
+
+- **Setup:** this branch.
+- **Input:** spawn a long agent task via the agent tool; cancel from parent.
+- **Expected:** subagent's in-flight tool calls abort, subagent's model stream stops, parent receives cancellation event.
+- **Log:** `05-subagent-cancel.log`.
+
+### 06 — Headless / non-interactive abort
+
+- **Setup:** `qwen --prompt "do a long task"`; send `SIGINT` from outside via `kill -INT <pid>`.
+- **Expected:** clean shutdown, exit code 130, no warnings.
+- **Log:** `06-headless-abort.log`.
+
+### 07 — Background agent flow
+
+- **Setup:** interactive.
+- **Input:** spawn a background agent (`run_in_background: true`); let it complete; spawn a second one; cancel the second mid-flight.
+- **Expected:** first agent completes normally; second aborts cleanly; no listener leak across the two.
+- **Log:** `07-background-agent.log`.
+
+### 08 — Memory baseline
+
+- **Setup:** `qwen --inspect`, attach Chrome devtools.
+- **Input:** 100-round session.
+- **Expected:** heap snapshots at round 0/50/100. `AbortSignal` instance count and per-signal listener count stable (no monotonic growth).
+- **Log:** `08-memory-snapshots/`.
+
+### 09 — Existing combinedAbortSignal consumer
+
+- **Setup:** trigger an HTTP hook with both an external signal and timeout.
+- **Input:** (a) cancel external signal mid-hook; (b) let timeout fire in a separate run.
+- **Expected:** hook aborts cleanly in both cases; deprecation shim path is exercised.
+- **Log:** `09-http-hook-shim.log`.
 
 ## Automated (non-interactive) verifications
 

@@ -45,10 +45,11 @@ export function resetWarningHandlerForTests(): void {
 
 /**
  * Install a process-level `warning` handler that swallows the well-known
- * `MaxListenersExceededWarning` for AbortSignal / EventTarget while letting
- * every other warning through. In debug mode (NODE_ENV=development, or
- * DEBUG / QWEN_DEBUG set), all warnings are forwarded to stderr so
- * developers can still see them.
+ * `MaxListenersExceededWarning` for AbortSignal while letting every other
+ * warning through — including generic EventTarget leak warnings, which we
+ * leave visible because they likely indicate a real leak elsewhere. In
+ * debug mode (NODE_ENV=development, or DEBUG / QWEN_DEBUG set), all
+ * warnings are forwarded to stderr so developers can still see them.
  *
  * Idempotent — repeated calls are a no-op.
  */

@@ -137,6 +137,14 @@ export function combineAbortSignals(
 
   for (const sourceSignal of signals) {
     if (!sourceSignal) continue;
+    // Re-check aborted state per iteration. Single-threaded JS can't actually
+    // interleave aborts between the initial scan above and this point, but
+    // making the check obvious here keeps the function correct even if a
+    // future caller passes signals whose `aborted` getter has side effects.
+    if (sourceSignal.aborted) {
+      controller.abort(sourceSignal.reason);
+      break;
+    }
     const handler = () => controller.abort(sourceSignal.reason);
     sourceSignal.addEventListener('abort', handler, { once: true });
     cleanups.push(() => sourceSignal.removeEventListener('abort', handler));

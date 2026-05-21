@@ -155,6 +155,28 @@ describe('combineAbortSignals', () => {
     expect(() => cleanup()).not.toThrow();
   });
 
+  it('aborts and stops registering listeners once an input is found aborted mid-iteration', () => {
+    const a = createAbortController();
+    const b = createAbortController();
+    const c = createAbortController();
+    // Simulate a signal whose `aborted` getter flips to true after the initial
+    // alreadyAborted scan — the second pass through the loop should catch it
+    // and short-circuit instead of attaching a listener that never fires.
+    let aborted = false;
+    const proxied = new Proxy(b.signal, {
+      get(target, prop, recv) {
+        if (prop === 'aborted') return aborted;
+        return Reflect.get(target, prop, recv);
+      },
+    }) as AbortSignal;
+    // Flip the proxy "aborted" right after the initial find() pass.
+    aborted = true;
+    const { signal } = combineAbortSignals([a.signal, proxied, c.signal]);
+    expect(signal.aborted).toBe(true);
+    // c should never have had a listener attached (we broke out of the loop).
+    expect(getEventListeners(c.signal, 'abort').length).toBe(0);
+  });
+
   it('auto-cleans listeners on inputs when the combined signal aborts', () => {
     const a = createAbortController();
     const b = createAbortController();
