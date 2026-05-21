@@ -129,4 +129,56 @@ describe('safeJsonStringify', () => {
       '{"a":{"tag":"shared"},"b":{"tag":"shared"},"self":"[Circular]"}',
     );
   });
+
+  it('should preserve a shared leaf reached through deep ancestor chains', () => {
+    // Forces the unwind loop to pop five frames between the deep branch and
+    // the sibling branch. Without the pop, the second occurrence of `shared`
+    // would still see `shared` on the stack and emit [Circular].
+    const shared = { tag: 'shared' };
+    const root = {
+      l1: { l2: { l3: { l4: { l5: { leaf: shared } } } } },
+      sibling: { leaf: shared },
+    };
+
+    const result = safeJsonStringify(root);
+    expect(result).toBe(
+      '{"l1":{"l2":{"l3":{"l4":{"l5":{"leaf":{"tag":"shared"}}}}}},"sibling":{"leaf":{"tag":"shared"}}}',
+    );
+    expect(result).not.toContain('[Circular]');
+  });
+
+  it('should detect a real cycle through deep ancestor chains', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const root: any = { l1: { l2: { l3: { l4: { l5: { back: null } } } } } };
+    root.l1.l2.l3.l4.l5.back = root;
+
+    const result = safeJsonStringify(root);
+    expect(result).toBe(
+      '{"l1":{"l2":{"l3":{"l4":{"l5":{"back":"[Circular]"}}}}}}',
+    );
+  });
+
+  it('should preserve a shared object returned by toJSON from sibling positions', () => {
+    // JSON.stringify calls toJSON() before invoking the replacer, so the
+    // replacer sees the post-toJSON value. Two siblings whose toJSON returns
+    // the same object are duplicate refs, not a cycle.
+    const shared = { tag: 'shared' };
+    const root = {
+      a: { toJSON: () => shared },
+      b: { toJSON: () => shared },
+    };
+
+    const result = safeJsonStringify(root);
+    expect(result).toBe('{"a":{"tag":"shared"},"b":{"tag":"shared"}}');
+    expect(result).not.toContain('[Circular]');
+  });
+
+  it('should detect a cycle when toJSON returns an ancestor', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const root: any = { name: 'root' };
+    root.child = { toJSON: () => root };
+
+    const result = safeJsonStringify(root);
+    expect(result).toBe('{"name":"root","child":"[Circular]"}');
+  });
 });
