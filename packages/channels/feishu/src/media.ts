@@ -1,0 +1,62 @@
+/**
+ * Feishu media download helpers.
+ *
+ * Downloads images, files, audio, and video from Feishu using the
+ * Open API: GET /im/v1/messages/:message_id/resources/:file_key
+ */
+
+const BASE_URL = 'https://open.feishu.cn/open-apis';
+
+export interface MediaFile {
+  buffer: Buffer;
+  mimeType: string;
+}
+
+/**
+ * Download a media file from Feishu.
+ *
+ * @param messageId - The message ID containing the resource
+ * @param fileKey - The file_key or image_key from the message content
+ * @param resourceType - 'image' or 'file'
+ * @param accessToken - A valid tenant access token
+ * @returns MediaFile with buffer and mimeType, or null on failure
+ */
+export async function downloadMedia(
+  messageId: string,
+  fileKey: string,
+  resourceType: 'image' | 'file',
+  accessToken: string,
+): Promise<MediaFile | null> {
+  if (!messageId || !fileKey || !accessToken) {
+    return null;
+  }
+
+  try {
+    const url = `${BASE_URL}/im/v1/messages/${messageId}/resources/${fileKey}?type=${resourceType}`;
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+    if (!resp.ok) {
+      const detail = await resp.text().catch(() => '');
+      process.stderr.write(
+        `[Feishu] downloadMedia failed: HTTP ${resp.status} ${detail}\n`,
+      );
+      return null;
+    }
+
+    const mimeType =
+      resp.headers.get('content-type') || 'application/octet-stream';
+    const buffer = Buffer.from(await resp.arrayBuffer());
+
+    return { buffer, mimeType };
+  } catch (err) {
+    process.stderr.write(
+      `[Feishu] downloadMedia error: ${err instanceof Error ? err.message : err}\n`,
+    );
+    return null;
+  }
+}

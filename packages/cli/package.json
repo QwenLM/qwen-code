@@ -47,6 +47,7 @@
     "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/channel-base": "file:../channels/base",
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
+    "@qwen-code/channel-feishu": "file:../channels/feishu",
     "@qwen-code/channel-telegram": "file:../channels/telegram",
     "@qwen-code/channel-weixin": "file:../channels/weixin",
     "@qwen-code/qwen-code-core": "file:../core",
