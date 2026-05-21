@@ -152,13 +152,22 @@ pr-size:
           const warnThreshold = 800;
           const blockThreshold = 1500;
 
-          if (totalChanges > blockThreshold) {
+          // escape hatch：带 `oversized-ok` label 时，超限降级为 warning
+          const sizeWaived = (context.payload.pull_request?.labels || [])
+            .map(l => l.name).includes('oversized-ok');
+
+          if (totalChanges > blockThreshold && sizeWaived) {
+            core.warning(
+              `PR 超过 size 阈值但带 oversized-ok label，maintainer 已确认，不阻断。`
+            );
+          } else if (totalChanges > blockThreshold) {
             core.setFailed(
               `PR 变更 ${totalChanges} 行 (${totalFiles} 文件)，超过阈值 ${blockThreshold} 行。\n\n` +
               `建议拆分为更小的、可独立 review 的 PR。拆分思路：\n` +
               `• 将重构与功能变更分开\n` +
               `• 将测试与实现分开提交\n` +
-              `• 按模块/关注点拆分`
+              `• 按模块/关注点拆分\n\n` +
+              `若 PR 大但确实内聚，maintainer 可打 oversized-ok label 降级为 warning。`
             );
           } else if (totalChanges > warnThreshold) {
             core.warning(
@@ -168,6 +177,8 @@ pr-size:
 ```
 
 **参考**：CodelyTV/pr-size-labeler 的思路，但这里用 github-script 做自定义逻辑，不依赖第三方 action。
+
+> **`oversized-ok` escape hatch**：size gate 是 required check，但一个合法的大型基建 PR（例如本 preflight-triage PR 自身）若没有逃生口就**永远无法合并**。因此 maintainer 可给 PR 打 `oversized-ok` label：超限时 size 检查从 hard block 降级为 warning（PR 仍能看到"过大"信号，但不被卡死）。workflow 需监听 `labeled`/`unlabeled` 事件，label 增删才能即时重跑 check。该 label 需在仓库预先创建。
 
 #### 完整 workflow 触发配置
 

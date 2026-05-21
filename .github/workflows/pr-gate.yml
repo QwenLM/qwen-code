@@ -15,10 +15,20 @@ name: 'PR Gate'
 #    body to fix a failed check, the workflow re-runs and updates the
 #    check status. Without 'edited', a failed PR Title / PR Template
 #    check would stay red forever even after correction.
+#  - 'labeled'/'unlabeled' are needed so the PR Size `oversized-ok`
+#    escape-hatch label takes effect (or is revoked) without an extra
+#    push or edit to re-trigger the check.
 
 on:
   pull_request:
-    types: ['opened', 'edited', 'synchronize', 'ready_for_review', 'reopened']
+    types:
+      - 'opened'
+      - 'edited'
+      - 'synchronize'
+      - 'ready_for_review'
+      - 'reopened'
+      - 'labeled'
+      - 'unlabeled'
     branches: ['main', 'release/**']
 
 permissions:
@@ -187,12 +197,31 @@ jobs:
             const BLOCK_THRESHOLD = 1500;
             const WARN_THRESHOLD = 1000;
 
+            // Escape hatch: a maintainer can consciously accept an
+            // over-threshold PR (a large but cohesive infra change, a
+            // generated-file refactor the exclusion list doesn't catch,
+            // etc.) by applying the `oversized-ok` label. With it the
+            // size limit downgrades from a hard block to a warning — the
+            // PR still gets a visible "this is large" signal, but is not
+            // wedged. Without an escape hatch a legitimately large PR has
+            // no path to merge at all.
+            const OVERSIZE_OK_LABEL = 'oversized-ok';
+            const labels = (context.payload.pull_request?.labels || [])
+              .map((l) => l.name);
+            const sizeWaived = labels.includes(OVERSIZE_OK_LABEL);
+
             core.info(
               `PR size: ${totalChanges} meaningful lines across ${totalFiles} files ` +
               `(block at ${BLOCK_THRESHOLD}, warn at ${WARN_THRESHOLD}; lockfile/docs/snapshot/generated excluded).`
             );
 
-            if (totalChanges > BLOCK_THRESHOLD) {
+            if (totalChanges > BLOCK_THRESHOLD && sizeWaived) {
+              core.warning(
+                `PR is over the size threshold (${totalChanges} > ${BLOCK_THRESHOLD} ` +
+                `meaningful lines) but carries the \`${OVERSIZE_OK_LABEL}\` label — ` +
+                'a maintainer has consciously accepted the size. Not blocking.'
+              );
+            } else if (totalChanges > BLOCK_THRESHOLD) {
               core.setFailed(
                 `PR is too large: ${totalChanges} meaningful lines across ${totalFiles} files ` +
                 `(threshold: ${BLOCK_THRESHOLD}).\n\n` +
@@ -201,6 +230,8 @@ jobs:
                 '  • Separate refactors from feature changes.\n' +
                 '  • Split by module/package or by concern.\n' +
                 '  • Ship test scaffolding in its own PR, then the implementation.\n\n' +
+                `If the PR is large but genuinely cohesive, a maintainer can apply the ` +
+                `\`${OVERSIZE_OK_LABEL}\` label to downgrade this block to a warning.\n\n` +
                 'Lockfile, docs, snapshot, and generated-file changes are already excluded ' +
                 'from this count. If the count still seems off, check ' +
                 '`.github/workflows/pr-gate.yml` for the exclusion list.'
