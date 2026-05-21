@@ -58,7 +58,7 @@ describe('toolHookTriggers', () => {
       expect(result).toEqual({ shouldProceed: true });
     });
 
-    it('should return shouldProceed: true when hook execution fails', async () => {
+    it('should return shouldProceed: true with sentinel hookError when hook execution fails without an error message', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
         success: false,
@@ -72,7 +72,12 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
-      expect(result).toEqual({ shouldProceed: true });
+      // #4321 review-7 SF-H1: runner contract violation (success:false
+      // with no error.message) used to silently return allow with no
+      // telemetry. Now synthesizes a sentinel hookError so the span
+      // records `success: false` + the description of what went wrong.
+      expect(result.shouldProceed).toBe(true);
+      expect(result.hookError).toMatch(/success: false/);
     });
 
     it('should return shouldProceed: true when hook output is empty', async () => {
@@ -239,7 +244,7 @@ describe('toolHookTriggers', () => {
       expect(result).toEqual({ shouldStop: false });
     });
 
-    it('should return shouldStop: false when hook execution fails', async () => {
+    it('should return shouldStop: false with sentinel hookError when hook execution fails without an error message', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
         success: false,
@@ -254,7 +259,9 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
-      expect(result).toEqual({ shouldStop: false });
+      // #4321 review-7 SF-H1 — see firePreToolUseHook counterpart.
+      expect(result.shouldStop).toBe(false);
+      expect(result.hookError).toMatch(/success: false/);
     });
 
     it('should return shouldStop: false when hook output is empty', async () => {
@@ -363,7 +370,7 @@ describe('toolHookTriggers', () => {
       expect(result).toEqual({});
     });
 
-    it('should return empty object when hook execution fails', async () => {
+    it('should return sentinel hookError when hook execution fails without an error message', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
         success: false,
@@ -377,7 +384,8 @@ describe('toolHookTriggers', () => {
         'error message',
       );
 
-      expect(result).toEqual({});
+      // #4321 review-7 SF-H1 — see firePreToolUseHook counterpart.
+      expect(result.hookError).toMatch(/success: false/);
     });
 
     it('should return empty object when hook output is empty', async () => {

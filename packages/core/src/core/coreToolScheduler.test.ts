@@ -4900,6 +4900,144 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
   });
 
+  it('signal.aborted re-check between for-loop awaits and awaiting_approval (#4321)', async () => {
+    // _schedule:1834 re-checks signal.aborted after the for-loop's
+    // await points (evaluatePermissionFlow / getConfirmationDetails /
+    // firePermissionRequestHook) and before opening the blocked span.
+    // Without this guard, an abort that resolves during one of those
+    // awaits would leave the tool in awaiting_approval on an already-
+    // aborted signal — the per-batch drain (deferred via setTimeout(0))
+    // could have fired before the new entry exists, leaking it until
+    // TTL.
+    //
+    // Drive the path by making `getConfirmationDetails` abort the
+    // signal as it returns: top-of-loop check passes (signal not yet
+    // aborted), evaluatePermissionFlow resolves, getConfirmationDetails
+    // resolves AND aborts → the re-check must fire the cancel path
+    // before any awaiting_approval transition or blocked span open.
+    toolSpanRecords.length = 0;
+    const abortController = new AbortController();
+    class AbortDuringConfirmTool extends BaseDeclarativeTool<
+      Record<string, unknown>,
+      ToolResult
+    > {
+      constructor() {
+        super(
+          'abortDuringConfirmTool',
+          'abortDuringConfirmTool',
+          'Aborts mid-confirmation',
+          Kind.Edit,
+          {},
+        );
+      }
+      protected createInvocation(params: Record<string, unknown>) {
+        return new (class extends BaseToolInvocation<
+          Record<string, unknown>,
+          ToolResult
+        > {
+          getDescription() {
+            return 'abort during confirmation';
+          }
+          override async getDefaultPermission(): Promise<PermissionDecision> {
+            return 'ask';
+          }
+          override async getConfirmationDetails(
+            _signal: AbortSignal,
+          ): Promise<ToolCallConfirmationDetails> {
+            // Abort BEFORE returning — by the time _schedule's
+            // re-check runs, signal.aborted is true.
+            abortController.abort();
+            return {
+              type: 'edit',
+              title: 'Confirm Edit',
+              fileName: 'test.txt',
+              filePath: 'test.txt',
+              fileDiff: 'mock diff',
+              originalContent: 'old',
+              newContent: 'new',
+              onConfirm: async () => {},
+            };
+          }
+          async execute(): Promise<ToolResult> {
+            return { llmContent: 'ok', returnDisplay: 'ok' };
+          }
+        })(params);
+      }
+    }
+    const tool = new AbortDuringConfirmTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({}),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'abort-recheck-1',
+          name: 'abortDuringConfirmTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-abort-recheck',
+        },
+      ],
+      abortController.signal,
+    );
+
+    // Cancelled marker on the tool span; setToolSpanCancelled records
+    // `failure_kind: 'cancelled'` and UNSET status.
+    const toolSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.abortDuringConfirmTool',
+    );
+    expect(toolSpan?.ended).toBe(true);
+    expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe('cancelled');
+    // Crucially: NO blocked_on_user span was ever started. If the
+    // re-check is regressed, _schedule would have called
+    // setStatusInternal('awaiting_approval', ...) + startToolBlockedOnUserSpan
+    // before the abort drain could fire.
+    const blockedSpan = toolSpanRecords.find(
+      (r) => r.name === 'tool.blocked_on_user',
+    );
+    expect(blockedSpan).toBeUndefined();
+  });
+
   it('signal.abort drains scheduler-local toolSpans + blockedSpans Maps (#4321)', async () => {
     // The 30-min TTL in session-tracing.ts ends underlying spans but
     // cannot reach the scheduler-local toolSpans/blockedSpans Maps. If

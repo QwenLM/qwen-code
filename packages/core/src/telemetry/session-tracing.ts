@@ -156,8 +156,14 @@ function sweepStaleSpans(now: number): void {
                 }
               : {}),
           });
-        } catch {
-          // OTel errors must not prevent span.end() from running.
+        } catch (error) {
+          // OTel errors must not prevent span.end() from running, but
+          // they're worth surfacing — dropping the sentinel attrs makes
+          // a TTL-aborted span look identical to a deliberately-UNSET
+          // one in dashboards (#4321 review-7 silent-failure-hunter).
+          debugLogger.warn(
+            `Failed to stamp TTL attrs on stale span ${spanId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
         // Include tool name + call_id so the log is actionable in
         // production without a trace-backend lookup (review-3).

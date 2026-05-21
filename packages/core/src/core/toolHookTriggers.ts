@@ -124,10 +124,15 @@ export async function firePreToolUseHook(
       // is the canonical cause — forward it so telemetry and operators
       // see the actual failure instead of a fake "allow" success
       // (#4321 review silent-failure-hunter HIGH).
-      const message = response.error?.message;
-      return message
-        ? { shouldProceed: true, hookError: message }
-        : { shouldProceed: true };
+      //
+      // If runner returned `{ success: false }` (or missing output) with no
+      // `error.message`, synthesize a sentinel so the contract violation is
+      // still visible on the span instead of silently degrading to an allow
+      // with empty telemetry (#4321 review-7 silent-failure-hunter HIGH-1).
+      const message =
+        response.error?.message ||
+        `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
+      return { shouldProceed: true, hookError: message };
     }
 
     const preToolOutput = createHookOutput(
@@ -227,10 +232,10 @@ export async function firePostToolUseHook(
 
     if (!response.success || !response.output) {
       // See firePreToolUseHook for the rationale.
-      const message = response.error?.message;
-      return message
-        ? { shouldStop: false, hookError: message }
-        : { shouldStop: false };
+      const message =
+        response.error?.message ||
+        `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
+      return { shouldStop: false, hookError: message };
     }
 
     const postToolOutput = createHookOutput(
@@ -310,8 +315,10 @@ export async function firePostToolUseFailureHook(
 
     if (!response.success || !response.output) {
       // See firePreToolUseHook for the rationale.
-      const message = response.error?.message;
-      return message ? { hookError: message } : {};
+      const message =
+        response.error?.message ||
+        `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
+      return { hookError: message };
     }
 
     const failureOutput = createHookOutput(
