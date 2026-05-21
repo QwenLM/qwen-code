@@ -45,6 +45,7 @@ import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
 import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js';
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
+import { ElicitationDialog } from './mcp/ElicitationDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
@@ -187,6 +188,15 @@ export const DialogManager = ({
         onSelect={request.onSelect}
         onCancel={request.onCancel}
         terminalWidth={terminalWidth}
+      />
+    );
+  }
+  if (uiState.elicitationRequests.length > 0) {
+    const request = uiState.elicitationRequests[0];
+    return (
+      <ElicitationDialog
+        key={`${request.serverName}:${String(request.requestId)}`}
+        event={request}
       />
     );
   }

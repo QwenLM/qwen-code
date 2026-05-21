@@ -975,6 +975,231 @@ describe('DiscoveredMCPTool', () => {
       expect(result.returnDisplay).not.toContain('Output too long');
     });
 
+    it('should handle URL elicitation required errors and retry direct client calls', async () => {
+      const urlError = {
+        code: -32042,
+        data: {
+          elicitations: [
+            {
+              message: 'Authorize to continue.',
+              url: 'https://example.com/auth',
+              elicitationId: 'url-1',
+            },
+          ],
+        },
+      };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockRejectedValueOnce(urlError)
+          .mockResolvedValueOnce({
+            content: [{ type: 'text', text: 'Authorized' }],
+          }),
+      };
+      const elicitationHandler = vi.fn().mockResolvedValue({
+        action: 'accept',
+      });
+      const waitForElicitationCompletion = vi.fn().mockResolvedValue(undefined);
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        {
+          ...mockConfigWithTruncation,
+          getElicitationHandler: () => elicitationHandler,
+          waitForElicitationCompletion,
+        } as any,
+        mockMcpClient,
+      );
+
+      const result = await retryTool
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(2);
+      expect(elicitationHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          serverName,
+          params: {
+            mode: 'url',
+            message: 'Authorize to continue.',
+            url: 'https://example.com/auth',
+            elicitationId: 'url-1',
+          },
+        }),
+      );
+      expect(waitForElicitationCompletion).toHaveBeenCalledWith(
+        serverName,
+        'url-1',
+        expect.any(AbortSignal),
+      );
+      expect(result.llmContent).toEqual([{ text: 'Authorized' }]);
+    });
+
+    it('should stop URL elicitation retry when the user declines', async () => {
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce({
+          error: {
+            code: -32042,
+            data: {
+              url: 'https://example.com/auth',
+              elicitationId: 'url-2',
+              message: 'Authorize to continue.',
+            },
+          },
+        }),
+      };
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        {
+          ...mockConfigWithTruncation,
+          getElicitationHandler: () =>
+            vi.fn().mockResolvedValue({ action: 'decline' }),
+          waitForElicitationCompletion: vi.fn(),
+        } as any,
+        mockMcpClient,
+      );
+
+      const result = await retryTool
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledOnce();
+      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(result.llmContent).toContain('was decline');
+    });
+
+    it('should stop URL elicitation retry after the maximum retry count', async () => {
+      const urlError = {
+        code: -32042,
+        data: {
+          url: 'https://example.com/auth',
+          elicitationId: 'url-max-retry',
+          message: 'Authorize to continue.',
+        },
+      };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(urlError),
+      };
+      const elicitationHandler = vi.fn().mockResolvedValue({
+        action: 'accept',
+      });
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        {
+          ...mockConfigWithTruncation,
+          getElicitationHandler: () => elicitationHandler,
+          waitForElicitationCompletion: vi.fn().mockResolvedValue(undefined),
+        } as any,
+        mockMcpClient,
+      );
+
+      const result = await retryTool
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(4);
+      expect(elicitationHandler).toHaveBeenCalledTimes(3);
+      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(result.llmContent).toContain(
+        'requested URL elicitation more than 3 times',
+      );
+    });
+
+    it('should return an error when URL elicitation completion times out', async () => {
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce({
+          code: -32042,
+          data: {
+            url: 'https://example.com/auth',
+            elicitationId: 'url-timeout',
+            message: 'Authorize to continue.',
+          },
+        }),
+      };
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        {
+          ...mockConfigWithTruncation,
+          getElicitationHandler: () =>
+            vi.fn().mockResolvedValue({ action: 'accept' }),
+          waitForElicitationCompletion: vi
+            .fn()
+            .mockRejectedValue(new DOMException('Timed out', 'TimeoutError')),
+        } as any,
+        mockMcpClient,
+      );
+
+      const result = await retryTool
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledOnce();
+      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(result.llmContent).toContain('Timed out waiting');
+    });
+
+    it('should interrupt URL elicitation retry when aborted while waiting', async () => {
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce({
+          code: -32042,
+          data: {
+            url: 'https://example.com/auth',
+            elicitationId: 'url-abort',
+            message: 'Authorize to continue.',
+          },
+        }),
+      };
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        {
+          ...mockConfigWithTruncation,
+          getElicitationHandler: () =>
+            vi.fn().mockResolvedValue({ action: 'accept' }),
+          waitForElicitationCompletion: vi
+            .fn()
+            .mockRejectedValue(new DOMException('Aborted', 'AbortError')),
+        } as any,
+        mockMcpClient,
+      );
+
+      await expect(
+        retryTool
+          .build({ param: 'test' })
+          .execute(new AbortController().signal),
+      ).rejects.toMatchObject({
+        name: 'AbortError',
+      });
+    });
+
     it('should not truncate non-text content (images, audio)', async () => {
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn(async () => ({
