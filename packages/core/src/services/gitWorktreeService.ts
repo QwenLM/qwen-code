@@ -1609,6 +1609,18 @@ export class GitWorktreeService {
         );
         continue;
       }
+      // Reject any literal `..` segment up front. The post-resolve
+      // `isWithinRoot` check below would still accept `foo/../bar`
+      // (resolves to `bar`, which is inside the repo), but the public
+      // contract — settingsSchema description, docs/users/features/
+      // worktree.md, WorktreeSettings JSDoc — promises rejection of
+      // any entry containing `..`. Enforce that promise here.
+      if (raw.split(/[\\/]/).includes('..')) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — contains '..' segment`,
+        );
+        continue;
+      }
       const sourceAbs = path.resolve(this.sourceRepoPath, raw);
       const repoRootAbs = path.resolve(this.sourceRepoPath);
       if (sourceAbs === repoRootAbs) {
@@ -1694,7 +1706,20 @@ export class GitWorktreeService {
       // exists. Treat that as "user already populated this slot, leave
       // it alone" — same as claude-code's behavior.
       try {
-        const symlinkType = sourceStat.isDirectory() ? 'dir' : 'file';
+        // On Windows, `fs.symlink(..., 'dir')` requires
+        // SeCreateSymbolicLinkPrivilege (administrator rights, or
+        // Developer Mode + unprivileged-symlink-creation enabled) and
+        // EPERMs on default consumer installs. A junction is a reparse
+        // point that achieves the same "this path resolves over there"
+        // semantics for directories without elevation. `'file'` symlinks
+        // on Windows also need the same privilege but there's no
+        // junction-equivalent for files, so we leave `'file'` as-is and
+        // accept the EPERM fall-through for the rare file-symlink case.
+        const symlinkType = sourceStat.isDirectory()
+          ? process.platform === 'win32'
+            ? 'junction'
+            : 'dir'
+          : 'file';
         await fs.symlink(sourceAbs, destAbs, symlinkType);
         debugLogger.debug(
           `symlinkConfiguredDirectories: linked ${destAbs} → ${sourceAbs} (${symlinkType})`,

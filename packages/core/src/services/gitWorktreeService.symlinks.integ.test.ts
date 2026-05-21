@@ -198,6 +198,40 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     }
   });
 
+  it("rejects any entry containing a '..' segment (docs contract)", async () => {
+    // `foo/../bar` resolves to `bar` (inside the repo), so the
+    // post-resolve isWithinRoot check would accept it. But the
+    // user-facing description for `worktree.symlinkDirectories`
+    // promises rejection of any entry containing `..`. Verify the
+    // contract is enforced syntactically, before path.resolve.
+    //
+    // Provision a real `bar/` source so this test would fail loudly
+    // if the syntactic guard were removed (we'd see a symlink at
+    // `<worktree>/bar` pointing back to the source).
+    await fs.mkdir(path.join(repoRoot, 'bar'));
+    await fs.writeFile(path.join(repoRoot, 'bar', 'marker'), 'bar');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('dotdot', 'main', {
+      symlinkDirectories: ['foo/../bar'],
+    });
+    expect(result.success).toBe(true);
+
+    const wt = result.worktree!.path;
+    // Nothing at <worktree>/bar (the resolved name)…
+    const bar = await fs
+      .lstat(path.join(wt, 'bar'))
+      .then(() => true)
+      .catch(() => false);
+    expect(bar).toBe(false);
+    // …nor at <worktree>/foo (the raw first segment).
+    const foo = await fs
+      .lstat(path.join(wt, 'foo'))
+      .then(() => true)
+      .catch(() => false);
+    expect(foo).toBe(false);
+  });
+
   it('handles multiple entries — some present, some missing', async () => {
     await fs.mkdir(path.join(repoRoot, 'present-a'));
     await fs.writeFile(path.join(repoRoot, 'present-a', 'x'), 'a');
