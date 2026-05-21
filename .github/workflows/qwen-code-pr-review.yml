@@ -3,8 +3,17 @@ name: 'Qwen Pull Request Review'
 on:
   pull_request_target:
     types: ['opened', 'reopened', 'ready_for_review', 'synchronize']
+  # 'edited' is intentional: a maintainer who typed a plain comment and
+  # then edits it to add `@qwen /review` (or fixes a typo in the command)
+  # should still trigger the review. The re-trigger surface is bounded —
+  # the job `if:` only fires for OWNER/MEMBER/COLLABORATOR authors, so a
+  # stale-comment edit can at worst cost one maintainer-initiated re-run.
   issue_comment:
     types: ['created', 'edited']
+  pull_request_review_comment:
+    types: ['created']
+  pull_request_review:
+    types: ['submitted']
   workflow_dispatch:
     inputs:
       pr_number:
@@ -521,6 +530,10 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_PREFLIGHT_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          # Routed through env (not interpolated into the script) so the
+          # value can't break the `[ -z ... ]` test or inject shell — same
+          # pattern as every other vars.*/secrets.* in this file.
+          PREFLIGHT_MODEL_RAW: '${{ vars.QWEN_PR_PREFLIGHT_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           CHANGED_LINES: '${{ steps.size.outputs.changed_lines }}'
           RAW_CHANGED_LINES: '${{ steps.size.outputs.raw_changed_lines }}'
@@ -528,7 +541,7 @@ jobs:
         run: |-
           set -euo pipefail
 
-          if [ -z "${{ vars.QWEN_PR_PREFLIGHT_MODEL }}" ]; then
+          if [ -z "${PREFLIGHT_MODEL_RAW:-}" ]; then
             echo "::warning::vars.QWEN_PR_PREFLIGHT_MODEL is unset; preflight is falling back to the deep-review model SKU. Configure a cheaper SKU to reduce token cost — see docs/design/code-review/preflight-triage.md §关键决策 D1."
           fi
 
