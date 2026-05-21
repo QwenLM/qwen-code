@@ -189,7 +189,11 @@ export * from './memory/writeContextFile.js';
 export * from './ide/ide-client.js';
 export * from './ide/ideContext.js';
 export * from './ide/ide-installer.js';
-export { IDE_DEFINITIONS, type IdeInfo } from './ide/detect-ide.js';
+export {
+  detectIdeFromEnv,
+  IDE_DEFINITIONS,
+  type IdeInfo,
+} from './ide/detect-ide.js';
 export * from './ide/constants.js';
 export * from './ide/types.js';
 
@@ -291,6 +295,7 @@ export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
 export * from './utils/fileUtils.js';
 export * from './utils/filesearch/fileSearch.js';
+export * as crawlCache from './utils/filesearch/crawlCache.js';
 export {
   Ignore,
   loadIgnoreRules,
@@ -307,6 +312,7 @@ export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
 export * from './utils/memoryDiscovery.js';
 export * from './utils/modelId.js';
+export * from './utils/runtimeDiagnostics.js';
 export { ConditionalRulesRegistry } from './utils/rulesDiscovery.js';
 export type { RuleFile } from './utils/rulesDiscovery.js';
 export {

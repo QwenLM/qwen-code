@@ -44,6 +44,7 @@ import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCa
 import type { RequestContext } from '../openaiContentGenerator/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import {
   getErrorMessage,
   getErrorStatus,
@@ -226,6 +227,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     const isInternal = isInternalPromptId(userPromptId);
     const session = this.startCaptureSession();
     try {
+      runtimeDiagnostics.recordGenerateContentRequest(req, {
+        stream: false,
+        source: 'generateContent',
+      });
       if (!isInternal) {
         addSystemPromptAttributes(
           this.config,
@@ -336,6 +341,10 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
+      runtimeDiagnostics.recordGenerateContentRequest(req, {
+        stream: true,
+        source: 'generateContentStream',
+      });
       if (!isInternal) {
         addSystemPromptAttributes(
           this.config,

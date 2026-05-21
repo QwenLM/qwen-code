@@ -303,8 +303,56 @@ export class GeminiClient {
     return this.getChat().getHistory(curated);
   }
 
+  getHistoryShallow(curated: boolean = false): Content[] {
+    const chat = this.getChat();
+    return chat.getHistoryShallow?.(curated) ?? chat.getHistory(curated);
+  }
+
   getHistoryTail(count: number, curated: boolean = false): Content[] {
     return this.getChat().getHistoryTail(count, curated);
+  }
+
+  private getHistoryTailShallow(
+    count: number,
+    curated: boolean = false,
+  ): Content[] {
+    const chat = this.getChat();
+    return (
+      chat.getHistoryTailShallow?.(count, curated) ??
+      chat.getHistoryTail?.(count, curated) ??
+      chat.getHistory(curated).slice(-count)
+    );
+  }
+
+  private peekLastHistoryEntry(): Content | undefined {
+    const chat = this.getChat();
+    return chat.peekLastHistoryEntry?.() ?? chat.getHistory().at(-1);
+  }
+
+  private getHistoryLength(): number {
+    const chat = this.getChat();
+    return chat.getHistoryLength?.() ?? chat.getHistory().length;
+  }
+
+  private getLastModelMessageText(): string | undefined {
+    const chat = this.getChat();
+    if (chat.getLastModelMessageText) {
+      return chat.getLastModelMessageText();
+    }
+    const history = chat.getHistoryShallow?.() ?? chat.getHistory();
+    for (let i = history.length - 1; i >= 0; i--) {
+      const message = history[i];
+      if (message?.role !== 'model') continue;
+      const text =
+        message.parts
+          ?.filter(
+            (part): part is { text: string } => typeof part.text === 'string',
+          )
+          .map((part) => part.text)
+          .join('') ?? '';
+      return text || undefined;
+    }
+    return undefined;
   }
 
   /**
@@ -937,7 +985,7 @@ export class GeminiClient {
     ) {
       const projectRoot = this.config.getProjectRoot();
       const sessionId = this.config.getSessionId();
-      const history = this.getHistory();
+      const history = this.getHistoryShallow();
       const mgr = this.config.getMemoryManager();
       const autoSkillEnabled = this.config.getAutoSkillEnabled();
 
@@ -1001,7 +1049,7 @@ export class GeminiClient {
 
     const projectRoot = this.config.getProjectRoot();
     const sessionId = this.config.getSessionId();
-    const history = this.getHistory();
+    const history = this.getHistoryShallow();
     const mgr = this.config.getMemoryManager();
 
     if (!this.config.getManagedAutoMemoryEnabled()) {
@@ -1275,7 +1323,7 @@ export class GeminiClient {
         // retries/hooks) so that model latency during a tool-call loop
         // doesn't count as user idle time.
         const mcResult = microcompactHistory(
-          this.getChat().getHistory(),
+          this.getHistoryShallow(),
           this.lastApiCompletionTimestamp,
           this.config.getClearContextOnIdle(),
         );
@@ -1410,9 +1458,8 @@ export class GeminiClient {
       // part from the user immediately follows a functionCall part from the model
       // in the conversation history . The IDE context is not discarded; it will
       // be included in the next regular message sent to the model.
-      const history = this.getHistory();
-      const lastMessage =
-        history.length > 0 ? history[history.length - 1] : undefined;
+      const historyLength = this.getHistoryLength();
+      const lastMessage = this.peekLastHistoryEntry();
       const hasPendingToolCall =
         !!lastMessage &&
         lastMessage.role === 'model' &&
@@ -1423,7 +1470,7 @@ export class GeminiClient {
 
       if (this.config.getIdeMode() && !hasPendingToolCall) {
         const { contextParts, newIdeContext } = this.getIdeContextParts(
-          this.forceFullIdeContext || history.length === 0,
+          this.forceFullIdeContext || historyLength === 0,
         );
         if (contextParts.length > 0) {
           ideContextText = wrapIdeContext(contextParts.join('\n'));
@@ -1659,16 +1706,8 @@ export class GeminiClient {
         !signal.aborted &&
         this.config.hasHooksForEvent('Stop')
       ) {
-        // Get response text from the chat history
-        const history = this.getHistory();
-        const lastModelMessage = history
-          .filter((msg) => msg.role === 'model')
-          .pop();
         const responseText =
-          lastModelMessage?.parts
-            ?.filter((p): p is { text: string } => 'text' in p)
-            .map((p) => p.text)
-            .join('') || '[no response text]';
+          this.getLastModelMessageText() || '[no response text]';
 
         const response = await messageBus.request<
           HookExecutionRequest,
@@ -1833,12 +1872,11 @@ export class GeminiClient {
         // see the current turn's history regardless of which path exits below.
         try {
           const chat = this.getChat();
-          const fullHistory = chat.getHistory(true);
           const maxHistoryForCache = 40;
-          const cachedHistory =
-            fullHistory.length > maxHistoryForCache
-              ? fullHistory.slice(-maxHistoryForCache)
-              : fullHistory;
+          const cachedHistory = this.getHistoryTailShallow(
+            maxHistoryForCache,
+            true,
+          );
           saveCacheSafeParams(
             chat.getGenerationConfig(),
             cachedHistory,
@@ -2024,7 +2062,8 @@ export class GeminiClient {
       signal,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
-      const compressedHistory = this.getChat().getHistory();
+      const chat = this.getChat();
+      const compressedHistory = chat.getHistoryShallow?.() ?? chat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
       if (
         !this.lastSessionStartContext &&
