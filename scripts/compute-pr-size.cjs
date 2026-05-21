@@ -28,9 +28,14 @@
  * Output (stdout, single line):
  *   <meaningful_changed_lines>
  *
+ * A missing or non-array `.files` is treated as zero meaningful lines
+ * (not an error) — the caller's size gate then runs the AI review, which
+ * is the safe default. Only an unreadable file or JSON parse failure is
+ * fatal.
+ *
  * Exit codes:
- *   0  success
- *   1  malformed input (file unreadable, JSON parse fail, missing files[])
+ *   0  success (includes the empty/missing files[] -> 0 case)
+ *   1  malformed input (file unreadable, JSON parse fail)
  *   2  missing args
  */
 const fs = require('fs');

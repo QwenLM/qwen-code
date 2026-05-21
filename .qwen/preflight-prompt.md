@@ -45,7 +45,7 @@ ULTRA_LIGHT. A 5-line `auth/oauth.ts` PR is DEEP.
 | **ULTRA_LIGHT** | All 5 dimensions false; change is purely docs / lockfile / fixtures / formatting / examples         | Skip review entirely; post a "no deep review needed" PR comment.                     |
 | **LIGHT**       | All 5 dimensions false; change is real code but **contained** (one module, no exports, no cross-file ripple, < ~100 lines logic)  | Single-shot review (~1-2 min). Up to 3 findings, no P0-P3 structure required.        |
 | **STANDARD**    | Cross-module / cross-file impact, internal API changes, or moderate ambiguity, **but** no high-risk dimension flips | Single-shot structured review (~3-6 min). Required P0-P3 markdown + Validation Evidence verdict. |
-| **DEEP**        | **Any** of `security_sensitive`, `public_api`, `build_or_release`, `data_path` is true; OR cross-package ripple; OR ambiguous after careful look | Full multi-agent bundled review (~10-25 min) with reverse audit.                    |
+| **DEEP**        | **Any** of `security_sensitive`, `public_api`, `build_or_release`, `data_path` is true; OR cross-package ripple; OR ambiguous after careful look | Full multi-agent bundled review (~10-40 min) with reverse audit.                    |
 
 ---
 

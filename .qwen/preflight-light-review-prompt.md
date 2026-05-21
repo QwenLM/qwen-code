@@ -50,7 +50,7 @@ In rough priority order:
    in the diff context lines.
 
 What **not** to check at this tier:
-- Performance / hot path concerns (preflight ruled out `performance_critical`).
+- Performance / hot path concerns (out of scope at this tier).
 - Public API / SDK signature concerns (preflight ruled out `public_api`).
 - Security / auth concerns (preflight ruled out `security_sensitive` —
   if any of these are real, that's a preflight mis-judgment; flag it as

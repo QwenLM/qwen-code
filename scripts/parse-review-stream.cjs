@@ -44,8 +44,8 @@
  *   tier          Optional tier label (UL/LIGHT/STANDARD/DEEP), embedded
  *                 in a HTML comment header. Used by maintainers to filter
  *                 review comments by tier in retrospective analysis.
- *   status        Optional status label, expected values: 'complete' or
- *                 'timeout'. Embedded in the same header.
+ *   status        Optional status label, expected values: 'complete',
+ *                 'timeout', or 'error'. Embedded in the same header.
  *
  * Exit codes:
  *   0  success (file written, even with placeholder body)

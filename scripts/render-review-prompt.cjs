@@ -41,13 +41,25 @@
  */
 const fs = require('fs');
 
+// Thrown by parseArgs on bad input. main() catches it and exits 2;
+// tests can assert on it without spawning a subprocess.
+class ArgError extends Error {}
+
 function parseArgs(argv) {
   const positional = [];
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--context' || a === '--rules') {
-      flags[a.slice(2)] = argv[++i];
+      const value = argv[i + 1];
+      // Reject a flag with no value (last arg, or followed by another
+      // flag) — otherwise a dropped path silently leaves the placeholder
+      // un-substituted in the rendered prompt.
+      if (value == null || value.startsWith('--')) {
+        throw new ArgError(`${a} requires a file path argument`);
+      }
+      flags[a.slice(2)] = value;
+      i++;
     } else {
       positional.push(a);
     }
@@ -80,7 +92,17 @@ function render(template, { context, rules }) {
 }
 
 function main() {
-  const { positional, flags } = parseArgs(process.argv.slice(2));
+  let positional;
+  let flags;
+  try {
+    ({ positional, flags } = parseArgs(process.argv.slice(2)));
+  } catch (err) {
+    if (err instanceof ArgError) {
+      process.stderr.write(`render-review-prompt: ${err.message}\n`);
+      process.exit(2);
+    }
+    throw err;
+  }
   if (positional.length < 2) {
     process.stderr.write(
       'Usage: render-review-prompt.cjs <template> <output> ' +
@@ -107,7 +129,7 @@ function main() {
 }
 
 // Export for tests.
-module.exports = { render, parseArgs };
+module.exports = { render, parseArgs, ArgError };
 
 if (require.main === module) {
   main();

@@ -328,6 +328,8 @@ Deep review verdict: APPROVE
 
 四条独立的 tier 路径，共用一套 `Post review summary comment` + fallback。
 
+> **注**：以下伪 YAML 是设计期的草图，**实现以 `.github/workflows/qwen-code-pr-review.yml` 为准**。已知与实现的差异：① 实现把 "Honor tier override" 与 preflight fan-in 合并成单个 `Compute effective tier` step；② LIGHT 的 `needs_upgrade` 自动升 STANDARD 已在实现阶段取消（见 §Failure modes 的设计 vs 实现说明），LIGHT timeout 走 partial flush 而非升档。
+
 ```yaml
 # ─── Stage 0: preflight ──────────────────────────────────────
 
@@ -389,21 +391,18 @@ Deep review verdict: APPROVE
     set -euo pipefail
     prompt="$(cat .qwen/preflight-light-review-prompt.md)"
     # 注入 PR diff + focus_areas
-    if ! timeout 3m qwen --yolo \
-         --output-format stream-json --include-partial-messages \
-         --prompt "$prompt" 2>&1 | tee qwen-review-stream.jsonl ; then
-      echo "::warning::LIGHT review failed; will be re-attempted as STANDARD"
-      echo "needs_upgrade=true" >> "$GITHUB_OUTPUT"
-      exit 0    # 不让 step 失败，由下一个 step 处理升级
-    fi
+    set +e
+    timeout --kill-after=15s 3m qwen --yolo \
+      --output-format stream-json --include-partial-messages \
+      --prompt "$prompt" 2>&1 | tee qwen-review-stream.jsonl
+    status=${PIPESTATUS[0]}
+    set -e
     # 累加式解析（见 §Failure modes 流式累加器实现要点）
-    # 写入 qwen-review-summary.md
+    # timeout / 非零 exit 都走 partial flush，不再升 STANDARD
 
-- name: 'Run STANDARD review (or LIGHT upgrade)'
+- name: 'Run STANDARD review'
   id: 'standard'
-  if: |-
-    env.EFFECTIVE_TIER == 'STANDARD' ||
-    steps.light.outputs.needs_upgrade == 'true'
+  if: env.EFFECTIVE_TIER == 'STANDARD'
   env:
     OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
   timeout-minutes: 10
@@ -583,6 +582,7 @@ Deep review verdict: APPROVE
 - **R1**：preflight 模型本身的可靠性 —— 便宜模型可能 JSON 结构不稳。需要在实现期 sample 试若干 PR 观察输出质量；不稳就回退到 deep review 模型 SKU。
 - **R2**：preflight 漏档 —— 模型可能把高风险 PR 误判为 LIGHT。**缓解**：calibration 示例里强化 high-blast-radius case；校准 loop 数据驱动 prompt 迭代；maintainer 可用 `@qwen /review --tier=deep` 显式补救。
 - **R3**：tier 升档的"棘轮效应" —— 用户感知 preflight 永远只升档不降档，长期可能不再信任。**缓解**：校准 loop 数据驱动 ablation，定期 review 是否过度保守。
+- **R4（安全 — 残留风险）**：review step 用 `qwen --yolo`（自动批准所有工具调用）处理**不可信的 PR diff / title / body**，同一 step 的 env 里有 `OPENAI_API_KEY` 和带 `pull-requests: write` 的 `GITHUB_TOKEN`。理论上恶意 PR 可通过 prompt injection 诱导 agent 执行 shell / 网络请求来外泄 secret 或越权发评论。**现有缓解**：① 自动触发与 `@qwen /review` 评论触发都限定 OWNER/MEMBER/COLLABORATOR；② workflow 全程 checkout 可信的 `main`，从不 checkout PR head 代码；③ 所有不可信数据走 `env:` + 引号变量，杜绝 shell 层注入；④ 第三方 action 全部 SHA pin。**未消除的部分**：LLM 语义层注入无法靠上述手段根除 —— 触发者可信不代表 PR *内容*可信。**后续硬化（非本 PR 范围，留作 follow-up）**：给 runner 加 egress 白名单（如 `step-security/harden-runner` 只放行模型端点），让外泄类 `curl` 失败;并把 CLI 安装从 `@latest` 钉到固定版本。
 
 ## Rollback / Emergency Disable
 
