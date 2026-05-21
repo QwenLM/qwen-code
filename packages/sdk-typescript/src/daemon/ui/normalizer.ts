@@ -144,7 +144,9 @@ function createBase(
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
-    ...(opts.includeRawEvent ? { rawEvent: event } : {}),
+    ...(opts.includeRawEvent
+      ? { rawEvent: { ...event, data: redactSensitiveFields(event.data) } }
+      : {}),
   };
 }
 
@@ -255,8 +257,14 @@ function normalizeToolUpdate(
     rawOutputSource !== undefined
       ? redactSensitiveFields(rawOutputSource)
       : undefined;
-  const content = update['content'];
-  const locations = update['locations'];
+  const content =
+    update['content'] !== undefined
+      ? redactSensitiveFields(update['content'])
+      : undefined;
+  const locations =
+    update['locations'] !== undefined
+      ? redactSensitiveFields(update['locations'])
+      : undefined;
   const toolCallId = getString(update, 'toolCallId');
   const status = getString(update, 'status');
   if (!toolCallId) {
@@ -364,7 +372,10 @@ function normalizePermissionRequest(
     ];
   }
 
-  const toolCall = event.data['toolCall'];
+  const toolCall =
+    event.data['toolCall'] !== undefined
+      ? redactSensitiveFields(event.data['toolCall'])
+      : undefined;
   return [
     {
       ...base,

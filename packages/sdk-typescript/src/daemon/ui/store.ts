@@ -79,6 +79,11 @@ function reportListenerError(error: unknown): void {
   ).reportError;
   if (typeof reporter === 'function') {
     reporter(error);
+    return;
+  }
+  const logger = globalThis.console?.error;
+  if (typeof logger === 'function') {
+    logger.call(globalThis.console, error);
   }
 }
 

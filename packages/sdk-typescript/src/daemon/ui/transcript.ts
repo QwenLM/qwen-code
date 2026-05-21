@@ -22,6 +22,7 @@ const DEFAULT_MAX_BLOCKS = 1_000;
 const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
 const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
+const MAX_CLONE_DEPTH = 16;
 
 export function createDaemonTranscriptState(
   opts: DaemonTranscriptReducerOptions = {},
@@ -545,13 +546,17 @@ function pruneTrimmedToolIndexes(state: DaemonTranscriptState): void {
   }
 }
 
-function cloneJsonLike<T>(value: T): T {
+function cloneJsonLike<T>(value: T, depth = 0): T {
+  if (depth > MAX_CLONE_DEPTH) return value;
   if (Array.isArray(value)) {
-    return value.map((entry) => cloneJsonLike(entry)) as T;
+    return value.map((entry) => cloneJsonLike(entry, depth + 1)) as T;
   }
   if (isRecord(value)) {
     return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, cloneJsonLike(entry)]),
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        cloneJsonLike(entry, depth + 1),
+      ]),
     ) as T;
   }
   return value;
