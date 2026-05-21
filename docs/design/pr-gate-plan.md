@@ -186,14 +186,17 @@ pr-size:
 name: PR Gate
 on:
   pull_request:
-    types: [opened, edited, synchronize, ready_for_review]
+    # labeled/unlabeled 是 oversized-ok 逃生口所必需（见上文）；
+    # reopened 也要带上。pr-template job 用 job 级 if: 跳过 label 事件，
+    # pr-size 只在 oversized-ok label 变动时才因 label 事件重跑。
+    types: [opened, edited, synchronize, ready_for_review, reopened, labeled, unlabeled]
     branches: [main, 'release/**']
 
 permissions:
   contents: read
   pull-requests: read
 
-# 三个 job 并行执行，互不依赖
+# 两个 job 并行执行，互不依赖
 ```
 
 ### Phase B：调整 `qwen-code-pr-review.yml`

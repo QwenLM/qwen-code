@@ -169,6 +169,16 @@ describe('buildOutput', () => {
     expect(out.header).toContain('emitted=1');
   });
 
+  it('DEEP with 0 segments falls back to the placeholder', () => {
+    // The `tier === 'DEEP' && segments.length > 1` branch is distinct
+    // from the empty-input path — pin it explicitly so a future change
+    // to the DEEP guard cannot silently break the 0-segment fallthrough.
+    const out = buildOutput([], 'DEEP', 'timeout');
+    expect(out.header).toContain('segments=0');
+    expect(out.header).toContain('emitted=0');
+    expect(out.body).toContain('no assistant text parsed');
+  });
+
   it('writes placeholder body when no segments parsed', () => {
     const out = buildOutput([], 'LIGHT', 'timeout');
     expect(out.header).toContain('segments=0');

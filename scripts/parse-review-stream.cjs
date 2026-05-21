@@ -135,7 +135,7 @@ function buildOutput(segments, tier, status) {
   const header =
     `<!-- tier=${tier}; status=${status}; ` +
     `segments=${segments.length}; emitted=${emitted} -->\n`;
-  return { header, body, full: header + body };
+  return { header, body, emitted, full: header + body };
 }
 
 function main() {
@@ -160,7 +160,7 @@ function main() {
   }
 
   const segments = accumulateSegments(raw);
-  const { full, body } = buildOutput(segments, tier, status);
+  const { full, body, emitted } = buildOutput(segments, tier, status);
 
   try {
     fs.writeFileSync(outputPath, full);
@@ -172,7 +172,7 @@ function main() {
   }
 
   console.error(
-    `parse-review-stream: ${segments.length} segment(s), ${body.length} char(s) written to ${outputPath}`
+    `parse-review-stream: ${segments.length} segment(s) parsed, ${emitted} emitted, ${body.length} char(s) written to ${outputPath}`
   );
 }
 

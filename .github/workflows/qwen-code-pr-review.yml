@@ -221,8 +221,12 @@ jobs:
                 | head -n1 \
                 | sed 's/^--tier=//')"
               tier_override="$(printf '%s' "$tier_raw" | tr '[:lower:]' '[:upper:]')"
+              # `I` flag = case-insensitive, so a mixed-case `--tier=Light`
+              # (accepted by the case-insensitive grep above) is also
+              # stripped here. Without it, mixed case parses correctly but
+              # leaks the literal `--tier=Light` token into the LLM prompt.
               additional_instructions="$(printf '%s' "$additional_instructions" \
-                | sed -E 's/(^|[[:space:]])--tier=(ultra_light|light|standard|deep|ULTRA_LIGHT|LIGHT|STANDARD|DEEP)([[:space:]]|$)/\1\3/g')"
+                | sed -E 's/(^|[[:space:]])--tier=(ultra_light|light|standard|deep)([[:space:]]|$)/\1\3/gI')"
             fi
           fi
           # Strip leading blank lines so the prompt doesn't start with an
@@ -537,7 +541,16 @@ jobs:
           base_ref="$(jq -r '.baseRefName' <<< "$pr_json")"
           head_ref="$(jq -r '.headRefName' <<< "$pr_json")"
           changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
-          diff_stat="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | diffstat -p1 2>/dev/null || gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | head -200)"
+          # diff_stat is a per-file churn summary for the preflight prompt.
+          # If `diffstat` isn't on the runner, fall back to a plain
+          # changed-file list — NOT `--patch | head`, which would dump raw
+          # +/- hunk lines mislabeled as a "stat" and skew the LLM's
+          # blast-radius read.
+          if command -v diffstat >/dev/null 2>&1; then
+            diff_stat="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | diffstat -p1)"
+          else
+            diff_stat="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --name-only)"
+          fi
           # First ~50KB of unified diff for content judgment. Anything beyond
           # is unlikely to flip the tier — preflight is a triage step, not
           # the actual review.
@@ -619,10 +632,20 @@ jobs:
           # Use multiline output format so a multi-line rationale survives.
           # GHA's single-line `key=value` form silently truncates at the
           # first newline, which would chop a multi-sentence rationale.
+          #
+          # The heredoc delimiter MUST be randomized: `rationale` is LLM
+          # output produced from attacker-controlled PR content (title,
+          # body, diff). A static delimiter lets a prompt-injected model
+          # emit that exact line to close the heredoc early and inject its
+          # own `tier=ULTRA_LIGHT` GITHUB_OUTPUT line — forcing a
+          # security-critical PR to skip deep review. A per-run random
+          # delimiter the model cannot predict closes that hole. Mirrors
+          # the dynamic-delimiter pattern in the 'Resolve PR context' step.
+          rationale_eof="RATIONALE_EOF_$(date +%s%N)"
           {
-            echo "rationale<<RATIONALE_EOF"
+            echo "rationale<<${rationale_eof}"
             printf '%s\n' "$rationale"
-            echo "RATIONALE_EOF"
+            echo "${rationale_eof}"
           } >> "$GITHUB_OUTPUT"
           # For the ::notice:: log line, condense newlines into spaces so
           # the GHA UI shows the full rationale on one line (GHA notice
@@ -774,6 +797,14 @@ jobs:
               cat qwen-review-summary.md
             } > /tmp/qwen-review-summary-with-warning.md
             mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
+          elif [ "$status_label" = "error" ]; then
+            # Same partial-flush treatment for non-timeout failures, so a
+            # crash-truncated review is not posted looking 'complete'.
+            {
+              printf '## ⚠️ LIGHT review exited with error (status %s) — partial output below\n\n' "$status"
+              cat qwen-review-summary.md
+            } > /tmp/qwen-review-summary-with-warning.md
+            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
           fi
 
           # If the accumulator only wrote its "no assistant text parsed"
@@ -781,8 +812,10 @@ jobs:
           # the fallback comment fires instead of posting a useless stub.
           # 200-char threshold leaves room for the metadata header + small
           # actual reviews (a one-liner finding is still ≥ 200 chars when
-          # wrapped in the markdown skeleton).
-          if [ "$(wc -c < qwen-review-summary.md)" -lt 200 ]; then
+          # wrapped in the markdown skeleton). The `-f` guard keeps this
+          # robust if a future step leaves the file missing — matching the
+          # STANDARD/DEEP near-empty guards.
+          if [ -f qwen-review-summary.md ] && [ "$(wc -c < qwen-review-summary.md)" -lt 200 ]; then
             echo "::warning::LIGHT review produced near-empty output; removing summary file so fallback comment fires."
             rm -f qwen-review-summary.md
           fi
@@ -1168,18 +1201,24 @@ jobs:
           path: '.qwen/review-cache'
           key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
 
-      # Fires when the job is failing AND there's no review markdown to
-      # post (the always-emit accumulator failed to produce even a partial).
-      # Without this fallback, a broken `gh pr comment`, an early-step
-      # crash, or a totally empty model output would all look identical to
-      # "no review happened" from the PR's perspective. The fallback's
-      # own `gh pr comment` ends with `|| true` so the step never causes
-      # a secondary cascade failure.
+      # Fires when the job is failing AND the review did not reach the PR.
+      # Two distinct cases must both trigger it:
+      #   1. no review markdown at all (the always-emit accumulator failed
+      #      to produce even a partial), or
+      #   2. the markdown exists but 'Post review summary comment' itself
+      #      failed (gh rate limit, transient API error, PR deleted) — the
+      #      file is on disk but no comment reached the PR. Without the
+      #      post-summary.outcome check this case is silently swallowed:
+      #      hashFiles() is non-empty, so the fallback would skip and up to
+      #      40 min of DEEP compute is lost with nothing on the PR.
+      # The fallback's own `gh pr comment` ends with `|| true` so the step
+      # never causes a secondary cascade failure.
       - name: 'Post fallback comment on review failure'
         if: |-
           failure() &&
           steps.pr.outputs.should_comment == 'true' &&
-          hashFiles('qwen-review-summary.md') == ''
+          (hashFiles('qwen-review-summary.md') == '' ||
+           steps.post-summary.outcome == 'failure')
         env:
           # Same qwen-code-bot identity as the happy-path 'Post review
           # summary comment' step (see comment there).

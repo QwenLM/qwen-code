@@ -55,6 +55,14 @@ jobs:
 
   pr-template:
     name: 'PR Template'
+    # `labeled`/`unlabeled` are in the workflow triggers only for the
+    # pr-size `oversized-ok` escape hatch. PR Template does not depend on
+    # labels at all, so skip it on label events — otherwise every
+    # unrelated label add/remove re-runs (and, with cancel-in-progress,
+    # can cancel) this check for no reason.
+    if: |-
+      github.event.action != 'labeled' &&
+      github.event.action != 'unlabeled'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 2
     steps:
@@ -150,6 +158,13 @@ jobs:
 
   pr-size:
     name: 'PR Size'
+    # Re-run on non-label events as usual; on label events run ONLY when
+    # the `oversized-ok` escape-hatch label itself is added or removed —
+    # an unrelated label (`bug`, `priority/*`) must not churn this check.
+    if: |-
+      (github.event.action != 'labeled' &&
+       github.event.action != 'unlabeled') ||
+      github.event.label.name == 'oversized-ok'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 3
     steps:
@@ -210,15 +225,45 @@ jobs:
               .map((l) => l.name);
             const sizeWaived = labels.includes(OVERSIZE_OK_LABEL);
 
+            // Self-waiver guard: a PR author applying `oversized-ok` to
+            // their own PR would bypass the gate unilaterally. Reject that.
+            // Only enforced on the `labeled` event — that is the moment of
+            // application, where `payload.sender` is the applier. On later
+            // synchronize events the label is already vetted and
+            // `payload.sender` is just the pusher, so re-checking there
+            // would false-fail a legitimately maintainer-applied waiver.
+            if (
+              context.payload.action === 'labeled' &&
+              context.payload.label &&
+              context.payload.label.name === OVERSIZE_OK_LABEL &&
+              context.payload.sender &&
+              context.payload.pull_request &&
+              context.payload.sender.login === context.payload.pull_request.user.login
+            ) {
+              core.setFailed(
+                `\`${OVERSIZE_OK_LABEL}\` was applied by the PR author ` +
+                `(@${context.payload.sender.login}); the size waiver must be ` +
+                'applied by a different maintainer.'
+              );
+              return;
+            }
+
             core.info(
               `PR size: ${totalChanges} meaningful lines across ${totalFiles} files ` +
               `(block at ${BLOCK_THRESHOLD}, warn at ${WARN_THRESHOLD}; lockfile/docs/snapshot/generated excluded).`
             );
 
             if (totalChanges > BLOCK_THRESHOLD && sizeWaived) {
+              // Name the applier when this run was triggered by the label
+              // event itself, so the job log carries an audit trail
+              // instead of relying only on GitHub's separate label log.
+              const applier =
+                context.payload.action === 'labeled' && context.payload.sender
+                  ? ` (applied by @${context.payload.sender.login})`
+                  : '';
               core.warning(
                 `PR is over the size threshold (${totalChanges} > ${BLOCK_THRESHOLD} ` +
-                `meaningful lines) but carries the \`${OVERSIZE_OK_LABEL}\` label — ` +
+                `meaningful lines) but carries the \`${OVERSIZE_OK_LABEL}\` label${applier} — ` +
                 'a maintainer has consciously accepted the size. Not blocking.'
               );
             } else if (totalChanges > BLOCK_THRESHOLD) {

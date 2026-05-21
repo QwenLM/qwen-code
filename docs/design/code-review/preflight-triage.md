@@ -62,6 +62,25 @@
 
 > **关键设计原则：tier 不由 size 决定**。1000 行的文档 PR 和 5 行改 `auth/oauth.ts` 是两种完全不同的"小改动" / "大改动"。size 只是 preflight LLM 拿来做 blast-radius 判断时的一个**辅助信号**，不是 primary criterion。
 
+### 路由决策流程图
+
+```mermaid
+flowchart TD
+    A["PR 打开 / 更新 / @qwen /review"] --> B{"Check PR size"}
+    B -->|"超过 1500 实质行"| Z["跳过 AI review<br/>merge-blocking 由 pr-gate.yml 负责"]
+    B -->|"size 在阈值内"| C["Preflight triage<br/>1 次廉价 LLM 调用"]
+    C --> D["对 5 个 blast-radius 维度打布尔分"]
+    D --> E{"任一 high-risk 维度为 true?<br/>security_sensitive / public_api<br/>/ build_or_release / data_path"}
+    E -->|"是"| DEEP["DEEP<br/>bundled 多 agent /review skill"]
+    E -->|"否"| F{"跨 package / 跨文件 ripple?"}
+    F -->|"是"| STD["STANDARD<br/>单发, 结构化 P0-P3"]
+    F -->|"否"| G{"是真实运行时代码?"}
+    G -->|"否: 文档/lockfile/fixture/formatting"| UL["ULTRA_LIGHT<br/>shell verdict, 不调 review LLM"]
+    G -->|"是: 单一内聚模块"| LIGHT["LIGHT<br/>单发, 聚焦 prompt"]
+```
+
+> **判断逻辑读法**：决策树的每个分叉都是**影响面**问题，不是**体量**问题。① size 只有一个硬作用 —— 超 1500 实质行直接跳过(交给 pr-gate)，这是防滥用、不是 tier 路由；② 进入 preflight 后，先看 4 个 high-risk 维度有没有 true，有就 DEEP；③ 否则看广度(跨 package / 跨文件)，有 ripple 就 STANDARD；④ 再否则看是不是真实运行时代码，是就 LIGHT、纯文档/lockfile 就 ULTRA_LIGHT。注意 `user_facing` 单独为 true **不**直接进 DEEP —— 它只是 LLM 综合判断的输入之一。任何一个分叉**模糊**时一律向上升档(P7 保守偏差)。
+
 ### 决策的真正维度（blast radius）
 
 preflight LLM 看 PR diff，对以下维度打布尔分：
