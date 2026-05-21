@@ -571,6 +571,7 @@ Deep review verdict: APPROVE
 | --- | --- | --- | --- | --- |
 | `QWEN_PR_PREFLIGHT_MODEL` | vars | 否 | fallback `QWEN_PR_REVIEW_MODEL` | preflight 用模型 |
 | `QWEN_REVIEW_CALIBRATION_ISSUE` | vars | 否 | 不设则跳过校准记录 | 校准数据存放 issue ID |
+| `QWEN_CODE_BOT_TOKEN` | secrets | 否 | fallback `CI_BOT_PAT` → `GITHUB_TOKEN` | 专用 qwen-code-bot 账号 PAT；配置后 review 评论以独立 bot 身份发出，与 release / CI 评论区分。未配置则复用共享的 `CI_BOT_PAT` |
 | 现有的 `REVIEW_OPENAI_API_KEY` / `REVIEW_OPENAI_BASE_URL` / `QWEN_PR_REVIEW_MODEL` | secrets / vars | 是 | 沿用 Phase 1-3 | 不变 |
 
 ## 验收标准（Phase A MVP）
@@ -586,7 +587,7 @@ Deep review verdict: APPROVE
 - **R1**：preflight 模型本身的可靠性 —— 便宜模型可能 JSON 结构不稳。需要在实现期 sample 试若干 PR 观察输出质量；不稳就回退到 deep review 模型 SKU。
 - **R2**：preflight 漏档 —— 模型可能把高风险 PR 误判为 LIGHT。**缓解**：calibration 示例里强化 high-blast-radius case；校准 loop 数据驱动 prompt 迭代；maintainer 可用 `@qwen /review --tier=deep` 显式补救。
 - **R3**：tier 升档的"棘轮效应" —— 用户感知 preflight 永远只升档不降档，长期可能不再信任。**缓解**：校准 loop 数据驱动 ablation，定期 review 是否过度保守。
-- **R4（安全 — 残留风险）**：review step 用 `qwen --yolo`（自动批准所有工具调用）处理**不可信的 PR diff / title / body**，同一 step 的 env 里有 `OPENAI_API_KEY` 和带 `pull-requests: write` 的 `GITHUB_TOKEN`。理论上恶意 PR 可通过 prompt injection 诱导 agent 执行 shell / 网络请求来外泄 secret 或越权发评论。**现有缓解**：① 自动触发与 `@qwen /review` 评论触发都限定 OWNER/MEMBER/COLLABORATOR；② workflow 全程 checkout 可信的 `main`，从不 checkout PR head 代码；③ 所有不可信数据走 `env:` + 引号变量，杜绝 shell 层注入；④ 第三方 action 全部 SHA pin。**未消除的部分**：LLM 语义层注入无法靠上述手段根除 —— 触发者可信不代表 PR *内容*可信。**后续硬化（非本 PR 范围，留作 follow-up）**：给 runner 加 egress 白名单（如 `step-security/harden-runner` 只放行模型端点），让外泄类 `curl` 失败;并把 CLI 安装从 `@latest` 钉到固定版本。
+- **R4（安全 — 残留风险）**：review step 用 `qwen --yolo`（自动批准所有工具调用）处理**不可信的 PR diff / title / body**，同一 step 的 env 里有 `OPENAI_API_KEY` 和带 `pull-requests: write` 的 `GITHUB_TOKEN`。理论上恶意 PR 可通过 prompt injection 诱导 agent 执行 shell / 网络请求来外泄 secret 或越权发评论。**现有缓解**：① 自动触发与 `@qwen /review` 评论触发都限定 OWNER/MEMBER/COLLABORATOR；② workflow 全程 checkout 可信的 `main`，从不 checkout PR head 代码；③ 所有不可信数据走 `env:` + 引号变量，杜绝 shell 层注入；④ 第三方 action 全部 SHA pin；⑤ job 首步用 `step-security/harden-runner`（**audit 模式**）记录全部 egress 到 job summary。**未消除的部分**：LLM 语义层注入无法靠上述手段根除 —— 触发者可信不代表 PR *内容*可信；audit 模式只观测、不拦截。**后续硬化（follow-up）**：观察若干 review run 的 egress 域名后，把 harden-runner 切到 `block` 模式 + 白名单（只放行模型端点 / npm / github），让外泄类 `curl` 直接失败；并把 CLI 安装从 `@latest` 钉到固定版本。
 
 ## Rollback / Emergency Disable
 
