@@ -139,6 +139,29 @@ describe('combineAbortSignals', () => {
     }
   });
 
+  it('auto-cleans input-signal listeners when the timeout fires', async () => {
+    // Timeout-driven aborts must run the same auto-cleanup as source-driven
+    // aborts — otherwise long-lived input signals (e.g. a session-lived
+    // AbortSignal) accumulate dead listeners across many short-lived
+    // combinedSignal calls. Verifies cleanup is wired to the COMBINED
+    // controller abort path, not just to source-signal events.
+    vi.useFakeTimers();
+    try {
+      const source = createAbortController();
+      const before = getEventListeners(source.signal, 'abort').length;
+      const { signal } = combineAbortSignals([source.signal], {
+        timeoutMs: 50,
+      });
+      expect(getEventListeners(source.signal, 'abort').length).toBe(before + 1);
+      vi.advanceTimersByTime(50);
+      expect(signal.aborted).toBe(true);
+      expect((signal.reason as DOMException).name).toBe('TimeoutError');
+      expect(getEventListeners(source.signal, 'abort').length).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('cleanup removes listeners from inputs', () => {
     const a = createAbortController();
     const before = getEventListeners(a.signal, 'abort').length;
