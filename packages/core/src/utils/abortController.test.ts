@@ -184,19 +184,43 @@ describe('combineAbortSignals', () => {
     expect(getEventListeners(c.signal, 'abort').length).toBe(0);
   });
 
-  it('does not schedule a timeout if the loop already aborted the controller', () => {
+  it('does not schedule a timeout when the per-iteration check aborts the controller mid-loop', () => {
+    // Drives the `!controller.signal.aborted` guard inside the timeout
+    // block (not the pre-loop fast path): the Proxy reports `aborted=false`
+    // on the initial scan and `aborted=true` once the loop re-checks it.
+    // Spy on setTimeout so we can distinguish "guard skipped scheduling"
+    // from "scheduled then immediately cleared by synchronous cleanup" —
+    // the latter would be observationally indistinguishable via timer
+    // advancement alone since cleanup() runs synchronously and clears the
+    // timer it just scheduled.
     vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     try {
       const a = createAbortController();
-      a.abort('pre');
-      const { signal } = combineAbortSignals([a.signal], { timeoutMs: 50 });
+      const b = createAbortController();
+      let accessCount = 0;
+      const proxied = new Proxy(b.signal, {
+        get(target, prop, recv) {
+          if (prop === 'aborted') {
+            accessCount++;
+            return accessCount > 1;
+          }
+          return Reflect.get(target, prop, recv);
+        },
+      }) as AbortSignal;
+      const { signal } = combineAbortSignals([a.signal, proxied], {
+        timeoutMs: 50,
+      });
       expect(signal.aborted).toBe(true);
-      // Advancing past the timeout must not change the abort reason — the
-      // controller was already aborted before the timer ran, and if we had
-      // scheduled one anyway it would have replaced `pre` with TimeoutError.
+      // The guard must prevent setTimeout from being called at all.
+      expect(setTimeoutSpy).not.toHaveBeenCalled();
+      // Belt-and-suspenders: even if a timer somehow snuck through,
+      // advancing past it must not change the abort reason.
+      const reasonAfterAbort = signal.reason;
       vi.advanceTimersByTime(100);
-      expect(signal.reason).toBe('pre');
+      expect(signal.reason).toBe(reasonAfterAbort);
     } finally {
+      setTimeoutSpy.mockRestore();
       vi.useRealTimers();
     }
   });
