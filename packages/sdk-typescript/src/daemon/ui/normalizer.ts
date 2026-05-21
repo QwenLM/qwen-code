@@ -40,17 +40,6 @@ type NormalizedEventBase = Pick<
 >;
 
 const DAEMON_ERROR_KIND_SET = new Set<string>(DAEMON_ERROR_KINDS);
-const DEVICE_FLOW_ERROR_KIND_SET = new Set<string>([
-  'expired',
-  'access_denied',
-  'slow_down_exhausted',
-  'transport',
-  'server',
-  'invalid_client',
-  'unsupported_provider',
-  'internal',
-  'not_found_or_evicted',
-]);
 const DEVICE_FLOW_PROVIDER_SET = new Set<string>(['qwen', 'qwen-oauth']);
 const MCP_RESTART_REFUSED_REASONS = new Set<string>([
   'in_flight',
@@ -1043,11 +1032,7 @@ function normalizeAuthDeviceFlowFailed(
 ): DaemonUiEvent[] {
   const deviceFlowId = getString(event.data, 'deviceFlowId');
   const errorKind = getString(event.data, 'errorKind');
-  if (
-    !deviceFlowId ||
-    !errorKind ||
-    !DEVICE_FLOW_ERROR_KIND_SET.has(errorKind)
-  ) {
+  if (!deviceFlowId || !isDeviceFlowErrorKind(errorKind)) {
     return fallbackDebug(
       event,
       base,
@@ -1060,10 +1045,16 @@ function normalizeAuthDeviceFlowFailed(
       ...base,
       type: 'auth.device_flow.failed',
       deviceFlowId,
-      errorKind: errorKind as DaemonAuthDeviceFlowSdkErrorKind,
+      errorKind,
       ...(hint ? { hint } : {}),
     },
   ];
+}
+
+function isDeviceFlowErrorKind(
+  value: unknown,
+): value is DaemonAuthDeviceFlowSdkErrorKind {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function normalizeAuthDeviceFlowCancelled(

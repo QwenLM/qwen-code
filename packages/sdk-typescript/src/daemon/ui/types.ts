@@ -432,14 +432,14 @@ export type DaemonToolPreview =
       /** Match count from `resultCount` / `total` / `results.length`. */
       resultCount?: number;
       /** Up to 5 top result lines (paths, snippets). */
-      top?: ReadonlyArray<string>;
+      top?: readonly string[];
     }
   | {
       kind: 'tabular';
       /** Column headers. Empty array when daemon doesn't stamp columns. */
-      columns: ReadonlyArray<string>;
+      columns: readonly string[];
       /** Row values aligned with `columns`. Capped at 50 rows to bound payload. */
-      rows: ReadonlyArray<ReadonlyArray<string>>;
+      rows: ReadonlyArray<readonly string[]>;
       /** Total row count if rows are truncated; undefined when full. */
       totalRows?: number;
     }

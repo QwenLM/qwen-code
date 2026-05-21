@@ -65,43 +65,51 @@ export function daemonBlockToMarkdown(
   opts: DaemonRenderOptions = {},
 ): string {
   const cap = capLength(opts);
+  const text = (value: string) => cap(sanitizeTerminalText(value));
   switch (block.kind) {
     case 'user':
-      return `**You**\n\n${cap(block.text)}`;
+      return `**You**\n\n${text(block.text)}`;
     case 'assistant':
-      return cap(block.text);
+      return text(block.text);
     case 'thought':
-      return `> *thought:* ${cap(block.text)}`;
+      return `> *thought:* ${text(block.text)}`;
     case 'tool': {
       const header = renderToolHeader(block);
       const previewMd = daemonToolPreviewToMarkdown(block.preview, opts);
-      const status = `_status: ${block.status}_`;
-      const details = block.details ? `\n\n${cap(block.details)}` : '';
+      const status = `_status: ${escapeMarkdownText(block.status, opts)}_`;
+      const details = block.details ? `\n\n${text(block.details)}` : '';
       return `${header}\n\n${previewMd}\n\n${status}${details}`;
     }
     case 'shell': {
       const lang = block.stream === 'stderr' ? 'shellsession-stderr' : 'shell';
-      return markdownFence(lang, cap(block.text));
+      return markdownFence(lang, text(block.text));
     }
     case 'permission': {
       const optionList = block.options
         .map(
           (opt) =>
-            `- **${opt.label}**${opt.description ? ` — ${opt.description}` : ''}`,
+            `- **${escapeMarkdownText(opt.label, opts)}**${
+              opt.description
+                ? ` - ${escapeMarkdownText(opt.description, opts)}`
+                : ''
+            }`,
         )
         .join('\n');
       const resolved = block.resolved
-        ? `\n\n_resolved: ${block.resolved}_`
+        ? `\n\n_resolved: ${escapeMarkdownText(block.resolved, opts)}_`
         : '\n\n_awaiting decision_';
       const previewMd = daemonToolPreviewToMarkdown(block.preview, opts);
-      return `### Permission: ${block.title}\n\n${previewMd}\n\n${optionList}${resolved}`;
+      return `### Permission: ${escapeMarkdownText(
+        block.title,
+        opts,
+      )}\n\n${previewMd}\n\n${optionList}${resolved}`;
     }
     case 'status':
-      return `*${cap(block.text)}*`;
+      return `*${text(block.text)}*`;
     case 'debug':
-      return `> debug: ${cap(block.text)}`;
+      return `> debug: ${text(block.text)}`;
     case 'error':
-      return `> [!CAUTION]\n> ${cap(block.text)}`;
+      return `> [!CAUTION]\n> ${text(block.text)}`;
     default:
       return '';
   }
@@ -110,9 +118,9 @@ export function daemonBlockToMarkdown(
 function renderToolHeader(
   block: Extract<DaemonTranscriptBlock, { kind: 'tool' }>,
 ): string {
-  const parts: string[] = [`### ${block.title}`];
-  if (block.toolName) parts.push(`\`${block.toolName}\``);
-  if (block.toolKind) parts.push(`(${block.toolKind})`);
+  const parts: string[] = [`### ${escapeMarkdownText(block.title)}`];
+  if (block.toolName) parts.push(inlineCode(block.toolName));
+  if (block.toolKind) parts.push(`(${escapeMarkdownText(block.toolKind)})`);
   return parts.join(' ');
 }
 
@@ -126,86 +134,107 @@ export function daemonToolPreviewToMarkdown(
   opts: DaemonRenderOptions = {},
 ): string {
   const cap = capLength(opts);
+  const text = (value: string) => cap(sanitizeTerminalText(value));
   switch (preview.kind) {
     case 'ask_user_question':
-      return preview.questions.map(renderQuestion).join('\n\n');
+      return preview.questions.map((q) => renderQuestion(q, opts)).join('\n\n');
     case 'command':
       return markdownFence(
         'bash',
-        [preview.cwd ? `# cwd: ${preview.cwd}` : null, preview.command]
+        [
+          preview.cwd ? `# cwd: ${text(preview.cwd)}` : null,
+          text(preview.command),
+        ]
           .filter(Boolean)
           .join('\n'),
       );
     case 'file_diff':
       if (preview.patch) {
-        return markdownFence('diff', cap(preview.patch));
+        return markdownFence('diff', text(preview.patch));
       }
       if (preview.oldText !== undefined && preview.newText !== undefined) {
         return [
-          `**Edit \`${preview.path}\`**`,
+          `**Edit ${inlineCode(preview.path, opts)}**`,
           '',
           markdownFence(
             'diff',
             [
-              ...preview.oldText.split('\n').map((line) => `- ${line}`),
-              ...preview.newText.split('\n').map((line) => `+ ${line}`),
+              ...text(preview.oldText)
+                .split('\n')
+                .map((line) => `- ${line}`),
+              ...text(preview.newText)
+                .split('\n')
+                .map((line) => `+ ${line}`),
             ].join('\n'),
           ),
         ].join('\n');
       }
       if (preview.newText !== undefined) {
         return [
-          `**Write \`${preview.path}\`**`,
+          `**Write ${inlineCode(preview.path, opts)}**`,
           '',
-          markdownFence('', cap(preview.newText)),
+          markdownFence('', text(preview.newText)),
         ].join('\n');
       }
-      return `**Edit \`${preview.path}\`**`;
+      return `**Edit ${inlineCode(preview.path, opts)}**`;
     case 'file_read':
       if (preview.range) {
-        return `Read \`${preview.path}\` (lines ${preview.range[0]}–${preview.range[1]})`;
+        return `Read ${inlineCode(preview.path, opts)} (lines ${preview.range[0]}-${preview.range[1]})`;
       }
-      return `Read \`${preview.path}\``;
+      return `Read ${inlineCode(preview.path, opts)}`;
     case 'web_fetch': {
       const url = opts.sanitizeUrls ? sanitizeUrl(preview.url) : preview.url;
-      return `${preview.method ?? 'GET'} ${url}`;
+      return `${escapeMarkdownText(preview.method ?? 'GET', opts)} ${inlineCode(
+        url,
+        opts,
+      )}`;
     }
     case 'mcp_invocation':
       return [
-        `**MCP** \`${preview.serverId}::${preview.toolName}\``,
-        preview.argsSummary ? `_args:_ \`${preview.argsSummary}\`` : null,
+        `**MCP** ${inlineCode(
+          `${preview.serverId}::${preview.toolName}`,
+          opts,
+        )}`,
+        preview.argsSummary
+          ? `_args:_ ${inlineCode(preview.argsSummary, opts)}`
+          : null,
       ]
         .filter(Boolean)
         .join('\n');
     case 'code_block':
       return [
-        preview.origin ? `_${preview.origin}_` : null,
-        markdownFence(preview.language ?? '', cap(preview.code)),
+        preview.origin ? `_${escapeMarkdownText(preview.origin, opts)}_` : null,
+        markdownFence(
+          escapeFenceLanguage(preview.language ?? ''),
+          text(preview.code),
+        ),
       ]
         .filter(Boolean)
         .join('\n');
     case 'search': {
       const lines = [
-        `**Search** \`${preview.query}\``,
+        `**Search** ${inlineCode(preview.query, opts)}`,
         preview.resultCount !== undefined
           ? `_${preview.resultCount} result${preview.resultCount === 1 ? '' : 's'}_`
           : null,
       ];
       if (preview.top && preview.top.length > 0) {
         for (const result of preview.top) {
-          lines.push(`- ${result}`);
+          lines.push(`- ${escapeMarkdownText(result, opts)}`);
         }
       }
       return lines.filter(Boolean).join('\n');
     }
     case 'tabular': {
       if (preview.columns.length === 0) return '_(empty table)_';
-      const headerRow = `| ${preview.columns.join(' | ')} |`;
+      const headerRow = `| ${preview.columns
+        .map((column) => escapeTableCell(column, opts))
+        .join(' | ')} |`;
       const sepRow = `| ${preview.columns.map(() => '---').join(' | ')} |`;
       const bodyRows = preview.rows.map(
         (row) =>
           `| ${preview.columns
-            .map((_, idx) => cap(String(row[idx] ?? '')).replace(/\|/g, '\\|'))
+            .map((_, idx) => escapeTableCell(String(row[idx] ?? ''), opts))
             .join(' | ')} |`,
       );
       const lines = [headerRow, sepRow, ...bodyRows];
@@ -222,8 +251,10 @@ export function daemonToolPreviewToMarkdown(
     case 'image_generation':
       return [
         `**Image generation**`,
-        `> ${cap(preview.prompt)}`,
-        preview.model ? `_model: ${preview.model}_` : null,
+        `> ${text(preview.prompt)}`,
+        preview.model
+          ? `_model: ${escapeMarkdownText(preview.model, opts)}_`
+          : null,
         preview.thumbnailUrl
           ? `![image](${opts.sanitizeUrls ? sanitizeUrl(preview.thumbnailUrl) : preview.thumbnailUrl})`
           : null,
@@ -232,21 +263,32 @@ export function daemonToolPreviewToMarkdown(
         .join('\n');
     case 'subagent_delegation':
       return [
-        `**Delegate → \`${preview.agentName}\`**`,
+        `**Delegate -> ${inlineCode(preview.agentName, opts)}**`,
         '',
-        `> ${cap(preview.task)}`,
+        `> ${text(preview.task)}`,
         preview.parentDelegationId
-          ? `_(chained from ${preview.parentDelegationId})_`
+          ? `_(chained from ${escapeMarkdownText(
+              preview.parentDelegationId,
+              opts,
+            )})_`
           : null,
       ]
         .filter(Boolean)
         .join('\n');
     case 'key_value':
       return preview.rows
-        .map((row) => `- **${row.label}:** ${cap(row.value)}`)
+        .map(
+          (row) =>
+            `- **${escapeMarkdownText(row.label, opts)}:** ${escapeMarkdownText(
+              row.value,
+              opts,
+            )}`,
+        )
         .join('\n');
     case 'generic':
-      return preview.summary ? `_${preview.summary}_` : '';
+      return preview.summary
+        ? `_${escapeMarkdownText(preview.summary, opts)}_`
+        : '';
     default:
       return '';
   }
@@ -261,15 +303,24 @@ function markdownFence(language: string, raw: string): string {
   return [`${fence}${language}`, raw, fence].join('\n');
 }
 
-function renderQuestion(question: DaemonTranscriptQuestion): string {
-  const heading = question.header ? `**${question.header}**\n\n` : '';
+function renderQuestion(
+  question: DaemonTranscriptQuestion,
+  opts: DaemonRenderOptions,
+): string {
+  const heading = question.header
+    ? `**${escapeMarkdownText(question.header, opts)}**\n\n`
+    : '';
   const options = question.options
     .map(
       (opt) =>
-        `- ${opt.label}${opt.description ? ` — ${opt.description}` : ''}`,
+        `- ${escapeMarkdownText(opt.label, opts)}${
+          opt.description
+            ? ` - ${escapeMarkdownText(opt.description, opts)}`
+            : ''
+        }`,
     )
     .join('\n');
-  return `${heading}${question.question}\n\n${options}`;
+  return `${heading}${escapeMarkdownText(question.question, opts)}\n\n${options}`;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -477,6 +528,39 @@ function capLength(opts: DaemonRenderOptions): (s: string) => string {
   return (s) => (s.length <= max ? s : `${s.slice(0, max)}… [truncated]`);
 }
 
+function escapeMarkdownText(
+  raw: string,
+  opts: DaemonRenderOptions = {},
+): string {
+  const capped = capLength(opts)(sanitizeTerminalText(raw));
+  return capped.replace(/([\\`*_{}[\]()#+!>-])/g, '\\$1');
+}
+
+function inlineCode(raw: string, opts: DaemonRenderOptions = {}): string {
+  const value = capLength(opts)(sanitizeTerminalText(raw));
+  const maxRun = Math.max(
+    0,
+    ...Array.from(value.matchAll(/`+/g), (match) => match[0].length),
+  );
+  const delimiter = '`'.repeat(maxRun + 1);
+  const padded =
+    value.startsWith('`') ||
+    value.endsWith('`') ||
+    value.startsWith(' ') ||
+    value.endsWith(' ')
+      ? ` ${value} `
+      : value;
+  return `${delimiter}${padded}${delimiter}`;
+}
+
+function escapeTableCell(raw: string, opts: DaemonRenderOptions = {}): string {
+  return escapeMarkdownText(raw, opts).replace(/\|/g, '\\|');
+}
+
+function escapeFenceLanguage(raw: string): string {
+  return sanitizeTerminalText(raw).replace(/[^A-Za-z0-9_+.-]/g, '');
+}
+
 function defaultEscapeHtml(raw: string): string {
   // Strip any ANSI / control chars first (defense against agents emitting
   // terminal escapes into HTML); then HTML-escape special characters.
@@ -490,19 +574,31 @@ function defaultEscapeHtml(raw: string): string {
 }
 
 /**
- * Strip `?<token>=...` query params commonly used for auth in image / CDN
- * URLs. Best-effort — opts-in via `sanitizeUrls`.
+ * Strip auth query params commonly used in image / CDN URLs and reject
+ * non-web protocols. Best-effort — opts-in via `sanitizeUrls`.
  */
 function sanitizeUrl(url: string): string {
   try {
     const u = new URL(url);
+    const protocol = u.protocol.toLowerCase();
+    if (
+      protocol !== 'http:' &&
+      protocol !== 'https:' &&
+      protocol !== 'mailto:'
+    ) {
+      return '#';
+    }
     for (const key of Array.from(u.searchParams.keys())) {
-      if (/^(token|key|auth|signature|sig|x-amz-|x-goog-)/i.test(key)) {
+      if (
+        /^(token|key|auth|signature|sig|access|secret|bearer|credential|session|api[_-]?key|x-amz-|x-goog-)/i.test(
+          key,
+        )
+      ) {
         u.searchParams.delete(key);
       }
     }
     return u.toString();
   } catch {
-    return url;
+    return '#';
   }
 }

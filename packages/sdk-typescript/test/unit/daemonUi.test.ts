@@ -19,6 +19,7 @@ import {
   selectPendingPermissionBlocks,
   selectTranscriptBlocksOrderedByEventId,
 } from '../../src/daemon/ui/index.js';
+import type { DaemonTranscriptBlock } from '../../src/daemon/ui/index.js';
 
 describe('daemon UI normalizer and transcript reducer', () => {
   it('normalizes daemon stream chunks and merges assistant transcript blocks', () => {
@@ -1476,6 +1477,48 @@ describe('daemon UI normalizer and transcript reducer', () => {
       ).reportError = previousReportError;
     }
   });
+
+  it('redacts tool content, locations, and permission toolCall payloads', () => {
+    const [toolEvent] = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 't-secret',
+          title: 'Read secure file',
+          status: 'completed',
+          content: [{ text: 'ok', secret_key: 'content-secret' }],
+          locations: [{ path: '/tmp/x', access_key: 'location-secret' }],
+        },
+      },
+    } as never);
+    const [permissionEvent] = normalizeDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'perm-1',
+        toolCall: {
+          name: 'Bash',
+          input: {
+            DATABASE_PASSWORD: 'db-secret',
+            db_password: 'db-secret-2',
+            aws_secret_access_key: 'aws-secret',
+          },
+        },
+      },
+    } as never);
+
+    const serialized = JSON.stringify([toolEvent, permissionEvent]);
+    expect(serialized).not.toContain('content-secret');
+    expect(serialized).not.toContain('location-secret');
+    expect(serialized).not.toContain('db-secret');
+    expect(serialized).not.toContain('db-secret-2');
+    expect(serialized).not.toContain('aws-secret');
+    expect(serialized).toContain('[redacted]');
+  });
 });
 
 describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
@@ -1711,14 +1754,27 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('auth_device_flow_failed', {
         deviceFlowId: 'df-1',
-        errorKind: 'expired',
+        errorKind: 'expired_token',
         hint: 'restart the device flow',
       }),
     );
     expect(events[0]).toMatchObject({
       type: 'auth.device_flow.failed',
-      errorKind: 'expired',
+      errorKind: 'expired_token',
       hint: 'restart the device flow',
+    });
+  });
+
+  it('keeps future auth_device_flow_failed errorKind values observable', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('auth_device_flow_failed', {
+        deviceFlowId: 'df-1',
+        errorKind: 'future_rate_limit',
+      }),
+    );
+    expect(events[0]).toMatchObject({
+      type: 'auth.device_flow.failed',
+      errorKind: 'future_rate_limit',
     });
   });
 
@@ -2039,6 +2095,97 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     );
     expect(state.currentToolCallId).toBeUndefined();
     expect(selectCurrentTool(state)).toBeUndefined();
+  });
+
+  it('falls back to another in-flight tool when the current one completes', async () => {
+    const { selectCurrentTool } = await import('../../src/daemon/ui/index.js');
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        ...normalizeDaemonEvent({
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'call-a',
+              title: 'first task',
+              status: 'running',
+            },
+          },
+        } as never),
+        ...normalizeDaemonEvent({
+          id: 2,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'call-b',
+              title: 'second task',
+              status: 'running',
+            },
+          },
+        } as never),
+      ],
+      { now: 2 },
+    );
+    expect(state.currentToolCallId).toBe('call-b');
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-b',
+            status: 'completed',
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+
+    expect(state.currentToolCallId).toBe('call-a');
+    expect(selectCurrentTool(state)).toMatchObject({ toolCallId: 'call-a' });
+  });
+
+  it('marks in-flight tools cancelled when a stream ends unexpectedly', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            title: 'long task',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.done', reason: 'stream_ended' }],
+      { now: 3 },
+    );
+
+    expect(state.currentToolCallId).toBeUndefined();
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      status: 'cancelled',
+    });
   });
 
   it('mirrors approval mode from session.approval_mode.changed event', async () => {
@@ -2607,6 +2754,68 @@ describe('daemon UI render contract (PR-D)', () => {
     expect(md).toContain('q=hi');
   });
 
+  it('sanitizeUrls rejects unsafe protocols and parse failures', async () => {
+    const { daemonToolPreviewToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    expect(
+      daemonToolPreviewToMarkdown(
+        { kind: 'web_fetch', url: 'javascript:alert(1)' },
+        { sanitizeUrls: true },
+      ),
+    ).toBe('GET `#`');
+    expect(
+      daemonToolPreviewToMarkdown(
+        { kind: 'web_fetch', url: 'http://[bad-url' },
+        { sanitizeUrls: true },
+      ),
+    ).toBe('GET `#`');
+  });
+
+  it('sanitizeUrls strips common auth query params', async () => {
+    const { daemonToolPreviewToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const md = daemonToolPreviewToMarkdown(
+      {
+        kind: 'web_fetch',
+        url: 'https://api.example.com/data?access_token=a&api_key=b&session_id=c&q=ok',
+      },
+      { sanitizeUrls: true },
+    );
+    expect(md).not.toContain('access_token');
+    expect(md).not.toContain('api_key');
+    expect(md).not.toContain('session_id');
+    expect(md).toContain('q=ok');
+  });
+
+  it('daemonBlockToMarkdown strips ANSI and bidi controls', async () => {
+    const { daemonBlockToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = appendLocalUserTranscriptMessage(
+      state,
+      '\x1b[31mred\x1b[0m \u202Eevil',
+      { now: 2 },
+    );
+    const md = daemonBlockToMarkdown(state.blocks[0]!);
+    expect(md).toContain('red evil');
+    expect(md).not.toContain('\x1b[');
+    expect(md).not.toContain('\u202E');
+  });
+
+  it('daemonToolPreviewToMarkdown escapes inline metadata delimiters', async () => {
+    const { daemonToolPreviewToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const md = daemonToolPreviewToMarkdown({
+      kind: 'file_read',
+      path: '` <img src=x onerror=alert(1)> `',
+    });
+    expect(md).toBe('Read `` ` <img src=x onerror=alert(1)> ` ``');
+  });
+
   it('custom sanitizer replaces default escaping', async () => {
     const { daemonBlockToHtml } = await import('../../src/daemon/ui/index.js');
     let state = createDaemonTranscriptState({ now: 1 });
@@ -2818,6 +3027,19 @@ describe('daemon UI tool preview taxonomy — long-tail kinds (PR-F)', () => {
     expect(md).toContain('| Alice | 30 |');
   });
 
+  it('tabular preview escapes pipes in headers and cells', async () => {
+    const { daemonToolPreviewToMarkdown } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const md = daemonToolPreviewToMarkdown({
+      kind: 'tabular',
+      columns: ['Name | ID', 'value'],
+      rows: [['Alice | 1', '30']],
+    });
+    expect(md).toContain('| Name \\| ID | value |');
+    expect(md).toContain('| Alice \\| 1 | 30 |');
+  });
+
   it('image_generation renders with embedded markdown image', async () => {
     const { daemonToolPreviewToMarkdown } = await import(
       '../../src/daemon/ui/index.js'
@@ -2840,7 +3062,7 @@ describe('daemon UI tool preview taxonomy — long-tail kinds (PR-F)', () => {
       agentName: 'reviewer',
       task: 'Review the PR',
     });
-    expect(md).toContain('**Delegate → `reviewer`**');
+    expect(md).toContain('**Delegate -> `reviewer`**');
     expect(md).toContain('> Review the PR');
   });
 });
@@ -2861,7 +3083,7 @@ describe('daemon UI adapter conformance framework (PR-G)', () => {
       },
       renderToText(state) {
         const s = state as {
-          blocks: ReadonlyArray<Parameters<typeof daemonBlockToMarkdown>[0]>;
+          blocks: readonly Parameters<typeof daemonBlockToMarkdown>[0][];
         };
         return s.blocks.map((b) => daemonBlockToMarkdown(b)).join('\n\n');
       },
@@ -2973,7 +3195,7 @@ describe('daemon UI adapter conformance framework (PR-G)', () => {
       },
       renderToText(state) {
         const s = state as {
-          blocks: ReadonlyArray<Parameters<typeof daemonBlockToPlainText>[0]>;
+          blocks: readonly Parameters<typeof daemonBlockToPlainText>[0][];
         };
         return s.blocks.map((b) => daemonBlockToPlainText(b)).join('\n');
       },

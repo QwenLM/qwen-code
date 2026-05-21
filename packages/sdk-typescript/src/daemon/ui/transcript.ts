@@ -139,7 +139,12 @@ function applyDaemonTranscriptEvent(
       // cancelled, any in-flight tool block whose status the daemon
       // never updated to a terminal state would otherwise spin forever.
       // Force them to 'cancelled' so renderers can clear spinners.
-      if (event.reason === 'cancelled') {
+      if (
+        event.reason === 'cancelled' ||
+        event.reason === 'stream_ended' ||
+        event.reason === 'reconnected' ||
+        event.reason === 'error'
+      ) {
         propagateCancellationToInFlightTools(next);
       }
       break;
@@ -209,7 +214,9 @@ function applyDaemonTranscriptEvent(
       // (introduced in PR-A follow-ups) consume these via `selectors.ts`.
       break;
     default:
-      assertNever(event);
+      // Forward compatibility: ignore UI events from a newer daemon SDK that
+      // this reducer does not project yet. `lastEventId` was already advanced.
+      void event;
   }
 }
 
@@ -368,11 +375,22 @@ function updateCurrentToolPointer(
   }
   if (TERMINAL_TOOL_STATUSES.has(status)) {
     if (state.currentToolCallId === toolCallId) {
-      state.currentToolCallId = undefined;
+      state.currentToolCallId = findLatestInFlightToolCallId(state);
     }
     return;
   }
   // Unknown status (forward-compat): leave pointer as-is.
+}
+
+function findLatestInFlightToolCallId(
+  state: DaemonTranscriptState,
+): string | undefined {
+  for (let index = state.blocks.length - 1; index >= 0; index -= 1) {
+    const block = state.blocks[index];
+    if (block?.kind !== 'tool') continue;
+    if (IN_FLIGHT_TOOL_STATUSES.has(block.status)) return block.toolCallId;
+  }
+  return undefined;
 }
 
 /**
@@ -562,6 +580,7 @@ function cloneTranscriptState(
       ...state.trimmedToolNotificationByCallId,
     },
     permissionBlockByRequestId: { ...state.permissionBlockByRequestId },
+    toolProgress: { ...state.toolProgress },
   };
 }
 
@@ -715,12 +734,6 @@ function cloneJsonLike<T>(value: T, depth = 0): T {
   return value;
 }
 
-function assertNever(value: never): never {
-  throw new Error(
-    `Unhandled daemon transcript event: ${JSON.stringify(value)}`,
-  );
-}
-
 /* ──────────────────────────────────────────────────────────────────────────
  * PR-B helpers: timestamp ordering + formatting
  * ──────────────────────────────────────────────────────────────────────── */
@@ -742,7 +755,10 @@ function assertNever(value: never): never {
 export function selectTranscriptBlocksOrderedByEventId(
   state: DaemonTranscriptState,
 ): readonly DaemonTranscriptBlock[] {
-  return [...state.blocks].sort(compareBlocksByEventOrder);
+  const orderKeyByBlockId = buildEventOrderKeys(state.blocks);
+  return [...state.blocks].sort((a, b) =>
+    compareBlocksByEventOrder(a, b, orderKeyByBlockId),
+  );
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -797,23 +813,36 @@ export function selectToolProgress(
 function compareBlocksByEventOrder(
   a: DaemonTranscriptBlock,
   b: DaemonTranscriptBlock,
+  orderKeyByBlockId: ReadonlyMap<string, number>,
 ): number {
-  // Primary: eventId when both sides have daemon-authored cursors.
-  if (a.eventId !== undefined && b.eventId !== undefined) {
-    return a.eventId - b.eventId;
-  }
-  // If only one block has eventId, fall through. Optimistic local user blocks
-  // have no eventId and must keep their time order against daemon replies.
-  if (a.eventId !== undefined || b.eventId !== undefined) {
-    return a.clientReceivedAt - b.clientReceivedAt;
-  }
+  const orderDelta =
+    (orderKeyByBlockId.get(a.id) ?? 0) - (orderKeyByBlockId.get(b.id) ?? 0);
+  if (orderDelta !== 0) return orderDelta;
   if (a.serverTimestamp !== undefined && b.serverTimestamp !== undefined) {
     return a.serverTimestamp - b.serverTimestamp;
   }
-  if (a.serverTimestamp !== undefined) return -1;
-  if (b.serverTimestamp !== undefined) return 1;
   // Last resort: client clock at the moment of receipt.
   return a.clientReceivedAt - b.clientReceivedAt;
+}
+
+function buildEventOrderKeys(
+  blocks: readonly DaemonTranscriptBlock[],
+): ReadonlyMap<string, number> {
+  const orderKeyByBlockId = new Map<string, number>();
+  let lastDaemonEventId: number | undefined;
+  blocks.forEach((block, index) => {
+    if (block.eventId !== undefined) {
+      lastDaemonEventId = block.eventId;
+      orderKeyByBlockId.set(block.id, block.eventId);
+      return;
+    }
+    const syntheticBase =
+      lastDaemonEventId === undefined
+        ? Number.MIN_SAFE_INTEGER
+        : lastDaemonEventId + 0.5;
+    orderKeyByBlockId.set(block.id, syntheticBase + index / 1_000_000);
+  });
+  return orderKeyByBlockId;
 }
 
 /**

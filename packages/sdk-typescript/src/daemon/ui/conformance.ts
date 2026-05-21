@@ -102,13 +102,13 @@ export interface DaemonUiConformanceFixture {
    * assertions ("transcript shows 'hello world'", "tool block shows
    * 'completed'").
    */
-  expectedContains: ReadonlyArray<string>;
+  expectedContains: readonly string[];
   /**
    * Substrings the rendered output MUST NOT contain. Use for guard
    * fixtures: "secret token must not leak", "raw event data must not
    * be dumped on malformed payload".
    */
-  expectedAbsent?: ReadonlyArray<string>;
+  expectedAbsent?: readonly string[];
   /**
    * Optional normalization options forwarded to `normalizeDaemonEvent`.
    */
@@ -121,8 +121,8 @@ export interface DaemonUiConformanceFixture {
 
 export interface ConformanceFailure {
   fixture: string;
-  missingPhrases: ReadonlyArray<string>;
-  leakedPhrases: ReadonlyArray<string>;
+  missingPhrases: readonly string[];
+  leakedPhrases: readonly string[];
   /** Truncated rendered output for diagnosis. */
   renderedExcerpt: string;
 }
@@ -135,9 +135,9 @@ export interface ConformanceSuiteResult {
 
 export interface RunConformanceOptions {
   /** Specific fixtures to run; omitted = all. */
-  only?: ReadonlyArray<string>;
+  only?: readonly string[];
   /** Skip these fixture names. */
-  skip?: ReadonlyArray<string>;
+  skip?: readonly string[];
 }
 
 /**
@@ -179,9 +179,9 @@ export function runAdapterConformanceSuite(
 }
 
 function filterFixtures(
-  fixtures: ReadonlyArray<DaemonUiConformanceFixture>,
+  fixtures: readonly DaemonUiConformanceFixture[],
   opts: RunConformanceOptions,
-): ReadonlyArray<DaemonUiConformanceFixture> {
+): readonly DaemonUiConformanceFixture[] {
   let out = fixtures;
   if (opts.only && opts.only.length > 0) {
     const set = new Set(opts.only);
@@ -214,7 +214,7 @@ function filterFixtures(
  * - **trim**: long-session block trim behavior
  * - **redaction**: malformed payloads must not leak raw fields
  */
-export const DAEMON_UI_CONFORMANCE_FIXTURES: ReadonlyArray<DaemonUiConformanceFixture> =
+export const DAEMON_UI_CONFORMANCE_FIXTURES: readonly DaemonUiConformanceFixture[] =
   [
     {
       name: 'simple-chat',

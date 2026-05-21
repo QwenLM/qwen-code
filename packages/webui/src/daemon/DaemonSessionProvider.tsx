@@ -153,6 +153,8 @@ export function DaemonSessionProvider({
               promptAbortRef.current = undefined;
               promptBusyRef.current = false;
               store.reset();
+            } else if (previousSessionId !== undefined) {
+              store.dispatch({ type: 'assistant.done', reason: 'reconnected' });
             }
             session = nextSession;
             lastSessionIdRef.current = session.sessionId;
@@ -195,10 +197,16 @@ export function DaemonSessionProvider({
           if (!disposed && !abort.signal.aborted) {
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
+            store.dispatch({ type: 'assistant.done', reason: 'stream_ended' });
             store.dispatch({
               type: 'status',
               text: 'SSE stream ended',
             });
+            setConnection((current) => ({
+              ...current,
+              status: 'disconnected',
+              error: 'SSE stream ended',
+            }));
           }
         } catch (error) {
           if (disposed || abort.signal.aborted) return;
@@ -445,7 +453,12 @@ export function useDaemonTranscriptState(): DaemonTranscriptState {
 }
 
 export function useDaemonTranscriptBlocks(): readonly DaemonTranscriptBlock[] {
-  return useDaemonTranscriptState().blocks;
+  const store = useDaemonTranscriptStore();
+  return useSyncExternalStore(
+    store.subscribe,
+    () => store.getSnapshot().blocks,
+    () => store.getSnapshot().blocks,
+  );
 }
 
 export function useDaemonPendingPermissions() {

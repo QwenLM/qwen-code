@@ -83,6 +83,8 @@ export function isSensitiveKey(key: string): boolean {
     normalized.endsWith('secretkey') ||
     normalized.endsWith('accesskey') ||
     normalized.endsWith('apikey') ||
+    normalized.endsWith('accesskey') ||
+    normalized.endsWith('secretkey') ||
     normalized.endsWith('privatekey') ||
     normalized.includes('accesstoken') ||
     normalized.includes('refreshtoken') ||
