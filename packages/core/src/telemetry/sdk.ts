@@ -318,16 +318,51 @@ export function initializeTelemetry(config: Config): void {
   // Build OTLP exporter URL prefixes once. The undici instrumentation must
   // ignore requests to these endpoints — otherwise it would create a client
   // span for every OTLP upload, that span would be exported, creating an
-  // infinite feedback loop. Strip trailing slash and query string so prefix
-  // matching against undici's `request.origin + request.path` is robust.
+  // infinite feedback loop. Use the WHATWG URL parser to extract a
+  // host+path prefix that is robust against user-config quirks (quoted
+  // strings, trailing slash, query string, #fragment, missing scheme).
+  // String-level transforms here would silently miss those forms — see PR
+  // review feedback (#4390).
+  function normalizeOtlpPrefix(raw: string | undefined): string | undefined {
+    if (!raw) return undefined;
+    // Trim surrounding whitespace + symmetric ASCII quotes a user may have
+    // placed in settings.json (`"value"` → `value`).
+    let s = raw.trim();
+    if (
+      s.length >= 2 &&
+      ((s.startsWith('"') && s.endsWith('"')) ||
+        (s.startsWith("'") && s.endsWith("'")))
+    ) {
+      s = s.slice(1, -1);
+    }
+    try {
+      const u = new URL(s);
+      // Drop ?query and #fragment — they're never part of the request
+      // signature undici exposes via `request.origin + request.path`.
+      // Strip a trailing `/` from path to keep the prefix tight.
+      const pathname = u.pathname === '/' ? '' : u.pathname.replace(/\/$/, '');
+      return `${u.origin}${pathname}`;
+    } catch {
+      // Not a valid URL — fall back to simple suffix trimming so a misconfigured
+      // endpoint still has SOME prefix protection rather than none.
+      const qIdx = s.indexOf('?');
+      const fIdx = s.indexOf('#');
+      let cut = s.length;
+      if (qIdx !== -1) cut = Math.min(cut, qIdx);
+      if (fIdx !== -1) cut = Math.min(cut, fIdx);
+      s = s.slice(0, cut);
+      while (s.endsWith('/')) s = s.slice(0, -1);
+      return s || undefined;
+    }
+  }
   const otlpUrlPrefixes = [
     config.getTelemetryOtlpEndpoint(),
     config.getTelemetryOtlpTracesEndpoint(),
     config.getTelemetryOtlpLogsEndpoint(),
     config.getTelemetryOtlpMetricsEndpoint(),
   ]
-    .filter((u): u is string => !!u)
-    .map((u) => u.replace(/\?.*$/, '').replace(/\/$/, ''));
+    .map(normalizeOtlpPrefix)
+    .filter((u): u is string => !!u);
 
   sdk = new NodeSDK({
     resource,
@@ -351,10 +386,16 @@ export function initializeTelemetry(config: Config): void {
       new UndiciInstrumentation({
         ignoreRequestHook: (request) => {
           if (otlpUrlPrefixes.length === 0) return false;
-          const path =
-            typeof request.path === 'string'
-              ? request.path.replace(/\?.*$/, '')
-              : '';
+          // Strip ?query / #fragment from the incoming request.path before
+          // matching. `indexOf` (not regex) for CodeQL ReDoS hygiene — a
+          // path like `??????…` would be O(n²) in some regex engines.
+          let path = typeof request.path === 'string' ? request.path : '';
+          const qIdx = path.indexOf('?');
+          const fIdx = path.indexOf('#');
+          let cut = path.length;
+          if (qIdx !== -1) cut = Math.min(cut, qIdx);
+          if (fIdx !== -1) cut = Math.min(cut, fIdx);
+          path = path.slice(0, cut);
           const url = `${request.origin}${path}`;
           return otlpUrlPrefixes.some((prefix) => url.startsWith(prefix));
         },
