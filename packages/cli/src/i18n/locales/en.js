@@ -123,6 +123,17 @@ export default {
   'View or change the language setting': 'View or change the language setting',
   'List background tasks (text dump — interactive dialog opens via the footer pill)':
     'List background tasks (text dump — interactive dialog opens via the footer pill)',
+  'Run a session-scoped automated repository improvement loop':
+    'Run a session-scoped automated repository improvement loop',
+  'Configure default context sources for future loops':
+    'Configure default context sources for future loops',
+  'Start a session-scoped automated improvement loop':
+    'Start a session-scoped automated improvement loop',
+  'Show the active auto-improve loop status':
+    'Show the active auto-improve loop status',
+  'Gracefully stop the active auto-improve loop':
+    'Gracefully stop the active auto-improve loop',
+  'Run one scheduled auto-improve tick': 'Run one scheduled auto-improve tick',
   'Delete a previous session': 'Delete a previous session',
   'Run installation and environment diagnostics':
     'Run installation and environment diagnostics',
