@@ -258,7 +258,8 @@ State file schema rules:
 
 Task selection guidance:
 - If GitHub issues are enabled, use gh to inspect open issues and prefer clear, unclaimed, locally verifiable bugs or small enhancements.
-- If GitHub PRs are enabled, inspect relevant current-repo PRs for CI failures, review comments, and requested changes.
+- If GitHub PRs are enabled, inspect relevant current-repo PRs and prefer open, non-draft PRs. Draft PRs are lower priority unless the user explicitly asked for them.
+- For GitHub PR work, focus on actionable unresolved review comments, requested changes, and failing checks. Do not treat already-resolved comments or mere comment history as work to fix.
 - If local repo signals are enabled, inspect TODOs, failing or missing tests, recent churn, .qwen/design, and .qwen/e2e-tests.
 - If custom sources are configured, treat each item as a user-provided source hint, then inspect or follow it where applicable.
 - If no sources and no start prompt are configured, do a minimal repository inspection and choose a useful small local task.

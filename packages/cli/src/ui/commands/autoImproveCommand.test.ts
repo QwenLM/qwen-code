@@ -117,6 +117,13 @@ describe('autoImproveCommand', () => {
     expect(prompt).toContain(
       'For PR-derived tasks, never merge the fix into the loop default branch unless it is the same branch.',
     );
+    expect(prompt).toContain(
+      'prefer open, non-draft PRs. Draft PRs are lower priority',
+    );
+    expect(prompt).toContain('actionable unresolved review comments');
+    expect(prompt).toContain(
+      'Do not treat already-resolved comments or mere comment history as work to fix.',
+    );
     expect(scheduler.create).toHaveBeenCalledWith(
       '7 */2 * * *',
       expect.stringMatching(/^\/auto-improve tick /),

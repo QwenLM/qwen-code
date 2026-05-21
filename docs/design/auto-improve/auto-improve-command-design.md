@@ -82,6 +82,10 @@ Each tick is prompt-driven. The prompt instructs the agent to:
 - commit only after tests pass;
 - choose a delivery branch before editing;
 - use a PR's head branch for PR-derived review / CI / comment tasks;
+- prioritize open, non-draft PRs for PR-derived work;
+- focus on actionable unresolved review comments, requested changes, and
+  failing checks instead of already-resolved comments or general comment
+  history;
 - use the loop default branch for ordinary local/default tasks;
 - use a local-only branch if the correct delivery branch is unclear;
 - never merge a PR-derived fix into the loop default branch unless they are the
