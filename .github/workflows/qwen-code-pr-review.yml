@@ -537,7 +537,12 @@ jobs:
             --json title,body,additions,deletions,changedFiles,files,headRefName,baseRefName)"
           pr_title="$(jq -r '.title' <<< "$pr_json")"
           # Trim the body to keep prompt size bounded.
-          pr_body="$(jq -r '.body // ""' <<< "$pr_json" | head -c 2000)"
+          # `{ producer || true; } | head -c N`: head closes the pipe after
+          # N bytes, the producer then dies of SIGPIPE (exit 141), and under
+          # `set -o pipefail` that 141 would abort the step. The `|| true`
+          # swallows the producer's SIGPIPE so only an oversized body is
+          # truncated, not the whole review run.
+          pr_body="$( { jq -r '.body // ""' <<< "$pr_json" || true; } | head -c 2000)"
           base_ref="$(jq -r '.baseRefName' <<< "$pr_json")"
           head_ref="$(jq -r '.headRefName' <<< "$pr_json")"
           changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
@@ -559,7 +564,10 @@ jobs:
           # First ~50KB of unified diff for content judgment. Anything beyond
           # is unlikely to flip the tier — preflight is a triage step, not
           # the actual review.
-          unified_diff="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | head -c 50000)"
+          # `|| true` so `gh`'s SIGPIPE (when head closes the pipe at the
+          # byte cap) doesn't trip `pipefail` and abort the step — see the
+          # pr_body capture above for the full rationale.
+          unified_diff="$( { gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch || true; } | head -c 50000)"
           echo "::endgroup::"
 
           # Build the PR context body into a file so the heredoc-with-YAML
@@ -618,7 +626,9 @@ jobs:
               case "$model_tier" in
                 ULTRA_LIGHT|LIGHT|STANDARD|DEEP)
                   tier="$model_tier"
-                  rationale="$(printf '%s' "$parsed" | jq -r '.rationale // ""' | head -c 200)"
+                  # `|| true` so a long rationale's SIGPIPE at the 200-byte
+                  # cap doesn't abort the step under pipefail.
+                  rationale="$( { printf '%s' "$parsed" | jq -r '.rationale // ""' || true; } | head -c 200)"
                   # Optional fields, may be empty.
                   focus_areas="$(printf '%s' "$parsed" | jq -c '.focus_areas // []')"
                   agents_to_run="$(printf '%s' "$parsed" | jq -c '.agents_to_run // []')"
@@ -743,9 +753,17 @@ jobs:
           pr_json="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --json title,body,files)"
           pr_title="$(jq -r '.title' <<< "$pr_json")"
-          pr_body="$(jq -r '.body // ""' <<< "$pr_json" | head -c 2000)"
+          # `{ producer || true; } | head -c N`: head closes the pipe after
+          # N bytes, the producer then dies of SIGPIPE (exit 141), and under
+          # `set -o pipefail` that 141 would abort the step. The `|| true`
+          # swallows the producer's SIGPIPE so only an oversized body is
+          # truncated, not the whole review run.
+          pr_body="$( { jq -r '.body // ""' <<< "$pr_json" || true; } | head -c 2000)"
           changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
-          unified_diff="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | head -c 50000)"
+          # `|| true` so `gh`'s SIGPIPE (when head closes the pipe at the
+          # byte cap) doesn't trip `pipefail` and abort the step — see the
+          # pr_body capture above for the full rationale.
+          unified_diff="$( { gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch || true; } | head -c 50000)"
           focus_areas="$(cat /tmp/qwen-focus-areas.json 2>/dev/null || echo '[]')"
 
           {
@@ -844,10 +862,14 @@ jobs:
           pr_json="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --json title,body,files)"
           pr_title="$(jq -r '.title' <<< "$pr_json")"
-          pr_body="$(jq -r '.body // ""' <<< "$pr_json" | head -c 4000)"
+          # `|| true` so an oversized body's SIGPIPE doesn't abort the step
+          # under pipefail (see the preflight step for the full rationale).
+          pr_body="$( { jq -r '.body // ""' <<< "$pr_json" || true; } | head -c 4000)"
           changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
-          # STANDARD gets a larger diff window than LIGHT (200KB vs 50KB)
-          unified_diff="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | head -c 200000)"
+          # STANDARD gets a larger diff window than LIGHT (200KB vs 50KB).
+          # `|| true` so `gh`'s SIGPIPE at the byte cap doesn't abort the
+          # step under pipefail (see the preflight step for the rationale).
+          unified_diff="$( { gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch || true; } | head -c 200000)"
           focus_areas="$(cat /tmp/qwen-focus-areas.json 2>/dev/null || echo '[]')"
           agents_to_run="$(cat /tmp/qwen-agents-to-run.json 2>/dev/null || echo '[]')"
 
@@ -1087,6 +1109,15 @@ jobs:
           cat qwen-review-summary.md 2>/dev/null || echo "(summary file removed by near-empty guard; fallback comment will fire)"
           echo "::endgroup::"
 
+          # Expose the run status so the cache steps can gate on review
+          # COMPLETION, not just step success. The step deliberately exits 0
+          # even on a timeout/crash (it swallows qwen's non-zero status to
+          # keep the always-emit path alive), so `steps.review.outcome ==
+          # 'success'` is true after a 40m timeout too. Saving the cache then
+          # would persist a "this head was reviewed" marker for a review that
+          # never consolidated — the next synchronize would short-circuit.
+          echo "review_status=$status_label" >> "$GITHUB_OUTPUT"
+
       - name: 'Post dry-run summary'
         if: |-
           steps.size.outputs.should_review == 'true' &&
@@ -1173,6 +1204,7 @@ jobs:
         id: 'cache-lookup'
         if: |-
           steps.review.outcome == 'success' &&
+          steps.review.outputs.review_status == 'complete' &&
           steps.post-summary.outcome == 'success' &&
           github.event_name == 'pull_request_target' &&
           steps.size.outputs.head_sha != '' &&
@@ -1191,11 +1223,15 @@ jobs:
       # "No new changes since last review" or scope to a tiny incremental
       # diff, and the findings that never reached the PR would be lost.
       # Gating on post-summary.outcome makes cache advancement track
-      # comment delivery, not just model success. The lookup step above skips
+      # comment delivery, not just model success. The `review_status`
+      # check additionally requires the DEEP run to have COMPLETED — the
+      # step exits 0 on a timeout/crash too, so without it a timed-out
+      # review would still advance the cache. The lookup step above skips
       # duplicate exact-key saves on reruns.
       - name: 'Save review cache'
         if: |-
           steps.review.outcome == 'success' &&
+          steps.review.outputs.review_status == 'complete' &&
           steps.post-summary.outcome == 'success' &&
           github.event_name == 'pull_request_target' &&
           steps.size.outputs.head_sha != '' &&
