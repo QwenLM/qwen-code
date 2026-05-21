@@ -35,7 +35,7 @@
 interface BridgeEvent {
   id?: number;                  // monotonic per session; absent on synthetic terminal frames
   v: 1;                          // EVENT_SCHEMA_VERSION
-  type: string;                  // one of the 28 known types or future-extensible
+  type: string;                  // one of the 29 known types or future-extensible
   data: unknown;                 // payload (typed per-type by the SDK; see 09-event-schema.md)
   originatorClientId?: string;   // set when the event derives from a clientId-stamped request
 }
@@ -87,7 +87,7 @@ flowchart TD
 
 `publish` never throws. Closing the bus mid-publish (the shutdown path closes per-session buses before awaiting `channel.kill()`) returns `undefined` rather than throwing because the agent may still emit `sessionUpdate` notifications in the small window between bus close and channel kill.
 
-### Subscribe + replay
+### Subscribe + replay (with ring-eviction detection)
 
 ```mermaid
 sequenceDiagram
@@ -100,6 +100,11 @@ sequenceDiagram
     EB->>EB: refuse if subs.size >= maxSubscribers<br/>(throws SubscriberLimitExceededError)
     EB->>Q: new BoundedAsyncQueue(256)
     EB->>EB: subs.add(sub)
+    EB->>EB: earliestInRing = ring[0]?.id
+    alt earliestInRing > lastEventId + 1 (gap evicted)
+        EB->>Q: forcePush state_resync_required<br/>{ reason: 'ring_evicted', lastDeliveredId: 42, earliestAvailableId: earliestInRing }
+        Note over EB,Q: id-less synthetic, frame goes BEFORE replay.<br/>Stream stays open; SDK reducer flips awaitingResync.
+    end
     loop ring scan
         EB->>EB: for e in ring where e.id > 42
         EB->>Q: forcePush(e)
@@ -110,6 +115,34 @@ sequenceDiagram
 ```
 
 If `subs.size >= maxSubscribers` at subscribe time, `SubscriberLimitExceededError` is thrown — the SSE route catches it and serializes a `stream_error` synthetic frame to the rejected client so they don't see a silent empty stream. Returning an empty iterable instead would leave oncall blind to "some clients get events, some don't" under load.
+
+### Ring-eviction → `state_resync_required` (the recovery flow)
+
+When a consumer reconnects with `Last-Event-ID: N` and the ring's earliest surviving event has `id > N + 1`, the events in `[N+1, earliestInRing-1]` were evicted before the consumer reconnected. The naïve replay would silently succeed with a non-contiguous suffix, the SDK reducer would keep applying deltas as if the stream were contiguous, and its state would diverge from the daemon's truth — with no terminal signal.
+
+Implemented at `packages/acp-bridge/src/eventBus.ts:359-402`:
+
+1. Compute `earliestInRing = this.ring[0]?.id`.
+2. If `earliestInRing > opts.lastEventId + 1`, force-push a synthetic frame **before** the replay frames:
+   ```jsonc
+   {
+     "v": 1,
+     "type": "state_resync_required",
+     "data": {
+       "reason": "ring_evicted",
+       "lastDeliveredId": <opts.lastEventId>,
+       "earliestAvailableId": <earliestInRing>
+     }
+   }
+   ```
+3. Continue the normal replay loop afterwards.
+
+Critical contracts (and what the wenshao #4360 review corrected):
+
+- **NO `id`** — same no-burn pattern as `client_evicted`, so it doesn't occupy a slot in the per-session monotonic sequence other subscribers observe.
+- **Stream stays OPEN** — unlike `client_evicted` (genuinely terminal), `state_resync_required` is recovery-oriented. Replay + live frames continue flowing afterward.
+- **Reducer auto-skips deltas** — the SDK side flips `awaitingResync = true` and only applies `state_resync_required` itself + the four terminal frames (`session_died`, `session_closed`, `client_evicted`, `stream_error`) until consumer code calls `loadSession` and clears the flag. See [`09-event-schema.md`](./09-event-schema.md) for `RESYNC_PASSTHROUGH_TYPES`.
+- **Network-friendly** — frames stay on the wire so the SDK can compute a "what you missed" diff later if it wants to. No extra reconnect cycle is required.
 
 ### Eviction terminal flow
 
@@ -203,7 +236,7 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 interface BridgeEvent {
   id?: number;                  // per session 单调；合成终态帧无 id
   v: 1;                          // EVENT_SCHEMA_VERSION
-  type: string;                  // 28 已知 type 之一或未来扩展
+  type: string;                  // 29 已知 type 之一或未来扩展
   data: unknown;                 // payload，SDK 按 type typed（详见 09）
   originatorClientId?: string;   // 由带 clientId 的请求派生
 }
@@ -238,11 +271,39 @@ interface SubscribeOptions {
 
 `publish` 永远不抛。关闭 bus 之中 publish（shutdown 路径在 await `channel.kill()` 前关每个 session 的 bus）返回 `undefined` 而不是抛，因为 agent 在 bus close 与 channel kill 之间的窗口里还可能发 `sessionUpdate` 通知。
 
-### Subscribe + replay
+### Subscribe + replay（带环驱逐检测）
 
-> 见英文版「Subscribe + replay」时序图。
+> 见英文版「Subscribe + replay (with ring-eviction detection)」时序图。
 
 subscribe 时 `subs.size >= maxSubscribers` 抛 `SubscriberLimitExceededError`，SSE 路由捕获并给被拒客户端序列化一个 `stream_error` 合成帧，免得他们看到一片空。返回空 iterable 会让 oncall 在高负载下分不清「有的客户端收到了，有的没收到」。
+
+### 环驱逐 → `state_resync_required`（恢复流）
+
+当消费方带 `Last-Event-ID: N` 重连，但环里最早留存事件的 `id > N + 1`，说明 `[N+1, earliestInRing-1]` 这段在重连前被 evict 了。朴素重放会默默成功但拿到一个非连续后缀，SDK reducer 当作连续流继续 apply delta，状态就与 daemon 真相分叉 —— 全程没有终态信号。
+
+实现在 `packages/acp-bridge/src/eventBus.ts:359-402`：
+
+1. 算 `earliestInRing = this.ring[0]?.id`。
+2. 若 `earliestInRing > opts.lastEventId + 1`，在重放帧**之前**强推一帧合成：
+   ```jsonc
+   {
+     "v": 1,
+     "type": "state_resync_required",
+     "data": {
+       "reason": "ring_evicted",
+       "lastDeliveredId": <opts.lastEventId>,
+       "earliestAvailableId": <earliestInRing>
+     }
+   }
+   ```
+3. 之后照常做重放循环。
+
+关键契约（以及 wenshao #4360 review 修正过的几点）：
+
+- **无 `id`** —— 与 `client_evicted` 同样的「不占位」模式，不会占掉 per-session 单调序列号让其他订阅者看到断档。
+- **流保持打开** —— 不同于 `client_evicted`（真终态），`state_resync_required` 面向恢复。重放和 live 帧继续。
+- **reducer 自动跳过 delta** —— SDK 端 `awaitingResync = true`，只放行 `state_resync_required` 本身加四个终态帧（`session_died`、`session_closed`、`client_evicted`、`stream_error`），直到调用方调 `loadSession` 清掉标志。详见 [`09-event-schema.md`](./09-event-schema.md) 的 `RESYNC_PASSTHROUGH_TYPES`。
+- **省网络** —— 帧仍然走线，SDK 之后可以计算「漏了什么」的 diff，不需要额外重连一次。
 
 ### 驱逐终态
 

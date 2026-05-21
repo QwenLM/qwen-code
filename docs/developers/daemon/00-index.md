@@ -38,7 +38,7 @@ Pick the path that matches your goal:
 - [`06-mcp-budget-guardrails.md`](./06-mcp-budget-guardrails.md) — `WorkspaceMcpBudget`, modes (off/warn/enforce), hysteresis, refused-batch coalescing.
 - [`07-workspace-filesystem.md`](./07-workspace-filesystem.md) — `WorkspaceFileSystem` sandbox, path policy, audit, `BridgeFileSystem` contract.
 - [`08-session-lifecycle.md`](./08-session-lifecycle.md) — create / attach / load / resume, `X-Qwen-Client-Id`, heartbeat, eviction, metadata.
-- [`09-event-schema.md`](./09-event-schema.md) — typed event schema v1: all 28 known event types with payloads, reducers, forward-compat.
+- [`09-event-schema.md`](./09-event-schema.md) — typed event schema v1: all 29 known event types with payloads, reducers, forward-compat.
 - [`10-event-bus.md`](./10-event-bus.md) — `EventBus`, monotonic IDs, ring replay, `Last-Event-ID`, slow-client backpressure, `client_evicted`.
 - [`11-capabilities-versioning.md`](./11-capabilities-versioning.md) — capability registry, protocol version, schema version, conditional advertisement.
 - [`12-auth-security.md`](./12-auth-security.md) — bearer middleware, host allowlist, CORS deny, mutation gate, `--require-auth`, `/health` exemption, device-flow.
@@ -83,17 +83,19 @@ Pick the path that matches your goal:
 - **Zed extension (`packages/zed-extension/`)** — uses stdio ACP directly to launch a `qwen --acp` agent; it bypasses the daemon. No daemon chapter needed.
 - **F4 (in progress)** — protocol completion plus `qwen --serve` co-host. Not stable enough at the time of writing for a dedicated doc; will be added when the surface lands.
 
-## F4 prereqs landing on `daemon_mode_b_main` (heads-up)
+## What changed in this revision (F4 prereqs merged)
 
-This doc set is pinned to `worktree-enumerated-stirring-adleman` (HEAD `cb206da36`). The `daemon_mode_b_main` branch has three F4-prereq commits that aren't on this worktree yet — they shift wire shapes additively, so the doc set keeps working but adds the following surface when they merge:
+This doc set was originally pinned to `cb206da36`. After merging `origin/daemon_mode_b_main` (commit `a60c1c52a` plus prior F-series fold-ins), the F4-prereq surface is now in-tree and the docs reflect it directly:
 
-| Commit | What it adds |
-|---|---|
-| `14637cd79` `feat(serve): stamp serverTimestamp / tool provenance / errorKind on daemon events` | Adds `_meta.serverTimestamp` on every SSE frame (stamped at `formatSseFrame` boundary, not `EventBus.publish`, so internal consumers don't see `_meta`). Adds `tool_call.provenance` (`'builtin' \| 'mcp' \| 'subagent'`) + `serverId?` on `ToolCallEmitter.emit{Start,Result,Error}`. Adds top-level `errorKind` envelope field. |
-| `c1a2f0a78` `feat(serve+sdk): detect SSE ring eviction on resume, expose state_resync_required` | Adds a **29th** known event type — `state_resync_required` synthetic terminal frame fired in `EventBus.subscribe()`'s replay path when `lastEventId < ringHead`. Carries `{ reason: 'ring_evicted', lastDeliveredId, earliestAvailableId }`, has **no `id`** like the other synthetic terminals. Tells reconnecting consumers to do a full `loadSession` rather than keep applying deltas. |
-| `74412919c` `fix(acp-bridge): preserve FsError structure over ACP wire` | Catches `FsError` thrown by the `BridgeFileSystem` adapter inside `BridgeClient.writeTextFile/readTextFile` and rethrows as ACP `RequestError(-32603, message, {errorKind, hint, status})` so the agent's RPC client sees the typed `errorKind` instead of a regex-on-message. |
+| Surface | Where it's documented now | Source landmark |
+|---|---|---|
+| `state_resync_required` synthetic frame (29th known event) | [`09-event-schema.md`](./09-event-schema.md) — Subscriber-level synthetic + SDK reducer behavior; [`10-event-bus.md`](./10-event-bus.md) — Ring-eviction → `state_resync_required` recovery flow | `packages/acp-bridge/src/eventBus.ts:359-402`, `packages/sdk-typescript/src/daemon/events.ts:13-63, 256-280` |
+| `_meta.serverTimestamp` envelope field | [`09-event-schema.md`](./09-event-schema.md) — Envelope-level metadata | `packages/cli/src/serve/server.ts:2602+` (`formatSseFrame`) |
+| `tool_call.provenance` + `serverId` (in `data._meta`, not envelope) | [`09-event-schema.md`](./09-event-schema.md) — Tool-call `_meta` | `packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts:218-237` (`resolveToolProvenance`) |
+| `awaitingResync` reducer flag + `RESYNC_PASSTHROUGH_TYPES` | [`09-event-schema.md`](./09-event-schema.md) — SDK reducer behavior | `packages/sdk-typescript/src/daemon/events.ts:870-905, 1120-1140` |
+| FsError preservation over ACP wire | [`07-workspace-filesystem.md`](./07-workspace-filesystem.md) — FsError preservation over the ACP wire | `packages/acp-bridge/src/bridgeClient.ts:40-100+` (`isFsErrorShape`, `preserveFsErrorOverAcp`) |
 
-Doc 07 already establishes the FsError contract; doc 09 already states the forward-compat rule (unknown event types fall through as `kind: 'unknown'`). The F4-prereq additions slot in without breaking either. Re-read this section when the docs get refreshed against a HEAD that has these commits.
+Forward compatibility is intact: SDK consumers that already implement the `narrowDaemonEvent` → `kind: 'unknown'` fallback for unrecognized event types saw zero breakage when the 29th type landed.
 
 ---
 
@@ -137,7 +139,7 @@ Doc 07 already establishes the FsError contract; doc 09 already states the forwa
 - [`06-mcp-budget-guardrails.md`](./06-mcp-budget-guardrails.md) — `WorkspaceMcpBudget`、模式（off/warn/enforce）、滞回阈值、批量拒绝合并。
 - [`07-workspace-filesystem.md`](./07-workspace-filesystem.md) — `WorkspaceFileSystem` 沙箱、路径策略、审计、`BridgeFileSystem` 契约。
 - [`08-session-lifecycle.md`](./08-session-lifecycle.md) — 创建 / 附加 / 载入 / 恢复、`X-Qwen-Client-Id`、心跳、剔除、元数据。
-- [`09-event-schema.md`](./09-event-schema.md) — Typed Event Schema v1：28 种已知事件、payload、reducer、向前兼容。
+- [`09-event-schema.md`](./09-event-schema.md) — Typed Event Schema v1：29 种已知事件、payload、reducer、向前兼容。
 - [`10-event-bus.md`](./10-event-bus.md) — `EventBus`、单调 ID、环形缓冲重放、`Last-Event-ID`、慢消费者反压、`client_evicted`。
 - [`11-capabilities-versioning.md`](./11-capabilities-versioning.md) — 能力注册表、协议版本、Schema 版本、条件广播。
 - [`12-auth-security.md`](./12-auth-security.md) — Bearer 中间件、Host 白名单、CORS 拒绝、Mutation Gate、`--require-auth`、`/health` 豁免、Device Flow。
@@ -182,14 +184,16 @@ Doc 07 already establishes the FsError contract; doc 09 already states the forwa
 - **Zed extension (`packages/zed-extension/`)** — 直接用 stdio ACP 拉起 `qwen --acp`，不走 daemon，不需要 daemon 章节。
 - **F4（进行中）** — 协议补齐和 `qwen --serve` 同进程托管。写文档时该 surface 还不稳定，等落地后再补章。
 
-## `daemon_mode_b_main` 上即将到来的 F4 prereq（提醒）
+## 本版本新增了什么（F4 prereq 已合入）
 
-本文档集锁定在 `worktree-enumerated-stirring-adleman`（HEAD `cb206da36`）。`daemon_mode_b_main` 已经有 3 个 F4-prereq commit 还没合到本 worktree —— 它们都是**纯加法**的 wire shape 变更，本文档集仍然适用，merge 后会多出以下 surface：
+本文档集原本锁在 `cb206da36`。merge `origin/daemon_mode_b_main`（commit `a60c1c52a` 加之前的 F 系列 fold-in）之后，F4-prereq surface 已经在树里，文档直接覆盖：
 
-| Commit | 加了什么 |
-|---|---|
-| `14637cd79` `feat(serve): stamp serverTimestamp / tool provenance / errorKind on daemon events` | 给每帧 SSE 加 `_meta.serverTimestamp`（在 `formatSseFrame` 边界盖，而不是 `EventBus.publish`，内部消费方不会看到 `_meta`）。给 `ToolCallEmitter.emit{Start,Result,Error}` 加 `tool_call.provenance`（`'builtin' \| 'mcp' \| 'subagent'`）+ `serverId?`。加顶层 `errorKind` envelope 字段 |
-| `c1a2f0a78` `feat(serve+sdk): detect SSE ring eviction on resume, expose state_resync_required` | 加 **第 29 种** 已知事件 —— `state_resync_required` 合成终态帧，在 `EventBus.subscribe()` 重放路径检测到 `lastEventId < ringHead` 时强推。携带 `{ reason: 'ring_evicted', lastDeliveredId, earliestAvailableId }`，与其它合成终态一致**无 `id`**。告诉重连消费方做完整 `loadSession` 而不是继续 apply delta |
-| `74412919c` `fix(acp-bridge): preserve FsError structure over ACP wire` | 在 `BridgeClient.writeTextFile/readTextFile` 里捕获 `BridgeFileSystem` 适配器抛的 `FsError`，重抛为 ACP `RequestError(-32603, message, {errorKind, hint, status})`，agent 的 RPC client 拿到 typed `errorKind` 而不是去 regex-on-message |
+| Surface | 现在记在哪 | 源代码定位 |
+|---|---|---|
+| `state_resync_required` 合成帧（第 29 种已知事件） | [`09-event-schema.md`](./09-event-schema.md) Subscriber 级合成帧 + SDK reducer 行为；[`10-event-bus.md`](./10-event-bus.md) 环驱逐 → `state_resync_required` 恢复流 | `packages/acp-bridge/src/eventBus.ts:359-402`、`packages/sdk-typescript/src/daemon/events.ts:13-63, 256-280` |
+| `_meta.serverTimestamp` envelope 字段 | [`09-event-schema.md`](./09-event-schema.md) Envelope 级元数据 | `packages/cli/src/serve/server.ts:2602+`（`formatSseFrame`） |
+| `tool_call.provenance` + `serverId`（在 `data._meta`，不是 envelope） | [`09-event-schema.md`](./09-event-schema.md) Tool-call `_meta` | `packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts:218-237`（`resolveToolProvenance`） |
+| `awaitingResync` reducer 标志 + `RESYNC_PASSTHROUGH_TYPES` | [`09-event-schema.md`](./09-event-schema.md) SDK reducer 行为 | `packages/sdk-typescript/src/daemon/events.ts:870-905, 1120-1140` |
+| FsError 在 ACP wire 上的保留 | [`07-workspace-filesystem.md`](./07-workspace-filesystem.md) FsError 在 ACP wire 上的保留 | `packages/acp-bridge/src/bridgeClient.ts:40-100+`（`isFsErrorShape`、`preserveFsErrorOverAcp`） |
 
-第 07 篇已经讲清 FsError 契约；第 09 篇已经讲清向前兼容（未知 event type 自动 fallback 到 `kind: 'unknown'`）。F4 prereq 落进来时这两条都不破。文档对齐到包含这些 commit 的 HEAD 时再重读这一节即可。
+向前兼容没破：已经按 `narrowDaemonEvent → kind: 'unknown'` fallback 实现的 SDK 消费方在 29th 类型落地时零破坏。

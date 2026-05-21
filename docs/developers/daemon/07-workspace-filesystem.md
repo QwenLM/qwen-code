@@ -74,6 +74,40 @@ Two defensive gates the adapter MUST replicate (because the inline proxy is full
 
 The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 18 primitive) for atomic tmp+rename with mode preservation, `0o600` default, symlink reject inside a per-path lock. This is a **divergence from the pre-F1 inline proxy** which resolved symlinks and wrote through to their target — agents that relied on writing through symlinked dotfiles now have to address the resolved path directly.
 
+### FsError preservation over the ACP wire
+
+When the `BridgeFileSystem` adapter throws an `FsError` (`kind: 'untrusted_workspace'` / `'symlink_escape'` / `'file_too_large'` / etc.), the ACP SDK's default RPC error path serializes only `error.message` as a generic `-32603 "Internal error"` — `kind` / `status` / `hint` are stripped. The agent's RPC client downstream then has to regex-match the human-readable message to dispatch typed UI (auth retry vs file picker vs proxy hint).
+
+`BridgeClient.writeTextFile` and `BridgeClient.readTextFile` install a thin guard (`packages/acp-bridge/src/bridgeClient.ts:40-100+`) that catches FsError-shaped throws and rethrows them as ACP `RequestError`:
+
+```ts
+function isFsErrorShape(err: unknown): err is FsErrorShape {
+  return (
+    err instanceof Error &&
+    err.name === 'FsError' &&
+    typeof (err as { kind?: unknown }).kind === 'string'
+  );
+}
+
+function preserveFsErrorOverAcp(err: unknown): never {
+  if (isFsErrorShape(err)) {
+    throw new RequestError(-32603, err.message, {
+      errorKind: err.kind,
+      ...(err.hint !== undefined ? { hint: err.hint } : {}),
+      ...(err.status !== undefined ? { status: err.status } : {}),
+    });
+  }
+  throw err;
+}
+```
+
+The agent's RPC client now receives `data.errorKind` (the closed `FsErrorKind` value) plus the optional `data.hint` and `data.status`, so SDK consumers branch on the typed enum instead of regex-matching the message.
+
+Two design notes:
+
+- **Duck typing over import** — `FsError` lives in `packages/cli/src/serve/fs/errors.ts` while `BridgeClient` lives in `packages/acp-bridge`. A direct `import { FsError }` would invert the dependency. The duck check (`name === 'FsError'` + `kind: string`) mirrors what `mapDomainErrorToErrorKind` (`status.ts`) already does for `TrustGateError` / `SkillError` for the same cross-package bundling reason.
+- **JSON-RPC code stays at -32603** — the bridge can't reliably map `FsError.kind` to a JSON-RPC error code shape, so the structured `data` field carries the semantic information for SDK consumers. The wire status code (`-32603` "internal error") is unchanged; clients route on `data.errorKind`.
+
 ### Trust gate
 
 `assertTrustedForIntent(intent)` consults `Config.isTrustedFolder()`. Read / list / stat / glob are always allowed (trust is only for writes). Write intents in untrusted workspaces throw `FsError('untrusted_workspace', ..., status: 403)`. The trust signal flows in via `WorkspaceFileSystemFactoryDeps.trusted: boolean` — `runQwenServe` passes `true` because the operator booted the daemon against a workspace they implicitly trust; `createServeApp` (direct embed without `runQwenServe`) defaults to `false` and warns once per process (see [`02-serve-runtime.md`](./02-serve-runtime.md)).
@@ -271,6 +305,40 @@ interface BridgeFileSystem {
 2. **缓冲大小上限** `READ_FILE_SIZE_CAP = 100 MiB`。否则一个针对 500 MB 日志的 `{ line: 1, limit: 10 }` 请求要花 500 MB RSS 才能返 10 行。
 
 适配器还更进一步：用 `WorkspaceFileSystem.writeTextOverwrite`（PR 18 原语）做 atomic tmp+rename、保留 mode、新建默认 `0o600`、symlink reject，整段在 per-path 锁内。这是**与 F1 前 inline proxy 的偏离** —— 老 proxy 解析 symlink 并写穿 target；现在的 agent 如果之前依赖通过 symlink 写 dotfile，要直接寻址解析后的路径。
+
+### FsError 在 ACP wire 上的保留
+
+`BridgeFileSystem` 适配器抛 `FsError`（`kind: 'untrusted_workspace'` / `'symlink_escape'` / `'file_too_large'` 等）时，ACP SDK 默认 RPC error 序列化只把 `error.message` 当作通用 `-32603 "Internal error"` —— `kind` / `status` / `hint` 在线上被剥掉。下游 agent 的 RPC client 想做 typed UI（auth 重试 vs 文件选择 vs 代理提示）就只能 regex-match 人类可读消息。
+
+`BridgeClient.writeTextFile` 与 `BridgeClient.readTextFile` 装了一道薄护栏（`packages/acp-bridge/src/bridgeClient.ts:40-100+`），捕获 FsError 形状的异常重抛为 ACP `RequestError`：
+
+```ts
+function isFsErrorShape(err: unknown): err is FsErrorShape {
+  return (
+    err instanceof Error &&
+    err.name === 'FsError' &&
+    typeof (err as { kind?: unknown }).kind === 'string'
+  );
+}
+
+function preserveFsErrorOverAcp(err: unknown): never {
+  if (isFsErrorShape(err)) {
+    throw new RequestError(-32603, err.message, {
+      errorKind: err.kind,
+      ...(err.hint !== undefined ? { hint: err.hint } : {}),
+      ...(err.status !== undefined ? { status: err.status } : {}),
+    });
+  }
+  throw err;
+}
+```
+
+agent 的 RPC client 现在拿到 `data.errorKind`（封闭 `FsErrorKind` 值）外加可选 `data.hint`、`data.status`，SDK 消费方按 typed 枚举 dispatch 而不是 regex 消息。
+
+两条设计说明：
+
+- **鸭子类型而非 import** —— `FsError` 住在 `packages/cli/src/serve/fs/errors.ts`，`BridgeClient` 住在 `packages/acp-bridge`，直接 `import { FsError }` 会反向依赖。鸭子检查（`name === 'FsError'` + `kind: string`）与 `mapDomainErrorToErrorKind`（`status.ts`）对 `TrustGateError` / `SkillError` 用的同样思路，跨包打包同问题。
+- **JSON-RPC code 保持 -32603** —— bridge 没法把 `FsError.kind` 可靠映射到 JSON-RPC error code 形状，所以语义信息走结构化 `data` 字段。wire 上状态码（`-32603` "internal error"）不变，客户端按 `data.errorKind` 路由。
 
 ### 信任 gate
 

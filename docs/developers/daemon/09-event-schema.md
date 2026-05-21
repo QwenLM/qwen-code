@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every SSE frame the daemon emits on `GET /session/:id/events` carries `{ id, v, type, data, originatorClientId? }`. `v: 1` is the current `EVENT_SCHEMA_VERSION`. `type` is a string from a closed, version-pinned set of **28 known types** declared in `DAEMON_KNOWN_EVENT_TYPE_VALUES` (`packages/sdk-typescript/src/daemon/events.ts:13-63`).
+Every SSE frame the daemon emits on `GET /session/:id/events` carries `{ id, v, type, data, originatorClientId?, _meta? }`. `v: 1` is the current `EVENT_SCHEMA_VERSION`. `type` is a string from a closed, version-pinned set of **29 known types** declared in `DAEMON_KNOWN_EVENT_TYPE_VALUES` (`packages/sdk-typescript/src/daemon/events.ts:13-63`). The envelope's `_meta` field is stamped at the SSE write boundary (`formatSseFrame()` in `server.ts`) — see [Envelope-level metadata](#envelope-level-metadata) below.
 
 The SDK exposes `narrowDaemonEvent(evt)` which returns a discriminated `KnownDaemonEvent` for any known type or `{ kind: 'unknown' }` for anything else — so SDK consumers handle forward-compat (a newer daemon adding a type) without crashing or pinning their SDK version.
 
@@ -15,7 +15,7 @@ The wire format is documented in [`../qwen-serve-protocol.md`](../qwen-serve-pro
 - Provide pure reducers (`reduceDaemonSessionEvent`, `reduceDaemonAuthEvent`) that project the event stream into SDK view-states.
 - Advertise the schema via the `typed_event_schema` capability tag (informational — `narrowDaemonEvent` falls back to `unknown` for daemons that don't advertise it).
 
-## Event vocabulary (28 types)
+## Event vocabulary (29 types)
 
 Grouped by domain.
 
@@ -35,6 +35,7 @@ Grouped by domain.
 | `client_evicted` | EventBus per-subscriber queue overflow. **NO `id` field**. | `reason: string, droppedAfter?: number`. Terminal for this subscriber only — the session lives on. |
 | `slow_client_warning` | EventBus subscriber queue ≥ 75% (force-push, **NO `id` field**). | `queueSize, maxQueued, lastEventId`. Hysteresis re-arm at 37.5%. |
 | `stream_error` | `SubscriberLimitExceededError` or other route-level stream failure. | `error: string`. Terminal for the subscription. |
+| `state_resync_required` | `subscribe({lastEventId})` where the daemon's ring no longer holds the gap `[lastEventId+1, earliestInRing-1]`. Force-pushed **before** the surviving replay frames. **NO `id` field**. | `reason: string` (currently always `'ring_evicted'`), `lastDeliveredId: number`, `earliestAvailableId: number`. **Recovery-oriented, not terminal** — the SSE stream stays open and replay + live frames continue flowing. The SDK reducer flips `awaitingResync = true` and auto-skips deltas until the consumer calls `loadSession` and reseeds. See `eventBus.ts:359-402` for the daemon emit, `events.ts:870-905` for the SDK side. |
 
 ### Permissions (F3 + base)
 
@@ -141,14 +142,67 @@ flowchart LR
     C -->|"kind: 'unknown'"| F["pass-through (forward-compat)"]
 ```
 
-## F4-prereq additions on `daemon_mode_b_main` (heads-up)
+## Envelope-level metadata
 
-Three commits on `daemon_mode_b_main` shift the wire shape additively and are coming to this branch. None of them break v1; SDK consumers that already implement the forward-compat rule below will keep working.
+In addition to the per-event `data` payload, the daemon stamps two envelope-level fields:
 
-- **`state_resync_required`** (commit `c1a2f0a78`) — **29th** known event type, synthetic terminal frame, no `id`. Fired in `EventBus.subscribe()`'s replay path when the requested `lastEventId` is below the ring's earliest available id (replay would silently miss events). Payload: `{ reason: 'ring_evicted', lastDeliveredId, earliestAvailableId }`. Receiving it means: stop applying deltas, call `POST /session/:id/load` for a full snapshot, then resubscribe.
-- **`_meta.serverTimestamp`** (commit `14637cd79`) — envelope-level field stamped at `formatSseFrame()` in `server.ts` (NOT at `EventBus.publish`, so the in-memory `BridgeEvent` type stays unchanged and internal consumers don't see `_meta`). Lets multi-client UIs sort transcript by daemon-wall-clock instead of per-client local clock — drifts of tens-of-seconds to minutes across browsers/tabs/mobile previously produced visibly inconsistent timestamps. Pre-existing `_meta` keys (e.g. tool_call's `_meta.toolName`) are preserved via spread merge.
-- **`tool_call.provenance` + `tool_call.serverId`** (commit `14637cd79`) — `provenance: 'builtin' \| 'mcp' \| 'subagent'`, `serverId?: string` (only set for `mcp`). Stamped on `ToolCallEmitter.emit{Start, Result, Error}`. Subagent takes precedence (set when `subagentMeta` is present); `mcp__<server>__<tool>` naming heuristic classifies MCP with serverId; everything else is builtin.
-- **`errorKind`** (commit `14637cd79`) — top-level envelope field (separate from the existing `auth_device_flow_failed.errorKind`). Maps to the closed `FsErrorKind` / `DaemonErrorKind` unions so UIs can dispatch on enum value instead of regex-on-message.
+### `_meta.serverTimestamp` — daemon wall-clock
+
+Stamped at the SSE write boundary inside `formatSseFrame()` (`packages/cli/src/serve/server.ts:2602+`), **not** at `EventBus.publish`. This keeps the in-memory `BridgeEvent` type unchanged — internal daemon consumers don't see `_meta`, only on-the-wire SSE frames carry it.
+
+```jsonc
+// One frame on the wire after stamping
+{
+  "id": 47,
+  "v": 1,
+  "type": "session_update",
+  "data": { ... },
+  "_meta": { "serverTimestamp": 1716287345123 }
+}
+```
+
+The merge preserves any pre-existing `_meta` keys via spread (`{...existingMeta, serverTimestamp: Date.now()}`). At the time of writing **no daemon producer sets envelope-level `_meta`** — wenshao #4360 review confirmed `ToolCallEmitter`'s metadata lives nested at `event.data._meta` (the ACP `session/update` payload's own `_meta`), not at the envelope. The top-level merge is a forward-compat escape hatch.
+
+**Why it matters**: multi-client UIs that render "X minutes ago" or sort transcript blocks by emit time used to consult each client's local clock, producing tens-of-seconds-to-minutes drift across browsers / tabs / mobile. With server stamping, every connected client agrees on order.
+
+**SDK access**: a 3-location probe (`event.serverTimestamp` / `event._meta.serverTimestamp` / `event.data._meta.serverTimestamp`) is planned in chiga0's PR #4353. Until that lands, SDK consumers can read `event._meta?.serverTimestamp` directly through an `as any` cast — the wire field is already there.
+
+### `originatorClientId`
+
+Already documented per-event above. Set when the request that triggered the event carried a registered `X-Qwen-Client-Id` (see [`08-session-lifecycle.md`](./08-session-lifecycle.md) for the rules).
+
+## Tool-call `_meta` (provenance / serverId)
+
+Distinct from the envelope-level `_meta` above: the ACP `session/update` payload itself carries its own `_meta` at `event.data._meta`. `ToolCallEmitter` (`packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts`) stamps two fields there on `emitStart` / `emitResult` / `emitError`:
+
+| Field | Type | Resolution rule (`ToolCallEmitter.resolveToolProvenance`) |
+|---|---|---|
+| `provenance` | `'builtin' \| 'mcp' \| 'subagent'` | `subagent` when `subagentMeta` is present (takes precedence); `mcp` when tool name matches `mcp__<server>__<tool>`; everything else is `builtin`. |
+| `serverId` | `string` (only when `provenance === 'mcp'`) | Extracted from the `mcp__<serverId>__<tool>` naming heuristic. |
+
+Plus the pre-existing `_meta.toolName` (display name).
+
+UIs use these to render builtin / MCP-server-badge / subagent-attributed tool calls without re-parsing tool names.
+
+## SDK reducer behavior
+
+`reduceDaemonSessionEvent(state, evt)` (`packages/sdk-typescript/src/daemon/events.ts:1100+`) projects the event stream into `DaemonSessionViewState`. Three resync-related fields:
+
+- **`awaitingResync: boolean`** — set to `true` on `state_resync_required`; cleared by consumer code (typically after calling `POST /session/:id/load` and reseeding view state).
+- **`resyncRequiredCount: number`** — observed-frame counter (a chatty pathological client could see more than one).
+- **`lastResyncRequired?: DaemonStateResyncRequiredData`** — the most recent payload.
+
+While `awaitingResync` is `true`, the reducer **auto-skips delta application** for everything except the closed `RESYNC_PASSTHROUGH_TYPES` set (`packages/sdk-typescript/src/daemon/events.ts:896-902`):
+
+| Passthrough type | Why it still applies during resync |
+|---|---|
+| `state_resync_required` | So a second resync (rare but possible) updates `lastResyncRequired` / `resyncRequiredCount`. |
+| `session_died` | End-of-stream signal must surface even in resync limbo. |
+| `session_closed` | Same. |
+| `client_evicted` | Same. |
+| `stream_error` | Same. |
+
+`lastEventId` still advances via `advanceLastEventId(base)` while in resync limbo so the recovery sequence stays monotonic — when the consumer reseeds and clears `awaitingResync`, subsequent deltas apply against the correct cursor.
 
 ## State & Forward Compatibility
 
@@ -190,7 +244,7 @@ Three commits on `daemon_mode_b_main` shift the wire shape additively and are co
 
 ## 概览
 
-daemon 在 `GET /session/:id/events` 上发的每一帧 SSE 都形如 `{ id, v, type, data, originatorClientId? }`，`v: 1` 是当前 `EVENT_SCHEMA_VERSION`。`type` 取自一个封闭的、版本固定的集合 —— `DAEMON_KNOWN_EVENT_TYPE_VALUES`（`packages/sdk-typescript/src/daemon/events.ts:13-63`）共 **28 种**。
+daemon 在 `GET /session/:id/events` 上发的每一帧 SSE 都形如 `{ id, v, type, data, originatorClientId?, _meta? }`，`v: 1` 是当前 `EVENT_SCHEMA_VERSION`。`type` 取自一个封闭的、版本固定的集合 —— `DAEMON_KNOWN_EVENT_TYPE_VALUES`（`packages/sdk-typescript/src/daemon/events.ts:13-63`）共 **29 种**。envelope 的 `_meta` 字段在 SSE 写边界（`server.ts` 的 `formatSseFrame()`）盖上 —— 详见下文 [Envelope 级元数据](#envelope-级元数据)。
 
 SDK 暴露 `narrowDaemonEvent(evt)`，对已知 type 返回一个判别式 `KnownDaemonEvent`，对其他 type 返回 `{ kind: 'unknown' }` —— SDK 消费方无需固定 SDK 版本就能处理向前兼容（更新的 daemon 加了新 type 也不会崩）。
 
@@ -203,7 +257,7 @@ wire 格式见 [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)，本文
 - 提供纯 reducer（`reduceDaemonSessionEvent`、`reduceDaemonAuthEvent`），把事件流投影成 SDK view-state。
 - 通过 `typed_event_schema` 能力 tag 广播（信息性 —— 不广播时 `narrowDaemonEvent` 仍 fallback 到 `unknown`）。
 
-## 事件词汇表（28 种）
+## 事件词汇表（29 种）
 
 按域分组。
 
@@ -223,6 +277,7 @@ wire 格式见 [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)，本文
 | `client_evicted` | EventBus 每订阅者队列溢出。**无 `id`** | `reason: string, droppedAfter?: number`；只对当前订阅者终态，session 还活着 |
 | `slow_client_warning` | 队列 ≥ 75%（force-push，**无 `id`**） | `queueSize, maxQueued, lastEventId`；37.5% 滞回 re-arm |
 | `stream_error` | `SubscriberLimitExceededError` 或其他路由流错 | `error: string`；订阅终态 |
+| `state_resync_required` | `subscribe({lastEventId})` 时 daemon 环里已不再持有 `[lastEventId+1, earliestInRing-1]` 这段间隙。在剩余 replay 帧**之前**强推。**无 `id`** | `reason: string`（当前恒为 `'ring_evicted'`）、`lastDeliveredId: number`、`earliestAvailableId: number`。**面向恢复，非终态** —— SSE 流保持打开，replay + live 帧继续；SDK reducer 翻转 `awaitingResync = true`，自动跳过 delta，直到调用方调 `loadSession` 重置。daemon 端实现见 `eventBus.ts:359-402`，SDK 端见 `events.ts:870-905` |
 
 ### Permissions（F3 + base）
 
@@ -314,14 +369,67 @@ wire 格式见 [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)，本文
 
 > 见英文版 consumer flowchart。
 
-## `daemon_mode_b_main` 上即将到来的 F4 prereq（提醒）
+## Envelope 级元数据
 
-`daemon_mode_b_main` 上有三个 commit 以**纯加法**方式调整 wire shape，即将合到本分支。它们都不破 v1；已经按下面向前兼容规则实现的 SDK 消费方继续工作。
+除了每事件的 `data` payload，daemon 还在 envelope 上盖两个字段：
 
-- **`state_resync_required`**（commit `c1a2f0a78`）—— 第 **29** 种已知事件类型，合成终态帧，**无 `id`**。在 `EventBus.subscribe()` 的重放路径上发现请求的 `lastEventId` 低于环最早可用 id（重放会默默漏事件）时强推。Payload：`{ reason: 'ring_evicted', lastDeliveredId, earliestAvailableId }`。收到它的意思是：停止 apply delta，调 `POST /session/:id/load` 拿完整快照，再重新订阅。
-- **`_meta.serverTimestamp`**（commit `14637cd79`）—— envelope 级字段，在 `server.ts` 的 `formatSseFrame()` 边界盖（**不**在 `EventBus.publish`，保留内存里 `BridgeEvent` 类型不变，内部消费方不见 `_meta`）。多客户端 UI 可以按 daemon wall-clock 排序 transcript 块，而不是按各客户端本地时钟 —— 之前各浏览器/标签页/手机时钟漂几十秒到几分钟，多端时间戳明显不一致。已有的 `_meta` 键（如 tool_call 的 `_meta.toolName`）通过 spread merge 保留。
-- **`tool_call.provenance` + `tool_call.serverId`**（commit `14637cd79`）—— `provenance: 'builtin' \| 'mcp' \| 'subagent'`，`serverId?: string`（仅 `mcp` 时设）。在 `ToolCallEmitter.emit{Start, Result, Error}` 上盖。subagent 优先（有 `subagentMeta` 时设）；`mcp__<server>__<tool>` 命名启发把 MCP 归类并带 serverId；其它都算 builtin。
-- **`errorKind`**（commit `14637cd79`）—— 顶层 envelope 字段（与已有的 `auth_device_flow_failed.errorKind` 不同）。映射封闭 `FsErrorKind` / `DaemonErrorKind` 联合，UI 可以按枚举值 dispatch 而不是 regex-on-message。
+### `_meta.serverTimestamp` —— daemon 时钟
+
+在 `formatSseFrame()`（`packages/cli/src/serve/server.ts:2602+`）的 SSE 写边界盖，**不**在 `EventBus.publish`。这样内存里的 `BridgeEvent` 类型不变，内部 daemon 消费方看不到 `_meta`，只有 wire 上的 SSE 帧带。
+
+```jsonc
+// 盖完之后 wire 上的一帧
+{
+  "id": 47,
+  "v": 1,
+  "type": "session_update",
+  "data": { ... },
+  "_meta": { "serverTimestamp": 1716287345123 }
+}
+```
+
+merge 保留任何已有 `_meta` 键（`{...existingMeta, serverTimestamp: Date.now()}`）。**当前 daemon 没有任何生产者写 envelope 级 `_meta`** —— wenshao #4360 review 已确认 `ToolCallEmitter` 的元数据嵌在 `event.data._meta`（ACP `session/update` payload 自己的 `_meta`），不是 envelope。顶层 merge 是向前兼容逃生口。
+
+**为什么重要**：多客户端 UI 渲「X 分钟前」或按 emit 时间排序 transcript 块时，老路径用各自本地时钟，跨浏览器 / 标签 / 手机漂几十秒到几分钟。服务端盖戳之后，所有客户端排序一致。
+
+**SDK 访问**：3 处探针（`event.serverTimestamp` / `event._meta.serverTimestamp` / `event.data._meta.serverTimestamp`）在 chiga0 的 PR #4353 规划中。在那合入之前，SDK 消费方可以直接通过 `as any` cast 读 `event._meta?.serverTimestamp` —— wire 上字段已经在了。
+
+### `originatorClientId`
+
+上文事件表已经标注。带了已注册 `X-Qwen-Client-Id` 的请求触发的事件才有（规则见 [`08-session-lifecycle.md`](./08-session-lifecycle.md)）。
+
+## Tool-call `_meta`（provenance / serverId）
+
+跟上面 envelope 级 `_meta` 不是同一个：ACP `session/update` payload 自己也带 `_meta`，在 `event.data._meta`。`ToolCallEmitter`（`packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts`）在 `emitStart` / `emitResult` / `emitError` 上盖两个字段：
+
+| 字段 | 类型 | 解析规则（`ToolCallEmitter.resolveToolProvenance`） |
+|---|---|---|
+| `provenance` | `'builtin' \| 'mcp' \| 'subagent'` | 有 `subagentMeta` → `subagent`（最高优先级）；tool 名匹配 `mcp__<server>__<tool>` → `mcp`；其它 → `builtin` |
+| `serverId` | `string`（仅 `provenance === 'mcp'` 时设） | 从 `mcp__<serverId>__<tool>` 命名启发提取 |
+
+加上原本就有的 `_meta.toolName`（显示名）。
+
+UI 据此渲染 builtin / MCP server badge / subagent 归属的 tool call，不必再去解析 tool 名字。
+
+## SDK reducer 行为
+
+`reduceDaemonSessionEvent(state, evt)`（`packages/sdk-typescript/src/daemon/events.ts:1100+`）把事件流投到 `DaemonSessionViewState`。三个 resync 相关字段：
+
+- **`awaitingResync: boolean`** —— `state_resync_required` 时置 `true`；调用方代码自己清（典型路径：调 `POST /session/:id/load` 重置 view state）。
+- **`resyncRequiredCount: number`** —— 观测帧计数（病态客户端可能不止一次 resync）。
+- **`lastResyncRequired?: DaemonStateResyncRequiredData`** —— 最近一次 payload。
+
+`awaitingResync = true` 期间 reducer **自动跳过** delta 应用，**只放行**封闭的 `RESYNC_PASSTHROUGH_TYPES` 集合（`packages/sdk-typescript/src/daemon/events.ts:896-902`）：
+
+| 放行 type | 为什么 resync 期间也要应用 |
+|---|---|
+| `state_resync_required` | 二次 resync（少见但可能）要更新 `lastResyncRequired` / `resyncRequiredCount` |
+| `session_died` | 流终态信号即便在 resync limbo 也必须可见 |
+| `session_closed` | 同上 |
+| `client_evicted` | 同上 |
+| `stream_error` | 同上 |
+
+`lastEventId` 在 resync limbo 期间仍然通过 `advanceLastEventId(base)` 单调推进，调用方重置并清掉 `awaitingResync` 后，后续 delta 对齐到正确游标。
 
 ## 状态与向前兼容
 
