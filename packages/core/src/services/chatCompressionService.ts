@@ -386,8 +386,8 @@ export class ChatCompressionService {
       return {
         newHistory: null,
         info: {
-          originalTokenCount: 0,
-          newTokenCount: 0,
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
           compressionStatus: CompressionStatus.NOOP,
         },
       };

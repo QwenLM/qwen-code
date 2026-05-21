@@ -693,15 +693,17 @@ export class GeminiChat {
       // (review #4168 R1.3 + R1.4)
       //
       // The consecutive-failure counter is NOT pre-reset here. force=true
-      // already bypasses the breaker (chatCompressionService.ts:339 checks
-      // `!force`), so a latched session can still attempt hard-rescue;
-      // pre-resetting would defeat the breaker entirely because hard-rescue
-      // failures don't increment via tryCompress (force=true skips the
-      // `if (!force)` increment), and only reactive overflow at line 992
-      // increments explicitly. With a pre-reset the counter would oscillate
-      // 0↔1 across sends and never trip. On COMPRESSED success the post-call
-      // branch at line 614 still resets to 0, which is the correct recovery
-      // path for a previously-latched session.
+      // already bypasses the breaker (the `!force` check in
+      // `chatCompressionService.compress`'s cheap-gate), so a latched session
+      // can still attempt hard-rescue; pre-resetting would defeat the breaker
+      // entirely because hard-rescue failures don't increment via tryCompress
+      // (force=true skips the `if (!force)` increment in the failure branch),
+      // and only the reactive overflow handler explicitly increments. With a
+      // pre-reset the counter would oscillate 0↔1 across sends and never trip.
+      // On COMPRESSED success, the post-call branch in `tryCompress` (the
+      // `consecutiveFailures = 0` line in the COMPRESSED handler) still resets
+      // to 0, which is the correct recovery path for a previously-latched
+      // session.
       const contextLimit =
         this.config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
@@ -716,8 +718,10 @@ export class GeminiChat {
       // The lastPromptTokenCount=0 branch (first send after --continue
       // restore / subagent inheritance) walks history with a char/4
       // heuristic that can under-count by ~15-20K tokens; the reactive
-      // overflow path at line 944 is the documented safety net when this
-      // under-count causes hard-rescue to miss.
+      // overflow recovery path inside the async iterator below (the
+      // `getContextLengthExceededInfo` → `tryCompress` → RETRY branch)
+      // is the documented safety net when this under-count causes
+      // hard-rescue to miss.
       const effectiveTokens = estimatePromptTokens(
         this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
         userContent,

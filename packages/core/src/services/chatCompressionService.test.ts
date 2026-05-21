@@ -437,6 +437,13 @@ describe('ChatCompressionService', () => {
     vi.mocked(mockChat.getHistory).mockReturnValue([
       { role: 'user', parts: [{ text: 'hi' }] },
     ]);
+    // Seed a non-zero originalTokenCount so we can assert the breaker-NOOP
+    // path forwards it (rather than zeroing the field — see R4-1). Telemetry
+    // consumers rely on this to distinguish "breaker tripped at N tokens"
+    // from "empty session".
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      120_000,
+    );
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
@@ -447,6 +454,8 @@ describe('ChatCompressionService', () => {
     });
     expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
     expect(result.newHistory).toBeNull();
+    expect(result.info.originalTokenCount).toBe(120_000);
+    expect(result.info.newTokenCount).toBe(120_000);
   });
 
   it('falls through when consecutiveFailures is below the breaker threshold', async () => {

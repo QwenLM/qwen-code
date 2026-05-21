@@ -2105,21 +2105,22 @@ describe('GeminiChat', async () => {
 
     it('forwards latched consecutiveFailures into hard-rescue (no pre-call reset); success recovers via the post-call branch', async () => {
       // Hard-rescue uses force=true, which already bypasses the
-      // chatCompressionService breaker (chatCompressionService.ts:339
-      // checks `!force`) regardless of the counter value — so a pre-call
-      // reset is unnecessary for "let the latched breaker recover".
+      // chatCompressionService breaker (the `!force` check in compress's
+      // cheap-gate) regardless of the counter value — so a pre-call reset
+      // is unnecessary for "let the latched breaker recover".
       //
       // Pre-resetting would in fact DEFEAT the breaker on
       // persistent-failure sessions: hard-rescue failures don't increment
-      // via tryCompress (force=true skips `if (!force)` at L627), and
-      // only the reactive overflow path at L992 explicitly increments.
-      // If hard-rescue zeroed the counter on every send, the L992
-      // increment would be wiped next send and the counter would
-      // oscillate 0↔1 indefinitely.
+      // via tryCompress (force=true skips the `if (!force)` increment in
+      // the failure branch), and only the reactive overflow handler
+      // explicitly increments. If hard-rescue zeroed the counter on every
+      // send, the reactive-overflow increment would be wiped next send
+      // and the counter would oscillate 0↔1 indefinitely.
       //
       // Correct behavior asserted here: hard-rescue forwards the existing
       // counter value as-is; on COMPRESSED success the post-call branch
-      // at geminiChat.ts:614 resets to 0 (recovering a latched session).
+      // in tryCompress's COMPRESSED handler resets to 0 (recovering a
+      // latched session).
       const compressSpy = vi.spyOn(
         ChatCompressionService.prototype,
         'compress',
@@ -2159,7 +2160,7 @@ describe('GeminiChat', async () => {
 
       // Step 2: bump lastPromptTokenCount into hard tier and send again.
       // Hard-rescue fires (force=true) and the COMPRESSED result triggers
-      // the post-call reset at geminiChat.ts:614.
+      // the post-call reset in tryCompress's COMPRESSED handler.
       compressSpy.mockClear();
       compressSpy.mockResolvedValueOnce({
         newHistory: [
@@ -2191,8 +2192,8 @@ describe('GeminiChat', async () => {
 
       // Step 3: verify the post-call reset took effect on the chat. A
       // follow-up below-hard send (cheap-gate path, force=false) should
-      // forward consecutiveFailures=0, proving geminiChat.ts:614 ran on
-      // the COMPRESSED result.
+      // forward consecutiveFailures=0, proving the post-call reset in
+      // tryCompress's COMPRESSED handler ran on the Step 2 result.
       compressSpy.mockClear();
       compressSpy.mockResolvedValueOnce({
         newHistory: null,
