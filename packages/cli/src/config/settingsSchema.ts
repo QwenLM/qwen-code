@@ -2297,10 +2297,12 @@ const SETTINGS_SCHEMA = {
           'general-purpose worktree on creation. Useful for sharing ' +
           'large opt-in dirs like `node_modules` so the model can run ' +
           'tests / builds inside the worktree without a fresh install. ' +
-          'Paths must be relative to the repo root; absolute paths and ' +
-          'anything containing `..` are rejected. Missing source dirs ' +
-          'and existing destination paths are silently skipped (no ' +
-          'overwrite, no failure).',
+          'Paths must be relative to the repo root; absolute paths, ' +
+          'anything containing `..`, and any path inside `.git` or ' +
+          '`.qwen` (the CLI-managed metadata tree, which contains ' +
+          'the worktrees directory itself) are rejected. Missing ' +
+          'source dirs and existing destination paths are silently ' +
+          'skipped (no overwrite, no failure).',
         showInDialog: false,
       },
     },

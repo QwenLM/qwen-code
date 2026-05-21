@@ -1600,9 +1600,13 @@ export class GitWorktreeService {
       // Refuse to symlink git-internal paths into the worktree. `.git`
       // would silently break commits / status / diff inside the
       // worktree (the worktree's own gitlink file points at the parent
-      // common-dir, and a symlink would shadow it). `.qwen/worktrees`
-      // would create a worktrees-inside-worktrees loop and confuse the
-      // startup sweep that scans for stale ephemeral worktrees.
+      // common-dir, and a symlink would shadow it). The whole `.qwen`
+      // tree is also off-limits: linking `.qwen` (parent) would
+      // recursively pull `.qwen/worktrees` into the new worktree,
+      // recreating the loop; linking `.qwen/worktrees` directly
+      // creates the same loop more obviously; and `.qwen/projects`
+      // / `.qwen/tmp` are CLI metadata users have no legitimate
+      // reason to share across worktrees.
       const gitDirAbs = path.join(repoRootAbs, '.git');
       if (isWithinRoot(sourceAbs, gitDirAbs)) {
         debugLogger.warn(
@@ -1610,9 +1614,12 @@ export class GitWorktreeService {
         );
         continue;
       }
-      if (isWithinRoot(sourceAbs, this.getUserWorktreesDir())) {
+      const qwenDirAbs = path.join(repoRootAbs, '.qwen');
+      if (isWithinRoot(sourceAbs, qwenDirAbs)) {
         debugLogger.warn(
-          `symlinkConfiguredDirectories: refusing path "${raw}" — would create a worktrees-inside-worktrees loop`,
+          `symlinkConfiguredDirectories: refusing path "${raw}" — ` +
+            `the .qwen tree is CLI-managed; symlinking any of it could ` +
+            `create a worktrees-inside-worktrees loop or alias CLI metadata.`,
         );
         continue;
       }
