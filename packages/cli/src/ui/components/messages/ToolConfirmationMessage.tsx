@@ -250,6 +250,16 @@ export const ToolConfirmationMessage: React.FC<
       key: 'No, suggest changes (esc)',
     });
 
+    // Warnings render as a sibling Box *below* the MaxSizedBox-capped
+    // command body, with marginTop={1}. They sit outside the MaxSizedBox
+    // cap, so we have to reserve their footprint up-front; otherwise the
+    // overall exec block can exceed availableTerminalHeight /
+    // COMPACT_BODY_MAX_LINES on small terminals and push the options
+    // list off-screen.
+    const warningsCount = executionProps.warnings?.length ?? 0;
+    // 1 line per warning + 1 line for the marginTop separator.
+    const warningsHeight = warningsCount > 0 ? warningsCount + 1 : 0;
+
     let bodyContentHeight = availableBodyContentHeight();
     if (bodyContentHeight !== undefined) {
       bodyContentHeight -= 2; // Account for padding;
@@ -259,6 +269,12 @@ export const ToolConfirmationMessage: React.FC<
         bodyContentHeight ?? COMPACT_BODY_MAX_LINES,
         COMPACT_BODY_MAX_LINES,
       );
+    }
+    // Subtract the warnings footprint last so it applies in both the
+    // normal-height and compact-cap paths. Floor at 1 so a long warning
+    // list never zeroes out the command body.
+    if (bodyContentHeight !== undefined && warningsHeight > 0) {
+      bodyContentHeight = Math.max(bodyContentHeight - warningsHeight, 1);
     }
     bodyContent = (
       <Box flexDirection="column">
@@ -273,9 +289,9 @@ export const ToolConfirmationMessage: React.FC<
             </Box>
           </MaxSizedBox>
         </Box>
-        {executionProps.warnings?.length ? (
+        {warningsCount > 0 ? (
           <Box flexDirection="column" paddingX={1} marginLeft={1} marginTop={1}>
-            {executionProps.warnings.map((warning, idx) => (
+            {executionProps.warnings!.map((warning, idx) => (
               <Text key={idx} color={theme.status.warning}>
                 ⚠ {warning}
               </Text>

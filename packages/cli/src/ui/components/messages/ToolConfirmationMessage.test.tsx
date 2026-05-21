@@ -119,6 +119,42 @@ describe('ToolConfirmationMessage', () => {
     expect(lastFrame() ?? '').not.toContain('command substitution');
   });
 
+  // Regression coverage for the round-1 review on PR #4386: the warnings
+  // block sits outside the MaxSizedBox cap, so its footprint has to be
+  // reserved up-front; otherwise the options list can be pushed off-screen
+  // on small terminals. Verify that on a tight compactMode layout the
+  // warning text AND every option label still render.
+  it('keeps options visible alongside the warning on a tight compactMode layout', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'python3 -c "print($(echo hello))"',
+      rootCommand: 'python3',
+      warnings: [
+        'Contains command substitution ($(...), backticks, <(...), or >(...)).',
+      ],
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={10}
+        contentWidth={80}
+        compactMode={true}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    // Warning is the load-bearing UX add — must not be truncated.
+    expect(frame).toContain('command substitution');
+    // All three compactMode options must still be on-screen.
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain('Allow always');
+    expect(frame).toContain('No');
+  });
+
   it('should render plan confirmation with markdown plan content', () => {
     const confirmationDetails: ToolCallConfirmationDetails = {
       type: 'plan',

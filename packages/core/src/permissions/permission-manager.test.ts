@@ -1022,11 +1022,16 @@ describe('PermissionManager', () => {
       });
 
       it('returns ask for a compound command where one sub-command matches an allow rule and another contains $()', async () => {
-        // This is the exact scenario from issue #4093: `echo hello` matches
-        // the configured `Bash(echo *)`-style allow rule (here Bash(git *)),
-        // making hasRelevantRules() true; the substitution sub-command then
-        // resolves via resolveDefaultPermission. It used to return 'deny'
-        // for the whole compound; it must now return 'ask'.
+        // Structurally equivalent to the scenario reported in issue #4093:
+        // the first sub-command (`git status`) matches the surrounding
+        // describe's `Bash(git *)` allow rule, which makes
+        // hasRelevantRules() return true and triggers full PM evaluation;
+        // the second sub-command (`python3 -c "..."`) contains command
+        // substitution and does not match any rule, so it falls into
+        // resolveDefaultPermission. Before the fix, that path returned
+        // 'deny' for the substitution sub-command and the most-restrictive
+        // combine made the whole compound deny. After the fix it returns
+        // 'ask' and the compound resolves to 'ask'.
         expect(
           await pm.evaluate({
             toolName: 'run_shell_command',
