@@ -58,9 +58,19 @@ export function isPoolable(
  * to the same fingerprint. `undefined`, `null`, `{}`, `{enabled: false}`
  * all mean "no OAuth" → all return `null`. See V21-9 in design doc.
  *
- * Scopes sorted so callsite order doesn't matter; explicit `null`
- * defaults so an undefined field doesn't change the hash vs an
+ * Scopes / audiences sorted so callsite order doesn't matter; explicit
+ * `null` defaults so an undefined field doesn't change the hash vs an
  * explicitly null one.
+ *
+ * F2 (#4175 commit 6 review fix — qwen-latest W88): hash every
+ * `MCPOAuthConfig` field (oauth-provider.ts:51-62). Pre-fix only
+ * `clientId` / `scopes` / `authorizationUrl` / `tokenUrl` were hashed
+ * — so two configs differing ONLY in `clientSecret` / `audiences` /
+ * `redirectUri` / `tokenParamName` / `registrationUrl` collapsed to
+ * the same fingerprint and shared a pool entry, leaking the first
+ * config's effective credentials/audience/redirect into the second
+ * session's transport. Especially load-bearing for `clientSecret`
+ * (confidential client) and `audiences` (multi-audience tokens).
  */
 export function canonicalOAuth(
   o?: MCPOAuthConfig | null,
@@ -69,9 +79,14 @@ export function canonicalOAuth(
   return {
     enabled: true,
     clientId: o.clientId ?? null,
+    clientSecret: o.clientSecret ?? null,
     scopes: o.scopes ? [...o.scopes].sort() : null,
+    audiences: o.audiences ? [...o.audiences].sort() : null,
     authorizationUrl: o.authorizationUrl ?? null,
     tokenUrl: o.tokenUrl ?? null,
+    redirectUri: o.redirectUri ?? null,
+    tokenParamName: o.tokenParamName ?? null,
+    registrationUrl: o.registrationUrl ?? null,
   };
 }
 

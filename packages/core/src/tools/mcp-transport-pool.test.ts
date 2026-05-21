@@ -230,6 +230,54 @@ describe('McpTransportPool', () => {
       expect(mocked.close).toHaveBeenCalledTimes(1);
     });
 
+    it('applies session-level includeTools/excludeTools to unpooled tools (W81/W87)', async () => {
+      mockMcpSuccess({ toolNames: ['allowed', 'denied'] });
+      const pool = new McpTransportPool(
+        cliConfig,
+        mkPoolOptions({
+          pooledTransports: new Set() as ReadonlySet<
+            'stdio' | 'websocket' | 'http' | 'sse' | 'sdk' | 'unknown'
+          >,
+        }),
+      );
+      // MCPServerConfig positional: 9=trust, 11=includeTools, 12=excludeTools
+      const cfg = new MCPServerConfig(
+        'node',
+        undefined, // args
+        undefined, // env
+        undefined, // cwd
+        undefined, // url
+        undefined, // httpUrl
+        undefined, // headers
+        undefined, // tcp
+        undefined, // timeout
+        true, // trust
+        undefined, // description
+        undefined, // includeTools
+        ['denied'], // excludeTools
+      );
+      const r = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      const registerTool = (
+        r.tools as unknown as { registerTool: ReturnType<typeof vi.fn> }
+      ).registerTool;
+      // Pre-fix (legacy `discover()` + `attach(skipReplay: true)`) would
+      // register BOTH tools, ignoring the session-level excludeTools and
+      // dropping the trust field. With the W81 fix routing through
+      // `discoverAndReturn` → `markActive(snap)` → `attach` (no
+      // skipReplay), `view.applyTools` filters `denied` out and propagates
+      // the cfg.trust value to the registered tool.
+      const registeredNames = registerTool.mock.calls.map(
+        (args) => (args[0] as { name: string }).name,
+      );
+      expect(registeredNames).toEqual(['mcp__srv__allowed']);
+      expect(registerTool).toHaveBeenCalledTimes(1);
+      const registeredTool = registerTool.mock.calls[0]?.[0] as {
+        trust?: boolean;
+      };
+      expect(registeredTool?.trust).toBe(true);
+    });
+
     it('cancels in-flight unpooled acquire when releaseSession races the connect/discover window (W77)', async () => {
       // Hold the unpooled connect() inside the runWithTimeout window so
       // we can fire releaseSession before the entry transitions to active.
@@ -293,6 +341,43 @@ describe('McpTransportPool', () => {
     });
   });
 
+  describe('pooled in-flight acquire (W90)', () => {
+    it('rolls back early reverse-index insertion when spawnInFlight rejects', async () => {
+      // Pre-W90 fix the in-flight branch indexed sessionToEntries only
+      // AFTER attach succeeded. Post-fix it indexes BEFORE the await
+      // so a concurrent releaseSession during the spawn window can
+      // find the eventual entry. Failure path must indexDetach in
+      // the catch so a stale id doesn't outlive a rejected spawn.
+      const mocked = mockMcpSuccess();
+      mocked.connect.mockRejectedValueOnce(new Error('boom-connect'));
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const r1 = mkSessionRegistries();
+      const r2 = mkSessionRegistries();
+      const first = pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      // Yield so 's1' enters spawnInFlight; 's2' joins via in-flight.
+      await Promise.resolve();
+      const second = pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts);
+
+      await expect(first).rejects.toThrow(/boom-connect/);
+      await expect(second).rejects.toThrow(/boom-connect/);
+
+      // Reverse index must be empty for both sessions — a subsequent
+      // releaseSession on either session must be a no-op (no stale id
+      // pointing at the never-spawned entry).
+      pool.releaseSession('s1');
+      pool.releaseSession('s2');
+      expect(pool.getSnapshot().total).toBe(0);
+
+      // Sanity: a fresh acquire on the same name now succeeds via a
+      // brand-new spawn (no leftover state).
+      mocked.connect.mockResolvedValueOnce(undefined);
+      const r3 = mkSessionRegistries();
+      const c = await pool.acquire('srv', cfg, 's3', r3.tools, r3.prompts);
+      expect(c).toBeDefined();
+    });
+  });
+
   describe('spawnInFlight dedupe', () => {
     it('5 concurrent acquires for same key → 1 spawn', async () => {
       const mocked = mockMcpSuccess();
@@ -342,6 +427,38 @@ describe('McpTransportPool', () => {
       expect(results).toHaveLength(1);
       expect(results[0].restarted).toBe(true);
       expect(results[0].entryIndex).toBe(0);
+    });
+
+    it('re-arms drain timer when restarting an idle entry (W85/W106)', async () => {
+      // Pre-W85/W106 fix: doRestart cancels both drainTimer and
+      // maxIdleTimer at the top, then never re-arms on success. If
+      // operator triggers /workspace/mcp/<srv>/restart on an entry
+      // with refs=0 (already detached, draining), the restart's
+      // success path transitioned `'draining' → 'active'` but left
+      // both timers off — the entry then sat in active state forever
+      // until the next acquire/restart/drainAll.
+      mockMcpSuccess();
+      const pool = new McpTransportPool(
+        cliConfig,
+        mkPoolOptions({ drainDelayMs: 100 }),
+      );
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      // Detach: drain timer starts (refs=0).
+      pool.releaseSession('s1');
+      expect(pool.getSnapshot().byName['srv'].entryCount).toBe(1);
+
+      // Restart the idle entry. Pre-fix: drain timer was cancelled by
+      // doRestart top and never re-armed → entry stays active. Post-
+      // fix: success path re-arms drain timer because refs.size === 0.
+      const results = await pool.restartByName('srv');
+      expect(results[0].restarted).toBe(true);
+
+      // The re-armed drain timer should fire after the grace period
+      // and close the entry — same lifecycle as a normal idle detach.
+      await vi.advanceTimersByTimeAsync(150);
+      expect(pool.getSnapshot().byName['srv']).toBeUndefined();
     });
 
     it('restartByName with entryIndex filters to a single entry', async () => {

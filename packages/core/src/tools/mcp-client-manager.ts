@@ -1596,6 +1596,25 @@ export class McpClientManager {
     // Stop all health checks first
     this.stopAllHealthChecks();
 
+    // F2 (#4175 commit 6 review fix — qwen-latest W94): drain the
+    // in-flight pool discovery pass BEFORE releasing pool refs.
+    // Pre-fix `stop()` called `releaseAllPooledConnections()` while a
+    // pool-mode `discoverAllMcpToolsViaPool` was still mid-flight (e.g.
+    // progressive discovery running during shutdown). The in-flight
+    // pass would subsequently call `pool.acquire(...)` and attach a
+    // fresh entry to `pooledConnections` AFTER the release loop had
+    // already cleared the Map — leaking pool refs that no caller now
+    // tracks. Awaiting it (catching its rejection so a discovery
+    // failure doesn't abort the shutdown) closes the window.
+    if (this.discoveryInFlight) {
+      try {
+        await this.discoveryInFlight;
+      } catch {
+        /* discovery errors are surfaced through the original caller;
+           shutdown must proceed regardless */
+      }
+    }
+
     // F2 (#4175 commit 4): release all pool refs this manager holds.
     // Pool's drain timer kicks in for entries that hit refs=0; other
     // sessions still referencing the same entry keep it alive.

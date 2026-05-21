@@ -335,7 +335,45 @@ export class McpTransportPool {
         });
       this.spawnInFlight.set(id, inFlight);
     }
-    const entry = await inFlight;
+    // F2 (#4175 commit 6 review fix — qwen-latest W90): index the
+    // sessionId BEFORE `await inFlight`. Symmetric to W77 on the
+    // unpooled path. Pre-fix the in-flight branch indexed only after
+    // `attach` succeeded (former line 351), so `releaseSession(sessionId)`
+    // fired during the await window walked an empty `sessionToEntries`
+    // entry and missed the in-flight acquire. With the early index a
+    // concurrent `releaseSession` AFTER the spawn's `entries.set` runs
+    // finds the entry via the reverse index and invokes
+    // `forceShutdown`, which the post-await `isTerminated()` guard
+    // below catches. NOTE: a `releaseSession` that fires BEFORE
+    // spawnEntry's `entries.set` is still a residual race — the reverse
+    // index has the id but `entries.get(id)` is `undefined` so
+    // `releaseSession`'s loop skips. Closing that window requires
+    // per-session cancellation plumbing (tracked as W90-followup).
+    this.indexAttach(sessionId, id);
+
+    let entry: PoolEntry;
+    try {
+      entry = await inFlight;
+    } catch (err) {
+      // Roll back the early index on spawn failure so a later
+      // `releaseSession(sessionId)` doesn't iterate a stale id with
+      // no matching entry.
+      this.indexDetach(sessionId, id);
+      throw err;
+    }
+
+    // Post-await terminal-state guard (W90 / W77): a concurrent
+    // `releaseSession` after `entries.set` may have invoked
+    // `forceShutdown` on the now-spawned entry, flipping state to
+    // 'closed'. `attach` would throw with a deep "Cannot attach in
+    // state closed" error; we surface a clearer message and clean up
+    // the reverse index.
+    if (!this.entries.has(id) || entry.isTerminated()) {
+      this.indexDetach(sessionId, id);
+      throw new Error(
+        `PoolEntry ${id} torn down before attach (concurrent release)`,
+      );
+    }
 
     const view = new SessionMcpView(
       sessionToolRegistry,
@@ -344,12 +382,18 @@ export class McpTransportPool {
       serverName,
       cfg,
     );
-    // W10 fix: same attach-then-index ordering as the fast path above.
-    const conn = entry.attach(sessionId, view, {
-      release: () => this.release(id, sessionId),
-    });
-    this.indexAttach(sessionId, id);
-    return conn;
+    try {
+      return entry.attach(sessionId, view, {
+        release: () => this.release(id, sessionId),
+      });
+    } catch (err) {
+      // Defensive: if `attach` throws between the `isTerminated` check
+      // and this line (narrow but possible race window), clean up the
+      // early index. Without this, `releaseSession` would later
+      // iterate the stale id.
+      this.indexDetach(sessionId, id);
+      throw err;
+    }
   }
 
   /**
@@ -436,6 +480,25 @@ export class McpTransportPool {
         const started = Date.now();
         try {
           await entry.restart();
+          // F2 (#4175 commit 6 review fix — qwen-latest W85 / W106):
+          // re-arm the drain timer if the restarted entry has no
+          // subscribers. `doRestart` unconditionally cancels both
+          // `drainTimer` and `maxIdleTimer` at the top so the restart
+          // can proceed atomically (W4 / W31), but pre-fix the success
+          // path never restored the drain lifecycle. If an operator
+          // invokes `/workspace/mcp/<srv>/restart` on an idle entry
+          // (refs=0, drain timer running), the entry transitioned back
+          // to `'active'` and then sat forever with no subscribers —
+          // a leaked subprocess until the next restart or `drainAll`.
+          // Re-arming here hands the lifecycle back to the standard
+          // refs=0 → drain → close path. We do this at the pool level
+          // rather than inside `entry.restart()` so the operator-
+          // configured pool `drainDelayMs` is used instead of
+          // `PoolEntry.opts.drainDelayMs` (which defaults to 30s and
+          // is independent of the pool's setting).
+          if (entry.refs.size === 0 && !this.unpooledIds.has(entry.id)) {
+            entry.startDrainTimer(this.opts.drainDelayMs);
+          }
           return {
             entryIndex: entry.entryIndex,
             restarted: true,
@@ -949,14 +1012,24 @@ export class McpTransportPool {
       // discovery. Same `discoveryTimeoutFor(cfg)` resolution
       // (stdio 30s default, remote 5s, per-server override).
       const timeoutMs = discoveryTimeoutFor(cfg);
-      await runWithTimeout(
+      // F2 (#4175 commit 6 review fix — qwen-latest W81 / W87): route
+      // unpooled through the same `discoverAndReturn` snapshot path as
+      // the pooled flow, so the per-session `SessionMcpView.applyTools`
+      // / `applyPrompts` filter+trust+rename pipeline is the
+      // authoritative registration. Pre-fix `client.discover(cliConfig)`
+      // called `discoverAndReturn({ applyConfigFilters: false })` and
+      // then registered the UNFILTERED snapshot directly into the
+      // session registries, while `attach(skipReplay: true)` bypassed
+      // the only filtering layer (view.applyTools). Net effect: SDK
+      // MCP / HTTP / SSE servers with `includeTools` / `excludeTools`
+      // received ALL tools and every tool had `trust: undefined`. The
+      // prior "avoid double-registration" rationale is obsolete —
+      // `view.applyTools` calls `removeMcpToolsByServer(serverName)`
+      // first, so the snapshot path is idempotent.
+      const snap = await runWithTimeout(
         (async () => {
           await client.connect();
-          // Per-session path: use the legacy discover() so the
-          // supplied session registries are populated directly.
-          // Avoids double-registration that would happen if we
-          // also called applyTools.
-          await client.discover(this.cliConfig);
+          return await client.discoverAndReturn(this.cliConfig);
         })(),
         timeoutMs,
         `unpooled spawn for ${id}`,
@@ -965,12 +1038,13 @@ export class McpTransportPool {
       // `releaseSession(sessionId)` may have invoked `forceShutdown`
       // while we were spawning. Without this guard, `markActive` /
       // `attach` would either resurrect the entry or throw deep in
-      // attach's state check, leaking the in-flight transport. Also
-      // roll back any side-effects of `client.discover()` via
-      // `view.teardown()` — the legacy unpooled discover() registers
-      // tools/prompts directly into the session registries inside the
-      // await window above, so detection alone isn't enough; the
-      // already-registered entries have to be evicted by serverName.
+      // attach's state check, leaking the in-flight transport. Now
+      // that the W81/W87 fix routes registration through `attach`'s
+      // snapshot-replay path, no direct registry mutation has happened
+      // yet at this point — `attach` is the only side-effecting call
+      // below. `view.teardown` is still defensive in case a future
+      // refactor moves registration earlier; it's a cheap no-op when
+      // nothing has been registered for this server.
       if (this.draining || !this.entries.has(id) || entry.isTerminated()) {
         try {
           view.teardown();
@@ -987,15 +1061,13 @@ export class McpTransportPool {
           `McpTransportPool is draining or unpooled ${id} was cancelled`,
         );
       }
-      entry.markActive([], []);
-      // Unpooled handle: skipReplay prevents `attach` from calling
-      // `view.applyTools([])` which would `removeMcpToolsByServer`
-      // and wipe the tools `discover()` just registered (commit-2
-      // review P1 #2 fix). Release callback runs forceShutdown
-      // directly — no pool refcount accounting for unpooled entries
-      // since they're per-session.
+      entry.markActive(snap.tools, snap.prompts);
+      // Unpooled handle: snapshot replay through `view.applyTools` /
+      // `applyPrompts` applies per-session `includeTools` / `excludeTools`
+      // filtering and the per-session trust copy (W81 fix). Release
+      // callback runs `forceShutdown` directly — no pool refcount
+      // accounting for unpooled entries since they're per-session.
       const conn = entry.attach(sessionId, view, {
-        skipReplay: true,
         release: () => {
           this.indexDetach(sessionId, id);
           void entry.forceShutdown('manual');

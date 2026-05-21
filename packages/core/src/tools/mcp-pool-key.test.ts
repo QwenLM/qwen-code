@@ -126,6 +126,34 @@ describe('mcp-pool-key', () => {
       const b = canonicalOAuth({ enabled: true, scopes: ['a', 'b'] });
       expect(a).toEqual(b);
     });
+
+    it('also sorts audiences (W88)', () => {
+      const a = canonicalOAuth({ enabled: true, audiences: ['b', 'a'] });
+      const b = canonicalOAuth({ enabled: true, audiences: ['a', 'b'] });
+      expect(a).toEqual(b);
+    });
+
+    it.each([
+      ['clientSecret', { clientSecret: 'shh' }],
+      ['audiences', { audiences: ['aud1'] }],
+      ['redirectUri', { redirectUri: 'https://x/cb' }],
+      ['tokenParamName', { tokenParamName: 'access_token' }],
+      ['registrationUrl', { registrationUrl: 'https://x/reg' }],
+    ])(
+      'distinguishes fingerprints on %s (W88 — pre-fix collided)',
+      (_field, diff) => {
+        const base = {
+          enabled: true as const,
+          clientId: 'id',
+          authorizationUrl: 'https://x/authz',
+          tokenUrl: 'https://x/token',
+          scopes: ['a'],
+        };
+        const a = canonicalOAuth(base);
+        const b = canonicalOAuth({ ...base, ...diff });
+        expect(a).not.toEqual(b);
+      },
+    );
   });
 
   describe('mcpTransportOf', () => {

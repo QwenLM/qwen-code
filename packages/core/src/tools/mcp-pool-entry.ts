@@ -805,6 +805,14 @@ export class PoolEntry {
       snapshot: this.promptsSnapshot,
       generation: this._generation,
     });
+    // F2 (#4175 commit 6 review fix — qwen-latest W85 / W106): the
+    // caller (pool's `restartByName`) is responsible for re-arming
+    // the drain timer when `refs.size === 0` after restart. The
+    // re-arm lives at the pool level rather than here so it uses the
+    // pool's operator-configured `drainDelayMs` (e.g. tight 100ms in
+    // tests) instead of `PoolEntry.opts.drainDelayMs` which falls
+    // through to the entry's transport-default 30s. See
+    // `mcp-transport-pool.ts:restartByName` for the re-arm site.
   }
 
   /**
