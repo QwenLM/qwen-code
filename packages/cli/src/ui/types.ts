@@ -5,6 +5,7 @@
  */
 
 import type {
+  CompactionThresholds,
   CompressionStatus,
   MCPServerConfig,
   ThoughtSummary,
@@ -344,16 +345,14 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
 
 export type ContextTier = 'safe' | 'warn' | 'auto' | 'hard';
 
-export interface ContextThresholds {
-  /** Window minus 20K summary reserve — the budget available for input + summary. */
-  effectiveWindow: number;
-  /** Token count at which the warn tier triggers. */
-  warn: number;
-  /** Token count at which auto-compaction triggers. */
-  auto: number;
-  /** Token count at which auto-compaction is forced (resets failure counter). */
-  hard: number;
-}
+/**
+ * Alias for the core compaction-thresholds shape. Re-exported under the
+ * CLI-friendly name so consumers in this package don't pull on the core
+ * module path; structurally identical to `CompactionThresholds`. The
+ * `readonly` modifiers on the core type are immaterial for UI rendering,
+ * but kept implicitly through the alias.
+ */
+export type ContextThresholds = CompactionThresholds;
 
 export interface ContextCategoryBreakdown {
   systemPrompt: number;

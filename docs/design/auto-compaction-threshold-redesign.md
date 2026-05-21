@@ -4,6 +4,8 @@
 
 ## 背景
 
+> 本节描述本 PR 落地**之前**的状态（pre-redesign behavior）。下文出现的 `COMPRESSION_TOKEN_THRESHOLD`、`thinkingConfig.includeThoughts = true`、`hasFailedCompressionAttempt`、以及具体的 file:line 引用都对应 PR #4345 合入前的代码——合入后这些符号 / 行号会不再有效。
+
 当前 qwen-code 的自动压缩仅使用单一比例阈值 `COMPRESSION_TOKEN_THRESHOLD = 0.7`（`chatCompressionService.ts:33`），所有窗口大小共用同一比例。对比 claude-code 的「绝对 token 梯子」（autoCompact.ts:62-65），qwen-code 存在三个具体问题：
 
 1. **大窗口下预留过多**：1M 模型 70% 阈值在 700K 触发，剩余 300K 远超摘要 + 输出实际所需的 ~33K

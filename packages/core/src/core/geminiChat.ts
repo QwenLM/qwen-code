@@ -736,9 +736,7 @@ export class GeminiChat {
       // Hard-tier rescue: when the estimated prompt size is at or above the
       // hard threshold (effectiveWindow - HARD_BUFFER), force compaction in
       // this send instead of waiting for the API to reject the request as too
-      // large. This also resets the consecutive-failure counter so a session
-      // that previously latched the breaker can recover — hard implies the
-      // next API call would very likely overflow without compaction.
+      // large.
       //
       // We compute `effectiveTokens` ONCE here and pass it through to
       // tryCompress → service.compress so the cheap-gate doesn't redo the
@@ -747,6 +745,17 @@ export class GeminiChat {
       // hard-tier rescue used the default imageTokenEstimate while the
       // cheap-gate inside tryCompress used the user's resolved value.
       // (review #4168 R1.3 + R1.4)
+      //
+      // The consecutive-failure counter is NOT pre-reset here. force=true
+      // already bypasses the breaker (chatCompressionService.ts:339 checks
+      // `!force`), so a latched session can still attempt hard-rescue;
+      // pre-resetting would defeat the breaker entirely because hard-rescue
+      // failures don't increment via tryCompress (force=true skips the
+      // `if (!force)` increment), and only reactive overflow at line 992
+      // increments explicitly. With a pre-reset the counter would oscillate
+      // 0↔1 across sends and never trip. On COMPRESSED success the post-call
+      // branch at line 614 still resets to 0, which is the correct recovery
+      // path for a previously-latched session.
       const contextLimit =
         this.config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
@@ -758,6 +767,11 @@ export class GeminiChat {
       // API-authoritative count + a tiny estimate of just the new user
       // message — it does NOT touch the history at all in that branch, so
       // skip the costly `getHistory(true)` clone on the steady-state path.
+      // The lastPromptTokenCount=0 branch (first send after --continue
+      // restore / subagent inheritance) walks history with a char/4
+      // heuristic that can under-count by ~15-20K tokens; the reactive
+      // overflow path at line 944 is the documented safety net when this
+      // under-count causes hard-rescue to miss.
       const effectiveTokens = estimatePromptTokens(
         this.lastPromptTokenCount > 0 ? [] : this.getHistory(true),
         userContent,
@@ -766,7 +780,9 @@ export class GeminiChat {
       );
       const shouldForceFromHard = effectiveTokens >= hard;
       if (shouldForceFromHard) {
-        this.consecutiveFailures = 0;
+        debugLogger.warn(
+          `[compaction] hard-tier rescue triggered: effectiveTokens=${effectiveTokens}, hard=${hard}, consecutiveFailures=${this.consecutiveFailures}.`,
+        );
       }
 
       compressionInfo = await this.tryCompress(

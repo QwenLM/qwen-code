@@ -2067,16 +2067,30 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
-    it('resets consecutiveFailures before forcing when hard threshold crossed', async () => {
-      // Pre-latch the breaker by failing the unforced cheap-gate
-      // MAX_CONSECUTIVE_FAILURES times below the hard threshold.
+    it('forwards latched consecutiveFailures into hard-rescue (no pre-call reset); success recovers via the post-call branch', async () => {
+      // Hard-rescue uses force=true, which already bypasses the
+      // chatCompressionService breaker (chatCompressionService.ts:339
+      // checks `!force`) regardless of the counter value — so a pre-call
+      // reset is unnecessary for "let the latched breaker recover".
+      //
+      // Pre-resetting would in fact DEFEAT the breaker on
+      // persistent-failure sessions: hard-rescue failures don't increment
+      // via tryCompress (force=true skips `if (!force)` at L627), and
+      // only the reactive overflow path at L992 explicitly increments.
+      // If hard-rescue zeroed the counter on every send, the L992
+      // increment would be wiped next send and the counter would
+      // oscillate 0↔1 indefinitely.
+      //
+      // Correct behavior asserted here: hard-rescue forwards the existing
+      // counter value as-is; on COMPRESSED success the post-call branch
+      // at geminiChat.ts:614 resets to 0 (recovering a latched session).
       const compressSpy = vi.spyOn(
         ChatCompressionService.prototype,
         'compress',
       );
 
-      // The latching sends never touch the hard tier; lastPromptTokenCount is
-      // small enough that effective < hard, so force stays false on each.
+      // Step 1: latch the breaker via MAX_CONSECUTIVE_FAILURES below-hard
+      // failures (cheap-gate path, force=false).
       compressSpy.mockResolvedValue({
         newHistory: null,
         info: {
@@ -2101,14 +2115,15 @@ describe('GeminiChat', async () => {
         }
         expect(compressSpy.mock.calls[i][1].force).toBe(false);
       }
-      // The counter is now at MAX_CONSECUTIVE_FAILURES (latched).
+      // Pre-increment semantic: i-th call sees i; counter on chat is now
+      // MAX_CONSECUTIVE_FAILURES (latched).
       expect(compressSpy.mock.calls.at(-1)![1].consecutiveFailures).toBe(
         MAX_CONSECUTIVE_FAILURES - 1,
       );
 
-      // Now bump lastPromptTokenCount into hard tier and send again. The
-      // hard-tier rescue must reset the counter and force=true on the call —
-      // not short-circuit on the latched breaker.
+      // Step 2: bump lastPromptTokenCount into hard tier and send again.
+      // Hard-rescue fires (force=true) and the COMPRESSED result triggers
+      // the post-call reset at geminiChat.ts:614.
       compressSpy.mockClear();
       compressSpy.mockResolvedValueOnce({
         newHistory: [
@@ -2125,17 +2140,18 @@ describe('GeminiChat', async () => {
       const rescueStream = await chat.sendMessageStream(
         'test-model',
         { message: 'rescue me' },
-        'prompt-hard-rescue-reset',
+        'prompt-hard-rescue-no-prereset',
       );
       for await (const _ of rescueStream) {
         /* consume */
       }
 
       expect(compressSpy).toHaveBeenCalledTimes(1);
-      // Counter forwarded to the service must be 0 (reset before the call),
-      // not MAX_CONSECUTIVE_FAILURES (which would gate the cheap-gate).
-      expect(compressSpy.mock.calls[0][1].consecutiveFailures).toBe(0);
       expect(compressSpy.mock.calls[0][1].force).toBe(true);
+      // Counter forwarded as-is — the LATCHED value, NOT zero.
+      expect(compressSpy.mock.calls[0][1].consecutiveFailures).toBe(
+        MAX_CONSECUTIVE_FAILURES,
+      );
     });
 
     it('does not force when tokens are below hard threshold (normal auto path)', async () => {

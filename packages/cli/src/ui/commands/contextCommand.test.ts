@@ -148,10 +148,14 @@ describe('/context shows three-tier thresholds', () => {
   });
 
   it('treats no-API-data sessions as safe and omits the threshold section from text', async () => {
-    // lastPromptTokenCount = 0 → collectContextData uses the estimated branch:
-    //   currentTier should be `safe` regardless of overhead size, and
-    //   formatContextUsageText must NOT emit the "Compaction thresholds" section
-    //   because the estimated path renders a different layout.
+    // lastPromptTokenCount = 0 → collectContextData uses the estimated branch
+    // (classifies against `rawOverhead`, not apiTotalTokens). With these
+    // default fixtures rawOverhead lands well below `warn`, so currentTier
+    // resolves to `safe`. On heavy system-prompt / skill / MCP loads the
+    // estimated branch can return warn/auto/hard — this test only covers
+    // the default-fixture safe case. formatContextUsageText must NOT emit
+    // the "Compaction thresholds" section because the estimated path
+    // renders a different layout.
     mockGetLastPromptTokenCount.mockReturnValue(0);
     const data = await collectContextData(makeMockConfig(200_000), false);
     expect(data.breakdown.currentTier).toBe('safe');

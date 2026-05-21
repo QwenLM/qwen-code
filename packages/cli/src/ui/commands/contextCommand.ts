@@ -332,12 +332,7 @@ export async function collectContextData(
     messages: messagesTokens,
     freeSpace,
     autocompactBuffer,
-    thresholds: {
-      effectiveWindow: thresholds.effectiveWindow,
-      warn: thresholds.warn,
-      auto: thresholds.auto,
-      hard: thresholds.hard,
-    },
+    thresholds,
     currentTier: currentTier(tierTokens, thresholds),
   };
 
@@ -428,7 +423,7 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     lines.push('');
     lines.push('**Compaction thresholds**');
     lines.push(
-      `  Effective window:   ${formatNum(breakdown.thresholds.effectiveWindow)}  (window − 20K reserve)`,
+      `  Effective window:   ${formatNum(breakdown.thresholds.effectiveWindow)}  (window − ${formatNum(contextWindowSize - breakdown.thresholds.effectiveWindow)} reserve)`,
     );
     lines.push(`  Warn threshold:     ${formatNum(breakdown.thresholds.warn)}`);
     lines.push(`  Auto threshold:     ${formatNum(breakdown.thresholds.auto)}`);

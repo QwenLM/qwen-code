@@ -128,7 +128,12 @@ export interface CompactionThresholds {
  * Pure function — no I/O, no shared state — safe to call repeatedly.
  */
 export function computeThresholds(window: number): CompactionThresholds {
-  const effectiveWindow = window - SUMMARY_RESERVE;
+  // Clamp to 0 for tiny windows (window < SUMMARY_RESERVE) so the surfaced
+  // value in `/context` stays meaningful. The Math.max guards on auto/warn/hard
+  // below absorb the floor — clamping does not shift those outputs because
+  // each is `max(proportional, absolute)` and the proportional branch
+  // dominates whenever the absolute branch goes negative.
+  const effectiveWindow = Math.max(0, window - SUMMARY_RESERVE);
 
   const absAuto = effectiveWindow - AUTOCOMPACT_BUFFER;
   const auto = Math.max(DEFAULT_PCT * window, absAuto);
