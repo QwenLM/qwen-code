@@ -968,28 +968,35 @@ describe('noFollow option — symlink protection', () => {
   // exercised and a one-line revert of the catch narrowing would pass
   // every test. The orphan-cleanup-on-fchmod-failure path also has no
   // coverage without these injections.
-  it('atomicWriteFile: noFollow EXDEV swallows fchmod ENOSYS (FAT/exFAT)', async () => {
-    const target = path.join(tmpDir, 'fat-target.txt');
-    const exdevRename = async () => {
-      const e: NodeJS.ErrnoException = new Error('EXDEV');
-      e.code = 'EXDEV';
-      throw e;
-    };
-    const fchmod = async () => {
-      const e: NodeJS.ErrnoException = new Error('ENOSYS');
-      e.code = 'ENOSYS';
-      throw e;
-    };
+  // Both ENOSYS (Linux FAT) and ENOTSUP (macOS exFAT) must be swallowed
+  // — dropping either from the catch condition would silently leave a
+  // credential file at the umask-masked open() mode on one of the two
+  // common removable-media filesystems.
+  it.each(['ENOSYS', 'ENOTSUP'] as const)(
+    'atomicWriteFile: noFollow EXDEV swallows fchmod %s (FAT/exFAT)',
+    async (chmodCode) => {
+      const target = path.join(tmpDir, `fat-target-${chmodCode}.txt`);
+      const exdevRename = async () => {
+        const e: NodeJS.ErrnoException = new Error('EXDEV');
+        e.code = 'EXDEV';
+        throw e;
+      };
+      const fchmod = async () => {
+        const e: NodeJS.ErrnoException = new Error(chmodCode);
+        e.code = chmodCode;
+        throw e;
+      };
 
-    await atomicWriteFile(
-      target,
-      'NEW',
-      { noFollow: true, mode: 0o600 },
-      { rename: exdevRename, fchmod },
-    );
+      await atomicWriteFile(
+        target,
+        'NEW',
+        { noFollow: true, mode: 0o600 },
+        { rename: exdevRename, fchmod },
+      );
 
-    expect(await fs.readFile(target, 'utf-8')).toBe('NEW');
-  });
+      expect(await fs.readFile(target, 'utf-8')).toBe('NEW');
+    },
+  );
 
   it('atomicWriteFile: noFollow EXDEV propagates fchmod EPERM and removes the orphan', async () => {
     const target = path.join(tmpDir, 'eperm-target.txt');
@@ -1019,28 +1026,31 @@ describe('noFollow option — symlink protection', () => {
     expect(fsSync.existsSync(target)).toBe(false);
   });
 
-  it('atomicWriteFileSync: noFollow EXDEV swallows fchmod ENOSYS (FAT/exFAT)', () => {
-    const target = path.join(tmpDir, 'fat-target-sync.txt');
-    const exdevRename = () => {
-      const e: NodeJS.ErrnoException = new Error('EXDEV');
-      e.code = 'EXDEV';
-      throw e;
-    };
-    const fchmod = () => {
-      const e: NodeJS.ErrnoException = new Error('ENOSYS');
-      e.code = 'ENOSYS';
-      throw e;
-    };
+  it.each(['ENOSYS', 'ENOTSUP'] as const)(
+    'atomicWriteFileSync: noFollow EXDEV swallows fchmod %s (FAT/exFAT)',
+    (chmodCode) => {
+      const target = path.join(tmpDir, `fat-target-sync-${chmodCode}.txt`);
+      const exdevRename = () => {
+        const e: NodeJS.ErrnoException = new Error('EXDEV');
+        e.code = 'EXDEV';
+        throw e;
+      };
+      const fchmod = () => {
+        const e: NodeJS.ErrnoException = new Error(chmodCode);
+        e.code = chmodCode;
+        throw e;
+      };
 
-    atomicWriteFileSync(
-      target,
-      'NEW',
-      { noFollow: true, mode: 0o600 },
-      { rename: exdevRename, fchmod },
-    );
+      atomicWriteFileSync(
+        target,
+        'NEW',
+        { noFollow: true, mode: 0o600 },
+        { rename: exdevRename, fchmod },
+      );
 
-    expect(fsSync.readFileSync(target, 'utf-8')).toBe('NEW');
-  });
+      expect(fsSync.readFileSync(target, 'utf-8')).toBe('NEW');
+    },
+  );
 
   it('atomicWriteFileSync: noFollow EXDEV propagates fchmod EPERM and removes the orphan', () => {
     const target = path.join(tmpDir, 'eperm-target-sync.txt');
@@ -1066,4 +1076,93 @@ describe('noFollow option — symlink protection', () => {
 
     expect(fsSync.existsSync(target)).toBe(false);
   });
+
+  // The pre-open unlink at `targetPath` swallows ENOENT (first-write
+  // case) but propagates anything else. Without injection, no test
+  // exercises the propagation path — a regression to a blanket catch
+  // would let a real error (EACCES on the parent directory, EROFS on
+  // a remount) hide behind the subsequent EEXIST from O_EXCL.
+  it('atomicWriteFile: noFollow EXDEV pre-open unlink propagates non-ENOENT errors', async () => {
+    const target = path.join(tmpDir, 'eacces-target.txt');
+    const exdevRename = async () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+    const unlink = async (p: fsSync.PathLike) => {
+      // Only the pre-open unlink at targetPath should fail; tmp-file
+      // cleanup goes through `fs.unlink` directly (not the seam).
+      if (p === target) {
+        const e: NodeJS.ErrnoException = new Error('EACCES');
+        e.code = 'EACCES';
+        throw e;
+      }
+    };
+
+    await expect(
+      atomicWriteFile(
+        target,
+        'NEW',
+        { noFollow: true, mode: 0o600 },
+        { rename: exdevRename, unlink: unlink as typeof fs.unlink },
+      ),
+    ).rejects.toThrow(/EACCES/);
+  });
+
+  it('atomicWriteFileSync: noFollow EXDEV pre-open unlink propagates non-ENOENT errors', () => {
+    const target = path.join(tmpDir, 'eacces-target-sync.txt');
+    const exdevRename = () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+    const unlink = (p: fsSync.PathLike) => {
+      if (p === target) {
+        const e: NodeJS.ErrnoException = new Error('EACCES');
+        e.code = 'EACCES';
+        throw e;
+      }
+    };
+
+    expect(() =>
+      atomicWriteFileSync(
+        target,
+        'NEW',
+        { noFollow: true, mode: 0o600 },
+        { rename: exdevRename, unlink: unlink as typeof fsSync.unlinkSync },
+      ),
+    ).toThrow(/EACCES/);
+  });
+
+  // Symlink-resolution failures (EACCES on intermediate dir, ELOOP)
+  // must share the `atomicWriteFile("path"): ...` annotation prefix
+  // so logs reference the logical filePath instead of an internal
+  // intermediate component.
+  it.skipIf(process.platform === 'win32')(
+    'atomicWriteFile: annotates resolveSymlinkChain ELOOP failures with the logical filePath',
+    async () => {
+      const linkA = path.join(tmpDir, 'loop-a');
+      const linkB = path.join(tmpDir, 'loop-b');
+      await fs.symlink(linkB, linkA);
+      await fs.symlink(linkA, linkB);
+
+      await expect(atomicWriteFile(linkA, 'X')).rejects.toThrow(
+        new RegExp(`atomicWriteFile\\(.*${path.basename(linkA)}.*\\):`),
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'atomicWriteFileSync: annotates resolveSymlinkChainSync ELOOP failures with the logical filePath',
+    () => {
+      const linkA = path.join(tmpDir, 'loop-a-sync');
+      const linkB = path.join(tmpDir, 'loop-b-sync');
+      fsSync.symlinkSync(linkB, linkA);
+      fsSync.symlinkSync(linkA, linkB);
+
+      expect(() => atomicWriteFileSync(linkA, 'X')).toThrow(
+        new RegExp(`atomicWriteFileSync\\(.*${path.basename(linkA)}.*\\):`),
+      );
+    },
+  );
 });

@@ -8,7 +8,10 @@ import * as crypto from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { createDebugLogger } from './debugLogger.js';
 import { isNodeError } from './errors.js';
+
+const debugLogger = createDebugLogger('ATOMIC_WRITE');
 
 export interface AtomicWriteOptions {
   /** Number of rename retries on EPERM/EACCES (default: 3). */
@@ -152,6 +155,7 @@ export async function atomicWriteFile(
     writeFile?: typeof fs.writeFile;
     chmod?: typeof fs.chmod;
     fchmod?: (fh: fs.FileHandle, mode: number) => Promise<void>;
+    unlink?: typeof fs.unlink;
   },
 ): Promise<void> {
   const retries = options?.retries ?? 3;
@@ -163,10 +167,18 @@ export async function atomicWriteFile(
   const chmodImpl = _testFs?.chmod ?? fs.chmod;
   const fchmodImpl =
     _testFs?.fchmod ?? ((fh: fs.FileHandle, mode: number) => fh.chmod(mode));
+  const unlinkImpl = _testFs?.unlink ?? fs.unlink;
 
+  // Annotate symlink resolution failures (EACCES on intermediate dir,
+  // ELOOP on circular chain) with the logical filePath so they share
+  // the `atomicWriteFile("path"): ...` prefix the rest of the function
+  // applies — otherwise incident-response logs reference an
+  // intermediate path component that the caller never asked about.
   const targetPath = options?.noFollow
     ? filePath
-    : await resolveSymlinkChain(filePath);
+    : await resolveSymlinkChain(filePath).catch((err) => {
+        throw annotateWriteError(err, filePath);
+      });
 
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
@@ -227,9 +239,12 @@ export async function atomicWriteFile(
           // paths. Unlink any existing entry (matches the rename
           // happy path that atomically replaces a symlink), then
           // open with O_EXCL to refuse writing through a symlink
-          // that races back into existence.
+          // that races back into existence. Non-ENOENT errors
+          // (EACCES on parent dir, EROFS, etc.) propagate so the
+          // caller sees the real cause instead of a downstream
+          // EEXIST from O_EXCL.
           try {
-            await fs.unlink(targetPath);
+            await unlinkImpl(targetPath);
           } catch (unlinkErr) {
             if (!isNodeError(unlinkErr) || unlinkErr.code !== 'ENOENT') {
               throw unlinkErr;
@@ -283,8 +298,15 @@ export async function atomicWriteFile(
             if (!writeOk) {
               try {
                 await fs.unlink(targetPath);
-              } catch {
-                // best effort
+              } catch (orphanErr) {
+                // Best-effort cleanup, but log so incident response
+                // can correlate the original write error with a
+                // subsequent EEXIST loop.
+                debugLogger.debug(
+                  'orphan unlink failed for %s: %s',
+                  targetPath,
+                  orphanErr,
+                );
               }
             }
             throw writeErr;
@@ -455,6 +477,7 @@ export function atomicWriteFileSync(
     writeFile?: typeof fsSync.writeFileSync;
     chmod?: typeof fsSync.chmodSync;
     fchmod?: (fd: number, mode: number) => void;
+    unlink?: typeof fsSync.unlinkSync;
   },
 ): void {
   const retries = options?.retries ?? 3;
@@ -465,10 +488,20 @@ export function atomicWriteFileSync(
   const writeFileImpl = _testFs?.writeFile ?? fsSync.writeFileSync;
   const chmodImpl = _testFs?.chmod ?? fsSync.chmodSync;
   const fchmodImpl = _testFs?.fchmod ?? fsSync.fchmodSync;
+  const unlinkImpl = _testFs?.unlink ?? fsSync.unlinkSync;
 
-  const targetPath = options?.noFollow
-    ? filePath
-    : resolveSymlinkChainSync(filePath);
+  // Annotate symlink-resolution failures with the logical filePath
+  // (see atomicWriteFile for rationale).
+  let targetPath: string;
+  if (options?.noFollow) {
+    targetPath = filePath;
+  } else {
+    try {
+      targetPath = resolveSymlinkChainSync(filePath);
+    } catch (err) {
+      throw annotateWriteError(err, filePath, 'atomicWriteFileSync');
+    }
+  }
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
   // forceMode without mode falls back to permission preservation — otherwise
@@ -521,8 +554,9 @@ export function atomicWriteFileSync(
         if (options?.noFollow) {
           // See atomicWriteFile for the rationale — noFollow must not
           // be silently dropped on the cross-device fallback path.
+          // Non-ENOENT errors propagate.
           try {
-            fsSync.unlinkSync(targetPath);
+            unlinkImpl(targetPath);
           } catch (unlinkErr) {
             if (!isNodeError(unlinkErr) || unlinkErr.code !== 'ENOENT') {
               throw unlinkErr;
@@ -568,8 +602,12 @@ export function atomicWriteFileSync(
             if (!writeOk) {
               try {
                 fsSync.unlinkSync(targetPath);
-              } catch {
-                // best effort
+              } catch (orphanErr) {
+                debugLogger.debug(
+                  'orphan unlink failed for %s: %s',
+                  targetPath,
+                  orphanErr,
+                );
               }
             }
             throw writeErr;
