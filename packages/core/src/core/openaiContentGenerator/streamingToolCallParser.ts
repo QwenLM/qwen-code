@@ -18,6 +18,19 @@ export interface ToolCallParseResult {
   error?: Error;
   /** Whether the JSON was repaired (e.g., auto-closed unclosed strings) */
   repaired?: boolean;
+  /**
+   * The actual storage index this chunk was routed to. May differ from the
+   * caller-supplied index when collision handling reassigned the chunk. Always
+   * populated, regardless of `complete`. Callers driving Phase 1 of
+   * stream-driven tool dispatch (issue #4387) use this together with
+   * `markEmitted()` to de-duplicate against `getCompletedToolCalls()` at
+   * stream end.
+   */
+  index?: number;
+  /** Tool call ID known at this point (mirrors metadata for convenience) */
+  id?: string;
+  /** Tool call function name known at this point (mirrors metadata) */
+  name?: string;
 }
 
 /**
@@ -45,6 +58,13 @@ export class StreamingToolCallParser {
   private idToIndexMap: Map<string, number> = new Map();
   /** Counter for generating new indices when collisions occur */
   private nextAvailableIndex: number = 0;
+  /**
+   * Indices already emitted as `functionCall` parts during the stream. Used by
+   * Phase 1 of stream-driven tool dispatch (issue #4387) so that the
+   * `finish_reason` flush via `getCompletedToolCalls()` does not re-emit a
+   * tool call that was already surfaced mid-stream.
+   */
+  private emittedIndices: Set<number> = new Set();
 
   /**
    * Processes a new chunk of tool call data and attempts to parse complete JSON objects
@@ -184,7 +204,13 @@ export class StreamingToolCallParser {
       try {
         // Standard JSON parsing attempt
         const parsed = JSON.parse(newBuffer);
-        return { complete: true, value: parsed };
+        return {
+          complete: true,
+          value: parsed,
+          index: actualIndex,
+          id: meta.id,
+          name: meta.name,
+        };
       } catch (e) {
         // Intelligent repair: try auto-closing unclosed strings
         if (inString) {
@@ -194,6 +220,9 @@ export class StreamingToolCallParser {
               complete: true,
               value: repaired,
               repaired: true,
+              index: actualIndex,
+              id: meta.id,
+              name: meta.name,
             };
           } catch {
             // If repair fails, fall through to error case
@@ -202,12 +231,39 @@ export class StreamingToolCallParser {
         return {
           complete: false,
           error: e instanceof Error ? e : new Error(String(e)),
+          index: actualIndex,
+          id: meta.id,
+          name: meta.name,
         };
       }
     }
 
     // JSON structure is incomplete, continue accumulating chunks
-    return { complete: false };
+    return {
+      complete: false,
+      index: actualIndex,
+      id: meta.id,
+      name: meta.name,
+    };
+  }
+
+  /**
+   * Marks the given storage index as already emitted as a mid-stream
+   * `functionCall` part. `getCompletedToolCalls()` then omits this index so
+   * the `finish_reason` flush does not produce a duplicate.
+   *
+   * Phase 1 of stream-driven tool dispatch (issue #4387).
+   */
+  markEmitted(index: number): void {
+    this.emittedIndices.add(index);
+  }
+
+  /**
+   * Whether the given storage index has already been marked emitted via
+   * `markEmitted()`.
+   */
+  isEmitted(index: number): boolean {
+    return this.emittedIndices.has(index);
   }
 
   /**
@@ -247,6 +303,11 @@ export class StreamingToolCallParser {
     }> = [];
 
     for (const [index, buffer] of this.buffers.entries()) {
+      // Skip indices that were already surfaced mid-stream by
+      // streamingToolDispatch — the converter emits them once and marks them
+      // via `markEmitted()` so the finish_reason flush is duplicate-free.
+      if (this.emittedIndices.has(index)) continue;
+
       const meta = this.toolCallMeta.get(index);
       if (meta?.name && buffer.trim()) {
         let args: Record<string, unknown> = {};
@@ -382,6 +443,7 @@ export class StreamingToolCallParser {
     this.toolCallMeta.clear();
     this.idToIndexMap.clear();
     this.nextAvailableIndex = 0;
+    this.emittedIndices.clear();
   }
 
   /**

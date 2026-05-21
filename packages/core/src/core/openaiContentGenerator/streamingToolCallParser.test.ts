@@ -861,4 +861,57 @@ describe('StreamingToolCallParser', () => {
       expect(parser.getState(0).depth).toBe(1);
     });
   });
+
+  describe('markEmitted (Phase 1 streaming dispatch, #4387)', () => {
+    it('addChunk return includes the actual storage index, id and name', () => {
+      const parser = new StreamingToolCallParser();
+      const result = parser.addChunk(
+        0,
+        '{"file_path":"/x.ts"}',
+        'call_X',
+        'read_file',
+      );
+      expect(result.complete).toBe(true);
+      expect(result.index).toBe(0);
+      expect(result.id).toBe('call_X');
+      expect(result.name).toBe('read_file');
+      expect(result.value).toEqual({ file_path: '/x.ts' });
+    });
+
+    it('addChunk on an incomplete chunk still reports the routed index', () => {
+      const parser = new StreamingToolCallParser();
+      const result = parser.addChunk(0, '{"file_path":"/x', 'call_X', 'read_file');
+      expect(result.complete).toBe(false);
+      expect(result.index).toBe(0);
+      expect(result.id).toBe('call_X');
+      expect(result.name).toBe('read_file');
+    });
+
+    it('markEmitted suppresses the index from getCompletedToolCalls', () => {
+      const parser = new StreamingToolCallParser();
+      parser.addChunk(0, '{"file_path":"/x.ts"}', 'call_X', 'read_file');
+      parser.addChunk(1, '{"file_path":"/y.ts"}', 'call_Y', 'read_file');
+
+      parser.markEmitted(0);
+
+      const remaining = parser.getCompletedToolCalls();
+      expect(remaining.map((t) => t.id)).toEqual(['call_Y']);
+      expect(parser.isEmitted(0)).toBe(true);
+      expect(parser.isEmitted(1)).toBe(false);
+    });
+
+    it('reset clears the emitted-indices set', () => {
+      const parser = new StreamingToolCallParser();
+      parser.addChunk(0, '{"a":1}', 'call_A', 'fn_A');
+      parser.markEmitted(0);
+      parser.reset();
+
+      // After reset, the same index is fresh — adding it again must show up
+      // in getCompletedToolCalls (i.e., the emitted set didn't carry over).
+      parser.addChunk(0, '{"b":2}', 'call_B', 'fn_B');
+      const completed = parser.getCompletedToolCalls();
+      expect(completed.map((t) => t.id)).toEqual(['call_B']);
+      expect(parser.isEmitted(0)).toBe(false);
+    });
+  });
 });
