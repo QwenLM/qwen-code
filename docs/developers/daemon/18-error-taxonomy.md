@@ -59,6 +59,19 @@ Typed classes thrown by the bridge / mediator. Most carry an HTTP status via the
 | `BridgeChannelClosedError` | 503 | ACP child channel closed mid-call. | Reconnect / retry; check `session_died` for cause. |
 | `BridgeTimeoutError` | 504 | Bridge-level wallclock exceeded. | Retry; investigate underlying slowness. |
 
+## Boot-time configuration errors (`packages/cli/src/serve/runQwenServe.ts`)
+
+| Class | When | Remediation |
+|---|---|---|
+| `InvalidPolicyConfigError` | `validatePolicyConfig()` rejected the merged settings: unknown `policy.permissionStrategy` (validated against `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes` as the single source of truth) **OR** non-positive-integer `policy.consensusQuorum`. Boot fails loudly. | Fix the offending `settings.json` entry. The class is `instanceof`-checkable from tests; the boot catch in `runQwenServe` distinguishes it from settings-read I/O failures (which silently fall back to defaults). |
+
+## Device-flow auth (`packages/cli/src/serve/auth/deviceFlow.ts`)
+
+| Class | When | Caveat |
+|---|---|---|
+| `UpstreamDeviceFlowError` | The upstream IdP returned a structured error during device-flow polling. | `oauthError` field is sanitized through `sanitizeForStderr` (CVE-2021-42574 / Trojan-Source defense, see [`12-auth-security.md`](./12-auth-security.md)) before being interpolated into stderr / audit hints. |
+| `DeviceFlowPollTimeoutError` | The registry's race timer fired before the provider returned. | **Provider code MUST NOT throw this type.** The class is exported only because the public-export caveat requires it for tests, but the registry uses a runtime brand `_isRegistryTimeout: boolean` (NOT `instanceof`) to gate `pollTimedOut`. Any provider that imports + throws `new DeviceFlowPollTimeoutError(ms)` STILL routes through the generic provider-throw audit path because `_isRegistryTimeout` defaults to `false`; the brand is set only by the internal `makeRegistryPollTimeoutError(ms)` factory the race timer calls. |
+
 ## Daemon-host error kinds (`packages/cli/src/serve/status.ts`)
 
 `DaemonErrorKind` enum used by `GET /workspace/preflight` cells when the daemon-host check fails:
@@ -200,6 +213,19 @@ bridge / mediator 抛的 typed class，多数路由 handler 通过 switch 给出
 | `PermissionPolicyNotImplementedError` | 500 | 请求的策略未在本 daemon 构建 | 升级 daemon 或改 `policy.permissionStrategy` |
 | `BridgeChannelClosedError` | 503 | ACP child channel 在调用中关闭 | 重连 / 重试；查 `session_died` 找原因 |
 | `BridgeTimeoutError` | 504 | bridge 级 wallclock 超 | 重试；排查底层慢 |
+
+## Boot 时配置错误（`packages/cli/src/serve/runQwenServe.ts`）
+
+| 类 | 何时 | 修复 |
+|---|---|---|
+| `InvalidPolicyConfigError` | `validatePolicyConfig()` 拒了合并后的 settings：未知的 `policy.permissionStrategy`（按 `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes` 单一事实源校验）**或** `policy.consensusQuorum` 不是正整数。boot 显式失败 | 改 `settings.json` 里的违规字段。该类支持 `instanceof` 测试；`runQwenServe` 的 boot catch 用它区分配置错配与 settings 读 I/O 失败（后者静默回退默认） |
+
+## Device Flow auth（`packages/cli/src/serve/auth/deviceFlow.ts`）
+
+| 类 | 何时 | 注意 |
+|---|---|---|
+| `UpstreamDeviceFlowError` | 上游 IdP 在 device-flow 轮询时返了结构化错误 | `oauthError` 字段在插值进 stderr / audit hint 之前过 `sanitizeForStderr` 净化（CVE-2021-42574 / Trojan-Source 防御，见 [`12-auth-security.md`](./12-auth-security.md)） |
+| `DeviceFlowPollTimeoutError` | registry 的 race 定时器在 provider 返回前就触发了 | **provider 代码不能抛此类型**。导出该类只是因为测试需要，但 registry 用运行时品牌 `_isRegistryTimeout: boolean`（**不是** `instanceof`）来闸 `pollTimedOut`。provider 自己 import + 抛 `new DeviceFlowPollTimeoutError(ms)` 仍走 generic provider-throw 审计路径（因为 `_isRegistryTimeout` 默认 `false`），品牌只在内部工厂 `makeRegistryPollTimeoutError(ms)`（race 定时器调用点）设 |
 
 ## Daemon-host 错误 kind（`packages/cli/src/serve/status.ts`）
 

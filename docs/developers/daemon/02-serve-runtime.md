@@ -61,7 +61,7 @@
 6. **MCP budget validation** — positive integer; `enforce` requires a budget.
 7. **MCP pool toggle inference** — when `QWEN_SERVE_NO_MCP_POOL=1` is in the parent env, `mcpPoolActive` defaults to `false` so the capabilities envelope honestly drops `mcp_workspace_pool` + `mcp_pool_restart`.
 8. **Per-handle `childEnvOverrides`** — `QWEN_SERVE_MCP_CLIENT_BUDGET` and `QWEN_SERVE_MCP_BUDGET_MODE` are passed via `BridgeOptions.childEnvOverrides` (not by mutating `process.env`, which would race when two embedded daemons run in the same Node process).
-9. **Load `settings.json` once** for `context.fileName`, `policy.permissionStrategy`, `policy.consensusQuorum`; corruption falls back to defaults (`try/catch`).
+9. **Load `settings.json` once** for `context.fileName`, `policy.permissionStrategy`, `policy.consensusQuorum`; corruption falls back to defaults (`try/catch`). Then **`validatePolicyConfig()`** (`runQwenServe.ts:89+`) parses the `policy.*` section and throws `InvalidPolicyConfigError` for an unknown strategy (validated against `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes` as the single source of truth) or non-positive-integer `consensusQuorum`. A stderr warning fires when `consensusQuorum` is set under a non-`consensus` strategy (silently ignored otherwise — surface so operators don't think it's in effect). Settings-read I/O failures fall back to defaults; `InvalidPolicyConfigError` is rethrown so boot fails loudly.
 10. **Allocate `PermissionAuditRing`** (512 entries).
 11. **Build `fsFactory`** with `trusted: true` (the `runQwenServe` path is the trusted boot path; `createServeApp` direct callers default to `trusted: false` and warn once).
 12. **`createHttpAcpBridge`** — see [`03-acp-bridge.md`](./03-acp-bridge.md).
@@ -205,7 +205,7 @@ See [`17-configuration.md`](./17-configuration.md) for the consolidated referenc
 6. **MCP 预算校验**：必须正整数；`enforce` 必须配 budget。
 7. **MCP pool 开关推断**：父进程 env 里 `QWEN_SERVE_NO_MCP_POOL=1` 时，`mcpPoolActive` 默认 `false`，capabilities 也会诚实地不广播 `mcp_workspace_pool` + `mcp_pool_restart`。
 8. **per-handle `childEnvOverrides`**：把 `QWEN_SERVE_MCP_CLIENT_BUDGET` 和 `QWEN_SERVE_MCP_BUDGET_MODE` 通过 `BridgeOptions.childEnvOverrides` 传给 ACP 子进程，**不**改 `process.env`（同进程跑两个 daemon 会出 race）。
-9. **boot 一次 `settings.json`**：取 `context.fileName`、`policy.permissionStrategy`、`policy.consensusQuorum`；损坏文件 try/catch 走默认值。
+9. **boot 一次 `settings.json`**：取 `context.fileName`、`policy.permissionStrategy`、`policy.consensusQuorum`；损坏文件 try/catch 走默认值。之后 **`validatePolicyConfig()`**（`runQwenServe.ts:89+`）解析 `policy.*`，未知 strategy（按 `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes` 单一事实源校验）或非正整数 `consensusQuorum` 时抛 `InvalidPolicyConfigError`。`consensusQuorum` 设了但策略非 `consensus` 时打 stderr 警告（默认会被静默忽略，浮出来防 operator 误以为它生效）。settings 读 I/O 失败回退默认；`InvalidPolicyConfigError` 重抛让 boot 显式失败。
 10. **分配 `PermissionAuditRing`**（512 条）。
 11. **建 `fsFactory`**：`runQwenServe` 路径默认 `trusted: true`；`createServeApp` 直接调时默认 `trusted: false` 并发警告一次。
 12. **`createHttpAcpBridge`**，见 [`03-acp-bridge.md`](./03-acp-bridge.md)。

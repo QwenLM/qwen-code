@@ -53,10 +53,10 @@ The daemon loads `settings.json` once at boot (`runQwenServe.ts:496+`) via `load
 
 | Key | Type | Effect |
 |---|---|---|
-| `policy.permissionStrategy` | `'first-responder' \| 'designated' \| 'consensus' \| 'local-only'` | Sets `BridgeOptions.permissionPolicy`. Active value surfaces in `/capabilities`'s `policy.permission`. |
-| `policy.consensusQuorum` | positive integer | N for the `consensus` mediator policy. |
+| `policy.permissionStrategy` | `'first-responder' \| 'designated' \| 'consensus' \| 'local-only'` | Sets `BridgeOptions.permissionPolicy`. Active value surfaces in `/capabilities`'s `policy.permission`. **Boot-validated** by `validatePolicyConfig()` against `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes`; an unknown literal throws `InvalidPolicyConfigError` (boot fails loudly). |
+| `policy.consensusQuorum` | positive integer | N for the `consensus` mediator policy. **Default:** `floor(M/2) + 1` of `votersAtIssue.size` (unanimity for M=2; supermajority for larger even M). Setting this under a non-`consensus` strategy is silently ignored — a stderr warning fires at boot. Non-positive-integer values throw `InvalidPolicyConfigError`. See [`04-permission-mediation.md`](./04-permission-mediation.md). |
 | `context.fileName` | string | Overrides `getCurrentGeminiMdFilename()`; used by `BridgeOptions.contextFilename`. |
-| `tools.disabled` | string[] | Tool names disabled on next ACP child spawn. `POST /workspace/tools/:name/enable` and `tool_toggled` event mutate this. |
+| `tools.disabled` | string[] | Tool names disabled on next ACP child spawn. Normalized through `normalizeDisabledToolList()` (`packages/cli/src/config/normalizeDisabledTools.ts`): non-array → `[]`; non-string entries skipped; whitespace trimmed; empty-after-trim dropped; duplicates de-duped (first-occurrence order preserved). Boot path and `restartMcpServer` settings refresh both call this helper so `ToolRegistry.has(name)` exact-match stays consistent. **Not** case-folded — Stage 1 tool names are case-sensitive throughout the registry. `POST /workspace/tools/:name/enable` and `tool_toggled` event mutate this. |
 | `tools.approvalMode` | `'default' \| 'auto' \| ...` | Default approval mode for sessions. `POST /session/:id/approval-mode` (with `persist: true`) writes here. |
 
 ## `ServeOptions` (programmatic embed)
@@ -172,10 +172,10 @@ daemon boot 时读一次（`runQwenServe.ts:496+`）：`loadSettings(boundWorksp
 
 | 键 | 类型 | 效果 |
 |---|---|---|
-| `policy.permissionStrategy` | `'first-responder' \| 'designated' \| 'consensus' \| 'local-only'` | 设 `BridgeOptions.permissionPolicy`；激活值出现在 `/capabilities` 的 `policy.permission` |
-| `policy.consensusQuorum` | 正整数 | `consensus` 策略的 N |
+| `policy.permissionStrategy` | `'first-responder' \| 'designated' \| 'consensus' \| 'local-only'` | 设 `BridgeOptions.permissionPolicy`；激活值出现在 `/capabilities` 的 `policy.permission`。**boot 校验**通过 `validatePolicyConfig()`，对照 `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes`；未知字面量抛 `InvalidPolicyConfigError`，boot 显式失败 |
+| `policy.consensusQuorum` | 正整数 | `consensus` 策略的 N。**默认**：`votersAtIssue.size` 的 `floor(M/2) + 1`（M=2 一致同意；更大偶数 M 超过半数）。非 `consensus` 策略下设它会被静默忽略，boot 会打 stderr 警告。非正整数抛 `InvalidPolicyConfigError`。详见 [`04-permission-mediation.md`](./04-permission-mediation.md) |
 | `context.fileName` | string | 覆盖 `getCurrentGeminiMdFilename()`；走 `BridgeOptions.contextFilename` |
-| `tools.disabled` | string[] | 下次 ACP child spawn 时被禁的 tool；`POST /workspace/tools/:name/enable` 与 `tool_toggled` 事件改这里 |
+| `tools.disabled` | string[] | 下次 ACP child spawn 时被禁的 tool；通过 `normalizeDisabledToolList()`（`packages/cli/src/config/normalizeDisabledTools.ts`）归一化：非数组 → `[]`；非字符串项跳过；trim 空白；trim 后空串丢弃；去重（保留首次出现顺序）。boot 路径与 `restartMcpServer` settings 刷新都过这函数，`ToolRegistry.has(name)` 精确匹配才一致。**不**做大小写折叠 —— Stage 1 工具名在 registry 全程大小写敏感。`POST /workspace/tools/:name/enable` 与 `tool_toggled` 事件改这里 |
 | `tools.approvalMode` | `'default' \| 'auto' \| ...` | session 默认 approval mode；`POST /session/:id/approval-mode`（带 `persist: true`）写这里 |
 
 ## `ServeOptions`（程序化嵌入）

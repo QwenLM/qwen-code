@@ -97,6 +97,14 @@ The `code: 'token_required'` shape is distinct from `bearerAuth`'s plain `Unauth
 
 On loopback binds, `/health` is registered **before** the bearer middleware so liveness probes inside the pod don't need to carry the token. Non-loopback binds gate `/health` behind bearer like every other route. `--require-auth` drops the exemption: `/health` requires `Authorization: Bearer <token>` on loopback too.
 
+### Client identity (`X-Qwen-Client-Id`) is self-declared in v1
+
+The daemon validates `X-Qwen-Client-Id` format (`[A-Za-z0-9._:-]{1,128}`) and tracks per-session attached client ids, but does **no proof-of-possession** check today. A client observing `originatorClientId` on SSE frames can register with the same id and impersonate the originator on subsequent requests.
+
+This affects the **`designated`** permission policy (a remote client can spoof originator identity to vote on a request meant for the prompt's actual originator) and **`consensus`** (a client already in `votersAtIssue` can vote with the spoofed id). It does **NOT** affect `local-only` because that policy gates on `fromLoopback` (daemon-stamped from the connection's remote address, not client-supplied) and **NOT** affect `first-responder` (identity-independent).
+
+A pair-token mechanism (the daemon mints a per-session secret on `POST /session` and requires it on permission votes for `designated` / `consensus`) is planned for a future PR. For now, deployments needing designated-policy hardening should bind to loopback or run behind an authenticating reverse proxy that enforces identity. See [`04-permission-mediation.md`](./04-permission-mediation.md) for the policy-by-policy impact.
+
 ### Device-flow auth
 
 Separate OAuth surface for provider authentication (Qwen OAuth, etc.):
@@ -109,6 +117,19 @@ Separate OAuth surface for provider authentication (Qwen OAuth, etc.):
 SSE events `auth_device_flow_{started, throttled, authorized, failed, cancelled}` fan-out flow state to all subscribers so multi-client UIs stay in sync. See [`09-event-schema.md`](./09-event-schema.md).
 
 Implementation: `packages/cli/src/serve/auth/deviceFlow.ts` + `qwenDeviceFlowProvider.ts`.
+
+**Log-injection / Trojan-Source defense**: `sanitizeForStderr(value)` (`deviceFlow.ts:47-72`) strips ASCII C0 / DEL / C1 controls **plus** Unicode lookalikes a hostile IdP could use to forge log lines or hide payloads:
+
+| Range | Why it's stripped |
+|---|---|
+| `\x00–\x1f`, `\x7f`, `\x80–\x9f` | ASCII C0 / DEL / C1 — log-line forging, terminal control sequences. |
+| `​–‏` | Zero-width characters + LRM/RLM — invisible but alter terminal rendering. |
+| ` – ` | LINE / PARAGRAPH SEPARATOR — rendered as newlines in many Unicode-aware terminals; the most direct log-forging vector. |
+| `‪–‮` | Bidirectional EMBEDDING / OVERRIDE controls. |
+| `⁦–⁩` | Bidirectional ISOLATE controls (LRI / RLI / FSI / PDI) — the primary [CVE-2021-42574 ("Trojan Source")](https://trojansource.codes/) attack vectors. A hostile IdP swapping U+2066 (LRI) for U+202D (LRO) would otherwise bypass the embedding/override range while achieving the same bidi visual reordering. |
+| `﻿` | BOM / zero-width no-break space. |
+
+Length-preserving (each stripped code point becomes `?` rather than vanishing) so operators can still tell something was present at that index. Used at both layers: `qwenDeviceFlowProvider` sanitizes the IdP's `oauthError` field, and the registry's late-poll observer sanitizes provider-controlled `latePollResult.kind` / `lateErr.name` interpolated into audit hints.
 
 The `auth_device_flow` capability tag is advertised **unconditionally**; the routes themselves return `400 unsupported_provider` if the daemon can't satisfy a specific provider. The supported-providers list is on `/workspace/auth/status` rather than `/capabilities` to keep the descriptor shape uniform.
 
@@ -301,6 +322,14 @@ per-route opt-in 闸门。行为矩阵：
 
 loopback 绑定上，`/health` 注册在 bearer 中间件**之前**，pod 内部 liveness 探针不必带 token。非 loopback 绑定下 `/health` 也走 bearer。`--require-auth` 撤销豁免：loopback 上 `/health` 也要 `Authorization: Bearer <token>`。
 
+### v1 的 client 身份 (`X-Qwen-Client-Id`) 是自报
+
+daemon 只校验 `X-Qwen-Client-Id` 的格式（`[A-Za-z0-9._:-]{1,128}`）并按 session 跟踪 attach 的 client id；当下**不做** proof-of-possession 检查。客户端只要观察到 SSE 帧里的 `originatorClientId` 就能用同 id 重新注册，在后续请求里冒充 originator。
+
+影响范围：**`designated`** 策略（远端可以伪装 originator 给本应只属于 prompt 发起人的请求投票）；**`consensus`** 策略（如果 `votersAtIssue` 快照里已经有伪装 id，它能投）。**不**影响 `local-only`（按 `fromLoopback` 闸，daemon 按连接 remote address 盖戳），**不**影响 `first-responder`（与身份无关）。
+
+「pair-token」机制（`POST /session` 时 daemon 发一个 per-session secret，`designated` / `consensus` 投票必须带）将来 PR 落地。当下需要加固 designated 策略的部署应当绑 loopback 或挂在做认证的反代后面。详见 [`04-permission-mediation.md`](./04-permission-mediation.md) 各策略的具体影响。
+
 ### Device-flow auth
 
 provider 认证（Qwen OAuth 等）的独立 OAuth surface：
@@ -313,6 +342,32 @@ provider 认证（Qwen OAuth 等）的独立 OAuth surface：
 SSE 事件 `auth_device_flow_{started, throttled, authorized, failed, cancelled}` 把流状态扇出给所有订阅者，多客户端 UI 同步。见 [`09-event-schema.md`](./09-event-schema.md)。
 
 实现：`packages/cli/src/serve/auth/deviceFlow.ts` + `qwenDeviceFlowProvider.ts`。
+
+**日志注入 / Trojan-Source 防御**：`sanitizeForStderr(value)`（`deviceFlow.ts:47-72`）剥掉 ASCII C0 / DEL / C1 控制字符**外加** Unicode 同形字符 —— 恶意 IdP 可能用它们伪造日志行或隐藏 payload：
+
+| 范围 | 为什么剥 |
+|---|---|
+| `\x00–\x1f`、`\x7f`、`\x80–\x9f` | ASCII C0 / DEL / C1，日志行伪造、终端控制序列 |
+| U+200B–U+200F | 零宽字符 + LRM / RLM，隐形但能改终端渲染 |
+| U+2028–U+2029 | LINE / PARAGRAPH SEPARATOR，许多 Unicode-aware 终端把它当换行，最直接的日志伪造向量 |
+| U+202A–U+202E | 双向 EMBEDDING / OVERRIDE 控制 |
+| U+2066–U+2069 | 双向 ISOLATE 控制（LRI / RLI / FSI / PDI），[CVE-2021-42574 "Trojan Source"](https://trojansource.codes/) 主攻击向量。恶意 IdP 用 U+2066 (LRI) 替换 U+202D (LRO) 会绕过 EMBEDDING/OVERRIDE 范围却达到同样视觉重排 |
+| U+FEFF | BOM / 零宽不折断空格 |
+
+长度保持（每个被剥码点替换为 `?` 而不是消失），operator 在那索引处仍能看出有东西曾经在。两层都用：`qwenDeviceFlowProvider` 净化 IdP 的 `oauthError`，registry 的 late-poll 观察者净化插值进 audit hint 的 provider 可控值（`latePollResult.kind` / `lateErr.name`）。
+
+**日志注入 / Trojan-Source 防御**：`sanitizeForStderr(value)`（`deviceFlow.ts:47-72`）剥掉 ASCII C0 / DEL / C1 控制字符**外加** Unicode 同形字符 —— 恶意 IdP 可能用它们伪造日志行或隐藏 payload：
+
+| 范围 | 为什么剥 |
+|---|---|
+| `\x00–\x1f`、`\x7f`、`\x80–\x9f` | ASCII C0 / DEL / C1，日志行伪造、终端控制序列 |
+| `​–‏` | Zero-width 字符 + LRM/RLM，隐形但能改终端渲染 |
+| ` – ` | LINE / PARAGRAPH SEPARATOR，许多 Unicode-aware 终端把它当换行，最直接的日志伪造向量 |
+| `‪–‮` | 双向 EMBEDDING / OVERRIDE 控制 |
+| `⁦–⁩` | 双向 ISOLATE 控制（LRI / RLI / FSI / PDI），[CVE-2021-42574 "Trojan Source"](https://trojansource.codes/) 主攻击向量。恶意 IdP 用 U+2066 (LRI) 替换 U+202D (LRO) 会绕过 EMBEDDING/OVERRIDE 范围却达到同样视觉重排 |
+| `﻿` | BOM / 零宽不折断空格 |
+
+长度保持（每个被剥码点替换为 `?` 而不是消失），operator 在那索引处仍能看出有东西曾经在。两层都用：`qwenDeviceFlowProvider` 净化 IdP 的 `oauthError`，registry 的 late-poll 观察者净化插值进 audit hint 的 provider 可控值（`latePollResult.kind` / `lateErr.name`）。
 
 `auth_device_flow` 能力 tag **无条件**广播；路由本身在 daemon 不支持指定 provider 时返 `400 unsupported_provider`。支持的 provider 列表在 `/workspace/auth/status` 而不是 `/capabilities`，保持 descriptor 形状统一。
 

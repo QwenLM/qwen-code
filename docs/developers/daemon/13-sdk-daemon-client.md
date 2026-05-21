@@ -61,7 +61,7 @@ Method groups (every method takes an optional `clientId` to stamp `X-Qwen-Client
 Every request goes through `fetchWithTimeout`. Critical details:
 
 - **Body read is inside the timer scope.** Previous implementations cleared the timer when headers arrived; if a proxy stalled mid-body, `await res.json()` could hang past `fetchTimeoutMs`. The current shape passes the body-reading code as a callback so the timer covers both header arrival AND body consumption.
-- **`perCallTimeoutMs`** lets a single call override the client-wide default (e.g. `restartMcpServer` accepts up to 300s because the daemon waits for MCP rediscovery; passing `0` disables the timeout entirely).
+- **`perCallTimeoutMs`** lets a single call override the client-wide default. The most prominent use is `restartMcpServer`, which the SDK calls with `MCP_RESTART_DEFAULT_TIMEOUT_MS = 330_000` (5 min 30 s). The daemon's own `MCP_RESTART_TIMEOUT_MS` ceiling is exactly 300 s — matching the client to that value would race the daemon's response: a restart finishing or failing near 300 s could see the client's `AbortSignal` fire before the daemon serialized + transmitted the structured response, yielding a phantom client `TimeoutError` while the daemon was still within its own budget. The 30 s headroom covers serialization + on-the-wire transit + decode at both ends. Callers who want a tighter cap pass their own `timeoutMs`; passing `0` disables the timeout entirely.
 - **`AbortSignal.any`** composes caller-supplied signal with the per-call timer signal, so caller cancellation and per-call timeout both abort cleanly.
 - **`AbortController` + cancellable `setTimeout`** instead of `AbortSignal.timeout()` so fast-resolving requests don't leak pending timers on the event loop. Timer is cleared in `finally`.
 - **Streaming endpoints (`subscribeEvents`) bypass the timeout** — long-lived SSE must not be killed by it.
@@ -310,7 +310,7 @@ new DaemonClient({
 每个请求都过 `fetchWithTimeout`。关键细节：
 
 - **body 读取在定时器作用域内**。之前实现 header 一到就清定时器；代理在 body 中途卡住时 `await res.json()` 会超过 `fetchTimeoutMs` 仍然 hang。当前形态把读 body 的代码作为 callback 传入，定时器覆盖 header 到 body 全程。
-- **`perCallTimeoutMs`** 允许单次调用覆盖 client 级默认（比如 `restartMcpServer` 最多接受 300s 因为 daemon 等 MCP rediscovery；传 `0` 完全关闭超时）。
+- **`perCallTimeoutMs`** 允许单次调用覆盖 client 级默认。最显眼的使用方是 `restartMcpServer`，SDK 用 `MCP_RESTART_DEFAULT_TIMEOUT_MS = 330_000`（5 分 30 秒）。daemon 自己的 `MCP_RESTART_TIMEOUT_MS` 上限正好是 300 秒 —— client 与之精确相等会与 daemon 响应 race：接近 300 秒完成或失败的重启可能在 daemon 把结构化响应序列化 + 上线 + 编码完之前 client 的 `AbortSignal` 先 fire，给出一个假阳性 `TimeoutError` 而 daemon 其实还在自己预算之内。多出的 30 秒覆盖序列化 + 在线传输 + 两端解码。想要更紧的调用方自己传 `timeoutMs`；传 `0` 完全关闭超时。
 - **`AbortSignal.any`** 把调用方信号与 per-call 定时器信号组合，调用方取消和 per-call 超时都干净 abort。
 - **`AbortController` + 可取消 `setTimeout`** 而不是 `AbortSignal.timeout()`；快速完成的请求不会在 event loop 上留 pending 定时器。`finally` 里 `clearTimeout`。
 - **流式端点（`subscribeEvents`）绕过超时** —— 长 SSE 不能被它杀。

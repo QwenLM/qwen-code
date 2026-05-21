@@ -159,9 +159,50 @@ The bridge's session-teardown path always calls `forgetSession` **before** the c
 | Capability tag | `permission_mediation` (always; `modes: ['first-responder', 'designated', 'consensus', 'local-only']`) | Build-supported set. |
 | Capability envelope | `policy.permission` | Active policy this daemon is running. |
 
+## Consensus quorum: default formula and the M=2 edge case
+
+When `consensus` is the active policy and `policy.consensusQuorum` isn't explicitly set, the mediator computes the quorum as **N = floor(M/2) + 1** of `votersAtIssue.size` (`permissionMediator.ts:1030`, `Math.max(1, Math.floor(m / 2) + 1)`). This means:
+
+| M (clients in `votersAtIssue`) | Default N | Behavior |
+|---|---|---|
+| 1 | 1 | Single voter resolves immediately. |
+| 2 | 2 | **Unanimity required.** Both clients must agree on the same option. |
+| 3 | 2 | Majority. |
+| 4 | 3 | Supermajority. |
+| 5 | 3 | Majority. |
+| 6 | 4 | Supermajority. |
+
+For **M = 2 specifically**, split votes (one client picks option A, the other picks option B) **resolve only via the per-permission timeout** — neither option ever reaches unanimity, so the request stays pending until `permissionResponseTimeoutMs` (default 5 min) fires and resolves it as `{cancelled, timeout}`. The mediator emits a stderr breadcrumb at `permissionMediator.ts:486-495` calling out the unanimity-implies-split-via-timeout dynamic so operators can see it in logs.
+
+Operators wanting strict majority instead of unanimity for M = 2 can override via `policy.consensusQuorum: 1`, which collapses behavior to first-vote-wins effectively. Wider tunings (e.g. unanimity for M = 4) override via the same setting.
+
+## Boot-time policy validation
+
+`runQwenServe.validatePolicyConfig(policyConfig)` (`packages/cli/src/serve/runQwenServe.ts:89+`) parses the `policy.*` section of merged settings at boot and throws `InvalidPolicyConfigError` when the operator misconfigured:
+
+- `policy.permissionStrategy` is set to a value outside the four-literal set. The valid set is **derived at runtime** from `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes` (single source of truth, so adding a 5th policy in the future updates the validator and the capability advertisement together).
+- `policy.consensusQuorum` is set but isn't a positive integer.
+
+Plus a **soft warning** (stderr) when `consensusQuorum` is set but `permissionStrategy !== 'consensus'` — the override is silently ignored under non-consensus policies and the warning surfaces the dropped value so operators don't think it's in effect.
+
+`InvalidPolicyConfigError` is exported so tests can `instanceof`-check; the boot-time catch in `runQwenServe` distinguishes it from settings-read failures (rethrow on `InvalidPolicyConfigError`, fall back to defaults on settings-read I/O errors).
+
+## Security caveat: client identity is self-declared in v1
+
+`X-Qwen-Client-Id` is **self-declared** by the HTTP client and the daemon does **no proof-of-possession check** in v1. The daemon validates the format (`[A-Za-z0-9._:-]{1,128}`) and tracks per-session attached client ids in `clientIds`, but any client observing `originatorClientId` on SSE frames can register with the same id and impersonate the originator on subsequent requests.
+
+Implication for each policy:
+
+- **`first-responder`** — unaffected; the policy doesn't depend on identity.
+- **`designated`** — a remote client can spoof `originatorClientId` to vote on a request meant only for the prompt's originator. **This is acknowledged in `settings.json`'s `policy.permissionStrategy` description.**
+- **`consensus`** — votes are gated against the issue-time `votersAtIssue` snapshot, but if the snapshot already includes a spoofed id (i.e. the impersonator was already attached at request time), it can vote.
+- **`local-only`** — `fromLoopback: boolean` is **daemon-stamped** based on the connection's remote address, not client-supplied — this policy is robust against id spoofing because the gate is on the connection, not the id.
+
+A pair-token mechanism (the daemon issues a per-session secret on `POST /session` and requires it on permission votes for `designated` / `consensus`) is planned for a future PR but not in v1. Deployments that need designated-policy hardening today should bind to loopback (`local-only` policy, robust by construction) or run behind an authenticating proxy that enforces identity.
+
 ## Caveats & Known Limits
 
-- **Cancel sentinel routes BEFORE policy dispatch** by design — a `local-only` daemon and a `consensus` daemon can both be cancelled by any voter who posts `{outcome: 'cancelled'}`. This is documented at `permissionMediator.ts:50-57` and is the agent-side abort path.
+- **Cancel sentinel routes BEFORE policy dispatch** by design — a `local-only` daemon and a `consensus` daemon can both be cancelled by any voter who posts `{outcome: 'cancelled'}`. This is documented at `permissionMediator.ts:50-57` and is the agent-side abort path. **For `local-only`** specifically: remote clients **cannot RESOLVE** but they **can ABORT** a pending permission. F3 v1 keeps cancel cross-policy for consistency. Deployments that need strict-cancel-too (remote callers cannot influence pending permissions at all) must run a dedicated loopback-bound daemon — there is no per-policy cancel gate today.
 - **`designated` and `consensus` overload `designated_mismatch`** in `PermissionVoteOutcome`. The mediator emits separate audit records but the wire shape is single. Future protocol versions may split the union.
 - **Anonymous voters (no `X-Qwen-Client-Id`)** are accepted under `first-responder` and `local-only` (loopback) only; `designated` and `consensus` reject them.
 - **Cross-policy escape hatch** means cancel cannot be gated by policy. If a deployment needs policy-gated cancel that would be a future contract change — do not paper-over with route-level checks.
@@ -307,9 +348,50 @@ bridge 的 session-teardown 路径永远在 channel-kill 窗口**之前**调 `fo
 | 能力 tag | `permission_mediation`（恒；`modes: ['first-responder', 'designated', 'consensus', 'local-only']`） | 构建期支持集 |
 | 能力 envelope | `policy.permission` | 当前 daemon 跑的策略 |
 
+## Consensus 法定人数：默认公式与 M=2 边界
+
+`consensus` 策略激活且 `policy.consensusQuorum` 没显式配置时，mediator 按 **N = floor(M/2) + 1** 算 quorum（`permissionMediator.ts:1030`，`Math.max(1, Math.floor(m / 2) + 1)`）。具体：
+
+| M（`votersAtIssue.size`） | 默认 N | 行为 |
+|---|---|---|
+| 1 | 1 | 单投票者立即裁决 |
+| 2 | 2 | **要求一致同意**，两个客户端必须选同一选项 |
+| 3 | 2 | 多数 |
+| 4 | 3 | 超过半数 |
+| 5 | 3 | 多数 |
+| 6 | 4 | 超过半数 |
+
+**M = 2** 时分票（A 选 X，B 选 Y）**只能靠 per-permission 超时**裁决 —— 哪个选项都到不了一致同意，请求挂到 `permissionResponseTimeoutMs`（默认 5 min）触发，解析为 `{cancelled, timeout}`。mediator 在 `permissionMediator.ts:486-495` 打 stderr 提示这层「一致同意 → 分票走超时」语义，operator 在日志里能看到。
+
+operator 想要 M = 2 时严格多数（不要一致同意）可以显式 `policy.consensusQuorum: 1`，行为塌陷为「第一票即胜」。更宽松配置（比如 M = 4 也强制一致）也通过同字段调。
+
+## Boot 时策略校验
+
+`runQwenServe.validatePolicyConfig(policyConfig)`（`packages/cli/src/serve/runQwenServe.ts:89+`）在 boot 时解析合并后的 settings `policy.*` 段，operator 配错时抛 `InvalidPolicyConfigError`：
+
+- `policy.permissionStrategy` 设了但不在四值集合内。合法集合**运行时派生**自 `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes`（单一事实源，将来加第五种策略时校验器和能力广播一起更新）。
+- `policy.consensusQuorum` 设了但不是正整数。
+
+外加一条**软警告**（stderr）：`consensusQuorum` 设了但 `permissionStrategy !== 'consensus'` —— override 在非 consensus 策略下会被静默丢掉，警告浮出来，operator 不会以为它生效。
+
+`InvalidPolicyConfigError` 导出供测试 `instanceof`；`runQwenServe` 的 boot catch 用它区分 operator 错配（rethrow → 显式 boot 失败）和 settings 读 I/O 失败（fallback 默认）。
+
+## 安全注意：v1 的 client 身份是自报
+
+`X-Qwen-Client-Id` 由 HTTP 客户端**自报**，daemon 在 v1 **不做** proof-of-possession 检查。daemon 校验格式（`[A-Za-z0-9._:-]{1,128}`），按 session 跟踪 attach 的 client id 进 `clientIds`，但任何客户端只要观察到 SSE 帧里的 `originatorClientId`，就能用同 id 注册并在后续请求里冒充 originator。
+
+每个策略的影响：
+
+- **`first-responder`** —— 不受影响，策略不依赖身份。
+- **`designated`** —— 远端客户端可以伪装 `originatorClientId`，对本应只让 prompt 发起人投票的请求投票。**`settings.json` 的 `policy.permissionStrategy` 描述里有显式标注。**
+- **`consensus`** —— 投票按 issue-time `votersAtIssue` 快照闸；快照里如果已经有伪装 id（冒充者在 request 时就 attach 了），它就能投。
+- **`local-only`** —— `fromLoopback: boolean` 由 daemon 按连接的 remote address 盖戳，**不**取自客户端，所以这个策略对 id 伪装免疫，闸是按连接而非按 id。
+
+「pair-token」机制（daemon 在 `POST /session` 发一个 per-session secret，`designated` / `consensus` 投票时必须带）将来 PR 落地，v1 没有。今天想加固 designated 策略的部署应当绑 loopback（`local-only` 天然 robust），或挂在做认证的反代后面。
+
 ## 注意 & 已知局限
 
-- **Cancel 哨兵在策略派发之前路由**是刻意的 —— `local-only` 和 `consensus` 都能被任何投 `{outcome: 'cancelled'}` 的客户端取消。这是 agent 侧 abort 路径，文档在 `permissionMediator.ts:50-57`。
+- **Cancel 哨兵在策略派发之前路由**是刻意的 —— `local-only` 和 `consensus` 都能被任何投 `{outcome: 'cancelled'}` 的客户端取消。这是 agent 侧 abort 路径，文档在 `permissionMediator.ts:50-57`。**`local-only` 特别注意**：远端客户端**不能 RESOLVE**，但**能 ABORT** pending permission。F3 v1 把 cancel 跨策略统一是出于一致性考虑。需要严格 cancel-too（远端调用方完全不能影响 pending）的部署必须跑专用 loopback-bound daemon —— 当下没有 per-policy cancel 闸。
 - **`designated` 与 `consensus` 都用 `designated_mismatch`** 在 `PermissionVoteOutcome` 里重载；mediator 写不同 audit，但 wire 形状一致。未来协议版本可能拆。
 - **匿名投票者（无 `X-Qwen-Client-Id`）** 只在 `first-responder` 和 `local-only`（loopback）下被接受；`designated` / `consensus` 拒。
 - **跨策略 escape** 意味着 cancel 无法被策略 gate。如果部署需要 policy-gated cancel，那是未来契约变化，不要用路由级 check paper-over。
