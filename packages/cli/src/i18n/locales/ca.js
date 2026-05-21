@@ -131,6 +131,46 @@ export default {
     'Canviar el nom de la conversa actual. --auto permet que el model ràpid triï un títol.',
   'Rewind conversation to a previous turn':
     'Rebobinar la conversa fins a un torn anterior',
+  'Rewind Conversation': 'Rebobinar la conversa',
+  'No user turns to rewind to.': "No hi ha torns d'usuari per rebobinar.",
+  'Rewind to: ': 'Rebobinar a: ',
+  'Restore code and conversation': 'Restaura el codi i la conversa',
+  'Restore conversation only': 'Restaura només la conversa',
+  'Restore code only': 'Restaura només el codi',
+  'Never mind': 'Tant és',
+  'Computing file changes...': "S'estan calculant els canvis als fitxers...",
+  'Restoring...': "S'està restaurant...",
+  'Restored {{count}} file(s).': "S'han restaurat {{count}} fitxer(s).",
+  'Failed to restore files: {{error}}':
+    'Error en restaurar els fitxers: {{error}}',
+  'Rewind failed: {{error}}': 'Error en retrocedir: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'No es pot retrocedir la conversa: cap client de model actiu.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Codi restaurat, però la conversa no s’ha pogut retrocedir (cap client actiu).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Conversa retrocedida. Edita la teva indicació i prem Retorn per continuar.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'El retrocés no afecta els fitxers editats manualment o mitjançant comandes de shell.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'No es pot retrocedir a un torn que ha estat comprimit. Prova amb un torn més recent.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'La restauració de fitxers no està disponible per a aquest torn (no s’han capturat canvis, o aquest torn és anterior a la sessió actual).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} en {{count}} fitxer)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} en {{count}} fitxers)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Error en restaurar {{count}} fitxer(s): {{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'No es poden restaurar els fitxers: aquest torn es va crear abans que el punt de control de fitxers estigués habilitat.',
+  'No files needed to be restored.': 'Cap fitxer necessitava restauració.',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ per navegar · Enter per seleccionar · Esc per tornar',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ per navegar · Enter per seleccionar · Esc per cancel·lar',
+  'Enter/Y to confirm · Esc/N to go back':
+    'Enter/Y per confirmar · Esc/N per tornar',
   'change the theme': 'canviar el tema',
   'Select Theme': 'Seleccionar tema',
   Preview: 'Previsualització',
@@ -150,8 +190,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'obrir la documentació completa de Qwen Code al navegador',
   'Configuration not available.': 'Configuració no disponible.',
-  'Configure authentication information for login':
-    "Configurar la informació d'autenticació per a iniciar sessió",
+  'Connect an LLM provider': 'Connectar un proveïdor LLM',
   'Copy the last result or code snippet to clipboard':
     "Copiar l'últim resultat o fragment de codi al porta-retalls",
 
@@ -1074,9 +1113,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Benvingut de nou! (Darrera actualització: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Objectiu general:',
-  'Select Authentication Method': "Seleccioneu el mètode d'autenticació",
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    "Cal seleccionar un mètode d'autenticació per continuar. Premeu Ctrl+C de nou per sortir.",
+  'Connect a Provider': 'Connectar un proveïdor',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'Cal connectar un proveïdor per continuar. Premeu Ctrl+C de nou per sortir.',
   'Terms of Services and Privacy Notice':
     'Termes de servei i avís de privacitat',
   'Qwen OAuth': 'Qwen OAuth',
@@ -1809,26 +1848,6 @@ export default {
   'Loading suggestions...': "S'estan carregant els suggeriments...",
   'Show per-item context usage breakdown.':
     "Mostrar el desglossament de l'ús del context per element.",
-  'Manage dynamic translation cache':
-    'Gestionar la memòria cau de traducció dinàmica',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    "Retraduir les descripcions de les ordres de barra dinàmiques carregades per a l'idioma de la interfície actual",
-  'Clear cached translations for the current UI language':
-    "Esborrar les traduccions emmagatzemades a la memòria cau per a l'idioma de la interfície actual",
-  'Manage AI translation for dynamic slash command descriptions':
-    "Gestionar la traducció amb IA de les descripcions dinàmiques d'ordres slash",
-  'Enable AI translation for dynamic slash command descriptions':
-    "Activar la traducció amb IA de les descripcions dinàmiques d'ordres slash",
-  'Disable AI translation for dynamic slash command descriptions':
-    "Desactivar la traducció amb IA de les descripcions dinàmiques d'ordres slash",
-  'Show AI translation status for dynamic slash command descriptions':
-    "Mostrar l'estat de la traducció amb IA de les descripcions dinàmiques d'ordres slash",
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    "La traducció amb IA de les descripcions dinàmiques d'ordres slash està {{status}}.",
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    "La traducció amb IA de les descripcions dinàmiques d'ordres slash ara està activada.",
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    "La traducció amb IA de les descripcions dinàmiques d'ordres slash ara està desactivada.",
   'Lock release warning': "Avís d'alliberament del bloqueig",
   'Metadata write warning': "Avís d'escriptura de metadades",
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":

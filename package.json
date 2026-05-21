@@ -26,15 +26,15 @@
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
     "generate:settings-schema": "node --import tsx/esm scripts/generate-settings-schema.ts",
-    "build": "node scripts/build.js",
+    "build": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" node scripts/build.js",
     "build-and-start": "npm run build && npm run start",
     "build:vscode": "node scripts/build_vscode_companion.js",
     "build:all": "npm run build && npm run build:sandbox && npm run build:vscode",
     "build:packages": "npm run build --workspaces",
     "build:sandbox": "node scripts/build_sandbox.js",
     "bundle": "npm run generate && node esbuild.config.js && node scripts/copy_bundle_assets.js",
-    "test": "npm run test --workspaces --if-present --parallel",
-    "test:ci": "npm run test:ci --workspaces --if-present --parallel && npm run test:scripts",
+    "test": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test --workspaces --if-present --parallel",
+    "test:ci": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present --parallel && npm run test:scripts",
     "test:scripts": "vitest run --config ./scripts/tests/vitest.config.ts",
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
     "test:integration:all": "npm run test:integration:sandbox:none && npm run test:integration:sandbox:docker && npm run test:integration:sandbox:podman",
@@ -79,7 +79,11 @@
       "wrap-ansi": "7.0.0"
     },
     "baseline-browser-mapping": "^2.9.19",
-    "normalize-package-data": "^7.0.1"
+    "normalize-package-data": "^7.0.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0"
   },
   "bin": {
     "qwen": "dist/cli.js"
@@ -130,7 +134,7 @@
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
-    "ink": "^6.2.3",
+    "ink": "^7.0.3",
     "simple-git": "^3.28.0"
   },
   "optionalDependencies": {

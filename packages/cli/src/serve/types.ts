@@ -4,17 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  SERVE_FEATURES,
+  type ServeFeature,
+  type ServeProtocolVersions,
+} from './capabilities.js';
+
 /**
  * Stage 1 daemon mode shape.
  *
- * `http-bridge` (Stage 1): one `qwen --acp` child PER WORKSPACE, with
- *   multiple sessions multiplexed onto that child via the agent's native
- *   `connection.newSession()` (see `acp-integration/acpAgent.ts:194`).
- *   Sessions on the same workspace share the child's process / OAuth /
- *   file-cache / hierarchy-memory parse. The daemon pipes ACP NDJSON over
- *   HTTP/SSE. Same-session multi-client requests serialize through the
- *   bridge's per-session FIFO; cross-session requests on the same channel
- *   can run concurrently (the ACP layer demultiplexes by sessionId).
+ * `http-bridge` (Stage 1): per #3803 §02, one `qwen --acp` child per
+ *   daemon (the daemon binds to ONE workspace at boot). Multiple
+ *   sessions multiplex onto that child via the agent's native
+ *   `connection.newSession()` (see `acp-integration/acpAgent.ts:194`),
+ *   sharing the child's process / OAuth / file-cache / hierarchy-memory
+ *   parse. The daemon pipes ACP NDJSON over HTTP/SSE. Same-session
+ *   multi-client requests serialize through the bridge's per-session
+ *   FIFO; cross-session requests on the same channel can run
+ *   concurrently (the ACP layer demultiplexes by sessionId).
  * `native` (Stage 2+): in-process multi-session, AsyncLocalStorage; not yet
  *   implemented.
  */
@@ -56,6 +63,75 @@ export interface ServeOptions {
    * (default cap 64) plus short-lived REST calls.
    */
   maxConnections?: number;
+  /**
+   * Per-session SSE replay ring depth. Threaded into the bridge as
+   * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
+   * construction site. Defaults to 8000 (the target named in
+   * #3803 §02 for chatty Stage 1 sessions). Must be a positive
+   * finite integer — `0` / `NaN` / negative fail at boot. Larger
+   * rings let clients with longer reconnect gaps replay more history
+   * at the cost of a few hundred KB extra RAM per session.
+   */
+  eventRingSize?: number;
+  /**
+   * Absolute workspace path this daemon binds to. Per #3803 §02 the
+   * daemon is **1 daemon = 1 workspace × N sessions**: one bound
+   * workspace at boot, sessions multiplexed on the single
+   * `qwen --acp` child via `connection.newSession()`.
+   *
+   * `POST /session` calls whose `cwd` doesn't canonicalize to this
+   * path are rejected with `400 workspace_mismatch`. Clients may
+   * also omit `cwd` — the route falls back to this bound path.
+   *
+   * Multi-workspace deployments use **multiple daemon processes**
+   * (one per workspace, each on its own port), supervised by
+   * systemd / docker-compose / k8s / `qwen-coordinator` reference
+   * orchestrator. There is no intra-daemon multi-workspace mode
+   * (the previous Stage 1 `byWorkspaceChannel` routing layer was
+   * removed in the §02 design revision).
+   *
+   * Defaults to `process.cwd()` when omitted.
+   */
+  workspace?: string;
+  /**
+   * Issue #4175 PR 15. When true, refuses to boot without a bearer
+   * token — even on loopback. Loopback's no-token developer default
+   * is convenient for local prototyping but unsafe to ship inside
+   * shared dev environments / CI runners / multi-tenant workstations
+   * (any local user can hit `127.0.0.1:4170` and drive the agent).
+   * `--require-auth` opts the operator into "token mandatory"
+   * regardless of bind interface; the global `bearerAuth` middleware
+   * then gates every route, including `/health`.
+   *
+   * Default `false` so existing single-user loopback workflows keep
+   * working bit-for-bit. Non-loopback binds already require a token
+   * irrespective of this flag.
+   */
+  requireAuth?: boolean;
+  /**
+   * Issue #4175 PR 14. Cap on live MCP clients spawned inside the
+   * ACP child for the bound workspace. When set, the daemon
+   * forwards `QWEN_SERVE_MCP_CLIENT_BUDGET` to the child's env so
+   * core's `McpClientManager` picks it up. Combined with
+   * `mcpBudgetMode`:
+   *   - `warn` (default when budget set): no refusal, snapshot
+   *     surfaces `status: 'warning'` at >=75% of budget.
+   *   - `enforce`: connects past the cap are refused, per-server
+   *     cell shows `disabledReason: 'budget'`, deterministic by
+   *     `Object.entries(mcpServers)` declaration order.
+   *   - `off`: no accounting-driven enforcement (the implicit
+   *     default when no budget is configured).
+   *
+   * Positive integer required; non-positive / NaN values throw at
+   * boot.
+   */
+  mcpClientBudget?: number;
+  /**
+   * Issue #4175 PR 14. Enforcement mode for `mcpClientBudget`.
+   * Boot rejects `enforce` without a budget; otherwise resolves to
+   * `warn` when budget set / `off` when budget unset.
+   */
+  mcpBudgetMode?: 'enforce' | 'warn' | 'off';
 }
 
 /**
@@ -66,6 +142,11 @@ export interface ServeOptions {
  */
 export interface CapabilitiesEnvelope {
   v: 1;
+  /**
+   * Serve protocol versions supported by this daemon. Optional because this is
+   * additive to v=1; older v=1 daemons omit it.
+   */
+  protocolVersions?: ServeProtocolVersions;
   mode: ServeMode;
   features: string[];
   /**
@@ -77,38 +158,29 @@ export interface CapabilitiesEnvelope {
    * this field being non-empty.
    */
   modelServices: string[];
+  /**
+   * Absolute workspace path this daemon is bound to (per #3803 §02:
+   * `1 daemon = 1 workspace`). Clients use this to:
+   *   - Detect mismatch before posting `/session` (vs. waiting for
+   *     400 workspace_mismatch from the bridge).
+   *   - Omit `cwd` on `POST /session` — the route falls back to this
+   *     path when the body has no `cwd` field.
+   *
+   * Optional at the type level (matches the SDK's `DaemonCapabilities`
+   * type) because the field is an additive extension of the v=1
+   * envelope introduced by #3803 §02. Daemons predating §02 still
+   * announce `v: 1` and omit this field; the protocol's "bump v only
+   * on incompatible frame changes" stance (see `qwen-serve-protocol.md`
+   * "Additive to v=1" note) makes additive optionality the correct
+   * shape. The post-§02 server code here always populates it.
+   */
+  workspaceCwd?: string;
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;
 
-/**
- * Stage 1 ships only the routes wired in `server.ts`. As routes land in
- * follow-up PRs, append the corresponding feature tag here so clients can
- * progressively enable UI affordances.
- *
- * The annotation is intentionally absent: `as const` widens to
- * `readonly ['health', 'capabilities', ...]` and the derived
- * `Stage1Feature` union catches typos at compile time. Annotating as
- * `readonly string[]` would erase the literal information.
- */
-// FIXME(stage-1.5, chiga0 finding 5):
-// `STAGE1_FEATURES` is a hard-coded constant — `extMethod` plugins
-// can't contribute to the capability set without editing the daemon.
-// Stage 1.5 should convert this to a registry that bridges and
-// plugins push into, alongside an `ext_*` event family + a
-// `POST /ext/:method` route. Tracked under #3803.
-// Reference: https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
-export const STAGE1_FEATURES = [
-  'health',
-  'capabilities',
-  'session_create',
-  'session_list',
-  'session_prompt',
-  'session_cancel',
-  'session_events',
-  'session_set_model',
-  'permission_vote',
-] as const;
+/** @deprecated Use SERVE_FEATURES from the capability registry. */
+export const STAGE1_FEATURES = SERVE_FEATURES;
 
-/** Compile-time-checked feature identifier — element of STAGE1_FEATURES. */
-export type Stage1Feature = (typeof STAGE1_FEATURES)[number];
+/** @deprecated Use ServeFeature from the capability registry. */
+export type Stage1Feature = ServeFeature;

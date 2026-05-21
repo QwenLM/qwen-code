@@ -91,6 +91,45 @@ export default {
   'Rename the current conversation. --auto lets the fast model pick a title.':
     '現在の会話の名前を変更する。--auto を使うと高速モデルがタイトルを決めます。',
   'Rewind conversation to a previous turn': '会話を前のターンまで巻き戻す',
+  'Rewind Conversation': '会話を巻き戻す',
+  'No user turns to rewind to.': '巻き戻せるユーザーターンがありません。',
+  'Rewind to: ': '巻き戻し先：',
+  'Restore code and conversation': 'コードと会話を復元',
+  'Restore conversation only': '会話のみ復元',
+  'Restore code only': 'コードのみ復元',
+  'Never mind': 'やめる',
+  'Computing file changes...': 'ファイルの変更を計算中...',
+  'Restoring...': '復元中...',
+  'Restored {{count}} file(s).': '{{count}} 個のファイルを復元しました。',
+  'Failed to restore files: {{error}}':
+    'ファイルの復元に失敗しました：{{error}}',
+  'Rewind failed: {{error}}': '巻き戻しに失敗しました：{{error}}',
+  'Cannot rewind conversation: no active model client.':
+    '会話を巻き戻せません：アクティブなモデルクライアントがありません。',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'コードは復元されましたが、会話は巻き戻せませんでした（モデルクライアントがアクティブではありません）。',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    '会話を巻き戻しました。プロンプトを編集して Enter キーで続行してください。',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    '巻き戻しは、手動で編集されたファイルや shell コマンドで変更されたファイルには影響しません。',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    '圧縮されたターンへは巻き戻せません。より最近のターンをお試しください。',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'このターンではファイル復元できません（捕捉されたファイル変更がないか、現在のセッションより前のターンです）。',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}}、{{count}} 個のファイル)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}}、{{count}} 個のファイル)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    '{{count}} 個のファイルの復元に失敗しました：{{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'ファイルを復元できません：このターンはファイルチェックポイントが有効になる前に作成されました。',
+  'No files needed to be restored.': '復元が必要なファイルはありません。',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ 移動 · Enter 選択 · Esc 戻る',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ 移動 · Enter 選択 · Esc キャンセル',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y 確認 · Esc/N 戻る',
   'change the theme': 'テーマを変更',
   'Select Theme': 'テーマを選択',
   Preview: 'プレビュー',
@@ -108,8 +147,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'ブラウザで Qwen Code のドキュメントを開く',
   'Configuration not available.': '設定が利用できません',
-  'Configure authentication information for login':
-    'ログイン用の認証情報を設定',
+  'Connect an LLM provider': 'LLM プロバイダーに接続',
   'Copy the last result or code snippet to clipboard':
     '最後の結果またはコードスニペットをクリップボードにコピー',
 
@@ -418,6 +456,8 @@ export default {
   'Before conversation compaction': '会話圧縮前',
   'When a session is ending': 'セッション終了時',
   'When a permission dialog is displayed': '権限ダイアログ表示時',
+  'When a new todo item is created': '新Todo項目作成時',
+  'When a todo item is marked as completed': 'Todo項目完了時',
   // Hooks - Event Descriptions (detailed)
   'Input to command is JSON of tool call arguments.':
     'コマンドへの入力はツール呼び出し引数の JSON です。',
@@ -441,6 +481,10 @@ export default {
     'コマンドへの入力は圧縮詳細を持つ JSON です。',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'コマンドへの入力は tool_name、tool_input、tool_use_id を持つ JSON です。許可または拒否の決定を含む hookSpecificOutput を持つ JSON を出力します。',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'コマンドへの入力は todo_id、todo_content、todo_status、all_todos、phase を持つ JSON です。validation では decision（allow/block/deny）と reason を持つ JSON を出力します。postWrite では block/deny は無視されます。',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'コマンドへの入力は todo_id、todo_content、previous_status、all_todos、phase を持つ JSON です。validation では decision（allow/block/deny）と reason を持つ JSON を出力します。postWrite では block/deny は無視されます。',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr は表示されません',
   'show stderr to model and continue conversation':
@@ -466,6 +510,12 @@ export default {
   'show stderr to user only but continue with compaction':
     'stderr をユーザーのみに表示し、圧縮を続ける',
   'use hook decision if provided': '提供されている場合はフックの決定を使用',
+  'allow todo creation': 'Todo作成を許可',
+  'block todo creation and show reason to model':
+    'Todo作成をブロックし、理由をモデルに表示',
+  'allow todo completion': 'Todo完了を許可',
+  'block todo completion and show reason to model':
+    'Todo完了をブロックし、理由をモデルに表示',
   // Hooks - Messages
   'Config not loaded.': '設定が読み込まれていません。',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
@@ -779,9 +829,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 おかえりなさい!(最終更新: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 全体目標:',
-  'Select Authentication Method': '認証方法を選択',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    '続行するには認証方法を選択してください。Ctrl+C をもう一度押すと終了します',
+  'Connect a Provider': 'プロバイダーに接続',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    '続行するにはプロバイダーに接続してください。Ctrl+C をもう一度押すと終了します',
   'Terms of Services and Privacy Notice': '利用規約とプライバシー通知',
   'Qwen OAuth': 'Qwen OAuth',
   'Discontinued — switch to Coding Plan or API Key':
@@ -1331,24 +1381,6 @@ export default {
   'update available': '更新あり',
   'checking...': '確認中...',
   'not updatable': '更新不可',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    '現在の UI 言語の動的スラッシュコマンド説明を再翻訳',
-  'Clear cached translations for the current UI language':
-    '現在の UI 言語の翻訳キャッシュをクリア',
-  'Manage AI translation for dynamic slash command descriptions':
-    '動的スラッシュコマンド説明の AI 翻訳を管理',
-  'Enable AI translation for dynamic slash command descriptions':
-    '動的スラッシュコマンド説明の AI 翻訳を有効化',
-  'Disable AI translation for dynamic slash command descriptions':
-    '動的スラッシュコマンド説明の AI 翻訳を無効化',
-  'Show AI translation status for dynamic slash command descriptions':
-    '動的スラッシュコマンド説明の AI 翻訳状態を表示',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    '動的スラッシュコマンド説明の AI 翻訳は{{status}}です。',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    '動的スラッシュコマンド説明の AI 翻訳を有効にしました。',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    '動的スラッシュコマンド説明の AI 翻訳を無効にしました。',
   'LLM output language set to {{lang}}':
     'LLM 出力言語を {{lang}} に設定しました',
   'Tool Approval Mode': 'ツール承認モード',
@@ -1408,7 +1440,6 @@ export default {
     'コンテキストウィンドウ使用量の内訳を表示します。項目ごとの内訳は "/context detail" を使用してください。',
   'Show per-item context usage breakdown.':
     '項目ごとのコンテキスト使用量の内訳を表示します。',
-  'Manage dynamic translation cache': '動的翻訳キャッシュを管理',
 
   // === Missing key backfill ===
   Status: 'ステータス',

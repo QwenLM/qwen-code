@@ -40,7 +40,10 @@ export const ToolNames = {
   SEND_MESSAGE: 'send_message',
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
+  NOTEBOOK_EDIT: 'notebook_edit',
   TOOL_SEARCH: 'tool_search',
+  ENTER_WORKTREE: 'enter_worktree',
+  EXIT_WORKTREE: 'exit_worktree',
 } as const;
 
 /**
@@ -71,7 +74,10 @@ export const ToolDisplayNames = {
   SEND_MESSAGE: 'SendMessage',
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
+  NOTEBOOK_EDIT: 'NotebookEdit',
   TOOL_SEARCH: 'ToolSearch',
+  ENTER_WORKTREE: 'EnterWorktree',
+  EXIT_WORKTREE: 'ExitWorktree',
 } as const;
 
 // Migration from old tool names to new tool names

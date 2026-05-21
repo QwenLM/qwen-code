@@ -130,6 +130,47 @@ export default {
     'Renommer la conversation en cours. --auto laisse le modèle rapide choisir un titre.',
   'Rewind conversation to a previous turn':
     'Revenir à un tour précédent de la conversation',
+  'Rewind Conversation': 'Rembobiner la conversation',
+  'No user turns to rewind to.':
+    'Aucun tour utilisateur vers lequel rembobiner.',
+  'Rewind to: ': 'Rembobiner vers : ',
+  'Restore code and conversation': 'Restaurer le code et la conversation',
+  'Restore conversation only': 'Restaurer la conversation uniquement',
+  'Restore code only': 'Restaurer le code uniquement',
+  'Never mind': 'Annuler',
+  'Computing file changes...': 'Calcul des modifications de fichiers...',
+  'Restoring...': 'Restauration en cours...',
+  'Restored {{count}} file(s).': '{{count}} fichier(s) restauré(s).',
+  'Failed to restore files: {{error}}':
+    'Échec de la restauration des fichiers : {{error}}',
+  'Rewind failed: {{error}}': 'Échec du retour en arrière : {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Impossible de revenir en arrière sur la conversation : aucun client de modèle actif.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Code restauré, mais la conversation n’a pas pu être ramenée en arrière (aucun client actif).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Conversation ramenée en arrière. Modifiez votre invite et appuyez sur Entrée pour continuer.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'Le retour en arrière n’affecte pas les fichiers édités manuellement ou via des commandes shell.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Impossible de revenir à un tour qui a été compressé. Essayez un tour plus récent.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'La restauration des fichiers est indisponible pour ce tour (aucune modification capturée, ou ce tour est antérieur à la session actuelle).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} dans {{count}} fichier)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} dans {{count}} fichiers)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Échec de la restauration de {{count}} fichier(s) : {{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    "Impossible de restaurer les fichiers : ce tour a été créé avant l'activation des points de contrôle de fichiers.",
+  'No files needed to be restored.':
+    "Aucun fichier n'a eu besoin d'être restauré.",
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ naviguer · Enter sélectionner · Esc retour',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ naviguer · Enter sélectionner · Esc annuler',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y confirmer · Esc/N retour',
   'change the theme': 'changer le thème',
   'Select Theme': 'Sélectionner un thème',
   Preview: 'Aperçu',
@@ -149,8 +190,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'ouvrir la documentation complète de Qwen Code dans votre navigateur',
   'Configuration not available.': 'Configuration non disponible.',
-  'Configure authentication information for login':
-    "Configurer les informations d'authentification pour la connexion",
+  'Connect an LLM provider': 'Se connecter à un fournisseur LLM',
   'Copy the last result or code snippet to clipboard':
     'Copier le dernier résultat ou extrait de code dans le presse-papiers',
 
@@ -692,6 +732,9 @@ export default {
   'When a session is ending': 'Quand une session se termine',
   'When a permission dialog is displayed':
     'Quand un dialogue de permission est affiché',
+  'When a new todo item is created': 'Quand un nouvel élément todo est créé',
+  'When a todo item is marked as completed':
+    'Quand un élément todo est marqué comme terminé',
   'Input to command is JSON of tool call arguments.':
     "L'entrée de la commande est du JSON des arguments d'appel d'outil.",
   'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
@@ -714,6 +757,10 @@ export default {
     "L'entrée de la commande est du JSON avec les détails de compaction.",
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     "L'entrée de la commande est du JSON avec tool_name, tool_input et tool_use_id. Sortie JSON avec hookSpecificOutput contenant la décision d'autoriser ou de refuser.",
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    "L'entrée de la commande est du JSON avec todo_id, todo_content, todo_status, all_todos et phase. Dans validation, sortie JSON avec decision (allow/block/deny) et reason. Dans postWrite, block/deny est ignoré.",
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    "L'entrée de la commande est du JSON avec todo_id, todo_content, previous_status, all_todos et phase. Dans validation, sortie JSON avec decision (allow/block/deny) et reason. Dans postWrite, block/deny est ignoré.",
   'stdout/stderr not shown': 'stdout/stderr non affiché',
   'show stderr to model and continue conversation':
     'afficher stderr au modèle et continuer la conversation',
@@ -738,6 +785,12 @@ export default {
   'show stderr to user only but continue with compaction':
     "afficher stderr à l'utilisateur uniquement mais continuer la compaction",
   'use hook decision if provided': 'utiliser la décision du hook si fournie',
+  'allow todo creation': 'autoriser la création de todo',
+  'block todo creation and show reason to model':
+    'bloquer la création de todo et afficher la raison au modèle',
+  'allow todo completion': 'autoriser la complétion de todo',
+  'block todo completion and show reason to model':
+    'bloquer la complétion de todo et afficher la raison au modèle',
   'Config not loaded.': 'Configuration non chargée.',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
     'Les hooks ne sont pas activés. Activez les hooks dans les paramètres pour utiliser cette fonctionnalité.',
@@ -1068,9 +1121,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Bon retour ! (Dernière mise à jour : {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Objectif global :',
-  'Select Authentication Method': "Sélectionner la méthode d'authentification",
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    "Vous devez sélectionner une méthode d'authentification pour continuer. Appuyez à nouveau sur Ctrl+C pour quitter.",
+  'Connect a Provider': 'Connecter un fournisseur',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'Vous devez connecter un fournisseur pour continuer. Appuyez à nouveau sur Ctrl+C pour quitter.',
   'Terms of Services and Privacy Notice':
     "Conditions d'utilisation et avis de confidentialité",
   'Qwen OAuth': 'Qwen OAuth',
@@ -1789,25 +1842,6 @@ export default {
     "Les panneaux Arena sont en cours d'exécution dans tmux. Attachez avec : `{{command}}`",
   '[{{label}}] failed: {{error}}': '[{{label}}] a échoué : {{error}}',
   'Loading suggestions...': 'Chargement des suggestions...',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    "Retraduire les descriptions de commandes slash dynamiques chargées pour la langue d'interface actuelle",
-  'Clear cached translations for the current UI language':
-    "Effacer les traductions mises en cache pour la langue d'interface actuelle",
-  'Manage dynamic translation cache': 'Gérer le cache de traduction dynamique',
-  'Manage AI translation for dynamic slash command descriptions':
-    'Gérer la traduction IA des descriptions dynamiques de commandes slash',
-  'Enable AI translation for dynamic slash command descriptions':
-    'Activer la traduction IA des descriptions dynamiques de commandes slash',
-  'Disable AI translation for dynamic slash command descriptions':
-    'Désactiver la traduction IA des descriptions dynamiques de commandes slash',
-  'Show AI translation status for dynamic slash command descriptions':
-    'Afficher l’état de la traduction IA des descriptions dynamiques de commandes slash',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    'La traduction IA des descriptions dynamiques de commandes slash est {{status}}.',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    'La traduction IA des descriptions dynamiques de commandes slash est maintenant activée.',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    'La traduction IA des descriptions dynamiques de commandes slash est maintenant désactivée.',
   'Open the memory manager.': 'Ouvrir le gestionnaire de mémoire.',
   'Save a durable memory to the memory system.':
     'Enregistrer une mémoire durable dans le système de mémoire.',

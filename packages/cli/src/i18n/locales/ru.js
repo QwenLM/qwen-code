@@ -134,6 +134,45 @@ export default {
     'Переименовать текущий разговор. --auto позволит быстрой модели выбрать заголовок.',
   'Rewind conversation to a previous turn':
     'Откатить разговор к предыдущему ходу',
+  'Rewind Conversation': 'Перемотка разговора',
+  'No user turns to rewind to.': 'Нет пользовательских ходов для перемотки.',
+  'Rewind to: ': 'Перемотать к: ',
+  'Restore code and conversation': 'Восстановить код и беседу',
+  'Restore conversation only': 'Восстановить только беседу',
+  'Restore code only': 'Восстановить только код',
+  'Never mind': 'Неважно',
+  'Computing file changes...': 'Вычисление изменений файлов...',
+  'Restoring...': 'Восстановление...',
+  'Restored {{count}} file(s).': 'Восстановлено файлов: {{count}}.',
+  'Failed to restore files: {{error}}':
+    'Не удалось восстановить файлы: {{error}}',
+  'Rewind failed: {{error}}': 'Сбой отката: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Невозможно откатить разговор: нет активного клиента модели.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Код восстановлен, но разговор не удалось откатить (нет активного клиента).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Разговор откатили. Отредактируйте подсказку и нажмите Enter, чтобы продолжить.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'Откат не затрагивает файлы, отредактированные вручную или с помощью shell-команд.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Не удаётся откатиться к сжатому ходу. Попробуйте более недавний ход.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'Восстановление файлов недоступно для этого хода (нет записанных изменений или ход был до текущей сессии).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} в {{count}} файле)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} в {{count}} файлах)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Не удалось восстановить {{count}} файл(ов): {{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'Невозможно восстановить файлы: этот ход был создан до включения контрольных точек файлов.',
+  'No files needed to be restored.': 'Файлы не нуждались в восстановлении.',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ навигация · Enter выбор · Esc назад',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ навигация · Enter выбор · Esc отмена',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y подтвердить · Esc/N назад',
   'change the theme': 'Изменение темы',
   'Select Theme': 'Выбор темы',
   Preview: 'Предпросмотр',
@@ -153,8 +192,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'Открытие полной документации Qwen Code в браузере',
   'Configuration not available.': 'Конфигурация недоступна.',
-  'Configure authentication information for login':
-    'Настройка аутентификационной информации для входа',
+  'Connect an LLM provider': 'Подключить провайдера LLM',
   'Copy the last result or code snippet to clipboard':
     'Копирование последнего результата или фрагмента кода в буфер обмена',
 
@@ -640,6 +678,9 @@ export default {
   'Before conversation compaction': 'Перед сжатием разговора',
   'When a session is ending': 'При завершении сессии',
   'When a permission dialog is displayed': 'При отображении диалога разрешений',
+  'When a new todo item is created': 'При создании новой задачи',
+  'When a todo item is marked as completed':
+    'При отметке задачи как выполненной',
   // Hooks - Event Descriptions (detailed)
   'Input to command is JSON of tool call arguments.':
     'Ввод в команду — это JSON аргументов вызова инструмента.',
@@ -663,6 +704,10 @@ export default {
     'Ввод в команду — это JSON с деталями сжатия.',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'Ввод в команду — это JSON с tool_name, tool_input и tool_use_id. Вывод — JSON с hookSpecificOutput, содержащим решение о разрешении или отказе.',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Ввод в команду — это JSON с todo_id, todo_content, todo_status, all_todos и phase. В validation вывод — JSON с decision (allow/block/deny) и reason. В postWrite block/deny игнорируется.',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Ввод в команду — это JSON с todo_id, todo_content, previous_status, all_todos и phase. В validation вывод — JSON с decision (allow/block/deny) и reason. В postWrite block/deny игнорируется.',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr не отображаются',
   'show stderr to model and continue conversation':
@@ -689,6 +734,12 @@ export default {
     'показать stderr только пользователю, но продолжить сжатие',
   'use hook decision if provided':
     'использовать решение хука, если предоставлено',
+  'allow todo creation': 'разрешить создание задачи',
+  'block todo creation and show reason to model':
+    'заблокировать создание задачи и показать причину модели',
+  'allow todo completion': 'разрешить выполнение задачи',
+  'block todo completion and show reason to model':
+    'заблокировать выполнение задачи и показать причину модели',
   // Hooks - Messages
   'Config not loaded.': 'Конфигурация не загружена.',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
@@ -977,9 +1028,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 С возвращением! (Последнее обновление: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Общая цель:',
-  'Select Authentication Method': 'Выберите метод авторизации',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'Вы должны выбрать метод авторизации для продолжения. Нажмите Ctrl+C снова для выхода.',
+  'Connect a Provider': 'Подключить провайдера',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'Необходимо подключить провайдера для продолжения. Нажмите Ctrl+C снова для выхода.',
   'Terms of Services and Privacy Notice':
     'Условия обслуживания и уведомление о конфиденциальности',
   'Qwen OAuth': 'Qwen OAuth',
@@ -1703,7 +1754,6 @@ export default {
   Tools: 'Инструменты',
   prompts: 'Подсказки',
   tools: 'инструменты',
-  'Manage dynamic translation cache': 'Управлять кешем динамического перевода',
   'Open MCP management dialog': 'Открыть диалог управления MCP',
   'Manage MCP servers': 'Управление MCP servers',
   'Manage extension settings': 'Управление настройками расширения',
@@ -1740,24 +1790,6 @@ export default {
   'update available': 'доступно обновление',
   'checking...': 'проверка...',
   'not updatable': 'обновление недоступно',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    'Перевести загруженные описания динамических слеш-команд для текущего языка интерфейса',
-  'Clear cached translations for the current UI language':
-    'Очистить кешированные переводы для текущего языка интерфейса',
-  'Manage AI translation for dynamic slash command descriptions':
-    'Управлять AI-переводом описаний динамических слеш-команд',
-  'Enable AI translation for dynamic slash command descriptions':
-    'Включить AI-перевод описаний динамических слеш-команд',
-  'Disable AI translation for dynamic slash command descriptions':
-    'Отключить AI-перевод описаний динамических слеш-команд',
-  'Show AI translation status for dynamic slash command descriptions':
-    'Показать статус AI-перевода описаний динамических слеш-команд',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    'AI-перевод описаний динамических слеш-команд {{status}}.',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    'AI-перевод описаний динамических слеш-команд теперь включен.',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    'AI-перевод описаний динамических слеш-команд теперь отключен.',
   'Ask a quick side question without affecting the main conversation':
     'Задать быстрый побочный вопрос, не затрагивая основной разговор',
   'Manage Arena sessions': 'Управлять сессиями Arena',

@@ -8,7 +8,9 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import {
   createDebugLogger,
   appendToLastTextPart,
+  buildSkillLlmContent,
 } from '@qwen-code/qwen-code-core';
+import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
 import type {
   SlashCommand,
@@ -80,7 +82,6 @@ export class SkillCommandLoader implements ICommandLoader {
           name: skill.name,
           description: skill.description,
           modelDescription: skill.description,
-          localizeDescription: true,
           kind: CommandKind.SKILL,
           source: (isExtension
             ? 'plugin-command'
@@ -95,7 +96,10 @@ export class SkillCommandLoader implements ICommandLoader {
           argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
-            const body = skill.body;
+            const body = buildSkillLlmContent(
+              dirname(skill.filePath),
+              skill.body,
+            );
 
             const content = context.invocation?.args
               ? appendToLastTextPart([{ text: body }], context.invocation.raw)

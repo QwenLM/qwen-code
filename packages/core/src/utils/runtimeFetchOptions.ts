@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ProxyAgent, type Dispatcher } from 'undici';
+import { ProxyAgent, fetch as undiciFetch, type Dispatcher } from 'undici';
 
 import { createDebugLogger } from './debugLogger.js';
 
@@ -37,6 +37,13 @@ export type OpenAIRuntimeFetchOptions =
         dispatcher?: Dispatcher;
         timeout?: false;
       };
+      // Optional fetch override. When a custom dispatcher is being passed,
+      // we pin this to the bundled undici's fetch so the dispatcher and
+      // fetch share a single undici version — otherwise Node's built-in
+      // fetch (newer undici) rejects a ProxyAgent from the bundled undici
+      // (e.g. v6) with `invalid onError method`.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fetch?: any;
     }
   | undefined;
 
@@ -596,7 +603,13 @@ function buildFetchOptionsWithDispatcher(
   // 300s bodyTimeout. This is sufficient for all current model streaming responses.
   try {
     const dispatcher = getOrCreateSharedDispatcher(proxyUrl);
-    return { fetchOptions: { dispatcher } };
+    // Pin fetch to undici's own implementation so the dispatcher and fetch
+    // come from the same undici version. Node's bundled undici may differ in
+    // major version from the project's bundled one (e.g. v8 vs v6), which
+    // breaks dispatcher handler-interface checks (`invalid onError method`).
+    // The no-proxy branch above intentionally skips this so the runtime's
+    // built-in fetch continues to be used when no dispatcher is involved.
+    return { fetchOptions: { dispatcher }, fetch: undiciFetch };
   } catch (error) {
     // Log dispatcher creation failure - requests will fallback to direct connection
     // bypassing the configured proxy. This is important for environments requiring
