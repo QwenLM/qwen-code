@@ -36,6 +36,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
+import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import {
@@ -1425,16 +1426,10 @@ export async function loadCliConfig(
   // Resolve the per-workspace tool denylist (#4175 Wave 4 PR 17). De-duplicate
   // while preserving original casing; downstream lookups go through
   // `Config.getDisabledTools()` which materializes a Set, so the order here
-  // is only meaningful for diagnostic output.
-  const disabledTools: string[] = [];
-  const seenDisabledTools = new Set<string>();
-  for (const raw of settings.tools?.disabled ?? []) {
-    if (typeof raw !== 'string') continue;
-    const trimmed = raw.trim();
-    if (!trimmed || seenDisabledTools.has(trimmed)) continue;
-    seenDisabledTools.add(trimmed);
-    disabledTools.push(trimmed);
-  }
+  // is only meaningful for diagnostic output. Shared helper since the MCP
+  // restart refresh path (`cli/src/acp-integration/acpAgent.ts`) MUST agree
+  // byte-for-byte with this — #4175 F1 (#4319) fold-in for #4329.
+  const disabledTools = normalizeDisabledToolList(settings.tools?.disabled);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)

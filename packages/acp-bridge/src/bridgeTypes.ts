@@ -16,6 +16,7 @@ import type {
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
+import type { PermissionPolicy } from './permission.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionSupportedCommandsStatus,
@@ -93,6 +94,18 @@ export interface SessionMetadataUpdate {
 export interface BridgeClientRequestContext {
   /** Daemon-issued client id echoed through the HTTP transport header. */
   clientId?: string;
+  /**
+   * `true` when the request arrived from a loopback peer (kernel-stamped
+   * `req.socket.remoteAddress` ∈ {`127.0.0.1`, `::1`, `::ffff:127.0.0.1`}).
+   * Populated by permission-vote routes for the `local-only` mediation
+   * policy; other routes leave this undefined.
+   *
+   * **Security**: this is NOT computed from `X-Forwarded-For` or any
+   * other forwardable HTTP header — those are forgeable. Callers that
+   * reverse-proxy `qwen serve` should not rely on `local-only` (use a
+   * dedicated daemon or `designated` policy instead).
+   */
+  fromLoopback?: boolean;
 }
 
 /**
@@ -380,6 +393,18 @@ export interface HttpAcpBridge {
 
   /** Test/inspection hook: number of permission requests awaiting a vote. */
   readonly pendingPermissionCount: number;
+
+  /**
+   * #4175 F3 Commit 6 — active permission mediation policy. Reflects
+   * the value `runQwenServe` resolved from
+   * `settings.policy.permissionStrategy` (or the
+   * `'first-responder'` default). Surfaced through the
+   * `/capabilities` envelope's `policy.permission` field so SDK
+   * clients can feature-detect at runtime which strategy is in
+   * effect, distinct from the build-supported set advertised on
+   * the `permission_mediation` capability tag.
+   */
+  readonly permissionPolicy: PermissionPolicy;
 
   /**
    * Synchronous force-kill of every live channel. Called by signal

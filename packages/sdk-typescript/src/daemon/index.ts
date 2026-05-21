@@ -51,6 +51,10 @@ export type {
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonControlEvent,
+  // #4175 F4 prereq (Ilya0527 issue #15) — daemon-emitted resync
+  // signal for SSE reconnects past the ring eviction boundary.
+  DaemonStateResyncRequiredData,
+  DaemonStateResyncRequiredEvent,
   DaemonMcpServerRestartedData,
   DaemonMcpServerRestartedEvent,
   DaemonMcpServerRestartRefusedData,
@@ -78,6 +82,11 @@ export type {
   DaemonPermissionOption,
   DaemonPermissionAlreadyResolvedData,
   DaemonPermissionAlreadyResolvedEvent,
+  // #4175 F3 Commit 7 — multi-client permission coordination push events.
+  DaemonPermissionForbiddenData,
+  DaemonPermissionForbiddenEvent,
+  DaemonPermissionPartialVoteData,
+  DaemonPermissionPartialVoteEvent,
   DaemonPermissionRequestData,
   DaemonPermissionRequestEvent,
   DaemonPermissionResolvedData,

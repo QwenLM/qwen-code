@@ -72,6 +72,7 @@ import type {
 import { buildAuthMethods } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
+import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import type { ApprovalModeValue } from './session/types.js';
@@ -1551,8 +1552,103 @@ class QwenAgent implements Agent {
             reason: 'budget_would_exceed' as const,
           };
         }
+        // #4282 fold-in 5 (Codex P2-2). Re-read settings to pick up
+        // any `tools.disabled` toggles applied since this ACP child
+        // booted. The original snapshot was frozen by Config's
+        // constructor; without this refresh, a `setWorkspaceToolEnabled`
+        // call followed by the documented `mcp restart` would
+        // re-register a just-disabled MCP tool because
+        // `discoverMcpToolsForServer` walks `ToolRegistry.registerTool`,
+        // which consults `Config.getDisabledTools()`.
+        //
+        // #4297 fold-in 3 (wenshao critical, addresses #3260725526):
+        // read the MERGED settings (User + System + Workspace union)
+        // rather than the workspace scope alone. The bootstrap Config
+        // received `merged.tools?.disabled`, so user/system policy is
+        // already enforced by `ToolRegistry.registerTool`. Replacing
+        // the in-memory set with the workspace scope alone would
+        // silently drop higher-scope entries — a user-level disable
+        // would survive boot but vanish after the first MCP restart,
+        // letting `discoverMcpToolsForServer` re-register the
+        // user-disabled tool.
+        //
+        // The asymmetry vs. the persist-write path is deliberate:
+        // `runQwenServe.persistDisabledTools` writes to
+        // `SettingScope.Workspace` only so the workspace file doesn't
+        // bake in user/system entries (the fold-in 1 H2 fix). Reads
+        // need the union; writes need the scope. The two paths look
+        // alike but answer different questions.
+        try {
+          const fresh = loadSettings(this.config.getTargetDir());
+          const mergedDisabled = fresh.merged.tools?.disabled;
+          // #4297 fold-in 7 (qwen-latest critical, addresses
+          // #3262625101): a malformed `tools.disabled` (boolean,
+          // string, object — hand-edited settings.json) DOESN'T
+          // throw, so the catch block below would never fire. The
+          // ternary used to silently substitute `[]`, clearing the
+          // entire disabled set with zero operator signal. Detect
+          // and stderr-log the malformed shape before clearing so a
+          // misconfigured settings file is loud rather than silent.
+          if (mergedDisabled !== undefined && !Array.isArray(mergedDisabled)) {
+            process.stderr.write(
+              `qwen serve: MCP restart for ${JSON.stringify(serverName)}: ` +
+                `tools.disabled has unexpected type ${typeof mergedDisabled}; ` +
+                `clearing disabled set — check settings.json. ` +
+                `Expected an array of strings.\n`,
+            );
+          }
+          // #4329 F1 fold-in (#4319): use the shared
+          // `normalizeDisabledToolList` helper so the boot path
+          // (`cli/src/config/config.ts`) and this MCP restart refresh
+          // path agree byte-for-byte on what counts as "disabled".
+          // Without the shared helper a `tools.disabled: ['  Foo  ',
+          // '', 'Foo']` settings entry would produce different sets
+          // at boot vs after restart — `ToolRegistry.has(tool.name)`
+          // exact-match check would then silently re-register the
+          // trimmed tool. Helper is in `cli/src/config/normalizeDisabledTools.ts`
+          // with its own unit tests covering the trim / empty-skip /
+          // dedupe contract.
+          const disabledList = normalizeDisabledToolList(mergedDisabled);
+          this.config.setDisabledTools(new Set(disabledList));
+        } catch (err) {
+          // #4297 fold-in 2 (wenshao S3): settings load failures are
+          // non-fatal — fall through with the existing in-memory
+          // snapshot. The MCP restart still runs; only the
+          // disabledTools sync is skipped. Surface a stderr line so a
+          // persistent failure (corrupted settings.json, permission
+          // denied) is visible to operators rather than silently
+          // breaking the documented "toggle + restart" workflow with
+          // zero diagnostic.
+          process.stderr.write(
+            `qwen serve: MCP restart for ${JSON.stringify(serverName)} ` +
+              `could not refresh disabledTools from merged settings ` +
+              `(${err instanceof Error ? err.message : String(err)}); ` +
+              `proceeding with the bootstrap snapshot — recently toggled ` +
+              `tools may not take effect until daemon restart.\n`,
+          );
+        }
+        // #4297 fold-in 9 (gpt-5.5 critical, addresses #3263088414):
+        // route through `ToolRegistry.discoverToolsForServer` instead
+        // of calling `manager.discoverMcpToolsForServer` directly.
+        // The registry wrapper PURGES this server's existing
+        // `DiscoveredMCPTool` entries (and its `revealedDeferred`
+        // markers) plus its prompts before rediscovery, so a
+        // toggle-disable-then-restart workflow actually removes the
+        // newly-disabled tool from the live registry. Without the
+        // wrapper, `registerTool` would only consult the refreshed
+        // `disabledTools` set for newly-discovered tools — entries
+        // that were already in the registry from the prior boot
+        // would keep serving requests, silently breaking the
+        // documented "toggle + restart" promise.
         const start = Date.now();
-        await manager.discoverMcpToolsForServer(serverName, this.config);
+        const toolRegistry = this.config.getToolRegistry();
+        if (!toolRegistry) {
+          throw RequestError.internalError(
+            undefined,
+            'ToolRegistry unavailable on this Config',
+          );
+        }
+        await toolRegistry.discoverToolsForServer(serverName);
         // #4282 gpt-5.5 C4 fold-in: `discoverMcpToolsForServer`
         // catches reconnect/discovery errors internally (logs and
         // resolves void) so a broken MCP server would otherwise
