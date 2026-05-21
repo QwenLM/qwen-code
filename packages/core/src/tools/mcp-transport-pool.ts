@@ -383,9 +383,33 @@ export class McpTransportPool {
       cfg,
     );
     try {
-      return entry.attach(sessionId, view, {
+      const conn = entry.attach(sessionId, view, {
         release: () => this.release(id, sessionId),
       });
+      // F2 (#4175 commit 6 review fix — qwen-latest W111): re-index
+      // AFTER attach succeeds. Pre-fix the early `indexAttach` at the
+      // top of this branch was enough on the unpooled path (W77)
+      // because a concurrent `releaseSession` during the spawn window
+      // there always invoked `forceShutdown('manual')` (unpooled +
+      // refs=0 → terminal), which the `isTerminated()` guard above
+      // caught. On the POOLED path a concurrent `releaseSession`
+      // instead calls `entry.startDrainTimer()` (state='draining',
+      // NOT terminal) AND then `sessionToEntries.delete(sessionId)`.
+      // The post-await guard wouldn't fire (state is 'draining', not
+      // 'closed'/'failed'), `attach` would transition the entry back
+      // to 'active' and add the ref — but `sessionToEntries[sessionId]`
+      // would be empty, so subsequent `releaseSession(sessionId)`
+      // returned early without ever dropping the ref. Result: leaked
+      // pool ref for the entry's lifetime.
+      //
+      // Re-running `indexAttach` is idempotent (the underlying
+      // `Set.add` is a no-op if the id is already there in the rare
+      // case `releaseSession` didn't fire). The early indexAttach at
+      // the top stays — it's load-bearing for the `isTerminated()`
+      // guard to actually find an entry to forceShutdown if a
+      // releaseSession DOES race AFTER `entries.set` runs.
+      this.indexAttach(sessionId, id);
+      return conn;
     } catch (err) {
       // Defensive: if `attach` throws between the `isTerminated` check
       // and this line (narrow but possible race window), clean up the

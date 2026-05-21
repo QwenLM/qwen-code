@@ -142,6 +142,133 @@ describe('McpClientManager', () => {
     expect(acquireSpy).toHaveBeenCalledTimes(2);
   });
 
+  it('stop() awaits in-flight pool discovery before releasing pool connections (W94/W108/W112)', async () => {
+    // Pre-W94 fix: stop() called releaseAllPooledConnections() while
+    // discoverAllMcpToolsViaPool was still mid-flight; the in-flight
+    // pass would subsequently call pool.acquire(...) and attach a
+    // fresh entry to pooledConnections AFTER the release loop had
+    // already cleared the Map → leaked pool ref.
+    let releaseAcquire!: () => void;
+    const acquireGate = new Promise<void>((resolve) => {
+      releaseAcquire = resolve;
+    });
+    const events: string[] = [];
+    const acquireSpy = vi.fn().mockImplementation(async (name: string) => {
+      events.push(`acquire-start-${name}`);
+      await acquireGate;
+      events.push(`acquire-end-${name}`);
+      // Returned connection's release() is what releaseAllPooledConnections
+      // invokes. Tracking THAT lets the test assert the ordering.
+      return {
+        release: vi.fn().mockImplementation(() => {
+          events.push(`release-${name}`);
+        }),
+        on: vi.fn(),
+        id: `${name}::abc`,
+        serverName: name,
+        entryIndex: 0,
+      };
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+
+    // Kick off discovery; it enters in-flight (acquire awaits the gate).
+    const discoveryPromise = manager.discoverAllMcpTools(mockConfig);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(events).toEqual(['acquire-start-srv']);
+
+    // Concurrently call stop(); it must AWAIT discoveryInFlight before
+    // calling releaseAllPooledConnections (which invokes each conn.release).
+    const stopPromise = manager.stop();
+    await Promise.resolve();
+    // Pre-fix: stop() would proceed past discoveryInFlight immediately
+    // and release-srv would fire BEFORE acquire-end-srv. Post-fix the
+    // outer Promise.race waits up to 5s for in-flight discovery.
+    expect(events).toEqual(['acquire-start-srv']);
+
+    // Release the gate; discovery completes, then stop() proceeds.
+    releaseAcquire();
+    await discoveryPromise;
+    await stopPromise;
+
+    // Ordering invariant: acquire-end MUST precede release-srv.
+    const acquireEndIdx = events.indexOf('acquire-end-srv');
+    const releaseIdx = events.indexOf('release-srv');
+    expect(acquireEndIdx).toBeGreaterThan(-1);
+    expect(releaseIdx).toBeGreaterThan(acquireEndIdx);
+  });
+
+  it('stop() proceeds when in-flight pool discovery rejects (W94/W108/W112 rejection path)', async () => {
+    // Pre-W94 fix: rejection swallowed silently with no log trail and
+    // no shutdown-deadline cap. Post-W108: debugLogger.debug records
+    // the rejection; stop() proceeds without throwing.
+    const acquireSpy = vi
+      .fn()
+      .mockRejectedValue(new Error('discovery-blew-up'));
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+
+    // Start discovery — will reject when the inner pool.acquire rejects.
+    // Catch here so the rejection doesn't surface as unhandled.
+    const discoveryPromise = manager
+      .discoverAllMcpTools(mockConfig)
+      .catch(() => {
+        /* expected — manager's discoverAllMcpToolsViaPool internally
+           catches per-server but this test's specific shape makes the
+           outer caller see the rejection */
+      });
+    await Promise.resolve();
+
+    // stop() must NOT throw even though discoveryInFlight rejects.
+    await expect(manager.stop()).resolves.toBeUndefined();
+    await discoveryPromise;
+  });
+
   it('routes incremental discovery through the pool when injected (F2 commit 4 C7 / W38)', async () => {
     // Wenshao W38 review fold-in: the C7 fix added the pool gate to
     // `discoverAllMcpToolsIncremental` (the default progressive-mode

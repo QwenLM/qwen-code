@@ -391,6 +391,58 @@ describe('McpTransportPool', () => {
       ).rejects.toThrow(/Cannot attach to PoolEntry/);
     });
 
+    it("re-indexes after attach so concurrent releaseSession during await doesn't leak the ref (W111)", async () => {
+      // Pre-W111 fix: releaseSession during the in-flight `await`
+      // window on the POOLED path called `sessionToEntries.delete(sid)`
+      // (NOT terminal — state goes to 'draining', not 'closed'), so
+      // the `isTerminated()` guard didn't fire, attach succeeded and
+      // added the ref, BUT `sessionToEntries[sid]` was empty afterward.
+      // Future releaseSession returned early → ref leaked for the
+      // entry's lifetime.
+      //
+      // Post-fix: re-index AFTER attach succeeds. A SECOND
+      // releaseSession(sid) call now finds the id again and properly
+      // drains the entry.
+      let releaseConnect!: () => void;
+      const connectGate = new Promise<void>((resolve) => {
+        releaseConnect = resolve;
+      });
+      const mocked = mockMcpSuccess({ toolNames: ['t1'] });
+      mocked.connect.mockImplementationOnce(() => connectGate);
+
+      const pool = new McpTransportPool(
+        cliConfig,
+        mkPoolOptions({ drainDelayMs: 100 }),
+      );
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+      const acquirePromise = pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      // Yield so s1 enters await inFlight (after the W90 early index).
+      await Promise.resolve();
+      // Fire releaseSession during the await window. Pre-W111 this
+      // wiped sessionToEntries['s1'] (drain timer started instead of
+      // forceShutdown because pooled+non-terminal); attach below then
+      // re-activated the entry and added the ref to entry.refs WITHOUT
+      // restoring the reverse-index entry.
+      pool.releaseSession('s1');
+      releaseConnect();
+      await acquirePromise;
+
+      // Sanity: after the release-race-then-attach sequence, the entry
+      // is active with refs=1 (we re-attached).
+      expect(pool.getSnapshot().byName['srv'].entrySummary[0].refs).toBe(1);
+
+      // Now THE critical assertion: a SECOND releaseSession('s1') must
+      // properly drop the ref. Pre-W111 it was a no-op (reverse index
+      // empty). Post-fix the W111 re-indexAttach restored the mapping
+      // so this second release actually drains.
+      pool.releaseSession('s1');
+      expect(pool.getSnapshot().byName['srv'].entrySummary[0].refs).toBe(0);
+      // Drain timer fires within the 100ms grace; entry tears down.
+      await vi.advanceTimersByTimeAsync(150);
+      expect(pool.getSnapshot().byName['srv']).toBeUndefined();
+    });
+
     it('rolls back early reverse-index insertion when spawnInFlight rejects', async () => {
       // Pre-W90 fix the in-flight branch indexed sessionToEntries only
       // AFTER attach succeeded. Post-fix it indexes BEFORE the await
