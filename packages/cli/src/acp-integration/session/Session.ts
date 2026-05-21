@@ -62,11 +62,13 @@ import {
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
   evaluateAutoMode,
+  getAutoModePermissionDeniedReason,
   isApproveOutcome,
   MAX_TRANSCRIPT_MESSAGES,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
+  shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from '@qwen-code/qwen-code-core';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
@@ -1980,6 +1982,17 @@ export class Session implements SessionContext {
           this.config,
           denialState,
         );
+        if (shouldFirePermissionDeniedForAutoMode(decision, outcome)) {
+          await this.config
+            .getHookSystem?.()
+            ?.firePermissionDeniedEvent(
+              fc.name,
+              toolParams,
+              callId,
+              getAutoModePermissionDeniedReason(decision),
+              abortSignal,
+            );
+        }
         switch (outcome.kind) {
           case 'approved':
             autoModeAllowed = true;

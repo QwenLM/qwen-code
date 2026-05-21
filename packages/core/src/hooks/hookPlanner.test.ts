@@ -31,6 +31,11 @@ describe('HookPlanner', () => {
         kind: 'toolName',
         target: '',
       });
+      expect(
+        getHookMatcherTarget(HookEventName.PermissionDenied, {
+          toolName: 'Bash',
+        }),
+      ).toEqual({ kind: 'toolName', target: 'Bash' });
     });
 
     it('returns agent type targets for subagent events', () => {

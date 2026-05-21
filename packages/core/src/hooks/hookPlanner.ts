@@ -33,6 +33,7 @@ export function getHookMatcherTarget(
     case HookEventName.PostToolUse:
     case HookEventName.PostToolUseFailure:
     case HookEventName.PermissionRequest:
+    case HookEventName.PermissionDenied:
       return { kind: 'toolName', target: context?.toolName ?? '' };
 
     case HookEventName.SubagentStart:

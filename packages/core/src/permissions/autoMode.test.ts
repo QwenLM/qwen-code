@@ -9,7 +9,9 @@ import {
   SAFE_TOOL_ALLOWLIST,
   evaluateAutoMode,
   formatClassifierBlockMessage,
+  getAutoModePermissionDeniedReason,
   isInSafeToolAllowlist,
+  shouldFirePermissionDeniedForAutoMode,
   passesAcceptEditsFastPath,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
@@ -350,6 +352,55 @@ describe('formatClassifierBlockMessage', () => {
         unavailable: true,
       }),
     ).toBe('Auto mode classifier unavailable; action blocked for safety');
+  });
+});
+
+// ─── PermissionDenied hook gating ────────────────────────────────────────
+
+describe('PermissionDenied hook gating', () => {
+  const classifierBlock = {
+    via: 'classifier' as const,
+    shouldBlock: true,
+    reason: 'Dangerous shell command',
+    unavailable: false,
+    stage: 'fast' as const,
+    durationMs: 20,
+  };
+
+  it('fires only for classifier blocks that produce a blocked outcome', () => {
+    expect(
+      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
+        kind: 'blocked',
+        errorMessage: 'blocked',
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(
+        { ...classifierBlock, shouldBlock: false },
+        { kind: 'approved' },
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(
+        { via: 'fallback' },
+        { kind: 'fallback' },
+      ),
+    ).toBe(false);
+  });
+
+  it('maps classifier blocks to stable PermissionDenied reasons', () => {
+    expect(getAutoModePermissionDeniedReason(classifierBlock)).toBe(
+      'classifier_blocked',
+    );
+
+    expect(
+      getAutoModePermissionDeniedReason({
+        ...classifierBlock,
+        unavailable: true,
+      }),
+    ).toBe('classifier_unavailable');
   });
 });
 
