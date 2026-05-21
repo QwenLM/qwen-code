@@ -317,6 +317,36 @@ export class FileReadCache {
     this.byInode.clear();
   }
 
+  /**
+   * Evict entries whose most recent Read (or Write; both set
+   * {@link FileReadEntry.lastReadAt}) is older than `minutes`.
+   *
+   * This is a memory-pressure-driven eviction: it targets entries the
+   * model is least likely to need again, trading cache hit rate for lower
+   * memory footprint. Unlike {@link clear}, it preserves recently-read
+   * entries so the file_unchanged fast-path stays available for active
+   * files.
+   *
+   * @returns Number of entries evicted.
+   */
+  evictNotAccessedSince(minutes: number): number {
+    if (!Number.isFinite(minutes) || minutes < 1) {
+      return 0;
+    }
+
+    const cutoff = Date.now() - minutes * 60 * 1000;
+    let evicted = 0;
+
+    for (const [key, entry] of this.byInode) {
+      if (entry.lastReadAt !== undefined && entry.lastReadAt < cutoff) {
+        this.byInode.delete(key);
+        evicted++;
+      }
+    }
+
+    return evicted;
+  }
+
   /** Number of tracked entries. Diagnostic / test use only. */
   size(): number {
     return this.byInode.size;
