@@ -8,7 +8,7 @@ import { realpathSync, promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { createServeApp } from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
@@ -29,7 +29,11 @@ import type {
   SetSessionModelRequest,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
-import { ApprovalMode, TrustGateError } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  Storage,
+  TrustGateError,
+} from '@qwen-code/qwen-code-core';
 import {
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -2043,6 +2047,52 @@ describe('createServeApp', () => {
   });
 
   describe('GET /workspace/:id/sessions', () => {
+    let previousRuntimeDir: string | undefined;
+    let runtimeDir: string;
+
+    beforeEach(async () => {
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-sessions-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    });
+
+    afterEach(async () => {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      await fsp.rm(runtimeDir, { recursive: true, force: true });
+    });
+
+    async function writeStoredSession(input: {
+      sessionId: string;
+      cwd: string;
+      timestamp: string;
+      prompt: string;
+      mtime: Date;
+    }): Promise<void> {
+      const chatsDir = path.join(
+        new Storage(input.cwd).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      const filePath = path.join(chatsDir, `${input.sessionId}.jsonl`);
+      const record = {
+        uuid: `${input.sessionId}-user-1`,
+        parentUuid: null,
+        sessionId: input.sessionId,
+        timestamp: input.timestamp,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: input.prompt }] },
+        cwd: input.cwd,
+      };
+      await fsp.writeFile(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+      await fsp.utimes(filePath, input.mtime, input.mtime);
+    }
+
     it('returns the list returned by the bridge', async () => {
       // #3803 §02 (commit 0c6e963cd): the route now rejects
       // cross-workspace queries with 400 workspace_mismatch (so
@@ -2077,22 +2127,88 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(2);
-      expect(res.body.sessions).toEqual([
-        {
-          sessionId: 's-1',
-          workspaceCwd: WS_BOUND,
-          createdAt: '2026-05-17T12:00:00.000Z',
-          clientCount: 1,
-          hasActivePrompt: false,
-        },
-        {
-          sessionId: 's-2',
-          workspaceCwd: WS_BOUND,
-          createdAt: '2026-05-17T12:01:00.000Z',
-          clientCount: 0,
-          hasActivePrompt: true,
-        },
-      ]);
+      expect(res.body.sessions).toEqual(
+        expect.arrayContaining([
+          {
+            sessionId: 's-1',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+          {
+            sessionId: 's-2',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:01:00.000Z',
+            clientCount: 0,
+            hasActivePrompt: true,
+          },
+        ]),
+      );
+      expect(bridge.listCalls).toEqual([WS_BOUND]);
+    });
+
+    it('includes persisted sessions from the CLI session store', async () => {
+      const storedOnlyId = '550e8400-e29b-41d4-a716-446655440000';
+      const liveAndStoredId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      await writeStoredSession({
+        sessionId: storedOnlyId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored only prompt',
+        mtime: new Date('2026-05-17T12:10:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: liveAndStoredId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:01:00.000Z',
+        prompt: 'stored live prompt',
+        mtime: new Date('2026-05-17T12:11:00.000Z'),
+      });
+
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: liveAndStoredId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:01:00.000Z',
+            displayName: 'Live display name',
+            clientCount: 3,
+            hasActivePrompt: true,
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(2);
+      expect(res.body.sessions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionId: storedOnlyId,
+            workspaceCwd: WS_BOUND,
+            title: 'stored only prompt',
+            clientCount: 0,
+            hasActivePrompt: false,
+          }),
+          expect.objectContaining({
+            sessionId: liveAndStoredId,
+            workspaceCwd: WS_BOUND,
+            title: 'stored live prompt',
+            displayName: 'Live display name',
+            clientCount: 3,
+            hasActivePrompt: true,
+          }),
+        ]),
+      );
       expect(bridge.listCalls).toEqual([WS_BOUND]);
     });
 

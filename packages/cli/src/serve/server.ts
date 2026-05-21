@@ -8,7 +8,11 @@ import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
-import { APPROVAL_MODES, TrustGateError } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  SessionService,
+  TrustGateError,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   bearerAuth,
@@ -50,6 +54,7 @@ import {
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
   WorkspaceMismatchError,
+  type BridgeSessionSummary,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
 import {
@@ -156,6 +161,48 @@ export function resolveBridgeFsFactory(input: {
     boundWorkspace: input.boundWorkspace,
     trusted: input.trusted,
     emit: input.emit ?? createDefaultFsAuditEmit(),
+  });
+}
+
+const WORKSPACE_SESSION_LIST_SIZE = 100;
+
+async function listWorkspaceSessionsForResponse(
+  bridge: HttpAcpBridge,
+  workspaceCwd: string,
+): Promise<BridgeSessionSummary[]> {
+  const persisted = await new SessionService(workspaceCwd).listSessions({
+    size: WORKSPACE_SESSION_LIST_SIZE,
+  });
+  const bySessionId = new Map<string, BridgeSessionSummary>();
+
+  for (const item of persisted.items) {
+    bySessionId.set(item.sessionId, {
+      sessionId: item.sessionId,
+      workspaceCwd: item.cwd,
+      createdAt: item.startTime,
+      updatedAt: new Date(item.mtime).toISOString(),
+      title: item.customTitle ?? item.prompt,
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+  }
+
+  for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
+    const existing = bySessionId.get(live.sessionId);
+    bySessionId.set(live.sessionId, {
+      ...existing,
+      ...live,
+      title: live.title ?? existing?.title,
+      updatedAt: live.updatedAt ?? existing?.updatedAt,
+      clientCount: live.clientCount,
+      hasActivePrompt: live.hasActivePrompt,
+    });
+  }
+
+  return [...bySessionId.values()].sort((a, b) => {
+    const aTime = Date.parse(a.updatedAt ?? a.createdAt);
+    const bTime = Date.parse(b.updatedAt ?? b.createdAt);
+    return bTime - aTime;
   });
 }
 
@@ -1394,7 +1441,7 @@ export function createServeApp(
     }
   });
 
-  app.get('/workspace/:id/sessions', (req, res) => {
+  app.get('/workspace/:id/sessions', async (req, res) => {
     // Express decodes URL-encoded path params automatically; clients pass
     // the absolute workspace cwd encoded (e.g.
     // GET /workspace/%2Fwork%2Fa/sessions).
@@ -1417,8 +1464,15 @@ export function createServeApp(
       });
       return;
     }
-    const sessions = bridge.listWorkspaceSessions(workspaceCwd);
-    res.status(200).json({ sessions });
+    try {
+      const sessions = await listWorkspaceSessionsForResponse(bridge, key);
+      res.status(200).json({ sessions });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+        code: 'session_list_failed',
+      });
+    }
   });
 
   app.post('/session/:id/model', mutate(), async (req, res) => {

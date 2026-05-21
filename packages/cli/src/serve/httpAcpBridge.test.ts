@@ -107,6 +107,7 @@ interface FakeAgentOpts {
     p: PromptRequest,
     self: FakeAgent,
   ) => Promise<PromptResponse> | PromptResponse;
+  cancelImpl?: (p: CancelNotification, self: FakeAgent) => Promise<void> | void;
   /**
    * Custom `newSession` handler. Default returns a synthesized id (see
    * `newSession` below). Used by tests that need to exercise the
@@ -198,6 +199,9 @@ class FakeAgent implements Agent {
   }
   async cancel(p: CancelNotification): Promise<void> {
     this.cancelCalls.push(p);
+    if (this.opts.cancelImpl) {
+      await this.opts.cancelImpl(p, this);
+    }
   }
   async setSessionMode(
     _p: SetSessionModeRequest,
@@ -2611,6 +2615,32 @@ describe('createHttpAcpBridge', () => {
       await expect(bridge.cancelSession('unknown')).rejects.toBeInstanceOf(
         SessionNotFoundError,
       );
+    });
+
+    it('treats idle agent cancel as success', async () => {
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({
+          cancelImpl: () => {
+            throw {
+              code: -32603,
+              message: 'Internal error',
+              data: { details: 'Not currently generating' },
+            };
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.cancelSession(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
+
+      await bridge.shutdown();
     });
   });
 

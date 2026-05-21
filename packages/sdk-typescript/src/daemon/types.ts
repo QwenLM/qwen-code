@@ -159,6 +159,8 @@ export interface DaemonSessionSummary {
   sessionId: string;
   workspaceCwd: string;
   createdAt?: string;
+  updatedAt?: string;
+  title?: string;
   displayName?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
