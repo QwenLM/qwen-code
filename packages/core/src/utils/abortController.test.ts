@@ -159,21 +159,23 @@ describe('combineAbortSignals', () => {
     const a = createAbortController();
     const b = createAbortController();
     const c = createAbortController();
-    // Simulate a signal whose `aborted` getter flips to true after the initial
-    // alreadyAborted scan — the second pass through the loop should catch it
-    // and short-circuit instead of attaching a listener that never fires.
-    let aborted = false;
+    // Simulate a signal whose `aborted` getter returns false during the initial
+    // `find` scan and true on subsequent accesses, exercising the per-iteration
+    // defensive check inside the for-loop (not the fast path).
+    let accessCount = 0;
     const proxied = new Proxy(b.signal, {
       get(target, prop, recv) {
-        if (prop === 'aborted') return aborted;
+        if (prop === 'aborted') {
+          accessCount++;
+          return accessCount > 1; // false on first access, true thereafter
+        }
         return Reflect.get(target, prop, recv);
       },
     }) as AbortSignal;
-    // Flip the proxy "aborted" right after the initial find() pass.
-    aborted = true;
     const { signal } = combineAbortSignals([a.signal, proxied, c.signal]);
+    // Per-iteration check fires when the loop reaches proxied (2nd `aborted`
+    // access) and short-circuits → controller aborts, loop breaks before c.
     expect(signal.aborted).toBe(true);
-    // c should never have had a listener attached (we broke out of the loop).
     expect(getEventListeners(c.signal, 'abort').length).toBe(0);
   });
 
