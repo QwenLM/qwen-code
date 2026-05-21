@@ -818,6 +818,150 @@ describe('Telemetry SDK', () => {
         }),
       ).toBe(true);
     });
+
+    it('ignoreRequestHook does NOT bleed across port boundary (4318 vs 43180)', () => {
+      // Defense against the URL prefix boundary collision: a naive
+      // `url.startsWith(prefix)` would match `http://host:43180/...` against
+      // prefix `http://host:4318`. Origin comparison is exact, so a
+      // different port has a different origin and must not match.
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'http://collector.example.com:4318',
+      );
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      expect(
+        config.ignoreRequestHook({
+          origin: 'http://collector.example.com:43180',
+          path: '/v1/traces',
+        }),
+      ).toBe(false);
+    });
+
+    it('ignoreRequestHook does NOT bleed across hostname boundary (otlp vs otlp.evil)', () => {
+      // Defense against the hostname suffix collision: prefix
+      // `https://otlp.example.com` must NOT match
+      // `https://otlp.example.com.evil.net`. Origin comparison is exact.
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'https://otlp.example.com',
+      );
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      expect(
+        config.ignoreRequestHook({
+          origin: 'https://otlp.example.com.evil.net',
+          path: '/v1/traces',
+        }),
+      ).toBe(false);
+    });
+
+    it('ignoreRequestHook does NOT bleed across path-segment boundary (/v1 vs /v1foo)', () => {
+      // Prefix `http://host/v1` must NOT match `http://host/v1foo/x`.
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'http://collector.example.com:4318/v1',
+      );
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      expect(
+        config.ignoreRequestHook({
+          origin: 'http://collector.example.com:4318',
+          path: '/v1foo/x',
+        }),
+      ).toBe(false);
+      // Sanity: same-origin match still works.
+      expect(
+        config.ignoreRequestHook({
+          origin: 'http://collector.example.com:4318',
+          path: '/v1/traces',
+        }),
+      ).toBe(true);
+    });
+
+    it('normalizeOtlpPrefix rejects unparseable URLs entirely (no dangerous "http" fallback)', () => {
+      // Critical fix: previously the catch fallback would let a typo like
+      // `"http"` produce the prefix `"http"`, which startsWith-matches every
+      // outbound HTTP request → silently disabled all instrumentation. The
+      // fix returns undefined for unparseable URLs and warns via diag.
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'not-a-valid-url',
+      );
+      vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+        undefined,
+      );
+      vi.spyOn(mockConfig, 'getTelemetryOtlpLogsEndpoint').mockReturnValue(
+        undefined,
+      );
+      vi.spyOn(mockConfig, 'getTelemetryOtlpMetricsEndpoint').mockReturnValue(
+        undefined,
+      );
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      // Unparseable endpoint produced NO prefix → hook is a no-op. Outbound
+      // LLM requests are NOT erroneously masked (this is the danger we
+      // prevent — the previous "http" fallback would mask everything).
+      expect(
+        config.ignoreRequestHook({
+          origin: 'https://api.openai.com',
+          path: '/v1/chat/completions',
+        }),
+      ).toBe(false);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('not a valid URL'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('HttpInstrumentation also receives ignoreOutgoingRequestHook for OTLP exporter', () => {
+      // The OTLP HTTP exporter uses node:http (patched by HttpInstrumentation,
+      // NOT undici). Without this guard, every OTLP upload batch creates a
+      // parasitic client span → feedback loop. PR #4390 review feedback.
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'http://collector.example.com:4318',
+      );
+      initializeTelemetry(mockConfig);
+      const httpInstrumentationConfig = vi.mocked(HttpInstrumentation).mock
+        .calls[0]![0]! as {
+        ignoreOutgoingRequestHook: (req: {
+          protocol: string;
+          host?: string;
+          hostname?: string;
+          port?: string | number;
+          path: string;
+        }) => boolean;
+      };
+      // OTLP upload to configured collector → skipped.
+      expect(
+        httpInstrumentationConfig.ignoreOutgoingRequestHook({
+          protocol: 'http:',
+          host: 'collector.example.com:4318',
+          hostname: 'collector.example.com',
+          port: 4318,
+          path: '/v1/traces',
+        }),
+      ).toBe(true);
+      // Unrelated LLM endpoint → traced.
+      expect(
+        httpInstrumentationConfig.ignoreOutgoingRequestHook({
+          protocol: 'https:',
+          host: 'dashscope.aliyuncs.com',
+          hostname: 'dashscope.aliyuncs.com',
+          path: '/compatible-mode/v1/chat/completions',
+        }),
+      ).toBe(false);
+    });
   });
 });
 

@@ -220,7 +220,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
-      fetch: wrapFetchWithCorrelation(baseFetch, this.cliConfig),
+      // Cast through unknown: Anthropic SDK's `Fetch` type uses the older
+      // DOM-style `RequestInfo` (no URL) which `typeof fetch` (Node WHATWG
+      // overloads) is not structurally assignable to, even though they're
+      // call-compatible at runtime. The cast is safe because the wrapper
+      // delegates to baseFetch (= runtimeOptions.fetch ?? globalThis.fetch)
+      // without altering its call shape.
+      fetch: wrapFetchWithCorrelation(
+        baseFetch,
+        this.cliConfig,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ) as unknown as any,
     });
 
     this.converter = new AnthropicContentConverter(

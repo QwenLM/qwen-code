@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { diag } from '@opentelemetry/api';
 import type { Config } from '../config/config.js';
 
 /**
@@ -15,6 +16,24 @@ import type { Config } from '../config/config.js';
  * an LLM request back to the originating qwen-code session.
  */
 export const SESSION_ID_HEADER = 'X-Qwen-Code-Session-Id';
+
+/**
+ * Loose fetch-like signature the wrapper internally programs against.
+ *
+ * Exists because the SDKs we wrap have **incompatible** Fetch types:
+ *   - `openai@5.11`: `(input: string | URL | Request, init?) => Promise<Response>`
+ *   - `@anthropic-ai/sdk`: `(input: RequestInfo, init?) => Promise<Response>`
+ *     where `RequestInfo = string | Request` (NOT including URL).
+ *
+ * No single concrete signature satisfies both as a structural subtype, so the
+ * public `wrapFetchWithCorrelation` is generic and preserves the caller's
+ * exact type (the SDK's own Fetch). This type only describes the input shape
+ * we touch inside the wrapper.
+ */
+type FetchLikeLoose = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;
 
 /**
  * Wrap a fetch implementation so every outbound request gets the
@@ -36,28 +55,53 @@ export const SESSION_ID_HEADER = 'X-Qwen-Code-Session-Id';
  * When telemetry is disabled, returns baseFetch unchanged — no correlation
  * header added. (Consistent with #4367's gating: opt-out of telemetry means
  * no telemetry-related wire signal, including correlation.)
+ *
+ * Safety: the wrapper catches its own exceptions and falls through to
+ * baseFetch on any internal error. Telemetry must never break the LLM
+ * request path — if Config getters throw, header construction fails, etc.,
+ * we still want the model call to proceed.
  */
-export function wrapFetchWithCorrelation(
-  baseFetch: typeof fetch,
+export function wrapFetchWithCorrelation<TFetch extends FetchLikeLoose>(
+  baseFetch: TFetch,
   config: Config,
-): typeof fetch {
-  return async function correlationFetch(
-    input: RequestInfo | URL,
+): TFetch {
+  const wrapped: FetchLikeLoose = async function correlationFetch(
+    input: string | URL | Request,
     init?: RequestInit,
   ): Promise<Response> {
-    if (!config.getTelemetryEnabled()) {
+    let headers: Headers;
+    try {
+      if (!config.getTelemetryEnabled()) {
+        return baseFetch(input, init);
+      }
+      const sid = config.getSessionId();
+      if (!sid) {
+        // Defensive: empty header value is rejected by some HTTP middleware.
+        // Skip injection rather than send `X-Qwen-Code-Session-Id: `.
+        return baseFetch(input, init);
+      }
+      // Seed headers from BOTH the init.headers (if any) AND the Request's
+      // own headers when input is a Request and init doesn't override.
+      // Otherwise `new Headers(undefined)` would drop the Request's headers
+      // (including Authorization) when we then pass `{...init, headers}`
+      // back to baseFetch. See PR #4393 review feedback.
+      headers = new Headers(init?.headers);
+      if (init?.headers === undefined && input instanceof Request) {
+        input.headers.forEach((value, key) => headers.set(key, value));
+      }
+      headers.set(SESSION_ID_HEADER, sid);
+    } catch (err) {
+      // Telemetry must never break the LLM request path. Log and fall through.
+      diag.warn(
+        `wrapFetchWithCorrelation: header construction failed, sending request without correlation header: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return baseFetch(input, init);
     }
-    const sid = config.getSessionId();
-    if (!sid) {
-      // Defensive: empty header value is rejected by some HTTP middleware.
-      // Skip injection rather than send `X-Qwen-Code-Session-Id: `.
-      return baseFetch(input, init);
-    }
-    const headers = new Headers(init?.headers);
-    headers.set(SESSION_ID_HEADER, sid);
     return baseFetch(input, { ...init, headers });
   };
+  // Cast back to TFetch: runtime behavior matches whatever signature the
+  // caller's baseFetch has (we delegate to it without altering shape).
+  return wrapped as unknown as TFetch;
 }
 
 /**

@@ -315,15 +315,18 @@ export function initializeTelemetry(config: Config): void {
   }
   // If no exporter is configured for a signal, it is silently skipped.
 
-  // Build OTLP exporter URL prefixes once. The undici instrumentation must
-  // ignore requests to these endpoints — otherwise it would create a client
-  // span for every OTLP upload, that span would be exported, creating an
-  // infinite feedback loop. Use the WHATWG URL parser to extract a
-  // host+path prefix that is robust against user-config quirks (quoted
-  // strings, trailing slash, query string, #fragment, missing scheme).
-  // String-level transforms here would silently miss those forms — see PR
-  // review feedback (#4390).
-  function normalizeOtlpPrefix(raw: string | undefined): string | undefined {
+  // Build OTLP exporter URL prefixes once. Both HttpInstrumentation (which
+  // patches Node's built-in `http`/`https` — used by the OTLP HTTP exporter)
+  // and UndiciInstrumentation (which patches `fetch` / undici — used by LLM
+  // SDKs but also by some OTLP exporters when configured) must ignore
+  // requests to these endpoints. Otherwise an upload would create a span
+  // that gets exported, creating an infinite feedback loop. Use WHATWG URL
+  // parsing so a parsed prefix is always { origin, pathname } — never the
+  // dangerous bare `"http"` fallback that startsWith would match against
+  // every HTTP URL on the wire. See PR #4390 review feedback (wenshao).
+  function normalizeOtlpPrefix(
+    raw: string | undefined,
+  ): { origin: string; pathname: string } | undefined {
     if (!raw) return undefined;
     // Trim surrounding whitespace + symmetric ASCII quotes a user may have
     // placed in settings.json (`"value"` → `value`).
@@ -338,21 +341,21 @@ export function initializeTelemetry(config: Config): void {
     try {
       const u = new URL(s);
       // Drop ?query and #fragment — they're never part of the request
-      // signature undici exposes via `request.origin + request.path`.
-      // Strip a trailing `/` from path to keep the prefix tight.
+      // signature an instrumentation observer sees on outbound requests.
+      // Strip a trailing `/` from path to keep prefix matching tight.
       const pathname = u.pathname === '/' ? '' : u.pathname.replace(/\/$/, '');
-      return `${u.origin}${pathname}`;
+      return { origin: u.origin, pathname };
     } catch {
-      // Not a valid URL — fall back to simple suffix trimming so a misconfigured
-      // endpoint still has SOME prefix protection rather than none.
-      const qIdx = s.indexOf('?');
-      const fIdx = s.indexOf('#');
-      let cut = s.length;
-      if (qIdx !== -1) cut = Math.min(cut, qIdx);
-      if (fIdx !== -1) cut = Math.min(cut, fIdx);
-      s = s.slice(0, cut);
-      while (s.endsWith('/')) s = s.slice(0, -1);
-      return s || undefined;
+      // Unparseable URL (e.g. typo, placeholder). Reject entirely rather than
+      // attempt a string-level fallback — a fallback like `"http"` from input
+      // `"http"` would `startsWith`-match every outbound HTTP request and
+      // silently disable all instrumentation. Returning undefined means this
+      // misconfigured endpoint loses its feedback-loop guard, but the rest of
+      // the system stays correct.
+      diag.warn(
+        `Telemetry OTLP endpoint "${raw}" is not a valid URL; instrumentation feedback-loop guard for it is disabled.`,
+      );
+      return undefined;
     }
   }
   const otlpUrlPrefixes = [
@@ -362,7 +365,38 @@ export function initializeTelemetry(config: Config): void {
     config.getTelemetryOtlpMetricsEndpoint(),
   ]
     .map(normalizeOtlpPrefix)
-    .filter((u): u is string => !!u);
+    .filter((u): u is { origin: string; pathname: string } => !!u);
+
+  // Boundary-safe URL match. `url.startsWith(prefix)` is unsafe because:
+  //   - port: prefix `http://host:4318` matches `http://host:43180/x`
+  //   - path: prefix `http://host/v1` matches `http://host/v1foo/x`
+  //   - host: prefix `https://otlp.example.com` matches `https://otlp.example.com.evil.net`
+  // Comparing origin exactly + pathname with a path-boundary check avoids all
+  // three. The next char after the prefix pathname must be `/`, `?`, `#`, or
+  // end-of-string. See PR #4390 review feedback (wenshao).
+  const matchesOtlpPrefix = (origin: string, path: string): boolean => {
+    for (const prefix of otlpUrlPrefixes) {
+      if (origin !== prefix.origin) continue;
+      if (prefix.pathname === '') return true;
+      if (!path.startsWith(prefix.pathname)) continue;
+      const next = path.charAt(prefix.pathname.length);
+      if (next === '' || next === '/' || next === '?' || next === '#') {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Strip ?query / #fragment from a path. `indexOf` (not regex) for CodeQL
+  // ReDoS hygiene.
+  const stripPathSuffix = (path: string): string => {
+    const qIdx = path.indexOf('?');
+    const fIdx = path.indexOf('#');
+    let cut = path.length;
+    if (qIdx !== -1) cut = Math.min(cut, qIdx);
+    if (fIdx !== -1) cut = Math.min(cut, fIdx);
+    return path.slice(0, cut);
+  };
 
   sdk = new NodeSDK({
     resource,
@@ -378,7 +412,26 @@ export function initializeTelemetry(config: Config): void {
         : [],
     ...(metricReader && { metricReader }),
     instrumentations: [
-      new HttpInstrumentation(),
+      new HttpInstrumentation({
+        // OTLP HTTP exporter uses node:http (patched here, not by undici).
+        // Without this, every OTLP upload batch creates a parasitic client
+        // span that itself gets exported → feedback loop. See PR #4390
+        // review feedback (wenshao).
+        ignoreOutgoingRequestHook: (req) => {
+          if (otlpUrlPrefixes.length === 0) return false;
+          const proto =
+            (req.protocol && String(req.protocol).replace(/:$/, '')) || 'http';
+          const host = req.hostname || req.host || '';
+          const portPart =
+            req.port !== undefined && req.port !== null && String(req.port)
+              ? `:${req.port}`
+              : '';
+          const origin = `${proto}://${host}${portPart}`;
+          const path =
+            typeof req.path === 'string' ? stripPathSuffix(req.path) : '';
+          return matchesOtlpPrefix(origin, path);
+        },
+      }),
       // Modern fetch (`globalThis.fetch` / undici) is the HTTP layer used by
       // `openai`, `@google/genai`, and `@anthropic-ai/sdk`. Without this
       // instrumentation, outbound LLM requests carry no `traceparent` header
@@ -386,18 +439,11 @@ export function initializeTelemetry(config: Config): void {
       new UndiciInstrumentation({
         ignoreRequestHook: (request) => {
           if (otlpUrlPrefixes.length === 0) return false;
-          // Strip ?query / #fragment from the incoming request.path before
-          // matching. `indexOf` (not regex) for CodeQL ReDoS hygiene — a
-          // path like `??????…` would be O(n²) in some regex engines.
-          let path = typeof request.path === 'string' ? request.path : '';
-          const qIdx = path.indexOf('?');
-          const fIdx = path.indexOf('#');
-          let cut = path.length;
-          if (qIdx !== -1) cut = Math.min(cut, qIdx);
-          if (fIdx !== -1) cut = Math.min(cut, fIdx);
-          path = path.slice(0, cut);
-          const url = `${request.origin}${path}`;
-          return otlpUrlPrefixes.some((prefix) => url.startsWith(prefix));
+          const path =
+            typeof request.path === 'string'
+              ? stripPathSuffix(request.path)
+              : '';
+          return matchesOtlpPrefix(request.origin, path);
         },
       }),
     ],

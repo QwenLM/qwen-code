@@ -97,11 +97,37 @@ describe('AnthropicContentGenerator', () => {
     mockConfig = {
       getCliVersion: vi.fn().mockReturnValue('1.2.3'),
       getProxy: vi.fn().mockReturnValue(undefined),
+      getTelemetryEnabled: vi.fn().mockReturnValue(false),
+      getSessionId: vi.fn().mockReturnValue('test-session'),
     } as unknown as Config;
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('installs the correlation fetch wrapper on the Anthropic client', async () => {
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-test',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.anthropic.com',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+    const fetchFn = anthropicState.constructorOptions?.['fetch'] as
+      | unknown
+      | undefined;
+    // Wrapper installed regardless of telemetry-enabled state — per-call
+    // header injection is gated inside the wrapper itself. Exhaustive
+    // behavior is in llm-correlation-fetch.test.ts.
+    expect(typeof fetchFn).toBe('function');
+    expect(fetchFn).not.toBe(globalThis.fetch);
   });
 
   it('uses claude-cli identity (User-Agent + x-app + Bearer auth) for non-Anthropic baseURLs', async () => {

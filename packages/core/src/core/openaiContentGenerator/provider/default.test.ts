@@ -180,6 +180,29 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(typeof callArg.fetch).toBe('function');
       expect(callArg.fetch).not.toBe(globalThis.fetch);
     });
+
+    it('wraps the proxy fetch (not globalThis.fetch) when runtimeOptions provides one', () => {
+      // Regression guard for design §4.3: when proxy is configured,
+      // buildRuntimeFetchOptions returns { fetch: <bundled undici fetch> }
+      // so the proxy dispatcher and fetch share a single undici version.
+      // The correlation wrapper must wrap THAT fetch, not globalThis.fetch.
+      const proxyFetch = vi.fn() as unknown as typeof fetch;
+      const mockedBuildRuntimeFetchOptions =
+        buildRuntimeFetchOptions as unknown as MockedFunction<
+          (sdkType: 'openai', proxyUrl?: string) => OpenAIRuntimeFetchOptions
+        >;
+      mockedBuildRuntimeFetchOptions.mockReturnValue({
+        fetch: proxyFetch,
+      } as OpenAIRuntimeFetchOptions);
+      provider.buildClient();
+      const callArg = vi.mocked(OpenAI).mock.calls[0]![0] as {
+        fetch?: typeof fetch;
+      };
+      expect(typeof callArg.fetch).toBe('function');
+      // Wrapped, not raw — the wrapper is a different function reference.
+      expect(callArg.fetch).not.toBe(proxyFetch);
+      expect(callArg.fetch).not.toBe(globalThis.fetch);
+    });
   });
 
   describe('buildRequest', () => {
