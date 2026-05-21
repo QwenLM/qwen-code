@@ -1236,22 +1236,41 @@ export class GitWorktreeService {
     }
     const timeoutMs = options?.timeoutMs ?? 30_000;
 
+    // Two-layer defense for the refspec argv element:
+    //
+    // 1. Regex digit-only validation at the call site — CodeQL's
+    //    `js/second-order-command-line-injection` rule recognises
+    //    `/^[1-9][0-9]*$/.test(x)` as a lexical sanitizer, which proves
+    //    `prNumber` cannot resemble a `--upload-pack=…` flag. The
+    //    entry guard above already establishes this at runtime, but
+    //    CodeQL's interprocedural taint tracker doesn't see through
+    //    that guard; the regex check IS the pattern its sanitizer
+    //    library recognises.
+    // 2. `--end-of-options` as a git-runtime marker. Even though
+    //    layer 1 makes a flag-shaped refspec impossible, the marker
+    //    tells git definitively that every subsequent argv element
+    //    is positional — defense-in-depth against a future
+    //    regression that loosens the entry guard.
+    const prNumberStr = String(prNumber);
+    if (!/^[1-9][0-9]*$/.test(prNumberStr)) {
+      // Unreachable given the entry guard; here to make the
+      // lexical sanitizer visible to static analyzers.
+      return {
+        success: false,
+        error: `Invalid PR number: ${prNumber}.`,
+      };
+    }
+    const refspec = `pull/${prNumberStr}/head`;
+
     try {
       // Force English git stderr so the error-taxonomy regexes below
       // match. Without this, users with non-English locales fall
       // through to the generic "PR may not exist" branch even for
       // well-known cases like missing-origin. The git binary itself is
       // unaffected by LANG/LC_ALL beyond message strings.
-      //
-      // `--end-of-options` defends against second-order command injection
-      // (git's own `--upload-pack` flag) flagged by CodeQL — even though
-      // `prNumber` is already constrained to a safe positive integer by
-      // the entry guard above, the marker tells git definitively that
-      // every subsequent argv element is a positional, not a flag, and
-      // satisfies the analyzer without runtime cost.
       await execFileAsync(
         'git',
-        ['fetch', '--end-of-options', 'origin', `pull/${prNumber}/head`],
+        ['fetch', '--end-of-options', 'origin', refspec],
         {
           cwd: this.sourceRepoPath,
           timeout: timeoutMs,
