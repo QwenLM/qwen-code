@@ -242,6 +242,8 @@ export function shouldFirePermissionDeniedForAutoMode(
   decision: AutoModeDecision,
   outcome: AutoModeOutcome,
 ): decision is Extract<AutoModeDecision, { via: 'classifier' }> {
+  // The type predicate narrows callers to classifier decisions so reason
+  // mapping can safely read classifier-only fields such as `unavailable`.
   return (
     decision.via === 'classifier' &&
     decision.shouldBlock &&

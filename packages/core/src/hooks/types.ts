@@ -526,7 +526,9 @@ export interface PermissionRequestInput extends HookInput {
 }
 
 export type PermissionDeniedReason =
+  /** AUTO classifier evaluated the request and actively blocked it. */
   | 'classifier_blocked'
+  /** AUTO classifier could not return a verdict, so AUTO mode denied it. */
   | 'classifier_unavailable';
 
 /**

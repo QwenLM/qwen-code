@@ -36,6 +36,8 @@ describe('HookPlanner', () => {
           toolName: 'Bash',
         }),
       ).toEqual({ kind: 'toolName', target: 'Bash' });
+      // PermissionDenied is permission-related, so it uses the same tool-name
+      // matcher as PermissionRequest rather than a classifier-reason matcher.
     });
 
     it('returns agent type targets for subagent events', () => {
