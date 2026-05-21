@@ -2334,6 +2334,32 @@ describe('PR 21 — auth device-flow events', () => {
       expect(errored.streamError).toEqual({ error: 'transport gone' });
     });
 
+    it('captures errorKind on stream_error in view state (wenshao #4360 review)', () => {
+      // The daemon stamps `errorKind` on `stream_error` payloads when
+      // classifiable (commit `14637cd79`, via `mapDomainErrorToErrorKind`).
+      // SDK consumers receiving these frames need `state.streamError.
+      // errorKind` to render typed retry/remediation UI (e.g. retry on
+      // init_timeout, install on missing_binary) without regex-matching
+      // the `error` message string.
+      //
+      // This test pins the flowthrough: the reducer's `stream_error`
+      // case must assign `event.data` as-is to `state.streamError`,
+      // preserving all fields including the optional `errorKind`. If
+      // a future refactor strips `errorKind` (e.g. by spreading only
+      // `{error}` instead of the full data object), this fails.
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'stream_error',
+        data: {
+          error: 'initialize timed out after 5000ms',
+          errorKind: 'init_timeout',
+        },
+      });
+      expect(state.alive).toBe(false);
+      expect(state.streamError?.errorKind).toBe('init_timeout');
+      expect(state.streamError?.error).toContain('timed out');
+    });
+
     it('still applies session_closed while awaitingResync (wenshao #4360 review)', () => {
       // session_closed is in RESYNC_PASSTHROUGH_TYPES alongside
       // session_died — terminal session lifecycle signals must still

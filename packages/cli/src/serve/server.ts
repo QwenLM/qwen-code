@@ -1934,6 +1934,37 @@ export function createServeApp(
           const next = await iter!.next();
           if (next.done) break;
           if (res.writableEnded) break;
+          // SSE ring eviction observability (#4360 wenshao review):
+          // EventBus.subscribe emits `state_resync_required` when a
+          // consumer reconnects with `Last-Event-ID` past the ring
+          // boundary. Without a daemon-side log, an operator chasing
+          // "my UI is frozen with stale state" has no breadcrumb to
+          // tell whether the ring is undersized, the client reconnects
+          // too slowly, or a network partition caused repeated
+          // reconnects. Log here (at the SSE write boundary) rather
+          // than inside EventBus — keeps the bus implementation pure
+          // and concentrates daemon-side observability in the route
+          // handler that already logs socket errors / heartbeats.
+          if (next.value.type === 'state_resync_required') {
+            const data = next.value.data as {
+              lastDeliveredId?: number;
+              earliestAvailableId?: number;
+              reason?: string;
+            };
+            const gap =
+              typeof data.earliestAvailableId === 'number' &&
+              typeof data.lastDeliveredId === 'number'
+                ? data.earliestAvailableId - data.lastDeliveredId - 1
+                : undefined;
+            writeStderrLine(
+              `qwen serve: SSE ring eviction detected (session ${sessionId}): ` +
+                `lastEventId=${data.lastDeliveredId ?? '?'}, ` +
+                `earliestInRing=${data.earliestAvailableId ?? '?'}, ` +
+                `gap=${gap ?? '?'} events, ` +
+                `reason=${data.reason ?? '?'}. ` +
+                `Consumer must call loadSession to recover.`,
+            );
+          }
           await writeWithBackpressure(formatSseFrame(next.value));
         }
       } catch (err) {
@@ -1953,6 +1984,20 @@ export function createServeApp(
           // rendering `error` text as before, so adding `errorKind` is
           // strictly additive / backward-compatible.
           const errorKind = mapDomainErrorToErrorKind(err);
+          // Bridge iterator error observability (#4360 wenshao review):
+          // forwarding the error to the client via `stream_error` is
+          // good for UX but leaves the daemon side blind. The adjacent
+          // `res.on('error', ...)` handler at line ~1925 already logs
+          // socket-level errors with `writeStderrLine`; mirror that
+          // pattern here for protocol/subprocess errors so operators
+          // can grep daemon stderr for "bridge iterator error" instead
+          // of attaching a debugger to distinguish "subprocess
+          // OOM-killed" from "bridge protocol bug".
+          writeStderrLine(
+            `qwen serve: bridge iterator error (session ${sessionId}): ` +
+              `${errorMessage(err)}` +
+              (errorKind ? ` [${errorKind}]` : ''),
+          );
           await writeWithBackpressure(
             formatSseFrame({
               v: 1,
