@@ -582,9 +582,10 @@ function createStreamableHttpFallbackFetch(
     };
     delete retryInit.body;
 
+    await response.body?.cancel();
+
     const retryResponse = await fetchImpl(url, retryInit);
     if (retryResponse.ok) {
-      await response.body?.cancel();
       return retryResponse;
     }
 
@@ -593,7 +594,6 @@ function createStreamableHttpFallbackFetch(
       return response;
     }
 
-    await response.body?.cancel();
     return retryResponse;
   };
 }

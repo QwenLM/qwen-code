@@ -40,6 +40,18 @@ function getStreamableHttpFetch(
   return (transport as unknown as { _fetch: FetchLike })._fetch;
 }
 
+function createResponseWithCancelableBody(
+  body: string,
+  init: ResponseInit,
+): { response: Response; cancel: ReturnType<typeof vi.fn> } {
+  const response = new Response(body, init);
+  const cancel = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(response, 'body', {
+    value: { cancel },
+  });
+  return { response, cancel };
+}
+
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
 }));
@@ -407,6 +419,110 @@ describe('mcp-client', () => {
 
         expect(response.status).toBe(502);
         expect(fetchSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('returns the retry response when GET 400 and POST retry fails', async () => {
+        const original = createResponseWithCancelableBody('bad request', {
+          status: 400,
+          statusText: 'Bad Request',
+        });
+        const retry = createResponseWithCancelableBody('unavailable', {
+          status: 503,
+          statusText: 'Service Unavailable',
+        });
+        const fetchSpy = vi
+          .spyOn(globalThis, 'fetch')
+          .mockResolvedValueOnce(original.response)
+          .mockResolvedValueOnce(retry.response);
+        const transport = (await createTransport(
+          'retry-fails-server',
+          {
+            httpUrl: 'http://test-server/mcp',
+          },
+          false,
+        )) as StreamableHTTPClientTransport;
+
+        const response = await getStreamableHttpFetch(transport)(
+          new URL('http://test-server/mcp'),
+          {
+            method: 'GET',
+            headers: { Accept: 'text/event-stream' },
+          },
+        );
+
+        expect(response).toBe(retry.response);
+        expect(response.status).toBe(503);
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        expect(original.cancel).toHaveBeenCalledTimes(1);
+        expect(retry.cancel).not.toHaveBeenCalled();
+      });
+
+      it('returns the original response when GET 405 and POST retry fails', async () => {
+        const original = createResponseWithCancelableBody(
+          'method not allowed',
+          {
+            status: 405,
+            statusText: 'Method Not Allowed',
+          },
+        );
+        const retry = createResponseWithCancelableBody('bad request', {
+          status: 400,
+          statusText: 'Bad Request',
+        });
+        const fetchSpy = vi
+          .spyOn(globalThis, 'fetch')
+          .mockResolvedValueOnce(original.response)
+          .mockResolvedValueOnce(retry.response);
+        const transport = (await createTransport(
+          'method-retry-fails-server',
+          {
+            httpUrl: 'http://test-server/mcp',
+          },
+          false,
+        )) as StreamableHTTPClientTransport;
+
+        const response = await getStreamableHttpFetch(transport)(
+          new URL('http://test-server/mcp'),
+          {
+            method: 'GET',
+            headers: { Accept: 'text/event-stream' },
+          },
+        );
+
+        expect(response).toBe(original.response);
+        expect(response.status).toBe(405);
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        expect(original.cancel).toHaveBeenCalledTimes(1);
+        expect(retry.cancel).toHaveBeenCalledTimes(1);
+      });
+
+      it('cancels the original response body when the POST retry throws', async () => {
+        const original = createResponseWithCancelableBody('bad request', {
+          status: 400,
+          statusText: 'Bad Request',
+        });
+        const retryError = new Error('network reset');
+        const fetchSpy = vi
+          .spyOn(globalThis, 'fetch')
+          .mockResolvedValueOnce(original.response)
+          .mockRejectedValueOnce(retryError);
+        const transport = (await createTransport(
+          'retry-throws-server',
+          {
+            httpUrl: 'http://test-server/mcp',
+          },
+          false,
+        )) as StreamableHTTPClientTransport;
+
+        await expect(
+          getStreamableHttpFetch(transport)(new URL('http://test-server/mcp'), {
+            method: 'GET',
+            headers: { Accept: 'text/event-stream' },
+          }),
+        ).rejects.toThrow('network reset');
+
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        expect(original.cancel).toHaveBeenCalledTimes(1);
       });
     });
 
