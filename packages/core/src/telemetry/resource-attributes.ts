@@ -35,6 +35,10 @@ export const RESERVED_RESOURCE_ATTRIBUTE_KEYS: ReadonlySet<string> = new Set([
  * startup on a single malformed value.
  *
  * Duplicate keys: last-write-wins, matching the OTel SDK reference behavior.
+ *
+ * Note on warn visibility: `diag.warn` routes to the debug log file
+ * (`~/.qwen/log/otel-*.log`), not console — see PR #3986. If a user-provided
+ * attribute appears not to take effect, that log is the place to look.
  */
 export function parseOtelResourceAttributes(
   raw: string | undefined,
@@ -46,8 +50,11 @@ export function parseOtelResourceAttributes(
     if (!trimmed) continue;
     const idx = trimmed.indexOf('=');
     if (idx < 0) {
+      // Common cause: literal comma in value (split treats it as a separator).
+      // Per OTel spec, commas in values must be percent-encoded as %2C.
       diag.warn(
-        `Skipping malformed OTEL_RESOURCE_ATTRIBUTES entry: "${trimmed}"`,
+        `Skipping malformed OTEL_RESOURCE_ATTRIBUTES entry: "${trimmed}" ` +
+          `(hint: percent-encode literal commas as %2C)`,
       );
       continue;
     }

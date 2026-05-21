@@ -192,8 +192,26 @@ Some keys are runtime-controlled and cannot be overridden:
 
 `OTEL_RESOURCE_ATTRIBUTES` follows the OpenTelemetry spec:
 `key1=value1,key2=value2` with values percent-encoded. Spaces in values must
-be encoded as `%20`. Malformed pairs are skipped with a warning rather than
-failing telemetry startup.
+be encoded as `%20`, **commas as `%2C`** (unencoded commas split the value at
+the wrong boundary and the second half is dropped as malformed). Malformed
+pairs are skipped with a warning rather than failing telemetry startup.
+
+#### Troubleshooting: when a user-provided attribute appears not to take effect
+
+Reserved keys (`service.version`, `session.id`), malformed pairs, non-string
+settings values, and invalid percent-encoding are all silently dropped with a
+warning logged via the OpenTelemetry diagnostics channel. That channel routes
+to the debug log file (`~/.qwen/log/otel-*.log`), **not** the console, so the
+behavior can look like silent failure.
+
+If a custom resource attribute isn't appearing on exported telemetry:
+
+1. Check `~/.qwen/log/otel-*.log` for lines matching `cannot override` (reserved
+   key dropped), `Skipping malformed` (bad env var pair), or `must be a string`
+   (non-string settings value).
+2. Verify the env var is set in the qwen-code process's environment (not just
+   your shell) and that values are percent-encoded.
+3. Confirm `telemetry.enabled` is `true` — telemetry init only runs if enabled.
 
 ### Cardinality controls
 
