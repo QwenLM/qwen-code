@@ -10,6 +10,9 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fail, isMainModule, readOptionValue } from './release-script-utils.js';
 
+const MAX_UPLOAD_ATTEMPTS = 3;
+const INITIAL_BACKOFF_MS = 2000;
+
 if (isMainModule(import.meta.url)) {
   try {
     main(process.argv.slice(2));
@@ -95,9 +98,6 @@ function parseUploadArgs(argv) {
 
   return args;
 }
-
-const MAX_UPLOAD_ATTEMPTS = 3;
-const INITIAL_BACKOFF_MS = 2000;
 
 function uploadAssets(
   { assets, bucket, config, prefix },
