@@ -11,6 +11,7 @@ import type {
 } from '../contentGenerator.js';
 import type { Config } from '../../config/config.js';
 import { InstallationManager } from '../../utils/installationManager.js';
+import { staticCorrelationHeaders } from '../../telemetry/llm-correlation-fetch.js';
 
 export { GeminiContentGenerator } from './geminiContentGenerator.js';
 
@@ -38,6 +39,13 @@ export function createGeminiContentGenerator(
       'x-gemini-api-privileged-user-id': `${installationId}`,
     };
   }
+  // Merge the session-id correlation header. `@google/genai`'s HttpOptions
+  // does not expose a `fetch` hook (unlike `openai` / `@anthropic-ai/sdk`),
+  // so we can only inject a static header here — captured at construction.
+  // Known limitation: after a `/clear`-triggered session reset, the Gemini
+  // SDK's cached headers retain the OLD session id until the contentGenerator
+  // is recreated. See design doc §8.6 + #4384 follow-up sub-issue tracking.
+  headers = { ...headers, ...staticCorrelationHeaders(gcConfig) };
   const httpOptions = config.baseUrl
     ? {
         headers,

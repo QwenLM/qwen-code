@@ -33,6 +33,7 @@ import {
   buildRuntimeFetchOptions,
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
+import { wrapFetchWithCorrelation } from '../../telemetry/llm-correlation-fetch.js';
 import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
@@ -203,6 +204,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // key as `X-Api-Key` to the IdeaLab proxy — leaking the credential to
     // a third-party endpoint. Explicit `null` suppresses the back-fill
     // and forces the intended auth path.
+    // Wrap fetch with per-request correlation header injection. Read the
+    // base fetch from runtimeOptions (proxy-aware) when present, else
+    // globalThis. See design doc §4.3 — fetch wrapper (not defaultHeaders)
+    // is required so the header tracks live session id across /clear resets.
+    const baseFetch =
+      (runtimeOptions as { fetch?: typeof fetch } | undefined)?.fetch ??
+      globalThis.fetch;
     this.client = new Anthropic({
       ...(useProxyIdentity
         ? { authToken: contentGeneratorConfig.apiKey, apiKey: null }
@@ -212,6 +220,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
+      fetch: wrapFetchWithCorrelation(baseFetch, this.cliConfig),
     });
 
     this.converter = new AnthropicContentConverter(
