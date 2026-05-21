@@ -270,8 +270,12 @@ export async function writeLine(
     }
     // flush:true fsyncs after each line so a process killed mid-write
     // doesn't leave a glued `}{` record on disk (closes #3681).
-    await fs.promises.appendFile(filePath, line, {
-      encoding: 'utf8',
+    //
+    // Pass a Buffer (not a string) — Node's C++ fast path for
+    // string + utf8 + appendFile bypasses the JS-side flush logic
+    // entirely, making `{ flush: true }` a silent no-op for strings.
+    // Buffers force the slow path that actually fsyncs.
+    await fs.promises.appendFile(filePath, Buffer.from(line, 'utf8'), {
       flush: true,
     });
   });
@@ -286,9 +290,12 @@ export async function writeLine(
  * and `write()`. Callers that share a JSONL file with concurrent
  * `writeLine()` callers must serialize externally.
  *
- * `flush: true` ensures each appended record reaches disk before the
- * call returns (closes #3681 — kill -9 mid-tool-call no longer
- * truncates the session transcript at the last buffered record).
+ * `flush: true` fsyncs after each appended record so a `kill -9`
+ * mid-tool-call cannot leave a glued `}{` record on disk (closes
+ * #3681). The line is converted to a `Buffer` because Node's
+ * C++ fast path for string + utf8 + appendFile bypasses the JS-side
+ * flush logic, making `{ flush: true }` a silent no-op when the
+ * payload is a string.
  */
 export function writeLineSync(filePath: string, data: unknown): void {
   const line = `${JSON.stringify(data)}\n`;
@@ -297,7 +304,7 @@ export function writeLineSync(filePath: string, data: unknown): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.appendFileSync(filePath, line, { encoding: 'utf8', flush: true });
+  fs.appendFileSync(filePath, Buffer.from(line, 'utf8'), { flush: true });
 }
 
 /**

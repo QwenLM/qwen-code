@@ -303,8 +303,7 @@ export async function atomicWriteFile(
                 // can correlate the original write error with a
                 // subsequent EEXIST loop.
                 debugLogger.debug(
-                  'orphan unlink failed for %s: %s',
-                  targetPath,
+                  `orphan unlink failed for ${targetPath}:`,
                   orphanErr,
                 );
               }
@@ -604,8 +603,7 @@ export function atomicWriteFileSync(
                 fsSync.unlinkSync(targetPath);
               } catch (orphanErr) {
                 debugLogger.debug(
-                  'orphan unlink failed for %s: %s',
-                  targetPath,
+                  `orphan unlink failed for ${targetPath}:`,
                   orphanErr,
                 );
               }
