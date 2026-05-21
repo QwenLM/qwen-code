@@ -601,6 +601,26 @@ Deep review verdict: APPROVE
 - **AC4**：preflight 故意返回 garbage（mock 测试）→ 兜底走 DEEP，留 warning，不导致 job fail
 - **AC5**：existing fallback comment 路径在 STANDARD/DEEP 失败时仍能发出
 
+## 实测验证记录
+
+下表是 `codex/preflight-triage` 分支经 `workflow_dispatch` 在真实 CI 上跑出的端到端结果。pre-merge 阶段新版链路只能靠 `workflow_dispatch` 验证 —— `pull_request_target` / `@qwen /review` 自动触发按 GHA 安全机制用 **base 分支(main)** 的 workflow,合并后才生效。
+
+**四档 tier —— 每档一条真实 review 评论:**
+
+| Tier | 实测 PR | 真实评论 |
+| --- | --- | --- |
+| ULTRA_LIGHT | #4356(纯文档) | [pull/4356#issuecomment-4506096640](https://github.com/QwenLM/qwen-code/pull/4356#issuecomment-4506096640) |
+| LIGHT | #4371(denylist 小改) | [pull/4371#issuecomment-4505842660](https://github.com/QwenLM/qwen-code/pull/4371#issuecomment-4505842660) |
+| STANDARD | #4383(CI/构建修复) | [pull/4383#issuecomment-4505964471](https://github.com/QwenLM/qwen-code/pull/4383#issuecomment-4505964471) |
+| DEEP | #4373(core 改动) | [pull/4373#issuecomment-4506321384](https://github.com/QwenLM/qwen-code/pull/4373#issuecomment-4506321384) |
+
+**Gate 链路:**
+
+- pr-gate `PR Size` 拦截 —— 实证:本 PR 超 1500 行被 `core.setFailed` 拦截;打 `oversized-ok` label 后降级为 warning、转 success。
+- review workflow size 短路 —— 实证:超限 PR 跳过 AI review、不发拦截评论、把 merge-blocking 交给 `pr-gate.yml`。
+- pr-gate `PR Template` —— 检查逻辑(缺必填段 / Validation 空模板 → `core.setFailed`)经静态核验成立。
+- 模型 —— 评论均由 `deepseek-v4-pro` 产出(经 `QWEN_PR_REVIEW_MODEL` 配置),CLI 仅作 agent runtime。
+
 ## Open questions / 风险
 
 - **R1**：preflight 模型本身的可靠性 —— 便宜模型可能 JSON 结构不稳。需要在实现期 sample 试若干 PR 观察输出质量；不稳就回退到 deep review 模型 SKU。
