@@ -35,6 +35,20 @@ import type { Config, WorktreeSession } from '@qwen-code/qwen-code-core';
 const debugLogger = createDebugLogger('WORKTREE_STARTUP');
 
 /**
+ * `git rev-parse --abbrev-ref HEAD` returns this literal when the
+ * launch cwd has a detached HEAD checked out. Two related uses:
+ *
+ * 1. As an INPUT filter when normalizing `getCurrentBranch` output:
+ *    we treat `'HEAD'` as "no real branch" and collapse to `undefined`
+ *    so detached-state propagates uniformly through the slug/baseRef
+ *    pipeline.
+ * 2. As the FALLBACK metadata string written to the sidecar's
+ *    `originalBranch` field when the launch state was detached
+ *    (no branch name to record).
+ */
+const DETACHED_HEAD = 'HEAD';
+
+/**
  * Resolved metadata for a startup worktree. Returned to the caller so the
  * sidecar write (which needs `Config`) can happen after `loadCliConfig`.
  */
@@ -164,16 +178,14 @@ export async function setupStartupWorktree(
   //
   // The two probes are independent — run in parallel to shave one
   // subprocess off the critical path. Each is individually try-wrapped
-  // so a failure in one (detached HEAD, unborn HEAD, partial init)
-  // doesn't poison the other. `getCurrentBranch` returns the literal
-  // string `'HEAD'` on a detached HEAD instead of throwing; normalize
-  // that to `undefined` so callers treat detached and missing the same.
+  // so a failure in one (unborn HEAD, partial init) doesn't poison
+  // the other. Detached-HEAD normalization via DETACHED_HEAD const.
   const [originalBranchRaw, originalHeadCommit] = await Promise.all([
     service.getCurrentBranch().catch(() => undefined),
     service.getCurrentCommitHash().catch(() => ''),
   ]);
   const originalBranch =
-    originalBranchRaw && originalBranchRaw !== 'HEAD'
+    originalBranchRaw && originalBranchRaw !== DETACHED_HEAD
       ? originalBranchRaw
       : undefined;
 
@@ -181,25 +193,32 @@ export async function setupStartupWorktree(
   // case: user did `qwen --worktree foo` previously, exited with Keep,
   // and now runs `qwen --resume <sid> --worktree foo` to continue. The
   // directory + branch are already on disk; we just chdir into them.
+  //
+  // `getRegisteredWorktreeBranch` returns the worktree's HEAD commit
+  // alongside the branch (single rev-parse). Using THAT as
+  // `originalHeadCommit` instead of the launch-cwd capture is critical:
+  // `WorktreeExitDialog` later runs `rev-list <head>..HEAD` inside the
+  // worktree, so the launch-cwd HEAD would make it count every commit
+  // accumulated in the worktree across all prior sessions as "new work
+  // this session".
   const expectedWorktreePath = service.getUserWorktreePath(slug);
   const expectedBranch = worktreeBranchForSlug(slug);
-  let registeredBranch: string | null = null;
+  let registered: { branch: string; headCommit: string } | null = null;
   try {
-    registeredBranch =
+    registered =
       await service.getRegisteredWorktreeBranch(expectedWorktreePath);
   } catch {
-    registeredBranch = null;
+    registered = null;
   }
-  if (registeredBranch !== null) {
-    // Directory exists AND is a registered git worktree. Verify the
-    // branch matches what we'd produce for this slug — if it doesn't,
-    // SOMETHING ELSE is occupying the path and we refuse to clobber it.
-    if (registeredBranch !== expectedBranch) {
+  if (registered !== null) {
+    if (registered.branch !== expectedBranch) {
+      // SOMETHING ELSE is occupying the path on a different branch —
+      // refuse to clobber it.
       return {
         ok: false,
         error:
           `--worktree: ${expectedWorktreePath} is already a git worktree, but its branch ` +
-          `is ${registeredBranch} (expected ${expectedBranch}). Refusing to re-attach. ` +
+          `is ${registered.branch} (expected ${expectedBranch}). Refusing to re-attach. ` +
           `Resolve the conflict manually (e.g. \`git worktree remove ${expectedWorktreePath}\`).`,
       };
     }
@@ -212,30 +231,18 @@ export async function setupStartupWorktree(
         error: `--worktree: failed to chdir into ${worktreePath} (${error instanceof Error ? error.message : String(error)}).`,
       };
     }
-    // Re-capture HEAD from INSIDE the worktree we just attached to.
-    // The launch-cwd capture above describes the main checkout — using
-    // it here would make WorktreeExitDialog's `rev-list <head>..HEAD`
-    // count every commit accumulated in the worktree across all prior
-    // sessions as "new work this session". Best-effort: fall back to
-    // the launch-cwd capture if the in-worktree probe fails, which
-    // matches the "treat empty as unknown and skip the count" contract
-    // the dialog already implements.
-    const reattachService = new GitWorktreeService(worktreePath);
-    const reattachHeadCommit = await reattachService
-      .getCurrentCommitHash()
-      .catch(() => originalHeadCommit);
     debugLogger.debug(
-      `setupStartupWorktree: re-attached to existing worktree at ${worktreePath} (branch=${registeredBranch})`,
+      `setupStartupWorktree: re-attached to existing worktree at ${worktreePath} (branch=${registered.branch})`,
     );
     return {
       ok: true,
       context: {
         worktreePath,
         slug,
-        branch: registeredBranch,
+        branch: registered.branch,
         repoRoot,
-        originalBranch: originalBranch ?? 'HEAD',
-        originalHeadCommit: reattachHeadCommit,
+        originalBranch: originalBranch ?? DETACHED_HEAD,
+        originalHeadCommit: registered.headCommit,
         isPullRequest,
         wasReattached: true,
       },
@@ -288,7 +295,7 @@ export async function setupStartupWorktree(
       slug,
       branch: result.worktree.branch,
       repoRoot,
-      originalBranch: originalBranch ?? 'HEAD',
+      originalBranch: originalBranch ?? DETACHED_HEAD,
       originalHeadCommit,
       isPullRequest,
       wasReattached: false,

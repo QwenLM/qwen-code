@@ -17,7 +17,7 @@ import { Storage } from '../config/storage.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { fileExists } from '../utils/fileUtils.js';
+import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
@@ -1090,37 +1090,41 @@ export class GitWorktreeService {
   }
 
   /**
-   * Returns the branch that the registered worktree at `worktreePath` has
-   * checked out, or `null` when the path is not a worktree of THIS
-   * repository (`sourceRepoPath`).
+   * Identifies the registered worktree at `worktreePath` as a member of
+   * THIS repository (`sourceRepoPath`). Returns the branch + HEAD commit
+   * SHA on success, or `null` when the path is not a worktree of this
+   * repo.
    *
    * Used by Phase D-1's re-attach path: when `--worktree foo` is passed
    * and `<repoRoot>/.qwen/worktrees/foo` already exists on disk, we
    * verify it really IS a Qwen-managed worktree of the current repo (not
    * a standalone `git init` someone dropped at that path) before
-   * assuming it's safe to chdir into.
+   * assuming it's safe to chdir into. Returning the HEAD SHA in the
+   * same call avoids a second subprocess to recapture it after chdir.
    *
-   * Implementation:
-   * 1. `git -C <worktreePath> rev-parse --git-common-dir` resolves the
-   *    common `.git` directory. For a real linked worktree of this repo
-   *    that's `<sourceRepoPath>/.git`; for a sibling `git init` it
-   *    resolves to `<worktreePath>/.git`. We compare against this repo's
-   *    own common-dir to reject the latter.
-   * 2. `--show-toplevel` returns git's idea of the worktree top. For a
-   *    real linked worktree this equals `worktreePath`; for a plain
+   * Implementation — a single `git rev-parse` returning four lines:
+   * 1. `HEAD` → the worktree's HEAD commit SHA (must come BEFORE
+   *    `--abbrev-ref` since the flag sticks for all subsequent refs).
+   * 2. `--abbrev-ref HEAD` → the branch name. A detached HEAD produces
+   *    `HEAD` here, which we treat as "no real branch" and return null
+   *    — the caller's re-attach gate will then refuse, since the
+   *    slug-derived branch couldn't possibly be `HEAD`.
+   * 3. `--git-common-dir` → the common `.git` directory. For a real
+   *    linked worktree of this repo that's `<sourceRepoPath>/.git`;
+   *    for a sibling `git init` it resolves to `<worktreePath>/.git`.
+   *    We compare against this repo's own common-dir to reject the
+   *    latter.
+   * 4. `--show-toplevel` → git's idea of the worktree top. For a real
+   *    linked worktree this equals `worktreePath`; for a plain
    *    directory living UNDER the main repo (e.g. `mkdir
-   *    <repo>/.qwen/worktrees/foo`) git walks up to the outer
-   *    `.git` and returns the OUTER repo's root — which would
-   *    otherwise pass the common-dir check and let us "re-attach"
-   *    to a non-worktree directory. Compare paths to reject this.
-   * 3. `--abbrev-ref HEAD` returns the branch name. A detached HEAD
-   *    produces `HEAD` here, which we treat as "no real branch" and
-   *    return null — the caller's re-attach gate will then refuse, since
-   *    the slug-derived branch couldn't possibly be `HEAD`.
+   *    <repo>/.qwen/worktrees/foo`) git walks up to the outer `.git`
+   *    and returns the OUTER repo's root — which would otherwise pass
+   *    the common-dir check and let us "re-attach" to a non-worktree
+   *    directory. Compare paths to reject this.
    */
   async getRegisteredWorktreeBranch(
     worktreePath: string,
-  ): Promise<string | null> {
+  ): Promise<{ branch: string; headCommit: string } | null> {
     let resolvedWorktreePath: string;
     try {
       const stat = await fs.stat(worktreePath);
@@ -1135,25 +1139,25 @@ export class GitWorktreeService {
     }
 
     // Run the two probes in parallel: this repo's common-dir comes from
-    // `this.git`, the candidate's common-dir + toplevel + branch come
-    // from a fresh simple-git rooted at `worktreePath` via a single
-    // combined rev-parse. `git rev-parse` accepts multiple args in one
-    // call and prints each result on its own line, so we collapse three
-    // subprocesses into one for the candidate side.
+    // `this.git`, the candidate's HEAD-SHA + branch + common-dir +
+    // toplevel come from a fresh simple-git rooted at `worktreePath`
+    // via a single combined rev-parse.
     const probeGit = simpleGit(worktreePath);
     let ourCommonDir: string;
+    let headCommit: string;
+    let branch: string;
     let probeCommonDir: string;
     let probeToplevel: string;
-    let branch: string;
     try {
       const [ourRaw, probeRaw] = await Promise.all([
         this.git.raw(['rev-parse', '--git-common-dir']),
         probeGit.raw([
           'rev-parse',
-          '--git-common-dir',
-          '--show-toplevel',
+          'HEAD',
           '--abbrev-ref',
           'HEAD',
+          '--git-common-dir',
+          '--show-toplevel',
         ]),
       ]);
       ourCommonDir = path.resolve(this.sourceRepoPath, ourRaw.trim());
@@ -1161,10 +1165,11 @@ export class GitWorktreeService {
         .split('\n')
         .map((l) => l.trim())
         .filter((l) => l.length > 0);
-      if (lines.length < 3) return null;
-      probeCommonDir = path.resolve(worktreePath, lines[0]!);
-      probeToplevel = path.resolve(lines[1]!);
-      branch = lines[2]!;
+      if (lines.length < 4) return null;
+      headCommit = lines[0]!;
+      branch = lines[1]!;
+      probeCommonDir = path.resolve(worktreePath, lines[2]!);
+      probeToplevel = path.resolve(lines[3]!);
     } catch (error) {
       debugLogger.debug(
         `getRegisteredWorktreeBranch: probe at ${worktreePath} failed: ${error}`,
@@ -1188,7 +1193,7 @@ export class GitWorktreeService {
       return null;
     }
     if (!branch || branch === 'HEAD') return null;
-    return branch;
+    return { branch, headCommit };
   }
 
   /**
@@ -1576,11 +1581,16 @@ export class GitWorktreeService {
       }
       const sourceAbs = path.resolve(this.sourceRepoPath, raw);
       const repoRootAbs = path.resolve(this.sourceRepoPath);
-      const sep = path.sep;
-      if (
-        sourceAbs !== repoRootAbs &&
-        !sourceAbs.startsWith(repoRootAbs + sep)
-      ) {
+      if (sourceAbs === repoRootAbs) {
+        // `""` / `"."` / `"./"` etc. — pointless and would alias the
+        // entire repo into itself. Reject explicitly so the path-prefix
+        // checks below don't have to handle this degenerate case.
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing empty / repo-root path "${raw}"`,
+        );
+        continue;
+      }
+      if (!isWithinRoot(sourceAbs, repoRootAbs)) {
         debugLogger.warn(
           `symlinkConfiguredDirectories: refusing path "${raw}" — resolves outside repo root (${sourceAbs} vs ${repoRootAbs})`,
         );
@@ -1593,20 +1603,14 @@ export class GitWorktreeService {
       // common-dir, and a symlink would shadow it). `.qwen/worktrees`
       // would create a worktrees-inside-worktrees loop and confuse the
       // startup sweep that scans for stale ephemeral worktrees.
-      const relFromRoot = path
-        .relative(repoRootAbs, sourceAbs)
-        .split(path.sep)[0];
-      if (relFromRoot === '.git' || sourceAbs === repoRootAbs) {
+      const gitDirAbs = path.join(repoRootAbs, '.git');
+      if (isWithinRoot(sourceAbs, gitDirAbs)) {
         debugLogger.warn(
           `symlinkConfiguredDirectories: refusing git-internal path "${raw}"`,
         );
         continue;
       }
-      const qwenWorktreesAbs = path.join(repoRootAbs, '.qwen', 'worktrees');
-      if (
-        sourceAbs === qwenWorktreesAbs ||
-        sourceAbs.startsWith(qwenWorktreesAbs + sep)
-      ) {
+      if (isWithinRoot(sourceAbs, this.getUserWorktreesDir())) {
         debugLogger.warn(
           `symlinkConfiguredDirectories: refusing path "${raw}" — would create a worktrees-inside-worktrees loop`,
         );
