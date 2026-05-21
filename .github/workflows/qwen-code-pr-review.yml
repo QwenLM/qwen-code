@@ -469,9 +469,9 @@ jobs:
       # conditionally would add branching with no real saving.
       #
       # Intentionally @latest — DO NOT pin this yet (deliberate decision):
-      #  1. This workflow is still in the Phase 1-3 bundled-action rollout
-      #     (see docs/design/code-review/roadmap.md); every CI run should
-      #     exercise the newest bundled /review skill while it stabilizes.
+      #  1. This workflow is still in the Phase 1-3 bundled-action rollout;
+      #     every CI run should exercise the newest bundled /review skill
+      #     while it stabilizes.
       #  2. The newest CLI is what reliably supports the streaming output
       #     mode this workflow depends on (`--output-format stream-json
       #     --include-partial-messages`). Without a streaming-capable CLI,

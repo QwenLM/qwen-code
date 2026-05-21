@@ -509,8 +509,8 @@ Deep review verdict: APPROVE
 ## 不做的事（避免范围漂移）
 
 - **不修改** bundled `/review` skill 内部（P1）
-- **不引入**历史 PR 感知（属于 `roadmap.md` 后续阶段）
-- **不做** GitHub App 切换（属于 `roadmap.md` 后续阶段）
+- **不引入**历史 PR 感知（属于后续阶段）
+- **不做** GitHub App 切换（属于后续阶段）
 - **不做**方向 / scope / anchor cite 类判定（属于原 Phase 4 Design Gate，与本设计正交）
 - **不引入新工具调用**到 preflight 模型（preflight 只读不写，不调 gh / git）
 
@@ -607,12 +607,12 @@ Deep review verdict: APPROVE
 
 **四档 tier —— 每档一条真实 review 评论:**
 
-| Tier | 实测 PR | 真实评论 |
-| --- | --- | --- |
-| ULTRA_LIGHT | #4356(纯文档) | [pull/4356#issuecomment-4506096640](https://github.com/QwenLM/qwen-code/pull/4356#issuecomment-4506096640) |
-| LIGHT | #4371(denylist 小改) | [pull/4371#issuecomment-4505842660](https://github.com/QwenLM/qwen-code/pull/4371#issuecomment-4505842660) |
-| STANDARD | #4383(CI/构建修复) | [pull/4383#issuecomment-4505964471](https://github.com/QwenLM/qwen-code/pull/4383#issuecomment-4505964471) |
-| DEEP | #4373(core 改动) | [pull/4373#issuecomment-4506321384](https://github.com/QwenLM/qwen-code/pull/4373#issuecomment-4506321384) |
+| Tier        | 实测 PR              | 真实评论                                                                                                   |
+| ----------- | -------------------- | ---------------------------------------------------------------------------------------------------------- |
+| ULTRA_LIGHT | #4356(纯文档)        | [pull/4356#issuecomment-4506096640](https://github.com/QwenLM/qwen-code/pull/4356#issuecomment-4506096640) |
+| LIGHT       | #4371(denylist 小改) | [pull/4371#issuecomment-4505842660](https://github.com/QwenLM/qwen-code/pull/4371#issuecomment-4505842660) |
+| STANDARD    | #4383(CI/构建修复)   | [pull/4383#issuecomment-4505964471](https://github.com/QwenLM/qwen-code/pull/4383#issuecomment-4505964471) |
+| DEEP        | #4373(core 改动)     | [pull/4373#issuecomment-4506321384](https://github.com/QwenLM/qwen-code/pull/4373#issuecomment-4506321384) |
 
 **Gate 链路:**
 

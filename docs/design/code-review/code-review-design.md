@@ -2,7 +2,7 @@
 
 > 本文档只覆盖本 PR 实际交付的 **Phase 1-3**（bundled action 切换、增量评审 cache wiring、本设计文档）。
 > Design Gate / 历史 PR 感知 / Feature Readiness / Override / 轮次抑制 / GitHub App 等属于 Phase 4-7，
-> 设计与实现随对应 PR 一起提交，路线见 `docs/design/code-review/roadmap.md`。
+> 设计与实现随对应 PR 一起提交，后续阶段的路线在本 PR 描述中说明。
 
 ## 问题陈述
 
@@ -176,4 +176,4 @@ PR review workflow 用的是 `qwen-code-action` 内部 `npm install qwen-code@la
 
 ## Follow-up & 实施路线
 
-后续 Phase 4-7（Design Gate / 历史感知 / 轮次抑制 / GitHub App）的范围、依赖、验收标准见 `docs/design/code-review/roadmap.md`。每个 Phase 作为独立 PR 推进，设计细节随对应实现 PR 一起提交，不在本 PR 提前沉淀。
+后续 Phase 4-7（Design Gate / 历史感知 / 轮次抑制 / GitHub App）每个 Phase 作为独立 PR 推进，范围、依赖、验收标准与设计细节随对应实现 PR 一起提交，不在本 PR 提前沉淀。
