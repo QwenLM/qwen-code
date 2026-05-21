@@ -174,6 +174,447 @@ const OUTPUT_RECOVERY_MESSAGE =
   'Break remaining work into smaller pieces.';
 
 /**
+ * Maximum length of the previous-response tail embedded inside the
+ * `<previous_response_suffix>` block of the recovery user-turn. Chosen as a
+ * pragmatic balance: large enough to give the model enough trailing context to
+ * resume coherently (covers ~200–400 tokens of prose, or a multi-row Markdown
+ * table), and small enough to keep the recovery prompt well under any
+ * provider's input budget even when combined with the rest of history.
+ */
+const OUTPUT_RECOVERY_TAIL_CHARS = 1200;
+
+/**
+ * Hard cap on the inner overlap/contained-prefix scan loops. Bounds both the
+ * suffix-anchored overlap search in {@link getRecoveryContinuationSuffix} and
+ * the contained-prefix scan in {@link findContainedRecoveryPrefixReplayLength}
+ * so recovery dedup stays O(min(previous, continuation, 4000)) in iteration
+ * count instead of unbounded against pathologically large continuations.
+ */
+const RECOVERY_OVERLAP_MAX_SCAN_CHARS = 4000;
+
+/**
+ * Minimum byte-length before a plain-text overlap (between previous tail and
+ * continuation prefix) is considered "significant" enough to dedup. Short
+ * coincidental matches like `". "`, `"the "`, or `", and "` happen routinely
+ * across unrelated turns; requiring ≥6 bytes makes accidental matches on
+ * common short suffixes vanishingly unlikely while still catching meaningful
+ * replayed phrases.
+ */
+const RECOVERY_OVERLAP_MIN_BYTES = 6;
+
+/**
+ * Companion floor in *code points* for prose overlaps. The byte floor alone is
+ * too permissive for CJK: a single Chinese character is 3 UTF-8 bytes, so
+ * `RECOVERY_OVERLAP_MIN_BYTES = 6` would accept a coincidental 2-character
+ * overlap like `"我们"` / `"但是"` that is extremely common across unrelated
+ * Chinese turns. Requiring at least 4 code points in addition to the byte
+ * floor makes CJK collisions need a 4-character coincidence (~10⁻⁵ when
+ * each character is independent), without raising the bar for ASCII (4 ASCII
+ * chars is only 4 bytes — still gated by the 6-byte floor, so ASCII effectively
+ * needs ≥6 chars). Structural anchors (`#|`\n) are exempted because the
+ * structural floor already governs them and structural collisions are far
+ * rarer than prose.
+ */
+const RECOVERY_OVERLAP_MIN_CHARS = 4;
+
+/**
+ * Lower floor for overlaps that contain Markdown structural characters
+ * (`#`, `|`, backtick, newline). Structural anchors are far less likely to
+ * collide coincidentally than prose — a 4-byte overlap like `"| a "` or
+ * `"## "` is almost certainly a replayed block-level marker, so we accept a
+ * smaller match to catch table/heading replays that the 6-byte prose floor
+ * would otherwise miss.
+ */
+const RECOVERY_STRUCTURAL_OVERLAP_MIN_BYTES = 4;
+// Plain-prose substring matches outside the suffix-anchored path are very
+// prone to false positives on common opener phrases ("In summary, …", "Here is
+// the …"). The contained-prefix replay path is reserved for replayed Markdown
+// blocks (tables, headings, fenced code), so we require both a structural
+// anchor at the start of the prefix and a substantially larger byte floor than
+// the suffix path uses. This intentionally errs on the side of leaving rare
+// duplicates in history rather than silently dropping legitimate continuation.
+const RECOVERY_CONTAINED_PREFIX_MIN_BYTES = 12;
+// Limit the substring search to the immediate truncation tail so a coincidental
+// match thousands of characters earlier in the previous turn cannot win.
+const RECOVERY_CONTAINED_TAIL_LOOKBACK_CHARS = 400;
+
+function byteLength(text: string): number {
+  return Buffer.byteLength(text, 'utf8');
+}
+
+function isSignificantRecoveryOverlap(overlap: string): boolean {
+  const overlapBytes = byteLength(overlap);
+  // This is intentionally a loose "contains any of these chars" check rather
+  // than a strict Markdown-block-anchor parse: an overlap that picks up `#`,
+  // `` ` ``, `|`, or `\n` is *probably* a replayed structural marker, and
+  // the 4-byte structural floor only differs from the 6-byte prose floor by
+  // a 2-byte window. The worst realistic over-classification (4–5 byte prose
+  // fragments like `"C#dev"` or `"a|b|c"` slipping through the structural
+  // path instead of the prose path) still requires that fragment to be
+  // identical at the truncation boundary on both sides, which is far rarer
+  // than the structural-replay scenarios this lower floor exists to catch.
+  const hasMarkdownStructure = /[#|`\n]/.test(overlap);
+  if (
+    hasMarkdownStructure &&
+    overlapBytes >= RECOVERY_STRUCTURAL_OVERLAP_MIN_BYTES
+  ) {
+    return true;
+  }
+  // Prose overlaps must clear *both* the byte floor (covers ASCII) and the
+  // code-point floor (covers CJK). Counting code points via the spread
+  // iterator handles surrogate pairs correctly so emoji do not double-count.
+  const overlapChars = [...overlap].length;
+  return (
+    overlapBytes >= RECOVERY_OVERLAP_MIN_BYTES &&
+    overlapChars >= RECOVERY_OVERLAP_MIN_CHARS
+  );
+}
+
+/**
+ * Returns true if `text` opens with a Markdown block-level structural marker
+ * (table row, fenced code, ATX heading, blockquote, list item). Leading
+ * whitespace/newline chars are skipped because providers often prepend them
+ * when restarting a block — some completion APIs re-emit the suffix with
+ * leading spaces or tabs, not just newlines. The marker must appear at the
+ * start of a line and be followed by the syntactic gap the spec requires
+ * (e.g. `# ` not `#abc`), so incidental `#` or `|` characters in prose do
+ * not count.
+ *
+ * The table-row alternation requires either ≥3 pipes (GFM tables need at
+ * least 2 cells, i.e. 3 separator pipes) *or* a separator row (`|---|`,
+ * `|:---:|`, etc.). A bare `|expression|` in technical prose has only 2
+ * pipes and no separator syntax, so it is intentionally rejected — that
+ * pattern is not a valid GFM table row anyway.
+ */
+function startsWithMarkdownStructuralAnchor(text: string): boolean {
+  const trimmed = text.replace(/^\s+/, '');
+  return /^(\|[^\n]*\|[^\n]*\||\|[\s\-:]+\||#{1,6} |```|>\s|[-*+] |\d+\. )/.test(
+    trimmed,
+  );
+}
+
+function findContainedRecoveryPrefixReplayLength(
+  previousText: string,
+  continuationText: string,
+): number {
+  // Only consider replaying the *immediate* tail of the previous response.
+  // Earlier matches would let a coincidental substring far above the
+  // truncation point silently delete legitimate continuation text.
+  const previousTail =
+    previousText.length > RECOVERY_CONTAINED_TAIL_LOOKBACK_CHARS
+      ? previousText.slice(-RECOVERY_CONTAINED_TAIL_LOOKBACK_CHARS)
+      : previousText;
+
+  // The contained-prefix path is intended *only* for replayed Markdown blocks
+  // (tables, headings, fenced code) that providers re-emit when resuming after
+  // MAX_TOKENS. Prose replays — even ones that briefly coincide with the
+  // previous tail — are out of scope: dropping them would silently lose user-
+  // visible content. Require a structural anchor at the very start of the
+  // continuation before considering any contained-prefix match at all.
+  if (!startsWithMarkdownStructuralAnchor(continuationText)) {
+    return 0;
+  }
+
+  // The anchor check above tolerates leading whitespace because some providers
+  // re-emit the replayed block with extra leading spaces/tabs. The actual
+  // substring match must use the *trimmed* continuation, otherwise a
+  // continuation like `"  ### Heading"` would never match a previous tail
+  // containing `"### Heading"` (no leading whitespace). Track the offset so
+  // the returned length consumes the leading whitespace too — keeping the
+  // caller's `continuationText.slice(replayedLength)` invariant intact.
+  const leadingMatch = continuationText.match(/^\s+/);
+  const leadingWhitespaceLength = leadingMatch?.[0].length ?? 0;
+  const trimmedContinuation = continuationText.slice(leadingWhitespaceLength);
+
+  const maxPrefix = Math.min(
+    previousTail.length,
+    trimmedContinuation.length,
+    RECOVERY_OVERLAP_MAX_SCAN_CHARS,
+  );
+
+  for (let length = maxPrefix; length > 0; length -= 1) {
+    const prefix = trimmedContinuation.slice(0, length);
+    if (
+      byteLength(prefix) >= RECOVERY_CONTAINED_PREFIX_MIN_BYTES &&
+      previousTailContainsAtLineBoundary(previousTail, prefix)
+    ) {
+      return leadingWhitespaceLength + length;
+    }
+  }
+
+  return 0;
+}
+
+/**
+ * Symmetric line-boundary check for the contained-prefix scan: returns true
+ * iff `prefix` occurs in `previousTail` starting at index 0 or immediately
+ * after a newline. The structural-anchor check on the continuation side only
+ * enforces that the *continuation* starts at a Markdown block boundary;
+ * without this guard, a plain substring match could land mid-paragraph in
+ * `previousTail` (e.g. inside a code block that contains the literal string
+ * `"### Heading\nfoo"`) and silently strip legitimate continuation text. All
+ * occurrences are checked so a benign mid-paragraph hit doesn't shadow a real
+ * line-anchored replay later in the tail.
+ */
+function previousTailContainsAtLineBoundary(
+  previousTail: string,
+  prefix: string,
+): boolean {
+  let searchFrom = 0;
+  while (searchFrom <= previousTail.length) {
+    const matchIndex = previousTail.indexOf(prefix, searchFrom);
+    if (matchIndex === -1) {
+      return false;
+    }
+    if (matchIndex === 0 || previousTail.charAt(matchIndex - 1) === '\n') {
+      return true;
+    }
+    searchFrom = matchIndex + 1;
+  }
+  return false;
+}
+
+/**
+ * Compute the portion of `continuationText` that should be appended to
+ * `previousText` after a MAX_TOKENS recovery, stripping any overlap that the
+ * provider replayed at the boundary.
+ *
+ * The empty-input guard (`previousText.length === 0 ||
+ * continuationText.length === 0`) is *defensive only*. The sole production
+ * caller is {@link appendRecoveryContinuationParts}, which already short-
+ * circuits when either side has no plain-text part — neither branch of the
+ * guard can fire from production code. It exists so that anyone reusing this
+ * helper directly (e.g. a future unit test, a refactor that bypasses the
+ * caller's filter) cannot crash or read out of bounds. We deliberately leave
+ * the guard in place rather than rely on the caller's invariant alone.
+ */
+function getRecoveryContinuationSuffix(
+  previousText: string,
+  continuationText: string,
+): string {
+  if (previousText.length === 0 || continuationText.length === 0) {
+    return continuationText;
+  }
+
+  if (
+    previousText.endsWith(continuationText) &&
+    isSignificantRecoveryOverlap(continuationText)
+  ) {
+    return '';
+  }
+
+  const maxOverlap = Math.min(
+    previousText.length,
+    continuationText.length,
+    RECOVERY_OVERLAP_MAX_SCAN_CHARS,
+  );
+
+  // Worst-case complexity here is O(n²): up to RECOVERY_OVERLAP_MAX_SCAN_CHARS
+  // iterations, each calling `previousText.endsWith(overlap)` plus
+  // `byteLength(overlap)` (both O(m)). At the current 4000-char scan cap that
+  // is ~16M char-ops per recovery event, which is fine because recovery is
+  // rare and the cap is small. If the cap ever grows materially, this can be
+  // rewritten with a precomputed Z-array / failure function on
+  // `continuationText` to scan once instead of repeatedly slicing/comparing.
+  for (let length = maxOverlap; length > 0; length -= 1) {
+    const overlap = continuationText.slice(0, length);
+    if (
+      isSignificantRecoveryOverlap(overlap) &&
+      previousText.endsWith(overlap)
+    ) {
+      return continuationText.slice(length);
+    }
+  }
+
+  // Providers/models frequently resume a MAX_TOKENS recovery from an anchor
+  // that appears near the tail of the previous response, rather than from the
+  // exact last byte. Drop that replayed leading prefix before coalescing the
+  // recovery model turn into durable history; otherwise later turns inherit
+  // duplicated Markdown tables/prose even if the live UI suppresses them.
+  const containedPrefixLength = findContainedRecoveryPrefixReplayLength(
+    previousText,
+    continuationText,
+  );
+  if (containedPrefixLength > 0) {
+    const replayedPrefix = continuationText.slice(0, containedPrefixLength);
+    let suffix = continuationText.slice(containedPrefixLength);
+    if (
+      suffix.length > 0 &&
+      replayedPrefix.endsWith('\n') &&
+      !previousText.endsWith('\n') &&
+      !suffix.startsWith('\n')
+    ) {
+      suffix = `\n${suffix}`;
+    }
+    return suffix;
+  }
+
+  return continuationText;
+}
+
+function isPlainTextPart(part: Part | undefined): part is Part & {
+  text: string;
+} {
+  // Delegate to the shared predicate used by normal history consolidation
+  // (see `isValidNonThoughtTextPart` below) so the recovery-merge path and
+  // the consolidated-history path agree on what counts as "plain text".
+  // Keeping the type predicate here gives callers `part.text: string`
+  // narrowing; the underlying checks (thought, thoughtSignature, function*,
+  // inlineData, fileData) live in one place.
+  return part !== undefined && isValidNonThoughtTextPart(part);
+}
+
+function getPlainTextFromParts(parts: Part[] | undefined): string {
+  return (parts ?? [])
+    .filter(isPlainTextPart)
+    .map((part) => part.text)
+    .join('');
+}
+
+/**
+ * Sanitize the previous-response tail before embedding it inside the
+ * `<previous_response_suffix>...</previous_response_suffix>` block.
+ *
+ * If the model's own truncated output happened to contain the literal
+ * closing delimiter (e.g. while generating XML/HTML examples), the
+ * recovery prompt's structure would break — the model would see a
+ * prematurely closed tag and misinterpret the suffix boundary. We
+ * neutralize any literal opening/closing delimiter occurrences by
+ * inserting a zero-width space between the angle bracket and the rest
+ * of the tag. The text remains visually identical to the model and
+ * preserves the recovery instruction's intent, but no longer collides
+ * with our delimiter scan.
+ */
+function sanitizeRecoverySuffixTail(tail: string): string {
+  if (
+    !tail.includes('</previous_response_suffix>') &&
+    !tail.includes('<previous_response_suffix>')
+  ) {
+    return tail;
+  }
+  return tail
+    .replace(/<\/previous_response_suffix>/g, '<​/previous_response_suffix>')
+    .replace(/<previous_response_suffix>/g, '<​previous_response_suffix>');
+}
+
+function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
+  const previousText =
+    previousModelTurn?.role === 'model'
+      ? getPlainTextFromParts(previousModelTurn.parts)
+      : '';
+  if (previousText.trim().length === 0) {
+    return OUTPUT_RECOVERY_MESSAGE;
+  }
+
+  const rawTail =
+    previousText.length > OUTPUT_RECOVERY_TAIL_CHARS
+      ? previousText.slice(-OUTPUT_RECOVERY_TAIL_CHARS)
+      : previousText;
+  const tail = sanitizeRecoverySuffixTail(rawTail);
+
+  return (
+    `${OUTPUT_RECOVERY_MESSAGE}\n\n` +
+    'The previous assistant response ended with this exact suffix. ' +
+    'Do not repeat any line, table row, code line, or prose that already ' +
+    'appears in it; output only text that comes after this suffix:\n\n' +
+    '<previous_response_suffix>\n' +
+    tail +
+    '\n</previous_response_suffix>'
+  );
+}
+
+/**
+ * Coalesce a recovery continuation turn into the preceding (truncated) model
+ * turn, dropping any replayed overlap.
+ *
+ * Coupling with `processStreamResponse`. This function assumes the parts
+ * arrays it receives were produced by {@link GeminiChat.processStreamResponse}
+ * — i.e. all plain-text streaming chunks from a given turn have been
+ * consolidated in place into a single text part via `lastPart.text +=
+ * part.text`. The dedup logic only inspects the *last* plain-text part of
+ * `previousParts` and the *first* plain-text part of `continuationParts`, so
+ * if a future refactor of `processStreamResponse` ever emits multiple adjacent
+ * unconsolidated text parts per turn, this function would compare the
+ * continuation against only the trailing fragment and miss real overlaps with
+ * earlier fragments. Both functions live in this file precisely so the
+ * coupling is reviewable in a single window.
+ *
+ * Return-value shape. The returned array preserves the *shape convention* of
+ * `processStreamResponse` output: `[thoughtPart?, ...consolidatedTextParts,
+ * ...nonTextParts]`. {@link GeminiChat.coalesceRecoveryPairs} relies on this
+ * by feeding the merged result back as `previousParts` on the next recovery
+ * iteration; if the shape ever diverges, multi-iteration recovery dedup would
+ * fail silently against the wrong part.
+ */
+function appendRecoveryContinuationParts(
+  previousParts: Part[] | undefined,
+  continuationParts: Part[] | undefined,
+): Part[] {
+  const mergedParts = [...(previousParts ?? [])];
+  const nextParts = [...(continuationParts ?? [])];
+
+  // `processStreamResponse` orders parts as
+  // `[thoughtPart?, ...consolidatedHistoryParts]`, so for thinking models the
+  // first element of `nextParts` is the recovery turn's thought, not its
+  // plain-text continuation. Similarly the previous truncated turn may end
+  // with a non-text part. Scan both sides for the dedup-relevant plain-text
+  // anchor instead of locking onto the boundary indices, otherwise thinking
+  // models leak duplicated text into durable history because the dedup block
+  // gets skipped wholesale.
+  const previousTextIndex = findLastPlainTextPartIndex(mergedParts);
+  const continuationTextIndex = nextParts.findIndex(isPlainTextPart);
+
+  if (previousTextIndex >= 0 && continuationTextIndex >= 0) {
+    const previousTextPart = mergedParts[previousTextIndex] as Part & {
+      text: string;
+    };
+    const continuationTextPart = nextParts[continuationTextIndex] as Part & {
+      text: string;
+    };
+    const suffix = getRecoveryContinuationSuffix(
+      previousTextPart.text,
+      continuationTextPart.text,
+    );
+    if (suffix.length > 0) {
+      // Allocate a fresh part rather than mutating in place: `mergedParts`
+      // shares element references with the caller's history slot, and any
+      // downstream caller that cached a `part` reference would observe the
+      // mutation. Cheap allocation; eliminates a fragile invariant.
+      mergedParts[previousTextIndex] = {
+        ...previousTextPart,
+        text: previousTextPart.text + suffix,
+      };
+    }
+    // Drop the matched continuation text part: a non-empty suffix has already
+    // been appended above, and an empty suffix means the part was a pure
+    // replay of the previous tail and should be discarded so it does not
+    // duplicate into history. Hoist any non-text parts that preceded the
+    // matched text on the continuation side (typically the recovery turn's
+    // thought) so they land *before* the merged text part — thinking-model
+    // providers (Gemini 2.5+, Anthropic, OpenAI o-series) validate
+    // thought-signature provenance and expect a thought to precede the
+    // content it generated. Trailing non-text parts (tool calls etc.) keep
+    // their position via the final `[...mergedParts, ...nextParts]` concat.
+    const leadingNonTextParts = nextParts.splice(0, continuationTextIndex);
+    nextParts.shift();
+    if (leadingNonTextParts.length > 0) {
+      mergedParts.splice(previousTextIndex, 0, ...leadingNonTextParts);
+    }
+  }
+
+  return [...mergedParts, ...nextParts];
+}
+
+function findLastPlainTextPartIndex(parts: Part[]): number {
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    if (isPlainTextPart(parts[i])) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
  * Options for retrying on rate-limit throttling errors returned as stream content.
  * Starts at 60s to match DashScope's per-minute quota window, then backs off
  * across repeated stream-side throttling errors.
@@ -999,7 +1440,9 @@ export class GeminiChat {
             // (pushed by processStreamResponse). Push a recovery user
             // message so the model sees its partial output and continues.
             self.history.push(
-              createUserContent([{ text: OUTPUT_RECOVERY_MESSAGE }]),
+              createUserContent([
+                { text: buildOutputRecoveryMessage(lastEntry) },
+              ]),
             );
             // Signal UI/turn to clear pending (incomplete) tool calls.
             // isContinuation tells the UI to keep the text buffer so the
@@ -1509,10 +1952,10 @@ export class GeminiChat {
         return;
       }
 
-      precedingModel.parts = [
-        ...(precedingModel.parts ?? []),
-        ...(modelContinuation.parts ?? []),
-      ];
+      precedingModel.parts = appendRecoveryContinuationParts(
+        precedingModel.parts,
+        modelContinuation.parts,
+      );
       // Drop the (userRecovery, modelContinuation) pair.
       this.history.splice(len - 2, 2);
     }
