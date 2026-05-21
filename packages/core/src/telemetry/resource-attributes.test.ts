@@ -36,6 +36,11 @@ describe('parseOtelResourceAttributes', () => {
     ['a=1,a=2', { a: '2' }],
     [' a = 1 , b = 2 ', { a: '1', b: '2' }],
     ['a=1,,b=2', { a: '1', b: '2' }],
+    // First-`=` split contract: values may legitimately contain `=` (base64
+    // padding, JWTs, connection strings). Regression-guard against a future
+    // refactor that switches indexOf('=') to split('=').
+    ['a=val=ue', { a: 'val=ue' }],
+    ['k=base64==,x=1', { k: 'base64==', x: '1' }],
   ])('parses %j → %j', (input, expected) => {
     expect(parseOtelResourceAttributes(input)).toEqual(expected);
   });
