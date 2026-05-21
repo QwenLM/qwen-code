@@ -314,6 +314,7 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.GLOB,
   ToolNames.LS,
   ToolNames.LSP,
+  ToolNames.NOTEBOOK_EDIT,
 ]);
 
 function canonicalToolName(toolName: string): string {
@@ -383,6 +384,7 @@ function pushLspPathCandidate(out: string[], v: unknown): void {
  * Per-tool dispatcher because the field name and shape differ:
  *
  *  - read_file / edit / write_file → `file_path`
+ *  - notebook_edit → `notebook_path`
  *  - list_directory → `path` (search root)
  *  - glob → `path` (search root, optional) + `pattern` (path-shaped
  *    selector); `<path>/<pattern>` is the effective glob walked
@@ -502,6 +504,13 @@ export function extractToolFilePaths(
     case ToolNames.READ_FILE:
     case ToolNames.EDIT:
     case ToolNames.WRITE_FILE:
+      push(obj['file_path']);
+      return out;
+
+    case ToolNames.NOTEBOOK_EDIT:
+      push(obj['notebook_path']);
+      return out;
+
     default:
       push(obj['file_path']);
       return out;

@@ -64,6 +64,7 @@ describe('ProviderSetupSteps', () => {
         totalSteps: 1,
         protocol: AuthType.USE_OPENAI,
         baseUrl: '',
+        baseUrlPlaceholder: '',
         baseUrlOptionIndex: 0,
         baseUrlError: null,
         apiKey: '',
