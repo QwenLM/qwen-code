@@ -82,11 +82,19 @@ function render(template, { context, rules }) {
   let out = template;
   // Use a function in replace() to avoid `$1` and other special replacement
   // patterns being interpreted inside the substituted text.
-  if (context != null) {
-    out = out.replace(/<<<PR_CONTEXT>>>/g, () => context);
-  }
+  //
+  // Substitute rules BEFORE context. The context blob embeds the
+  // attacker-controlled PR body, so it must be inserted last — once it is
+  // in, no further substitution pass scans it. If context went first, a
+  // PR body containing the literal `<<<REVIEW_RULES_MD>>>` would be hit by
+  // the rules pass, letting the PR forge a review-rules section in the
+  // prompt. (The rules file is trusted, so a `<<<PR_CONTEXT>>>` literal in
+  // it being substituted is harmless — but order it this way regardless.)
   if (rules != null) {
     out = out.replace(/<<<REVIEW_RULES_MD>>>/g, () => rules);
+  }
+  if (context != null) {
+    out = out.replace(/<<<PR_CONTEXT>>>/g, () => context);
   }
   return out;
 }

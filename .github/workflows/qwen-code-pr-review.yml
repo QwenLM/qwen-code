@@ -597,12 +597,28 @@ jobs:
 
           echo "::group::Run preflight LLM"
           set +e
-          # `timeout 3m` kills qwen at 3 min; the step's `timeout-minutes: 5`
-          # is the outer safety net (D6).
-          raw_out="$(timeout 3m qwen --yolo --prompt "$(cat /tmp/preflight-prompt-rendered.md)" 2>&1)"
+          # `timeout --kill-after=15s 3m` kills qwen at 3 min and SIGKILLs
+          # it 15s later if it ignored SIGTERM — matches the LIGHT/STANDARD/
+          # DEEP tier steps; the step's `timeout-minutes: 5` is the outer
+          # safety net (D6).
+          # stderr is sent to a file, NOT merged into raw_out: the JSON
+          # parser below feeds raw_out to `jq` as a single document, so any
+          # stderr line (node warnings, telemetry) would break the parse.
+          raw_out="$(timeout --kill-after=15s 3m qwen --yolo --prompt "$(cat /tmp/preflight-prompt-rendered.md)" 2>/tmp/preflight-stderr.log)"
           qwen_status=$?
           set -e
+          # Echo raw_out (and qwen's stderr) inside a stop-commands fence:
+          # GitHub Actions scans step stdout for ::workflow commands::, and
+          # this content is untrusted LLM output derived from attacker-
+          # controlled PR diff. The fence makes GHA treat it as plain text.
+          stop_token="preflight-raw-$(date +%s%N)"
+          echo "::stop-commands::${stop_token}"
           echo "$raw_out"
+          if [ -s /tmp/preflight-stderr.log ]; then
+            echo "--- preflight stderr ---"
+            cat /tmp/preflight-stderr.log
+          fi
+          echo "::${stop_token}::"
           echo "::endgroup::"
 
           # Default to DEEP on any failure (P7 conservative bias).

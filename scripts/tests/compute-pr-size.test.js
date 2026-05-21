@@ -82,10 +82,13 @@ describe('computeMeaningfulSize', () => {
         null,
         { additions: 5 },
         { path: 42, additions: 5 },
+        // additions present, deletions undefined -> deletions defaults to 0
         { path: 'src/c.ts', additions: 7 },
+        // deletions present, additions undefined -> additions defaults to 0
+        { path: 'src/d.ts', deletions: 4 },
       ],
     };
-    expect(computeMeaningfulSize(prJson)).toBe(7);
+    expect(computeMeaningfulSize(prJson)).toBe(11);
   });
 });
 
