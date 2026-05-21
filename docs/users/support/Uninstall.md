@@ -1,6 +1,6 @@
 # Uninstall
 
-Your uninstall method depends on how you ran the CLI. Follow the instructions for either npx or a global npm installation.
+Your uninstall method depends on how you installed the CLI.
 
 ## Method 1: Using npx
 
@@ -40,3 +40,21 @@ npm uninstall -g @qwen-code/qwen-code
 ```
 
 This command completely removes the package from your system.
+
+## Method 3: Standalone Install
+
+If you installed via the standalone installer (`curl ... | bash` or `irm ... | iex`), use the dedicated uninstall script.
+
+**Linux / macOS**
+
+```bash
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.sh | bash
+```
+
+**Windows**
+
+```powershell
+irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.ps1 | iex
+```
+
+The uninstaller removes the standalone runtime, generated `qwen` wrapper, and installer-managed PATH changes. Your Qwen Code configuration (`~/.qwen`) is preserved by default.

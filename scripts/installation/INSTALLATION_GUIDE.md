@@ -46,11 +46,6 @@ standalone release. The `standalone` suffix intentionally avoids overwriting the
 existing production `install-qwen.sh` / `install-qwen.bat` OSS objects during
 the staged rollout.
 
-Public installation documentation intentionally continues to use the existing
-production installer in this PR. Update README and other public quick-install
-instructions in a follow-up after the standalone-suffixed hosted installers and
-release archive sync have been validated in production.
-
 Hosted installer assets are staged separately from GitHub Release archives:
 
 - `install-qwen-standalone.sh` is the Linux/macOS hosted entrypoint.
