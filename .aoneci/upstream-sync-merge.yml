@@ -19,7 +19,8 @@ name: Upstream Sync 合并
 
 triggers:
   schedule:
-    - cron: '20 22 * * *' # 每天 23:00 执行
+    - cron: '20 22 * * *' # 每天 22:20 执行
+      always: true        # 即使没有新提交也触发
   push:
     branches: ['feat/upstream-sync-automation']
 
