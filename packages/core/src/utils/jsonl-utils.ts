@@ -269,12 +269,11 @@ export async function writeLine(
       ensuredDirs.add(dir);
     }
     // flush:true fsyncs after each line so a process killed mid-write
-    // doesn't leave a glued `}{` record on disk (closes #3681).
-    //
-    // Pass a Buffer (not a string) — Node's C++ fast path for
-    // string + utf8 + appendFile bypasses the JS-side flush logic
-    // entirely, making `{ flush: true }` a silent no-op for strings.
-    // Buffers force the slow path that actually fsyncs.
+    // doesn't leave a glued `}{` record on disk (closes #3681). On
+    // Node v22/v24 strace shows string + utf8 + flush:true does fsync
+    // correctly; passing a Buffer is forward-compat insurance against
+    // any future C++ fast path that might bypass JS-side flush logic
+    // for the string case, with no behavior delta on tested versions.
     await fs.promises.appendFile(filePath, Buffer.from(line, 'utf8'), {
       flush: true,
     });
@@ -292,10 +291,12 @@ export async function writeLine(
  *
  * `flush: true` fsyncs after each appended record so a `kill -9`
  * mid-tool-call cannot leave a glued `}{` record on disk (closes
- * #3681). The line is converted to a `Buffer` because Node's
- * C++ fast path for string + utf8 + appendFile bypasses the JS-side
- * flush logic, making `{ flush: true }` a silent no-op when the
- * payload is a string.
+ * #3681). The line is converted to a `Buffer` for forward-compat
+ * insurance — strace on Node v22/v24 confirms string + utf8 +
+ * flush:true does fsync correctly today, but Buffer is the
+ * unambiguous slow-path form and protects against any future C++
+ * fast-path optimization that might bypass the flush hook for
+ * strings.
  */
 export function writeLineSync(filePath: string, data: unknown): void {
   const line = `${JSON.stringify(data)}\n`;

@@ -208,13 +208,25 @@ export async function atomicWriteFile(
   if (flush) writeOptions.flush = true;
   if (desiredMode !== undefined) writeOptions.mode = desiredMode;
 
-  // chmod fails on filesystems without POSIX permissions (FAT/exFAT). Best-effort.
+  // chmod fails on filesystems without POSIX permissions (FAT/exFAT) —
+  // narrow the catch to ENOSYS/ENOTSUP so security-relevant errors
+  // (sandbox EPERM, transient EIO, read-only EROFS) propagate. This
+  // matters specifically on the EXDEV non-noFollow fallback below,
+  // where tryChmod is the *sole* mode-setting mechanism for an
+  // existing target (writeFile ignores `mode` when the target exists).
+  // Non-credential callers don't pass `mode`, so `desiredMode ===
+  // undefined` short-circuits before any chmod is attempted.
   const tryChmod = async (target: string): Promise<void> => {
     if (desiredMode === undefined) return;
     try {
       await chmodImpl(target, desiredMode);
-    } catch {
-      // Ignore — not all filesystems support chmod.
+    } catch (chmodErr) {
+      if (
+        !isNodeError(chmodErr) ||
+        (chmodErr.code !== 'ENOSYS' && chmodErr.code !== 'ENOTSUP')
+      ) {
+        throw chmodErr;
+      }
     }
   };
 
@@ -528,12 +540,18 @@ export function atomicWriteFileSync(
   if (flush) writeOptions.flush = true;
   if (desiredMode !== undefined) writeOptions.mode = desiredMode;
 
+  // See tryChmod in atomicWriteFile for rationale on the narrowed catch.
   const tryChmodSync = (target: string): void => {
     if (desiredMode === undefined) return;
     try {
       chmodImpl(target, desiredMode);
-    } catch {
-      // Not all filesystems support chmod (FAT/exFAT).
+    } catch (chmodErr) {
+      if (
+        !isNodeError(chmodErr) ||
+        (chmodErr.code !== 'ENOSYS' && chmodErr.code !== 'ENOTSUP')
+      ) {
+        throw chmodErr;
+      }
     }
   };
 
@@ -573,7 +591,14 @@ export function atomicWriteFileSync(
             try {
               const buf =
                 typeof data === 'string' ? Buffer.from(data, encoding) : data;
-              fsSync.writeSync(fd, buf);
+              // writeFileSync(fd, buf) loops until the full buffer is
+              // written. Plain `fsSync.writeSync(fd, buf)` returns the
+              // bytes-actually-written and can short-write, which would
+              // silently truncate the credential file while still
+              // reaching fsync + fchmod. The async sibling
+              // (`fd.writeFile`) handles short-writes internally; the
+              // sync path now matches.
+              fsSync.writeFileSync(fd, buf);
               if (flush) fsSync.fsyncSync(fd);
               // fchmod on the open fd (see atomicWriteFile for rationale).
               // Narrow the catch to FAT/exFAT signatures so EPERM/EIO/EROFS
