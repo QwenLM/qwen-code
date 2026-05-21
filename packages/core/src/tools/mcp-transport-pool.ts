@@ -237,13 +237,6 @@ export class McpTransportPool {
       // session caller. Also handles the leftover stale entry case
       // (any pre-existing zombie not yet evicted by `onClosed`).
       if (existing && !existing.isTerminated()) {
-        const view = new SessionMcpView(
-          sessionToolRegistry,
-          sessionPromptRegistry,
-          sessionId,
-          serverName,
-          cfg,
-        );
         // F2 (#4175 commit 6 review fix — wenshao W10): index update
         // happens AFTER `attach` succeeds. Pre-fix the order was
         // reversed; an `attach` rejection (e.g., entry transitioned
@@ -251,11 +244,20 @@ export class McpTransportPool {
         // `attach` call) left a stale `sessionToEntries[sessionId]`
         // mapping with no matching `entry.refs.has(sessionId)` —
         // `releaseSession` would later iterate the stale id and call
-        // `entry.detach` on a non-attached session.
+        // `entry.detach` on a non-attached session. W11/PR A:
+        // `attachPooledSession` is the shared view+attach helper;
+        // call-site ordering (indexAttach AFTER attach, terminal-state
+        // self-heal in catch) stays here, not in the helper.
         try {
-          const conn = existing.attach(sessionId, view, {
-            release: () => this.release(id, sessionId),
-          });
+          const conn = this.attachPooledSession(
+            existing,
+            id,
+            serverName,
+            cfg,
+            sessionId,
+            sessionToolRegistry,
+            sessionPromptRegistry,
+          );
           this.indexAttach(sessionId, id);
           return conn;
         } catch (err) {
@@ -355,16 +357,11 @@ export class McpTransportPool {
           sessionPromptRegistry,
         );
       } catch (err) {
-        // R24 T17: only release if THIS acquire actually reserved a
-        // new slot. `'already_held'` means the sibling holds it; not
-        // ours to release.
-        if (
-          this.opts.budget !== undefined &&
-          reservationResult === 'reserved' &&
-          !this.hasNameSibling(serverName)
-        ) {
-          this.opts.budget.release(serverName);
-        }
+        // R24 T17 (codified by W11/PR A as a shared helper): only
+        // release if THIS acquire actually reserved a new slot.
+        // `'already_held'` means the sibling holds it; not ours to
+        // release.
+        this.rollbackReservationOnSpawnFailure(reservationResult, serverName);
         throw err;
       }
     }
@@ -397,20 +394,14 @@ export class McpTransportPool {
           // spawn failure (V21-4) so a transient connect failure
           // doesn't leak the slot until daemon restart.
           //
-          // R24 T17: only release if THIS acquire actually reserved a
-          // new slot (`reservationResult === 'reserved'`). When
-          // `tryReserve` returned `'already_held'`, a same-name
-          // sibling held the slot; this acquire reserved nothing, so
-          // a release here would phantom-decrement the budget counter
-          // if the sibling were concurrently evicted between
-          // `tryReserve` and this catch.
-          if (
-            this.opts.budget !== undefined &&
-            reservationResult === 'reserved' &&
-            !this.hasNameSibling(serverName)
-          ) {
-            this.opts.budget.release(serverName);
-          }
+          // R24 T17 contract (codified as `rollbackReservationOnSpawnFailure`
+          // helper in W11/PR A): only release if THIS acquire actually
+          // reserved a new slot (`reservationResult === 'reserved'`).
+          // `'already_held'` means a sibling holds the slot — phantom-
+          // releasing here would decrement the counter if the sibling
+          // were concurrently evicted between `tryReserve` and this
+          // catch.
+          this.rollbackReservationOnSpawnFailure(reservationResult, serverName);
           throw err;
         });
       this.spawnInFlight.set(id, inFlight);
@@ -455,17 +446,16 @@ export class McpTransportPool {
       );
     }
 
-    const view = new SessionMcpView(
-      sessionToolRegistry,
-      sessionPromptRegistry,
-      sessionId,
-      serverName,
-      cfg,
-    );
     try {
-      const conn = entry.attach(sessionId, view, {
-        release: () => this.release(id, sessionId),
-      });
+      const conn = this.attachPooledSession(
+        entry,
+        id,
+        serverName,
+        cfg,
+        sessionId,
+        sessionToolRegistry,
+        sessionPromptRegistry,
+      );
       // F2 (#4175 commit 6 review fix — qwen-latest W111): re-index
       // AFTER attach succeeds. Pre-fix the early `indexAttach` at the
       // top of this branch was enough on the unpooled path (W77)
@@ -830,6 +820,79 @@ export class McpTransportPool {
   }
 
   // ---------- internals ----------
+
+  /**
+   * F2 (#4175 commit 6 review fix — wenshao W11 / PR A): shared
+   * view+attach helper for the two POOLED `acquire()` branches (the
+   * fast-path for an existing entry, and the post-spawn attach after
+   * `await inFlight`). Pre-fix both branches inlined the same 3-step
+   * pattern (build view → entry.attach → return) with identical
+   * release-callback wiring; PR A's stated cleanup goal is to dedupe
+   * without losing the per-call-site race-window invariant comments
+   * that explain WHY each branch's surrounding ordering is what it is.
+   *
+   * NOT used by `createUnpooledConnection` — the unpooled release
+   * callback runs `entry.forceShutdown('manual')` directly (no pool
+   * refcount accounting since unpooled entries are per-session) and
+   * also calls `indexDetach` from the release callback itself.
+   *
+   * Caller is responsible for:
+   *   - Terminal-state pre-check (`!entry.isTerminated()`) + race-
+   *     window self-heal (`evictEntry` on the W125 catch path).
+   *   - Reverse-index ordering (early `indexAttach` BEFORE await on
+   *     the post-spawn branch per W90; AFTER attach on the fast-path
+   *     per W10; W111 re-indexAttach AFTER attach on post-spawn).
+   *   The race-window comments live at the call sites because they
+   *   describe the surrounding ordering, not the attach itself.
+   */
+  private attachPooledSession(
+    entry: PoolEntry,
+    id: ConnectionId,
+    serverName: string,
+    cfg: MCPServerConfig,
+    sessionId: string,
+    sessionToolRegistry: ToolRegistry,
+    sessionPromptRegistry: PromptRegistry,
+  ): PooledConnection {
+    const view = new SessionMcpView(
+      sessionToolRegistry,
+      sessionPromptRegistry,
+      sessionId,
+      serverName,
+      cfg,
+    );
+    return entry.attach(sessionId, view, {
+      release: () => this.release(id, sessionId),
+    });
+  }
+
+  /**
+   * F2 (#4175 commit 6 review fix — wenshao W11 / PR A; codifies the
+   * R24 T17 contract): roll back THIS acquire's slot reservation on
+   * spawn failure. Used by both the unpooled-spawn catch and the
+   * pooled-spawn-in-flight catch — both decisions are identical:
+   *   - `'reserved'`     → THIS acquire newly held the slot; release
+   *                        if no sibling holds it
+   *   - `'already_held'` → sibling holds it; never release here (the
+   *                        sibling's own onClosed / evictEntry will
+   *                        handle it). Pre-R24 the bare
+   *                        `!hasNameSibling()` check would phantom-
+   *                        release a slot this acquire never reserved
+   *                        when the sibling was concurrently evicted.
+   *   - `undefined`      → no budget configured; nothing to do.
+   */
+  private rollbackReservationOnSpawnFailure(
+    reservationResult: 'reserved' | 'already_held' | undefined,
+    serverName: string,
+  ): void {
+    if (
+      this.opts.budget !== undefined &&
+      reservationResult === 'reserved' &&
+      !this.hasNameSibling(serverName)
+    ) {
+      this.opts.budget.release(serverName);
+    }
+  }
 
   /**
    * F2 (#4175 commit 6 review fix — wenshao R22 W125-followup A+B):
