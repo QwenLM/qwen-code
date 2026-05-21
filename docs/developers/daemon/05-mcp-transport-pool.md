@@ -251,6 +251,30 @@ The W77 race (`cb206da36`): `createUnpooledConnection` stores the entry in `this
 
 This race was latent today (the W61/W71 per-session `releaseSession` hooks land in F4) but would become live the moment that hook arrived — fix landed early on the F2 line.
 
+## In-flight tool calls during reconnect (`MCPCallInterruptedError`)
+
+When the underlying MCP transport drops silently (a "silent transport drop": the connection went from `'active'` / `'draining'` straight to `localStatus === DISCONNECTED` with no explicit close), the pool transitions the entry to `'failed'`, evicts it from `pool.entries`, and emits the `failed` event **before** detaching subscriber views (`mcp-pool-entry.ts:335-360`). The emit-before-detach ordering matters: subscribers receive the `failed` event in time to route any pending `callTool` promises to `MCPCallInterruptedError`, so a stuck `await client.callTool(...)` rejects cleanly instead of hanging.
+
+This is documented as F2 commit-6 review fix W122 R20-followup + R23 T15 ordering fix. The mirror site is `forceShutdown`'s emit→detach ordering at `mcp-pool-entry.ts:583-593`.
+
+## Fingerprint and `canonicalOAuth` normalization
+
+Pool keys are computed by `fingerprint(cfg)` (`mcp-pool-key.ts:128+`). The hashed fields cover everything transport-defining:
+
+> `transport, command, args, cwd, env, url, httpUrl, tcp, headers, timeout, oauth`
+
+Per-session filter / metadata fields (`includeTools`, `excludeTools`, `trust`, `description`, `extensionName`, `discoveryTimeoutMs`) are **excluded** so different sessions filtering the same transport differently still share one entry.
+
+For the OAuth slot, `canonicalOAuth(o)` (`mcp-pool-key.ts:75-110`) hashes **every** `MCPOAuthConfig` field — `clientId`, `clientSecret`, `scopes` (sorted), `audiences` (sorted), `authorizationUrl`, `tokenUrl`, `redirectUri`, `tokenParamName`, `registrationUrl`. Pre-fix only `clientId` / `scopes` / `authorizationUrl` / `tokenUrl` were hashed — so two sessions whose configs differed ONLY in `clientSecret` or `audiences` collapsed to the same fingerprint and shared one entry, leaking the first config's credentials into the second session's transport. **Especially load-bearing for `clientSecret` (confidential client) and `audiences` (multi-audience tokens).** Closed by qwen-latest W88 (F2 commit-6 review).
+
+Scope arrays + audience arrays are sorted so callsite order doesn't change the fingerprint; explicit `null` defaults are used so an undefined field hashes the same as an explicitly null one. There's no `discoveryTimeoutMs` in the key — F2 v1 acknowledged race-acquire of the same key with different timeouts is first-wins (matches pre-F2 per-session manager behavior).
+
+## Extension uninstall: orphan entries reaped by MAX_IDLE_MS
+
+The F2 v2.1 design (V21-13) chose **NOT** to add a proactive reap path when an MCP extension is uninstalled mid-daemon-life. Orphan entries (the extension's `MCPServerConfig` is gone from the workspace's merged settings but a pool entry still exists) are reaped by the natural `MAX_IDLE_MS` (5 min default) hard cap when their last subscriber detaches. Rationale: a synchronous uninstall-reap path adds complexity for an edge case operators rarely hit, and the hard cap bounds the worst case to 5 minutes of orphan-process lifetime past the uninstall.
+
+Operators who need faster orphan cleanup can either restart the daemon or trigger `POST /workspace/mcp/:server/restart` against the (now-unconfigured) name — which will fail through the disabled-server path and tear the entry down.
+
 ## Caveats & Known Limits
 
 - **HTTP / SSE transports are unpooled** — each acquire mints a fresh entry that lives only as long as its session. Reason: their headers may carry session-specific OAuth state, so pooling would leak credentials across sessions.
@@ -424,6 +448,30 @@ W77 竞态（`cb206da36`）：`createUnpooledConnection` 在 await `client.conne
 - 调用方（池的 unpooled 路径）在 await 之间探 `isTerminated()`，父 session 没了就放弃 attach。
 
 这条 race 今天**潜在**（W61/W71 的 per-session `releaseSession` hook 在 F4 才落），但那个 hook 一到这条 race 就变 live —— F2 线上先把它修了。
+
+## 重连期间 in-flight 工具调用（`MCPCallInterruptedError`）
+
+底层 MCP transport 静默掉线（"silent transport drop"：连接从 `'active'` / `'draining'` 直接进 `localStatus === DISCONNECTED`，没有显式关闭）时，池把 entry 转 `'failed'`、从 `pool.entries` 驱逐、在 detach 订阅者视图**之前**先 emit `failed` 事件（`mcp-pool-entry.ts:335-360`）。emit-先于-detach 的顺序重要：订阅者及时收到 `failed` 事件，能把 pending `callTool` promise 路由到 `MCPCallInterruptedError`，卡住的 `await client.callTool(...)` 干净 reject 而不是 hang。
+
+这是 F2 commit-6 review fix W122 R20-followup + R23 T15 ordering fix。镜像点是 `forceShutdown` 的 emit→detach 顺序，`mcp-pool-entry.ts:583-593`。
+
+## Fingerprint 与 `canonicalOAuth` 归一
+
+池 key 由 `fingerprint(cfg)`（`mcp-pool-key.ts:128+`）计算。哈希字段覆盖所有 transport 定义性的：
+
+> `transport, command, args, cwd, env, url, httpUrl, tcp, headers, timeout, oauth`
+
+per-session 过滤 / 元数据字段（`includeTools`、`excludeTools`、`trust`、`description`、`extensionName`、`discoveryTimeoutMs`）**被排除**，不同 session 用不同过滤共享同一 entry。
+
+OAuth 这一格，`canonicalOAuth(o)`（`mcp-pool-key.ts:75-110`）哈希**每一个** `MCPOAuthConfig` 字段 —— `clientId`、`clientSecret`、`scopes`（排序后）、`audiences`（排序后）、`authorizationUrl`、`tokenUrl`、`redirectUri`、`tokenParamName`、`registrationUrl`。修复前只哈希 `clientId` / `scopes` / `authorizationUrl` / `tokenUrl` —— 两个 session 的 config 仅在 `clientSecret` 或 `audiences` 上有差也会塌缩到同 fingerprint 共享一条 entry，把第一个 config 的凭证泄漏给第二个 session 的 transport。**对 `clientSecret`（confidential client）和 `audiences`（multi-audience token）尤其关键。** 由 qwen-latest W88（F2 commit-6 review）关闭。
+
+scope 数组和 audience 数组排序，callsite 顺序不会改 fingerprint；显式 `null` 默认让 undefined 字段哈希等于显式 null。key 里没有 `discoveryTimeoutMs` —— F2 v1 承认同 key 不同 timeout 并发 acquire 是「first wins」（对齐 pre-F2 per-session manager 行为）。
+
+## Extension 卸载：孤儿 entry 由 MAX_IDLE_MS 自然回收
+
+F2 v2.1 设计（V21-13）选择**不**为运行中卸载 MCP extension 加主动回收。孤儿 entry（extension 的 `MCPServerConfig` 已不在工作区合并设置里但池里还有 entry）由最后一个订阅者 detach 后的 `MAX_IDLE_MS`（默认 5 min）硬上限自然回收。原因：同步的卸载-回收路径为 operator 罕见的边缘场景加复杂度，硬上限把孤儿进程超过卸载点的最坏寿命限到 5 分钟。
+
+operator 想要更快的孤儿清理可以重启 daemon 或对已不再配置的 name 触发 `POST /workspace/mcp/:server/restart` —— 会走 disabled-server 路径把 entry 拆掉。
 
 ## 注意 & 已知局限
 

@@ -61,7 +61,7 @@ Grouped by domain.
 | `mcp_budget_warning` | S→C | `liveCount, reservedCount, budget, thresholdRatio: 0.75, mode: 'warn' \| 'enforce', scope?: 'workspace' \| 'session'`. |
 | `mcp_child_refused_batch` | S→C | `refusedServers: [{name, transport, reason: 'budget_exhausted'}], budget, liveCount, reservedCount, mode: 'enforce', scope?: 'workspace' \| 'session'`. |
 | `mcp_server_restarted` | S→C | `serverName, durationMs, entryIndex?` (F2 multi-entry). |
-| `mcp_server_restart_refused` | S→C | `serverName, reason: 'budget_would_exceed' \| 'in_flight' \| 'disabled', entryIndex?, details?`. |
+| `mcp_server_restart_refused` | S→C | `serverName, reason: 'budget_would_exceed' \| 'in_flight' \| 'disabled' \| 'restart_failed', entryIndex?, details?`. The 4th value `'restart_failed'` (F2 commit 5) carries an underlying hard-failure as a free-form `details` string for pool-mode multi-entry restarts. **Closed-set predicate**: `MCP_RESTART_REFUSED_REASONS` rejects unknown reasons, so SDK reducers predating an additive enum value silently DROP these events (`parseDaemonEvent` returns `undefined`). New reason values must therefore stay paired with the SDK release that knows them. |
 
 ### Mutation control (Wave 4 PR 16+17)
 
@@ -303,7 +303,7 @@ wire 格式见 [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)，本文
 | `mcp_budget_warning` | S→C | `liveCount, reservedCount, budget, thresholdRatio: 0.75, mode: 'warn' \| 'enforce', scope?: 'workspace' \| 'session'` |
 | `mcp_child_refused_batch` | S→C | `refusedServers: [{name, transport, reason: 'budget_exhausted'}], budget, liveCount, reservedCount, mode: 'enforce', scope?: 'workspace' \| 'session'` |
 | `mcp_server_restarted` | S→C | `serverName, durationMs, entryIndex?`（F2 多 entry） |
-| `mcp_server_restart_refused` | S→C | `serverName, reason: 'budget_would_exceed' \| 'in_flight' \| 'disabled', entryIndex?, details?` |
+| `mcp_server_restart_refused` | S→C | `serverName, reason: 'budget_would_exceed' \| 'in_flight' \| 'disabled' \| 'restart_failed', entryIndex?, details?`。第 4 个值 `'restart_failed'`（F2 commit 5）携带底层硬失败，`details` 是自由格式字符串，给池模式多 entry restart 用。**封闭集判别**：`MCP_RESTART_REFUSED_REASONS` 拒绝未知 reason，老 SDK reducer 看到加法新值会**默默丢弃**事件（`parseDaemonEvent` 返回 `undefined`）。新 reason 值必须与认识它的 SDK 版本一起发 |
 
 ### Mutation control（Wave 4 PR 16+17）
 
