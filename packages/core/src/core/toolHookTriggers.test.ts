@@ -80,6 +80,32 @@ describe('toolHookTriggers', () => {
       expect(result.hookError).toMatch(/success: false/);
     });
 
+    it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
+      // #4321 review-9: pin the `||` (not `??`) semantics. A future
+      // regression back to `??` would preserve `hookError: ""` here
+      // which downstream `r.hookError ? ...` truthiness then silently
+      // drops — same allow-without-telemetry pathology SF-H1 closed.
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: { message: '' },
+      });
+
+      const result = await firePreToolUseHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        'test-id',
+        'auto',
+      );
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.hookError).toMatch(/success: false/);
+      // Specifically NOT empty: an empty string would round-trip through
+      // a downstream truthiness check as missing.
+      expect(result.hookError).not.toBe('');
+    });
+
     it('should return shouldProceed: true when hook output is empty', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -264,6 +290,28 @@ describe('toolHookTriggers', () => {
       expect(result.hookError).toMatch(/success: false/);
     });
 
+    it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
+      // #4321 review-9 — see firePreToolUseHook counterpart.
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: { message: '' },
+      });
+
+      const result = await firePostToolUseHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        {},
+        'test-id',
+        'auto',
+      );
+
+      expect(result.shouldStop).toBe(false);
+      expect(result.hookError).toMatch(/success: false/);
+      expect(result.hookError).not.toBe('');
+    });
+
     it('should return shouldStop: false when hook output is empty', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -386,6 +434,26 @@ describe('toolHookTriggers', () => {
 
       // #4321 review-7 SF-H1 — see firePreToolUseHook counterpart.
       expect(result.hookError).toMatch(/success: false/);
+    });
+
+    it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
+      // #4321 review-9 — see firePreToolUseHook counterpart.
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: { message: '' },
+      });
+
+      const result = await firePostToolUseFailureHook(
+        mockMessageBus,
+        'test-id',
+        'test-tool',
+        {},
+        'error message',
+      );
+
+      expect(result.hookError).toMatch(/success: false/);
+      expect(result.hookError).not.toBe('');
     });
 
     it('should return empty object when hook output is empty', async () => {
