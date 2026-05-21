@@ -256,9 +256,25 @@ export const ToolConfirmationMessage: React.FC<
     // overall exec block can exceed availableTerminalHeight /
     // COMPACT_BODY_MAX_LINES on small terminals and push the options
     // list off-screen.
-    const warningsCount = executionProps.warnings?.length ?? 0;
-    // 1 line per warning + 1 line for the marginTop separator.
-    const warningsHeight = warningsCount > 0 ? warningsCount + 1 : 0;
+    //
+    // Each warning may wrap across multiple visual rows on a narrow
+    // terminal. Account for that by computing `ceil(rendered_len /
+    // contentWidth)` per warning (rendered length includes the leading
+    // `⚠ ` glyph + space, so add 2). Falling back to a 1-row estimate
+    // when contentWidth is non-positive keeps the math defined for
+    // pathological inputs.
+    const warningPrefixLen = 2; // "⚠ "
+    const safeWidth = Math.max(contentWidth, 1);
+    const warnings = executionProps.warnings ?? [];
+    const warningsCount = warnings.length;
+    const wrappedWarningRows = warnings.reduce(
+      (sum, w) =>
+        sum + Math.max(Math.ceil((w.length + warningPrefixLen) / safeWidth), 1),
+      0,
+    );
+    // wrapped rows + 1 line for the marginTop separator (only when at
+    // least one warning is present).
+    const warningsHeight = warningsCount > 0 ? wrappedWarningRows + 1 : 0;
 
     let bodyContentHeight = availableBodyContentHeight();
     if (bodyContentHeight !== undefined) {
