@@ -51,9 +51,15 @@ export class TrustedHooksManager {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
+      // 0o600 + forceMode: this file lists user-approved executable
+      // hook commands and is strictly more sensitive than
+      // trustedFolders.json / tipHistory.json, both of which already
+      // use the same options. forceMode heals over-permissive perms
+      // restored from a backup.
       atomicWriteFileSync(
         this.configPath,
         JSON.stringify(this.trustedHooks, null, 2),
+        { mode: 0o600, forceMode: true },
       );
     } catch (error) {
       debugLogger.warn('Failed to save trusted hooks config', error);

@@ -279,7 +279,16 @@ export async function writeLine(
 
 /**
  * Synchronous version of writeLine for use in non-async contexts.
- * Uses a simple flag-based locking mechanism (less robust than async version).
+ *
+ * NOTE: this function is unsynchronized — there is no locking. The
+ * `writeLine` async variant uses a per-file `Mutex` to serialize
+ * concurrent writers, but that lock is bypassed by `writeLineSync`
+ * and `write()`. Callers that share a JSONL file with concurrent
+ * `writeLine()` callers must serialize externally.
+ *
+ * `flush: true` ensures each appended record reaches disk before the
+ * call returns (closes #3681 — kill -9 mid-tool-call no longer
+ * truncates the session transcript at the last buffered record).
  */
 export function writeLineSync(filePath: string, data: unknown): void {
   const line = `${JSON.stringify(data)}\n`;

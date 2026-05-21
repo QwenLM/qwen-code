@@ -558,6 +558,44 @@ describe('renameWithRetry (async, dependency-injected rename)', () => {
     );
     expect(attempts).toBe(1);
   });
+
+  // The existing tests cover retry count + error propagation but not the
+  // backoff curve itself. A regression that swapped `delayMs * 2 ** attempt`
+  // for linear, constant, or — worst — regressive backoff (which intensifies
+  // under Windows AV-scan stress) would pass every other test. Fake timers
+  // make the assertion deterministic without burning real wall-clock time.
+  it('backs off exponentially: delayMs, 2*delayMs, 4*delayMs, ...', async () => {
+    vi.useFakeTimers();
+    try {
+      const gaps: number[] = [];
+      let lastInvocation = Date.now();
+      const mockRename = async () => {
+        const now = Date.now();
+        gaps.push(now - lastInvocation);
+        lastInvocation = now;
+        const e: NodeJS.ErrnoException = new Error('EPERM');
+        e.code = 'EPERM';
+        throw e;
+      };
+
+      const promise = renameWithRetry('s', 'd', 3, 50, mockRename);
+      // Catch eventual rejection so unhandled-rejection doesn't fire.
+      promise.catch(() => {});
+
+      // 4 invocations total (initial + 3 retries), gaps after the
+      // first should be [50, 100, 200].
+      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(200);
+
+      await expect(promise).rejects.toThrow(/EPERM/);
+      // gaps[0] is the first invocation's offset from the timer start
+      // (effectively 0). gaps[1..] are the post-retry waits.
+      expect(gaps.slice(1)).toEqual([50, 100, 200]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('renameWithRetrySync (dependency-injected rename)', () => {

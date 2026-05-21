@@ -322,4 +322,15 @@ describe('writeLine / writeLineSync / write', () => {
       .filter((f) => f.startsWith(path.basename(file)));
     expect(dirEntries).toEqual([path.basename(file)]);
   });
+
+  // The other write() test targets a path inside the pre-created tmpRoot,
+  // so the `if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })`
+  // branch is never exercised. A regression that dropped that branch would
+  // make write() fail with ENOENT only when callers target a brand-new
+  // subdirectory.
+  it('write() creates parent dirs when missing', () => {
+    const nested = path.join(tmpRoot, 'a', 'b', 'c', 'file.jsonl');
+    write(nested, [{ x: 1 }]);
+    expect(fs.readFileSync(nested, 'utf-8')).toBe('{"x":1}\n');
+  });
 });
