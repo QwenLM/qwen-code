@@ -44,8 +44,8 @@ export {
 
 /** All known providers, in display order. */
 export const ALL_PROVIDERS: readonly ProviderConfig[] = [
-  codingPlanProvider,
   tokenPlanProvider,
+  codingPlanProvider,
   alibabaStandardProvider,
   deepseekProvider,
   minimaxProvider,

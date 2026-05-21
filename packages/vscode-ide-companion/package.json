@@ -206,17 +206,17 @@
           "order": 0,
           "type": "string",
           "enum": [
-            "coding-plan",
             "token-plan",
+            "coding-plan",
             "api-key"
           ],
           "enumDescriptions": [
-            "Alibaba Cloud Coding Plan — for individual developers",
             "Alibaba Cloud Token Plan — for teams and companies",
+            "Alibaba Cloud Coding Plan — for individual developers",
             "API Key — ModelStudio or OpenAI-compatible providers"
           ],
-          "default": "coding-plan",
-          "markdownDescription": "**Coding Plan**: enter API Key + Region to sync `~/.qwen/settings.json`.\n\n**Token Plan**: enter API Key to sync `~/.qwen/settings.json`.\n\n**API Key**: use **Qwen Code: Auth** or the onboarding button to configure ModelStudio or custom OpenAI-compatible providers."
+          "default": "token-plan",
+          "markdownDescription": "**Token Plan**: enter API Key to sync `~/.qwen/settings.json`.\n\n**Coding Plan**: enter API Key + Region to sync `~/.qwen/settings.json`.\n\n**API Key**: use **Qwen Code: Auth** or the onboarding button to configure ModelStudio or custom OpenAI-compatible providers."
         },
         "qwen-code.apiKey": {
           "order": 1,
