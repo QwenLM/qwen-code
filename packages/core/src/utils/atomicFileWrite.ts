@@ -150,6 +150,7 @@ export async function atomicWriteFile(
   _testFs?: {
     rename?: (s: string, d: string) => Promise<void>;
     writeFile?: typeof fs.writeFile;
+    chmod?: typeof fs.chmod;
   },
 ): Promise<void> {
   const retries = options?.retries ?? 3;
@@ -158,6 +159,7 @@ export async function atomicWriteFile(
   const encoding = options?.encoding ?? 'utf-8';
   const renameImpl = _testFs?.rename ?? fs.rename;
   const writeFileImpl = _testFs?.writeFile ?? fs.writeFile;
+  const chmodImpl = _testFs?.chmod ?? fs.chmod;
 
   const targetPath = options?.noFollow
     ? filePath
@@ -195,7 +197,7 @@ export async function atomicWriteFile(
   const tryChmod = async (target: string): Promise<void> => {
     if (desiredMode === undefined) return;
     try {
-      await fs.chmod(target, desiredMode);
+      await chmodImpl(target, desiredMode);
     } catch {
       // Ignore — not all filesystems support chmod.
     }
@@ -246,11 +248,22 @@ export async function atomicWriteFile(
             // close and a path-based chmod, which would otherwise redirect
             // the 0o600 onto an attacker-pointed target and silently
             // defeat noFollow on the EXDEV fallback path.
+            //
+            // Narrow the catch to FAT/exFAT signatures (ENOSYS / ENOTSUP).
+            // Operations on credential files are security-sensitive enough
+            // that a sandbox EPERM, transient EIO, or read-only EROFS
+            // should fail loudly rather than leave the file at the
+            // umask-masked open() mode with no diagnostic trail.
             if (desiredMode !== undefined) {
               try {
                 await fd.chmod(desiredMode);
-              } catch {
-                // Ignore — FAT/exFAT lack POSIX permissions.
+              } catch (chmodErr) {
+                if (
+                  !isNodeError(chmodErr) ||
+                  (chmodErr.code !== 'ENOSYS' && chmodErr.code !== 'ENOTSUP')
+                ) {
+                  throw chmodErr;
+                }
               }
             }
           } finally {
@@ -420,6 +433,7 @@ export function atomicWriteFileSync(
   _testFs?: {
     rename?: (s: string, d: string) => void;
     writeFile?: typeof fsSync.writeFileSync;
+    chmod?: typeof fsSync.chmodSync;
   },
 ): void {
   const retries = options?.retries ?? 3;
@@ -428,6 +442,7 @@ export function atomicWriteFileSync(
   const encoding = options?.encoding ?? 'utf-8';
   const renameImpl = _testFs?.rename ?? fsSync.renameSync;
   const writeFileImpl = _testFs?.writeFile ?? fsSync.writeFileSync;
+  const chmodImpl = _testFs?.chmod ?? fsSync.chmodSync;
 
   const targetPath = options?.noFollow
     ? filePath
@@ -462,7 +477,7 @@ export function atomicWriteFileSync(
   const tryChmodSync = (target: string): void => {
     if (desiredMode === undefined) return;
     try {
-      fsSync.chmodSync(target, desiredMode);
+      chmodImpl(target, desiredMode);
     } catch {
       // Not all filesystems support chmod (FAT/exFAT).
     }
@@ -504,11 +519,19 @@ export function atomicWriteFileSync(
             fsSync.writeSync(fd, buf);
             if (flush) fsSync.fsyncSync(fd);
             // fchmod on the open fd (see atomicWriteFile for rationale).
+            // Narrow the catch to FAT/exFAT signatures so EPERM/EIO/EROFS
+            // surface instead of leaving a credential file at the
+            // umask-masked open() mode silently.
             if (desiredMode !== undefined) {
               try {
                 fsSync.fchmodSync(fd, desiredMode);
-              } catch {
-                // FAT/exFAT.
+              } catch (chmodErr) {
+                if (
+                  !isNodeError(chmodErr) ||
+                  (chmodErr.code !== 'ENOSYS' && chmodErr.code !== 'ENOTSUP')
+                ) {
+                  throw chmodErr;
+                }
               }
             }
           } finally {

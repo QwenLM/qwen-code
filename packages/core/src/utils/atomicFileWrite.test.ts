@@ -8,7 +8,7 @@ import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   atomicWriteFile,
   atomicWriteFileSync,
@@ -899,6 +899,14 @@ describe('noFollow option — symlink protection', () => {
   // Mode assertions are Linux/macOS only — Windows NTFS reports 0o666
   // for any non-read-only file regardless of chmod, matching the existing
   // platform-guard pattern used elsewhere in this file.
+  //
+  // These tests also spy on path-based chmod to verify the *mechanism*,
+  // not just the outcome. Under typical umask 0o022, `open(O_EXCL, 0o600)`
+  // already creates the file at 0o600, so a regression that swapped
+  // `fd.chmod()` back to a path-based `tryChmod(targetPath)` (the
+  // pre-fix TOCTOU-vulnerable form) would leave the mode assertion
+  // passing. Asserting the path-based chmod was never called against
+  // `targetPath` catches that regression directly.
   it.skipIf(process.platform === 'win32')(
     'atomicWriteFile: noFollow EXDEV fallback creates a new file when target does not exist',
     async () => {
@@ -908,17 +916,23 @@ describe('noFollow option — symlink protection', () => {
         e.code = 'EXDEV';
         throw e;
       };
+      const chmodSpy = vi.fn(fs.chmod);
 
       await atomicWriteFile(
         target,
         'NEW',
         { noFollow: true, mode: 0o600 },
-        { rename: exdevRename },
+        { rename: exdevRename, chmod: chmodSpy },
       );
 
       expect(fsSync.lstatSync(target).isSymbolicLink()).toBe(false);
       expect(await fs.readFile(target, 'utf-8')).toBe('NEW');
       expect(fsSync.statSync(target).mode & 0o777).toBe(0o600);
+      // Path-based chmod is permitted on the tmp file (pre-rename) but
+      // must never run against the credential target — that path is
+      // exclusively for the open-fd fchmod.
+      const targetCalls = chmodSpy.mock.calls.filter(([p]) => p === target);
+      expect(targetCalls).toEqual([]);
     },
   );
 
@@ -931,17 +945,20 @@ describe('noFollow option — symlink protection', () => {
         e.code = 'EXDEV';
         throw e;
       };
+      const chmodSpy = vi.fn(fsSync.chmodSync);
 
       atomicWriteFileSync(
         target,
         'NEW',
         { noFollow: true, mode: 0o600 },
-        { rename: exdevRename },
+        { rename: exdevRename, chmod: chmodSpy },
       );
 
       expect(fsSync.lstatSync(target).isSymbolicLink()).toBe(false);
       expect(fsSync.readFileSync(target, 'utf-8')).toBe('NEW');
       expect(fsSync.statSync(target).mode & 0o777).toBe(0o600);
+      const targetCalls = chmodSpy.mock.calls.filter(([p]) => p === target);
+      expect(targetCalls).toEqual([]);
     },
   );
 });
