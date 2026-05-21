@@ -326,6 +326,65 @@ describe('McpClientManager', () => {
     }
   });
 
+  it('discovery resets stopTimedOut so manager remains usable after a timed-out shutdown (W118)', async () => {
+    // Pre-W118: stopTimedOut was sticky across stop() calls. Once set
+    // by a 5s grace timeout, every subsequent discovery pass would
+    // release/skip every acquired connection, silently leaving the
+    // manager unable to reattach pooled MCP servers. Post-W118 the
+    // flag is reset at the start of every discovery pass.
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+
+    // Simulate a prior timed-out shutdown that set the sticky flag.
+    (manager as unknown as { stopTimedOut: boolean }).stopTimedOut = true;
+
+    // A fresh discovery pass should reset the flag at the top so the
+    // acquired connection is tracked normally — pre-W118 it would be
+    // released and the pooledConnections Map would stay empty.
+    await manager.discoverAllMcpTools(mockConfig);
+    expect((manager as unknown as { stopTimedOut: boolean }).stopTimedOut).toBe(
+      false,
+    );
+    // Connection MUST have been tracked (not silently released by the
+    // sticky-flag guard).
+    expect(
+      (
+        manager as unknown as {
+          pooledConnections: Map<string, unknown>;
+        }
+      ).pooledConnections.has('srv'),
+    ).toBe(true);
+  });
+
   it('routes incremental discovery through the pool when injected (F2 commit 4 C7 / W38)', async () => {
     // Wenshao W38 review fold-in: the C7 fix added the pool gate to
     // `discoverAllMcpToolsIncremental` (the default progressive-mode

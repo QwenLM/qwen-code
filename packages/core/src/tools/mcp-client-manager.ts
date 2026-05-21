@@ -1419,6 +1419,18 @@ export class McpClientManager {
     cliConfig: Config,
   ): Promise<void> {
     if (!this.pool) return; // unreachable; caller already gates
+    // F2 (#4175 commit 6 review fix — gpt-5.5 W118): reset the W115
+    // shutdown-timeout flag at the START of every discovery pass. The
+    // flag is sticky — it persists across `stop()` calls until
+    // explicitly reset. Without this reset, a manager that survived
+    // one timed-out shutdown (e.g., a slow MCP server during SIGTERM
+    // exceeding the 5s grace cap) would then enter every subsequent
+    // discovery pass with the guard already true, silently calling
+    // `conn.release()` and skipping `pooledConnections.set(...)` for
+    // every server — the manager would appear to discover servers but
+    // none would be reachable for subsequent tool calls. A fresh
+    // discovery pass means we're past any prior shutdown phase.
+    this.stopTimedOut = false;
     this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
     // F2 (#4175 commit 6 review fix — gpt-5.5 W72): also write the
     // module-global `mcpDiscoveryState`. Pre-fix the pool path only
