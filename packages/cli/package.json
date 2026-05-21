@@ -49,6 +49,7 @@
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
     "@qwen-code/channel-telegram": "file:../channels/telegram",
     "@qwen-code/channel-weixin": "file:../channels/weixin",
+    "@alife/dataworks-qwen-code-channel-feishu": "file:../channels/feishu",
     "@qwen-code/qwen-code-core": "file:../core",
     "@qwen-code/web-templates": "file:../web-templates",
     "@types/update-notifier": "^6.0.8",

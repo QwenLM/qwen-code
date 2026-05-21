@@ -11,6 +11,7 @@
 #   $ARTIFACT_DIR/qwen-code/
 #     ├── bin/qwen            <- launcher（使用系统 node）
 #     ├── dist/cli.js         <- esbuild bundle
+#     ├── package.json        <- Node package scope for ESM
 #     ├── dist/vendor/        <- ripgrep 等工具
 #     ├── dist/locales/       <- i18n
 #     ├── dist/bundled/       <- 内置 skill 文档
@@ -71,6 +72,23 @@ if [ -f "${STANDALONE_DIR}/dist/cli.js" ]; then
     fs.writeFileSync(p, c);
   " || echo "  -> 版本注入跳过（无 __QWEN_VERSION__ 占位符）"
 fi
+
+# ── Node package scope ──
+node -e "
+  const fs = require('fs');
+  let name = '@alife/dataworks-qwen-code';
+  try {
+    const rootPkg = JSON.parse(fs.readFileSync('${SOURCE_DIR}/package.json', 'utf8'));
+    if (rootPkg.name) name = rootPkg.name;
+  } catch {}
+  const pkg = {
+    name,
+    version: '${VERSION}',
+    type: 'module',
+    private: true,
+  };
+  fs.writeFileSync('${STANDALONE_DIR}/package.json', JSON.stringify(pkg, null, 2) + '\n');
+"
 
 # ── Step 3: Launcher + Metadata ──
 echo "[3/4] 生成 launcher 脚本和 metadata..."

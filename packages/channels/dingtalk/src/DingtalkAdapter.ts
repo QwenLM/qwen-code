@@ -2,7 +2,12 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DWClient, TOPIC_ROBOT, TOPIC_CARD, EventAck } from 'dingtalk-stream-sdk-nodejs';
+import {
+  DWClient,
+  TOPIC_ROBOT,
+  TOPIC_CARD,
+  EventAck,
+} from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import { ChannelBase } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
@@ -880,9 +885,10 @@ export class DingtalkChannel extends ChannelBase {
    */
   private onCardCallback(downstream: DWClientDownStream): void {
     try {
-      const data = typeof downstream.data === 'string'
-        ? JSON.parse(downstream.data)
-        : downstream.data;
+      const data =
+        typeof downstream.data === 'string'
+          ? JSON.parse(downstream.data)
+          : downstream.data;
 
       process.stderr.write(
         `[DingTalk:${this.name}] Card callback received: ${JSON.stringify(data)}\n`,
@@ -939,7 +945,11 @@ export class DingtalkChannel extends ChannelBase {
           `[DingTalk:${this.name}] Finalizing card with ${cardState.accumulatedText.length} chars\n`,
         );
         try {
-          const ok = await this.streamingCard(outTrackId, cardState.accumulatedText, true);
+          const ok = await this.streamingCard(
+            outTrackId,
+            cardState.accumulatedText,
+            true,
+          );
           process.stderr.write(
             `[DingTalk:${this.name}] streamingCard finalize => ${ok}\n`,
           );
@@ -950,9 +960,7 @@ export class DingtalkChannel extends ChannelBase {
         }
 
         this.cleanupCard(chatId);
-        process.stderr.write(
-          `[DingTalk:${this.name}] Card stop completed\n`,
-        );
+        process.stderr.write(`[DingTalk:${this.name}] Card stop completed\n`);
       };
 
       handleStop().catch((err) => {

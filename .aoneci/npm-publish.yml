@@ -44,7 +44,7 @@ jobs:
       - uses: checkout
       - uses: setup-env
         inputs:
-          node-version: '20'
+          node-version: '22'
           tnpm-version: '10'
           python-version: '3.10'
           rust-toolchain-version: stable
