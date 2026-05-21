@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { homedir } from 'node:os';
 import {
   getAllGeminiMdFilenames,
+  getLocalContextFilePath,
   LOCAL_CONTEXT_FILENAME,
 } from '../memory/const.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -26,7 +27,18 @@ interface GeminiFileContent {
   content: string | null;
 }
 
-async function findProjectRoot(startDir: string): Promise<string | null> {
+/**
+ * Walks up the directory tree from `startDir` looking for a `.git`
+ * directory. Returns the first directory containing `.git`, or `null`
+ * if the filesystem root is reached without finding one.
+ *
+ * Exported so callers that need to resolve the project root (e.g.
+ * `workspaceMemory.ts` for the local file probe) can reuse the same
+ * logic as the discovery path, avoiding monorepo path mismatches.
+ */
+export async function findProjectRoot(
+  startDir: string,
+): Promise<string | null> {
   let currentDir = path.resolve(startDir);
   while (true) {
     const gitPath = path.join(currentDir, '.git');
@@ -384,11 +396,7 @@ export async function loadServerHierarchicalMemory(
   // Probe for .qwen/QWEN.local.md — personal, gitignored instructions.
   // Separate scope from committed files; inserted between global and committed.
   if (folderTrust && !options.explicitOnly) {
-    const localPath = path.join(
-      effectiveRoot,
-      QWEN_DIR,
-      LOCAL_CONTEXT_FILENAME,
-    );
+    const localPath = getLocalContextFilePath(effectiveRoot);
     try {
       await fs.access(localPath, fsSync.constants.R_OK);
       const globalQwenDir = Storage.getGlobalQwenDir();
@@ -406,8 +414,23 @@ export async function loadServerHierarchicalMemory(
       }
       filePaths.splice(lastGlobalIdx + 1, 0, localPath);
       logger.debug(`Found local context file: ${localPath}`);
-    } catch {
-      // Not found — common case.
+    } catch (err) {
+      // ENOENT is the common case — file doesn't exist, skip silently.
+      // Log non-ENOENT errors (EACCES, EPERM, EIO) so the operator
+      // can diagnose permission issues; don't swallow them silently.
+      if (
+        typeof err !== 'object' ||
+        err === null ||
+        (err as { code?: string }).code === 'ENOENT'
+      ) {
+        // Not found — expected.
+      } else {
+        logger.warn(
+          `Could not access local context file ${localPath}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
   }
 

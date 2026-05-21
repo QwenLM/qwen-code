@@ -12,11 +12,11 @@ import {
   WorkspaceMemoryFileTooLargeError,
   WorkspaceMemoryWriteTimeoutError,
   getAllGeminiMdFilenames,
-  LOCAL_CONTEXT_FILENAME,
-  QWEN_DIR,
+  getLocalContextFilePath,
   writeWorkspaceContextFile,
   type WriteContextFileScope,
 } from '@qwen-code/qwen-code-core';
+import { findProjectRoot } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debugMode.js';
 import type { HttpAcpBridge } from './httpAcpBridge.js';
@@ -214,7 +214,7 @@ export function mountWorkspaceMemoryRoutes(
           deps.bridge.publishWorkspaceEvent({
             type: 'memory_changed',
             data: {
-              scope,
+              scope: result.resolvedScope,
               filePath: result.filePath,
               mode,
               bytesWritten: result.bytesWritten,
@@ -347,8 +347,15 @@ async function collectWorkspaceMemoryStatus(
   );
   files.push(...workspaceFiles);
 
-  // Probe for .qwen/QWEN.local.md at the workspace root.
-  const localPath = path.join(boundWorkspace, QWEN_DIR, LOCAL_CONTEXT_FILENAME);
+  // Probe for .qwen/QWEN.local.md at the project root (git root, not
+  // necessarily the bound workspace). Uses findProjectRoot to match
+  // the discovery path in memoryDiscovery.ts — in a monorepo where
+  // the daemon is bound to a subdirectory, both must probe the same
+  // directory or writes will silently disappear from the prompt.
+  const resolvedWorkspace = path.resolve(boundWorkspace);
+  const foundProjectRoot = await findProjectRoot(resolvedWorkspace);
+  const effectiveRoot = foundProjectRoot ?? resolvedWorkspace;
+  const localPath = getLocalContextFilePath(effectiveRoot);
   try {
     const stat = await fs.stat(localPath);
     if (stat.isFile()) {

@@ -4,10 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
+import { QWEN_DIR } from '../utils/paths.js';
+
 export const DEFAULT_CONTEXT_FILENAME = 'QWEN.md';
 export const AGENT_CONTEXT_FILENAME = 'AGENTS.md';
 export const LOCAL_CONTEXT_FILENAME = 'QWEN.local.md';
 export const MEMORY_SECTION_HEADER = '## Qwen Added Memories';
+
+/**
+ * Returns the absolute path to `.qwen/QWEN.local.md` for a given
+ * project root. Centralized here so all call sites use a single
+ * source of truth — if the directory name or filename changes, only
+ * this function needs updating.
+ */
+export function getLocalContextFilePath(projectRoot: string): string {
+  return path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME);
+}
 
 // This variable will hold the currently configured filename for context files.
 // It defaults to include both QWEN.md and AGENTS.md but can be overridden by setGeminiMdFilename.

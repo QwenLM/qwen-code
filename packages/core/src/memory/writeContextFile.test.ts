@@ -5,6 +5,7 @@
  */
 
 import { promises as fs } from 'node:fs';
+import * as fsSync from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,6 +14,7 @@ import { QWEN_DIR } from '../utils/paths.js';
 import {
   AGENT_CONTEXT_FILENAME,
   DEFAULT_CONTEXT_FILENAME,
+  getLocalContextFilePath,
   LOCAL_CONTEXT_FILENAME,
   MEMORY_SECTION_HEADER,
   setGeminiMdFilename,
@@ -601,6 +603,190 @@ describe('writeWorkspaceContextFile', () => {
           (l) => l.trim() === `${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}`,
         ).length;
       expect(count).toBe(1);
+    });
+  });
+
+  describe('resolvedScope', () => {
+    it('returns resolvedScope matching the requested scope for workspace', async () => {
+      const result = await writeWorkspaceContextFile({
+        scope: 'workspace',
+        mode: 'append',
+        content: '- workspace entry',
+        projectRoot: workspace,
+      });
+
+      expect(result.resolvedScope).toBe('workspace');
+    });
+
+    it('returns resolvedScope matching the requested scope for global', async () => {
+      const result = await writeWorkspaceContextFile({
+        scope: 'global',
+        mode: 'append',
+        content: '- global entry',
+        projectRoot: workspace,
+      });
+
+      expect(result.resolvedScope).toBe('global');
+    });
+
+    it('returns resolvedScope matching the requested scope for local', async () => {
+      const result = await writeWorkspaceContextFile({
+        scope: 'local',
+        mode: 'append',
+        content: '- local entry',
+        projectRoot: workspace,
+      });
+
+      expect(result.resolvedScope).toBe('local');
+    });
+
+    it('resolves auto to workspace when project QWEN.md exists', async () => {
+      await fs.writeFile(
+        path.join(workspace, DEFAULT_CONTEXT_FILENAME),
+        '# project\n',
+        'utf8',
+      );
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'append',
+        content: '- auto workspace entry',
+        projectRoot: workspace,
+      });
+
+      expect(result.resolvedScope).toBe('workspace');
+      expect(result.filePath).toBe(
+        path.join(workspace, DEFAULT_CONTEXT_FILENAME),
+      );
+    });
+
+    it('resolves auto to local when only local file exists', async () => {
+      const localPath = getLocalContextFilePath(workspace);
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      await fs.writeFile(localPath, '# local\n', 'utf8');
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'append',
+        content: '- auto local entry',
+        projectRoot: workspace,
+      });
+
+      expect(result.resolvedScope).toBe('local');
+      expect(result.filePath).toBe(localPath);
+    });
+
+    it('resolves auto to global when no project file exists', async () => {
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'append',
+        content: '- auto global entry',
+        projectRoot: workspace,
+      });
+
+      expect(result.resolvedScope).toBe('global');
+      expect(result.filePath).toBe(
+        path.join(globalDir, DEFAULT_CONTEXT_FILENAME),
+      );
+    });
+  });
+
+  describe('auto scope safety', () => {
+    it('refuses mode=replace when auto resolves to global', async () => {
+      await expect(
+        writeWorkspaceContextFile({
+          scope: 'auto',
+          mode: 'replace',
+          content: '- dangerous replace',
+          projectRoot: workspace,
+        }),
+      ).rejects.toThrow("scope='auto' with mode='replace' is not allowed");
+    });
+
+    it('allows mode=replace when auto resolves to workspace', async () => {
+      await fs.writeFile(
+        path.join(workspace, DEFAULT_CONTEXT_FILENAME),
+        '# project\n',
+        'utf8',
+      );
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'replace',
+        content: '- replaced',
+        projectRoot: workspace,
+      });
+
+      expect(result.resolvedScope).toBe('workspace');
+      const written = await fs.readFile(result.filePath, 'utf8');
+      expect(written).toBe('- replaced');
+    });
+
+    it('allows mode=replace when auto resolves to local', async () => {
+      const localPath = getLocalContextFilePath(workspace);
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      await fs.writeFile(localPath, '# local\n', 'utf8');
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'replace',
+        content: '- replaced local',
+        projectRoot: workspace,
+      });
+
+      expect(result.resolvedScope).toBe('local');
+      const written = await fs.readFile(result.filePath, 'utf8');
+      expect(written).toBe('- replaced local');
+    });
+  });
+
+  describe('symlink safety', () => {
+    it('skips gitignore update when .gitignore is a symlink', async () => {
+      // Create a target file for the symlink
+      const targetFile = path.join(workspace, 'gitignore-target');
+      await fs.writeFile(targetFile, 'original\n', 'utf8');
+
+      // Create .gitignore as a symlink to the target
+      const gitignorePath = path.join(workspace, '.gitignore');
+      fsSync.symlinkSync(targetFile, gitignorePath);
+
+      // Write with local scope — should NOT follow the symlink
+      await writeWorkspaceContextFile({
+        scope: 'local',
+        mode: 'append',
+        content: '- local entry',
+        projectRoot: workspace,
+      });
+
+      // The target file should be unchanged
+      const targetContent = await fs.readFile(targetFile, 'utf8');
+      expect(targetContent).toBe('original\n');
+
+      // The local file should still be written
+      const localPath = getLocalContextFilePath(workspace);
+      await expect(fs.access(localPath)).resolves.toBeUndefined();
+    });
+
+    it('updates .gitignore normally when it is a regular file', async () => {
+      // Create a regular .gitignore
+      await fs.writeFile(
+        path.join(workspace, '.gitignore'),
+        '# ignore\n',
+        'utf8',
+      );
+
+      await writeWorkspaceContextFile({
+        scope: 'local',
+        mode: 'append',
+        content: '- local entry',
+        projectRoot: workspace,
+      });
+
+      const gitignore = await fs.readFile(
+        path.join(workspace, '.gitignore'),
+        'utf8',
+      );
+      expect(gitignore).toContain(`${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}`);
     });
   });
 });

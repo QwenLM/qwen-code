@@ -16,6 +16,7 @@ import { Storage } from '../config/storage.js';
 import {
   getCurrentGeminiMdFilename,
   getAllGeminiMdFilenames,
+  getLocalContextFilePath,
   LOCAL_CONTEXT_FILENAME,
   MEMORY_SECTION_HEADER,
 } from './const.js';
@@ -108,6 +109,14 @@ export interface WriteContextFileOptions {
 export interface WriteContextFileResult {
   filePath: string;
   /**
+   * The scope that was actually written to, resolved from the
+   * requested `scope`. When `scope: 'auto'` is used, this reflects
+   * the concrete scope (`'workspace'`, `'local'`, or `'global'`)
+   * that the auto-detection resolved to. `'auto'` never appears
+   * here — it is always resolved to a concrete value.
+   */
+  resolvedScope: 'workspace' | 'local' | 'global';
+  /**
    * Bytes actually written by this call. `0` on the no-op short-
    * circuit path (`changed: false`). NOT a measurement of the file's
    * on-disk size — callers that need that should `fs.stat` the
@@ -153,10 +162,26 @@ export async function writeWorkspaceContextFile(
       `writeWorkspaceContextFile: projectRoot must be absolute, got "${options.projectRoot}"`,
     );
   }
-  const filePath = await resolveContextFilePath(
+  const { filePath, resolvedScope } = await resolveContextFilePath(
     options.scope,
     options.projectRoot,
   );
+
+  // Safety guard: refuse `replace` when `auto` resolves to global.
+  // `scope: 'auto'` with `mode: 'replace'` would wipe all global
+  // memories across every workspace with no confirmation. Require
+  // explicit `scope: 'global'` for that destructive operation.
+  if (
+    options.scope === 'auto' &&
+    resolvedScope === 'global' &&
+    options.mode === 'replace'
+  ) {
+    throw new Error(
+      `scope='auto' with mode='replace' is not allowed when auto resolves ` +
+        `to the global directory. Use scope='global' to explicitly target ` +
+        `the global memory file, or use mode='append'.`,
+    );
+  }
 
   // Hold the per-file mutex for the entire read-compose-write sequence
   // INCLUDING the whitespace-only no-op detection. Two concurrent
@@ -170,7 +195,7 @@ export async function writeWorkspaceContextFile(
   // composite.
   try {
     return await getFileLock(filePath).runExclusive(
-      async () => await runWrite(filePath, options),
+      async () => await runWrite(filePath, options, resolvedScope),
     );
   } catch (err) {
     // `withTimeout` rejects with the `E_TIMEOUT` sentinel when the
@@ -191,6 +216,7 @@ export async function writeWorkspaceContextFile(
 async function runWrite(
   filePath: string,
   options: WriteContextFileOptions,
+  resolvedScope: 'workspace' | 'local' | 'global',
 ): Promise<WriteContextFileResult> {
   if (options.mode === 'append' && isWhitespaceOnly(options.content)) {
     // No-op short-circuit. Skip the mkdir + writeFile path entirely
@@ -206,7 +232,7 @@ async function runWrite(
     // added in for every whitespace POST. `changed: false` already
     // gives clients the no-op signal; the byte count should remain
     // true to its field name.
-    return { filePath, bytesWritten: 0, changed: false };
+    return { filePath, resolvedScope, bytesWritten: 0, changed: false };
   }
 
   // Ensure the local context file is gitignored before writing. Covers
@@ -218,8 +244,7 @@ async function runWrite(
   // rather than aborting the memory write itself.
   if (
     options.scope === 'local' ||
-    filePath ===
-      path.join(options.projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME)
+    filePath === getLocalContextFilePath(options.projectRoot)
   ) {
     try {
       await ensureGitignoreEntry(options.projectRoot);
@@ -241,6 +266,7 @@ async function runWrite(
     });
     return {
       filePath,
+      resolvedScope,
       bytesWritten: Buffer.byteLength(options.content, 'utf8'),
       changed: true,
     };
@@ -250,6 +276,7 @@ async function runWrite(
   await fs.writeFile(filePath, next, { encoding: 'utf8', mode: 0o644 });
   return {
     filePath,
+    resolvedScope,
     bytesWritten: Buffer.byteLength(next, 'utf8'),
     changed: true,
   };
@@ -259,10 +286,36 @@ async function runWrite(
  * Idempotently add `.qwen/QWEN.local.md` to `.gitignore` so the local
  * context file is never accidentally committed. Safe to call on every
  * local-scope write — exits early when the pattern is already present.
+ *
+ * Symlink safety: uses `lstat` to detect and refuse to follow symlinks.
+ * A malicious repository can ship `.gitignore` as a symlink pointing to
+ * `~/.bashrc`, `~/.config/git/config`, or any other user-writable file.
+ * Without this check, the first `scope='local'` write would append to
+ * the symlink target, corrupting it.
  */
 async function ensureGitignoreEntry(projectRoot: string): Promise<void> {
   const entry = `${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}`;
   const gitignorePath = path.join(projectRoot, '.gitignore');
+
+  try {
+    const lstat = await fs.lstat(gitignorePath);
+    if (lstat.isSymbolicLink()) {
+      logger.warn(
+        `.gitignore at ${gitignorePath} is a symlink; skipping gitignore update.`,
+      );
+      return;
+    }
+  } catch (err) {
+    // ENOENT — file doesn't exist yet, create it below.
+    // Any other error (EACCES, EPERM) is thrown to the caller.
+    if (
+      (typeof err === 'object' &&
+        err !== null &&
+        (err as { code?: string }).code) !== 'ENOENT'
+    ) {
+      throw err;
+    }
+  }
 
   try {
     const existing = await fs.readFile(gitignorePath, 'utf8');
@@ -283,16 +336,25 @@ async function ensureGitignoreEntry(projectRoot: string): Promise<void> {
 async function resolveContextFilePath(
   scope: WriteContextFileScope,
   projectRoot: string,
-): Promise<string> {
+): Promise<{
+  filePath: string;
+  resolvedScope: 'workspace' | 'local' | 'global';
+}> {
   // Honor `setGeminiMdFilename()` overrides so POST writes to the same
   // file GET surfaces.
   const filename = getCurrentGeminiMdFilename();
   if (scope === 'workspace') {
-    return path.join(projectRoot, filename);
+    return {
+      filePath: path.join(projectRoot, filename),
+      resolvedScope: 'workspace',
+    };
   }
 
   if (scope === 'local') {
-    return path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME);
+    return {
+      filePath: getLocalContextFilePath(projectRoot),
+      resolvedScope: 'local',
+    };
   }
 
   if (scope === 'auto') {
@@ -307,26 +369,41 @@ async function resolveContextFilePath(
       try {
         const stat = await fs.stat(candidatePath);
         if (stat.isFile()) {
-          return candidatePath;
+          return { filePath: candidatePath, resolvedScope: 'workspace' };
         }
       } catch (err) {
         if (!isEnoent(err)) throw err;
       }
     }
     // Check for local file before falling back to global.
-    const localPath = path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME);
+    const localPath = getLocalContextFilePath(projectRoot);
     try {
       const stat = await fs.stat(localPath);
       if (stat.isFile()) {
-        return localPath;
+        return { filePath: localPath, resolvedScope: 'local' };
       }
     } catch (err) {
       if (!isEnoent(err)) throw err;
     }
-    return path.join(Storage.getGlobalQwenDir(), filename);
+    // Fallback to global — log a warning so the operator knows auto
+    // did not find a project-level file. This is a data safety signal:
+    // project-specific content written via `auto` will leak into every
+    // future session for every project.
+    logger.warn(
+      `scope='auto' resolved to global (~/.qwen/${filename}) — no project-level ` +
+        `context file found at ${projectRoot}. Consider creating a project QWEN.md ` +
+        `or using scope='local' for project-scoped memory.`,
+    );
+    return {
+      filePath: path.join(Storage.getGlobalQwenDir(), filename),
+      resolvedScope: 'global',
+    };
   }
 
-  return path.join(Storage.getGlobalQwenDir(), filename);
+  return {
+    filePath: path.join(Storage.getGlobalQwenDir(), filename),
+    resolvedScope: 'global',
+  };
 }
 
 /**
