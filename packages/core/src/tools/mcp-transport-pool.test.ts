@@ -344,6 +344,56 @@ describe('McpTransportPool', () => {
   });
 
   describe('pooled in-flight acquire (W90)', () => {
+    it('transitions zombie entry to failed when transport silently drops, evicting from pool (W120)', async () => {
+      // Pre-W120: McpClient.onerror / a silent transport drop writes
+      // DISCONNECTED to the global serverStatuses, statusChangeListener
+      // mirrored it into localStatus but state stayed 'active'. The
+      // pool fast-path then attached new sessions to the zombie entry,
+      // replayed stale tools, and every tool call failed on the dead
+      // transport. Post-W120 the listener transitions state='failed'
+      // synchronously when localStatus flips to DISCONNECTED on an
+      // active entry (gated by !restartInProgress so intentional
+      // restart-mid-disconnect doesn't trip it).
+      const { updateMCPServerStatus, MCPServerStatus } = await import(
+        './mcp-client.js'
+      );
+      mockMcpSuccess({ toolNames: ['t1'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const r1 = mkSessionRegistries();
+      const conn1 = await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      let failedEventReceived = false;
+      conn1.on('event', (e) => {
+        if (e.kind === 'failed') failedEventReceived = true;
+      });
+
+      // Simulate a silent transport drop: writing DISCONNECTED to the
+      // global registry fires the statusChangeListener inside PoolEntry.
+      // McpClient.onerror in production would do the same.
+      const targetId = connectionIdOf('srv', cfg);
+      const entries = (pool as unknown as { entries: Map<string, PoolEntry> })
+        .entries;
+      const entry = entries.get(targetId)!;
+      // Pre-fix: localStatus mirror + state stays 'active' → fast-path
+      // attach below succeeds against the zombie. Post-fix: W120 listener
+      // sets state='failed' and emits 'failed'.
+      const mockClient = (entry as unknown as { client: { status: unknown } })
+        .client;
+      mockClient.status = MCPServerStatus.DISCONNECTED;
+      updateMCPServerStatus('srv', MCPServerStatus.DISCONNECTED);
+
+      expect(failedEventReceived).toBe(true);
+
+      // A fresh acquire for the SAME (name, cfg) must NOT attach to the
+      // zombie via the fast path. With the entry now in 'failed' state,
+      // existing.attach() rejects → acquire falls through to spawn a
+      // fresh entry.
+      const r2 = mkSessionRegistries();
+      await expect(
+        pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts),
+      ).rejects.toThrow(/Cannot attach to PoolEntry/);
+    });
+
     it('rejects attach on terminal-state entry (W90 contract proxy via fast path; in-flight guard reproduction tracked as W109-followup)', async () => {
       // The W90 fix's primary correctness guard catches a concurrent
       // `forceShutdown` that lands on the spawned entry between

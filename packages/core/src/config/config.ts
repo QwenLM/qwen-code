@@ -700,6 +700,22 @@ export interface ConfigInitializeOptions {
    * need config services (hooks, tools, MCP) before a real session exists.
    */
   skipGeminiInitialization?: boolean;
+  /**
+   * F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): skip MCP
+   * discovery entirely (both inline tool-registry-time discovery AND
+   * the post-`createToolRegistry` background `startMcpDiscoveryInBackground`).
+   * The bootstrap config in ACP daemon mode uses this to AVOID spawning
+   * MCP servers under the bootstrap's pool-less McpClientManager.
+   * Pre-fix every stdio MCP server was spawned twice — once by the
+   * bootstrap (legacy per-server path, invisible to pool / budget /
+   * drainAll / pid-sweep) and once by each session's pool-routed
+   * discovery — silently violating the workspace budget contract.
+   * The bootstrap's MCP clients were never actually used to serve a
+   * session (each session builds its own per-session Config and runs
+   * its own discovery), so skipping at the bootstrap layer is safe
+   * AND closes the 2N subprocess leak.
+   */
+  skipMcpDiscovery?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
@@ -1333,7 +1349,14 @@ export class Config {
     // an escape hatch.
     const legacyBlockingMcp =
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
-    const skipInlineMcpDiscovery = this.getBareMode() || !legacyBlockingMcp;
+    // W119: also force the inline-discovery skip when the caller opts
+    // out of MCP entirely (ACP bootstrap path) — otherwise the legacy
+    // blocking mode would still spawn MCP servers via the tool-registry
+    // construction path.
+    const skipInlineMcpDiscovery =
+      this.getBareMode() ||
+      !legacyBlockingMcp ||
+      options?.skipMcpDiscovery === true;
 
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
@@ -1366,7 +1389,15 @@ export class Config {
     // `setTools()` (~16ms / one frame) so the model sees the new tools
     // shortly after each server settles. See `AppContainer.tsx`'s
     // `mcp-client-update` subscriber.
-    if (skipInlineMcpDiscovery && !this.getBareMode()) {
+    //
+    // W119: also gated on `!options?.skipMcpDiscovery` — the ACP
+    // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
+    // config doesn't run discovery under its pool-less manager.
+    if (
+      skipInlineMcpDiscovery &&
+      !this.getBareMode() &&
+      !options?.skipMcpDiscovery
+    ) {
       this.startMcpDiscoveryInBackground();
     }
 

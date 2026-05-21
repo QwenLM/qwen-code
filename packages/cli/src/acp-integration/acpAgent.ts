@@ -159,21 +159,26 @@ export async function runAcpAgent(
   settings: LoadedSettings,
   argv: CliArgs,
 ) {
-  // Initialize config to set up ACP bootstrap services (hooks, tools, MCP)
-  // without creating a chat session. The real per-session Config will own
-  // GeminiClient.initialize() and any SessionStart hook execution.
-  await config.initialize({ skipGeminiInitialization: true });
-  // ACP forwards session messages straight to the model; under progressive
-  // MCP availability `initialize()` returns before MCP servers settle, so
-  // we wait here to keep the first session's tool surface consistent with
-  // the legacy synchronous behavior.
+  // F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): skip MCP
+  // discovery in the BOOTSTRAP config. Pre-fix every stdio MCP server
+  // was spawned twice — once by the bootstrap (legacy per-server path,
+  // pool=undefined, invisible to budget / drainAll / pid-sweep) and
+  // once via each session's pool-routed discovery. With N servers and
+  // M sessions, the headline `4 sessions × budget=2 caps at 2`
+  // contract was silently violated by the bootstrap copies. Bootstrap
+  // MCP clients are never used to serve a session (each session
+  // builds its own per-session Config and runs discovery there), so
+  // skipping at the bootstrap layer is safe AND closes the 2N
+  // subprocess leak. `waitForMcpReady` + `getFailedMcpServerNames`
+  // below are kept as no-ops (defensive) — no discovery was started,
+  // so they resolve / return empty immediately.
+  await config.initialize({
+    skipGeminiInitialization: true,
+    skipMcpDiscovery: true,
+  });
+  // No-op when `skipMcpDiscovery: true` — kept for defense against a
+  // future code path that re-introduces bootstrap-level discovery.
   await config.waitForMcpReady();
-  // Surface MCP failures to stderr. ACP's stdout is the protocol channel
-  // so info/log writes are already redirected to stderr below, but we
-  // emit this BEFORE that redirection takes effect to keep the message
-  // visible regardless of how the host process is wired.
-  // Defensive against tests that pass a stubbed Config without
-  // `getFailedMcpServerNames`.
   const failedMcpServers =
     typeof config.getFailedMcpServerNames === 'function'
       ? config.getFailedMcpServerNames()

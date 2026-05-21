@@ -117,6 +117,18 @@ export class PoolEntry {
   private firstIdleAt?: number;
   private restartInFlight?: Promise<void>;
   /**
+   * F2 (#4175 commit 6 review fix — claude-opus-4-7 W120 gate): set
+   * SYNCHRONOUSLY at the top of `doRestart` (before any side effects).
+   * Distinct from `restartInFlight` which only becomes truthy AFTER
+   * `doRestart()` returns its Promise — the W120 status listener
+   * fires synchronously inside `client.disconnect()`'s
+   * `updateMCPServerStatus` call (via `sweepAndDisconnect`), which
+   * happens BEFORE `restart()`'s `this.restartInFlight = ...` assignment.
+   * Without this flag the listener would trip the W120 'failed'
+   * transition mid-restart, aborting the restart at the state guard.
+   */
+  private restartInProgress = false;
+  /**
    * Pool-wide event emitter for entry-scoped events. Each
    * `PooledConnection` registers a single listener that forwards
    * to the subscriber's callback list.
@@ -218,6 +230,55 @@ export class PoolEntry {
       // the listener. McpClient already wrote the authoritative
       // status to the module-level map; our job is to mirror it
       // into localStatus only.
+      //
+      // F2 (#4175 commit 6 review fix — claude-opus-4-7 W120):
+      // transition the entry to terminal state when localStatus flips
+      // to DISCONNECTED on a currently-active entry. Pre-fix the
+      // transport could die silently (server crash, EPIPE, network
+      // drop) and McpClient.onerror would write DISCONNECTED, but
+      // `state` stayed `'active'` — only `forceShutdown` and
+      // `doRestart`'s catch path transitioned state to terminal. A
+      // subsequent `pool.acquire` for the same fingerprint hit the
+      // fast-path (`mcp-transport-pool.ts:226-249`), `existing.attach`
+      // only rejected on closed/failed, so it attached to the zombie
+      // entry, replayed the stale snapshot, and the new session's
+      // tool calls all failed on the dead transport. Pool mode has
+      // no health monitor (`mcp-client-manager.ts:1383-1386`) so
+      // there was no auto-recovery — operator had to manually
+      // `POST /workspace/mcp/<name>/restart`. Now: emit `failed`
+      // synchronously so the manager-side `onFailed` listener
+      // (`mcp-client-manager.ts:1531-1538`) evicts the dead handle
+      // from `pooledConnections`, AND set `state='failed'` so the
+      // next fast-path `acquire` short-circuits to a fresh spawn via
+      // `attach`'s state guard. `localStatus = DISCONNECTED` was
+      // already set above; mirrors the W69 sync ordering invariant.
+      //
+      // Gate on `!this.restartInFlight`: `doRestart`'s `sweepAndDisconnect`
+      // intentionally disconnects the client mid-restart, which would
+      // otherwise trip this listener and flip state to 'failed' before
+      // the reconnect completes. Restart's own catch path handles the
+      // 'failed' transition on a reconnect FAILURE; the restart's
+      // success path leaves state='active'. Don't preempt that.
+      if (
+        status === MCPServerStatus.DISCONNECTED &&
+        this.state === 'active' &&
+        !this.restartInProgress
+      ) {
+        this.state = 'failed';
+        // Detach the status listener now that we're terminal —
+        // mirrors the cleanup symmetry in forceShutdown / doRestart
+        // catch (otherwise the listener leaks across entry recreation).
+        if (this.statusChangeListener) {
+          removeMCPStatusChangeListener(this.statusChangeListener);
+          this.statusChangeListener = undefined;
+        }
+        this.emit({
+          kind: 'failed',
+          serverName: this.serverName,
+          generation: this._generation,
+          lastError: 'transport disconnected (silent transport drop)',
+        });
+      }
     };
     addMCPStatusChangeListener(this.statusChangeListener);
   }
@@ -585,6 +646,24 @@ export class PoolEntry {
         `Cannot restart PoolEntry ${this.id} in state ${this.state}`,
       );
     }
+    // F2 (#4175 commit 6 review fix — claude-opus-4-7 W120 gate): set
+    // the in-progress flag SYNCHRONOUSLY at the top of doRestart so
+    // the W120 listener (which fires synchronously inside the
+    // upcoming `client.disconnect()` → `updateMCPServerStatus` chain)
+    // skips its 'failed' transition for this entry's intentional
+    // mid-restart disconnect. `restartInFlight` is set by the outer
+    // `restart()` wrapper AFTER doRestart returns its Promise — too
+    // late to gate the synchronous listener fire. Cleared in the
+    // success-path tail AND every throw path below.
+    this.restartInProgress = true;
+    try {
+      return await this.doRestartInner();
+    } finally {
+      this.restartInProgress = false;
+    }
+  }
+
+  private async doRestartInner(): Promise<void> {
     // F2 (#4175 commit 6 review fix — wenshao W4 + W31): restart
     // supersedes drain. Pre-fix the entry could be in `'draining'`
     // state (refs=0, both `drainTimer` AND `maxIdleTimer` running)
