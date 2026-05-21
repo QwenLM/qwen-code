@@ -105,14 +105,9 @@ function accumulateSegments(raw) {
 /**
  * Build the final on-disk markdown body from accumulated segments.
  *
- * Tier matters here. Single-shot tiers (LIGHT/STANDARD) emit the review
- * as their whole output, so every segment is review content and they are
- * joined as-is. DEEP runs the bundled multi-agent skill: its stream
- * carries many short orchestrator-narration segments ("Launching 6
- * agents…", "Let me compile the review…", "All agents unanimous") plus
- * ONE large segment that is the actual consolidated review. Joining them
- * all would sandwich the review in narration noise, so for DEEP we emit
- * only the largest segment.
+ * All current tiers are single-shot, tool-free qwen calls. Every assistant
+ * segment is review content, including partial text captured before a
+ * timeout, so segments are joined in stream order.
  *
  * Empty input gets a placeholder so downstream `gh pr comment
  * --body-file` always has a non-empty body to post.
@@ -122,10 +117,7 @@ function accumulateSegments(raw) {
 function buildOutput(segments, tier, status) {
   let body;
   let emitted;
-  if (tier === 'DEEP' && segments.length > 1) {
-    body = segments.reduce((a, b) => (b.length > a.length ? b : a));
-    emitted = 1;
-  } else if (segments.length > 0) {
+  if (segments.length > 0) {
     body = segments.join('\n\n');
     emitted = segments.length;
   } else {
@@ -144,7 +136,7 @@ function main() {
 
   if (!inputPath || !outputPath) {
     console.error(
-      'Usage: parse-review-stream.cjs <input.jsonl> <output.md> [tier] [status]'
+      'Usage: parse-review-stream.cjs <input.jsonl> <output.md> [tier] [status]',
     );
     process.exit(2);
   }
@@ -154,7 +146,7 @@ function main() {
     raw = fs.readFileSync(inputPath, 'utf8');
   } catch (err) {
     console.error(
-      `parse-review-stream: failed to read ${inputPath}: ${err.message}`
+      `parse-review-stream: failed to read ${inputPath}: ${err.message}`,
     );
     process.exit(1);
   }
@@ -166,13 +158,13 @@ function main() {
     fs.writeFileSync(outputPath, full);
   } catch (err) {
     console.error(
-      `parse-review-stream: failed to write ${outputPath}: ${err.message}`
+      `parse-review-stream: failed to write ${outputPath}: ${err.message}`,
     );
     process.exit(1);
   }
 
   console.error(
-    `parse-review-stream: ${segments.length} segment(s) parsed, ${emitted} emitted, ${body.length} char(s) written to ${outputPath}`
+    `parse-review-stream: ${segments.length} segment(s) parsed, ${emitted} emitted, ${body.length} char(s) written to ${outputPath}`,
   );
 }
 

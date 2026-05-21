@@ -169,23 +169,17 @@ describe('buildOutput', () => {
     );
   });
 
-  it('DEEP emits only the largest segment (drops orchestrator narration)', () => {
-    // The bundled multi-agent skill streams many short narration
-    // segments plus one large segment that is the real review.
-    const narrationA = 'Launching all 6 review agents in parallel.';
-    const review =
-      '# Code Review — PR #1\n\n## Findings\n\n' +
-      'A real consolidated review, much longer than any narration line.';
-    const narrationB = 'All agents unanimous. Review closed.';
-    const out = buildOutput(
-      [narrationA, review, narrationB],
-      'DEEP',
-      'complete',
-    );
-    expect(out.body).toBe(review);
-    expect(out.emitted).toBe(1);
+  it('DEEP joins all segments in stream order', () => {
+    const segmentA = '## Qwen Code Review (DEEP)';
+    const segmentB =
+      '### P1 - High\n\n' +
+      '1. A real consolidated review finding from the stream.';
+    const segmentC = '## Validation Evidence\n\nPRESENT';
+    const out = buildOutput([segmentA, segmentB, segmentC], 'DEEP', 'complete');
+    expect(out.body).toBe(`${segmentA}\n\n${segmentB}\n\n${segmentC}`);
+    expect(out.emitted).toBe(3);
     expect(out.header).toBe(
-      '<!-- tier=DEEP; status=complete; segments=3; emitted=1 -->\n',
+      '<!-- tier=DEEP; status=complete; segments=3; emitted=3 -->\n',
     );
   });
 
@@ -197,9 +191,6 @@ describe('buildOutput', () => {
   });
 
   it('DEEP with 0 segments falls back to the placeholder', () => {
-    // The `tier === 'DEEP' && segments.length > 1` branch is distinct
-    // from the empty-input path — pin it explicitly so a future change
-    // to the DEEP guard cannot silently break the 0-segment fallthrough.
     const out = buildOutput([], 'DEEP', 'timeout');
     expect(out.header).toContain('segments=0');
     expect(out.header).toContain('emitted=0');

@@ -34,6 +34,7 @@ CLAUDE.md
 !.qwen/preflight-prompt.md
 !.qwen/preflight-light-review-prompt.md
 !.qwen/preflight-standard-review-prompt.md
+!.qwen/preflight-deep-review-prompt.md
 !.qwen/commands/
 !.qwen/commands/**
 !.qwen/skills/

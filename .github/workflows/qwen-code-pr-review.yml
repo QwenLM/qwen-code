@@ -76,39 +76,49 @@ jobs:
         contains(github.event.comment.body, '@qwen /review') &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'COLLABORATOR'))
+         github.event.comment.author_association == 'COLLABORATOR')) ||
+      (github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '@qwen /review') &&
+        (github.event.comment.author_association == 'OWNER' ||
+         github.event.comment.author_association == 'MEMBER' ||
+         github.event.comment.author_association == 'COLLABORATOR')) ||
+      (github.event_name == 'pull_request_review' &&
+        contains(github.event.review.body, '@qwen /review') &&
+        (github.event.review.author_association == 'OWNER' ||
+         github.event.review.author_association == 'MEMBER' ||
+         github.event.review.author_association == 'COLLABORATOR'))
     concurrency:
       group: 'qwen-pr-review-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.pr_number }}'
       cancel-in-progress: true
-    # 30 min was empirically too low: a full (no-cache) 9-agent deep
-    # review on a ~800-line PR exceeded it and the job was killed
-    # mid-review. Incremental (synchronize) reviews are far shorter, but
-    # opened/comment/dispatch run the full path. 60 min leaves headroom.
+    # 30 min was empirically too low for the former multi-agent deep path
+    # on a ~800-line PR. The current review tiers are toolless single-shot
+    # qwen calls, but opened/comment/review/dispatch still need room for
+    # package install, preflight, and a large DEEP prompt.
     timeout-minutes: 60
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'read'
-      # 'write' is required even though we only use `gh pr comment`: the gh
-      # CLI calls the GraphQL addComment mutation, which is gated on
-      # pull-requests:write (not issues:write — that path is for issue
-      # comments on non-PR issues). Validated by an empirical
-      # workflow_dispatch run that failed with
-      # "GraphQL: Resource not accessible by integration (addComment)".
+      # Needed only by trusted shell steps that post the final comment. Every
+      # qwen invocation below unsets GITHUB_TOKEN/GH_TOKEN before the model
+      # process starts, so the token is not available to model-controlled code.
       pull-requests: 'write'
+      issues: 'read'
     env:
-      GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
       OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
       QWEN_PR_REVIEW_MAX_CHANGED_LINES: "${{ vars.QWEN_PR_REVIEW_MAX_CHANGED_LINES || '1500' }}"
+      # Toolless qwen mode for all LLM calls in this pull_request_target
+      # workflow. `--core-tools structured_output` activates the core-tool
+      # allowlist while naming no registered core tool for these text-only
+      # runs, so Shell/ReadFile/Edit/etc. are unavailable. The explicit deny
+      # list covers non-core orchestration tools that bypass coreTools.
+      QWEN_REVIEW_CORE_TOOLS: 'structured_output'
+      QWEN_REVIEW_DENY_TOOLS: 'agent,skill,tool_search,ask_user_question,task_stop,send_message,enter_worktree,exit_worktree,exit_plan_mode'
     steps:
-      # Security (R4): this job runs `qwen --yolo` — which auto-approves
-      # every tool call, incl. shell and network — over UNTRUSTED PR diff
-      # content, while OPENAI_API_KEY and a write-scoped GITHUB_TOKEN are
-      # in the step env. A prompt-injected diff could try to exfiltrate
-      # those secrets. harden-runner in `audit` mode does NOT block — it
-      # records every outbound connection to the job summary, so the set
-      # of domains the review path actually contacts can be observed and
-      # later turned into a `block`-mode allowlist. Must be the first
-      # step so its monitor is installed before anything else runs.
+      # Security (R4): this job runs on pull_request_target with model
+      # secrets, so all qwen calls below are toolless and run without a
+      # GitHub token in the qwen process. harden-runner remains in audit
+      # mode to observe outbound domains before a later block-mode
+      # allowlist. Must be first so monitoring starts before anything else.
       - name: 'Harden runner (egress audit)'
         uses: 'step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5' # v2.19.3
         with:
@@ -170,6 +180,16 @@ jobs:
               review_mode="comment"
               comment_body="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
               ;;
+            pull_request_review_comment)
+              pr_number="$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
+              review_mode="comment"
+              comment_body="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
+              ;;
+            pull_request_review)
+              pr_number="$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
+              review_mode="comment"
+              comment_body="$(jq -r '.review.body // ""' "$GITHUB_EVENT_PATH")"
+              ;;
             *)
               echo "::error::Unsupported event: $EVENT_NAME"
               exit 1
@@ -221,9 +241,9 @@ jobs:
           # (it ends up there after the regex strip above). Match: --tier=light,
           # --tier=DEEP, etc. The matched token is REMOVED from
           # additional_instructions so it doesn't leak into the review prompt.
-          # Only honored when the event is issue_comment (workflow_dispatch
+          # Only honored for comment/review-triggered runs (workflow_dispatch
           # already set tier_override from its input above).
-          if [ "$EVENT_NAME" = "issue_comment" ] && [ -z "$tier_override" ]; then
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$EVENT_NAME" != "pull_request_target" ] && [ -z "$tier_override" ]; then
             if printf '%s' "$additional_instructions" | grep -qiE '(^|[[:space:]])--tier=(ultra_light|light|standard|deep)([[:space:]]|$)'; then
               tier_raw="$(printf '%s' "$additional_instructions" \
                 | grep -oiE -- '--tier=(ultra_light|light|standard|deep)' \
@@ -248,26 +268,10 @@ jobs:
           # Reviewers should keep instructions short.
           additional_instructions="${additional_instructions:0:2048}"
 
-          # Build the review prompt for qwen-code-action.
-          # Pass the full PR URL so the skill can resolve owner/repo unambiguously.
-          #
-          # Intentionally NOT passing `/review --comment` even in comment mode:
-          # the bundled skill may submit an APPROVE review when no findings are
-          # found, and this workflow is comment-only (it posts the action
-          # summary itself below). The dry-run vs comment distinction is
-          # carried via $should_comment, not by changing the slash-command.
-          review_target="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/pull/${pr_number}"
-          review_prompt="/review $review_target"
           if [ "$review_mode" = "comment" ]; then
             should_comment="true"
           else
             should_comment="false"
-          fi
-
-          if [ -n "$additional_instructions" ]; then
-            review_prompt="$review_prompt
-
-            Additional reviewer focus: $additional_instructions"
           fi
 
           output_delimiter="QWEN_REVIEW_PROMPT_$(date +%s%N)"
@@ -280,9 +284,6 @@ jobs:
             echo "additional_instructions<<QWEN_REVIEW_AI_${output_delimiter}"
             printf '%s\n' "$additional_instructions"
             echo "QWEN_REVIEW_AI_${output_delimiter}"
-            echo "review_prompt<<$output_delimiter"
-            printf '%s\n' "$review_prompt"
-            echo "$output_delimiter"
           } >> "$GITHUB_OUTPUT"
 
       - name: 'Check PR size'
@@ -290,6 +291,7 @@ jobs:
         if: |-
           steps.pr.outputs.should_run_review == 'true'
         env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
           SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
@@ -358,48 +360,14 @@ jobs:
             exit 1
           fi
 
-          # Compute the merge-base SHA, i.e., the commit where the PR's
-          # history forks from the base branch. The merge base is what the
-          # cache key must be scoped to, NOT baseRefOid.
-          #
-          # baseRefOid is the current tip of the base ref (e.g., main HEAD).
-          # That value can stay fixed across reviews even when the PR
-          # merges base into itself: if the author clicks "Update branch"
-          # while base hasn't moved, baseRefOid is unchanged but the PR's
-          # history now incorporates base's commits. A cache restored under
-          # baseRefOid would then let the bundled /review skill compute
-          # `git diff <oldHead>..<newHead>` across upstream commits the PR
-          # did not author. The merge base, in contrast, advances whenever
-          # base content enters the PR (Update branch, rebase onto newer
-          # base, or base retarget), which is exactly the boundary we
-          # want to invalidate the cache on.
-          #
-          # merge-base is best-effort: the compare endpoint can fail to
-          # resolve SHAs for fork PRs in the base repo's namespace. That
-          # must not abort the review (set -euo pipefail) — it only means
-          # the incremental cache can't be scoped this run, so we fall
-          # back to a full review rather than failing the job.
-          merge_base_sha="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/compare/${base_sha}...${head_sha}" \
-            --jq '.merge_base_commit.sha // ""' 2>/dev/null || true)"
-          if [ -z "$merge_base_sha" ]; then
-            echo "::warning::Could not resolve PR merge base; incremental cache will fall back to a full review this run."
-          fi
-
           write_output "changed_lines=$changed_lines"
           write_output "raw_changed_lines=$raw_changed_lines"
           write_output "changed_files=$changed_files"
           write_output "head_sha=$head_sha"
           write_output "base_sha=$base_sha"
-          write_output "merge_base_sha=$merge_base_sha"
           echo "Review target: PR #$PR_NUMBER"
           echo "Review title: $title"
           echo "Review branch: $base_ref ($base_sha) <- $head_ref ($head_sha)"
-          if [ -n "$merge_base_sha" ]; then
-            echo "Review merge base: $merge_base_sha"
-          else
-            echo "Review merge base: (unresolved; full review this run)"
-          fi
           echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines reviewable lines after excluding docs/lockfiles/snapshots)"
 
           if [ "$changed_lines" -gt "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" ]; then
@@ -418,34 +386,6 @@ jobs:
           else
             write_output "should_review=true"
           fi
-
-      # Restore the bundled /review skill's per-PR cache only on synchronize.
-      # The skill writes .qwen/review-cache/pr-<n>.json with the last reviewed
-      # commit SHA so subsequent runs can scope review to the incremental
-      # diff. Cache is intentionally NOT restored on opened/reopened (full
-      # review) or comment / workflow_dispatch (manual re-review must not
-      # short-circuit on "No new changes since last review"). See
-      # docs/design/code-review/code-review-design.md §增量评审与缓存.
-      #
-      # Cache key uses merge_base_sha + head_sha (not baseRefOid). The
-      # merge base advances whenever base content enters the PR — Update
-      # branch, rebase onto newer base, or base retarget — which are
-      # exactly the boundaries that should invalidate the cache. Pure
-      # author pushes leave the merge base alone, so the restore-keys
-      # prefix `qwen-review-<pr#>-<merge_base_sha>-` keeps matching and
-      # bundled /review can still scope to the incremental diff.
-      - name: 'Restore review cache'
-        id: 'restore-cache'
-        if: |-
-          steps.size.outputs.should_review == 'true' &&
-          github.event_name == 'pull_request_target' &&
-          github.event.action == 'synchronize'
-        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
-        with:
-          path: '.qwen/review-cache'
-          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
-          restore-keys: |
-            qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-
 
       # @qwen-code/qwen-code requires Node >=22; runner default is 20
       # (npm EBADENGINE). Pin Node 22 before installing/invoking qwen.
@@ -478,10 +418,7 @@ jobs:
       # conditionally would add branching with no real saving.
       #
       # Intentionally @latest — DO NOT pin this yet (deliberate decision):
-      #  1. This workflow is still in the Phase 1-3 bundled-action rollout;
-      #     every CI run should exercise the newest bundled /review skill
-      #     while it stabilizes.
-      #  2. The newest CLI is what reliably supports the streaming output
+      #  1. The newest CLI is what reliably supports the streaming output
       #     mode this workflow depends on (`--output-format stream-json
       #     --include-partial-messages`). Without a streaming-capable CLI,
       #     a GitHub Actions step full-buffers qwen's stdout and shows
@@ -502,7 +439,7 @@ jobs:
           cat > .qwen/settings.json <<'EOF'
           {
             "security": { "folderTrust": { "enabled": false } },
-            "tools": { "approvalMode": "yolo" },
+            "tools": { "approvalMode": "default" },
             "sandbox": false
           }
           EOF
@@ -617,7 +554,12 @@ jobs:
           # stderr is sent to a file, NOT merged into raw_out: the JSON
           # parser below feeds raw_out to `jq` as a single document, so any
           # stderr line (node warnings, telemetry) would break the parse.
-          raw_out="$(timeout --kill-after=15s 3m qwen --yolo --prompt "$(cat /tmp/preflight-prompt-rendered.md)" 2>/tmp/preflight-stderr.log)"
+          raw_out="$(timeout --kill-after=15s 3m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
+            --approval-mode default \
+            --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
+            --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+            --allowed-mcp-server-names __qwen_review_no_mcp__ \
+            --prompt "$(cat /tmp/preflight-prompt-rendered.md)" 2>/tmp/preflight-stderr.log)"
           qwen_status=$?
           set -e
           # Echo raw_out (and qwen's stderr) inside a stop-commands fence:
@@ -654,10 +596,31 @@ jobs:
               model_tier="$(printf '%s' "$parsed" | jq -r '.tier' | tr '[:lower:]' '[:upper:]')"
               case "$model_tier" in
                 ULTRA_LIGHT|LIGHT|STANDARD|DEEP)
-                  tier="$model_tier"
                   # `|| true` so a long rationale's SIGPIPE at the 200-byte
                   # cap doesn't abort the step under pipefail.
                   rationale="$( { printf '%s' "$parsed" | jq -r '.rationale // ""' || true; } | head -c 200)"
+                  user_facing="$(printf '%s' "$parsed" | jq -r '.blast_radius.user_facing == true')"
+                  security_sensitive="$(printf '%s' "$parsed" | jq -r '.blast_radius.security_sensitive == true')"
+                  public_api="$(printf '%s' "$parsed" | jq -r '.blast_radius.public_api == true')"
+                  build_or_release="$(printf '%s' "$parsed" | jq -r '.blast_radius.build_or_release == true')"
+                  data_path="$(printf '%s' "$parsed" | jq -r '.blast_radius.data_path == true')"
+
+                  tier="$model_tier"
+                  if [ "$security_sensitive" = "true" ] ||
+                     [ "$public_api" = "true" ] ||
+                     [ "$build_or_release" = "true" ] ||
+                     [ "$data_path" = "true" ]; then
+                    if [ "$model_tier" != "DEEP" ]; then
+                      echo "::warning::Preflight tier=$model_tier contradicts high-risk blast_radius; upgrading to DEEP."
+                      tier="DEEP"
+                      rationale="model tier $model_tier contradicted high-risk blast_radius; upgraded to DEEP"
+                    fi
+                  elif [ "$user_facing" = "true" ] &&
+                       { [ "$model_tier" = "ULTRA_LIGHT" ] || [ "$model_tier" = "LIGHT" ]; }; then
+                    echo "::warning::Preflight tier=$model_tier contradicts user_facing blast_radius; upgrading to STANDARD."
+                    tier="STANDARD"
+                    rationale="model tier $model_tier contradicted user_facing blast_radius; upgraded to STANDARD"
+                  fi
                   # Optional fields, may be empty.
                   focus_areas="$(printf '%s' "$parsed" | jq -c '.focus_areas // []')"
                   agents_to_run="$(printf '%s' "$parsed" | jq -c '.agents_to_run // []')"
@@ -775,6 +738,7 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
         timeout-minutes: 5
         run: |-
           set -euo pipefail
@@ -797,6 +761,9 @@ jobs:
 
           {
             printf '**PR title:** %s\n\n' "$pr_title"
+            if [ -n "${ADDITIONAL_INSTRUCTIONS:-}" ]; then
+              printf '**Maintainer focus:**\n%s\n\n' "$ADDITIONAL_INSTRUCTIONS"
+            fi
             printf '**Changed files:**\n```\n%s\n```\n\n' "$changed_files_block"
             printf '**Unified diff (first 50KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
             printf '**Preflight focus_areas (hints, not mandatory):**\n```json\n%s\n```\n\n' "$focus_areas"
@@ -815,7 +782,11 @@ jobs:
           out=qwen-review-stream.jsonl
           echo "::group::Qwen LIGHT review (live stream)"
           set +e
-          timeout --kill-after=15s 3m qwen --yolo \
+          timeout --kill-after=15s 3m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
+            --approval-mode default \
+            --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
+            --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+            --allowed-mcp-server-names __qwen_review_no_mcp__ \
             --output-format stream-json --include-partial-messages \
             --prompt "$(cat /tmp/light-prompt-rendered.md)" 2>&1 | tee "$out"
           status=${PIPESTATUS[0]}
@@ -884,6 +855,7 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
         timeout-minutes: 10
         run: |-
           set -euo pipefail
@@ -904,27 +876,30 @@ jobs:
 
           {
             printf '**PR title:** %s\n\n' "$pr_title"
+            if [ -n "${ADDITIONAL_INSTRUCTIONS:-}" ]; then
+              printf '**Maintainer focus:**\n%s\n\n' "$ADDITIONAL_INSTRUCTIONS"
+            fi
             printf '**Changed files:**\n```\n%s\n```\n\n' "$changed_files_block"
             printf '**Unified diff (first 200KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
             printf '**Preflight focus_areas (hints):**\n```json\n%s\n```\n\n' "$focus_areas"
             printf '**Preflight agents_to_run (hints):**\n```json\n%s\n```\n\n' "$agents_to_run"
-            printf '**Repository review rules (.qwen/review-rules.md):**\n'
-            cat .qwen/review-rules.md
             printf '\n\n**PR body (first 4KB):**\n%s\n' "$pr_body"
           } > /tmp/standard-pr-context.md
 
-          # STANDARD already inlines review-rules.md via `cat` in the
-          # context block above, so the template doesn't need
-          # <<<REVIEW_RULES_MD>>> substitution. Pass --context only.
           node scripts/render-review-prompt.cjs \
             .qwen/preflight-standard-review-prompt.md \
             /tmp/standard-prompt-rendered.md \
-            --context /tmp/standard-pr-context.md
+            --context /tmp/standard-pr-context.md \
+            --rules .qwen/review-rules.md
 
           out=qwen-review-stream.jsonl
           echo "::group::Qwen STANDARD review (live stream)"
           set +e
-          timeout --kill-after=30s 8m qwen --yolo \
+          timeout --kill-after=30s 8m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
+            --approval-mode default \
+            --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
+            --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+            --allowed-mcp-server-names __qwen_review_no_mcp__ \
             --output-format stream-json --include-partial-messages \
             --prompt "$(cat /tmp/standard-prompt-rendered.md)" 2>&1 | tee "$out"
           status=${PIPESTATUS[0]}
@@ -970,27 +945,15 @@ jobs:
             rm -f qwen-review-summary.md
           fi
 
-      # ─── DEEP: bundled /review skill (Phase 1-3 path, with parser update) ──
+      # ─── DEEP: large single-shot review, deliberately toolless ─────────────
       #
-      # Direct invocation instead of QwenLM/qwen-code-action.
-      # The action wraps the CLI in `QWEN_RESPONSE=$(qwen ...)` command
-      # substitution, which buffers ALL stdout until the process exits —
-      # so a slow or stuck bundled /review produced zero observable
-      # output for the whole job and could not be diagnosed. Calling
-      # qwen ourselves and piping through `tee` streams progress to the
-      # live job log in real time, and an explicit `timeout` makes a
-      # stall fail fast with a clear error instead of a silent job kill.
-      #
-      # Timeout is 40m (down from Phase 1-3's 50m). Unlike STANDARD/LIGHT
-      # — which are single-shot, so the accumulator's partial flush IS a
-      # usable partial review — DEEP runs the bundled multi-agent skill:
-      # sub-agent findings never reach the top-level assistant text stream
-      # the accumulator reads, only orchestrator narration does. A DEEP
-      # timeout therefore cannot flush a usable review, so the cap is set
-      # generously (40m) to let the run actually finish; on the rare
-      # timeout we post an explicit re-run notice instead of narration.
-      # CI dry-run on PR #4110 hit the old 25m cap mid-consolidation.
-      - name: 'Run DEEP review (bundled skill)'
+      # This workflow runs under pull_request_target with model secrets.
+      # Running the bundled multi-agent /review skill here would expose those
+      # secrets to model-controlled shell/file/network tools. DEEP therefore
+      # uses the same trusted-shell data collection pattern as STANDARD but
+      # with a larger diff window and a high-risk review prompt. The qwen
+      # process receives no GitHub token and no invocable tools.
+      - name: 'Run DEEP review'
         id: 'review'
         if: |-
           steps.size.outputs.should_review == 'true' &&
@@ -1000,130 +963,77 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          REVIEW_PROMPT: '${{ steps.pr.outputs.review_prompt }}'
-          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
-          FOCUS_AREAS_FILE: '/tmp/qwen-focus-areas.json'
-        timeout-minutes: 45
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
+        timeout-minutes: 20
         run: |-
           set -euo pipefail
 
-          # The bundled /review skill checks out the PR-under-review into
-          # the working tree (git checkout / worktree ops). That tree is
-          # the PR's branch — NOT this workflow's branch — so it does not
-          # contain scripts/parse-review-stream.cjs. Copy the parser out
-          # to $RUNNER_TEMP up front, before qwen runs, and invoke it from
-          # there afterwards. (LIGHT/STANDARD are single-shot qwen calls
-          # that never mutate the tree, so only DEEP needs this.)
-          parser="$RUNNER_TEMP/parse-review-stream.cjs"
-          cp scripts/parse-review-stream.cjs "$parser"
+          pr_json="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json title,body,files)"
+          pr_title="$(jq -r '.title' <<< "$pr_json")"
+          pr_body="$( { jq -r '.body // ""' <<< "$pr_json" || true; } | head -c 8000)"
+          changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
+          unified_diff="$( { gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch || true; } | head -c 500000)"
+          focus_areas="$(cat /tmp/qwen-focus-areas.json 2>/dev/null || echo '[]')"
+          agents_to_run="$(cat /tmp/qwen-agents-to-run.json 2>/dev/null || echo '[]')"
 
-          # CI-lightweight steering applies to EVERY CI run (comment and
-          # dry-run): the full bundled /review (9 agents incl. Agent 7 =
-          # npm ci + whole-monorepo build/test) cannot finish a heavy PR
-          # within the job timeout, and the repo's own CI already
-          # builds/tests every PR, so Agent 7 is redundant here. The
-          # extra "do not post" clause is added only for dry-run.
-          # Prompt-level steering only — the bundled SKILL.md is unchanged.
-          #
-          # Validation Evidence verdict: the exact section name, PRESENT /
-          # MISSING semantics, and the verbatim advisory closing line all
-          # live in .qwen/review-rules.md ("Validation And Dogfooding").
-          # The bundled /review skill is expected to load that file, so the
-          # prompt only references it instead of restating the spec — that
-          # way edits to review-rules.md don't drift from the workflow.
-          focus_areas_text=""
-          if [ -s "$FOCUS_AREAS_FILE" ]; then
-            focus_areas_text="$(jq -r 'if length>0 then "\nPreflight focus_areas: " + (join("; ")) else "" end' "$FOCUS_AREAS_FILE" 2>/dev/null || true)"
-          fi
-          prompt="${REVIEW_PROMPT}${focus_areas_text}
+          {
+            printf '**PR title:** %s\n\n' "$pr_title"
+            if [ -n "${ADDITIONAL_INSTRUCTIONS:-}" ]; then
+              printf '**Maintainer focus:**\n%s\n\n' "$ADDITIONAL_INSTRUCTIONS"
+            fi
+            printf '**Changed files:**\n```\n%s\n```\n\n' "$changed_files_block"
+            printf '**Unified diff (first 500KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
+            printf '**Preflight focus_areas (hints):**\n```json\n%s\n```\n\n' "$focus_areas"
+            printf '**Preflight agents_to_run (hints):**\n```json\n%s\n```\n\n' "$agents_to_run"
+            printf '**PR body (first 8KB):**\n%s\n' "$pr_body"
+          } > /tmp/deep-pr-context.md
 
-          CI LIGHTWEIGHT MODE — follow these execution constraints, they
-          override the skill's defaults for this run:
-          1. Do NOT run \`npm ci\`/install, build, or the test suite, and
-             do NOT launch Agent 7 (Build & Test). The repository's own
-             CI already builds and tests this PR; it is redundant here.
-          2. Run Agents 1-5 (Correctness, Security, Code Quality,
-             Performance, Test Coverage) and ONE consolidated audit
-             instead of the three separate 6a/6b/6c personas.
-          3. Skip the local linter/typecheck step (Step 3).
-          4. Apply the \`## Validation Evidence\` requirement defined in
-             .qwen/review-rules.md (section 'Validation And Dogfooding')
-             exactly as written there — same section title, same PRESENT/
-             MISSING verdict, same verbatim advisory closing line. Do not
-             paraphrase.
-          5. Produce the complete code review."
-          if [ "${SHOULD_COMMENT:-}" != "true" ]; then
-            prompt="${prompt}
-
-          DRY RUN: print the full review to stdout and do NOT post
-          anything to GitHub — no gh pr comment, no gh pr review, no
-          GitHub API writes, no inline comments. Output only; the
-          maintainer reads it from the CI log."
-          fi
+          node scripts/render-review-prompt.cjs \
+            .qwen/preflight-deep-review-prompt.md \
+            /tmp/deep-prompt-rendered.md \
+            --context /tmp/deep-pr-context.md \
+            --rules .qwen/review-rules.md
 
           out=qwen-review-stream.jsonl
-          # Plain `qwen ... | tee` does NOT stream: qwen is a Node CLI and
-          # Node full-buffers stdout when it is a pipe, so nothing shows
-          # until exit. `--output-format stream-json --include-partial-
-          # messages` is qwen's purpose-built incremental event stream —
-          # each event is written as it happens, so `tee` shows real
-          # progress in the live job log. `timeout` bounds a stall.
           echo "::group::Qwen DEEP review (live stream-json events)"
           set +e
-          timeout --kill-after=60s 40m qwen --yolo \
+          timeout --kill-after=30s 15m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
+            --approval-mode default \
+            --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
+            --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+            --allowed-mcp-server-names __qwen_review_no_mcp__ \
             --output-format stream-json --include-partial-messages \
-            --prompt "$prompt" 2>&1 | tee "$out"
+            --prompt "$(cat /tmp/deep-prompt-rendered.md)" 2>&1 | tee "$out"
           status=${PIPESTATUS[0]}
           set -e
           echo "::endgroup::"
 
-          # Accumulator parser: collects ALL assistant text segments and
-          # writes to qwen-review-summary.md. Even if qwen was killed mid-
-          # stream by `timeout 40m`, the on-disk JSONL captured everything
-          # the model emitted up to that point. (For DEEP that is only
-          # orchestrator narration — see the timeout branch below.)
           status_label="complete"
           if [ "$status" -eq 124 ]; then
             status_label="timeout"
-            echo "::warning::DEEP review timed out at 40m before consolidating findings."
+            echo "::warning::DEEP review timed out at 15m; flushing partial output."
           elif [ "$status" -ne 0 ]; then
             status_label="error"
-            echo "::warning::DEEP review exited with status $status (non-timeout failure)."
+            echo "::warning::DEEP review exited with status $status (non-timeout failure); flushing any partial output."
           fi
 
-          # Guard the parser under `set -e` (see LIGHT step for rationale).
-          # On DEEP a timeout/error overwrites the summary with a re-run
-          # notice below regardless, but a complete-but-unparseable stream
-          # still needs this guard to reach the fallback comment.
-          # Invoke the $RUNNER_TEMP copy: the in-repo scripts/ path is no
-          # longer reliable after the bundled skill mutated the tree.
-          node "$parser" "$out" qwen-review-summary.md DEEP "$status_label" \
+          node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md DEEP "$status_label" \
             || { echo "::warning::parse-review-stream.cjs failed; fallback comment will fire."; : > qwen-review-summary.md; }
 
-          # DEEP-specific: a non-clean exit cannot produce a usable partial
-          # review. The bundled multi-agent skill keeps each agent's
-          # findings inside that agent's own transcript; only the
-          # orchestrator's progress narration reaches the top-level
-          # assistant text stream the accumulator parses. Posting that
-          # narration ("Let me now consolidate the findings…") would be
-          # misleading, so replace the body with an explicit re-run notice.
-          # (STANDARD/LIGHT are single-shot — their partial flush IS the
-          # real review-in-progress text, so they keep partial output.)
-          if [ "$status_label" = "timeout" ] || [ "$status_label" = "error" ]; then
-            if [ "$status_label" = "timeout" ]; then
-              cap_reason='did not finish within the 40 min time cap'
-            else
-              cap_reason="exited early (status $status)"
-            fi
+          if [ "$status_label" = "timeout" ]; then
             {
-              printf '## ⚠️ DEEP review %s\n\n' "$cap_reason"
-              printf 'The multi-agent DEEP review stopped before it could '
-              printf 'consolidate its findings. Partial agent output is not '
-              printf 'a usable review on its own, so it is omitted here.\n\n'
-              printf '_Reply `@qwen /review` to re-run, or '
-              printf '`@qwen /review --tier=standard` for a faster '
-              printf 'single-pass review._\n'
-            } > qwen-review-summary.md
+              printf '## ⚠️ DEEP review was time-capped at 15 min — partial output below\n\n'
+              cat qwen-review-summary.md
+            } > /tmp/qwen-review-summary-with-warning.md
+            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
+          elif [ "$status_label" = "error" ]; then
+            {
+              printf '## ⚠️ DEEP review exited with error (status %s) — partial output below\n\n' "$status"
+              cat qwen-review-summary.md
+            } > /tmp/qwen-review-summary-with-warning.md
+            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
           fi
 
           # Apply LIGHT's 200-byte near-empty guard: if accumulator only
@@ -1138,13 +1048,6 @@ jobs:
           cat qwen-review-summary.md 2>/dev/null || echo "(summary file removed by near-empty guard; fallback comment will fire)"
           echo "::endgroup::"
 
-          # Expose the run status so the cache steps can gate on review
-          # COMPLETION, not just step success. The step deliberately exits 0
-          # even on a timeout/crash (it swallows qwen's non-zero status to
-          # keep the always-emit path alive), so `steps.review.outcome ==
-          # 'success'` is true after a 40m timeout too. Saving the cache then
-          # would persist a "this head was reviewed" marker for a review that
-          # never consolidated — the next synchronize would short-circuit.
           echo "review_status=$status_label" >> "$GITHUB_OUTPUT"
 
       - name: 'Post dry-run summary'
@@ -1177,9 +1080,8 @@ jobs:
         env:
           # Post the review as the qwen-code-bot identity when available,
           # so PR comments are visually distinct from generic CI bot
-          # comments (`github-actions[bot]`). Falls back to GITHUB_TOKEN
-          # if the bot PAT is not configured. Mirrors the token-pick
-          # pattern in qwen-issue-followup-bot.yml.
+          # comments (`github-actions[bot]`). Falls back to GITHUB_TOKEN;
+          # qwen itself never receives that token.
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           EFFECTIVE_TIER: '${{ steps.tier.outputs.tier }}'
@@ -1205,72 +1107,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --body-file qwen-pr-review-summary-comment.md
 
-      # CACHE SCOPE NOTE: the incremental review cache is intentionally
-      # bound to the DEEP tier only (step id `review`). LIGHT and STANDARD
-      # tiers are single-shot qwen calls that do NOT invoke the bundled
-      # `/review` skill, so they never write `.qwen/review-cache/pr-<n>.json`
-      # (the file the skill uses to record `lastCommitSha + lastModelId`).
-      # Gating cache save/restore on `steps.review.outcome == 'success'`
-      # therefore correctly scopes the cache to DEEP runs; adding LIGHT or
-      # STANDARD outcomes would save an empty cache directory with no
-      # incremental-review semantics behind it (the skill's contract is
-      # what makes the cache meaningful, and only DEEP invokes the skill).
-      #
-      # Cross-tier sequencing on the same PR: when a PR's first review is
-      # LIGHT/STANDARD and a later synchronize is DEEP, the DEEP run does
-      # a full review (no prior cache from DEEP's perspective). This is
-      # correct — the LIGHT/STANDARD review markdown is already posted as
-      # a comment, but DEEP doesn't know what LIGHT/STANDARD covered. A
-      # small amount of work duplication is the trade-off for keeping the
-      # skill stateless across the LIGHT/STANDARD vs DEEP boundary.
-      #
-      # Check the exact cache key after the review comment is delivered.
-      # lookup-only avoids downloading/restoring cache contents here; it only
-      # prevents actions/cache/save from attempting to create a key that already
-      # exists, which can happen on reruns of opened/reopened/ready_for_review
-      # where the pre-review restore step intentionally did not run.
-      - name: 'Check review cache key'
-        id: 'cache-lookup'
-        if: |-
-          steps.review.outcome == 'success' &&
-          steps.review.outputs.review_status == 'complete' &&
-          steps.post-summary.outcome == 'success' &&
-          github.event_name == 'pull_request_target' &&
-          steps.size.outputs.head_sha != '' &&
-          steps.size.outputs.merge_base_sha != ''
-        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
-        with:
-          path: '.qwen/review-cache'
-          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
-          lookup-only: true
-
-      # Save cache only AFTER the review summary comment was successfully
-      # posted. Saving before publication would persist "this head was
-      # reviewed" state even if `gh pr comment` later failed (rate-limit,
-      # network, deleted PR, etc.) — the next synchronize would then
-      # restore the cache, bundled /review would short-circuit on
-      # "No new changes since last review" or scope to a tiny incremental
-      # diff, and the findings that never reached the PR would be lost.
-      # Gating on post-summary.outcome makes cache advancement track
-      # comment delivery, not just model success. The `review_status`
-      # check additionally requires the DEEP run to have COMPLETED — the
-      # step exits 0 on a timeout/crash too, so without it a timed-out
-      # review would still advance the cache. The lookup step above skips
-      # duplicate exact-key saves on reruns.
-      - name: 'Save review cache'
-        if: |-
-          steps.review.outcome == 'success' &&
-          steps.review.outputs.review_status == 'complete' &&
-          steps.post-summary.outcome == 'success' &&
-          github.event_name == 'pull_request_target' &&
-          steps.size.outputs.head_sha != '' &&
-          steps.size.outputs.merge_base_sha != '' &&
-          steps.cache-lookup.outputs.cache-hit != 'true'
-        uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
-        with:
-          path: '.qwen/review-cache'
-          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
-
       # Fires when the job is failing AND the review did not reach the PR.
       # Two distinct cases must both trigger it:
       #   1. no review markdown at all (the always-emit accumulator failed
@@ -1279,16 +1115,17 @@ jobs:
       #      failed (gh rate limit, transient API error, PR deleted) — the
       #      file is on disk but no comment reached the PR. Without the
       #      post-summary.outcome check this case is silently swallowed:
-      #      hashFiles() is non-empty, so the fallback would skip and up to
-      #      40 min of DEEP compute is lost with nothing on the PR.
+      #      hashFiles() is non-empty, so the fallback would skip and the
+      #      completed review would be lost with nothing on the PR.
       # The fallback's own `gh pr comment` ends with `|| true` so the step
       # never causes a secondary cascade failure.
       - name: 'Post fallback comment on review failure'
         if: |-
-          failure() &&
+          (failure() || cancelled()) &&
           steps.pr.outputs.should_comment == 'true' &&
           (hashFiles('qwen-review-summary.md') == '' ||
-           steps.post-summary.outcome == 'failure')
+           steps.post-summary.outcome == 'failure' ||
+           steps.post-summary.outcome == 'cancelled')
         env:
           # Same qwen-code-bot identity as the happy-path 'Post review
           # summary comment' step (see comment there).

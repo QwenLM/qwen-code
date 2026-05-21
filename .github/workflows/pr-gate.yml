@@ -33,8 +33,8 @@ on:
 
 permissions:
   contents: 'read'
-  pull-requests: 'read'    # read-only: pr-title/pr-template use event payload; pr-size calls listFiles
-  issues: 'read'           # pr-size resolves the oversized-ok label applier via the issue events API
+  pull-requests: 'read' # read-only: pr-title/pr-template use event payload; pr-size calls listFiles
+  issues: 'read' # pr-size resolves the oversized-ok label applier via the issue events API
 
 # Cancel earlier in-flight runs on the same PR when a new event arrives.
 # 'edited' events can fire frequently while the contributor iterates on
@@ -99,19 +99,9 @@ jobs:
             }
 
             // Validation must have substantive content, not just the
-            // template's empty bullet placeholders.
-            //
-            // The repo's template (.github/PULL_REQUEST_TEMPLATE.md) ships
-            // with bullets like `- Commands run:` and `- Expected result:`
-            // that contain no real content after the colon. A naive length
-            // check would let these slip through. So we strip:
-            //   1. HTML comments
-            //   2. Code fences (empty AND containing the "# paste …" comment)
-            //   3. Bullet lines whose content after the colon is empty
-            //      (i.e. the template's untouched placeholders)
-            //   4. Bullet lines whose value is just a bracketed example
-            //      like `- Foo: [paste here]`
-            // and require ≥20 chars of substantive remainder.
+            // template's empty bullet placeholders. Keep real fenced command
+            // output/logs, but drop the untouched "# paste ..." template
+            // fence so contributors can put all evidence inside code blocks.
             const validationIdx = body.indexOf('## Validation');
             if (validationIdx !== -1) {
               const after = body.slice(validationIdx + '## Validation'.length);
@@ -122,7 +112,12 @@ jobs:
 
               const stripped = validationSection
                 .replace(/<!--[\s\S]*?-->/g, '')   // HTML comments
-                .replace(/```[\s\S]*?```/g, '')    // code fences (any content)
+                .replace(/```[^\n\r]*(?:\r?\n)?([\s\S]*?)```/g, (_match, inner) => {
+                  const content = inner.trim();
+                  if (!content) return '';
+                  if (/^#\s*paste\b/i.test(content)) return '';
+                  return `\n${content}\n`;
+                })
                 .split('\n')
                 .filter((line) => {
                   const t = line.trim();

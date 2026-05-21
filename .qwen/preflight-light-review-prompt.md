@@ -2,7 +2,7 @@
 
 You are reviewing a **low-blast-radius** PR. The preflight triage stage
 already judged that this change is contained, has no high-risk dimension
-flips, and does not warrant a full multi-agent audit.
+flips, and does not warrant the high-risk DEEP path.
 
 Your job is a **fast, focused review** suitable for a few-minute turnaround.
 
@@ -50,6 +50,7 @@ In rough priority order:
    in the diff context lines.
 
 What **not** to check at this tier:
+
 - Performance / hot path concerns (out of scope at this tier).
 - Public API / SDK signature concerns (preflight ruled out `public_api`).
 - Security / auth concerns (preflight ruled out `security_sensitive` —
@@ -80,7 +81,7 @@ No issues found in the visible diff at this tier.
 
 ---
 
-_Tier: LIGHT. Reply `@qwen /review --tier=deep` to request a full multi-agent review._
+_Tier: LIGHT. Reply `@qwen /review --tier=deep` to request a high-risk structured review with a larger diff window._
 ```
 
 ---
