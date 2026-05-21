@@ -106,5 +106,10 @@ function createState(
     permissionBlockByRequestId: {
       ...(seed.permissionBlockByRequestId ?? {}),
     },
+    toolProgress: { ...(seed.toolProgress ?? {}) },
+    lastResyncRequired:
+      seed.lastResyncRequired !== undefined
+        ? { ...seed.lastResyncRequired }
+        : undefined,
   };
 }

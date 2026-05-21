@@ -32,6 +32,7 @@ export type DaemonUiEventType =
   | 'session.metadata.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
+  | 'session.state_resync_required'
   // Workspace events (Wave 3-4)
   | 'workspace.memory.changed'
   | 'workspace.agent.changed'
@@ -203,6 +204,13 @@ export interface DaemonUiSessionAvailableCommandsEvent
   commands: ReadonlyArray<Record<string, unknown>>;
 }
 
+export interface DaemonUiStateResyncRequiredEvent extends DaemonUiEventBase {
+  type: 'session.state_resync_required';
+  reason: string;
+  lastDeliveredId: number;
+  earliestAvailableId: number;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
  * Workspace events (Wave 3-4)
  * ──────────────────────────────────────────────────────────────────────── */
@@ -330,6 +338,7 @@ export type DaemonUiEvent =
   | DaemonUiSessionMetadataChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
+  | DaemonUiStateResyncRequiredEvent
   // Workspace events
   | DaemonUiWorkspaceMemoryChangedEvent
   | DaemonUiWorkspaceAgentChangedEvent
@@ -598,6 +607,16 @@ export interface DaemonTranscriptSidechannelState {
    * ready to consume the field shape today).
    */
   toolProgress: Record<string, { ratio?: number; step?: string }>;
+  /** True after daemon reports missed SSE events and before state is reloaded. */
+  awaitingResync: boolean;
+  /** Count of resync-required frames observed by this transcript store. */
+  resyncRequiredCount: number;
+  /** Most recent daemon resync gap payload. */
+  lastResyncRequired?: {
+    reason: string;
+    lastDeliveredId: number;
+    earliestAvailableId: number;
+  };
 }
 
 export interface DaemonTranscriptState

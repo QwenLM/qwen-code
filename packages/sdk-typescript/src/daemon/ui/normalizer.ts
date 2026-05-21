@@ -158,6 +158,8 @@ export function normalizeDaemonEvent(
             'SSE stream error (no details available)',
         },
       ];
+    case 'state_resync_required':
+      return normalizeStateResyncRequired(event, base);
 
     // ── Session-meta events ──────────────────────────────────────────────
     case 'session_metadata_updated':
@@ -221,6 +223,35 @@ export function normalizeDaemonEvent(
         },
       ];
   }
+}
+
+function normalizeStateResyncRequired(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const reason = getString(event.data, 'reason');
+  const lastDeliveredId = numberField(event.data, 'lastDeliveredId');
+  const earliestAvailableId = numberField(event.data, 'earliestAvailableId');
+  if (
+    !reason ||
+    lastDeliveredId === undefined ||
+    earliestAvailableId === undefined
+  ) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed state_resync_required payload',
+    );
+  }
+  return [
+    {
+      ...base,
+      type: 'session.state_resync_required',
+      reason,
+      lastDeliveredId,
+      earliestAvailableId,
+    },
+  ];
 }
 
 function createBase(

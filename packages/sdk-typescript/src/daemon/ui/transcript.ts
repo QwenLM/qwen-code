@@ -43,6 +43,8 @@ export function createDaemonTranscriptState(
     permissionBlockByRequestId: {},
     // PR-E sidechannel: track current tool / approval mode / progress
     toolProgress: {},
+    awaitingResync: false,
+    resyncRequiredCount: 0,
     nextOrdinal: 1,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? DEFAULT_MAX_BLOCKS,
@@ -75,6 +77,13 @@ const TERMINAL_TOOL_STATUSES: ReadonlySet<string> = new Set([
   'error',
   'canceled',
   'cancelled',
+]);
+const RESYNC_PASSTHROUGH_TYPES: ReadonlySet<string> = new Set([
+  'session.state_resync_required',
+  'assistant.done',
+  'status',
+  'debug',
+  'error',
 ]);
 
 export function appendLocalUserTranscriptMessage(
@@ -118,6 +127,9 @@ function applyDaemonTranscriptEvent(
 ): void {
   if (event.eventId !== undefined) {
     next.lastEventId = Math.max(next.lastEventId ?? 0, event.eventId);
+  }
+  if (next.awaitingResync && !RESYNC_PASSTHROUGH_TYPES.has(event.type)) {
+    return;
   }
 
   switch (event.type) {
@@ -197,6 +209,11 @@ function applyDaemonTranscriptEvent(
       break;
     case 'session.metadata.changed':
     case 'session.available_commands':
+      // Intentional no-op against `blocks[]`.
+      break;
+    case 'session.state_resync_required':
+      handleStateResyncRequired(next, event);
+      break;
     case 'workspace.memory.changed':
     case 'workspace.agent.changed':
     case 'workspace.tool.toggled':
@@ -218,6 +235,26 @@ function applyDaemonTranscriptEvent(
       // this reducer does not project yet. `lastEventId` was already advanced.
       void event;
   }
+}
+
+function handleStateResyncRequired(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'session.state_resync_required' }>,
+): void {
+  state.awaitingResync = true;
+  state.resyncRequiredCount += 1;
+  state.lastResyncRequired = {
+    reason: event.reason,
+    lastDeliveredId: event.lastDeliveredId,
+    earliestAvailableId: event.earliestAvailableId,
+  };
+  propagateCancellationToInFlightTools(state);
+  appendStatusBlock(
+    state,
+    'error',
+    `State resync required: missed daemon events ${event.lastDeliveredId + 1}-${event.earliestAvailableId - 1}. Reload the session to recover.`,
+    event,
+  );
 }
 
 export function selectTranscriptBlocks(
@@ -581,6 +618,10 @@ function cloneTranscriptState(
     },
     permissionBlockByRequestId: { ...state.permissionBlockByRequestId },
     toolProgress: { ...state.toolProgress },
+    lastResyncRequired:
+      state.lastResyncRequired !== undefined
+        ? { ...state.lastResyncRequired }
+        : undefined,
   };
 }
 

@@ -60,6 +60,12 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       );
     case 'session.available_commands':
       return terminalLine('commands', `available ${event.count}`, '2');
+    case 'session.state_resync_required':
+      return terminalLine(
+        'resync-required',
+        `${event.reason}: missed ${event.lastDeliveredId + 1}-${event.earliestAvailableId - 1}`,
+        '31',
+      );
     case 'workspace.memory.changed':
       return terminalLine(
         'memory',

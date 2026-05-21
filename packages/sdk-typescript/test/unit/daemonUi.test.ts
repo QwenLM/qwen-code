@@ -2188,6 +2188,72 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     });
   });
 
+  it('enters resync-required state and skips later non-terminal deltas', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            title: 'long task',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        ...normalizeDaemonEvent({
+          id: 5,
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 1,
+            earliestAvailableId: 4,
+          },
+        } as never),
+        ...normalizeDaemonEvent({
+          id: 6,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'stale delta' },
+            },
+          },
+        } as never),
+      ],
+      { now: 3 },
+    );
+
+    expect(state.awaitingResync).toBe(true);
+    expect(state.resyncRequiredCount).toBe(1);
+    expect(state.lastResyncRequired).toEqual({
+      reason: 'ring_evicted',
+      lastDeliveredId: 1,
+      earliestAvailableId: 4,
+    });
+    expect(state.lastEventId).toBe(6);
+    expect(state.blocks).toMatchObject([
+      { kind: 'tool', status: 'cancelled' },
+      {
+        kind: 'error',
+        text: expect.stringContaining('State resync required') as string,
+      },
+    ]);
+    expect(JSON.stringify(state.blocks)).not.toContain('stale delta');
+  });
+
   it('mirrors approval mode from session.approval_mode.changed event', async () => {
     const { selectApprovalMode } = await import('../../src/daemon/ui/index.js');
     let state = createDaemonTranscriptState({ now: 1 });
