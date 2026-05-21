@@ -587,12 +587,16 @@ export async function main() {
     }
   }
 
-  // Phase 6 fix (G2): when --worktree is going to chdir us into a worktree
-  // below, resolve any relative-path argv fields to absolute paths now —
-  // BEFORE the chdir. Otherwise downstream `fs.existsSync('./mcp.json')`
-  // calls in `loadCliConfig` re-resolve against the worktree dir, where
-  // the file doesn't exist. Only touches values that look like paths
-  // (mcpConfig also accepts inline JSON — skip those).
+  // When --worktree is going to chdir us into a worktree below, resolve
+  // any relative-path argv fields to absolute paths now — BEFORE the
+  // chdir. Otherwise downstream `fs.existsSync('./mcp.json')` calls in
+  // `loadCliConfig` re-resolve against the worktree dir, where the file
+  // doesn't exist. Only touches values that look like paths (mcpConfig
+  // also accepts inline JSON — skip those).
+  //
+  // The list of fields below is hand-maintained. If you add a new
+  // CLI flag that takes a relative path, register it here too,
+  // otherwise --worktree silently breaks for that flag.
   if (argv.worktree !== undefined) {
     const launchCwdForPaths = process.cwd();
     const looksLikeInlineJson = (v: string): boolean => {

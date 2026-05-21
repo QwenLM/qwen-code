@@ -26,16 +26,14 @@ import * as path from 'node:path';
 import {
   createDebugLogger,
   GitWorktreeService,
+  readWorktreeSession,
   worktreeBranchForSlug,
+  writeWorktreeSession,
   writeWorktreeSessionMarker,
 } from '@qwen-code/qwen-code-core';
+import type { Config, WorktreeSession } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('WORKTREE_STARTUP');
-import type {
- Config ,
-  type WorktreeSession,
-  writeWorktreeSession,
-  readWorktreeSession } from '@qwen-code/qwen-code-core';
 
 /**
  * Resolved metadata for a startup worktree. Returned to the caller so the
@@ -58,7 +56,7 @@ export interface StartupWorktreeContext {
   isPullRequest: boolean;
   /**
    * True when the worktree directory already existed at startup and we
-   * re-attached to it (Phase 6 fix: G1 resume flow). PR fetch is skipped
+   * re-attached to it. PR fetch is skipped
    * on re-attach since the ref was materialized previously, and
    * commit-count semantics in `WorktreeExitDialog` will track only this
    * session's new commits.
@@ -113,13 +111,6 @@ export async function setupStartupWorktree(
       error: `--worktree: ${gitCheck.error ?? 'git is not available on PATH.'}`,
     };
   }
-  const isRepo = await probe.isGitRepository();
-  if (!isRepo) {
-    return {
-      ok: false,
-      error: `--worktree: ${launchCwd} is not a git repository. Run \`git init\` first or relaunch from inside one.`,
-    };
-  }
 
   // Refuse nested creation: launching with --worktree from inside an existing
   // worktree creates `<otherRepo>/.qwen/worktrees/<slug>/`, which is rarely
@@ -131,7 +122,16 @@ export async function setupStartupWorktree(
     };
   }
 
-  const repoRoot = (await probe.getRepoTopLevel()) ?? launchCwd;
+  // `getRepoTopLevel()` returns null when cwd is not inside a git repo,
+  // so a single subprocess covers both the is-a-repo gate and the
+  // top-level resolution we need for the worktree path.
+  const repoRoot = await probe.getRepoTopLevel();
+  if (repoRoot === null) {
+    return {
+      ok: false,
+      error: `--worktree: ${launchCwd} is not a git repository. Run \`git init\` first or relaunch from inside one.`,
+    };
+  }
   const service =
     repoRoot === launchCwd ? probe : new GitWorktreeService(repoRoot);
 
@@ -160,24 +160,18 @@ export async function setupStartupWorktree(
   // they record "where the user came from THIS time", which is the more
   // useful framing for the resume case (the first-create values are no
   // longer available without round-tripping through the persisted sidecar).
-  let originalBranch: string | undefined;
-  try {
-    originalBranch = await service.getCurrentBranch();
-  } catch {
-    // Detached HEAD or partially initialized repo — fall through; the
-    // create call will fail with a clear message if this matters.
-  }
-  let originalHeadCommit = '';
-  try {
-    originalHeadCommit = await service.getCurrentCommitHash();
-  } catch {
-    // Empty repo / unborn HEAD — leave empty. The dialog treats empty as
-    // "unknown" and skips the commit-count display.
-  }
+  // The two probes are independent — run in parallel to shave one
+  // subprocess off the critical path. Each is individually try-wrapped
+  // so a failure in one (detached HEAD, unborn HEAD, partial init)
+  // doesn't poison the other.
+  const [originalBranch, originalHeadCommit] = await Promise.all([
+    service.getCurrentBranch().catch(() => undefined),
+    service.getCurrentCommitHash().catch(() => ''),
+  ]);
 
-  // Phase 6 fix (G1): re-attach to an existing worktree instead of erroring
-  // out. Common case: user did `qwen --worktree foo` previously, exited with
-  // Keep, and now runs `qwen --resume <sid> --worktree foo` to continue. The
+  // Re-attach to an existing worktree instead of erroring out. Common
+  // case: user did `qwen --worktree foo` previously, exited with Keep,
+  // and now runs `qwen --resume <sid> --worktree foo` to continue. The
   // directory + branch are already on disk; we just chdir into them.
   const expectedWorktreePath = service.getUserWorktreePath(slug);
   const expectedBranch = worktreeBranchForSlug(slug);
@@ -322,12 +316,18 @@ export async function persistStartupWorktreeSidecar(
   // Read whatever sidecar exists before we clobber it, so we can detect
   // and report an override. A read failure (corrupt JSON, permission)
   // collapses to "no previous worktree" — the new sidecar still wins.
+  // Log the failure with the sidecar path so an operator can recover the
+  // previous slug from a backup if they care; silent loss would make
+  // "where did my previous worktree binding go?" undebuggable.
   let overrodeResumedWorktree = false;
   let overriddenSlug: string | undefined;
   let previous: WorktreeSession | null = null;
   try {
     previous = await readWorktreeSession(sidecarPath);
-  } catch {
+  } catch (error) {
+    debugLogger.warn(
+      `persistStartupWorktreeSidecar: failed to read existing sidecar at ${sidecarPath} — treating as "no previous worktree" and proceeding: ${error}`,
+    );
     previous = null;
   }
   if (previous && previous.slug !== context.slug) {

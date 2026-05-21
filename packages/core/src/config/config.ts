@@ -796,10 +796,16 @@ export class Config {
   private sessionData?: ResumedSessionData;
   /**
    * One-shot notice produced by `setupStartupWorktree` (Phase D-1) when the
-   * CLI was launched with `--worktree`. The three entry points (TUI /
-   * headless / ACP) read it via {@link consumePendingStartupWorktreeNotice}
-   * on the model's first prompt and skip Phase C's `restoreWorktreeContext`
-   * for that turn — startup wins over the resumed-session sidecar.
+   * CLI was launched with `--worktree`. The active entry point (TUI XOR
+   * headless) reads it via {@link consumePendingStartupWorktreeNotice} on
+   * the model's first prompt and skips Phase C's `restoreWorktreeContext`
+   * for that turn — startup wins over the resumed-session sidecar. ACP is
+   * gated out earlier in `gemini.tsx` (mutex with `--worktree`) so it
+   * never reaches this slot.
+   *
+   * @invariant At most one consumer per process. If a future entry path
+   * sets this slot without ever consuming, the string persists until
+   * process exit (which dies with the process — no leak).
    */
   private pendingStartupWorktreeNotice: string | null = null;
   private debugLogger: DebugLogger;
@@ -2598,14 +2604,13 @@ export class Config {
     return this.agentsSettings;
   }
 
-  getWorktreeSettings(): WorktreeSettings {
-    return this.worktreeSettings;
-  }
-
   /**
    * Convenience accessor for `worktree.symlinkDirectories` — returns an
    * empty array when the setting is unset, so callers can pass the
    * result directly into the GitWorktreeService loop without nullchecks.
+   *
+   * (No general `getWorktreeSettings()` getter yet — add one when a
+   * second field on `WorktreeSettings` justifies the broader API.)
    */
   getWorktreeSymlinkDirectories(): string[] {
     return this.worktreeSettings.symlinkDirectories ?? [];

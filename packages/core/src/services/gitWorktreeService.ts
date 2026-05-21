@@ -1121,47 +1121,44 @@ export class GitWorktreeService {
       return null;
     }
 
-    // Resolve THIS repo's common-dir first so we have something to
-    // compare the probe target against. If we can't resolve our own
-    // common-dir (e.g. sourceRepoPath isn't a repo for some reason),
-    // fail closed — the caller's re-attach won't fire and the create
-    // path will produce its own clear error.
+    // Run the two probes in parallel: this repo's common-dir comes from
+    // `this.git`, the candidate's common-dir + branch come from a fresh
+    // simple-git rooted at `worktreePath` via a single combined rev-parse.
+    // `git rev-parse` accepts multiple args in one call and prints each
+    // result on its own line, so we collapse two subprocesses into one
+    // for the candidate side.
+    const probeGit = simpleGit(worktreePath);
     let ourCommonDir: string;
+    let probeCommonDir: string;
+    let branch: string;
     try {
-      const raw = (
-        await this.git.raw(['rev-parse', '--git-common-dir'])
-      ).trim();
-      ourCommonDir = path.resolve(this.sourceRepoPath, raw);
-    } catch (error) {
-      debugLogger.debug(
-        `getRegisteredWorktreeBranch: cannot resolve common-dir of source repo ${this.sourceRepoPath}: ${error}`,
-      );
-      return null;
-    }
-
-    try {
-      const probeGit = simpleGit(worktreePath);
-      const probeCommonDirRaw = (
-        await probeGit.raw(['rev-parse', '--git-common-dir'])
-      ).trim();
-      const probeCommonDir = path.resolve(worktreePath, probeCommonDirRaw);
-      if (probeCommonDir !== ourCommonDir) {
-        debugLogger.debug(
-          `getRegisteredWorktreeBranch: ${worktreePath} belongs to a different repo (common-dir=${probeCommonDir}, expected ${ourCommonDir})`,
-        );
-        return null;
-      }
-      const branch = (
-        await probeGit.raw(['rev-parse', '--abbrev-ref', 'HEAD'])
-      ).trim();
-      if (!branch || branch === 'HEAD') return null;
-      return branch;
+      const [ourRaw, probeRaw] = await Promise.all([
+        this.git.raw(['rev-parse', '--git-common-dir']),
+        probeGit.raw(['rev-parse', '--git-common-dir', '--abbrev-ref', 'HEAD']),
+      ]);
+      ourCommonDir = path.resolve(this.sourceRepoPath, ourRaw.trim());
+      const lines = probeRaw
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      if (lines.length < 2) return null;
+      probeCommonDir = path.resolve(worktreePath, lines[0]!);
+      branch = lines[1]!;
     } catch (error) {
       debugLogger.debug(
         `getRegisteredWorktreeBranch: probe at ${worktreePath} failed: ${error}`,
       );
       return null;
     }
+
+    if (probeCommonDir !== ourCommonDir) {
+      debugLogger.debug(
+        `getRegisteredWorktreeBranch: ${worktreePath} belongs to a different repo (common-dir=${probeCommonDir}, expected ${ourCommonDir})`,
+      );
+      return null;
+    }
+    if (!branch || branch === 'HEAD') return null;
+    return branch;
   }
 
   /**
