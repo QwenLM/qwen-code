@@ -34,6 +34,7 @@ on:
 permissions:
   contents: 'read'
   pull-requests: 'read'    # read-only: pr-title/pr-template use event payload; pr-size calls listFiles
+  issues: 'read'           # pr-size resolves the oversized-ok label applier via the issue events API
 
 # Cancel earlier in-flight runs on the same PR when a new event arrives.
 # 'edited' events can fire frequently while the contributor iterates on
@@ -226,26 +227,69 @@ jobs:
             const sizeWaived = labels.includes(OVERSIZE_OK_LABEL);
 
             // Self-waiver guard: a PR author applying `oversized-ok` to
-            // their own PR would bypass the gate unilaterally. Reject that.
-            // Only enforced on the `labeled` event — that is the moment of
-            // application, where `payload.sender` is the applier. On later
-            // synchronize events the label is already vetted and
-            // `payload.sender` is just the pusher, so re-checking there
-            // would false-fail a legitimately maintainer-applied waiver.
+            // their own PR would bypass the size gate unilaterally — that
+            // is not a real maintainer decision, so reject it.
+            //
+            // The applier is resolved from the issue events timeline, NOT
+            // from `payload.sender`. `sender` only names the applier on
+            // the `labeled` event itself; on a later `synchronize` the
+            // label is still on the PR but `sender` is just the pusher.
+            // A `sender`-only check could be dodged: self-apply the label
+            // (labeled event fails RED) then push a commit — the
+            // synchronize run sees `sizeWaived` true, a labeled-only guard
+            // would not fire, and the size check flips GREEN. Resolving
+            // the actual applier makes the guard hold on every event.
+            let waiverApplier = null;
+            if (sizeWaived) {
+              const events = await github.paginate(
+                github.rest.issues.listEvents,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  per_page: 100,
+                },
+                (response) => response.data,
+              );
+              // The label can be removed and re-added; the most recent
+              // `labeled` event for `oversized-ok` is the application
+              // that currently holds.
+              for (const ev of events) {
+                if (
+                  ev.event === 'labeled' &&
+                  ev.label &&
+                  ev.label.name === OVERSIZE_OK_LABEL
+                ) {
+                  waiverApplier = ev.actor ? ev.actor.login : null;
+                }
+              }
+            }
+
+            const prAuthor = context.payload.pull_request?.user?.login || null;
             if (
-              context.payload.action === 'labeled' &&
-              context.payload.label &&
-              context.payload.label.name === OVERSIZE_OK_LABEL &&
-              context.payload.sender &&
-              context.payload.pull_request &&
-              context.payload.sender.login === context.payload.pull_request.user.login
+              sizeWaived &&
+              waiverApplier !== null &&
+              prAuthor !== null &&
+              waiverApplier === prAuthor
             ) {
               core.setFailed(
                 `\`${OVERSIZE_OK_LABEL}\` was applied by the PR author ` +
-                `(@${context.payload.sender.login}); the size waiver must be ` +
-                'applied by a different maintainer.'
+                `(@${waiverApplier}); the size waiver must be applied by a ` +
+                'different maintainer. Remove the label and ask a maintainer ' +
+                'to re-apply it.'
               );
               return;
+            }
+            // `sizeWaived` true but applier unresolved (events API returned
+            // no matching `labeled` event — e.g. the label predates event
+            // retention). Honor the label but flag it, so the waiver stays
+            // auditable instead of being trusted silently.
+            if (sizeWaived && waiverApplier === null) {
+              core.warning(
+                `Could not resolve who applied the \`${OVERSIZE_OK_LABEL}\` ` +
+                'label from the issue events timeline; honoring the waiver ' +
+                'but it could not be verified as maintainer-applied.'
+              );
             }
 
             core.info(
@@ -254,13 +298,11 @@ jobs:
             );
 
             if (totalChanges > BLOCK_THRESHOLD && sizeWaived) {
-              // Name the applier when this run was triggered by the label
-              // event itself, so the job log carries an audit trail
-              // instead of relying only on GitHub's separate label log.
-              const applier =
-                context.payload.action === 'labeled' && context.payload.sender
-                  ? ` (applied by @${context.payload.sender.login})`
-                  : '';
+              // Name the applier (resolved from the events timeline above,
+              // so it works on every event, not just `labeled`) to keep an
+              // audit trail in the job log instead of relying only on
+              // GitHub's separate label event log.
+              const applier = waiverApplier ? ` (applied by @${waiverApplier})` : '';
               core.warning(
                 `PR is over the size threshold (${totalChanges} > ${BLOCK_THRESHOLD} ` +
                 `meaningful lines) but carries the \`${OVERSIZE_OK_LABEL}\` label${applier} — ` +

@@ -48,9 +48,14 @@ describe('extractSegmentFromEvent', () => {
   });
 
   it('returns null when content is missing or not an array', () => {
-    expect(extractSegmentFromEvent({ type: 'assistant', message: {} })).toBeNull();
     expect(
-      extractSegmentFromEvent({ type: 'assistant', message: { content: 'oops' } }),
+      extractSegmentFromEvent({ type: 'assistant', message: {} }),
+    ).toBeNull();
+    expect(
+      extractSegmentFromEvent({
+        type: 'assistant',
+        message: { content: 'oops' },
+      }),
     ).toBeNull();
   });
 
@@ -79,9 +84,15 @@ describe('accumulateSegments', () => {
   it('collects multiple assistant segments in order', () => {
     const raw = jsonl(
       { type: 'system' },
-      { type: 'assistant', message: { content: [{ type: 'text', text: 'first' }] } },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'first' }] },
+      },
       { type: 'stream_event', event: {} },
-      { type: 'assistant', message: { content: [{ type: 'text', text: 'second' }] } },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'second' }] },
+      },
     );
     expect(accumulateSegments(raw)).toEqual(['first', 'second']);
   });
@@ -99,9 +110,18 @@ describe('accumulateSegments', () => {
 
   it('rejects whitespace-only text segments', () => {
     const raw = jsonl(
-      { type: 'assistant', message: { content: [{ type: 'text', text: '   ' }] } },
-      { type: 'assistant', message: { content: [{ type: 'text', text: '\n\n' }] } },
-      { type: 'assistant', message: { content: [{ type: 'text', text: 'real' }] } },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: '   ' }] },
+      },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: '\n\n' }] },
+      },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'real' }] },
+      },
     );
     expect(accumulateSegments(raw)).toEqual(['real']);
   });
@@ -138,6 +158,11 @@ describe('buildOutput', () => {
     expect(out.header).toBe(
       '<!-- tier=STANDARD; status=complete; segments=2; emitted=2 -->\n',
     );
+    // Assert `emitted` directly, not only via the header string: main()
+    // destructures `{ emitted }` for its stderr log, so a refactor that
+    // drops the property while keeping the header computation must fail
+    // a test rather than silently log `undefined`.
+    expect(out.emitted).toBe(2);
     expect(out.body).toBe('s1\n\ns2');
     expect(out.full).toBe(
       '<!-- tier=STANDARD; status=complete; segments=2; emitted=2 -->\ns1\n\ns2',
@@ -158,6 +183,7 @@ describe('buildOutput', () => {
       'complete',
     );
     expect(out.body).toBe(review);
+    expect(out.emitted).toBe(1);
     expect(out.header).toBe(
       '<!-- tier=DEEP; status=complete; segments=3; emitted=1 -->\n',
     );
@@ -166,6 +192,7 @@ describe('buildOutput', () => {
   it('DEEP with a single segment keeps it as-is', () => {
     const out = buildOutput(['only one'], 'DEEP', 'complete');
     expect(out.body).toBe('only one');
+    expect(out.emitted).toBe(1);
     expect(out.header).toContain('emitted=1');
   });
 
@@ -176,6 +203,7 @@ describe('buildOutput', () => {
     const out = buildOutput([], 'DEEP', 'timeout');
     expect(out.header).toContain('segments=0');
     expect(out.header).toContain('emitted=0');
+    expect(out.emitted).toBe(0);
     expect(out.body).toContain('no assistant text parsed');
   });
 

@@ -3,6 +3,7 @@
 > 目标：为社区 PR 建立分层门禁体系，解耦快速合规检查与深度 AI review，确保每个 check 职责单一、失败信息清晰。
 >
 > **状态**：本设计已在本 PR（codex/preflight-triage 分支）落地。具体文件：
+>
 > - `.github/workflows/pr-gate.yml` — 两个独立 job (PR Template / PR Size)。PR Title (Conventional Commits) check 不做 —— 仓库已有本地 commit-msg hook 把住格式。
 > - `.github/PULL_REQUEST_TEMPLATE.md` — 仓库**已有**，结构与本 plan 兼容（`## Linked Issues / Bugs` 包含 `## Linked Issues` 子串），无需重写
 > - `.github/workflows/qwen-code-pr-review.yml` — Phase B 已应用：size 超限不再发"请拆分"评论，阻断职责完全交给 `pr-gate.yml`
@@ -12,12 +13,12 @@
 
 ## 现状问题
 
-| 问题 | 具体表现 |
-|------|---------|
-| check 耦合 | size check 嵌在 `qwen-code-pr-review.yml` 内部，不是独立 status check；LLM 超时会连带 size 判断一起失败 |
-| 缺 PR body 校验 | 有 PR template 但没有 CI 强制校验；社区 PR 可以空着 Validation section 直接提交 |
-| 无独立 CODEOWNERS | 缺少自动 reviewer 分配 |
-| AI review 与合并阻断混淆 | qwen-code review 是辅助决策，不应作为 merge blocker，但目前没有明确区分 |
+| 问题                     | 具体表现                                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| check 耦合               | size check 嵌在 `qwen-code-pr-review.yml` 内部，不是独立 status check；LLM 超时会连带 size 判断一起失败 |
+| 缺 PR body 校验          | 有 PR template 但没有 CI 强制校验；社区 PR 可以空着 Validation section 直接提交                         |
+| 无独立 CODEOWNERS        | 缺少自动 reviewer 分配                                                                                  |
+| AI review 与合并阻断混淆 | qwen-code review 是辅助决策，不应作为 merge blocker，但目前没有明确区分                                 |
 
 > **本来还有 "PR title 规范" 这一项**，最终判定**不在 CI 层做**：仓库已通过本地 commit-msg hook 强制 Conventional Commits 格式，CI 重复校验只是冗余。维护者合并时仍可手动校对 PR title（squash-merge 时它会成为 main 上的 commit message）。
 
@@ -65,9 +66,9 @@
 
 #### Job 1: PR Template Validation
 
-```yaml
+````yaml
 pr-body:
-  name: "PR Template"
+  name: 'PR Template'
   runs-on: ubuntu-latest
   steps:
     - uses: actions/github-script@v7
@@ -113,7 +114,7 @@ pr-body:
               `请按照 PR 模板填写完整信息。`
             );
           }
-```
+````
 
 **参考**：React 的 `shared_check_maintainer.yml` 对 PR metadata 做类似的程序化校验。
 
@@ -121,7 +122,7 @@ pr-body:
 
 ```yaml
 pr-size:
-  name: "PR Size"
+  name: 'PR Size'
   runs-on: ubuntu-latest
   steps:
     - uses: actions/github-script@v7
@@ -179,6 +180,8 @@ pr-size:
 **参考**：CodelyTV/pr-size-labeler 的思路，但这里用 github-script 做自定义逻辑，不依赖第三方 action。
 
 > **`oversized-ok` escape hatch**：size gate 是 required check，但一个合法的大型基建 PR（例如本 preflight-triage PR 自身）若没有逃生口就**永远无法合并**。因此 maintainer 可给 PR 打 `oversized-ok` label：超限时 size 检查从 hard block 降级为 warning（PR 仍能看到"过大"信号，但不被卡死）。workflow 需监听 `labeled`/`unlabeled` 事件，label 增删才能即时重跑 check。该 label 需在仓库预先创建。
+>
+> **self-waiver guard**：PR 作者给自己的 PR 打 `oversized-ok` 等于单方面绕过 size gate，必须拒绝。判定不能只看 `payload.sender`——它只在 `labeled` 事件当下等于打标签的人；后续 `synchronize` 事件里 `sender` 只是推送者，作者可以「先自打 label（labeled 事件红）→ 再推一个 commit（synchronize 事件重跑，labeled-only 守卫不触发，check 变绿）」来绕过。因此实现改为通过 issue events timeline（`issues.listEvents`）解析出 `oversized-ok` 最近一次 `labeled` 事件的 `actor`，与 PR 作者比对——守卫在所有事件上都成立。该查询需要 `issues: read` 权限。
 
 #### 完整 workflow 触发配置
 
@@ -189,13 +192,21 @@ on:
     # labeled/unlabeled 是 oversized-ok 逃生口所必需（见上文）；
     # reopened 也要带上。pr-template job 用 job 级 if: 跳过 label 事件，
     # pr-size 只在 oversized-ok label 变动时才因 label 事件重跑。
-    types: [opened, edited, synchronize, ready_for_review, reopened, labeled, unlabeled]
+    types:
+      [
+        opened,
+        edited,
+        synchronize,
+        ready_for_review,
+        reopened,
+        labeled,
+        unlabeled,
+      ]
     branches: [main, 'release/**']
 
 permissions:
   contents: read
   pull-requests: read
-
 # 两个 job 并行执行，互不依赖
 ```
 
@@ -253,7 +264,7 @@ docs/                       @QwenLM/qwen-code-maintainers
 ```yaml
 # 可加入 pr-gate.yml 或独立 workflow
 pr-label:
-  name: "Auto Label"
+  name: 'Auto Label'
   runs-on: ubuntu-latest
   steps:
     # 按文件路径自动打 label
@@ -273,13 +284,13 @@ pr-label:
 
 ## 开源项目参考
 
-| 项目 | 做法 | 启发点 |
-|------|------|--------|
-| **Next.js** (vercel/next.js) | 快速 gate（auto-label、title）和慢速 CI（build matrix）分离；PR stats 只作为 comment | 快慢分离的典范 |
-| **Nx** (nrwl/nx) | `pr-title-validation.yml` + `do-not-merge.yml` 独立 workflow | 每个关注点一个 workflow 文件 |
-| **Kubernetes** | Prow bot 管理 `/command`，所有 check 完全解耦；merge queue 保证 main 永绿 | 自研 bot + 解耦 check 的极致形态（你们的 qwen-code 可以走这条路） |
-| **Rust** (rust-lang/rust) | bors merge queue + 独立 per-check reporting | merge queue 对大仓库很有价值 |
-| **Danger JS** 模式 | 在 `dangerfile.ts` 里用代码写所有 PR 规则 | 如果规则复杂度上升，可以考虑迁移到 Danger |
+| 项目                         | 做法                                                                                 | 启发点                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| **Next.js** (vercel/next.js) | 快速 gate（auto-label、title）和慢速 CI（build matrix）分离；PR stats 只作为 comment | 快慢分离的典范                                                    |
+| **Nx** (nrwl/nx)             | `pr-title-validation.yml` + `do-not-merge.yml` 独立 workflow                         | 每个关注点一个 workflow 文件                                      |
+| **Kubernetes**               | Prow bot 管理 `/command`，所有 check 完全解耦；merge queue 保证 main 永绿            | 自研 bot + 解耦 check 的极致形态（你们的 qwen-code 可以走这条路） |
+| **Rust** (rust-lang/rust)    | bors merge queue + 独立 per-check reporting                                          | merge queue 对大仓库很有价值                                      |
+| **Danger JS** 模式           | 在 `dangerfile.ts` 里用代码写所有 PR 规则                                            | 如果规则复杂度上升，可以考虑迁移到 Danger                         |
 
 ## 与现有 qwen-code review 的关系
 
@@ -308,14 +319,14 @@ pr-label:
 
 ## 实施优先级
 
-| 优先级 | 内容 | 预估工作量 | 依赖 |
-|--------|------|-----------|------|
-| P0 | 新建 `pr-gate.yml` (title + body + size) | 1-2h | 无 |
-| P0 | Branch Protection 配置 | 10min | pr-gate.yml 合入后 |
-| P1 | 调整 `qwen-code-pr-review.yml` 移除 size 阻断 | 30min | pr-gate.yml 合入后 |
-| P1 | 新建 CODEOWNERS | 30min | 确认团队分组 |
-| P2 | Auto-label + do-not-merge | 1h | 无 |
-| P2 | `.github/labeler.yml` 路径 → label 映射 | 30min | 无 |
+| 优先级 | 内容                                          | 预估工作量 | 依赖               |
+| ------ | --------------------------------------------- | ---------- | ------------------ |
+| P0     | 新建 `pr-gate.yml` (title + body + size)      | 1-2h       | 无                 |
+| P0     | Branch Protection 配置                        | 10min      | pr-gate.yml 合入后 |
+| P1     | 调整 `qwen-code-pr-review.yml` 移除 size 阻断 | 30min      | pr-gate.yml 合入后 |
+| P1     | 新建 CODEOWNERS                               | 30min      | 确认团队分组       |
+| P2     | Auto-label + do-not-merge                     | 1h         | 无                 |
+| P2     | `.github/labeler.yml` 路径 → label 映射       | 30min      | 无                 |
 
 ## 注意事项
 

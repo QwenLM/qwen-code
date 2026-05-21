@@ -548,8 +548,13 @@ jobs:
           # blast-radius read.
           if command -v diffstat >/dev/null 2>&1; then
             diff_stat="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | diffstat -p1)"
+            diff_stat_label='git diff --stat'
           else
+            # Label the fallback honestly: a bare changed-file list is not
+            # a --stat output, and mislabeling it would skew the LLM's
+            # blast-radius read.
             diff_stat="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --name-only)"
+            diff_stat_label='changed files (diffstat unavailable on runner)'
           fi
           # First ~50KB of unified diff for content judgment. Anything beyond
           # is unlikely to flip the tier — preflight is a triage step, not
@@ -566,7 +571,7 @@ jobs:
             printf '**Changed lines:** %s total (%s reviewable, excludes docs/lockfiles/snapshots)\n\n' "$RAW_CHANGED_LINES" "$CHANGED_LINES"
             printf '**Changed files (path + line counts):**\n'
             printf '```\n%s\n```\n\n' "$changed_files_block"
-            printf '**git diff --stat:**\n'
+            printf '**%s:**\n' "$diff_stat_label"
             printf '```\n%s\n```\n\n' "$diff_stat"
             printf '**First 50KB of unified diff:**\n'
             printf '```diff\n%s\n```\n\n' "$unified_diff"
@@ -1228,10 +1233,28 @@ jobs:
         run: |-
           set -euo pipefail
 
-          {
-            printf '_Qwen Code automated PR review did not complete successfully. See the workflow logs for details: %s_\n' "$RUN_URL"
-            printf "\nThis is an automated message; please retry by commenting \`@qwen /review\` once the underlying issue is resolved.\n"
-          } > qwen-pr-review-failure-comment.md
+          # Case 2 (post-summary failed but the review markdown exists on
+          # disk): the review itself succeeded — only delivery failed
+          # (gh rate limit / transient API error). Re-post the actual
+          # review content instead of a generic stub; the transient error
+          # has very likely cleared in the seconds since. Case 1 (no
+          # markdown at all) falls through to the generic failure note.
+          # The 200-byte floor matches the tier steps' near-empty guard.
+          if [ -f qwen-review-summary.md ] && [ "$(wc -c < qwen-review-summary.md)" -ge 200 ]; then
+            summary_bytes=$(wc -c < qwen-review-summary.md)
+            {
+              head -c 60000 qwen-review-summary.md
+              if [ "$summary_bytes" -gt 60000 ]; then
+                printf '\n\n_Review summary was truncated at 60KB. See the workflow logs for the full output._\n'
+              fi
+              printf '\n\n---\n_Qwen Code automated review — the first comment delivery attempt failed; this is an automatic retry. Workflow run: %s_\n' "$RUN_URL"
+            } > qwen-pr-review-failure-comment.md
+          else
+            {
+              printf '_Qwen Code automated PR review did not complete successfully. See the workflow logs for details: %s_\n' "$RUN_URL"
+              printf "\nThis is an automated message; please retry by commenting \`@qwen /review\` once the underlying issue is resolved.\n"
+            } > qwen-pr-review-failure-comment.md
+          fi
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --body-file qwen-pr-review-failure-comment.md || true
