@@ -21,6 +21,8 @@ export {
 } from './terminal.js';
 export {
   getOutputText,
+  isSensitiveKey as isDaemonUiSensitiveKey,
+  redactSensitiveFields as redactDaemonUiSensitiveFields,
   sanitizeTerminalText,
   stringifyJson,
   stripOscSequences,

@@ -1283,5 +1283,9 @@ describe('daemon UI normalizer and transcript reducer', () => {
       'curl https://api.example.com',
     );
     expect((event.rawOutput as Record<string, unknown>).text).toBe('OK');
+    expect(event.details).toContain('[redacted]');
+    expect(event.details).not.toContain('sk-prod-do-not-leak');
+    expect(event.details).not.toContain('Bearer secret-do-not-leak');
+    expect(event.details).not.toContain('returned-secret-do-not-leak');
   });
 });

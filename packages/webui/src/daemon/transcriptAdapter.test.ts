@@ -100,8 +100,15 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         title: '\u202eRun',
         status: 'completed',
         preview: { kind: 'generic' },
-        rawInput: { '\u202ecommand': '\u202enpm test' },
-        rawOutput: '\u001b]0;bad\u0007ok',
+        rawInput: {
+          '\u202ecommand': '\u202enpm test',
+          apiKey: 'secret-input',
+          headers: { Authorization: 'Bearer secret-auth' },
+        },
+        rawOutput: {
+          token: 'secret-output',
+          text: '\u001b]0;bad\u0007ok',
+        },
         createdAt: 2,
         updatedAt: 2,
       },
@@ -110,9 +117,17 @@ describe('daemonTranscriptToUnifiedMessages', () => {
     expect(messages[0]?.content).toBe('txt.exered');
     expect(messages[1]?.toolCall).toMatchObject({
       title: 'Run',
-      rawInput: { command: 'npm test' },
-      rawOutput: 'ok',
+      rawInput: {
+        command: 'npm test',
+        apiKey: '[redacted]',
+        headers: { Authorization: '[redacted]' },
+      },
+      rawOutput: {
+        token: '[redacted]',
+        text: 'ok',
+      },
     });
+    expect(JSON.stringify(messages[1]?.toolCall)).not.toContain('secret-');
   });
 
   it('renders shell and status text as visible tool content', () => {

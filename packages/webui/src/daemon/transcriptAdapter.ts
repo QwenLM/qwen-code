@@ -5,6 +5,7 @@
  */
 
 import {
+  isDaemonUiSensitiveKey,
   sanitizeDaemonTerminalText,
   type DaemonTranscriptBlock,
   type DaemonToolTranscriptBlock,
@@ -337,10 +338,15 @@ function sanitizeDaemonValue(value: unknown, depth = 0): unknown {
   }
   if (!isRecord(value)) return value;
   return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [
-      sanitizeDisplayText(key),
-      sanitizeDaemonValue(entry, depth + 1),
-    ]),
+    Object.entries(value).map(([key, entry]) => {
+      const sanitizedKey = sanitizeDisplayText(key);
+      return [
+        sanitizedKey,
+        isDaemonUiSensitiveKey(key)
+          ? '[redacted]'
+          : sanitizeDaemonValue(entry, depth + 1),
+      ];
+    }),
   );
 }
 

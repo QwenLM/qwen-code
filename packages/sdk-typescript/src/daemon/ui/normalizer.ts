@@ -245,14 +245,8 @@ function normalizeToolUpdate(
   const rawOutputSource =
     update['rawOutput'] ?? update['output'] ?? update['result'];
   // Redact sensitive fields (apiKey / token / password / etc.) at the
-  // normalizer boundary so the raw values never reach the UI layer. The
-  // pre-redaction shape goes into `details` / `getOutputText` already, but
-  // `rawInput` / `rawOutput` are also forwarded verbatim onto the
-  // `DaemonToolTranscriptBlock` and any UI component that renders them
-  // (e.g., ShellToolCall, WriteToolCall, JSON debug panels) would expose
-  // the unredacted secret. Redact ONCE here so downstream is uniformly
-  // safe; the `details` / `getOutputText` paths below reuse the same
-  // redacted shape, avoiding redundant traversal.
+  // normalizer boundary so raw values never reach transcript blocks, terminal
+  // details, or downstream UI components.
   const rawInput =
     rawInputSource !== undefined
       ? redactSensitiveFields(rawInputSource)
@@ -286,9 +280,9 @@ function normalizeToolUpdate(
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(rawInput !== undefined
-      ? { details: capDetails(stringifyJson(rawInput)) }
+      ? { details: capDetails(stringifyRedactedJson(rawInput)) }
       : rawOutput !== undefined
-        ? { details: capDetails(getOutputText(rawOutput)) }
+        ? { details: capDetails(stringifyRedactedJson(rawOutput)) }
         : {}),
   };
 }
