@@ -519,6 +519,21 @@ export const AppContainer = (props: AppContainerProps) => {
       // the profile captures the full MCP timeline without holding back
       // the user-facing TTI.
 
+      // Phase D-1: when launched with --worktree, gemini.tsx stashes a
+      // one-shot notice on Config. Consume it here so it surfaces in the
+      // transcript AND gets injected into the next user prompt. This
+      // wins over the Phase C resume-restore path below — startup beats
+      // resume on the same prompt.
+      const startupWorktreeNotice =
+        config.consumePendingStartupWorktreeNotice();
+      if (startupWorktreeNotice) {
+        historyManager.addItem(
+          { type: MessageType.INFO, text: startupWorktreeNotice },
+          Date.now(),
+        );
+        pendingWorktreeNoticeRef.current = startupWorktreeNotice;
+      }
+
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
         const historyItems = buildResumedHistoryItems(
@@ -560,32 +575,39 @@ export const AppContainer = (props: AppContainerProps) => {
         // Restore worktree context (shared logic — headless and ACP use
         // the same helper). Stale sidecars get cleaned up; live ones
         // produce an INFO message the model sees on the next turn.
-        try {
-          const sessionPath = config
-            .getSessionService()
-            .getWorktreeSessionPath(config.getSessionId());
-          const restored = await restoreWorktreeContext(sessionPath, (err) => {
-            // eslint-disable-next-line no-console
-            console.debug('worktree session restore warning:', err);
-          });
-          if (restored.contextMessage) {
-            // UI: show the notice in the transcript so the user knows.
-            historyManager.addItem(
-              { type: MessageType.INFO, text: restored.contextMessage },
-              Date.now(),
+        // Skipped when Phase D-1 already injected a --worktree startup
+        // notice above (startup wins over resume on the same prompt).
+        if (!startupWorktreeNotice) {
+          try {
+            const sessionPath = config
+              .getSessionService()
+              .getWorktreeSessionPath(config.getSessionId());
+            const restored = await restoreWorktreeContext(
+              sessionPath,
+              (err) => {
+                // eslint-disable-next-line no-console
+                console.debug('worktree session restore warning:', err);
+              },
             );
-            // Model: queue the notice for one-shot injection into the
-            // next user prompt (consumed by handleFinalSubmit). The INFO
-            // history item alone is UI-only — the model never sees it,
-            // so without this it could resume editing the parent
-            // checkout despite the user seeing the worktree path.
-            pendingWorktreeNoticeRef.current = restored.contextMessage;
+            if (restored.contextMessage) {
+              // UI: show the notice in the transcript so the user knows.
+              historyManager.addItem(
+                { type: MessageType.INFO, text: restored.contextMessage },
+                Date.now(),
+              );
+              // Model: queue the notice for one-shot injection into the
+              // next user prompt (consumed by handleFinalSubmit). The INFO
+              // history item alone is UI-only — the model never sees it,
+              // so without this it could resume editing the parent
+              // checkout despite the user seeing the worktree path.
+              pendingWorktreeNoticeRef.current = restored.contextMessage;
+            }
+          } catch (error) {
+            // Best-effort: failures here only affect UI hint visibility,
+            // not the resumed conversation itself.
+            // eslint-disable-next-line no-console
+            console.debug('worktree session restore failed:', error);
           }
-        } catch (error) {
-          // Best-effort: failures here only affect UI hint visibility,
-          // not the resumed conversation itself.
-          // eslint-disable-next-line no-console
-          console.debug('worktree session restore failed:', error);
         }
       }
     })();

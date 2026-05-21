@@ -375,13 +375,29 @@ export async function runNonInteractive(
         initialPartList = [{ text: input }];
       }
 
-      // Phase C: when --resume restored a session with an active worktree,
-      // prepend a system-reminder block to the user prompt so the model
-      // knows to keep using the worktree path. Stale sidecars (worktree
-      // dir deleted between sessions) are cleaned up inside the helper.
-      // TUI does this via historyManager.addItem(INFO); headless does it
-      // here because there is no UI history to write into.
-      if (config.getResumedSessionData()) {
+      // Phase D-1: when launched with --worktree, gemini.tsx stashes a
+      // notice on Config. Consuming it here takes precedence over the
+      // Phase C resume-restore path below — `--worktree` overrides the
+      // resumed session's saved worktree.
+      const startupNotice = config.consumePendingStartupWorktreeNotice();
+      if (startupNotice) {
+        const reminderPart: Part = {
+          text: `<system-reminder>\n${startupNotice}\n</system-reminder>\n\n`,
+        };
+        const partsArr = Array.isArray(initialPartList)
+          ? initialPartList
+          : [initialPartList];
+        initialPartList = [reminderPart, ...partsArr];
+        adapter.emitSystemMessage('worktree_started', {
+          notice: startupNotice,
+        });
+      } else if (config.getResumedSessionData()) {
+        // Phase C: when --resume restored a session with an active worktree,
+        // prepend a system-reminder block to the user prompt so the model
+        // knows to keep using the worktree path. Stale sidecars (worktree
+        // dir deleted between sessions) are cleaned up inside the helper.
+        // TUI does this via historyManager.addItem(INFO); headless does it
+        // here because there is no UI history to write into.
         try {
           const sessionPath = config
             .getSessionService()
