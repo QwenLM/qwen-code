@@ -28,6 +28,9 @@ fi
 : > "${http_out}"
 : > "${mitm_log}"
 
+# --set ssl_insecure=true disables upstream TLS verification so mitmproxy
+# can intercept HTTPS calls from the wrapped command. Intended for local
+# dev only; do NOT run this script on shared or untrusted networks.
 REPRO_CAPTURE_OUT="${http_out}" \
   mitmdump \
     --listen-host 127.0.0.1 \
