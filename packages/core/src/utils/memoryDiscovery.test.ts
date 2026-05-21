@@ -12,6 +12,7 @@ import { loadServerHierarchicalMemory } from './memoryDiscovery.js';
 import {
   setGeminiMdFilename,
   DEFAULT_CONTEXT_FILENAME,
+  AGENT_CONTEXT_FILENAME,
   LOCAL_CONTEXT_FILENAME,
 } from '../memory/const.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -597,6 +598,45 @@ describe('loadServerHierarchicalMemory', () => {
       // Order in prompt: global → local → committed (later = higher priority).
       expect(globalIdx).toBeLessThan(localIdx);
       expect(localIdx).toBeLessThan(committedIdx);
+    });
+
+    it('keeps every global file ahead of the local file with interleaved filenames', async () => {
+      // Two configured filenames produce an interleaved discovery list
+      // (e.g. [global/QWEN.md, committed/QWEN.md, global/AGENTS.md]). The
+      // local file must land after ALL global entries, not just the first
+      // non-global — otherwise global/AGENTS.md ends up behind local.
+      setGeminiMdFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+      await createTestFile(
+        path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),
+        'global qwen content',
+      );
+      await createTestFile(
+        path.join(homedir, QWEN_DIR, AGENT_CONTEXT_FILENAME),
+        'global agents content',
+      );
+      await createTestFile(
+        path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+        'committed content',
+      );
+      await createTestFile(
+        path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME),
+        'local content',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      const content = result.memoryContent!;
+      const localIdx = content.indexOf('local content');
+      expect(localIdx).toBeGreaterThan(content.indexOf('global qwen content'));
+      expect(localIdx).toBeGreaterThan(
+        content.indexOf('global agents content'),
+      );
     });
 
     it('does not load local file for untrusted workspaces', async () => {

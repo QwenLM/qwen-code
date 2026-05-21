@@ -498,6 +498,14 @@ describe('writeWorkspaceContextFile', () => {
       expect(result.filePath).toBe(localPath);
       const written = await fs.readFile(localPath, 'utf8');
       expect(written).toContain('- auto local entry');
+
+      // The path-based guard must also gitignore the auto-resolved local
+      // file, mirroring explicit scope='local' behavior.
+      const gitignore = await fs.readFile(
+        path.join(workspace, '.gitignore'),
+        'utf8',
+      );
+      expect(gitignore).toContain(`${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}`);
     });
 
     it('prefers committed QWEN.md over local file in auto scope', async () => {

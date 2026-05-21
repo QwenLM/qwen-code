@@ -392,17 +392,19 @@ export async function loadServerHierarchicalMemory(
     try {
       await fs.access(localPath, fsSync.constants.R_OK);
       const globalQwenDir = Storage.getGlobalQwenDir();
-      // filePaths order is: [global..., committed...]. Find the first
-      // non-global path and insert local before it so the final order
-      // is: global → local → committed.
-      const insertIdx = filePaths.findIndex(
-        (p) => !p.startsWith(globalQwenDir),
-      );
-      if (insertIdx === -1) {
-        filePaths.push(localPath);
-      } else {
-        filePaths.splice(insertIdx, 0, localPath);
+      // filePaths is interleaved per configured filename, e.g.
+      // [global/QWEN.md, workspace/QWEN.md, global/AGENTS.md, ...].
+      // Insert local AFTER the last global path so every global file
+      // stays ahead of it (global → local → committed). Inserting before
+      // the first non-global would strand later global entries (e.g.
+      // global/AGENTS.md) behind the local file.
+      let lastGlobalIdx = -1;
+      for (let i = 0; i < filePaths.length; i++) {
+        if (filePaths[i].startsWith(globalQwenDir)) {
+          lastGlobalIdx = i;
+        }
       }
+      filePaths.splice(lastGlobalIdx + 1, 0, localPath);
       logger.debug(`Found local context file: ${localPath}`);
     } catch {
       // Not found — common case.

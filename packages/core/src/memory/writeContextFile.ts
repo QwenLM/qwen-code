@@ -20,6 +20,9 @@ import {
   MEMORY_SECTION_HEADER,
 } from './const.js';
 import { QWEN_DIR } from '../utils/paths.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const logger = createDebugLogger('MEMORY_WRITE');
 
 /**
  * Per-resolved-file mutex map. Two simultaneous `writeWorkspaceContextFile`
@@ -155,18 +158,6 @@ export async function writeWorkspaceContextFile(
     options.projectRoot,
   );
 
-  // Ensure the local context file is gitignored before writing.
-  // This covers both explicit `scope='local'` and `scope='auto'` that
-  // resolved to the local file path (e.g. no committed QWEN.md/AGENTS.md
-  // exists but .qwen/QWEN.local.md does).
-  if (
-    options.scope === 'local' ||
-    filePath ===
-      path.join(options.projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME)
-  ) {
-    await ensureGitignoreEntry(options.projectRoot);
-  }
-
   // Hold the per-file mutex for the entire read-compose-write sequence
   // INCLUDING the whitespace-only no-op detection. Two concurrent
   // POSTs targeting the same file (one whitespace-only, one with real
@@ -216,6 +207,29 @@ async function runWrite(
     // gives clients the no-op signal; the byte count should remain
     // true to its field name.
     return { filePath, bytesWritten: 0, changed: false };
+  }
+
+  // Ensure the local context file is gitignored before writing. Covers
+  // both explicit `scope='local'` and `scope='auto'` that resolved to
+  // the local file path (no committed QWEN.md/AGENTS.md exists but
+  // .qwen/QWEN.local.md does). Placed after the no-op guard so a
+  // whitespace-only append never touches .gitignore, and wrapped so a
+  // permission/read-only failure (EACCES/EROFS) degrades to a warning
+  // rather than aborting the memory write itself.
+  if (
+    options.scope === 'local' ||
+    filePath ===
+      path.join(options.projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME)
+  ) {
+    try {
+      await ensureGitignoreEntry(options.projectRoot);
+    } catch (err) {
+      logger.warn(
+        `Failed to ensure .gitignore entry for ${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   await fs.mkdir(path.dirname(filePath), { recursive: true });

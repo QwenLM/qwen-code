@@ -62,6 +62,7 @@ describe('FileExclusions', () => {
       // Should include dynamic patterns
       expect(patterns).toContain('**/GEMINI.md');
       expect(patterns).toContain('**/AGENTS.md');
+      expect(patterns).toContain('**/.qwen/QWEN.local.md');
     });
 
     it('should respect includeDefaults option', () => {
@@ -109,8 +110,10 @@ describe('FileExclusions', () => {
 
       expect(patternsWithDynamic).toContain('**/GEMINI.md');
       expect(patternsWithDynamic).toContain('**/AGENTS.md');
+      expect(patternsWithDynamic).toContain('**/.qwen/QWEN.local.md');
       expect(patternsWithoutDynamic).not.toContain('**/GEMINI.md');
       expect(patternsWithoutDynamic).not.toContain('**/AGENTS.md');
+      expect(patternsWithoutDynamic).not.toContain('**/.qwen/QWEN.local.md');
     });
   });
 
