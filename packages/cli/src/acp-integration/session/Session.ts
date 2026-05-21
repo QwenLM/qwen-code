@@ -1601,6 +1601,10 @@ export class Session implements SessionContext {
 
     const monitorRegistry = this.config.getMonitorRegistry();
     monitorRegistry.setNotificationCallback((displayText, modelText, meta) => {
+      if (meta.status === 'running') {
+        return;
+      }
+
       this.#enqueueBackgroundNotification({
         displayText,
         modelText,

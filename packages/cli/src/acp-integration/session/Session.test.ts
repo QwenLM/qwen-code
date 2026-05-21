@@ -983,6 +983,50 @@ describe('Session', () => {
       });
     });
 
+    it('does not enqueue running monitor notifications for model follow-up', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start monitor' }],
+      });
+
+      const callback = mockMonitorRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { monitorId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback(
+        'Monitor "dev server" event #1: ready',
+        '<task-notification><status>running</status></task-notification>',
+        {
+          monitorId: 'monitor-1',
+          status: 'running',
+          toolUseId: 'tool-1',
+        },
+      );
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: expect.objectContaining({
+          _meta: expect.objectContaining({
+            backgroundTask: expect.objectContaining({
+              taskId: 'monitor-1',
+              status: 'running',
+            }),
+          }),
+        }),
+      });
+    });
+
     it('drains background shell notifications through ACP after the prompt is idle', async () => {
       mockChat.sendMessageStream = vi
         .fn()

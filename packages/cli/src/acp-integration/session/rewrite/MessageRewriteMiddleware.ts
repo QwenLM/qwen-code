@@ -35,6 +35,7 @@ export class MessageRewriteMiddleware {
   private readonly target: MessageRewriteConfig['target'];
   private readonly timeoutMs: number;
   private turnIndex = 0;
+  private turnMeta: Record<string, unknown> | undefined;
 
   constructor(
     config: Config,
@@ -82,14 +83,21 @@ export class MessageRewriteMiddleware {
     await this.sendUpdate(update);
 
     // Accumulate for turn-end rewriting
+    let didAccumulate = false;
     if (updateType === 'agent_thought_chunk') {
       if (this.target === 'thought' || this.target === 'all') {
         this.turnBuffer.appendThought(text);
+        didAccumulate = true;
       }
     } else if (updateType === 'agent_message_chunk') {
       if (this.target === 'message' || this.target === 'all') {
         this.turnBuffer.appendMessage(text);
+        didAccumulate = true;
       }
+    }
+
+    if (didAccumulate) {
+      this.captureTurnMeta(updateRecord);
     }
   }
 
@@ -108,6 +116,8 @@ export class MessageRewriteMiddleware {
    */
   async flushTurn(signal?: AbortSignal): Promise<void> {
     const content = this.turnBuffer.flush();
+    const turnMeta = this.turnMeta;
+    this.turnMeta = undefined;
     if (!content) return;
 
     this.turnIndex++;
@@ -137,6 +147,7 @@ export class MessageRewriteMiddleware {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: rewritten },
             _meta: {
+              ...turnMeta,
               rewritten: true,
               turnIndex: turnIdx,
             },
@@ -148,6 +159,18 @@ export class MessageRewriteMiddleware {
         }
       })(),
     );
+  }
+
+  private captureTurnMeta(update: Record<string, unknown>): void {
+    const meta = update['_meta'];
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+      return;
+    }
+
+    this.turnMeta = {
+      ...this.turnMeta,
+      ...(meta as Record<string, unknown>),
+    };
   }
 
   /**
