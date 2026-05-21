@@ -11,6 +11,11 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { autoImproveCommand } from './autoImproveCommand.js';
+import {
+  getAutoImproveConfigPath,
+  readAutoImproveConfig,
+  writeAutoImproveConfig,
+} from './autoImproveState.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { CommandContext } from './types.js';
 
@@ -82,12 +87,26 @@ describe('autoImproveCommand', () => {
   });
 
   it('starts a session loop and submits the first tick prompt', async () => {
+    await writeAutoImproveConfig(tempDir, {
+      version: 1,
+      sources: {
+        githubIssues: false,
+        githubPrs: false,
+        localSignals: false,
+      },
+      customSources: ['watch flaky auth tests', 'scan docs TODOs'],
+    });
+
     const result = await autoImproveCommand.action?.(
       context,
       'start --every 2h prefer small fixes',
     );
 
     expect(result).toMatchObject({ type: 'submit_prompt' });
+    const prompt = (result as { content: Array<{ text: string }> }).content[0]!
+      .text;
+    expect(prompt).toContain('- Custom sources:\n  - watch flaky auth tests');
+    expect(prompt).toContain('  - scan docs TODOs');
     expect(scheduler.create).toHaveBeenCalledWith(
       '7 */2 * * *',
       expect.stringMatching(/^\/auto-improve tick /),
@@ -123,6 +142,46 @@ describe('autoImproveCommand', () => {
         'summary.md',
       ),
     ).toBeTruthy();
+  });
+
+  it('normalizes custom sources and deduplicates saved config', async () => {
+    await writeAutoImproveConfig(tempDir, {
+      version: 1,
+      sources: {
+        githubIssues: true,
+        githubPrs: false,
+        localSignals: true,
+      },
+      customSources: [' scan docs ', '', 'scan docs', 'check failing CI'],
+    });
+
+    const config = await readAutoImproveConfig(tempDir);
+    expect(config.customSources).toEqual(['scan docs', 'check failing CI']);
+  });
+
+  it('loads legacy user context as a custom source', async () => {
+    const configPath = getAutoImproveConfigPath(tempDir);
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(
+      configPath,
+      JSON.stringify(
+        {
+          version: 1,
+          sources: {
+            githubIssues: false,
+            githubPrs: false,
+            localSignals: false,
+          },
+          userContext: 'prefer dependency cleanup',
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+
+    const config = await readAutoImproveConfig(tempDir);
+    expect(config.customSources).toEqual(['prefer dependency cleanup']);
   });
 
   it('reports active loop status', async () => {

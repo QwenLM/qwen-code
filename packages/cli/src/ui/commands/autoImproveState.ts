@@ -16,7 +16,7 @@ export interface AutoImproveSources {
 export interface AutoImproveConfig {
   version: 1;
   sources: AutoImproveSources;
-  userContext: string;
+  customSources: string[];
 }
 
 export interface AutoImproveRunRef {
@@ -58,7 +58,7 @@ export const DEFAULT_AUTO_IMPROVE_CONFIG: AutoImproveConfig = {
     githubPrs: false,
     localSignals: false,
   },
-  userContext: '',
+  customSources: [],
 };
 
 export function getAutoImproveRoot(repoRoot: string): string {
@@ -95,10 +95,30 @@ function readBoolean(value: unknown): boolean {
   return typeof value === 'boolean' ? value : false;
 }
 
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
+}
+
 function normalizeConfig(value: unknown): AutoImproveConfig {
   if (!isRecord(value)) return DEFAULT_AUTO_IMPROVE_CONFIG;
   const rawSources = value['sources'];
   const sources = isRecord(rawSources) ? rawSources : {};
+  const customSources = normalizeStringList(value['customSources']);
+  const legacyUserContext =
+    typeof value['userContext'] === 'string' ? value['userContext'].trim() : '';
+  if (customSources.length === 0 && legacyUserContext) {
+    customSources.push(legacyUserContext);
+  }
   return {
     version: 1,
     sources: {
@@ -106,8 +126,7 @@ function normalizeConfig(value: unknown): AutoImproveConfig {
       githubPrs: readBoolean(sources['githubPrs']),
       localSignals: readBoolean(sources['localSignals']),
     },
-    userContext:
-      typeof value['userContext'] === 'string' ? value['userContext'] : '',
+    customSources,
   };
 }
 

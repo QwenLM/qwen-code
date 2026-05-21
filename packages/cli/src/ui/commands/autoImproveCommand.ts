@@ -156,8 +156,17 @@ function describeSources(state: AutoImproveLoopState): string {
   if (state.sourceSnapshot.sources.localSignals) {
     enabled.push('Local repo signals');
   }
-  if (state.sourceSnapshot.userContext.trim()) enabled.push('User context');
+  if (state.sourceSnapshot.customSources.length > 0) {
+    enabled.push(
+      `Custom sources (${state.sourceSnapshot.customSources.length})`,
+    );
+  }
   return enabled.length === 0 ? 'none configured' : enabled.join(', ');
+}
+
+function formatCustomSources(customSources: string[]): string {
+  if (customSources.length === 0) return '(none)';
+  return customSources.map((source) => `  - ${source}`).join('\n');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -208,7 +217,8 @@ Loop state:
 - Repair budget: 5 test/repair attempts.
 - Source snapshot: ${describeSources(state)}
 - Start prompt: ${state.prompt || '(none)'}
-- User context: ${state.sourceSnapshot.userContext || '(none)'}
+- Custom sources:
+${formatCustomSources(state.sourceSnapshot.customSources)}
 
 Hard rules:
 1. Run exactly one small, coherent, locally verifiable improvement.
@@ -238,6 +248,7 @@ Task selection guidance:
 - If GitHub issues are enabled, use gh to inspect open issues and prefer clear, unclaimed, locally verifiable bugs or small enhancements.
 - If GitHub PRs are enabled, inspect relevant current-repo PRs for CI failures, review comments, and requested changes.
 - If local repo signals are enabled, inspect TODOs, failing or missing tests, recent churn, .qwen/design, and .qwen/e2e-tests.
+- If custom sources are configured, treat each item as a user-provided source hint, then inspect or follow it where applicable.
 - If no sources and no start prompt are configured, do a minimal repository inspection and choose a useful small local task.
 
 Final response format:
@@ -368,6 +379,11 @@ async function statusAutoImprove(config: Config): Promise<MessageActionReturn> {
     `Prompt: ${state.prompt || '(none)'}`,
     `Cron job: ${job ? job.id : 'none'}`,
   ];
+  if (state.sourceSnapshot.customSources.length > 0) {
+    lines.push(
+      `Custom sources: ${state.sourceSnapshot.customSources.join('; ')}`,
+    );
+  }
   const currentRun = formatRunRef(state.currentRun);
   if (currentRun) lines.push(`Current run: ${currentRun}`);
   const lastRun = formatRunRef(state.lastRun);

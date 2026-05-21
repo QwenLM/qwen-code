@@ -19,9 +19,10 @@ Expose four user-facing subcommands:
 - `/auto-improve stop`
 
 `source` is interactive-only. It opens a dialog with checkboxes for GitHub
-issues, GitHub PRs / CI / review comments, and local repository signals, plus
-an always-visible user-context input. The input can be used alone or together
-with checked sources. Defaults are all off and an empty user context.
+issues, GitHub PRs / CI / review comments, and local repository signals, plus a
+custom source list. Users can add multiple custom source hints, edit existing
+items, and delete items. Custom sources can be used alone or together with
+checked built-in sources. Defaults are all off and an empty custom source list.
 
 `start` may run even when no source and no prompt are configured. In that case
 the tick prompt tells the agent to do a small baseline repository inspection and
@@ -45,12 +46,13 @@ Store state under `.qwen/auto-improve/`:
         001-xxx.md
 ```
 
-`config.json` is repository-level default source configuration. `active.json`
-is a thin pointer to the one active loop. First version allows at most one
-active loop per repository. `state.json` belongs to a single loop and contains
-the cadence, target branch, source snapshot, start prompt, status, stop request
-flag, current run, last run, and cron job id when available. Historical loops
-remain in `loops/`, but `/auto-improve status` reads only the active loop.
+`config.json` is repository-level default source configuration, including the
+built-in source toggles and ordered custom source hints. `active.json` is a thin
+pointer to the one active loop. First version allows at most one active loop per
+repository. `state.json` belongs to a single loop and contains the cadence,
+target branch, source snapshot, start prompt, status, stop request flag, current
+run, last run, and cron job id when available. Historical loops remain in
+`loops/`, but `/auto-improve status` reads only the active loop.
 
 The loop is session-scoped. Exiting Qwen Code is equivalent to stopping the
 loop. If the CLI exits abruptly and leaves `active.json` behind, a later status
