@@ -5,6 +5,12 @@ import react from '@vitejs/plugin-react';
 const daemonProxy: ProxyOptions = {
   target: 'http://127.0.0.1:4170',
   changeOrigin: true,
+  bypass: (req) => {
+    if (req.headers.accept?.includes('text/html')) {
+      return '/index.html';
+    }
+    return undefined;
+  },
   configure: (proxy) => {
     proxy.on('proxyReq', (proxyReq) => {
       proxyReq.removeHeader('origin');

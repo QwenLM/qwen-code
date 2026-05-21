@@ -14,7 +14,11 @@ export const LOCAL_COMMANDS: CommandInfo[] = [
     description: '切换审批模式',
     argumentHint: '<mode>',
   },
-  { name: 'model', description: '切换模型', argumentHint: '<model>' },
+  {
+    name: 'model',
+    description: '切换模型或设置 fast model',
+    argumentHint: '[--fast] [<model>]',
+  },
   { name: 'mcp', description: '管理 MCP servers' },
   { name: 'skills', description: '查看可用 skills' },
   { name: 'memory', description: '查看和写入 memory' },
@@ -29,7 +33,7 @@ export const LOCAL_COMMANDS: CommandInfo[] = [
   {
     name: 'rename',
     description: '重命名当前会话',
-    argumentHint: '<name>',
+    argumentHint: '[--auto] [<name>]',
   },
   { name: 'resume', description: '恢复历史会话', argumentHint: '<session-id>' },
 ];

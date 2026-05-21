@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import type { ModelInfo } from '../../adapters/types';
 
 interface ModelDialogProps {
+  mode?: 'main' | 'fast';
   currentModel: string;
   availableModels: ModelInfo[];
   onSelect: (modelId: string) => void;
@@ -9,11 +10,13 @@ interface ModelDialogProps {
 }
 
 export function ModelDialog({
+  mode = 'main',
   currentModel,
   availableModels,
   onSelect,
   onClose,
 }: ModelDialogProps) {
+  const isFastMode = mode === 'fast';
   const [selectedIdx, setSelectedIdx] = useState(() => {
     const idx = availableModels.findIndex((m) => m.id === currentModel);
     return idx >= 0 ? idx : 0;
@@ -174,9 +177,13 @@ export function ModelDialog({
   return (
     <div className="resume-picker">
       <div className="resume-picker-header">
-        <span className="resume-picker-title">Switch Model</span>
+        <span className="resume-picker-title">
+          {isFastMode ? 'Set Fast Model' : 'Switch Model'}
+        </span>
         <span className="resume-picker-count">
-          current: {currentModel || 'unknown'}
+          {isFastMode
+            ? 'for suggestions and side tasks'
+            : `current: ${currentModel || 'unknown'}`}
         </span>
       </div>
 
@@ -244,7 +251,7 @@ export function ModelDialog({
               <span className="resume-picker-item-title">
                 {m.label || m.id}
               </span>
-              {m.id === currentModel && (
+              {!isFastMode && m.id === currentModel && (
                 <span className="resume-picker-item-check"> ✓</span>
               )}
             </div>
@@ -260,7 +267,9 @@ export function ModelDialog({
           ? 'Enter to confirm · Esc to cancel'
           : searchMode
             ? 'Type to search · Enter to commit · Esc to clear'
-            : '↑↓ to navigate · / to search · c for custom · Enter to select · Esc to cancel'}
+            : isFastMode
+              ? '↑↓ to navigate · / to search · c for custom · Enter to set fast model · Esc to cancel'
+              : '↑↓ to navigate · / to search · c for custom · Enter to select · Esc to cancel'}
       </div>
     </div>
   );

@@ -63,6 +63,7 @@ export interface DaemonSessionConfig {
   baseUrl: string;
   token?: string;
   workspaceCwd?: string;
+  initialSessionId?: string;
   autoReconnect?: boolean;
   reconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
@@ -80,6 +81,7 @@ export interface DaemonActions {
   ): Promise<boolean>;
   listSessions(): Promise<DaemonSessionSummary[]>;
   loadSession(sessionId: string): Promise<void>;
+  newSession(): Promise<void>;
   closeSession(): Promise<void>;
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
   restartMcpServer(serverName: string): Promise<DaemonMcpRestartResult>;
@@ -120,9 +122,10 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
   const [promptStatus, setPromptStatus] = useState<PromptStatus>('idle');
-  const [restoreSessionId, setRestoreSessionId] = useState<
-    string | undefined
-  >();
+  const [restoreSessionId, setRestoreSessionId] = useState<string | undefined>(
+    opts.initialSessionId,
+  );
+  const [newSessionNonce, setNewSessionNonce] = useState(0);
 
   const [connection, setConnection] = useState<DaemonConnectionState>({
     status: 'connecting',
@@ -144,6 +147,8 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         token: opts.token,
       });
       let session: DaemonSessionClient | undefined;
+      let reconnectSessionId = restoreSessionId;
+      let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
       let reconnectAttempt = 0;
 
       while (!disposed && !abort.signal.aborted) {
@@ -156,9 +161,18 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               ? await DaemonSessionClient.load(client, restoreSessionId, {
                   workspaceCwd,
                 })
-              : await DaemonSessionClient.createOrAttach(client, {
-                  workspaceCwd,
-                });
+              : reconnectSessionId
+                ? await DaemonSessionClient.load(client, reconnectSessionId, {
+                    workspaceCwd,
+                  })
+                : await DaemonSessionClient.createOrAttach(client, {
+                    workspaceCwd,
+                    ...(shouldCreateFreshSession
+                      ? { sessionScope: 'thread' as const }
+                      : {}),
+                  });
+            reconnectSessionId = session.sessionId;
+            shouldCreateFreshSession = false;
             sessionRef.current = session;
           }
 
@@ -278,6 +292,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
     opts.maxReconnectDelayMs,
     store,
     restoreSessionId,
+    newSessionNonce,
   ]);
 
   const actions = useMemo<DaemonActions>(
@@ -395,6 +410,14 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
         store.reset();
         setRestoreSessionId(sessionId);
+      },
+
+      async newSession(): Promise<void> {
+        setPromptStatus('idle');
+        clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+        store.reset();
+        setRestoreSessionId(undefined);
+        setNewSessionNonce((nonce) => nonce + 1);
       },
 
       async closeSession(): Promise<void> {

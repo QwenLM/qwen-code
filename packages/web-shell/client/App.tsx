@@ -29,10 +29,42 @@ const DAEMON_TOKEN = getDaemonToken();
 const WEB_SHELL_VERSION = '0.0.1';
 const MODES_CYCLE = ['plan', 'default', 'auto-edit', 'yolo'];
 
+function getSessionIdFromUrl(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const match = window.location.pathname.match(/\/session\/([^/]+)/);
+  return match ? decodeURIComponent(match[1]) : undefined;
+}
+
+function replaceSessionUrl(sessionId: string): void {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  url.pathname = `/session/${encodeURIComponent(sessionId)}`;
+  window.history.replaceState(null, '', url);
+}
+
+function parseRenameArgument(
+  raw: string,
+):
+  | { type: 'auto' }
+  | { type: 'manual'; displayName: string }
+  | { type: 'delegate' } {
+  const trimmed = raw.trim().replace(/[\r\n]+/g, ' ');
+  if (!trimmed) return { type: 'auto' };
+  if (trimmed === '--') return { type: 'manual', displayName: '' };
+  if (trimmed.startsWith('-- ')) {
+    return { type: 'manual', displayName: trimmed.slice(3).trim() };
+  }
+  if (trimmed.toLowerCase() === '--auto') return { type: 'auto' };
+  if (trimmed.startsWith('--')) return { type: 'delegate' };
+  return { type: 'manual', displayName: trimmed };
+}
+
 export function App() {
+  const initialSessionId = useMemo(() => getSessionIdFromUrl(), []);
   const { store, state, connection, actions, promptStatus } = useDaemonSession({
     baseUrl: DAEMON_BASE_URL,
     token: DAEMON_TOKEN,
+    initialSessionId,
   });
 
   const messages = useMemo(
@@ -67,7 +99,9 @@ export function App() {
   }, [promptStatus, transcriptStreamingState]);
   const connected = connection.status === 'connected';
 
-  const [showModelDialog, setShowModelDialog] = useState(false);
+  const [modelDialogMode, setModelDialogMode] = useState<
+    'main' | 'fast' | null
+  >(null);
   const [showModeDialog, setShowModeDialog] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showMcpDialog, setShowMcpDialog] = useState(false);
@@ -108,6 +142,12 @@ export function App() {
     }
   }, [connection.currentMode]);
 
+  useEffect(() => {
+    if (connection.sessionId) {
+      replaceSessionUrl(connection.sessionId);
+    }
+  }, [connection.sessionId]);
+
   const handleCycleMode = useCallback(() => {
     const idx = MODES_CYCLE.indexOf(currentMode);
     const next = MODES_CYCLE[(idx + 1) % MODES_CYCLE.length];
@@ -123,6 +163,16 @@ export function App() {
           const cmd = match[1];
           if (cmd === 'model') {
             const modelArg = text.slice(match[0].length).trim();
+            if (modelArg === '--fast') {
+              if (promptBlocked) return false;
+              setModelDialogMode('fast');
+              return true;
+            }
+            if (modelArg.startsWith('--fast ')) {
+              if (promptBlocked) return false;
+              actions.sendPrompt(text, images).catch(() => {});
+              return true;
+            }
             if (modelArg) {
               actions
                 .setModel(modelArg)
@@ -131,7 +181,7 @@ export function App() {
                 })
                 .catch(() => {});
             } else {
-              setShowModelDialog(true);
+              setModelDialogMode('main');
             }
             return true;
           }
@@ -181,17 +231,27 @@ export function App() {
             setAgentsDialogMode(subCommand === 'create' ? 'create' : 'manage');
             return true;
           }
-          if (cmd === 'clear' || cmd === 'new' || cmd === 'reset') {
+          if (cmd === 'clear') {
             store.reset();
             return true;
           }
+          if (cmd === 'new' || cmd === 'reset') {
+            actions.newSession().catch(() => {});
+            return true;
+          }
           if (cmd === 'rename') {
-            const displayName = text.slice(match[0].length).trim();
+            const renameArg = parseRenameArgument(text.slice(match[0].length));
+            if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
+              if (promptBlocked) return false;
+              actions.sendPrompt(text, images).catch(() => {});
+              return true;
+            }
+            const displayName = renameArg.displayName;
             if (!displayName) {
               store.dispatch([
                 {
                   type: 'error',
-                  text: '请输入新的会话名称，例如 /rename 项目排查',
+                  text: '请输入新的会话名称，例如 /rename 项目排查，或使用 /rename --auto 自动生成',
                 },
               ]);
               return true;
@@ -285,6 +345,14 @@ export function App() {
     [actions],
   );
 
+  const handleFastModelSelect = useCallback(
+    (modelId: string) => {
+      if (streamingState !== 'idle') return;
+      actions.sendPrompt(`/model --fast ${modelId}`).catch(() => {});
+    },
+    [actions, streamingState],
+  );
+
   const commands = useMemo(
     () => mergeCommands(LOCAL_COMMANDS, connection.commands ?? []),
     [connection.commands],
@@ -292,12 +360,17 @@ export function App() {
 
   return (
     <div className="app">
-      {showModelDialog ? (
+      {modelDialogMode ? (
         <ModelDialog
+          mode={modelDialogMode}
           currentModel={currentModel}
           availableModels={connection.models ?? []}
-          onSelect={handleModelSelect}
-          onClose={() => setShowModelDialog(false)}
+          onSelect={
+            modelDialogMode === 'fast'
+              ? handleFastModelSelect
+              : handleModelSelect
+          }
+          onClose={() => setModelDialogMode(null)}
         />
       ) : showResumeDialog ? (
         <ResumeDialog
