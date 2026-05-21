@@ -49,7 +49,16 @@ export function resetWarningHandlerForTests(): void {
  * warning through — including generic EventTarget leak warnings, which we
  * leave visible because they likely indicate a real leak elsewhere. In
  * debug mode (NODE_ENV=development, or DEBUG / QWEN_DEBUG set), all
- * warnings are forwarded to stderr so developers can still see them.
+ * warnings are forwarded so developers can still see them.
+ *
+ * Implementation note: simply adding a `warning` listener does NOT prevent
+ * Node's default printer from writing to stderr — the default handler is
+ * registered as an ordinary listener (`lib/internal/process/warning.js`).
+ * To actually suppress targeted warnings, we capture the existing listeners
+ * (which include the default printer and any third-party telemetry hooks),
+ * remove them, then install ours as the sole listener. Non-suppressed
+ * warnings get fanned out to the captured listeners so the default printer
+ * still fires for them; suppressed warnings stop here.
  *
  * Idempotent — repeated calls are a no-op.
  */
@@ -58,16 +67,25 @@ export function initializeWarningHandler(): void {
 
   const debug = isDebugMode();
 
+  // Snapshot everything currently listening on 'warning' (Node's default
+  // onWarning printer + any external telemetry subscribers). We will fan
+  // out non-suppressed warnings back to them.
+  const priorListeners = [...process.listeners('warning')] as Array<
+    (warning: Error) => void
+  >;
+
   installedHandler = (warning: Error) => {
     if (!debug && isSuppressed(warning)) return;
-    const text = warning.stack ?? `${warning.name}: ${warning.message}`;
-    process.stderr.write(`(node) ${text}\n`);
+    for (const fn of priorListeners) {
+      try {
+        fn(warning);
+      } catch {
+        // Don't let a misbehaving prior listener (e.g. a buggy telemetry
+        // hook) take down warning delivery for the rest of the chain.
+      }
+    }
   };
 
-  // Adding a listener (instead of removeAllListeners) leaves any third-party
-  // warning subscribers in place. Node's default printer only fires when
-  // there are zero listeners — so installing our handler implicitly disables
-  // the default print path, and we take over forwarding to stderr for the
-  // non-suppressed cases.
+  process.removeAllListeners('warning');
   process.on('warning', installedHandler);
 }

@@ -34,52 +34,26 @@ function asSignal(
 }
 
 /**
- * Propagate abort from a weakly-referenced parent to a weakly-referenced child.
- * Module-scope (not a per-call closure) to keep allocation cheap.
- */
-function propagateAbort(
-  this: WeakRef<AbortSignal>,
-  weakChild: WeakRef<AbortController>,
-): void {
-  const parent = this.deref();
-  weakChild.deref()?.abort(parent?.reason);
-}
-
-/**
- * Remove an abort handler from a weakly-referenced parent signal.
- * No-op if either side has been GC'd or the parent already fired (`{once:true}`).
- */
-function removeAbortHandler(
-  this: WeakRef<AbortSignal>,
-  weakHandler: WeakRef<(...args: unknown[]) => void>,
-): void {
-  const parent = this.deref();
-  const handler = weakHandler.deref();
-  if (parent && handler) {
-    parent.removeEventListener('abort', handler);
-  }
-}
-
-/**
  * Create a child AbortController that aborts when its parent aborts.
  * Aborting the child does NOT abort the parent.
  *
- * Three invariants make this safe under long-running parents with many
- * short-lived children:
+ * Three invariants keep listener accumulation bounded on long-lived parents
+ * even when many short-lived children come and go:
  *  - The parent's abort listener is registered with `{once: true}` so it
  *    removes itself when the parent fires.
  *  - When the child aborts (from any source — parent propagation, manual
  *    abort, etc.), the listener it registered on the parent is actively
  *    removed. This is the key to preventing dead-listener accumulation on
  *    long-lived parents.
- *  - Both parent and child are held via `WeakRef`, so the parent does not
- *    strongly retain abandoned children; a child that is dropped without
- *    being aborted can still be GC'd.
+ *  - The parent is held via `WeakRef` from the child's reverse-cleanup
+ *    closure, so a child being kept alive does not pin its parent.
  *
- * Caveat: if the parent controller is held ONLY through the child's WeakRef,
- * it can be GC'd before its `abort` fires. In practice every parent in this
- * codebase is held strongly by a long-lived owner (e.g. `this.master...`)
- * that outlives the child, so this is safe.
+ * Lifetime contract: the child controller is held strongly by the parent's
+ * listener closure until either the parent fires (closure released by
+ * `{once: true}` self-removal) or the child aborts (closure released by
+ * reverse-cleanup). This means callers can safely pass `child.signal` into
+ * async APIs and drop the controller object — the controller will stay
+ * alive long enough for parent abort to propagate to the signal.
  *
  * Accepts an `AbortController`, an `AbortSignal`, or `undefined`. Undefined
  * returns a fresh controller with no parent propagation.
@@ -99,15 +73,25 @@ export function createChildAbortController(
     return child;
   }
 
-  const weakChild = new WeakRef(child);
+  // WeakRef on the parent only — the handler closure strongly retains the
+  // child so that propagation works even if the caller passes child.signal
+  // to an async API and drops the controller object. See the contract
+  // docstring above.
   const weakParent = new WeakRef(parentSignal);
-  const handler = propagateAbort.bind(weakParent, weakChild);
+  const handler = (): void => {
+    child.abort(weakParent.deref()?.reason);
+  };
 
   parentSignal.addEventListener('abort', handler, { once: true });
 
   child.signal.addEventListener(
     'abort',
-    removeAbortHandler.bind(weakParent, new WeakRef(handler)),
+    () => {
+      // `{once: true}` on the parent listener already self-removes when
+      // parent fires; this branch covers the child-aborts-first case so
+      // we don't leave a dead listener on a long-lived parent.
+      weakParent.deref()?.removeEventListener('abort', handler);
+    },
     { once: true },
   );
 

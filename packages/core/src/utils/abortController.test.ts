@@ -191,27 +191,46 @@ describe('combineAbortSignals', () => {
   });
 });
 
+describe('lifetime contract', () => {
+  it('parent abort propagates to a signal whose controller the caller has dropped', () => {
+    // Real-world pattern: caller pipes child.signal into an async API and
+    // does not hold the controller object itself. The parent listener
+    // closure keeps the controller alive long enough for parent abort to
+    // reach the signal — verified WITHOUT --expose-gc because we don't
+    // depend on GC behavior at all, only on the strong reference inside
+    // the listener closure.
+    const parent = createAbortController();
+    let signal: AbortSignal;
+    (() => {
+      const child = createChildAbortController(parent);
+      signal = child.signal;
+    })();
+    expect(signal!.aborted).toBe(false);
+    parent.abort('parent-reason');
+    expect(signal!.aborted).toBe(true);
+    expect(signal!.reason).toBe('parent-reason');
+  });
+});
+
 describe('GC safety (best-effort, requires --expose-gc)', () => {
   const maybeGc = (globalThis as { gc?: () => void }).gc;
   const itGc = maybeGc ? it : it.skip;
 
-  itGc(
-    'does not retain abandoned children through the parent listener',
-    async () => {
-      const parent = createAbortController();
-      let weakChild: WeakRef<AbortController>;
-      (() => {
-        const child = createChildAbortController(parent);
-        weakChild = new WeakRef(child);
-      })();
-      // Yield to allow finalizers; then GC.
-      await new Promise((r) => setTimeout(r, 0));
-      maybeGc!();
-      await new Promise((r) => setTimeout(r, 0));
-      maybeGc!();
-      expect(weakChild!.deref()).toBeUndefined();
-      // Firing parent now should not throw (handler dereferences a dead WeakRef).
-      expect(() => parent.abort()).not.toThrow();
-    },
-  );
+  itGc('controller becomes GC-eligible after the child aborts', async () => {
+    // After child.abort(), the reverse-cleanup listener removes the
+    // parent's handler closure — which was the strong holder of the
+    // controller. With no other refs, the controller is collectable.
+    const parent = createAbortController();
+    let weakChild: WeakRef<AbortController>;
+    (() => {
+      const child = createChildAbortController(parent);
+      weakChild = new WeakRef(child);
+      child.abort();
+    })();
+    await new Promise((r) => setTimeout(r, 0));
+    maybeGc!();
+    await new Promise((r) => setTimeout(r, 0));
+    maybeGc!();
+    expect(weakChild!.deref()).toBeUndefined();
+  });
 });
