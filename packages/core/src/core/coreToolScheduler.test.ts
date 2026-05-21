@@ -5038,6 +5038,113 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(blockedSpan).toBeUndefined();
   });
 
+  it('prelude throw in _executeToolCallBody transitions tool from scheduled to error (#4321)', async () => {
+    // _executeToolCallBody's prelude (addToolInputAttributes,
+    // getMessageBus, startToolExecutionSpan, etc.) runs BEFORE the
+    // `scheduled → executing` transition. If a synchronous throw escapes
+    // the prelude, the catch in executeSingleToolCall must finalize the
+    // tool span with failure_kind=tool_exception AND transition the
+    // toolCall to 'error' — otherwise checkAndNotifyCompletion never
+    // sees a terminal state and the scheduler stalls (#4321 review-8
+    // wenshao Critical refinement of review-7 SF-H2).
+    toolSpanRecords.length = 0;
+    const mockTool = new MockTool({
+      name: 'mockTool',
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      }),
+    });
+    const mockToolRegistry = {
+      getTool: () => mockTool,
+      ensureTool: async () => mockTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => mockTool,
+      getToolByDisplayName: () => mockTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    // The auto-approve YOLO path doesn't call _schedule's getMessageBus
+    // branch, so the only getMessageBus call is the prelude one at
+    // _executeToolCallBody. Make that call throw.
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({}),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn(() => {
+        throw new Error('prelude boom — getMessageBus throws');
+      }),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+    } as unknown as Config;
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    // The prelude throw re-throws out of executeSingleToolCall →
+    // attemptExecutionOfScheduledCalls → _schedule. That's expected;
+    // the caller surfaces the error. The critical regression is
+    // whether the toolCall transitions out of `scheduled` BEFORE the
+    // throw propagates so checkAndNotifyCompletion sees a terminal
+    // state — without that transition the scheduler is stuck and
+    // onAllToolCallsComplete never fires.
+    await expect(
+      scheduler.schedule(
+        [
+          {
+            callId: 'prelude-throw-1',
+            name: 'mockTool',
+            args: { input: 'x' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-prelude-throw',
+          },
+        ],
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('prelude boom');
+
+    // onAllToolCallsComplete fired (synchronously dispatched from
+    // setStatusInternal → checkAndNotifyCompletion) with the call in
+    // 'error' status — proves the catch transitioned it out of
+    // 'scheduled' BEFORE re-throwing.
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+
+    // Tool span finalized with the canonical failure_kind.
+    const toolSpan = toolSpanRecords.find((r) => r.name === 'tool.mockTool');
+    expect(toolSpan?.ended).toBe(true);
+    expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(
+      'tool_exception',
+    );
+  });
+
   it('signal.abort drains scheduler-local toolSpans + blockedSpans Maps (#4321)', async () => {
     // The 30-min TTL in session-tracing.ts ends underlying spans but
     // cannot reach the scheduler-local toolSpans/blockedSpans Maps. If

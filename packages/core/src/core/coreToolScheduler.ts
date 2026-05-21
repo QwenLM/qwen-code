@@ -2385,18 +2385,20 @@ export class CoreToolScheduler {
       );
     } catch (error) {
       // _executeToolCallBody pre-sets span status (OK / FAILURE /
-      // CANCELLED) only AFTER its main try/catch is entered. Throws from
-      // the prelude — addToolInputAttributes, getMessageBus,
-      // startToolExecutionSpan, etc. — propagate up to this finally
-      // without ever calling setToolSpan*, so the span would end UNSET
-      // with no failure_kind AND the tool call would stay in 'executing'
-      // forever (checkAndNotifyCompletion never sees terminal state).
-      // Pre-set failure status + an error response here so the
-      // finalizeToolSpan in `finally` produces meaningful telemetry and
-      // the scheduler can complete (#4321 review-7 silent-failure-hunter
-      // HIGH-2). If the body's own catch already set status, the
-      // setStatusInternal('error', ...) below is a no-op because the
-      // call has already moved to a terminal status.
+      // CANCELLED) only AFTER its main try/catch is entered. Throws
+      // from the prelude — addToolInputAttributes, getMessageBus,
+      // startToolExecutionSpan, etc. — happen BEFORE the
+      // `scheduled → executing` transition, so the span would end
+      // UNSET with no failure_kind AND the tool call would stay in
+      // `scheduled` forever (checkAndNotifyCompletion never sees a
+      // terminal state). Set failure status + error response here so
+      // the finalizeToolSpan in `finally` produces meaningful
+      // telemetry and the scheduler can complete (#4321 review-7
+      // silent-failure-hunter HIGH-2; review-8 wenshao Critical
+      // dropped the `status === 'executing'` guard the previous
+      // attempt used — `setStatusInternal` already no-ops on
+      // terminal states, so the unconditional call covers both
+      // `scheduled` and `executing` prelude-throw paths).
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       setToolSpanFailure(
@@ -2404,21 +2406,15 @@ export class CoreToolScheduler {
         TOOL_FAILURE_KIND_TOOL_EXCEPTION,
         errorMessage,
       );
-      if (
-        this.toolCalls.find(
-          (c) => c.request.callId === callId && c.status === 'executing',
-        )
-      ) {
-        this.setStatusInternal(
-          callId,
-          'error',
-          createErrorResponse(
-            scheduledCall.request,
-            error instanceof Error ? error : new Error(errorMessage),
-            ToolErrorType.UNHANDLED_EXCEPTION,
-          ),
-        );
-      }
+      this.setStatusInternal(
+        callId,
+        'error',
+        createErrorResponse(
+          scheduledCall.request,
+          error instanceof Error ? error : new Error(errorMessage),
+          ToolErrorType.UNHANDLED_EXCEPTION,
+        ),
+      );
       throw error;
     } finally {
       // _executeToolCallBody pre-sets status (OK / FAILURE / CANCELLED) via

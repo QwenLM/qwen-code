@@ -1020,5 +1020,29 @@ describe('session-tracing', () => {
       const exactlyAtCap = 'b'.repeat(1024);
       expect(truncateSpanError(exactlyAtCap)).toBe(exactlyAtCap);
     });
+
+    it('backs up one code unit when the cut would split a surrogate pair (#4321)', () => {
+      // OTLP/gRPC collectors reject batches with invalid UTF-8. If the
+      // 1024-char cap lands between the high + low surrogate of an
+      // emoji or rare CJK character, truncateSpanError must back up one
+      // code unit so we never emit a lone high surrogate.
+      // 🚀 is U+1F680, encoded as the surrogate pair [0xD83D, 0xDE80].
+      // Put it so the high surrogate is at char index 1023 (last byte
+      // BEFORE the cap), low surrogate at 1024 (first byte AFTER the
+      // cap): pad with 1023 'a's, then the rocket, then enough filler
+      // to push above the cap.
+      const oversized = 'a'.repeat(1023) + '🚀' + 'b'.repeat(100);
+      const truncated = truncateSpanError(oversized);
+      // The truncated string must not END with a lone high surrogate
+      // (code point in [0xD800, 0xDBFF]). The implementation backs up
+      // one code unit when needed.
+      const lastBeforeSentinel = truncated.slice(0, -'…[truncated]'.length);
+      const lastCharCode = lastBeforeSentinel.charCodeAt(
+        lastBeforeSentinel.length - 1,
+      );
+      expect(lastCharCode).not.toBeGreaterThanOrEqual(0xd800);
+      // And the result must be valid UTF-16 (no orphan surrogates).
+      expect(() => Buffer.from(truncated, 'utf16le')).not.toThrow();
+    });
   });
 });

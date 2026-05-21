@@ -218,9 +218,16 @@ const SPAN_ERROR_MAX_CHARS = 1024;
  * the encoder cost on every endXSpan (review-4 follow-up).
  */
 export function truncateSpanError(s: string): string {
-  return s.length > SPAN_ERROR_MAX_CHARS
-    ? s.slice(0, SPAN_ERROR_MAX_CHARS) + '…[truncated]'
-    : s;
+  if (s.length <= SPAN_ERROR_MAX_CHARS) return s;
+  // Back up one code unit if the cut lands on a high surrogate so we
+  // don't emit a lone surrogate followed by the sentinel — strict
+  // OTLP/gRPC collectors reject span batches with invalid UTF-8
+  // (a lone high surrogate encodes to an invalid byte sequence)
+  // (#4321 review-8 wenshao Suggestion).
+  let end = SPAN_ERROR_MAX_CHARS;
+  const code = s.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end--;
+  return s.slice(0, end) + '…[truncated]';
 }
 
 function getTracer() {

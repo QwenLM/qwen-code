@@ -129,8 +129,12 @@ export async function firePreToolUseHook(
       // `error.message`, synthesize a sentinel so the contract violation is
       // still visible on the span instead of silently degrading to an allow
       // with empty telemetry (#4321 review-7 silent-failure-hunter HIGH-1).
+      // `??` not `||`: a runner returning `{ error: { message: "" } }`
+      // is unhelpful but still IS a message — only synthesize the
+      // sentinel when the message is truly absent (#4321 review-8
+      // wenshao Suggestion).
       const message =
-        response.error?.message ||
+        response.error?.message ??
         `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
       return { shouldProceed: true, hookError: message };
     }
@@ -232,8 +236,12 @@ export async function firePostToolUseHook(
 
     if (!response.success || !response.output) {
       // See firePreToolUseHook for the rationale.
+      // `??` not `||`: a runner returning `{ error: { message: "" } }`
+      // is unhelpful but still IS a message — only synthesize the
+      // sentinel when the message is truly absent (#4321 review-8
+      // wenshao Suggestion).
       const message =
-        response.error?.message ||
+        response.error?.message ??
         `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
       return { shouldStop: false, hookError: message };
     }
@@ -315,8 +323,12 @@ export async function firePostToolUseFailureHook(
 
     if (!response.success || !response.output) {
       // See firePreToolUseHook for the rationale.
+      // `??` not `||`: a runner returning `{ error: { message: "" } }`
+      // is unhelpful but still IS a message — only synthesize the
+      // sentinel when the message is truly absent (#4321 review-8
+      // wenshao Suggestion).
       const message =
-        response.error?.message ||
+        response.error?.message ??
         `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
       return { hookError: message };
     }
