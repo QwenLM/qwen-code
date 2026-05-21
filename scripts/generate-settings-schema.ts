@@ -116,6 +116,15 @@ function convertSettingToJsonSchema(
     schema.description = setting.description;
   }
 
+  // Add note for userOnly settings
+  if (setting.userOnly) {
+    const userOnlyNote =
+      '**User-only setting**: This setting can only be configured in user settings, not in workspace settings.';
+    schema.description = schema.description
+      ? `${schema.description} ${userOnlyNote}`
+      : userOnlyNote;
+  }
+
   switch (setting.type) {
     case 'boolean':
       schema.type = 'boolean';

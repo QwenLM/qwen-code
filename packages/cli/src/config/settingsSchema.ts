@@ -113,6 +113,13 @@ export interface SettingDefinition {
    * SettingDefinition `type` field cannot express.
    */
   jsonSchemaOverride?: Record<string, unknown>;
+  /**
+   * When true, this setting can only be configured at the user scope.
+   * Workspace-level values are ignored during merge. Use for settings
+   * that should not be overridable by workspace (e.g., security-sensitive
+   * or user-preference settings).
+   */
+  userOnly?: boolean;
 }
 
 /**
@@ -760,6 +767,7 @@ const SETTINGS_SCHEMA = {
         description:
           'Command to execute for fortune quotes. Use -s for short fortunes, -n <chars> to limit length. Set `enableFortunes` to false to disable. Requires restart to apply.',
         showInDialog: false,
+        userOnly: true,
       },
       enableWelcomeBack: {
         type: 'boolean',
