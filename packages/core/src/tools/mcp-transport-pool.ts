@@ -314,6 +314,19 @@ export class McpTransportPool {
     // both branches; refusal under enforce mode throws
     // BudgetExhaustedError so the caller's catch translates to
     // `refused_batch` in the snapshot.
+    // F2 (#4175 commit 6 review fix — wenshao R24 T17 Critical):
+    // hoist `reservationResult` into outer scope so the catch blocks
+    // below can distinguish `'reserved'` (THIS acquire actually
+    // consumed a slot, must roll back on failure) from
+    // `'already_held'` (a same-name sibling held the slot, this
+    // acquire reserved nothing, must NOT release on failure). Pre-
+    // R24 the catches called `budget.release(serverName)` whenever
+    // `!hasNameSibling()` was true — a sibling concurrently evicted
+    // between this acquire's `tryReserve` and the catch would cause
+    // a phantom release of a slot this acquire never reserved,
+    // drifting the budget counter (false-positive
+    // `BudgetExhaustedError` refusals or under-counted over-spawn).
+    let reservationResult: 'reserved' | 'already_held' | undefined;
     if (this.opts.budget !== undefined) {
       const reservation = this.opts.budget.tryReserve(serverName);
       if (reservation === 'refused') {
@@ -328,6 +341,7 @@ export class McpTransportPool {
       // 'reserved' or 'already_held' both proceed — `already_held`
       // means same-name divergent-fingerprint or a reconnect-after-
       // drain. Either way no slot is newly consumed.
+      reservationResult = reservation;
     }
 
     // SDK MCP / non-pooled HTTP go through the per-session bypass.
@@ -341,8 +355,12 @@ export class McpTransportPool {
           sessionPromptRegistry,
         );
       } catch (err) {
+        // R24 T17: only release if THIS acquire actually reserved a
+        // new slot. `'already_held'` means the sibling holds it; not
+        // ours to release.
         if (
           this.opts.budget !== undefined &&
+          reservationResult === 'reserved' &&
           !this.hasNameSibling(serverName)
         ) {
           this.opts.budget.release(serverName);
@@ -378,10 +396,20 @@ export class McpTransportPool {
           // F2 (#4175 commit 6): roll back the slot reservation on
           // spawn failure (V21-4) so a transient connect failure
           // doesn't leak the slot until daemon restart.
-          if (this.opts.budget !== undefined) {
-            if (!this.hasNameSibling(serverName)) {
-              this.opts.budget.release(serverName);
-            }
+          //
+          // R24 T17: only release if THIS acquire actually reserved a
+          // new slot (`reservationResult === 'reserved'`). When
+          // `tryReserve` returned `'already_held'`, a same-name
+          // sibling held the slot; this acquire reserved nothing, so
+          // a release here would phantom-decrement the budget counter
+          // if the sibling were concurrently evicted between
+          // `tryReserve` and this catch.
+          if (
+            this.opts.budget !== undefined &&
+            reservationResult === 'reserved' &&
+            !this.hasNameSibling(serverName)
+          ) {
+            this.opts.budget.release(serverName);
           }
           throw err;
         });

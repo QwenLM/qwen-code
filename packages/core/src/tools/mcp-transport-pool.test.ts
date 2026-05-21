@@ -977,6 +977,61 @@ describe('McpTransportPool', () => {
       ).rejects.toThrow(/budget exhausted/i);
     });
 
+    it("does NOT phantom-release when 'already_held' spawn fails (R24 T17)", async () => {
+      // R24 T17: pre-fix the spawn-failure catch unconditionally
+      // called `budget.release(serverName)` whenever
+      // `!hasNameSibling(serverName)` was true, regardless of whether
+      // THIS acquire actually reserved a new slot. When `tryReserve`
+      // returned `'already_held'` (sibling A already held the slot),
+      // and the sibling was concurrently evicted between this
+      // acquire's `tryReserve` and its catch, the catch would call
+      // `budget.release(serverName)` — releasing a slot this acquire
+      // never reserved. Set.delete idempotency masked the practical
+      // drift, but the contract was wrong: the catch's job is to
+      // roll back THIS acquire's reservation, not to re-attempt
+      // cleanup that already happened (or never should have).
+      // Post-fix the catch checks `reservationResult === 'reserved'`
+      // before releasing.
+      const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
+      const budget = new WorkspaceMcpBudget({
+        clientBudget: 2,
+        mode: 'enforce',
+      });
+      // Connect: first call (A's spawn) resolves; second call (B's
+      // spawn) throws so B hits the catch path.
+      let connectCallCount = 0;
+      const mocked = mockMcpSuccess({ toolNames: ['t1'] });
+      mocked.connect = vi.fn().mockImplementation(() => {
+        connectCallCount += 1;
+        if (connectCallCount === 1) return Promise.resolve(undefined);
+        return Promise.reject(new Error('B spawn boom'));
+      });
+
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions({ budget }));
+      const r1 = mkSessionRegistries();
+      const cfgA = new MCPServerConfig('node', ['-a']);
+      const cfgB = new MCPServerConfig('node', ['-b']);
+      // A: tryReserve → 'reserved', spawn succeeds.
+      await pool.acquire('srvA', cfgA, 's1', r1.tools, r1.prompts);
+      expect(budget.getReservedSlots()).toEqual(['srvA']);
+
+      // B: same name, different fingerprint → tryReserve →
+      // 'already_held'. Spawn throws.
+      const releaseSpy = vi.spyOn(budget, 'release');
+      const r2 = mkSessionRegistries();
+      await expect(
+        pool.acquire('srvA', cfgB, 's2', r2.tools, r2.prompts),
+      ).rejects.toThrow(/B spawn boom/);
+
+      // Post-R24: B's catch must NOT call release because
+      // `reservationResult === 'already_held'`. Pre-R24 release was
+      // called (no-op via Set.delete idempotency, but the call
+      // happened, indicating the wrong contract).
+      expect(releaseSpy).not.toHaveBeenCalled();
+      // A still holds the slot.
+      expect(budget.getReservedSlots()).toEqual(['srvA']);
+    });
+
     it('rolls back the slot reservation on spawn failure', async () => {
       // Mock connect to throw → entry never reaches `markActive`,
       // pool's `entries.delete(id)` runs in the catch block.

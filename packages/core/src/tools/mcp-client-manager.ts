@@ -2373,6 +2373,26 @@ export class McpClientManager {
     }
     const pooled = this.pooledConnections.get(serverName);
     if (pooled) {
+      // F2 (#4175 commit 6 review fix — wenshao R24 T19): self-heal
+      // pre-call health check. There is a narrow window between a
+      // silent transport drop (W120/W131 flips entry to 'failed' +
+      // emits the 'failed' event) and the manager-side `onFailed`
+      // listener evicting the handle from `pooledConnections`. A
+      // `readResource` landing in that window pre-fix delegated to
+      // `pooled.client.readResource` on a dead transport and
+      // surfaced an opaque MCP `"Transport is closed"` error.
+      // Detect the dead handle, evict it inline (so the next call
+      // re-acquires through the legacy spawn path below), and throw
+      // a clear server-unavailable error the caller can surface.
+      // Mirrors the W122 self-heal philosophy: the pool already
+      // owns the eviction, we just close the observability gap on
+      // the read path.
+      if (pooled.client.getStatus() !== MCPServerStatus.CONNECTED) {
+        this.pooledConnections.delete(serverName);
+        throw new Error(
+          `MCP server '${serverName}' pool entry disconnected; retry after discovery.`,
+        );
+      }
       return pooled.client.readResource(uri, options);
     }
 

@@ -471,6 +471,7 @@ describe('McpClientManager', () => {
   });
 
   it('routes readResource through an existing pooled connection', async () => {
+    const { MCPServerStatus } = await import('./mcp-client.js');
     const readResource = vi.fn().mockResolvedValue({
       contents: [{ uri: 'mcp://srv/doc', text: 'pooled' }],
     });
@@ -480,7 +481,9 @@ describe('McpClientManager', () => {
       id: 'srv::abc',
       serverName: 'srv',
       entryIndex: 0,
-      client: { readResource },
+      // R24 T19: pooled fast-path now health-checks via
+      // `client.getStatus()` before delegating; mocks must provide it.
+      client: { readResource, getStatus: () => MCPServerStatus.CONNECTED },
     });
     const fakePool = {
       acquire: acquireSpy,
@@ -515,6 +518,89 @@ describe('McpClientManager', () => {
       contents: [{ uri: 'mcp://srv/doc', text: 'pooled' }],
     });
     expect(McpClient).not.toHaveBeenCalled();
+  });
+
+  it('readResource self-heals when pooled handle is dead (R24 T19)', async () => {
+    // R24 T19: pre-fix the pooled fast-path
+    // (`pooledConnections.get` → `pooled.client.readResource`) skipped
+    // any health check on the McpClient. In the narrow window between
+    // a silent transport drop (W120/W131 flips entry to 'failed' +
+    // emits the 'failed' event) and the manager's `onFailed`
+    // listener evicting the handle from `pooledConnections`, a
+    // `readResource` would delegate to a dead transport and surface
+    // an opaque MCP `"Transport is closed"` error. Post-fix the
+    // pooled path checks `pooled.client.getStatus()`; if not
+    // CONNECTED, it evicts the handle inline (so the next call
+    // re-acquires through the legacy spawn path) and throws a clear
+    // server-unavailable error.
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const readResource = vi.fn().mockResolvedValue({
+      contents: [{ uri: 'mcp://srv/doc', text: 'pooled' }],
+    });
+    let mockedStatus: (typeof MCPServerStatus)[keyof typeof MCPServerStatus] =
+      MCPServerStatus.CONNECTED;
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+      client: {
+        readResource,
+        getStatus: () => mockedStatus,
+      },
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    await manager.discoverAllMcpTools(mockConfig);
+    // Sanity: healthy fast-path still works.
+    await expect(manager.readResource('srv', 'mcp://srv/doc')).resolves.toEqual(
+      {
+        contents: [{ uri: 'mcp://srv/doc', text: 'pooled' }],
+      },
+    );
+
+    // Simulate the silent-drop window: pooled handle is still in
+    // pooledConnections (onFailed listener hasn't run yet), but the
+    // McpClient's status has flipped to DISCONNECTED.
+    mockedStatus = MCPServerStatus.DISCONNECTED;
+
+    // Pre-R24 this delegated to readResource on the dead transport
+    // and surfaced an opaque MCP error. Post-R24 self-heal: clear
+    // server-unavailable error + handle evicted from pooledConnections.
+    await expect(manager.readResource('srv', 'mcp://srv/doc')).rejects.toThrow(
+      /pool entry disconnected; retry after discovery/,
+    );
+
+    // Handle evicted — confirms self-heal cleanup ran.
+    const pooledMap = (
+      manager as unknown as {
+        pooledConnections: Map<string, unknown>;
+      }
+    ).pooledConnections;
+    expect(pooledMap.has('srv')).toBe(false);
   });
 
   it('disconnectServer releases pooled connection in pool mode (F2 commit 4 / W39)', async () => {
