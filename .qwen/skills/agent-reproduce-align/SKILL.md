@@ -45,7 +45,7 @@ Read `references/alignment-workflow.md` before the first comparison pass.
 Normalize:
 
 ```sh
-skills/agent-reproduce-align/scripts/normalize_trace.py \
+.qwen/skills/agent-reproduce-align/scripts/normalize_trace.py \
   .repro-runs/reference/http.jsonl \
   > .repro-runs/reference/normalized.json
 ```
@@ -53,7 +53,7 @@ skills/agent-reproduce-align/scripts/normalize_trace.py \
 Compare:
 
 ```sh
-skills/agent-reproduce-align/scripts/compare_traces.py \
+.qwen/skills/agent-reproduce-align/scripts/compare_traces.py \
   .repro-runs/reference/normalized.json \
   .repro-runs/qwen/normalized.json
 ```
@@ -62,7 +62,7 @@ Run a paired shell scenario:
 
 ```sh
 REPRO_REFERENCE_AGENT=codex \
-skills/agent-reproduce-align/scripts/run_pair_capture.sh \
+.qwen/skills/agent-reproduce-align/scripts/run_pair_capture.sh \
   .repro-runs/slash-help \
   "codex exec '/help'" \
   "npm test -- --runInBand"

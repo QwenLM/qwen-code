@@ -42,13 +42,13 @@ Use both when a feature has model calls and visible terminal state.
 Run a state snapshot before and after the reference scenario:
 
 ```sh
-skills/agent-reproduce-feature/scripts/capture_state.py \
+.qwen/skills/agent-reproduce-feature/scripts/capture_state.py \
   snapshot OUT_DIR/state-before --agent codex
 
-skills/agent-reproduce-feature/scripts/capture_state.py \
+.qwen/skills/agent-reproduce-feature/scripts/capture_state.py \
   snapshot OUT_DIR/state-after --agent codex
 
-skills/agent-reproduce-feature/scripts/capture_state.py \
+.qwen/skills/agent-reproduce-feature/scripts/capture_state.py \
   diff OUT_DIR/state-before OUT_DIR/state-after \
   --out-dir OUT_DIR/state-diff
 ```
@@ -84,7 +84,7 @@ python -m pip install --user mitmproxy
 Run a command under capture:
 
 ```sh
-skills/agent-reproduce-feature/scripts/run_with_mitm.sh OUT_DIR -- COMMAND ARG...
+.qwen/skills/agent-reproduce-feature/scripts/run_with_mitm.sh OUT_DIR -- COMMAND ARG...
 ```
 
 Generated files:
@@ -108,7 +108,7 @@ The default CA path is `~/.mitmproxy/mitmproxy-ca-cert.pem`. Some CLIs ignore on
 Run:
 
 ```sh
-skills/agent-reproduce-feature/scripts/run_tmux_capture.sh OUT_DIR COMMAND ARG...
+.qwen/skills/agent-reproduce-feature/scripts/run_tmux_capture.sh OUT_DIR COMMAND ARG...
 ```
 
 Generated files:

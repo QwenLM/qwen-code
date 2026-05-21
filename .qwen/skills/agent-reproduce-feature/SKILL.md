@@ -65,7 +65,7 @@ Prefer a fresh output directory per run:
 
 ```sh
 mkdir -p .repro-runs/slash-command-baseline
-skills/agent-reproduce-feature/scripts/run_with_mitm.sh \
+.qwen/skills/agent-reproduce-feature/scripts/run_with_mitm.sh \
   .repro-runs/slash-command-baseline \
   -- codex exec "exercise the Codex feature here"
 ```
@@ -73,7 +73,7 @@ skills/agent-reproduce-feature/scripts/run_with_mitm.sh \
 For Claude Code, use the discovered headless command if available; otherwise use tmux:
 
 ```sh
-skills/agent-reproduce-feature/scripts/run_tmux_capture.sh \
+.qwen/skills/agent-reproduce-feature/scripts/run_tmux_capture.sh \
   .repro-runs/slash-command-claude \
   claude
 ```
@@ -81,7 +81,7 @@ skills/agent-reproduce-feature/scripts/run_tmux_capture.sh \
 For interactive slash commands or terminal rendering, use tmux:
 
 ```sh
-skills/agent-reproduce-feature/scripts/run_tmux_capture.sh \
+.qwen/skills/agent-reproduce-feature/scripts/run_tmux_capture.sh \
   .repro-runs/slash-command-tui \
   codex
 ```
@@ -91,17 +91,17 @@ The mitm script sets common proxy and CA variables for Node, Python, and curl-ba
 Capture reference-agent state before and after a run:
 
 ```sh
-skills/agent-reproduce-feature/scripts/capture_state.py \
+.qwen/skills/agent-reproduce-feature/scripts/capture_state.py \
   snapshot .repro-runs/slash-command-baseline/state-before \
   --agent codex
 
 # Run the reference scenario here.
 
-skills/agent-reproduce-feature/scripts/capture_state.py \
+.qwen/skills/agent-reproduce-feature/scripts/capture_state.py \
   snapshot .repro-runs/slash-command-baseline/state-after \
   --agent codex
 
-skills/agent-reproduce-feature/scripts/capture_state.py \
+.qwen/skills/agent-reproduce-feature/scripts/capture_state.py \
   diff \
   .repro-runs/slash-command-baseline/state-before \
   .repro-runs/slash-command-baseline/state-after \
