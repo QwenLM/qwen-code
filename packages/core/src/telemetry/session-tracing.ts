@@ -20,6 +20,7 @@ import {
   SPAN_HOOK,
   SPAN_INTERACTION,
   SPAN_LLM_REQUEST,
+  SPAN_SUBAGENT,
   SPAN_TOOL,
   SPAN_TOOL_BLOCKED_ON_USER,
   SPAN_TOOL_EXECUTION,
@@ -103,11 +104,12 @@ interface SpanContext {
     | 'llm_request'
     | 'tool'
     | 'tool.execution'
-    // Phase 2 forward-declarations (no start*/end* helpers wired yet —
-    // see docs/design/workflow-tracing-gaps.md). Listed here so Phase 2
-    // can add helpers without touching this type.
     | 'tool.blocked_on_user'
-    | 'hook';
+    | 'hook'
+    // Phase 3: single subagent invocation. Hosts the LLM/tool/hook subtree
+    // emitted by the subagent so concurrent subagents don't interleave
+    // (#3731 Phase 3; see docs/design/telemetry-subagent-spans-design.md).
+    | 'subagent';
 }
 
 /**
@@ -158,70 +160,97 @@ const strongSpans = new Map<string, SpanContext>();
 let interactionSequence = 0;
 let lastInteractionCtx: SpanContext | undefined;
 let cleanupIntervalStarted = false;
-const SPAN_TTL_MS = 30 * 60 * 1000;
+const SPAN_TTL_MS_DEFAULT = 30 * 60 * 1000; //   30 min — user walk-away
+const SPAN_TTL_MS_LONG = 4 * 60 * 60 * 1000; //   4 h  — long fire-and-forget subagent
+
+/**
+ * TTL per span type. Default is 30 min — picked for `tool.blocked_on_user`
+ * (user think-time). Subagent fork/background invocations can legitimately
+ * run hours (large analysis, slow builds, deep research), so they need a
+ * wider safety-net window (#3731 Phase 3). The check on
+ * `invocation_kind === 'foreground'` keeps foreground subagents at the
+ * default TTL — those are bound to the user-facing request and should
+ * never legitimately exceed the default window.
+ */
+function ttlFor(ctx: SpanContext): number {
+  if (ctx.type === 'subagent') {
+    const kind = ctx.attributes['qwen-code.subagent.invocation_kind'];
+    if (kind === 'fork' || kind === 'background') return SPAN_TTL_MS_LONG;
+  }
+  return SPAN_TTL_MS_DEFAULT;
+}
 
 function sweepStaleSpans(now: number): void {
-  const cutoff = now - SPAN_TTL_MS;
   for (const [spanId, weakRef] of activeSpans) {
     const ctx = weakRef.deref();
     if (ctx === undefined) {
       activeSpans.delete(spanId);
       strongSpans.delete(spanId);
-    } else if (ctx.startTime < cutoff) {
-      if (!ctx.ended) {
-        ctx.ended = true;
-        // Mark the span so backends can distinguish "abandoned and
-        // garbage-collected by the TTL safety net" from "deliberately
-        // ended without setting status / attrs" (#4321 review).
-        const ageMs = now - ctx.startTime;
-        const toolName = ctx.attributes['tool.name'];
-        const callId = ctx.attributes['tool.call_id'];
-        // setAttributes and span.end() are wrapped separately so a
-        // setAttributes throw can't prevent the span from being ended
-        // (#4321 review-3 wenshao Suggestion). For blocked_on_user
-        // spans, also stamp the canonical decision/source taxonomy so
-        // dashboards filtering by `decision: 'aborted'` count
-        // walk-aways consistently with explicit user aborts.
-        try {
-          ctx.span.setAttributes({
-            'qwen-code.span.ttl_expired': true,
-            'qwen-code.span.duration_ms': ageMs,
-            ...(ctx.type === 'tool.blocked_on_user'
-              ? {
-                  decision: 'aborted',
-                  source: 'system',
-                }
-              : {}),
-          });
-        } catch (error) {
-          // OTel errors must not prevent span.end() from running, but
-          // they're worth surfacing — dropping the sentinel attrs makes
-          // a TTL-aborted span look identical to a deliberately-UNSET
-          // one in dashboards (#4321 review-7 silent-failure-hunter).
-          debugLogger.warn(
-            `Failed to stamp TTL attrs on stale span ${spanId}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-        // Include tool name + call_id so the log is actionable in
-        // production without a trace-backend lookup (review-3).
-        const ctxLabel =
-          toolName && callId
-            ? `${ctx.type} (tool.name=${toolName}, tool.call_id=${callId})`
-            : ctx.type;
-        debugLogger.warn(
-          `Stale ${ctxLabel} span ended by TTL safety net (age=${ageMs}ms, spanId=${spanId})`,
-        );
-        try {
-          ctx.span.end();
-        } catch (error) {
-          debugLogger.warn(
-            `Failed to end stale span ${spanId}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      }
-      activeSpans.delete(spanId);
-      strongSpans.delete(spanId);
+      continue;
     }
+    if (now - ctx.startTime < ttlFor(ctx)) continue;
+
+    if (!ctx.ended) {
+      ctx.ended = true;
+      // Mark the span so backends can distinguish "abandoned and
+      // garbage-collected by the TTL safety net" from "deliberately
+      // ended without setting status / attrs" (#4321 review).
+      const ageMs = now - ctx.startTime;
+      const toolName = ctx.attributes['tool.name'];
+      const callId = ctx.attributes['tool.call_id'];
+      // setAttributes and span.end() are wrapped separately so a
+      // setAttributes throw can't prevent the span from being ended
+      // (#4321 review-3 wenshao Suggestion). Type-specific stamps:
+      //  - blocked_on_user: canonical decision/source so dashboards
+      //    counting `decision: 'aborted'` cover walk-aways.
+      //  - subagent: status='aborted' + terminate_reason='ttl_swept'
+      //    so subagent dashboards see ttl-victims as distinct from
+      //    user-cancelled / failed (#3731 Phase 3).
+      try {
+        ctx.span.setAttributes({
+          'qwen-code.span.ttl_expired': true,
+          'qwen-code.span.duration_ms': ageMs,
+          ...(ctx.type === 'tool.blocked_on_user'
+            ? {
+                decision: 'aborted',
+                source: 'system',
+              }
+            : {}),
+          ...(ctx.type === 'subagent'
+            ? {
+                'qwen-code.subagent.status': 'aborted',
+                'qwen-code.subagent.terminate_reason': 'ttl_swept',
+              }
+            : {}),
+        });
+      } catch (error) {
+        // OTel errors must not prevent span.end() from running, but
+        // they're worth surfacing — dropping the sentinel attrs makes
+        // a TTL-aborted span look identical to a deliberately-UNSET
+        // one in dashboards (#4321 review-7 silent-failure-hunter).
+        debugLogger.warn(
+          `Failed to stamp TTL attrs on stale span ${spanId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      // Include tool name + call_id so the log is actionable in
+      // production without a trace-backend lookup (review-3).
+      const ctxLabel =
+        toolName && callId
+          ? `${ctx.type} (tool.name=${toolName}, tool.call_id=${callId})`
+          : ctx.type;
+      debugLogger.warn(
+        `Stale ${ctxLabel} span ended by TTL safety net (age=${ageMs}ms, spanId=${spanId})`,
+      );
+      try {
+        ctx.span.end();
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to end stale span ${spanId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    activeSpans.delete(spanId);
+    strongSpans.delete(spanId);
   }
 }
 
@@ -935,6 +964,230 @@ export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
       `Failed to end hook span: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  activeSpans.delete(spanId);
+  strongSpans.delete(spanId);
+}
+
+// --- Subagent Spans (#3731 Phase 3) ---
+
+export type SubagentInvocationKind = 'foreground' | 'fork' | 'background';
+
+export type SubagentStatus = 'completed' | 'failed' | 'cancelled' | 'aborted';
+
+export interface StartSubagentSpanOptions {
+  /** Unique identifier for this subagent invocation (e.g. `Explore-abc123`). */
+  agentId: string;
+  /** Human-readable subagent type (e.g. `Explore`, `code-reviewer`, `fork`). */
+  subagentName: string;
+  invocationKind: SubagentInvocationKind;
+  isBuiltIn: boolean;
+  /** Parent agent's id, when this subagent is nested inside another. */
+  parentAgentId?: string;
+  /** 0 for top-level subagent, +1 per nesting. */
+  depth: number;
+  /** Parent's request id (for cross-trace correlation with parent prompt). */
+  invokingRequestId?: string;
+  /** Session id — set as both `gen_ai.conversation.id` and vendor key. */
+  sessionId: string;
+  /** Model override, if this subagent runs on a different model than parent. */
+  modelOverride?: string;
+  /**
+   * For `fork` / `background` invocations: span context of the invoking
+   * span (the parent AGENT tool span). Used as the `Link` source so the
+   * new-traceId root can be navigated back to the invoker. Ignored for
+   * `foreground` (inherits via context.active()).
+   */
+  invokerSpanContext?: import('@opentelemetry/api').SpanContext;
+}
+
+export interface SubagentSpanMetadata {
+  status: SubagentStatus;
+  /** Free-form reason (e.g. `task_complete`, `max_iterations`, `user_abort`, `ttl_swept`). */
+  terminateReason?: string;
+  /** Whether the subagent produced any result text. Bounded boolean (no payload). */
+  resultSummaryPresent?: boolean;
+  /** Truncated via {@link truncateSpanError} before write. */
+  error?: string;
+  /** Error class name (e.g. `Error`, `AbortError`). */
+  errorType?: string;
+}
+
+/**
+ * Open a subagent span.
+ *
+ * - `foreground` invocations become children of the currently-active span
+ *   (typically the AGENT tool span), inheriting its traceId.
+ * - `fork` / `background` invocations become linked-root spans — new traceId,
+ *   with an OTel {@link Link} pointing at `invokerSpanContext`. The OTel
+ *   spec explicitly recommends Link for "long running asynchronous data
+ *   processing operation that was initiated by [a] fast incoming request"
+ *   (`https://opentelemetry.io/docs/specs/otel/overview/#links-between-spans`).
+ *   Fire-and-forget subagents run for minutes-to-hours and would otherwise
+ *   inflate the parent trace's duration / span count beyond several
+ *   backends' caps (e.g. LangSmith's 25k-run cap per trace).
+ *
+ * Dual-emits the OTel GenAI spec attrs (`gen_ai.agent.id`, `gen_ai.agent.name`,
+ * `gen_ai.conversation.id`) alongside vendor `qwen-code.subagent.*` keys.
+ * Spec is in Development status — dual-emit lets dashboards transition once
+ * the spec stabilises; drop the vendor key in a follow-up.
+ */
+export function startSubagentSpan(opts: StartSubagentSpanOptions): Span {
+  if (!isTelemetrySdkInitialized()) return NOOP_SPAN;
+
+  ensureCleanupInterval();
+
+  const attributes: Attributes = {
+    // Spec-aligned (OTel GenAI Agent Spans, Development status).
+    'gen_ai.operation.name': 'invoke_agent',
+    'gen_ai.provider.name': SERVICE_NAME,
+    'gen_ai.agent.id': opts.agentId,
+    'gen_ai.agent.name': opts.subagentName,
+    'gen_ai.conversation.id': opts.sessionId,
+
+    // Vendor (qwen-code-specific). Dual-emit id/name so dashboards already
+    // querying spec keys still work.
+    'qwen-code.subagent.id': opts.agentId,
+    'qwen-code.subagent.name': opts.subagentName,
+    'qwen-code.subagent.invocation_kind': opts.invocationKind,
+    'qwen-code.subagent.is_built_in': opts.isBuiltIn,
+    'qwen-code.subagent.depth': opts.depth,
+  };
+
+  if (opts.modelOverride !== undefined) {
+    attributes['gen_ai.request.model'] = opts.modelOverride;
+  }
+  if (opts.parentAgentId !== undefined) {
+    attributes['qwen-code.subagent.parent_agent_id'] = opts.parentAgentId;
+  }
+  if (opts.invokingRequestId !== undefined) {
+    attributes['qwen-code.subagent.invoking_request_id'] =
+      opts.invokingRequestId;
+  }
+
+  const tracer = getTracer();
+
+  let span: Span;
+  if (opts.invocationKind === 'foreground') {
+    // Child of current active span — caller's tool span via context.active().
+    span = tracer.startSpan(SPAN_SUBAGENT, {
+      kind: SpanKind.INTERNAL,
+      attributes,
+    });
+  } else {
+    // fork / background: linked root span. `root: true` forces a new traceId
+    // ignoring any active context; Link points back to the invoker so
+    // operators can navigate cross-trace.
+    span = tracer.startSpan(SPAN_SUBAGENT, {
+      kind: SpanKind.INTERNAL,
+      attributes,
+      root: true,
+      links: opts.invokerSpanContext
+        ? [
+            {
+              context: opts.invokerSpanContext,
+              attributes: { 'qwen-code.link.kind': 'invoker' },
+            },
+          ]
+        : undefined,
+    });
+  }
+
+  const spanId = getSpanId(span);
+  const spanContextObj: SpanContext = {
+    span,
+    startTime: Date.now(),
+    attributes: attributes as Record<string, string | number | boolean>,
+    type: 'subagent',
+  };
+  activeSpans.set(spanId, new WeakRef(spanContextObj));
+  strongSpans.set(spanId, spanContextObj);
+  return span;
+}
+
+/**
+ * Run `fn` with `span` set as the active OTel span. Child LLM / tool /
+ * hook spans created inside `fn` will see `span` as parent via
+ * `context.active()` and inherit its traceId. Required for fork /
+ * background paths so child spans don't escape into the ambient context
+ * after the caller's AgentTool.execute has already returned.
+ *
+ * Mirrors opencode's `withRunSpan` pattern.
+ */
+export function runInSubagentSpanContext<T>(
+  span: Span,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const ctx = trace.setSpan(otelContext.active(), span);
+  return otelContext.with(ctx, fn);
+}
+
+/**
+ * Finalize a subagent span. Status mapping:
+ *  - `completed` → SpanStatus OK
+ *  - `failed`    → SpanStatus ERROR, sets `exception.message` + `error.type`
+ *  - `cancelled` / `aborted` → SpanStatus UNSET (matches Phase 2 cancellation)
+ *
+ * Idempotent: second call on the same span is a no-op.
+ */
+export function endSubagentSpan(
+  span: Span,
+  metadata: SubagentSpanMetadata,
+): void {
+  const spanId = getSpanId(span);
+  const spanCtx = activeSpans.get(spanId)?.deref();
+  if (!spanCtx || spanCtx.ended) return;
+
+  spanCtx.ended = true;
+
+  try {
+    const duration = Date.now() - spanCtx.startTime;
+    const endAttributes: Attributes = {
+      'qwen-code.subagent.duration_ms': duration,
+      'qwen-code.subagent.status': metadata.status,
+    };
+    if (metadata.terminateReason !== undefined) {
+      endAttributes['qwen-code.subagent.terminate_reason'] =
+        metadata.terminateReason;
+    }
+    if (metadata.resultSummaryPresent !== undefined) {
+      endAttributes['qwen-code.subagent.result_summary_present'] =
+        metadata.resultSummaryPresent;
+    }
+    if (metadata.error !== undefined) {
+      const truncated = truncateSpanError(metadata.error);
+      endAttributes['exception.message'] = truncated;
+    }
+    if (metadata.errorType !== undefined) {
+      endAttributes['error.type'] = metadata.errorType;
+    }
+
+    spanCtx.span.setAttributes(endAttributes);
+
+    if (metadata.status === 'completed') {
+      spanCtx.span.setStatus({ code: SpanStatusCode.OK });
+    } else if (metadata.status === 'failed') {
+      spanCtx.span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: metadata.error
+          ? truncateSpanError(metadata.error)
+          : 'subagent failed',
+      });
+    }
+    // cancelled / aborted → leave SpanStatus UNSET (Phase 2 convention).
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to update subagent span attributes/status: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  try {
+    spanCtx.span.end();
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to end subagent span: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
 }

@@ -751,4 +751,46 @@ describe('LogToSpanProcessor', () => {
       deriveTraceId('fresh-session'),
     );
   });
+
+  describe('bridge skip-list (#3731 Phase 3)', () => {
+    it('skips qwen-code.subagent_execution events — no bridge span emitted', async () => {
+      const logRecord = {
+        body: 'subagent started',
+        hrTime: [2000, 0] as [number, number],
+        attributes: {
+          'event.name': 'qwen-code.subagent_execution',
+          subagent_name: 'Explore',
+          status: 'started',
+        },
+      } as unknown as ReadableLogRecord;
+
+      processor.onEmit(logRecord);
+      await processor.forceFlush();
+
+      // The LogRecord itself is unaffected — RUM + metrics consumers
+      // still see it via the regular LogRecord pipeline. But the
+      // log-to-span bridge does NOT emit a span for it (the native
+      // qwen-code.subagent span from agent.ts provides the trace
+      // hierarchy instead).
+      expect(exportedSpans).toHaveLength(0);
+    });
+
+    it('still bridges other events normally (e.g. qwen-code.tool_call)', async () => {
+      const logRecord = {
+        body: 'tool call',
+        hrTime: [3000, 0] as [number, number],
+        attributes: {
+          'event.name': 'qwen-code.tool_call',
+          tool_name: 'read_file',
+        },
+      } as unknown as ReadableLogRecord;
+
+      processor.onEmit(logRecord);
+      await processor.forceFlush();
+
+      // Sanity check: skip list is narrow — non-listed events still bridge.
+      expect(exportedSpans).toHaveLength(1);
+      expect(exportedSpans[0].name).toBe('qwen-code.tool_call');
+    });
+  });
 });

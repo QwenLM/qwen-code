@@ -22,7 +22,19 @@ import {
   resourceFromAttributes,
 } from '@opentelemetry/resources';
 
-import { SERVICE_NAME } from './constants.js';
+import { EVENT_SUBAGENT_EXECUTION, SERVICE_NAME } from './constants.js';
+
+/**
+ * LogRecord event names that have native span coverage elsewhere and
+ * should NOT be bridged to a duplicate `qwen-code.<event>` span. Today
+ * subagent_execution is the only one — the native `qwen-code.subagent`
+ * span (#3731 Phase 3) provides richer hierarchy via `runInSubagentSpanContext`,
+ * so the bridge span here would duplicate without adding anything.
+ *
+ * The LogRecord itself still flows through to other consumers
+ * (QwenLogger RUM, metrics counter) — only the span bridge is skipped.
+ */
+const BRIDGE_SKIP_EVENT_NAMES = new Set<string>([EVENT_SUBAGENT_EXECUTION]);
 import {
   deriveTraceId,
   randomHexString,
@@ -110,6 +122,17 @@ export class LogToSpanProcessor implements LogRecordProcessor {
 
   onEmit(logRecord: ReadableLogRecord): void {
     if (this.isShutdown) {
+      return;
+    }
+
+    // Short-circuit before any work for events with native span coverage
+    // (#3731 Phase 3 — see BRIDGE_SKIP_EVENT_NAMES). LogRecord still
+    // reaches other consumers via the normal LogRecord pipeline.
+    const eventName = logRecord.attributes?.['event.name'];
+    if (
+      typeof eventName === 'string' &&
+      BRIDGE_SKIP_EVENT_NAMES.has(eventName)
+    ) {
       return;
     }
 

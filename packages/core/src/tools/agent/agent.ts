@@ -51,9 +51,18 @@ import {
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import {
+  getCurrentAgentDepth,
   getCurrentAgentId,
   runWithAgentContext,
 } from '../../agents/runtime/agent-context.js';
+import { trace, context as otelContext } from '@opentelemetry/api';
+import {
+  endSubagentSpan,
+  runInSubagentSpanContext,
+  startSubagentSpan,
+  type SubagentInvocationKind,
+  type SubagentSpanMetadata,
+} from '../../telemetry/index.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -1143,6 +1152,73 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   }
 
   /**
+   * Wrap a subagent body in `qwen-code.subagent` span lifecycle.
+   *
+   * Single entry point for the 3 invocation paths (foreground named, fork,
+   * background). Captures the invoker span context (for fork/background's
+   * `Link`), reads parent agent id + depth from the AgentContext ALS, opens
+   * the span with appropriate parent strategy, runs `body` inside
+   * `runInSubagentSpanContext` so child LLM/tool/hook spans correctly
+   * inherit the subagent's traceId, then closes the span with the right
+   * status taxonomy.
+   *
+   * The span's lifecycle is **decoupled from this method's return** — for
+   * fire-and-forget paths (fork, background), the caller `void`s the
+   * returned promise; the span only closes when the body actually finishes
+   * (or the 4h TTL safety net fires). See `telemetry-subagent-spans-design.md`.
+   *
+   * #3731 Phase 3.
+   */
+  private async runWithSubagentSpan<T>(
+    spec: {
+      agentId: string;
+      subagentName: string;
+      invocationKind: SubagentInvocationKind;
+      isBuiltIn: boolean;
+      modelOverride?: string;
+    },
+    signal: AbortSignal | undefined,
+    body: () => Promise<T>,
+  ): Promise<T> {
+    const invokerSpanContext =
+      spec.invocationKind === 'foreground'
+        ? undefined
+        : trace.getSpan(otelContext.active())?.spanContext();
+    const span = startSubagentSpan({
+      ...spec,
+      // parentAgentId / depth captured at caller's ALS frame BEFORE we
+      // enter the child's runWithAgentContext frame inside `body`.
+      parentAgentId: getCurrentAgentId() ?? undefined,
+      depth: getCurrentAgentDepth(),
+      invokingRequestId: this.callId,
+      sessionId: this.config.getSessionId(),
+      invokerSpanContext,
+    });
+
+    let metadata: SubagentSpanMetadata = {
+      status: 'aborted',
+      terminateReason: 'subagent body did not reach a terminal state',
+    };
+    try {
+      const result = await runInSubagentSpanContext(span, body);
+      metadata = { status: 'completed' };
+      return result;
+    } catch (error) {
+      const aborted = signal?.aborted ?? false;
+      metadata = {
+        status: aborted ? 'aborted' : 'failed',
+        error: error instanceof Error ? error.message : String(error),
+        errorType:
+          error instanceof Error ? error.constructor.name : 'NonErrorThrown',
+        terminateReason: aborted ? 'signal_aborted' : 'exception',
+      };
+      throw error;
+    } finally {
+      endSubagentSpan(span, metadata);
+    }
+  }
+
+  /**
    * Runs a subagent with start/stop hook lifecycle, updating the display
    * as execution progresses.
    */
@@ -2120,9 +2196,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
         // Wrap in the agent-identity frame so nested `agent` tool calls
         // from this subagent's model record this agent's id as their
-        // `parentAgentId` in the sidecar meta.
+        // `parentAgentId` in the sidecar meta. Also wrap in
+        // qwen-code.subagent span (#3731 Phase 3) — background is
+        // fire-and-forget, so the span gets a new traceId + `Link` to the
+        // invoking AGENT tool span. `invocationKind` distinguishes the
+        // implicit fork (no subagent_type) from a named background agent;
+        // both are long-lived enough to qualify for the 4h TTL safety net.
         const framedBgBody = () =>
-          runWithAgentContext(hookOpts.agentId, bgBody);
+          this.runWithSubagentSpan(
+            {
+              agentId: hookOpts.agentId,
+              subagentName: hookOpts.agentType,
+              invocationKind: isFork ? 'fork' : 'background',
+              isBuiltIn: subagentConfig.level === 'builtin',
+              modelOverride: subagentConfig.model,
+            },
+            hookOpts.signal,
+            () => runWithAgentContext(hookOpts.agentId, bgBody),
+          );
         void (isFork ? runInForkContext(framedBgBody) : framedBgBody());
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
@@ -2168,23 +2259,44 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // do this in their finally blocks. Without it, every AgentTool /
         // SkillTool the fork's model instantiates from this registry leaks
         // its change-listener on shared SubagentManager / SkillManager.
+        // Wrap fork body in qwen-code.subagent span (#3731 Phase 3). Forks
+        // are fire-and-forget — span gets a NEW traceId + `Link` back to the
+        // invoking tool span. Spec recommends Link for "long running
+        // asynchronous data processing operations" (OTel trace spec). Span
+        // lifetime is decoupled from this AgentTool.execute return; the 4h
+        // TTL safety net catches genuinely abandoned forks.
         const runFramedFork = () =>
-          runWithAgentContext(hookOpts.agentId, async () => {
-            try {
-              await this.runSubagentWithHooks(subagent, contextState, hookOpts);
-            } finally {
-              cleanupOwnedMonitorNotifications();
-              void agentConfig
-                .getToolRegistry()
-                .stop()
-                .catch(() => {});
-              // Restore parent PM's dangerous allow rules if this AUTO
-              // override stripped them. Fork-async path: restore fires
-              // when the fork body terminates, not when the outer
-              // execute() returns the FORK_PLACEHOLDER_RESULT.
-              restoreParentPM();
-            }
-          });
+          this.runWithSubagentSpan(
+            {
+              agentId: hookOpts.agentId,
+              subagentName: hookOpts.agentType,
+              invocationKind: 'fork',
+              isBuiltIn: subagentConfig.level === 'builtin',
+              modelOverride: subagentConfig.model,
+            },
+            hookOpts.signal,
+            () =>
+              runWithAgentContext(hookOpts.agentId, async () => {
+                try {
+                  await this.runSubagentWithHooks(
+                    subagent,
+                    contextState,
+                    hookOpts,
+                  );
+                } finally {
+                  cleanupOwnedMonitorNotifications();
+                  void agentConfig
+                    .getToolRegistry()
+                    .stop()
+                    .catch(() => {});
+                  // Restore parent PM's dangerous allow rules if this AUTO
+                  // override stripped them. Fork-async path: restore fires
+                  // when the fork body terminates, not when the outer
+                  // execute() returns the FORK_PLACEHOLDER_RESULT.
+                  restoreParentPM();
+                }
+              }),
+          );
         void runInForkContext(runFramedFork);
         return {
           llmContent: [{ text: FORK_PLACEHOLDER_RESULT }],
@@ -2206,9 +2318,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       const fgHookOpts = { ...hookOpts, signal: fgAbortController.signal };
+      // Wrap in qwen-code.subagent span (#3731 Phase 3). Foreground
+      // invocations are child spans of the AGENT tool's `qwen-code.tool`
+      // span, inheriting its traceId so the trace tree stays unified.
       const runFramed = () =>
-        runWithAgentContext(hookOpts.agentId, () =>
-          this.runSubagentWithHooks(subagent, contextState, fgHookOpts),
+        this.runWithSubagentSpan(
+          {
+            agentId: hookOpts.agentId,
+            subagentName: hookOpts.agentType,
+            invocationKind: 'foreground',
+            isBuiltIn: subagentConfig.level === 'builtin',
+            modelOverride: subagentConfig.model,
+          },
+          fgAbortController.signal,
+          () =>
+            runWithAgentContext(hookOpts.agentId, () =>
+              this.runSubagentWithHooks(subagent, contextState, fgHookOpts),
+            ),
         );
 
       // Register in BackgroundTaskRegistry with isBackgrounded:false so the
