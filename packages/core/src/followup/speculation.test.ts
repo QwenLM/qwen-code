@@ -5,8 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { getEventListeners } from 'node:events';
 import { ensureToolResultPairing, startSpeculation } from './speculation.js';
-import type { Content } from '@google/genai';
+import type { Content, GenerateContentConfig } from '@google/genai';
 import {
   saveCacheSafeParams,
   clearCacheSafeParams,
@@ -147,11 +148,12 @@ describe('startSpeculation — abort-controller wiring', () => {
 
   beforeEach(() => {
     // startSpeculation throws if cache-safe params aren't set; install a stub.
-    saveCacheSafeParams({
-      model: 'fake-model',
-      history: [],
-      tools: [],
-    } as unknown as import('../utils/forkedAgent.js').CacheSafeParams);
+    // saveCacheSafeParams takes 3 positional args: (generationConfig, history, model).
+    saveCacheSafeParams(
+      { systemInstruction: '' } as unknown as GenerateContentConfig,
+      [],
+      'fake-model',
+    );
   });
 
   afterEach(() => {
@@ -189,7 +191,6 @@ describe('startSpeculation — abort-controller wiring', () => {
   });
 
   it('child controller never strong-pins the parent listener after settling', async () => {
-    const { getEventListeners } = await import('node:events');
     const parent = new AbortController();
     const before = getEventListeners(parent.signal, 'abort').length;
     const state = await startSpeculation(

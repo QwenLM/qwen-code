@@ -103,10 +103,10 @@ when done; `tmux kill-session -t qwen-verify-XX` to stop the pane.
 The automated checks below were run during development and recorded in
 `automated-results.md`:
 
-- All abortController unit tests pass (`abortController.test.ts`, 18 tests + 1 GC test skipped under non-`--expose-gc`).
-- All warningHandler tests pass (`warningHandler.test.ts`, 9 tests).
-- Existing combinedAbortSignal tests pass against the deprecation shim (8 tests).
-- All agent runtime / followup / openaiContentGenerator / hooks tests pass.
+- All abortController unit tests pass (`abortController.test.ts`, 26 tests; 1 GC test skipped under non-`--expose-gc`).
+- All warningHandler tests pass (`warningHandler.test.ts`, 13 tests including a spawned-child stderr integration test).
+- All `combineAbortSignals` consumer tests pass (`httpHookRunner.test.ts`); the deprecated `createCombinedAbortSignal` shim plus its own test file were removed once the lone caller migrated.
+- All agent runtime / followup / openaiContentGenerator / hooks tests pass — including new pinning tests for the master→agent abort cascade (`ArenaManager.test.ts`) and `startSpeculation` parent-signal wiring (`speculation.test.ts`).
 - Migration completeness: `grep -rn "new AbortController" packages/core/src --include="*.ts" | grep -v test | grep -v abortController.ts` returns **empty**.
 - TypeScript strict-mode typecheck passes for both `packages/core` and `packages/cli`.
 - Prettier check passes on all modified files.
