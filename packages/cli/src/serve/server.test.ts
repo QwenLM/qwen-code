@@ -4687,6 +4687,178 @@ describe('GET /session/:id/events (SSE)', () => {
     expect(parsed.data.error).toContain('timed out');
   });
 
+  it('writes a daemon-side stderr log on SSE ring eviction (#4360 wenshao observability fold-in)', async () => {
+    // The SSE write loop detects `state_resync_required` frames and
+    // emits a stderr breadcrumb so operators can grep daemon logs for
+    // ring-eviction events. Test covers:
+    //   - the `writeStderrLine` actually fires
+    //   - the `gap` arithmetic (earliestAvailableId - lastDeliveredId - 1)
+    //   - all four data fields (lastEventId / earliestInRing / gap / reason)
+    //   - the sessionId is included
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield {
+            v: 1,
+            type: 'state_resync_required',
+            data: {
+              reason: 'ring_evicted',
+              lastDeliveredId: 5,
+              earliestAvailableId: 12,
+            },
+          };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+      await readSseFrames(res.body!, 1);
+
+      const stderrLines = stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((s) => s.includes('SSE ring eviction detected'));
+      expect(stderrLines.length).toBeGreaterThanOrEqual(1);
+      const line = stderrLines[0]!;
+      expect(line).toContain('session sess-A');
+      expect(line).toContain('lastEventId=5');
+      expect(line).toContain('earliestInRing=12');
+      // gap = 12 - 5 - 1 = 6 events
+      expect(line).toContain('gap=6 events');
+      expect(line).toContain('reason=ring_evicted');
+      expect(line).toContain('loadSession');
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('falls back to "?" placeholders when state_resync_required data is partial', async () => {
+    // Defensive: the `?? '?'` fallback for missing fields lets the log
+    // line still print intelligibly when the daemon emits a partial
+    // payload (e.g. a future schema change drops one field). Pins the
+    // placeholder behavior so a regression that crashes the log call
+    // is caught.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield {
+            v: 1,
+            type: 'state_resync_required',
+            // Intentionally missing all numeric fields + reason —
+            // exercises every `?? '?'` branch.
+            data: {} as unknown as {
+              reason: string;
+              lastDeliveredId: number;
+              earliestAvailableId: number;
+            },
+          };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      await fetch(`http://127.0.0.1:${port}/session/sess-A/events`).then((r) =>
+        readSseFrames(r.body!, 1),
+      );
+
+      const stderrLines = stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((s) => s.includes('SSE ring eviction detected'));
+      expect(stderrLines.length).toBeGreaterThanOrEqual(1);
+      const line = stderrLines[0]!;
+      // All four `?? '?'` branches print `?` for the missing values.
+      expect(line).toContain('lastEventId=?');
+      expect(line).toContain('earliestInRing=?');
+      expect(line).toContain('gap=? events');
+      expect(line).toContain('reason=?');
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('writes a daemon-side stderr log on bridge iterator error (#4360 wenshao observability fold-in)', async () => {
+    // The bridge-iterator-catch block in the SSE handler now emits a
+    // `writeStderrLine` BEFORE sending the `stream_error` SSE frame so
+    // operators can distinguish "subprocess OOM-killed" from "protocol
+    // bug" via `grep "bridge iterator error"`. Test covers:
+    //   - the log fires with the error message
+    //   - the sessionId is included
+    //   - NO `[errorKind]` suffix for unclassified errors (plain Error)
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+          throw new Error('agent died');
+        },
+      });
+      handle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      await fetch(`http://127.0.0.1:${port}/session/sess-A/events`).then((r) =>
+        readSseFrames(r.body!, 2),
+      );
+
+      const stderrLines = stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((s) => s.includes('bridge iterator error'));
+      expect(stderrLines.length).toBeGreaterThanOrEqual(1);
+      const line = stderrLines[0]!;
+      expect(line).toContain('session sess-A');
+      expect(line).toContain('agent died');
+      // Plain Error → mapDomainErrorToErrorKind returns undefined →
+      // suffix branch must NOT add `[...]`.
+      expect(line).not.toMatch(/\[.*?\]/);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('includes [errorKind] suffix in bridge iterator error log when classified (#4360 wenshao observability fold-in)', async () => {
+    // BridgeTimeoutError → classified as `init_timeout`. The log line
+    // must include `[init_timeout]` so operators can `grep '\[init_'`
+    // for that specific failure class.
+    const { BridgeTimeoutError } = await import('@qwen-code/acp-bridge');
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+          throw new BridgeTimeoutError('initialize', 5000);
+        },
+      });
+      handle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      await fetch(`http://127.0.0.1:${port}/session/sess-A/events`).then((r) =>
+        readSseFrames(r.body!, 2),
+      );
+
+      const stderrLines = stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((s) => s.includes('bridge iterator error'));
+      expect(stderrLines.length).toBeGreaterThanOrEqual(1);
+      const line = stderrLines[0]!;
+      expect(line).toContain('session sess-A');
+      expect(line).toContain('timed out');
+      expect(line).toContain('[init_timeout]');
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
   it('forwards numeric Last-Event-ID even when supplied as a string', async () => {
     let seen: number | undefined;
     const bridge = fakeBridge({
