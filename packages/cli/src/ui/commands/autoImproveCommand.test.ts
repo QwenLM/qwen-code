@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { autoImproveCommand } from './autoImproveCommand.js';
 import {
   getAutoImproveConfigPath,
+  markActiveAutoImproveRunCancelled,
   readAutoImproveConfig,
   writeAutoImproveConfig,
 } from './autoImproveState.js';
@@ -196,6 +197,49 @@ describe('autoImproveCommand', () => {
 
     const config = await readAutoImproveConfig(tempDir);
     expect(config.customSources).toEqual(['prefer dependency cleanup']);
+  });
+
+  it('marks the active run cancelled without stopping the loop', async () => {
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+    const activeRaw = await fs.readFile(
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
+      'utf8',
+    );
+    const active = JSON.parse(activeRaw) as { activeLoopId: string };
+    const statePath = path.join(
+      tempDir,
+      '.qwen',
+      'auto-improve',
+      'loops',
+      active.activeLoopId,
+      'state.json',
+    );
+    const state = JSON.parse(await fs.readFile(statePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    state['currentRun'] = {
+      runId: '001-review-fix',
+      status: 'testing',
+      worktreePath: path.join(tempDir, 'worktree'),
+    };
+    await fs.writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    await expect(
+      markActiveAutoImproveRunCancelled(tempDir, active.activeLoopId),
+    ).resolves.toBe(true);
+
+    const updated = JSON.parse(await fs.readFile(statePath, 'utf8')) as {
+      status: string;
+      currentRun?: unknown;
+      lastRun?: { runId: string; status: string };
+    };
+    expect(updated.status).toBe('running');
+    expect(updated.currentRun).toBeUndefined();
+    expect(updated.lastRun).toMatchObject({
+      runId: '001-review-fix',
+      status: 'cancelled',
+    });
   });
 
   it('reports active loop status', async () => {

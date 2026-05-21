@@ -217,6 +217,7 @@ describe('useGeminiStream', () => {
         () => ({ getToolSchemaList: vi.fn(() => []) }) as any,
       ),
       getProjectRoot: vi.fn(() => '/test/dir'),
+      getWorkingDir: vi.fn(() => '/test/dir'),
       getCheckpointingEnabled: vi.fn(() => false),
       getGeminiClient: mockGetGeminiClient,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -2392,6 +2393,41 @@ describe('useGeminiStream', () => {
 
       // Verify state is reset
       expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('adds auto-improve guidance when cancelling a cron tick', async () => {
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Working' };
+        await new Promise(() => {});
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          '/auto-improve tick loop-1',
+          SendMessageType.Cron,
+        );
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          {
+            type: MessageType.INFO,
+            text: 'Auto-improve run cancelled. The loop is still active; run /auto-improve stop to stop future ticks.',
+          },
+          expect.any(Number),
+        );
+      });
     });
 
     it('should call onCancelSubmit handler when cancelOngoingRequest is called', async () => {

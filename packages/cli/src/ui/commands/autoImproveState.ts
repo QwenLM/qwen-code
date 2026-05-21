@@ -6,6 +6,10 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 export interface AutoImproveSources {
   githubIssues: boolean;
@@ -276,4 +280,47 @@ export async function initializeAutoImproveLoopFiles(
     ].join('\n'),
     'utf8',
   );
+}
+
+async function resolveRepoRoot(cwd: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('git', [
+      '-C',
+      cwd,
+      'rev-parse',
+      '--show-toplevel',
+    ]);
+    return stdout.trim();
+  } catch {
+    return cwd;
+  }
+}
+
+function isTerminalRunStatus(status: string): boolean {
+  return ['success', 'failed', 'blocked', 'cancelled'].includes(status);
+}
+
+export async function markActiveAutoImproveRunCancelled(
+  cwd: string,
+  loopId: string,
+): Promise<boolean> {
+  const repoRoot = await resolveRepoRoot(cwd);
+  const active = await readActiveAutoImproveLoop(repoRoot);
+  if (!active || active.activeLoopId !== loopId) return false;
+
+  const state = await readAutoImproveLoopState(repoRoot, loopId);
+  if (!state || state.status !== 'running') return false;
+
+  if (state.currentRun && isTerminalRunStatus(state.currentRun.status)) {
+    return false;
+  }
+
+  const cancelledRun: AutoImproveRunRef = {
+    ...(state.currentRun ?? { runId: 'cancelled-by-user', status: 'running' }),
+    status: 'cancelled',
+  };
+  state.lastRun = cancelledRun;
+  delete state.currentRun;
+  await writeAutoImproveLoopState(repoRoot, state);
+  return true;
 }
