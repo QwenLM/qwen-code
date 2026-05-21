@@ -68,7 +68,7 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: 'Validate PR body has required sections'
-        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea' # v7.0.1
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
         with:
           script: |
             const body = context.payload.pull_request.body || '';
@@ -165,7 +165,7 @@ jobs:
     timeout-minutes: 3
     steps:
       - name: 'Compute size and block XL'
-        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea' # v7.0.1
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
         with:
           script: |
             // Pull the full file list (up to 3 pages * 100 = 300 files;
