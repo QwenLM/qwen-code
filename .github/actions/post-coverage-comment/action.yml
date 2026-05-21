@@ -105,10 +105,49 @@ runs:
         echo "_For detailed HTML reports, please see the 'coverage-reports-${NODE_VERSION}-${OS}' artifact from the main CI run._" >> "${COMMENT_FILE}"
 
     - name: 'Post Coverage Comment'
-      uses: 'thollander/actions-comment-pull-request@65f9e5c9a1f2cd378bd74b2e057c9736982a8e74' # ratchet:thollander/actions-comment-pull-request@v3
       if: |-
         ${{ always() }}
-      with:
-        file-path: 'coverage-comment.md' # Use the generated file directly
-        comment-tag: 'code-coverage-summary'
-        github-token: '${{ inputs.github_token }}'
+      shell: 'bash'
+      env:
+        GH_TOKEN: '${{ inputs.github_token }}'
+        GITHUB_TOKEN: '${{ inputs.github_token }}'
+        COMMENT_FILE: 'coverage-comment.md'
+        COMMENT_TAG: 'code-coverage-summary'
+      run: |-
+        set -euo pipefail
+
+        if [ ! -f "${COMMENT_FILE}" ]; then
+          echo "Coverage comment file not found at: ${COMMENT_FILE}" >&2
+          exit 1
+        fi
+
+        pr_number="$(jq -r '.pull_request.number // empty' "${GITHUB_EVENT_PATH}")"
+        if [ -z "${pr_number}" ]; then
+          echo "No pull_request number found in ${GITHUB_EVENT_PATH}; skipping coverage comment."
+          exit 0
+        fi
+
+        marker="<!-- ${COMMENT_TAG} -->"
+        body_file="$(mktemp)"
+        {
+          printf '%s\n' "${marker}"
+          cat "${COMMENT_FILE}"
+        } > "${body_file}"
+
+        comment_id="$(
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" \
+            --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" \
+            | head -n 1
+        )"
+
+        if [ -n "${comment_id}" ]; then
+          jq -n --rawfile body "${body_file}" '{ body: $body }' \
+            | gh api --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+                --input - >/dev/null
+        else
+          jq -n --rawfile body "${body_file}" '{ body: $body }' \
+            | gh api --method POST \
+                "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" \
+                --input - >/dev/null
+        fi
