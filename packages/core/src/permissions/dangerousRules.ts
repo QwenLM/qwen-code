@@ -27,7 +27,6 @@ import type { PermissionRule } from './types.js';
 const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   // Unix shells
   'bash',
-  'bash.exe',
   'sh',
   'zsh',
   'fish',
@@ -36,6 +35,7 @@ const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   'dash',
   'ksh',
   // Windows shells
+  'bash.exe',
   'cmd',
   'cmd.exe',
   'pwsh',
