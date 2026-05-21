@@ -4,12 +4,13 @@ This is the developer-facing technical documentation set for **qwen-code daemon 
 
 It complements rather than replaces the existing docs:
 
-| Existing doc | Audience | Stays the source of truth for |
-|---|---|---|
-| [`../../users/qwen-serve.md`](../../users/qwen-serve.md) | Operators | Quickstart, flags, threat model |
-| [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md) | Protocol implementers | HTTP route catalogue, request/response shapes, error codes |
-| [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md) | SDK users | End-to-end TS walkthrough |
-| [`../daemon-client-adapters/`](../daemon-client-adapters/) | Adapter authors (draft) | Per-client adapter design notes |
+| Existing doc                                                                         | Audience                | Stays the source of truth for                                                  |
+| ------------------------------------------------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------ |
+| [`../../users/qwen-serve.md`](../../users/qwen-serve.md)                             | Operators               | Quickstart, flags, threat model                                                |
+| [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)                             | Protocol implementers   | HTTP route catalogue, request/response shapes, error codes                     |
+| [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md) | SDK users               | End-to-end TS walkthrough                                                      |
+| [`../daemon-client-adapters/`](../daemon-client-adapters/)                           | Adapter authors (draft) | Per-client adapter design notes                                                |
+| [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md)     | F2 maintainers          | Workspace-shared MCP transport pool design v2.2 (32 review fold-ins changelog) |
 
 If you want to **start a daemon and use it**, read `qwen-serve.md` first. If you want to **build a client against the wire format**, read `qwen-serve-protocol.md`. If you want to **understand how the daemon works internally, extend it, or debug it**, read this set.
 
@@ -87,13 +88,13 @@ Pick the path that matches your goal:
 
 This doc set was originally pinned to `cb206da36`. After merging `origin/daemon_mode_b_main` (commit `a60c1c52a` plus prior F-series fold-ins), the F4-prereq surface is now in-tree and the docs reflect it directly:
 
-| Surface | Where it's documented now | Source landmark |
-|---|---|---|
-| `state_resync_required` synthetic frame (29th known event) | [`09-event-schema.md`](./09-event-schema.md) — Subscriber-level synthetic + SDK reducer behavior; [`10-event-bus.md`](./10-event-bus.md) — Ring-eviction → `state_resync_required` recovery flow | `packages/acp-bridge/src/eventBus.ts:359-402`, `packages/sdk-typescript/src/daemon/events.ts:13-63, 256-280` |
-| `_meta.serverTimestamp` envelope field | [`09-event-schema.md`](./09-event-schema.md) — Envelope-level metadata | `packages/cli/src/serve/server.ts:2602+` (`formatSseFrame`) |
-| `tool_call.provenance` + `serverId` (in `data._meta`, not envelope) | [`09-event-schema.md`](./09-event-schema.md) — Tool-call `_meta` | `packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts:218-237` (`resolveToolProvenance`) |
-| `awaitingResync` reducer flag + `RESYNC_PASSTHROUGH_TYPES` | [`09-event-schema.md`](./09-event-schema.md) — SDK reducer behavior | `packages/sdk-typescript/src/daemon/events.ts:870-905, 1120-1140` |
-| FsError preservation over ACP wire | [`07-workspace-filesystem.md`](./07-workspace-filesystem.md) — FsError preservation over the ACP wire | `packages/acp-bridge/src/bridgeClient.ts:40-100+` (`isFsErrorShape`, `preserveFsErrorOverAcp`) |
+| Surface                                                             | Where it's documented now                                                                                                                                                                        | Source landmark                                                                                              |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `state_resync_required` synthetic frame (29th known event)          | [`09-event-schema.md`](./09-event-schema.md) — Subscriber-level synthetic + SDK reducer behavior; [`10-event-bus.md`](./10-event-bus.md) — Ring-eviction → `state_resync_required` recovery flow | `packages/acp-bridge/src/eventBus.ts:359-402`, `packages/sdk-typescript/src/daemon/events.ts:13-63, 256-280` |
+| `_meta.serverTimestamp` envelope field                              | [`09-event-schema.md`](./09-event-schema.md) — Envelope-level metadata                                                                                                                           | `packages/cli/src/serve/server.ts:2602+` (`formatSseFrame`)                                                  |
+| `tool_call.provenance` + `serverId` (in `data._meta`, not envelope) | [`09-event-schema.md`](./09-event-schema.md) — Tool-call `_meta`                                                                                                                                 | `packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts:218-237` (`resolveToolProvenance`)     |
+| `awaitingResync` reducer flag + `RESYNC_PASSTHROUGH_TYPES`          | [`09-event-schema.md`](./09-event-schema.md) — SDK reducer behavior                                                                                                                              | `packages/sdk-typescript/src/daemon/events.ts:870-905, 1120-1140`                                            |
+| FsError preservation over ACP wire                                  | [`07-workspace-filesystem.md`](./07-workspace-filesystem.md) — FsError preservation over the ACP wire                                                                                            | `packages/acp-bridge/src/bridgeClient.ts:40-100+` (`isFsErrorShape`, `preserveFsErrorOverAcp`)               |
 
 Forward compatibility is intact: SDK consumers that already implement the `narrowDaemonEvent` → `kind: 'unknown'` fallback for unrecognized event types saw zero breakage when the 29th type landed.
 
@@ -105,12 +106,13 @@ Forward compatibility is intact: SDK consumers that already implement the `narro
 
 它是对现有文档的补充，而不是替代：
 
-| 现有文档 | 受众 | 仍是该主题的事实来源 |
-|---|---|---|
-| [`../../users/qwen-serve.md`](../../users/qwen-serve.md) | 运维 / 使用者 | 启动方式、命令行参数、威胁模型 |
-| [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md) | 协议实现者 | HTTP 路由清单、请求/响应结构、错误码 |
-| [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md) | SDK 使用者 | TS 端到端示例 |
-| [`../daemon-client-adapters/`](../daemon-client-adapters/) | 适配器作者（草案） | 每种客户端的设计草案 |
+| 现有文档                                                                             | 受众               | 仍是该主题的事实来源                                                   |
+| ------------------------------------------------------------------------------------ | ------------------ | ---------------------------------------------------------------------- |
+| [`../../users/qwen-serve.md`](../../users/qwen-serve.md)                             | 运维 / 使用者      | 启动方式、命令行参数、威胁模型                                         |
+| [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)                             | 协议实现者         | HTTP 路由清单、请求/响应结构、错误码                                   |
+| [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md) | SDK 使用者         | TS 端到端示例                                                          |
+| [`../daemon-client-adapters/`](../daemon-client-adapters/)                           | 适配器作者（草案） | 每种客户端的设计草案                                                   |
+| [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md)     | F2 维护者          | 工作区共享 MCP transport 池设计 v2.2（32 条 review fold-in changelog） |
 
 如果你想 **启动一个 daemon 并使用它**，先看 `qwen-serve.md`；如果你想 **基于 wire 协议构建一个客户端**，先看 `qwen-serve-protocol.md`；如果你想 **理解 daemon 内部如何工作、扩展它或调试它**，就读这个文档集。
 
@@ -188,12 +190,12 @@ Forward compatibility is intact: SDK consumers that already implement the `narro
 
 本文档集原本锁在 `cb206da36`。merge `origin/daemon_mode_b_main`（commit `a60c1c52a` 加之前的 F 系列 fold-in）之后，F4-prereq surface 已经在树里，文档直接覆盖：
 
-| Surface | 现在记在哪 | 源代码定位 |
-|---|---|---|
-| `state_resync_required` 合成帧（第 29 种已知事件） | [`09-event-schema.md`](./09-event-schema.md) Subscriber 级合成帧 + SDK reducer 行为；[`10-event-bus.md`](./10-event-bus.md) 环驱逐 → `state_resync_required` 恢复流 | `packages/acp-bridge/src/eventBus.ts:359-402`、`packages/sdk-typescript/src/daemon/events.ts:13-63, 256-280` |
-| `_meta.serverTimestamp` envelope 字段 | [`09-event-schema.md`](./09-event-schema.md) Envelope 级元数据 | `packages/cli/src/serve/server.ts:2602+`（`formatSseFrame`） |
-| `tool_call.provenance` + `serverId`（在 `data._meta`，不是 envelope） | [`09-event-schema.md`](./09-event-schema.md) Tool-call `_meta` | `packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts:218-237`（`resolveToolProvenance`） |
-| `awaitingResync` reducer 标志 + `RESYNC_PASSTHROUGH_TYPES` | [`09-event-schema.md`](./09-event-schema.md) SDK reducer 行为 | `packages/sdk-typescript/src/daemon/events.ts:870-905, 1120-1140` |
-| FsError 在 ACP wire 上的保留 | [`07-workspace-filesystem.md`](./07-workspace-filesystem.md) FsError 在 ACP wire 上的保留 | `packages/acp-bridge/src/bridgeClient.ts:40-100+`（`isFsErrorShape`、`preserveFsErrorOverAcp`） |
+| Surface                                                               | 现在记在哪                                                                                                                                                          | 源代码定位                                                                                                   |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `state_resync_required` 合成帧（第 29 种已知事件）                    | [`09-event-schema.md`](./09-event-schema.md) Subscriber 级合成帧 + SDK reducer 行为；[`10-event-bus.md`](./10-event-bus.md) 环驱逐 → `state_resync_required` 恢复流 | `packages/acp-bridge/src/eventBus.ts:359-402`、`packages/sdk-typescript/src/daemon/events.ts:13-63, 256-280` |
+| `_meta.serverTimestamp` envelope 字段                                 | [`09-event-schema.md`](./09-event-schema.md) Envelope 级元数据                                                                                                      | `packages/cli/src/serve/server.ts:2602+`（`formatSseFrame`）                                                 |
+| `tool_call.provenance` + `serverId`（在 `data._meta`，不是 envelope） | [`09-event-schema.md`](./09-event-schema.md) Tool-call `_meta`                                                                                                      | `packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts:218-237`（`resolveToolProvenance`）    |
+| `awaitingResync` reducer 标志 + `RESYNC_PASSTHROUGH_TYPES`            | [`09-event-schema.md`](./09-event-schema.md) SDK reducer 行为                                                                                                       | `packages/sdk-typescript/src/daemon/events.ts:870-905, 1120-1140`                                            |
+| FsError 在 ACP wire 上的保留                                          | [`07-workspace-filesystem.md`](./07-workspace-filesystem.md) FsError 在 ACP wire 上的保留                                                                           | `packages/acp-bridge/src/bridgeClient.ts:40-100+`（`isFsErrorShape`、`preserveFsErrorOverAcp`）              |
 
 向前兼容没破：已经按 `narrowDaemonEvent → kind: 'unknown'` fallback 实现的 SDK 消费方在 29th 类型落地时零破坏。

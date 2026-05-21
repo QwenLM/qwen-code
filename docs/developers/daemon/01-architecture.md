@@ -313,28 +313,29 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 
 ## Critical files
 
-| Concern | File |
-|---|---|
-| Bootstrap | `packages/cli/src/serve/runQwenServe.ts` (308-994) |
-| Express app | `packages/cli/src/serve/server.ts` (261-339) |
-| Capability registry | `packages/cli/src/serve/capabilities.ts` (37-215) |
-| Auth middleware | `packages/cli/src/serve/auth.ts` (1-60) |
-| Bridge | `packages/acp-bridge/src/bridge.ts` |
-| BridgeClient | `packages/acp-bridge/src/bridgeClient.ts` |
-| Permission mediator | `packages/acp-bridge/src/permissionMediator.ts` (1-1292) |
-| EventBus | `packages/acp-bridge/src/eventBus.ts` |
-| MCP transport pool | `packages/core/src/tools/mcp-transport-pool.ts` (104+) |
-| Workspace MCP budget | `packages/core/src/tools/mcp-workspace-budget.ts` |
-| Workspace FS | `packages/cli/src/serve/fs/` |
-| SDK DaemonClient | `packages/sdk-typescript/src/daemon/DaemonClient.ts` (209-1506) |
-| SDK SessionClient | `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts` (61-385) |
-| Event schema | `packages/sdk-typescript/src/daemon/events.ts` (13-63) |
+| Concern              | File                                                                 |
+| -------------------- | -------------------------------------------------------------------- |
+| Bootstrap            | `packages/cli/src/serve/runQwenServe.ts` (308-994)                   |
+| Express app          | `packages/cli/src/serve/server.ts` (261-339)                         |
+| Capability registry  | `packages/cli/src/serve/capabilities.ts` (37-215)                    |
+| Auth middleware      | `packages/cli/src/serve/auth.ts` (1-60)                              |
+| Bridge               | `packages/acp-bridge/src/bridge.ts`                                  |
+| BridgeClient         | `packages/acp-bridge/src/bridgeClient.ts`                            |
+| Permission mediator  | `packages/acp-bridge/src/permissionMediator.ts` (1-1292)             |
+| EventBus             | `packages/acp-bridge/src/eventBus.ts`                                |
+| MCP transport pool   | `packages/core/src/tools/mcp-transport-pool.ts` (104+)               |
+| Workspace MCP budget | `packages/core/src/tools/mcp-workspace-budget.ts`                    |
+| Workspace FS         | `packages/cli/src/serve/fs/`                                         |
+| SDK DaemonClient     | `packages/sdk-typescript/src/daemon/DaemonClient.ts` (209-1506)      |
+| SDK SessionClient    | `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts` (61-385) |
+| Event schema         | `packages/sdk-typescript/src/daemon/events.ts` (13-63)               |
 
 ## References
 
 - Design issues: [#3803](https://github.com/QwenLM/qwen-code/issues/3803) (daemon design), [#4175](https://github.com/QwenLM/qwen-code/issues/4175) (F-series milestones).
 - User guide: [`../../users/qwen-serve.md`](../../users/qwen-serve.md).
 - Wire protocol reference: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md).
+- F2 design doc (v2.2 with 32 review fold-ins): [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md).
 - F2 design notes: issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) commits 4-6.
 
 ---
@@ -354,6 +355,7 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 > 见英文版「Process topology」图（同一张 Mermaid 图无需重复渲染）。
 
 要点：
+
 - daemon 进程与 ACP 子进程通过 `AcpChannel` 连接，默认是真实的子进程 + 一对管道；`inMemoryChannel` 用于测试。
 - 所有架构都被这条「daemon ↔ child」缝隙塑造：HTTP / SSE 在 daemon 终止，agent 决策与工具调用在子进程发生，bridge 是中转。
 
@@ -362,6 +364,7 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 > 见英文版「Package map」图。
 
 记住三条信任边界：
+
 1. HTTP 入口边界：`serve/auth.ts` 中间件链。
 2. bridge ↔ ACP 子进程边界：stdio 上的 NDJSON，没有认证 —— 子进程默认信任 bridge。
 3. agent ↔ MCP server 边界：agent 可能触发涉及宿主资源的工具调用。
@@ -377,6 +380,7 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 > 见英文版「Workflow 2」时序图。
 
 要点：
+
 - 环形缓冲有上限（`eventRingSize`，默认 1024）。
 - 重连客户端如果 `Last-Event-ID` 已经落出环外，会收到合成 catch-up 信号，必须用 `loadSession` / `resumeSession` 重建更深层状态。
 - 慢消费者在队列 75% 触发 `slow_client_warning`，达到上限时收到 `client_evicted`（终态）后被关掉。
@@ -388,6 +392,7 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 跨策略「逃生口」：任何客户端都可以投 `CANCEL_VOTE_SENTINEL` 把请求短路成 `cancelled / agent_cancelled`。bridge 防止 wire 端通过普通 `optionId` 字段偷偷塞这个哨兵（`InvalidPermissionOptionError`）。
 
 四种策略一句话：
+
 - `first-responder` — 第一个有效投票获胜（默认，保留 live 协作 UX）。
 - `designated` — 只有 `originatorClientId` 能投，其他客户端收 `permission_forbidden`。
 - `consensus` — N-of-M 法定人数，过程中发 `permission_partial_vote` 让 UI 渲染进度。
@@ -398,6 +403,7 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 > 见英文版「Workflow 4」时序图。
 
 要点：
+
 - `releaseSession(sessionId)` 借助 `sessionToEntries` 反向索引，以 O(refs) 释放该 session 持有的所有条目。
 - daemon 关停时 `drainAll()` 置 `draining` 标志（拒绝新的 acquire），并以可配置超时等待所有条目关闭。
 - `restartByName` 可以接 `entryIndex` 来精确重启某条；池里同名多条目时返回 `{entries: RestartResult[]}` 形状。
@@ -407,32 +413,34 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 > 见英文版「Workflow 5」时序图。
 
 为什么要分两阶段：
+
 - 还在飞的 HTTP 请求、还连着的 SSE 订阅者、子进程里还在跑的工具调用都需要有上限的退出窗口。
 - 任何一条卡过窗口，force-close 路径会接管，避免子进程把 daemon 进程拖住。
 - 第二次 SIGTERM 直接走 `bridge.killAllSync()` + `process.exit(1)`，防孤儿。
 
 ## 关键文件
 
-| 关注点 | 文件 |
-|---|---|
-| Bootstrap | `packages/cli/src/serve/runQwenServe.ts` (308-994) |
-| Express 应用 | `packages/cli/src/serve/server.ts` (261-339) |
-| 能力注册表 | `packages/cli/src/serve/capabilities.ts` (37-215) |
-| Auth 中间件 | `packages/cli/src/serve/auth.ts` (1-60) |
-| Bridge | `packages/acp-bridge/src/bridge.ts` |
-| BridgeClient | `packages/acp-bridge/src/bridgeClient.ts` |
-| 权限协调器 | `packages/acp-bridge/src/permissionMediator.ts` (1-1292) |
-| EventBus | `packages/acp-bridge/src/eventBus.ts` |
-| MCP transport 池 | `packages/core/src/tools/mcp-transport-pool.ts` (104+) |
-| Workspace MCP 预算 | `packages/core/src/tools/mcp-workspace-budget.ts` |
-| Workspace 文件系统 | `packages/cli/src/serve/fs/` |
-| SDK DaemonClient | `packages/sdk-typescript/src/daemon/DaemonClient.ts` (209-1506) |
-| SDK SessionClient | `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts` (61-385) |
-| 事件 schema | `packages/sdk-typescript/src/daemon/events.ts` (13-63) |
+| 关注点             | 文件                                                                 |
+| ------------------ | -------------------------------------------------------------------- |
+| Bootstrap          | `packages/cli/src/serve/runQwenServe.ts` (308-994)                   |
+| Express 应用       | `packages/cli/src/serve/server.ts` (261-339)                         |
+| 能力注册表         | `packages/cli/src/serve/capabilities.ts` (37-215)                    |
+| Auth 中间件        | `packages/cli/src/serve/auth.ts` (1-60)                              |
+| Bridge             | `packages/acp-bridge/src/bridge.ts`                                  |
+| BridgeClient       | `packages/acp-bridge/src/bridgeClient.ts`                            |
+| 权限协调器         | `packages/acp-bridge/src/permissionMediator.ts` (1-1292)             |
+| EventBus           | `packages/acp-bridge/src/eventBus.ts`                                |
+| MCP transport 池   | `packages/core/src/tools/mcp-transport-pool.ts` (104+)               |
+| Workspace MCP 预算 | `packages/core/src/tools/mcp-workspace-budget.ts`                    |
+| Workspace 文件系统 | `packages/cli/src/serve/fs/`                                         |
+| SDK DaemonClient   | `packages/sdk-typescript/src/daemon/DaemonClient.ts` (209-1506)      |
+| SDK SessionClient  | `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts` (61-385) |
+| 事件 schema        | `packages/sdk-typescript/src/daemon/events.ts` (13-63)               |
 
 ## 参考
 
 - 设计 issue：[#3803](https://github.com/QwenLM/qwen-code/issues/3803)（daemon 总体设计）、[#4175](https://github.com/QwenLM/qwen-code/issues/4175)（F 系列里程碑）。
 - 用户使用文档：[`../../users/qwen-serve.md`](../../users/qwen-serve.md)。
 - Wire 协议参考：[`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)。
+- F2 设计文档（v2.2，含 32 条 review fold-in）：[`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md)。
 - F2 设计笔记：issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) commit 4-6。
