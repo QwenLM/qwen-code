@@ -397,6 +397,23 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-3')).toBeUndefined();
     });
 
+    it('allows replacing the same running background agent at the cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      registry.register(makeRegistration('bg-1'));
+
+      expect(() =>
+        registry.register(
+          makeRegistration('bg-1', {
+            prompt: 'resumed continuation',
+          }),
+        ),
+      ).not.toThrow();
+      expect(registry.get('bg-1')?.prompt).toBe('resumed continuation');
+    });
+
     it('does not count foreground, paused, or terminal entries toward the cap', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 1,

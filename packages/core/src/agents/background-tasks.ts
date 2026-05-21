@@ -44,9 +44,15 @@ export function resolveMaxConcurrentBackgroundAgents(
   }
 
   const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed >= 1
-    ? parsed
-    : DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS;
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    debugLogger.warn(
+      `Invalid ${BACKGROUND_AGENT_CONCURRENCY_ENV}=${JSON.stringify(raw)}, ` +
+        `using default (${DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS})`,
+    );
+    return DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS;
+  }
+
+  return parsed;
 }
 
 export const MAX_CONCURRENT_BACKGROUND_AGENTS =
@@ -297,9 +303,13 @@ export class BackgroundTaskRegistry {
   }
 
   assertCanStartBackgroundAgent(): void {
-    if (
-      this.getRunningBackgroundCount() >= this.maxConcurrentBackgroundAgents
-    ) {
+    const running = this.getRunningBackgroundCount();
+    if (running >= this.maxConcurrentBackgroundAgents) {
+      debugLogger.warn(
+        `Background agent concurrency cap reached: ` +
+          `${running}/${this.maxConcurrentBackgroundAgents}. ` +
+          `Refusing new background agent.`,
+      );
       throw new Error(
         `Cannot start background agent: maximum concurrent background agents ` +
           `(${this.maxConcurrentBackgroundAgents}) reached. Stop an existing ` +
@@ -310,7 +320,12 @@ export class BackgroundTaskRegistry {
 
   register(registration: AgentTaskRegistration): AgentTask {
     if (registration.isBackgrounded && registration.status === 'running') {
-      this.assertCanStartBackgroundAgent();
+      const existing = this.agents.get(registration.agentId);
+      const isReplacingRunning =
+        existing?.isBackgrounded === true && existing.status === 'running';
+      if (!isReplacingRunning) {
+        this.assertCanStartBackgroundAgent();
+      }
     }
 
     // Mutate the registration in place to graduate it to an `AgentTask`.

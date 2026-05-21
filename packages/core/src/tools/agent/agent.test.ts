@@ -2021,6 +2021,48 @@ describe('AgentTool', () => {
       }
     });
 
+    it('fires SubagentStop when the final background register check fails after SubagentStart', async () => {
+      const errorMessage =
+        'Cannot start background agent: maximum concurrent background agents ' +
+        '(1) reached. Stop an existing agent first.';
+      mockRegistry.register.mockImplementation(() => {
+        throw new Error(errorMessage);
+      });
+      const mockHookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HookSystem;
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(mockHookSystem);
+
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(errorMessage);
+      expect(mockHookSystem.fireSubagentStartEvent).toHaveBeenCalledOnce();
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledWith(
+        expect.stringContaining('monitor-'),
+        'monitor',
+        expect.stringMatching(
+          /subagents[\\/]test-session-id[\\/]agent-monitor-.*\.jsonl$/,
+        ),
+        'Monitor done',
+        false,
+        PermissionMode.AutoEdit,
+        undefined,
+      );
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+    });
+
     it('preflights the background cap before hooks and subagent setup', async () => {
       const errorMessage =
         'Cannot start background agent: maximum concurrent background agents ' +

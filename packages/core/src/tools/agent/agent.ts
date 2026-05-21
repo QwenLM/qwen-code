@@ -1343,6 +1343,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.params.run_in_background === true ||
         subagentConfig.background === true;
 
+      // Preflight: fast-fail before expensive worktree/subagent setup.
+      // This is not redundant with registry.register() below — that call
+      // remains the authoritative race guard, but by then the launch path
+      // has already run hooks and created a child agent.
       if (shouldRunInBackground) {
         try {
           this.config
@@ -1617,6 +1621,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       if (shouldRunInBackground) {
         // Fire SubagentStart hook before background launch
         const hookSystem = this.config.getHookSystem();
+        let subagentStartHookCompleted = false;
         if (hookSystem) {
           try {
             const startHookOutput = await hookSystem.fireSubagentStartEvent(
@@ -1629,6 +1634,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             if (additionalContext) {
               contextState.set('hook_context', additionalContext);
             }
+            subagentStartHookCompleted = true;
           } catch (hookError) {
             debugLogger.warn(
               `[Agent] SubagentStart hook failed, continuing execution: ${hookError}`,
@@ -1718,6 +1724,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             error instanceof Error ? error.message : String(error);
           bgAbortController.abort();
 
+          if (hookSystem && subagentStartHookCompleted) {
+            try {
+              await hookSystem.fireSubagentStopEvent(
+                hookOpts.agentId,
+                hookOpts.agentType,
+                jsonlPath,
+                bgSubagent.getFinalText(),
+                false,
+                resolvedMode,
+                signal,
+              );
+            } catch (hookError) {
+              debugLogger.warn(
+                `[Agent] SubagentStop hook after background registration failure failed: ${hookError}`,
+              );
+            }
+          }
+
           let wtSuffix = '';
           try {
             wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
@@ -1737,7 +1761,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           void agentConfig
             .getToolRegistry()
             .stop()
-            .catch(() => {});
+            .catch((stopError) => {
+              debugLogger.warn(
+                `[Agent] ToolRegistry stop after background registration failure failed: ${stopError}`,
+              );
+            });
           return {
             llmContent: `${errorMessage}${wtSuffix}`,
             returnDisplay: this.currentDisplay!,
