@@ -758,7 +758,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: '/usr/games/fortune -s -n 45',
         description:
-          'Command to execute for fortune quotes. Use -s for short fortunes, -n <chars> to limit length. Set to empty string "" to disable (falls back to witty phrases). Requires restart to apply.',
+          'Command to execute for fortune quotes. Use -s for short fortunes, -n <chars> to limit length. Set `enableFortunes` to false to disable. Requires restart to apply.',
         showInDialog: false,
       },
       enableWelcomeBack: {

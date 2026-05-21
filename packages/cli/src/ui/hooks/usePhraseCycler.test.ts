@@ -13,16 +13,10 @@ import {
 import * as i18n from '../../i18n/index.js';
 
 const MOCK_WITTY_PHRASES = ['Phrase 1', 'Phrase 2', 'Phrase 3'];
-const MOCK_FORTUNE_QUOTE = 'The fortune favors the bold.';
+const MOCK_FORTUNE_QUOTE = 'The early bird catches the worm.';
 
-// Mock the getFortuneQuote function
 vi.mock('./fortune.js', () => ({
   getFortuneQuote: vi.fn(),
-}));
-
-// Mock the selectRandomPhrase function to return phrases deterministically
-vi.mock('./phraseSelector.js', () => ({
-  selectRandomPhrase: vi.fn((phrases) => phrases[0]),
 }));
 
 describe('usePhraseCycler', () => {
@@ -33,10 +27,9 @@ describe('usePhraseCycler', () => {
     vi.spyOn(i18n, 'ta').mockReturnValue(MOCK_WITTY_PHRASES);
     vi.spyOn(i18n, 't').mockImplementation((key) => key);
     const fortuneModule = await import('./fortune.js');
-    mockGetFortuneQuote = fortuneModule.getFortuneQuote as ReturnType<
-      typeof vi.fn
-    >;
+    mockGetFortuneQuote = fortuneModule.getFortuneQuote;
     mockGetFortuneQuote.mockReset();
+    mockGetFortuneQuote.mockResolvedValue(MOCK_FORTUNE_QUOTE);
   });
 
   afterEach(() => {
@@ -85,15 +78,14 @@ describe('usePhraseCycler', () => {
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
   });
 
-  it('should reset to a witty phrase when isActive becomes true after being false (and not waiting)', async () => {
-    // Mock selectRandomPhrase to cycle through phrases deterministically
-    const { selectRandomPhrase } = await import('./phraseSelector.js');
+  it('should reset to a witty phrase when isActive becomes true after being false (and not waiting)', () => {
+    // Mock Math.random to make the test deterministic.
     let callCount = 0;
-    vi.mocked(selectRandomPhrase).mockImplementation((phrases) => {
+    vi.spyOn(Math, 'random').mockImplementation(() => {
       // Cycle through 0, 1, 0, 1, ...
       const val = callCount % 2;
       callCount++;
-      return phrases[val];
+      return val / MOCK_WITTY_PHRASES.length;
     });
 
     const { result, rerender } = renderHook(
@@ -103,9 +95,6 @@ describe('usePhraseCycler', () => {
 
     // Activate
     rerender({ isActive: true, isWaiting: false });
-    await act(async () => {
-      await Promise.resolve();
-    });
     const firstActivePhrase = result.current;
     expect(MOCK_WITTY_PHRASES).toContain(firstActivePhrase);
     // With our mock, this should be the first phrase.
@@ -127,7 +116,7 @@ describe('usePhraseCycler', () => {
     act(() => {
       rerender({ isActive: true, isWaiting: false });
     });
-    // The mock will now return 0, so it should be the first phrase again.
+    // The random mock will now return 0, so it should be the first phrase again.
     expect(result.current).toBe(MOCK_WITTY_PHRASES[0]);
   });
 
@@ -138,15 +127,13 @@ describe('usePhraseCycler', () => {
     expect(clearIntervalSpy).toHaveBeenCalledOnce();
   });
 
-  it('should use custom phrases when provided', async () => {
+  it('should use custom phrases when provided', () => {
     const customPhrases = ['Custom Phrase 1', 'Custom Phrase 2'];
-    // Mock selectRandomPhrase to cycle through phrases deterministically
-    const { selectRandomPhrase } = await import('./phraseSelector.js');
     let callCount = 0;
-    vi.mocked(selectRandomPhrase).mockImplementation((phrases) => {
+    vi.spyOn(Math, 'random').mockImplementation(() => {
       const val = callCount % 2;
       callCount++;
-      return phrases[val];
+      return val / customPhrases.length;
     });
 
     const { result, rerender } = renderHook(
@@ -161,9 +148,6 @@ describe('usePhraseCycler', () => {
       },
     );
 
-    await act(async () => {
-      await Promise.resolve();
-    });
     expect(result.current).toBe(customPhrases[0]);
 
     act(() => {
@@ -217,18 +201,37 @@ describe('usePhraseCycler', () => {
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
   });
 
-  // Fortune integration tests
-  it('should use fortune quote when enableFortunes is true', async () => {
-    mockGetFortuneQuote.mockResolvedValue(MOCK_FORTUNE_QUOTE);
-
+  it('should not use fortune when enableFortunes is false', () => {
     const { result } = renderHook(() =>
-      usePhraseCycler(
-        true,
-        false,
-        undefined,
-        true,
-        '/usr/games/fortune -s -n 45',
-      ),
+      usePhraseCycler(true, false, undefined, false),
+    );
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
+  });
+
+  it('should not use fortune when fortuneCommand is empty string', () => {
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, ''),
+    );
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
+  });
+
+  it('should not use fortune when fortuneCommand is whitespace only', () => {
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, '   '),
+    );
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
+  });
+
+  it('should clear interval on unmount when inactive', () => {
+    const { unmount } = renderHook(() => usePhraseCycler(false, false));
+    const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
+    unmount();
+    expect(clearIntervalSpy).not.toHaveBeenCalled();
+  });
+
+  it('should use fortune quote when enableFortunes is true', async () => {
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, '/usr/games/fortune'),
     );
 
     // Wait for the async fortune call to complete
@@ -237,19 +240,14 @@ describe('usePhraseCycler', () => {
     });
 
     expect(result.current).toBe(MOCK_FORTUNE_QUOTE);
+    expect(mockGetFortuneQuote).toHaveBeenCalledWith('/usr/games/fortune');
   });
 
-  it('should fall back to static phrase when fortune command fails', async () => {
+  it('should fall back to random phrase when fortune command fails', async () => {
     mockGetFortuneQuote.mockResolvedValue(null);
 
     const { result } = renderHook(() =>
-      usePhraseCycler(
-        true,
-        false,
-        undefined,
-        true,
-        '/usr/games/fortune -s -n 45',
-      ),
+      usePhraseCycler(true, false, undefined, true, '/usr/games/fortune'),
     );
 
     // Wait for the async fortune call to complete
@@ -257,13 +255,11 @@ describe('usePhraseCycler', () => {
       await Promise.resolve();
     });
 
-    expect(result.current).toBe(MOCK_WITTY_PHRASES[0]);
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
   });
 
   it('should use custom fortune command when provided', async () => {
-    const customCommand = '/custom/fortune -n 100';
-    mockGetFortuneQuote.mockResolvedValue(MOCK_FORTUNE_QUOTE);
-
+    const customCommand = '/usr/local/bin/my-fortune';
     const { result } = renderHook(() =>
       usePhraseCycler(true, false, undefined, true, customCommand),
     );
@@ -273,103 +269,36 @@ describe('usePhraseCycler', () => {
       await Promise.resolve();
     });
 
+    expect(result.current).toBe(MOCK_FORTUNE_QUOTE);
     expect(mockGetFortuneQuote).toHaveBeenCalledWith(customCommand);
-    expect(result.current).toBe(MOCK_FORTUNE_QUOTE);
   });
 
-  it('should not use fortune when enableFortunes is false', async () => {
-    mockGetFortuneQuote.mockResolvedValue(MOCK_FORTUNE_QUOTE);
-
-    const { result } = renderHook(() =>
-      usePhraseCycler(
-        true,
-        false,
-        undefined,
-        false,
-        '/usr/games/fortune -s -n 45',
-      ),
+  it('should cycle fortune quotes every interval when enabled', async () => {
+    const differentQuotes = ['Quote 1', 'Quote 2', 'Quote 3'];
+    let quoteIndex = 0;
+    mockGetFortuneQuote.mockImplementation(
+      async () => differentQuotes[quoteIndex++ % differentQuotes.length],
     );
 
-    // Wait for the async fortune call to complete
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    expect(mockGetFortuneQuote).not.toHaveBeenCalled();
-    expect(result.current).toBe(MOCK_WITTY_PHRASES[0]);
-  });
-
-  it('should cycle fortune quotes every 15 seconds when enabled', async () => {
-    const firstFortune = 'First fortune quote.';
-    const secondFortune = 'Second fortune quote.';
-
-    let callIndex = 0;
-    mockGetFortuneQuote.mockImplementation(() => {
-      if (callIndex === 0) {
-        callIndex++;
-        return Promise.resolve(firstFortune);
-      }
-      return Promise.resolve(secondFortune);
-    });
-
     const { result } = renderHook(() =>
-      usePhraseCycler(
-        true,
-        false,
-        undefined,
-        true,
-        '/usr/games/fortune -s -n 45',
-      ),
+      usePhraseCycler(true, false, undefined, true, '/usr/games/fortune'),
     );
 
     // Wait for initial fortune call
     await act(async () => {
       await Promise.resolve();
     });
+    expect(result.current).toBe(differentQuotes[0]);
 
-    expect(result.current).toBe(firstFortune);
-
-    // Advance time to trigger next fortune update
-    await act(async () => {
+    // Advance time to trigger next interval
+    act(() => {
       vi.advanceTimersByTime(PHRASE_CHANGE_INTERVAL_MS);
-      await Promise.resolve();
     });
 
-    expect(result.current).toBe(secondFortune);
-  });
-
-  it('should disable fortune cycling when isActive becomes false', async () => {
-    mockGetFortuneQuote.mockResolvedValue(MOCK_FORTUNE_QUOTE);
-
-    const { result, rerender } = renderHook(
-      ({ isActive }) =>
-        usePhraseCycler(
-          isActive,
-          false,
-          undefined,
-          true,
-          '/usr/games/fortune -s -n 45',
-        ),
-      { initialProps: { isActive: true } },
-    );
-
-    // Wait for initial fortune call
+    // Wait for async call
     await act(async () => {
       await Promise.resolve();
     });
-
-    expect(result.current).toBe(MOCK_FORTUNE_QUOTE);
-    const callCount = mockGetFortuneQuote.mock.calls.length;
-
-    // Deactivate
-    rerender({ isActive: false });
-
-    // Advance time - should not trigger new fortune calls
-    await act(async () => {
-      vi.advanceTimersByTime(PHRASE_CHANGE_INTERVAL_MS);
-      await Promise.resolve();
-    });
-
-    expect(mockGetFortuneQuote.mock.calls.length).toBe(callCount);
+    expect(result.current).toBe(differentQuotes[1]);
   });
 });

@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -11,16 +11,14 @@ const execAsync = promisify(exec);
 
 /**
  * Get a random fortune quote by calling the fortune command.
- * Uses -s flag to get only short (single-line) fortunes.
+ * Exported for testing purposes.
  */
 export async function getFortuneQuote(command: string): Promise<string | null> {
   try {
     const { stdout } = await execAsync(command);
-    // Replace newlines with spaces and trim to ensure single-line output
     const quote = stdout.trim().replace(/\s+/g, ' ');
     return quote || null;
   } catch {
-    // Return null to signal fallback to preselected phrases
     return null;
   }
 }

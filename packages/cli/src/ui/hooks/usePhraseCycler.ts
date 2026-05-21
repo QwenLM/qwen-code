@@ -7,11 +7,21 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { t, ta, getCurrentLanguage } from '../../i18n/index.js';
 import { getFortuneQuote } from './fortune.js';
-import { selectRandomPhrase } from './phraseSelector.js';
 
 export const WITTY_LOADING_PHRASES: string[] = ["I'm Feeling Lucky"];
 
 export const PHRASE_CHANGE_INTERVAL_MS = 15000;
+
+/**
+ * Select a random phrase from an array.
+ */
+function selectRandomPhrase<T>(phrases: T[]): T {
+  if (!phrases || phrases.length === 0) {
+    throw new Error('Phrases array cannot be empty');
+  }
+  const index = Math.floor(Math.random() * phrases.length);
+  return phrases[index];
+}
 
 /**
  * Custom hook to manage cycling through loading phrases.
@@ -60,9 +70,10 @@ export const usePhraseCycler = (
         clearInterval(phraseIntervalRef.current);
       }
 
+      // Use fortune command for dynamic quotes if enabled
       const updatePhrase = async () => {
-        const hasFortuneCommand = enableFortunes && fortuneCommand?.trim();
-        if (hasFortuneCommand) {
+        const shouldUseFortune = enableFortunes && fortuneCommand?.trim();
+        if (shouldUseFortune) {
           const fortuneQuote = await getFortuneQuote(fortuneCommand);
           setCurrentLoadingPhrase(
             fortuneQuote ?? selectRandomPhrase(loadingPhrases),
@@ -72,12 +83,16 @@ export const usePhraseCycler = (
         }
       };
 
+      // Set initial loading phrase
       updatePhrase();
-      phraseIntervalRef.current = setInterval(
-        updatePhrase,
-        PHRASE_CHANGE_INTERVAL_MS,
-      );
+
+      phraseIntervalRef.current = setInterval(() => {
+        // Update with new loading phrase every interval
+        updatePhrase();
+      }, PHRASE_CHANGE_INTERVAL_MS);
     } else {
+      // Idle or other states, clear the phrase interval
+      // and reset to the first phrase for next active state.
       if (phraseIntervalRef.current) {
         clearInterval(phraseIntervalRef.current);
         phraseIntervalRef.current = null;
