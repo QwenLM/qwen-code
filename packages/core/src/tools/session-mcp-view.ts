@@ -29,6 +29,51 @@ function passesNameFilter(
 }
 
 /**
+ * F2 (#4175 commit 6 review fix — wenshao W12 / PR A): precompute
+ * lookup `Set`s once per `applyTools` / `applyPrompts` pass so the
+ * per-tool predicate is O(1) instead of repeating the array scan
+ * inside `passesNameFilter` for every snapshot entry. Same semantics:
+ * `excludeTools` is direct-equality match (parens form not stripped —
+ * intentional pre-F2 behavior preserved); `includeTools` strips the
+ * first `(...)` suffix so `toolName(args)` matches `toolName`.
+ *
+ * `passesSessionFilter` / `passesSessionPromptFilter` (the array-
+ * based predicates exported above) stay unchanged for unit tests
+ * and any caller that wants to test a single name without paying
+ * the Set-construction cost. The Sets live on `applyTools` /
+ * `applyPrompts`'s stack frame.
+ */
+interface CompiledNameFilter {
+  excludeSet?: ReadonlySet<string>;
+  includeSet?: ReadonlySet<string>;
+}
+
+function compileNameFilter(
+  includeTools?: readonly string[],
+  excludeTools?: readonly string[],
+): CompiledNameFilter {
+  return {
+    excludeSet: excludeTools ? new Set(excludeTools) : undefined,
+    includeSet: includeTools
+      ? new Set(
+          includeTools.map((entry) =>
+            entry.includes('(') ? entry.slice(0, entry.indexOf('(')) : entry,
+          ),
+        )
+      : undefined,
+  };
+}
+
+function compiledFilterAccepts(
+  filter: CompiledNameFilter,
+  name: string,
+): boolean {
+  if (filter.excludeSet?.has(name)) return false;
+  if (!filter.includeSet) return true;
+  return filter.includeSet.has(name);
+}
+
+/**
  * Decide whether a tool from a snapshot passes a session's
  * include/exclude filter. Exported for unit-testability and so the
  * future pool/F3 audit path can replay the same predicate.
@@ -127,11 +172,17 @@ export class SessionMcpView {
    */
   applyTools(snapshot: readonly DiscoveredMCPTool[]): void {
     this.sessionToolRegistry.removeMcpToolsByServer(this.serverName);
+    // W12/PR A: precompute filter Sets once per pass so the per-tool
+    // predicate is O(1). Pre-fix `passesSessionFilter` re-scanned the
+    // includeTools / excludeTools arrays inside every iteration —
+    // O(M tools × N filter entries) per pass. Same semantics applied.
+    const filter = compileNameFilter(
+      this.cfg.includeTools,
+      this.cfg.excludeTools,
+    );
     let registered = 0;
     for (const tool of snapshot) {
-      if (
-        !passesSessionFilter(tool, this.cfg.includeTools, this.cfg.excludeTools)
-      ) {
+      if (!compiledFilterAccepts(filter, tool.serverToolName)) {
         continue;
       }
       // V21 C7: per-session trust copy. `withTrust` returns the same
@@ -176,15 +227,14 @@ export class SessionMcpView {
    */
   applyPrompts(snapshot: readonly DiscoveredMCPPrompt[]): void {
     this.sessionPromptRegistry.removePromptsByServer(this.serverName);
+    // W12/PR A: same Set precompute as applyTools.
+    const filter = compileNameFilter(
+      this.cfg.includeTools,
+      this.cfg.excludeTools,
+    );
     let registered = 0;
     for (const prompt of snapshot) {
-      if (
-        !passesSessionPromptFilter(
-          prompt.name,
-          this.cfg.includeTools,
-          this.cfg.excludeTools,
-        )
-      ) {
+      if (!compiledFilterAccepts(filter, prompt.name)) {
         continue;
       }
       try {
