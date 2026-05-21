@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -28,6 +29,44 @@ def json_body(record: dict[str, Any]) -> Any:
         return {"text_hash": content_hash(text), "text_len": len(text)}
 
 
+SCHEMA_KEYS = (
+    "type",
+    "enum",
+    "const",
+    "items",
+    "properties",
+    "required",
+    "anyOf",
+    "allOf",
+    "oneOf",
+    "additionalProperties",
+)
+
+
+def normalize_schema(value: Any) -> Any:
+    if isinstance(value, dict):
+        normalized: dict[str, Any] = {}
+        for key in SCHEMA_KEYS:
+            if key not in value:
+                continue
+            child = value[key]
+            if key == "required" and isinstance(child, list):
+                normalized[key] = sorted(str(item) for item in child)
+            elif key == "properties" and isinstance(child, dict):
+                normalized[key] = {
+                    str(name): normalize_schema(schema)
+                    for name, schema in sorted(child.items())
+                }
+            elif key in {"anyOf", "allOf", "oneOf"} and isinstance(child, list):
+                normalized[key] = [normalize_schema(item) for item in child]
+            else:
+                normalized[key] = normalize_schema(child)
+        return normalized
+    if isinstance(value, list):
+        return [normalize_schema(item) for item in value]
+    return value
+
+
 def walk_tools(value: Any) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
     if isinstance(value, dict):
@@ -37,11 +76,6 @@ def walk_tools(value: Any) -> list[dict[str, Any]]:
         if "functions" in value and isinstance(value["functions"], list):
             for fn in value["functions"]:
                 tools.append(summarize_tool({"type": "function", "function": fn}))
-        for child in value.values():
-            tools.extend(walk_tools(child))
-    elif isinstance(value, list):
-        for child in value:
-            tools.extend(walk_tools(child))
     return tools
 
 
@@ -49,7 +83,10 @@ def summarize_tool(tool: Any) -> dict[str, Any]:
     if not isinstance(tool, dict):
         return {"raw_type": type(tool).__name__}
     fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
-    params = fn.get("parameters") if isinstance(fn, dict) else None
+    params = None
+    if isinstance(fn, dict):
+        params = fn.get("parameters") or fn.get("input_schema")
+    schema = normalize_schema(params) if isinstance(params, dict) else {}
     return {
         "type": tool.get("type"),
         "name": fn.get("name") if isinstance(fn, dict) else None,
@@ -62,19 +99,37 @@ def summarize_tool(tool: Any) -> dict[str, Any]:
         "properties": sorted(params.get("properties", {}).keys())
         if isinstance(params, dict) and isinstance(params.get("properties"), dict)
         else [],
+        "schema": schema,
     }
 
 
 def summarize_messages(value: Any) -> list[dict[str, Any]]:
     messages = None
+    system_messages: list[Any] = []
     if isinstance(value, dict):
+        for key in ("system", "instructions"):
+            if key in value:
+                system_messages.append(value[key])
         if isinstance(value.get("messages"), list):
             messages = value["messages"]
         elif isinstance(value.get("input"), list):
             messages = value["input"]
     if messages is None:
-        return []
+        messages = []
     summary = []
+    for system in system_messages:
+        content = (
+            system
+            if isinstance(system, str)
+            else json.dumps(system, ensure_ascii=False, sort_keys=True)
+        )
+        summary.append(
+            {
+                "role": "system",
+                "content_hash": content_hash(content),
+                "content_len": len(content),
+            }
+        )
     for item in messages:
         if not isinstance(item, dict):
             continue
@@ -93,18 +148,28 @@ def summarize_messages(value: Any) -> list[dict[str, Any]]:
 
 def normalize(path: Path) -> dict[str, Any]:
     requests = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_num, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
-        raw = json.loads(line)
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(
+                f"Warning: skipping malformed line {line_num} in {path}: {exc}",
+                file=sys.stderr,
+            )
+            continue
         req = raw.get("request") or {}
         resp = raw.get("response") or {}
         parsed = urlparse(req.get("url", ""))
+        url_path = parsed.path
+        if parsed.query:
+            url_path = f"{url_path}?{parsed.query}"
         body = json_body(req)
         requests.append(
             {
                 "method": req.get("method"),
-                "url_path": parsed.path,
+                "url_path": url_path,
                 "body_keys": sorted(body.keys()) if isinstance(body, dict) else [],
                 "model": body.get("model") if isinstance(body, dict) else None,
                 "stream": body.get("stream") if isinstance(body, dict) else None,

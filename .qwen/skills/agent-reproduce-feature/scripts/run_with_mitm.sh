@@ -25,6 +25,11 @@ if ! command -v mitmdump >/dev/null 2>&1; then
   exit 127
 fi
 
+if [[ ! -f "${ca_file}" ]]; then
+  echo "WARNING: CA cert not found at ${ca_file}." >&2
+  echo "Run mitmproxy once to generate it, or set MITMPROXY_CA_FILE." >&2
+fi
+
 : > "${http_out}"
 : > "${mitm_log}"
 
@@ -47,19 +52,58 @@ cleanup() {
 }
 trap cleanup EXIT
 
-sleep 1
+proxy_ready=0
+for _attempt in {1..50}; do
+  if ! kill -0 "${mitm_pid}" >/dev/null 2>&1; then
+    echo "mitmdump exited before the wrapped command started." >&2
+    cat "${mitm_log}" >&2
+    exit 1
+  fi
+  if python3 - "${port}" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=0.2):
+    pass
+PY
+  then
+    proxy_ready=1
+    break
+  fi
+  sleep 0.1
+done
+
+if [[ "${proxy_ready}" != "1" ]]; then
+  echo "mitmdump did not start listening on 127.0.0.1:${port}." >&2
+  cat "${mitm_log}" >&2
+  exit 1
+fi
+
+redacted_command="$(
+  printf '%q ' "$@" |
+    sed -E \
+      -e 's/sk-[A-Za-z0-9_-]{12,}/sk-<redacted>/g' \
+      -e 's/(ghp|gho|ghu|ghs)_[A-Za-z0-9_]{20,}/gh_<redacted>/g' \
+      -e 's/github_pat_[A-Za-z0-9_]{20,}/github_pat_<redacted>/g' \
+      -e 's/([A-Za-z0-9_.-]*(api[-_]?key|token|secret|credential)[A-Za-z0-9_.-]*=)[^[:space:]]+/\1<redacted>/Ig'
+)"
 
 {
   echo "out_dir=${out_dir}"
   echo "proxy=http://127.0.0.1:${port}"
   echo "ca_file=${ca_file}"
-  echo "command=$*"
+  echo "command=${redacted_command}"
 } > "${out_dir}/env.txt"
 
 set +e
 HTTP_PROXY="http://127.0.0.1:${port}" \
 HTTPS_PROXY="http://127.0.0.1:${port}" \
 ALL_PROXY="http://127.0.0.1:${port}" \
+http_proxy="http://127.0.0.1:${port}" \
+https_proxy="http://127.0.0.1:${port}" \
+all_proxy="http://127.0.0.1:${port}" \
+NO_PROXY="" \
+no_proxy="" \
 NODE_EXTRA_CA_CERTS="${ca_file}" \
 SSL_CERT_FILE="${ca_file}" \
 REQUESTS_CA_BUNDLE="${ca_file}" \

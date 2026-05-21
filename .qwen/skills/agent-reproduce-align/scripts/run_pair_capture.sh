@@ -50,22 +50,65 @@ set +e
 qwen_status=$?
 set -e
 
-"${script_dir}/normalize_trace.py" "${out_dir}/reference/http.jsonl" > "${out_dir}/reference/normalized.json"
-"${script_dir}/normalize_trace.py" "${out_dir}/qwen/http.jsonl" > "${out_dir}/qwen/normalized.json"
-
 set +e
-"${script_dir}/compare_traces.py" \
-  "${out_dir}/reference/normalized.json" \
-  "${out_dir}/qwen/normalized.json" \
-  > "${out_dir}/trace.diff"
-compare_status=$?
+"${script_dir}/normalize_trace.py" "${out_dir}/reference/http.jsonl" \
+  > "${out_dir}/reference/normalized.json" \
+  2> "${out_dir}/reference/normalize.err"
+normalize_ref_status=$?
+"${script_dir}/normalize_trace.py" "${out_dir}/qwen/http.jsonl" \
+  > "${out_dir}/qwen/normalized.json" \
+  2> "${out_dir}/qwen/normalize.err"
+normalize_qwen_status=$?
 set -e
+
+compare_status=0
+if [[ "${normalize_ref_status}" -ne 0 || "${normalize_qwen_status}" -ne 0 ]]; then
+  {
+    echo "Trace normalization failed."
+    echo "reference_normalize_status=${normalize_ref_status}"
+    echo "qwen_normalize_status=${normalize_qwen_status}"
+    echo "reference_normalize_err=${out_dir}/reference/normalize.err"
+    echo "qwen_normalize_err=${out_dir}/qwen/normalize.err"
+  } > "${out_dir}/trace.diff"
+  compare_status=2
+else
+  request_counts="$(
+    python3 - "${out_dir}/reference/normalized.json" "${out_dir}/qwen/normalized.json" <<'PY'
+import json
+import sys
+
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as handle:
+        print(json.load(handle).get("request_count", 0))
+PY
+  )"
+  reference_count="$(printf '%s\n' "${request_counts}" | sed -n '1p')"
+  qwen_count="$(printf '%s\n' "${request_counts}" | sed -n '2p')"
+  if [[ "${reference_count}" == "0" && "${qwen_count}" == "0" ]]; then
+    {
+      echo "Both captures produced empty traces."
+      echo "reference_http=${out_dir}/reference/http.jsonl"
+      echo "qwen_http=${out_dir}/qwen/http.jsonl"
+    } > "${out_dir}/trace.diff"
+    compare_status=1
+  else
+    set +e
+    "${script_dir}/compare_traces.py" \
+      "${out_dir}/reference/normalized.json" \
+      "${out_dir}/qwen/normalized.json" \
+      > "${out_dir}/trace.diff"
+    compare_status=$?
+    set -e
+  fi
+fi
 
 echo "reference_status=${reference_status}"
 echo "qwen_status=${qwen_status}"
+echo "normalize_reference_status=${normalize_ref_status}"
+echo "normalize_qwen_status=${normalize_qwen_status}"
 echo "compare_status=${compare_status}"
 echo "diff=${out_dir}/trace.diff"
 
-if [[ "${reference_status}" -ne 0 || "${qwen_status}" -ne 0 || "${compare_status}" -ne 0 ]]; then
+if [[ "${reference_status}" -ne 0 || "${qwen_status}" -ne 0 || "${normalize_ref_status}" -ne 0 || "${normalize_qwen_status}" -ne 0 || "${compare_status}" -ne 0 ]]; then
   exit 1
 fi

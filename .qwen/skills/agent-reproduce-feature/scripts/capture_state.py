@@ -53,17 +53,32 @@ SENSITIVE_PATH_PARTS = {
     "cookies",
     "credential",
     "credentials",
+    "docker",
+    "env",
+    "gcloud",
+    "gh",
+    "gnupg",
     "history",
+    "id_ed25519",
+    "id_rsa",
+    "identity",
     "key",
     "keys",
+    "kube",
     "log",
     "logs",
+    "netrc",
+    "npmrc",
     "oauth",
+    "pgp",
+    "private_key",
+    "pypirc",
     "refresh_token",
     "secret",
     "secrets",
     "session",
     "sessions",
+    "ssh",
     "token",
     "tokens",
     "transcript",
@@ -71,8 +86,9 @@ SENSITIVE_PATH_PARTS = {
 }
 
 SENSITIVE_KEY_PATTERN = (
-    r"api[_-]?key|authorization|cookie|password|secret|token|"
-    r"access[_-]?token|refresh[_-]?token|client[_-]?secret"
+    r"[A-Za-z0-9_.-]*(?:api[_-]?key|authorization|cookie|password|secret|"
+    r"token|credential|access[_-]?token|refresh[_-]?token|"
+    r"client[_-]?secret)[A-Za-z0-9_.-]*"
 )
 QUOTED_KEY_QUOTED_VALUE_RE = re.compile(
     rf"(?i)([\"'])({SENSITIVE_KEY_PATTERN})\1(\s*:\s*)([\"'])(.*?)\4"
@@ -88,6 +104,16 @@ UNQUOTED_KEY_BARE_VALUE_RE = re.compile(
 )
 BEARER_RE = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
 OPENAI_STYLE_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
+GITHUB_TOKEN_RE = re.compile(r"\b(?:ghp|gho|ghu|ghs)_[A-Za-z0-9_]{20,}\b")
+GITHUB_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")
+AWS_KEY_RE = re.compile(r"\bAKIA[0-9A-Z]{16}\b")
+GOOGLE_API_KEY_RE = re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b")
+GENERIC_AUTH_RE = re.compile(r"(?i)\b(?:token|basic)\s+[a-z0-9._~+/=-]{8,}")
+PEM_KEY_RE = re.compile(
+    r"-----BEGIN\s+\w+(?:\s+\w+)*\s+PRIVATE\s+KEY-----.*?"
+    r"-----END\s+\w+(?:\s+\w+)*\s+PRIVATE\s+KEY-----",
+    re.DOTALL,
+)
 
 
 def now_iso() -> str:
@@ -127,6 +153,15 @@ def redact_text(text: str) -> str:
     text = text.replace(home, "~")
     text = BEARER_RE.sub("Bearer <redacted>", text)
     text = OPENAI_STYLE_KEY_RE.sub("sk-<redacted>", text)
+    text = GITHUB_TOKEN_RE.sub("gh_<redacted>", text)
+    text = GITHUB_PAT_RE.sub("github_pat_<redacted>", text)
+    text = AWS_KEY_RE.sub("AKIA<redacted>", text)
+    text = GOOGLE_API_KEY_RE.sub("AIza<redacted>", text)
+    text = GENERIC_AUTH_RE.sub(lambda m: m.group(0).split()[0] + " <redacted>", text)
+    text = PEM_KEY_RE.sub(
+        "-----BEGIN PRIVATE KEY-----<redacted>-----END PRIVATE KEY-----",
+        text,
+    )
 
     def replace_quoted_key_quoted_value(match: re.Match[str]) -> str:
         return (
@@ -200,10 +235,13 @@ def collect_entries(
         for dirname in sorted(dirnames):
             path = Path(dirpath) / dirname
             rel_path = path.relative_to(root).as_posix()
-            if path.is_symlink():
-                entries[rel_path] = {"kind": "symlink"}
-            else:
-                walkable_dirnames.append(dirname)
+            try:
+                if path.is_symlink():
+                    entries[rel_path] = {"kind": "symlink"}
+                else:
+                    walkable_dirnames.append(dirname)
+            except OSError as exc:
+                entries[rel_path] = {"kind": "error", "error": str(exc)}
         dirnames[:] = walkable_dirnames
         for filename in sorted(filenames):
             path = Path(dirpath) / filename
@@ -255,11 +293,13 @@ def write_snapshot(args: argparse.Namespace) -> int:
             args.max_text_bytes,
         )
 
-    (out_dir / "state-manifest.json").write_text(
+    manifest_path = out_dir / "state-manifest.json"
+    manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    print(out_dir / "state-manifest.json")
+    os.chmod(manifest_path, 0o600)
+    print(manifest_path)
     return 0
 
 
@@ -482,15 +522,19 @@ def write_diff(args: argparse.Namespace) -> int:
     diff = build_diff(before, after, args.max_diff_lines)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    (args.out_dir / "state-diff.json").write_text(
+    json_path = args.out_dir / "state-diff.json"
+    md_path = args.out_dir / "state-diff.md"
+    json_path.write_text(
         json.dumps(diff, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    (args.out_dir / "state-diff.md").write_text(
+    md_path.write_text(
         markdown_for_diff(diff),
         encoding="utf-8",
     )
-    print(args.out_dir / "state-diff.md")
+    os.chmod(json_path, 0o600)
+    os.chmod(md_path, 0o600)
+    print(md_path)
     return 0
 
 

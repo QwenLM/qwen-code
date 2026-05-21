@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,14 @@ def tool_index(request: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def compare_request(idx: int, left: dict[str, Any], right: dict[str, Any]) -> list[str]:
     diffs: list[str] = []
     prefix = f"request[{idx}]"
-    for key in ("method", "url_path", "model", "stream", "response_status"):
+    for key in (
+        "method",
+        "url_path",
+        "body_keys",
+        "model",
+        "stream",
+        "response_status",
+    ):
         if left.get(key) != right.get(key):
             diffs.append(f"{prefix}.{key}: {left.get(key)!r} != {right.get(key)!r}")
 
@@ -42,7 +50,7 @@ def compare_request(idx: int, left: dict[str, Any], right: dict[str, Any]) -> li
         diffs.append(f"{prefix}.tools_extra_in_right: {extra}")
 
     for name in sorted(set(left_tools) & set(right_tools)):
-        for key in ("required", "properties"):
+        for key in ("type", "description_hash", "required", "properties", "schema"):
             if left_tools[name].get(key) != right_tools[name].get(key):
                 diffs.append(
                     f"{prefix}.tool[{name}].{key}: "
@@ -57,8 +65,13 @@ def main() -> int:
     parser.add_argument("right", type=Path, help="Target normalized trace, usually Qwen Code")
     args = parser.parse_args()
 
-    left = load(args.left)
-    right = load(args.right)
+    try:
+        left = load(args.left)
+        right = load(args.right)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Failed to load normalized trace: {exc}", file=sys.stderr)
+        return 2
+
     diffs: list[str] = []
 
     if left.get("request_count") != right.get("request_count"):
@@ -70,6 +83,14 @@ def main() -> int:
         zip(left.get("requests") or [], right.get("requests") or [])
     ):
         diffs.extend(compare_request(idx, left_req, right_req))
+    left_requests = left.get("requests") or []
+    right_requests = right.get("requests") or []
+    if len(left_requests) > len(right_requests):
+        for idx, request in enumerate(left_requests[len(right_requests) :], len(right_requests)):
+            diffs.append(f"request[{idx}].missing_in_right: {request!r}")
+    elif len(right_requests) > len(left_requests):
+        for idx, request in enumerate(right_requests[len(left_requests) :], len(left_requests)):
+            diffs.append(f"request[{idx}].extra_in_right: {request!r}")
 
     if not diffs:
         print("No normalized trace differences found.")
