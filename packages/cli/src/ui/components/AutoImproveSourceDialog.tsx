@@ -7,7 +7,6 @@
 import type React from 'react';
 import { useCallback, useEffect, useState } from 'react';
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -20,8 +19,6 @@ import {
   writeAutoImproveConfig,
   type AutoImproveConfig,
 } from '../commands/autoImproveState.js';
-
-const execFileAsync = promisify(execFile);
 
 interface AutoImproveSourceDialogProps {
   config: Config;
@@ -41,22 +38,33 @@ function getConfiguredRoot(config: Config): string {
   return config.getWorkingDir() || config.getProjectRoot();
 }
 
-async function resolveRepoRoot(config: Config): Promise<string> {
+async function resolveRepoRoot(
+  config: Config,
+  signal: AbortSignal,
+): Promise<string> {
   const cwd = getConfiguredRoot(config);
   try {
-    const { stdout } = await execFileAsync('git', [
-      '-C',
-      cwd,
-      'rev-parse',
-      '--show-toplevel',
-    ]);
-    return stdout.trim();
-  } catch {
+    return await new Promise<string>((resolve, reject) => {
+      execFile(
+        'git',
+        ['-C', cwd, 'rev-parse', '--show-toplevel'],
+        { signal },
+        (error, stdout) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve(stdout.trim());
+        },
+      );
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
     return cwd;
   }
 }
 
-function normalizeCustomSources(sources: string[]): string[] {
+export function normalizeCustomSources(sources: string[]): string[] {
   const seen = new Set<string>();
   return sources
     .map((source) => source.trim())
@@ -67,7 +75,7 @@ function normalizeCustomSources(sources: string[]): string[] {
     });
 }
 
-function applyDraftSource(
+export function applyDraftSource(
   customSources: string[],
   draftSource: string,
   editingIndex: number | null,
@@ -109,28 +117,28 @@ export function AutoImproveSourceDialog({
   const saveIndex = inputIndex + 1;
 
   useEffect(() => {
-    let cancelled = false;
-    resolveRepoRoot(config)
+    const abortController = new AbortController();
+    resolveRepoRoot(config, abortController.signal)
       .then(async (root) => {
         const stored = await readAutoImproveConfig(root);
         return { root, stored };
       })
       .then((stored) => {
-        if (cancelled) return;
+        if (abortController.signal.aborted) return;
         setRepoRoot(stored.root);
         setSources(stored.stored.sources);
         setCustomSources(stored.stored.customSources);
         setLoaded(true);
       })
       .catch((loadError: unknown) => {
-        if (cancelled) return;
+        if (abortController.signal.aborted) return;
         setError(
           loadError instanceof Error ? loadError.message : String(loadError),
         );
         setLoaded(true);
       });
     return () => {
-      cancelled = true;
+      abortController.abort();
     };
   }, [config]);
 

@@ -106,7 +106,7 @@ describe('autoImproveCommand', () => {
     expect(result).toMatchObject({ type: 'submit_prompt' });
     const prompt = (result as { content: Array<{ text: string }> }).content[0]!
       .text;
-    expect(prompt).toContain('- Custom sources:\n  - watch flaky auth tests');
+    expect(prompt).toContain('Custom sources:\n  - watch flaky auth tests');
     expect(prompt).toContain('  - scan docs TODOs');
     expect(prompt).toContain(
       'Delivery policy: source-aware local commit. Do not push unless the user explicitly requested push',
@@ -154,7 +154,8 @@ describe('autoImproveCommand', () => {
     expect(state.prompt).toBe('prefer small fixes');
     expect(state.cronJobId).toBe('job-1');
     expect(state.deliveryPolicy).toBe('source-aware-local-commit');
-    expect(
+    expect(state).toHaveProperty('currentRun');
+    const summaryContent = await fs.readFile(
       path.join(
         tempDir,
         '.qwen',
@@ -163,7 +164,30 @@ describe('autoImproveCommand', () => {
         active.activeLoopId,
         'summary.md',
       ),
-    ).toBeTruthy();
+      'utf8',
+    );
+    expect(summaryContent).toContain('# Auto-Improve Summary');
+  });
+
+  it('accepts spaced intervals and rejects unsupported cadences', async () => {
+    const seconds = await autoImproveCommand.action?.(
+      context,
+      'start --every 30s',
+    );
+    expect(seconds).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+    });
+
+    const days = await autoImproveCommand.action?.(context, 'start --every 2d');
+    expect(days).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+    });
+
+    await expect(
+      autoImproveCommand.action?.(context, 'start --every 30 minutes'),
+    ).resolves.toMatchObject({ type: 'submit_prompt' });
   });
 
   it('normalizes custom sources and deduplicates saved config', async () => {
@@ -278,7 +302,87 @@ describe('autoImproveCommand', () => {
     expect(content).toContain('Cadence: 30m');
   });
 
-  it('does not print undefined for legacy primitive run refs', async () => {
+  it('rejects duplicate starts while the cron job still exists', async () => {
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+
+    const result = await autoImproveCommand.action?.(
+      context,
+      'start --every 30m',
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+    });
+    expect((result as { content: string }).content).toContain('already active');
+  });
+
+  it('clears stale active pointers and starts a replacement loop', async () => {
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+    scheduler.list.mockReturnValueOnce([]);
+
+    const result = await autoImproveCommand.action?.(
+      context,
+      'start --every 30m',
+    );
+
+    expect(result).toMatchObject({ type: 'submit_prompt' });
+  });
+
+  it('stops an active loop and deletes the cron job', async () => {
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+
+    const result = await autoImproveCommand.action?.(context, 'stop');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+    });
+    expect(scheduler.delete).toHaveBeenCalledWith('job-1');
+    await expect(
+      fs.readFile(
+        path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
+        'utf8',
+      ),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('runs a tick only for the active loop', async () => {
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+    const activeRaw = await fs.readFile(
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
+      'utf8',
+    );
+    const active = JSON.parse(activeRaw) as { activeLoopId: string };
+    const statePath = path.join(
+      tempDir,
+      '.qwen',
+      'auto-improve',
+      'loops',
+      active.activeLoopId,
+      'state.json',
+    );
+    const state = JSON.parse(await fs.readFile(statePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    delete state['currentRun'];
+    await fs.writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    const skipped = await autoImproveCommand.action?.(context, 'tick other');
+    expect(skipped).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+    });
+
+    const result = await autoImproveCommand.action?.(
+      context,
+      `tick ${active.activeLoopId}`,
+    );
+    expect(result).toMatchObject({ type: 'submit_prompt' });
+  });
+
+  it('normalizes malformed legacy state without printing undefined', async () => {
     await autoImproveCommand.action?.(context, 'start --every 30m');
     const activeRaw = await fs.readFile(
       path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
@@ -305,9 +409,9 @@ describe('autoImproveCommand', () => {
     context.executionMode = 'non_interactive';
     const result = await autoImproveCommand.action?.(context, 'status');
     const content = (result as { content: string }).content;
-    expect(content).toContain('Status: completed_one_run');
-    expect(content).toContain('Current run: 1');
-    expect(content).toContain('Last run: 2026-05-15T02:02:00Z');
+    expect(content).toContain('Status: stale');
+    expect(content).not.toContain('Current run:');
+    expect(content).not.toContain('Last run:');
     expect(content).not.toContain('undefined');
   });
 });

@@ -98,11 +98,26 @@ function parseAutoImproveTickLoopId(
   submitType: SendMessageType,
   query: PartListUnion,
 ): string | null {
-  if (submitType !== SendMessageType.Cron || typeof query !== 'string') {
+  if (submitType === SendMessageType.ToolResult) {
     return null;
   }
-  const match = query.trim().match(/^\/auto-improve\s+tick\s+(\S+)$/);
-  return match?.[1] ?? null;
+  const text =
+    typeof query === 'string'
+      ? query
+      : Array.isArray(query)
+        ? query
+            .map((part) =>
+              typeof part === 'string'
+                ? part
+                : ((part as { text?: string }).text ?? ''),
+            )
+            .join('\n')
+        : '';
+  const trimmed = text.trim();
+  const slashMatch = trimmed.match(/^\/auto-improve\s+tick\s+(\S+)$/);
+  if (slashMatch) return slashMatch[1]!;
+  const expandedPromptMatch = trimmed.match(/^- Loop id:\s*(\S+)$/m);
+  return expandedPromptMatch?.[1] ?? null;
 }
 
 /**
@@ -695,7 +710,9 @@ export const useGeminiStream = (
       addItem(
         {
           type: MessageType.INFO,
-          text: 'Auto-improve run cancelled. The loop is still active; run /auto-improve stop to stop future ticks.',
+          text: t(
+            'Auto-improve run cancelled. The loop is still active; run /auto-improve stop to stop future ticks.',
+          ),
         },
         Date.now(),
       );
@@ -805,6 +822,10 @@ export const useGeminiStream = (
               localQueryToSendToGemini = slashCommandResult.content;
               submitPromptOnCompleteRef.current =
                 slashCommandResult.onComplete ?? null;
+              currentAutoImproveLoopIdRef.current = parseAutoImproveTickLoopId(
+                submitType,
+                localQueryToSendToGemini,
+              );
 
               return {
                 queryToSend: localQueryToSendToGemini,

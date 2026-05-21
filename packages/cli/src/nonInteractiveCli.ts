@@ -44,6 +44,14 @@ import {
   handleCancellationError,
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
+import {
+  normalizePartList,
+  extractPartsFromUserMessage,
+  buildSystemMessage,
+  createToolProgressHandler,
+  createAgentToolProgressHandler,
+  computeUsageFromMetrics,
+} from './utils/nonInteractiveHelpers.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -81,14 +89,12 @@ function suppressedOutputBody(structuredCaptured: boolean): string {
     ? SUPPRESSED_OUTPUT_SUCCESS
     : SUPPRESSED_OUTPUT_RETRY;
 }
-import {
-  normalizePartList,
-  extractPartsFromUserMessage,
-  buildSystemMessage,
-  createToolProgressHandler,
-  createAgentToolProgressHandler,
-  computeUsageFromMetrics,
-} from './utils/nonInteractiveHelpers.js';
+
+function partListToText(parts: PartListUnion): string {
+  return normalizePartList(parts)
+    .map((part) => part.text ?? JSON.stringify(part))
+    .join('');
+}
 
 // Human-readable labels for the detectors that can fire mid-stream.
 // Surfaced to stderr in TEXT mode so a headless run that halts on a loop
@@ -997,13 +1003,32 @@ export async function runNonInteractive(
               };
 
               scheduler.start((job: { prompt: string }) => {
-                const label = job.prompt.slice(0, 40);
-                localQueue.push({
-                  displayText: `Cron: ${label}`,
-                  modelText: job.prompt,
-                  sendMessageType: SendMessageType.Cron,
-                });
-                drainLocalQueue().then(checkCronDone, onDrainError);
+                void (async () => {
+                  const label = job.prompt.slice(0, 40);
+                  let modelText = job.prompt;
+                  if (isSlashCommand(job.prompt)) {
+                    const slashCommandResult = await handleSlashCommand(
+                      job.prompt,
+                      abortController,
+                      config,
+                      settings,
+                    );
+                    if (slashCommandResult.type === 'submit_prompt') {
+                      modelText = partListToText(slashCommandResult.content);
+                    } else if (slashCommandResult.type === 'message') {
+                      modelText = slashCommandResult.content;
+                    } else {
+                      return;
+                    }
+                  }
+                  localQueue.push({
+                    displayText: `Cron: ${label}`,
+                    modelText,
+                    sendMessageType: SendMessageType.Cron,
+                  });
+                  await drainLocalQueue();
+                  checkCronDone();
+                })().catch(onDrainError);
               });
 
               // Check immediately in case jobs were already deleted

@@ -7,9 +7,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
 
 export interface AutoImproveSources {
   githubIssues: boolean;
@@ -62,6 +59,15 @@ export interface AutoImproveActivePointer {
 }
 
 export const AUTO_IMPROVE_DIR = path.join('.qwen', 'auto-improve');
+const LOOP_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+const LOOP_STATUSES = new Set(['running', 'stopping', 'stopped', 'stale']);
+const ACTIVE_RUN_STATUSES = new Set(['implementing', 'testing', 'running']);
+const TERMINAL_RUN_STATUSES = new Set([
+  'success',
+  'failed',
+  'blocked',
+  'cancelled',
+]);
 
 export const DEFAULT_AUTO_IMPROVE_CONFIG: AutoImproveConfig = {
   version: 1,
@@ -89,6 +95,7 @@ export function getAutoImproveLoopDir(
   repoRoot: string,
   loopId: string,
 ): string {
+  assertValidLoopId(loopId);
   return path.join(getAutoImproveRoot(repoRoot), 'loops', loopId);
 }
 
@@ -99,8 +106,18 @@ export function getAutoImproveStatePath(
   return path.join(getAutoImproveLoopDir(repoRoot, loopId), 'state.json');
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function isValidAutoImproveLoopId(loopId: string): boolean {
+  return LOOP_ID_PATTERN.test(loopId);
+}
+
+function assertValidLoopId(loopId: string): void {
+  if (!isValidAutoImproveLoopId(loopId)) {
+    throw new Error(`Invalid auto-improve loop id: ${loopId}`);
+  }
 }
 
 function readBoolean(value: unknown): boolean {
@@ -186,7 +203,7 @@ export async function readActiveAutoImproveLoop(
     if (
       isRecord(parsed) &&
       typeof parsed['activeLoopId'] === 'string' &&
-      parsed['activeLoopId'].trim()
+      isValidAutoImproveLoopId(parsed['activeLoopId'])
     ) {
       return { activeLoopId: parsed['activeLoopId'] };
     }
@@ -208,6 +225,7 @@ export async function writeActiveAutoImproveLoop(
   repoRoot: string,
   loopId: string,
 ): Promise<void> {
+  assertValidLoopId(loopId);
   await ensureAutoImproveRoot(repoRoot);
   await fs.writeFile(
     getAutoImproveActivePath(repoRoot),
@@ -222,6 +240,101 @@ export async function clearActiveAutoImproveLoop(
   await fs.rm(getAutoImproveActivePath(repoRoot), { force: true });
 }
 
+function normalizeRunRef(value: unknown): AutoImproveRunRef | undefined {
+  if (!isRecord(value)) return undefined;
+  const runId = value['runId'];
+  const status = value['status'];
+  if (typeof runId !== 'string' || !runId.trim()) return undefined;
+  if (typeof status !== 'string' || !status.trim()) return undefined;
+
+  const runRef: AutoImproveRunRef = {
+    runId: runId.trim(),
+    status: status.trim(),
+  };
+  const worktreePath = value['worktreePath'];
+  const runDoc = value['runDoc'];
+  if (typeof worktreePath === 'string' && worktreePath.trim()) {
+    runRef.worktreePath = worktreePath;
+  }
+  if (typeof runDoc === 'string' && runDoc.trim()) {
+    runRef.runDoc = runDoc;
+  }
+
+  const deliveryTarget = value['deliveryTarget'];
+  if (isRecord(deliveryTarget)) {
+    const kind = deliveryTarget['kind'];
+    const branch = deliveryTarget['branch'];
+    const pushRequested = deliveryTarget['pushRequested'];
+    const prNumber = deliveryTarget['prNumber'];
+    if (
+      (kind === 'loop-branch' ||
+        kind === 'pr-branch' ||
+        kind === 'local-only') &&
+      typeof branch === 'string' &&
+      branch.trim() &&
+      typeof pushRequested === 'boolean'
+    ) {
+      runRef.deliveryTarget = {
+        kind,
+        branch,
+        pushRequested,
+        ...(typeof prNumber === 'number' && Number.isFinite(prNumber)
+          ? { prNumber }
+          : {}),
+      };
+    }
+  }
+
+  return runRef;
+}
+
+function normalizeLoopState(value: unknown): AutoImproveLoopState | null {
+  if (!isRecord(value)) return null;
+  const loopId = value['loopId'];
+  if (typeof loopId !== 'string' || !isValidAutoImproveLoopId(loopId)) {
+    return null;
+  }
+  const status = value['status'];
+  const state: AutoImproveLoopState = {
+    version: 1,
+    loopId,
+    status: LOOP_STATUSES.has(String(status))
+      ? (status as AutoImproveLoopState['status'])
+      : 'stale',
+    sessionScoped: true,
+    createdAt: typeof value['createdAt'] === 'string' ? value['createdAt'] : '',
+    cadence: typeof value['cadence'] === 'string' ? value['cadence'] : '',
+    cron: typeof value['cron'] === 'string' ? value['cron'] : '',
+    targetBranch:
+      typeof value['targetBranch'] === 'string' ? value['targetBranch'] : '',
+    repoRoot: typeof value['repoRoot'] === 'string' ? value['repoRoot'] : '',
+    deliveryPolicy: 'source-aware-local-commit',
+    stopRequested: readBoolean(value['stopRequested']),
+    sourceSnapshot: normalizeConfig(value['sourceSnapshot']),
+    prompt: typeof value['prompt'] === 'string' ? value['prompt'] : '',
+  };
+  const cronJobId = value['cronJobId'];
+  if (typeof cronJobId === 'string' && cronJobId.trim()) {
+    state.cronJobId = cronJobId;
+  }
+  const currentRun = normalizeRunRef(value['currentRun']);
+  if (currentRun) state.currentRun = currentRun;
+  const lastRun = normalizeRunRef(value['lastRun']);
+  if (lastRun) state.lastRun = lastRun;
+  return state;
+}
+
+export function isActiveAutoImproveRunRef(
+  value: unknown,
+): value is AutoImproveRunRef {
+  const runRef = normalizeRunRef(value);
+  return !!runRef && ACTIVE_RUN_STATUSES.has(runRef.status);
+}
+
+export function isTerminalAutoImproveRunStatus(status: string): boolean {
+  return TERMINAL_RUN_STATUSES.has(status);
+}
+
 export async function readAutoImproveLoopState(
   repoRoot: string,
   loopId: string,
@@ -231,7 +344,7 @@ export async function readAutoImproveLoopState(
       getAutoImproveStatePath(repoRoot, loopId),
       'utf8',
     );
-    return JSON.parse(raw) as AutoImproveLoopState;
+    return normalizeLoopState(JSON.parse(raw));
   } catch (error) {
     if (
       error &&
@@ -241,6 +354,7 @@ export async function readAutoImproveLoopState(
     ) {
       return null;
     }
+    if (error instanceof SyntaxError) return null;
     throw error;
   }
 }
@@ -252,7 +366,7 @@ export async function writeAutoImproveLoopState(
   const loopDir = getAutoImproveLoopDir(repoRoot, state.loopId);
   await fs.mkdir(path.join(loopDir, 'runs'), { recursive: true });
   await fs.writeFile(
-    path.join(loopDir, 'state.json'),
+    getAutoImproveStatePath(repoRoot, state.loopId),
     `${JSON.stringify(state, null, 2)}\n`,
     'utf8',
   );
@@ -284,20 +398,22 @@ export async function initializeAutoImproveLoopFiles(
 
 async function resolveRepoRoot(cwd: string): Promise<string> {
   try {
-    const { stdout } = await execFileAsync('git', [
-      '-C',
-      cwd,
-      'rev-parse',
-      '--show-toplevel',
-    ]);
-    return stdout.trim();
+    return await new Promise<string>((resolve, reject) => {
+      execFile(
+        'git',
+        ['-C', cwd, 'rev-parse', '--show-toplevel'],
+        (error, stdout) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve(stdout.trim());
+        },
+      );
+    });
   } catch {
     return cwd;
   }
-}
-
-function isTerminalRunStatus(status: string): boolean {
-  return ['success', 'failed', 'blocked', 'cancelled'].includes(status);
 }
 
 export async function markActiveAutoImproveRunCancelled(
@@ -311,7 +427,10 @@ export async function markActiveAutoImproveRunCancelled(
   const state = await readAutoImproveLoopState(repoRoot, loopId);
   if (!state || state.status !== 'running') return false;
 
-  if (state.currentRun && isTerminalRunStatus(state.currentRun.status)) {
+  if (
+    state.currentRun &&
+    isTerminalAutoImproveRunStatus(state.currentRun.status)
+  ) {
     return false;
   }
 

@@ -1397,10 +1397,29 @@ export class Session implements SessionContext {
           this.config.getSessionId() + '########cron' + Date.now();
 
         try {
+          let promptParts: Part[] = [{ text: prompt }];
+          if (isSlashCommand(prompt)) {
+            const slashCommandResult = await handleSlashCommand(
+              prompt,
+              ac,
+              this.config,
+              this.settings,
+            );
+            const processedParts = await this.#processSlashCommandResult(
+              slashCommandResult,
+              [{ type: 'text', text: prompt }],
+            );
+            if (processedParts === null) return;
+            promptParts = processedParts;
+          }
+          const promptText = promptParts
+            .map((part) => part.text ?? JSON.stringify(part))
+            .join('');
+
           // Echo the cron prompt as a user message so the client sees it
           await this.sendUpdate({
             sessionUpdate: 'user_message_chunk',
-            content: { type: 'text', text: prompt },
+            content: { type: 'text', text: promptText },
             _meta: { source: 'cron' },
           });
 
@@ -1409,7 +1428,7 @@ export class Session implements SessionContext {
           const cronReminders = await this.#buildInitialSystemReminders();
           let nextMessage: Content | null = {
             role: 'user',
-            parts: [...cronReminders, { text: prompt }],
+            parts: [...cronReminders, ...promptParts],
           };
 
           while (nextMessage !== null) {
