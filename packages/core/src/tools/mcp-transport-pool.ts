@@ -935,7 +935,17 @@ export class McpTransportPool {
       const snap = await runWithTimeout(
         (async () => {
           await client.connect();
-          return client.discoverAndReturn(this.cliConfig);
+          // F2 (#4175 commit 6 review fix — wenshao R23 T1): explicitly
+          // opt out of `applyConfigFilters` for pool snapshot. Per-
+          // session `SessionMcpView.applyTools` is the authoritative
+          // filter (otherwise pool-mode trust + include/exclude would
+          // apply twice — once at the shared snapshot level and again
+          // at the per-session view, with potentially divergent
+          // decisions when sessions in the same workspace have
+          // different runtime trust state).
+          return client.discoverAndReturn(this.cliConfig, {
+            applyConfigFilters: false,
+          });
         })(),
         timeoutMs,
         `pool spawn for ${id}`,
@@ -1157,7 +1167,13 @@ export class McpTransportPool {
       const snap = await runWithTimeout(
         (async () => {
           await client.connect();
-          return await client.discoverAndReturn(this.cliConfig);
+          // F2 (#4175 commit 6 review fix — wenshao R23 T1): same
+          // opt-out as the pooled spawn — view.applyTools handles
+          // filtering for the unpooled path too (W81/W87 fix routes
+          // unpooled through attach's snapshot-replay).
+          return await client.discoverAndReturn(this.cliConfig, {
+            applyConfigFilters: false,
+          });
         })(),
         timeoutMs,
         `unpooled spawn for ${id}`,

@@ -300,7 +300,7 @@ describe('mcp-client', () => {
       expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
     });
 
-    it('discoverAndReturn ignores config filters and trust for shared pool snapshots', async () => {
+    it('discoverAndReturn with { applyConfigFilters: false } ignores config filters and trust for shared pool snapshots', async () => {
       const mockedClient = {
         connect: vi.fn(),
         registerCapabilities: vi.fn(),
@@ -350,7 +350,14 @@ describe('mcp-client', () => {
       );
       await client.connect();
 
-      const snapshot = await client.discoverAndReturn({} as Config);
+      // R23 T1: pool callers explicitly opt out of filters via the
+      // `applyConfigFilters: false` opts argument. Default
+      // `discoverAndReturn(cliConfig)` (no opts) applies filters,
+      // matching the legacy `discover()` semantics expected by
+      // non-pool consumers.
+      const snapshot = await client.discoverAndReturn({} as Config, {
+        applyConfigFilters: false,
+      });
 
       expect(snapshot.tools.map((tool) => tool.serverToolName)).toEqual([
         'allowed',
@@ -360,6 +367,75 @@ describe('mcp-client', () => {
         true,
       );
       expect(toolRegistry.registerTool).not.toHaveBeenCalled();
+    });
+
+    it('discoverAndReturn (default) applies config filters and trust — legacy non-pool callers (R23 T1)', async () => {
+      // R23 T1 regression: pre-fix `discoverAndReturn` hardcoded
+      // `{ applyConfigFilters: false }`, so legacy `discover()`
+      // (which delegates here) silently lost filtering and trust.
+      // Operators with `trust: true` saw unexpected permission
+      // prompts, and `excludeTools` was ignored.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [
+              { name: 'allowed' },
+              { name: 'filtered_out' },
+            ],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const client = new McpClient(
+        'legacy-filter-server',
+        new MCPServerConfig(
+          'test-command',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
+          undefined,
+          ['allowed'],
+          ['filtered_out'],
+        ),
+        toolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      // No opts → default applyConfigFilters=true → filters applied.
+      const snapshot = await client.discoverAndReturn({} as Config);
+
+      // `excludeTools: ['filtered_out']` excludes the second tool;
+      // `includeTools: ['allowed']` keeps the first.
+      expect(snapshot.tools.map((tool) => tool.serverToolName)).toEqual([
+        'allowed',
+      ]);
+      // `trust: true` config → tools carry trust=true (pre-fix this
+      // was always undefined because discoverAndReturn forced
+      // applyConfigFilters=false).
+      expect(snapshot.tools[0].trust).toBe(true);
     });
 
     it('discoverAndReturn throws "No prompts or tools found" when both empty', async () => {

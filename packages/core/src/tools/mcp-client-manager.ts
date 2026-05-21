@@ -1675,15 +1675,21 @@ export class McpClientManager {
       // the loop open — it does NOT prevent the callback from
       // executing if other refs keep the loop alive.
       let graceTimer: ReturnType<typeof setTimeout> | undefined;
-      // F2 (#4175 commit 6 review fix — qwen-latest W115): set the
-      // `stopTimedOut` flag BEFORE the race so the in-flight discovery
-      // pass can detect a timed-out shutdown via
-      // `runDiscoverAllMcpToolsViaPool`'s pre-set guard at line
-      // ~1539. Pre-fix a slow `pool.acquire` (stdio default 30s
-      // timeout) that resolved at 8s did `pooledConnections.set` AFTER
-      // the release loop had cleared the Map — orphan entry in the
-      // pool. Now the discovery pass aborts the set if shutdown is
-      // already past its 5s cap.
+      // F2 (#4175 commit 6 review fix — qwen-latest W115; R23 T16
+      // doc fix): the `stopTimedOut` flag is set synchronously inside
+      // the grace-timer callback below — i.e. the instant the timer
+      // fires (when `Promise.race` resolves via the timeout branch)
+      // and BEFORE `stop()` proceeds to `releaseAllPooledConnections`.
+      // Any in-flight `pool.acquire` callback that resolves between
+      // the grace timeout firing and the release loop running sees
+      // the gate at line ~1572 and skips the `pooledConnections.set`,
+      // preventing the orphan-entry bug W115 describes. Pre-R23 the
+      // comment said "set BEFORE the race" which misled readers into
+      // expecting a synchronous pre-set; the line citation `~1539`
+      // was also stale (the consumer guard is at ~1572).
+      // Pre-fix: a slow `pool.acquire` (stdio default 30s timeout)
+      // that resolved at 8s did `pooledConnections.set` AFTER the
+      // release loop had cleared the Map — orphan entry in the pool.
       try {
         await Promise.race([
           this.discoveryInFlight,

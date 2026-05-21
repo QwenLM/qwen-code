@@ -176,6 +176,20 @@ export class McpClient {
    * and logs; we just need the status registry to reflect reality.
    */
   async discover(cliConfig: Config): Promise<void> {
+    // F2 (#4175 commit 6 review fix — wenshao R23 T1 Critical): legacy
+    // `discover()` path (used by non-pool sessions and any direct
+    // McpClient consumers) MUST apply config filters at discovery
+    // time — pre-PR `this.discoverTools(cliConfig)` defaulted
+    // `applyConfigFilters` to `true`, so `trust: true` server config
+    // → tool's trust set; `includeTools`/`excludeTools` filtered out
+    // disallowed tools. The F2 refactor routed `discover()` through
+    // `discoverAndReturn` which used to hardcode
+    // `{ applyConfigFilters: false }` (matching pool semantics where
+    // `SessionMcpView.applyTools` is the authoritative filter), but
+    // that broke the legacy path: trust silently became `undefined`
+    // (operators saw unexpected permission prompts) and include/
+    // exclude filters were ignored. Now `discoverAndReturn` defaults
+    // to applying filters; pool callers explicitly opt out.
     const { tools, prompts } = await this.discoverAndReturn(cliConfig);
     for (const tool of tools) {
       this.toolRegistry.registerTool(tool);
@@ -199,8 +213,19 @@ export class McpClient {
    * Returns the same combined "no prompts or tools" error that `discover()`
    * raised pre-F2, so callers that distinguish "server up but empty" from
    * "server down" still get the right signal.
+   *
+   * @param opts.applyConfigFilters Whether to apply `includeTools` /
+   *   `excludeTools` filtering and set the `trust` field on returned
+   *   tools at discovery time. Defaults to `true` (legacy `discover()`
+   *   semantics). Pool callers pass `false` because per-session
+   *   `SessionMcpView.applyTools` is the authoritative filter
+   *   (otherwise pool-mode trust + filtering would apply twice
+   *   inconsistently across sessions).
    */
-  async discoverAndReturn(cliConfig: Config): Promise<{
+  async discoverAndReturn(
+    cliConfig: Config,
+    opts?: { applyConfigFilters?: boolean },
+  ): Promise<{
     tools: DiscoveredMCPTool[];
     prompts: DiscoveredMCPPrompt[];
   }> {
@@ -215,7 +240,7 @@ export class McpClient {
         this.serverConfig,
         this.client,
         cliConfig,
-        { applyConfigFilters: false },
+        { applyConfigFilters: opts?.applyConfigFilters ?? true },
       );
 
       if (prompts.length === 0 && tools.length === 0) {
@@ -773,8 +798,18 @@ export async function discoverTools(
     for (const funcDecl of tool.functionDeclarations) {
       try {
         if (!funcDecl.name) {
-          // Preserve the existing warning text for malformed MCP servers.
-          isEnabled(funcDecl, mcpServerName, mcpServerConfig);
+          // F2 (#4175 commit 6 review fix — wenshao R23 T5): emit the
+          // malformed-funcDecl warning inline rather than calling
+          // `isEnabled` solely for its side effect. Pre-fix
+          // `isEnabled(funcDecl, ...)` was invoked just to trigger
+          // the warn log inside it (return value ignored), which
+          // misuses isEnabled as a logging helper. The warning text
+          // is the same as the one in isEnabled (line 1618-1620);
+          // keeping it here keeps the call site readable and lets
+          // isEnabled stay a pure predicate.
+          debugLogger.warn(
+            `Discovered a function declaration without a name from MCP server '${mcpServerName}'. Skipping.`,
+          );
           continue;
         }
 

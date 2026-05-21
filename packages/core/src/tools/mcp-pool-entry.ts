@@ -58,7 +58,23 @@ export interface PoolEntryOptions {
 export function defaultPoolEntryOptions(
   transport: McpTransportKind,
 ): PoolEntryOptions {
-  const isRemote = transport === 'http' || transport === 'sse';
+  // F2 (#4175 commit 6 review fix — wenshao R23 T4): include
+  // 'websocket' in the remote set so the classification matches
+  // `discoveryTimeoutFor` in `mcp-discovery-timeout.ts:47`
+  // (`!!(cfg.httpUrl || cfg.url || cfg.tcp)` — websocket configs
+  // populate `cfg.tcp`/`cfg.url` and got the 5s remote discovery
+  // timeout). Pre-fix websocket got remote-style discovery timing
+  // (5s) but local-style reconnect timing (3 attempts, fixed 5s
+  // delay), an inconsistency surfaced by reviewer.
+  // NOTE: `maxReconnectAttempts` and `reconnectStrategy` are
+  // currently unconsumed by any pool code path (pool mode has no
+  // health monitor — see `mcp-client-manager.ts:1383-1386`); the
+  // classification alignment is forward-looking for when the
+  // health monitor lands. Keeping the field populated rather than
+  // removing it because the design doc declares both as part of
+  // the entry-options contract.
+  const isRemote =
+    transport === 'http' || transport === 'sse' || transport === 'websocket';
   return {
     drainDelayMs: 30_000,
     maxIdleMs: 5 * 60_000,
@@ -338,29 +354,47 @@ export class PoolEntry {
         for (const [sid] of [...this.subscribers]) {
           this.detach(sid);
         }
-        // F2 (#4175 commit 6 review fix — wenshao W122 R20-followup):
-        // fire-and-forget `sweepAndDisconnect` to kill wrapper-
-        // grandchildren (`npx`, `uvx`, `pnpm dlx`) that may outlive
-        // the dead transport. The transport itself is already
-        // disconnected (McpClient.onerror wrote DISCONNECTED to
-        // trigger us), but stdio wrapper trees can have grandchild
-        // processes that don't get SIGPIPE on parent death. The
-        // helper is best-effort: per-pid sigterm failures and
-        // disconnect errors log at warn/error and don't surface.
-        // `void` is intentional — we can't await in a sync listener,
-        // and operator visibility for the listener path is provided
-        // by the `debugLogger.error` line above + the helper's own
-        // logs.
-        void this.sweepAndDisconnect('silent_drop');
-        // F2 (#4175 commit 6 review fix — wenshao W122 R20-followup):
-        // recompute aggregated status across siblings (different
-        // fingerprints under same serverName). Pre-fix the global
-        // map kept whatever value McpClient.onerror wrote
-        // (DISCONNECTED for THIS entry's per-server view), so a
-        // multi-fingerprint server with one alive sibling would
-        // report DISCONNECTED in `Footer` / status routes even
-        // though the aggregate is still CONNECTED. Mirrors
-        // forceShutdown line 606.
+        // F2 (#4175 commit 6 review fix — wenshao W122 R20-followup +
+        // R23 T15 ordering fix): chain `updateGlobalStatus` AFTER
+        // `sweepAndDisconnect` resolves. Pre-R23 the W122-followup
+        // called `updateGlobalStatus` synchronously BEFORE the void
+        // sweep had run, so the sweep's later `client.disconnect()`
+        // — which unconditionally writes
+        // `updateMCPServerStatus(name, DISCONNECTED)` at
+        // `mcp-client.ts:250` — overwrote the aggregate we just set.
+        // For a multi-fingerprint server with an alive sibling,
+        // global map flapped CONNECTED (sync) → DISCONNECTED (sweep
+        // tail), self-healing only on the next sibling status event.
+        // Now: keep the synchronous best-effort write (covers any
+        // reader between now and sweep settle), AND chain a second
+        // `updateGlobalStatus` onto the sweep so it lands AFTER
+        // `client.disconnect()`'s stale write. Both calls are
+        // idempotent — `aggregateStatusByName` reads only `localStatus`
+        // of remaining entries, and our entry is removed from
+        // `pool.entries` by `onClosed` below before either runs the
+        // second time.
+        //
+        // `void` on the chain is intentional — we can't await in a
+        // sync listener, and best-effort is the right shape for
+        // wrapper-grandchild SIGTERM cleanup (the transport is
+        // already dead via the McpClient.onerror that triggered us).
+        // Errors inside the chain log at warn/error via
+        // `sweepAndDisconnect`'s own catches.
+        void this.sweepAndDisconnect('silent_drop').then(
+          () => {
+            this.updateGlobalStatus();
+          },
+          () => {
+            // sweepAndDisconnect catches its own errors; this branch
+            // is unreachable in practice. Defense against a future
+            // refactor that makes the helper rejectable.
+            this.updateGlobalStatus();
+          },
+        );
+        // Synchronous best-effort: covers any aggregator-reader
+        // racing between now and the sweep's tail. Mirrors
+        // forceShutdown line 606. With the chained call above this
+        // becomes a leading edge of "eventually correct".
         this.updateGlobalStatus();
         // Notify the pool so it drops this entry from `pool.entries`
         // (W122). The next `pool.acquire(serverName, cfg)` for the
@@ -497,12 +531,7 @@ export class PoolEntry {
       }
     }
 
-    const handle = new PooledConnectionImpl(
-      this,
-      sessionId,
-      view,
-      opts?.release,
-    );
+    const handle = new PooledConnectionImpl(this, sessionId, opts?.release);
     this.subscriberHandles.set(sessionId, handle);
     return handle;
   }
@@ -823,7 +852,13 @@ export class PoolEntry {
       snap = await runWithTimeout(
         (async () => {
           await this.client.connect();
-          return this.client.discoverAndReturn(this.cliConfig);
+          // F2 (#4175 commit 6 review fix — wenshao R23 T1): pool
+          // restart path opts out of applyConfigFilters; per-session
+          // SessionMcpView is the authoritative filter (mirrors the
+          // pool spawn path in mcp-transport-pool.ts).
+          return this.client.discoverAndReturn(this.cliConfig, {
+            applyConfigFilters: false,
+          });
         })(),
         timeoutMs,
         `pool restart for ${this.id}`,
@@ -1058,8 +1093,15 @@ class PooledConnectionImpl implements PooledConnection {
   constructor(
     private readonly entry: PoolEntry,
     readonly sessionId: string,
-    // View kept for parity / future use (e.g. per-subscriber filters).
-    _view: SessionMcpView,
+    // F2 (#4175 commit 6 review fix — wenshao R23 T6): the `_view`
+    // parameter was accepted but never stored or referenced. The
+    // underscore prefix signaled intent ("kept for parity / future
+    // use") but the deferred-need never materialized; per-subscriber
+    // filters live on `SessionMcpView` itself, not on the connection
+    // handle. Removed entirely to drop the dead parameter from the
+    // constructor signature and unblock callers from passing through
+    // a redundant arg (the pool's `attach` already wires the view to
+    // the entry's subscriber map at line ~410).
     // Pool-supplied release callback. Wired by `pool.acquire` to call
     // `pool.release(id, sessionId)` so subscribers can `handle.release()`
     // without needing a pool reference (commit-2 review P1 #1 fix).
@@ -1087,6 +1129,18 @@ class PooledConnectionImpl implements PooledConnection {
 
   on(event: 'event', listener: (e: PoolEvent) => void): this {
     if (event !== 'event') return this;
+    // F2 (#4175 commit 6 review fix — wenshao R23 T2): the local
+    // `Set<>` deduplicates the public-API listener registration, but
+    // `entry.internalOn` (a thin wrapper over `EventEmitter.on`)
+    // does NOT dedup — calling `on(cb)` twice with the same listener
+    // would register the listener twice on the entry's emitter while
+    // appearing as a single entry in `this.listeners`. On `release()`
+    // (line 1126) we'd call `internalOff(cb)` once, leaving one
+    // registration leaking on the entry's emitter that fires once
+    // per future event for the entry's lifetime. Detect the duplicate
+    // pre-attach and short-circuit so internalOn is invoked exactly
+    // once per unique (handle, listener) pair.
+    if (this.listeners.has(listener)) return this;
     this.listeners.add(listener);
     this.entry.internalOn(listener);
     return this;
