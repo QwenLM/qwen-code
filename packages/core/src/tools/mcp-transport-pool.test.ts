@@ -456,12 +456,19 @@ describe('McpTransportPool', () => {
       updateMCPServerStatus('srv', MCPServerStatus.DISCONNECTED);
 
       expect(failedEventReceived).toBe(true);
+      // Pin the W131 invariant: listener transitioned 'draining' → 'failed'
+      // (not left in 'draining' or transitioned to 'closed').
+      expect(entry.currentState).toBe('failed');
 
       // After W131 the listener also cancels the drain timer — verify
       // it doesn't subsequently fire a stale `forceShutdown('drain_timer')`
-      // by advancing past the drain window. No additional failed/
-      // disconnected events should fire (entry is already terminal).
+      // by advancing past the drain window. Entry state must remain
+      // 'failed' (not transitioned to 'closed' by a stale timer fire,
+      // which would silently happen if `cancelDrainTimer()` in the
+      // wasDraining branch regressed since `forceShutdown` no-ops
+      // idempotently on `state === 'failed'`).
       await vi.advanceTimersByTimeAsync(1_500);
+      expect(entry.currentState).toBe('failed');
     });
 
     it('PoolEntry.attach rejects on terminal-state entry (W90 contract — direct probe; W125 made the pool fast-path self-heal so we exercise the guard at the entry level)', async () => {

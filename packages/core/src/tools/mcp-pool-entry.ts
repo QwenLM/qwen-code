@@ -320,7 +320,8 @@ export class PoolEntry {
           `PoolEntry ${this.id} silent transport drop ` +
             `(prev state='${wasDraining ? 'draining' : 'active'}', ` +
             `localStatus→DISCONNECTED). ` +
-            `Transitioning to 'failed'; manager-side onFailed will evict.`,
+            `Transitioning to 'failed'; evicting from pool.entries + ` +
+            `pooledConnections (W122 R20).`,
         );
         // Emit BEFORE subscriber detach so subscribers receive the
         // 'failed' event and can route any pending callTool promises
@@ -337,18 +338,35 @@ export class PoolEntry {
         for (const [sid] of [...this.subscribers]) {
           this.detach(sid);
         }
+        // F2 (#4175 commit 6 review fix — wenshao W122 R20-followup):
+        // fire-and-forget `sweepAndDisconnect` to kill wrapper-
+        // grandchildren (`npx`, `uvx`, `pnpm dlx`) that may outlive
+        // the dead transport. The transport itself is already
+        // disconnected (McpClient.onerror wrote DISCONNECTED to
+        // trigger us), but stdio wrapper trees can have grandchild
+        // processes that don't get SIGPIPE on parent death. The
+        // helper is best-effort: per-pid sigterm failures and
+        // disconnect errors log at warn/error and don't surface.
+        // `void` is intentional — we can't await in a sync listener,
+        // and operator visibility for the listener path is provided
+        // by the `debugLogger.error` line above + the helper's own
+        // logs.
+        void this.sweepAndDisconnect('silent_drop');
+        // F2 (#4175 commit 6 review fix — wenshao W122 R20-followup):
+        // recompute aggregated status across siblings (different
+        // fingerprints under same serverName). Pre-fix the global
+        // map kept whatever value McpClient.onerror wrote
+        // (DISCONNECTED for THIS entry's per-server view), so a
+        // multi-fingerprint server with one alive sibling would
+        // report DISCONNECTED in `Footer` / status routes even
+        // though the aggregate is still CONNECTED. Mirrors
+        // forceShutdown line 606.
+        this.updateGlobalStatus();
         // Notify the pool so it drops this entry from `pool.entries`
         // (W122). The next `pool.acquire(serverName, cfg)` for the
         // same fingerprint will then miss the fast-path lookup and
         // fall through to spawn a fresh entry — pool self-heals
         // after a silent transport drop without operator intervention.
-        // NOTE: we intentionally do NOT call `sweepAndDisconnect`
-        // here — the transport is already dead (otherwise the
-        // status listener wouldn't have fired DISCONNECTED), and
-        // running an async sweep inside a synchronous listener
-        // would either swallow descendant-pid cleanup errors or
-        // require fire-and-forget. Wrapper-grandchild cleanup for
-        // the silent-drop case is tracked as F2 follow-up W134.
         this.onClosed(this.id);
       }
     };
