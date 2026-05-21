@@ -844,6 +844,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        dispose: vi.fn(),
         captureHistorySnapshot: vi
           .fn()
           .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
@@ -1658,6 +1659,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
     });
     vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
@@ -2361,6 +2363,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
+          dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -2616,6 +2619,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        dispose: vi.fn(),
       };
       lastSessionMock = sessionMock;
       return sessionMock as unknown as InstanceType<typeof Session>;
