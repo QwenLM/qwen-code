@@ -566,6 +566,8 @@ export class ContentGenerationPipeline {
         providerOverrides.splitToolMedia ??
         this.contentGeneratorConfig.splitToolMedia ??
         false,
+      streamingToolDispatch:
+        isStreaming && this.config.cliConfig.getStreamingToolDispatch(),
       ...(toolCallParser ? { toolCallParser } : {}),
       ...(responseParsingOptions ? { responseParsingOptions } : {}),
       ...(taggedThinkingParser ? { taggedThinkingParser } : {}),

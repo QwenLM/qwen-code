@@ -157,7 +157,9 @@ describe('ContentGenerationPipeline — concurrent streams (issue #3516)', () =>
     } as ContentGeneratorConfig;
 
     const config: PipelineConfig = {
-      cliConfig: {} as Config,
+      cliConfig: {
+        getStreamingToolDispatch: () => false,
+      } as unknown as Config,
       provider: mockProvider,
       contentGeneratorConfig,
       errorHandler: mockErrorHandler,

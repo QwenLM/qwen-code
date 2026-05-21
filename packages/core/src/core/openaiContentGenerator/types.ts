@@ -60,6 +60,13 @@ export interface RequestContext {
    * channel are deduplicated correctly.
    */
   reasoningDeltaState?: StreamingTextDeltaState;
+  /**
+   * Phase 1 of stream-driven tool dispatch (issue #4387). When true, the
+   * OpenAI chunk converter emits a `functionCall` part for each tool call as
+   * soon as its arguments JSON closes, instead of deferring until the chunk
+   * carrying `finish_reason`. See `Config.getStreamingToolDispatch()`.
+   */
+  streamingToolDispatch?: boolean;
 }
 
 export interface ErrorHandler {

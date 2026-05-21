@@ -1813,6 +1813,8 @@ export async function loadCliConfig(
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? false,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
+    streamingToolDispatch:
+      settings.experimental?.streamingToolDispatch ?? false,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],

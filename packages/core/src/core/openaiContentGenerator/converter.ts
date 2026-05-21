@@ -1227,27 +1227,51 @@ export function convertOpenAIChunkToGemini(
       parts.push(...convertOpenAITextToParts('', requestContext, true));
     }
 
-    // Handle tool calls using the stream-local parser
+    // Handle tool calls using the stream-local parser.
+    //
+    // When `streamingToolDispatch` is on (Phase 1 of issue #4387), any chunk
+    // that completes a tool call's JSON arguments is surfaced as a
+    // `functionCall` part immediately, instead of waiting for the chunk that
+    // carries `finish_reason`. The parser's `markEmitted()` bookkeeping
+    // suppresses the corresponding entry from `getCompletedToolCalls()` so
+    // the finish_reason flush below does not produce a duplicate.
+    const streamingToolDispatch = requestContext.streamingToolDispatch === true;
     if (choice.delta?.tool_calls) {
       for (const toolCall of choice.delta.tool_calls) {
         const index = toolCall.index ?? 0;
 
         // Process the tool call chunk through the streaming parser
-        if (toolCall.function?.arguments) {
-          toolCallParser.addChunk(
-            index,
-            toolCall.function.arguments,
-            toolCall.id,
-            toolCall.function.name,
-          );
-        } else {
-          // Handle metadata-only chunks (id and/or name without arguments)
-          toolCallParser.addChunk(
-            index,
-            '', // Empty chunk for metadata-only updates
-            toolCall.id,
-            toolCall.function?.name,
-          );
+        const result = toolCall.function?.arguments
+          ? toolCallParser.addChunk(
+              index,
+              toolCall.function.arguments,
+              toolCall.id,
+              toolCall.function.name,
+            )
+          : toolCallParser.addChunk(
+              index,
+              '', // Empty chunk for metadata-only updates
+              toolCall.id,
+              toolCall.function?.name,
+            );
+
+        if (
+          streamingToolDispatch &&
+          result.complete &&
+          result.name &&
+          result.index !== undefined &&
+          !toolCallParser.isEmitted(result.index)
+        ) {
+          parts.push({
+            functionCall: {
+              id:
+                result.id ||
+                `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+              name: result.name,
+              args: result.value ?? {},
+            },
+          });
+          toolCallParser.markEmitted(result.index);
         }
       }
     }

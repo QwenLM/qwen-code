@@ -2315,6 +2315,16 @@ const SETTINGS_SCHEMA = {
           'Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.',
         showInDialog: true,
       },
+      streamingToolDispatch: {
+        type: 'boolean',
+        label: 'Streaming Tool Dispatch',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Phase 1 of stream-driven tool dispatch (issue #4387). When enabled, the OpenAI-compatible converter surfaces each tool call as soon as its arguments JSON is complete during the stream, instead of waiting for `finish_reason`. Downstream consumers still buffer and dispatch after stream end, so this is a no-op for observable behavior and prepares the ground for later phases that begin tool execution early. Can be overridden with QWEN_CODE_STREAMING_TOOL_DISPATCH=1 to force on or =0 to force off.',
+        showInDialog: true,
+      },
     },
   },
 } as const satisfies SettingsSchema;
