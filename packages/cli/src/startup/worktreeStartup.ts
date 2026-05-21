@@ -11,12 +11,11 @@
  * so the resulting `process.cwd()` change feeds directly into the Config's
  * `targetDir`. Three entry forms are supported (see {@link setupStartupWorktree}):
  *
- * - Empty string (bare `--worktree`) → auto-generated `{adj}-{noun}-{4hex}` slug
+ * - Empty string (bare `--worktree`) → auto-generated `{adj}-{noun}-{6hex}` slug
  * - Plain slug (`--worktree my-feature`) → that exact slug
  * - PR reference (`--worktree=#123`, `--worktree https://github.com/o/r/pull/123`)
- *   → slug `pr-<N>` (PR fetch wiring lands in Phase D-3 — for now PR forms are
- *   detected and rejected with a clear "coming in D-3" message so the parser
- *   contract is observable from outside).
+ *   → slug `pr-<N>`, fetched via `git fetch origin pull/<N>/head` and based
+ *   off `FETCH_HEAD` (Phase D-3).
  *
  * Sidecar writing and `--resume` override accounting are NOT handled here —
  * those need a constructed `Config` and live in {@link persistStartupWorktreeSidecar}.
