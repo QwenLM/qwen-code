@@ -37,6 +37,7 @@ import {
   type MarkdownSourceCopyIndexOffsets,
 } from '../utils/MarkdownDisplay.js';
 import { AboutBox } from './AboutBox.js';
+import { AutoImproveStatusBox } from './AutoImproveStatusBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
 import { ModelStatsDisplay } from './ModelStatsDisplay.js';
 import { ToolStatsDisplay } from './ToolStatsDisplay.js';
@@ -193,6 +194,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'about' && (
         <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'auto_improve_status' && (
+        <AutoImproveStatusBox {...itemForDisplay} width={boxWidth} />
       )}
       {itemForDisplay.type === 'help' && commands && (
         <Help commands={commands} width={boxWidth} />

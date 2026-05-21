@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { type Config } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type {
+  CommandContext,
   MessageActionReturn,
   OpenDialogActionReturn,
   SlashCommand,
@@ -27,6 +28,7 @@ import {
   writeAutoImproveLoopState,
   type AutoImproveLoopState,
 } from './autoImproveState.js';
+import type { HistoryItemAutoImproveStatus } from '../types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -201,6 +203,55 @@ function formatRunRef(value: unknown): string | null {
   return null;
 }
 
+function buildStatusItem(
+  state: AutoImproveLoopState,
+  status: string,
+  cronJobId?: string,
+): Omit<HistoryItemAutoImproveStatus, 'type' | 'text'> {
+  return {
+    loopId: state.loopId,
+    status,
+    cadence: state.cadence,
+    cron: state.cron,
+    targetBranch: state.targetBranch,
+    sources: describeSources(state),
+    prompt: state.prompt,
+    cronJobId,
+    customSources: state.sourceSnapshot.customSources,
+    currentRun: formatRunRef(state.currentRun) ?? undefined,
+    lastRun: formatRunRef(state.lastRun) ?? undefined,
+  };
+}
+
+function formatStatusText(
+  statusItem: Omit<HistoryItemAutoImproveStatus, 'type' | 'text'>,
+): string {
+  const lines = [
+    'Auto-Improve',
+    `Status: ${statusItem.status}`,
+    `Loop: ${statusItem.loopId}`,
+    `Cadence: ${statusItem.cadence} (${statusItem.cron})`,
+    `Target branch: ${statusItem.targetBranch}`,
+    `Sources: ${statusItem.sources}`,
+    `Cron job: ${statusItem.cronJobId ?? 'none'}`,
+    'Prompt:',
+    `  ${statusItem.prompt || '(none)'}`,
+  ];
+  if (statusItem.customSources.length > 0) {
+    lines.push(
+      'Custom sources:',
+      ...statusItem.customSources.map((source) => `  - ${source}`),
+    );
+  }
+  if (statusItem.currentRun) {
+    lines.push(`Current run: ${statusItem.currentRun}`);
+  }
+  if (statusItem.lastRun) {
+    lines.push(`Last run: ${statusItem.lastRun}`);
+  }
+  return lines.join('\n');
+}
+
 function buildTickPrompt(state: AutoImproveLoopState): string {
   const loopDir = getAutoImproveLoopDir(state.repoRoot, state.loopId);
   return `You are running one tick of the built-in /auto-improve loop.
@@ -359,7 +410,13 @@ async function startAutoImprove(
   };
 }
 
-async function statusAutoImprove(config: Config): Promise<MessageActionReturn> {
+async function statusAutoImprove(
+  context: CommandContext,
+): Promise<MessageActionReturn | void> {
+  const config = context.services.config;
+  if (!config) {
+    return message('error', t('Config not loaded.'));
+  }
   const repoRoot = await getRepoRoot(config);
   const active = await readActiveAutoImproveLoop(repoRoot);
   if (!active) {
@@ -382,26 +439,20 @@ async function statusAutoImprove(config: Config): Promise<MessageActionReturn> {
     .find((candidate) => candidate.id === state.cronJobId);
   const effectiveStatus =
     state.status === 'running' && !job ? 'stale' : state.status;
+  const statusItem = buildStatusItem(state, effectiveStatus, job?.id);
 
-  const lines = [
-    `Loop: ${state.loopId}`,
-    `Status: ${effectiveStatus}`,
-    `Cadence: ${state.cadence} (${state.cron})`,
-    `Target branch: ${state.targetBranch}`,
-    `Sources: ${describeSources(state)}`,
-    `Prompt: ${state.prompt || '(none)'}`,
-    `Cron job: ${job ? job.id : 'none'}`,
-  ];
-  if (state.sourceSnapshot.customSources.length > 0) {
-    lines.push(
-      `Custom sources: ${state.sourceSnapshot.customSources.join('; ')}`,
+  if (context.executionMode === 'interactive') {
+    context.ui.addItem(
+      {
+        type: 'auto_improve_status',
+        ...statusItem,
+      },
+      Date.now(),
     );
+    return;
   }
-  const currentRun = formatRunRef(state.currentRun);
-  if (currentRun) lines.push(`Current run: ${currentRun}`);
-  const lastRun = formatRunRef(state.lastRun);
-  if (lastRun) lines.push(`Last run: ${lastRun}`);
-  return message('info', lines.join('\n'));
+
+  return message('info', formatStatusText(statusItem));
 }
 
 async function stopAutoImprove(config: Config): Promise<MessageActionReturn> {
@@ -521,13 +572,7 @@ export const autoImproveCommand: SlashCommand = {
         return t('Show the active auto-improve loop status');
       },
       kind: CommandKind.BUILT_IN,
-      action: async (context): Promise<SlashCommandActionReturn> => {
-        const config = context.services.config;
-        if (!config) {
-          return message('error', t('Config not loaded.'));
-        }
-        return statusAutoImprove(config);
-      },
+      action: async (context): Promise<void | SlashCommandActionReturn> => statusAutoImprove(context),
     },
     {
       name: 'stop',
@@ -564,7 +609,7 @@ export const autoImproveCommand: SlashCommand = {
       },
     },
   ],
-  action: async (context, args): Promise<SlashCommandActionReturn> => {
+  action: async (context, args): Promise<void | SlashCommandActionReturn> => {
     const config = context.services.config;
     if (!config) {
       return message('error', t('Config not loaded.'));
@@ -589,7 +634,7 @@ export const autoImproveCommand: SlashCommand = {
     }
 
     if (trimmed === 'status') {
-      return statusAutoImprove(config);
+      return statusAutoImprove(context);
     }
 
     if (trimmed === 'stop') {

@@ -67,6 +67,7 @@ export function isSyntheticHistoryItem(
     case 'btw':
     case 'memory_saved':
     case 'about':
+    case 'auto_improve_status':
     case 'help':
     case 'stats':
     case 'model_stats':

@@ -167,6 +167,21 @@ export type HistoryItemAbout = HistoryItemBase & {
   };
 };
 
+export type HistoryItemAutoImproveStatus = HistoryItemBase & {
+  type: 'auto_improve_status';
+  loopId: string;
+  status: string;
+  cadence: string;
+  cron: string;
+  targetBranch: string;
+  sources: string;
+  prompt: string;
+  cronJobId?: string;
+  customSources: string[];
+  currentRun?: string;
+  lastRun?: string;
+};
+
 export type HistoryItemHelp = HistoryItemBase & {
   type: 'help';
   timestamp: Date;
@@ -551,6 +566,7 @@ export type HistoryItemWithoutId =
   | HistoryItemSuccess
   | HistoryItemRetryCountdown
   | HistoryItemAbout
+  | HistoryItemAutoImproveStatus
   | HistoryItemHelp
   | HistoryItemToolGroup
   | HistoryItemToolUseSummary

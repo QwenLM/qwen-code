@@ -99,6 +99,29 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toContain('Status');
   });
 
+  it('renders AutoImproveStatusBox for "auto_improve_status" type', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'auto_improve_status',
+      loopId: 'loop-1',
+      status: 'running',
+      cadence: '30m',
+      cron: '*/30 * * * *',
+      targetBranch: 'dragon/feat-self-improve',
+      sources: 'GitHub PRs / CI / review comments',
+      prompt: 'check unresolved comments',
+      cronJobId: 'job-1',
+      customSources: [],
+      lastRun: '001-fix (success)',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    expect(lastFrame()).toContain('Auto-Improve');
+    expect(lastFrame()).toContain('dragon/feat-self-improve');
+    expect(lastFrame()).toContain('001-fix (success)');
+  });
+
   it('renders ModelStatsDisplay for "model_stats" type', () => {
     const item: HistoryItem = {
       ...baseItem,

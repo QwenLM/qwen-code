@@ -252,14 +252,30 @@ describe('autoImproveCommand', () => {
   it('reports active loop status', async () => {
     await autoImproveCommand.action?.(context, 'start --every 30m');
     const result = await autoImproveCommand.action?.(context, 'status');
+    expect(result).toBeUndefined();
+    expect(context.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'auto_improve_status',
+        status: 'running',
+        cadence: '30m',
+        targetBranch: expect.any(String),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('reports active loop status as text outside interactive mode', async () => {
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+    context.executionMode = 'non_interactive';
+    const result = await autoImproveCommand.action?.(context, 'status');
     expect(result).toMatchObject({
       type: 'message',
       messageType: 'info',
     });
-    expect((result as { content: string }).content).toContain(
-      'Status: running',
-    );
-    expect((result as { content: string }).content).toContain('Cadence: 30m');
+    const content = (result as { content: string }).content;
+    expect(content).toContain('Auto-Improve');
+    expect(content).toContain('Status: running');
+    expect(content).toContain('Cadence: 30m');
   });
 
   it('does not print undefined for legacy primitive run refs', async () => {
@@ -286,6 +302,7 @@ describe('autoImproveCommand', () => {
     state['lastRun'] = '2026-05-15T02:02:00Z';
     await fs.writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
 
+    context.executionMode = 'non_interactive';
     const result = await autoImproveCommand.action?.(context, 'status');
     const content = (result as { content: string }).content;
     expect(content).toContain('Status: completed_one_run');
