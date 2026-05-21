@@ -212,8 +212,8 @@ Loop state:
 - State file: ${path.join(loopDir, 'state.json')}
 - Summary file: ${path.join(loopDir, 'summary.md')}
 - Runs dir: ${path.join(loopDir, 'runs')}
-- Target branch: ${state.targetBranch}
-- Auto-merge: true, local only. Do not push. Do not open PRs.
+- Loop default branch: ${state.targetBranch}
+- Delivery policy: source-aware local commit. Do not push unless the user explicitly requested push in the start prompt or selected source.
 - Repair budget: 5 test/repair attempts.
 - Source snapshot: ${describeSources(state)}
 - Start prompt: ${state.prompt || '(none)'}
@@ -222,15 +222,21 @@ ${formatCustomSources(state.sourceSnapshot.customSources)}
 
 Hard rules:
 1. Run exactly one small, coherent, locally verifiable improvement.
-2. Work in an isolated git worktree created from the target branch.
-3. Never overwrite, reset, delete, or discard user uncommitted changes.
-4. Commit only after appropriate tests pass.
-5. If tests fail, repair and rerun checks up to 5 times before giving up.
-6. On success, merge the commit back to the local target branch and delete the worktree.
-7. After 5 failed repair attempts, delete the worktree and keep only documentation.
-8. Update ${path.join(loopDir, 'summary.md')} and one markdown file under ${path.join(loopDir, 'runs')} for every attempted run.
-9. Update ${path.join(loopDir, 'state.json')} as you progress, including currentRun, lastRun, stopRequested, and status.
-10. If stopRequested is true when you read the state, do not start a new run; mark the loop stopped if appropriate and stop.
+2. Determine the delivery target before editing:
+   - For PR-derived tasks, use that PR's head branch as the delivery branch.
+   - For local/default tasks, use the loop default branch.
+   - If the correct branch is unclear, use a new local branch and mark the delivery target as "local-only".
+3. Work in an isolated git worktree created from the delivery branch.
+4. Never overwrite, reset, delete, or discard user uncommitted changes.
+5. Commit only after appropriate tests pass.
+6. If tests fail, repair and rerun checks up to 5 times before giving up.
+7. On success, commit to the delivery branch, ensure the commit remains reachable after cleanup, then delete the worktree. For PR-derived tasks, never merge the fix into the loop default branch unless it is the same branch.
+8. Do not push unless the user explicitly requested push in the start prompt or selected source. If push was not requested, report the local commit and branch.
+9. Do not open PRs.
+10. After 5 failed repair attempts, delete the worktree and keep only documentation.
+11. Update ${path.join(loopDir, 'summary.md')} and one markdown file under ${path.join(loopDir, 'runs')} for every attempted run.
+12. Update ${path.join(loopDir, 'state.json')} as you progress, including currentRun, lastRun, stopRequested, status, and deliveryTarget.
+13. If stopRequested is true when you read the state, do not start a new run; mark the loop stopped if appropriate and stop.
 
 State file schema rules:
 - status must be one of: "running", "stopping", "stopped", or "stale".
@@ -240,7 +246,13 @@ State file schema rules:
     "runId": "001-short-slug",
     "status": "implementing | testing | success | failed | blocked | cancelled",
     "worktreePath": "/absolute/path/to/worktree",
-    "runDoc": "/absolute/path/to/run.md"
+    "runDoc": "/absolute/path/to/run.md",
+    "deliveryTarget": {
+      "kind": "loop-branch | pr-branch | local-only",
+      "branch": "branch-name",
+      "prNumber": 123,
+      "pushRequested": false
+    }
   }
 - Do not write primitive values such as numbers or timestamps to currentRun or lastRun.
 
@@ -326,7 +338,7 @@ async function startAutoImprove(
     cron: interval.cron,
     targetBranch,
     repoRoot,
-    autoMerge: true,
+    deliveryPolicy: 'source-aware-local-commit',
     stopRequested: false,
     sourceSnapshot,
     prompt: parsed.prompt,

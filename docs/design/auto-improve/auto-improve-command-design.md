@@ -5,7 +5,7 @@
 Add a built-in `/auto-improve` command that runs a session-scoped loop for
 small, locally verifiable repository improvements. The command should be useful
 without becoming a hard-coded automation framework: first version keeps the
-actual implementation, testing, repair, merge, and documentation work
+actual implementation, testing, repair, delivery, and documentation work
 prompt-driven, while the built-in command owns reliable local state, scheduling,
 status, and source configuration.
 
@@ -50,9 +50,10 @@ Store state under `.qwen/auto-improve/`:
 built-in source toggles and ordered custom source hints. `active.json` is a thin
 pointer to the one active loop. First version allows at most one active loop per
 repository. `state.json` belongs to a single loop and contains the cadence,
-target branch, source snapshot, start prompt, status, stop request flag, current
-run, last run, and cron job id when available. Historical loops remain in
-`loops/`, but `/auto-improve status` reads only the active loop.
+loop default branch, source snapshot, delivery policy, start prompt, status,
+stop request flag, current run, last run, and cron job id when available.
+Historical loops remain in `loops/`, but `/auto-improve status` reads only the
+active loop.
 
 The loop is session-scoped. Exiting Qwen Code is equivalent to stopping the
 loop. If the CLI exits abruptly and leaves `active.json` behind, a later status
@@ -79,14 +80,23 @@ Each tick is prompt-driven. The prompt instructs the agent to:
 - run appropriate tests;
 - repair and retest up to five times;
 - commit only after tests pass;
-- merge back to the local target branch by default;
+- choose a delivery branch before editing;
+- use a PR's head branch for PR-derived review / CI / comment tasks;
+- use the loop default branch for ordinary local/default tasks;
+- use a local-only branch if the correct delivery branch is unclear;
+- never merge a PR-derived fix into the loop default branch unless they are the
+  same branch;
+- never push unless the user explicitly requested push in the start prompt or
+  selected source;
 - never overwrite or discard user uncommitted work;
 - delete the worktree after success or after five failed repair attempts;
 - update `summary.md` and one run document for every attempted run.
 
-Successful runs are merged only into the local target branch. First version does
-not push and does not open pull requests. Failed runs delete their worktree and
-leave only the run document.
+Successful runs are local commits by default. For PR-derived tasks, the local
+commit belongs to the PR head branch rather than the branch that started the
+loop. The first version does not push unless the user explicitly requested it
+and does not open pull requests. Failed runs delete their worktree and leave
+only the run document.
 
 ## Stop And Status
 

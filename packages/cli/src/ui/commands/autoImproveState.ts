@@ -24,6 +24,14 @@ export interface AutoImproveRunRef {
   status: string;
   worktreePath?: string;
   runDoc?: string;
+  deliveryTarget?: AutoImproveDeliveryTarget;
+}
+
+export interface AutoImproveDeliveryTarget {
+  kind: 'loop-branch' | 'pr-branch' | 'local-only';
+  branch: string;
+  prNumber?: number;
+  pushRequested: boolean;
 }
 
 export interface AutoImproveLoopState {
@@ -37,7 +45,7 @@ export interface AutoImproveLoopState {
   cronJobId?: string;
   targetBranch: string;
   repoRoot: string;
-  autoMerge: true;
+  deliveryPolicy: 'source-aware-local-commit';
   stopRequested: boolean;
   sourceSnapshot: AutoImproveConfig;
   prompt: string;

@@ -107,6 +107,15 @@ describe('autoImproveCommand', () => {
       .text;
     expect(prompt).toContain('- Custom sources:\n  - watch flaky auth tests');
     expect(prompt).toContain('  - scan docs TODOs');
+    expect(prompt).toContain(
+      'Delivery policy: source-aware local commit. Do not push unless the user explicitly requested push',
+    );
+    expect(prompt).toContain(
+      "For PR-derived tasks, use that PR's head branch as the delivery branch.",
+    );
+    expect(prompt).toContain(
+      'For PR-derived tasks, never merge the fix into the loop default branch unless it is the same branch.',
+    );
     expect(scheduler.create).toHaveBeenCalledWith(
       '7 */2 * * *',
       expect.stringMatching(/^\/auto-improve tick /),
@@ -129,9 +138,14 @@ describe('autoImproveCommand', () => {
       ),
       'utf8',
     );
-    const state = JSON.parse(stateRaw) as { prompt: string; cronJobId: string };
+    const state = JSON.parse(stateRaw) as {
+      prompt: string;
+      cronJobId: string;
+      deliveryPolicy: string;
+    };
     expect(state.prompt).toBe('prefer small fixes');
     expect(state.cronJobId).toBe('job-1');
+    expect(state.deliveryPolicy).toBe('source-aware-local-commit');
     expect(
       path.join(
         tempDir,
