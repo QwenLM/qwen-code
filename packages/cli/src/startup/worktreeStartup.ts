@@ -138,13 +138,18 @@ export async function setupStartupWorktree(
   // `getRepoTopLevel()` returns null when cwd is not inside a git repo,
   // so a single subprocess covers both the is-a-repo gate and the
   // top-level resolution we need for the worktree path.
-  const repoRoot = await probe.getRepoTopLevel();
-  if (repoRoot === null) {
+  const rawRepoRoot = await probe.getRepoTopLevel();
+  if (rawRepoRoot === null) {
     return {
       ok: false,
       error: `--worktree: ${launchCwd} is not a git repository. Run \`git init\` first or relaunch from inside one.`,
     };
   }
+  // git always emits POSIX-style paths (forward slashes) via
+  // `--show-toplevel`. Normalize to the platform-native separator
+  // before storing or comparing so the sidecar's `originalCwd` and
+  // downstream `startsWith` checks don't mix `/` and `\` on Windows.
+  const repoRoot = path.resolve(rawRepoRoot);
   const service =
     repoRoot === launchCwd ? probe : new GitWorktreeService(repoRoot);
 

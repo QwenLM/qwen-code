@@ -28,6 +28,12 @@ async function makeTempRepo(): Promise<string> {
   await exec('git', ['config', 'user.email', 't@e.com'], { cwd: resolved });
   await exec('git', ['config', 'user.name', 't'], { cwd: resolved });
   await exec('git', ['config', 'commit.gpgsign', 'false'], { cwd: resolved });
+  // Disable autocrlf so file contents committed and read back via the
+  // test compare byte-for-byte on Windows runners (where the default
+  // `core.autocrlf=true` checks files out with `\r\n`, breaking
+  // assertions like `expect(content).toBe('foo\n')`).
+  await exec('git', ['config', 'core.autocrlf', 'false'], { cwd: resolved });
+  await exec('git', ['config', 'core.eol', 'lf'], { cwd: resolved });
   await fs.writeFile(path.join(resolved, 'README.md'), 'hello\n');
   await exec('git', ['add', 'README.md'], { cwd: resolved });
   await exec('git', ['commit', '-q', '-m', 'initial', '--no-verify'], {
