@@ -205,18 +205,23 @@ describe('initializeWarningHandler — end-to-end stderr behavior', () => {
   // process.stderr.write spy.
   it('a child process with the handler installed does not print suppressed AbortSignal warnings to stderr', async () => {
     const { spawn } = await import('node:child_process');
-    const { fileURLToPath } = await import('node:url');
+    const { fileURLToPath, pathToFileURL } = await import('node:url');
     const { dirname, join } = await import('node:path');
     const { writeFile, mkdtemp, rm } = await import('node:fs/promises');
     const { tmpdir } = await import('node:os');
 
     const here = dirname(fileURLToPath(import.meta.url));
-    const helperPath = join(here, 'warningHandler.ts');
+    // Convert the absolute path to a `file://` URL — on Windows, Node's ESM
+    // loader rejects raw absolute paths (it treats `D:` as a URL scheme),
+    // so import specifiers MUST be file URLs.
+    const helperImportSpecifier = pathToFileURL(
+      join(here, 'warningHandler.ts'),
+    ).href;
 
     const dir = await mkdtemp(join(tmpdir(), 'warning-handler-e2e-'));
     try {
       const script = `
-        import { initializeWarningHandler } from ${JSON.stringify(helperPath)};
+        import { initializeWarningHandler } from ${JSON.stringify(helperImportSpecifier)};
         delete process.env.DEBUG; delete process.env.QWEN_DEBUG;
         process.env.NODE_ENV = 'production';
         initializeWarningHandler();
