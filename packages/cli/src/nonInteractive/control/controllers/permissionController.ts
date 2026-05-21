@@ -263,12 +263,28 @@ export class PermissionController extends BaseController {
     const confirmationType = type as ToolConfirmationType;
 
     switch (confirmationType) {
-      case 'exec': // ToolExecuteConfirmationDetails
+      case 'exec': {
+        // ToolExecuteConfirmationDetails. Propagate any informational
+        // warnings (e.g. command substitution flagged by the shell tool
+        // — see #4093) into the suggestion description so daemon/API
+        // consumers can surface them to the end-user when prompting
+        // for approval. Mitigated by auto-deny in non-interactive
+        // default mode, but matters for hosts that delegate the choice
+        // back to a user.
+        const warnings = Array.isArray(details['warnings'])
+          ? (details['warnings'] as unknown[]).filter(
+              (w): w is string => typeof w === 'string',
+            )
+          : [];
+        const warningSuffix =
+          warnings.length > 0
+            ? ` (${warnings.map((w) => `⚠ ${w}`).join('; ')})`
+            : '';
         return [
           {
             type: 'allow',
             label: 'Allow Command',
-            description: `Execute: ${details['command']}`,
+            description: `Execute: ${details['command']}${warningSuffix}`,
           },
           {
             type: 'deny',
@@ -276,6 +292,7 @@ export class PermissionController extends BaseController {
             description: 'Block this command execution',
           },
         ];
+      }
 
       case 'edit': // ToolEditConfirmationDetails
         return [

@@ -1058,6 +1058,15 @@ describe('PermissionManager', () => {
         ).toBe('ask');
       });
 
+      it('returns ask for >() output process substitution', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'echo data > >(tee log.txt)',
+          }),
+        ).toBe('ask');
+      });
+
       it('still honors explicit deny rules over substitution-bearing commands', async () => {
         // The 'ask' from substitution must never downgrade a real deny rule.
         expect(

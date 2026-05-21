@@ -92,6 +92,22 @@ export function buildPermissionRequestContent(
     });
   }
 
+  // Propagate informational warnings (e.g. command substitution detected
+  // in a shell command — see #4093) so ACP clients can surface them when
+  // prompting the user for approval. The tool input itself is already
+  // visible to the host, so we only emit the new warning channel here.
+  if (confirmation.type === 'exec' && confirmation.warnings?.length) {
+    for (const warning of confirmation.warnings) {
+      content.push({
+        type: 'content',
+        content: {
+          type: 'text',
+          text: `⚠ ${warning}`,
+        },
+      });
+    }
+  }
+
   return content;
 }
 

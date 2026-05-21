@@ -416,44 +416,49 @@ describe('MonitorTool', () => {
   });
 
   describe('getDefaultPermission', () => {
-    it('denies command substitution before confirmation', async () => {
+    // Command substitution previously returned 'deny' here. Per #4093 it
+    // now falls through to 'ask' (matching ShellToolInvocation and
+    // PermissionManager.resolveDefaultPermission); the substitution
+    // warning is surfaced via getConfirmationDetails. YOLO mode can now
+    // override the prompt; before this change it could not.
+    it('asks for command substitution before confirmation', async () => {
       const invocation = createInvocation({
         command: 'echo $(cat secret.txt)',
       });
 
-      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
-    it('denies command substitution inside explicit shell wrappers', async () => {
+    it('asks for command substitution inside explicit shell wrappers', async () => {
       const invocation = createInvocation({
         command: `/bin/bash -c 'echo $(cat secret.txt)'`,
       });
 
-      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
-    it('denies command substitution inside wrapped scripts with argv suffixes', async () => {
+    it('asks for command substitution inside wrapped scripts with argv suffixes', async () => {
       const invocation = createInvocation({
         command: `/bin/bash -c 'echo $(cat secret.txt)' ignored`,
       });
 
-      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
-    it('denies command substitution inside quoted env-prefixed wrappers', async () => {
+    it('asks for command substitution inside quoted env-prefixed wrappers', async () => {
       const invocation = createInvocation({
         command: `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
       });
 
-      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
-    it('denies command substitution inside env-prefix assignments', async () => {
+    it('asks for command substitution inside env-prefix assignments', async () => {
       const invocation = createInvocation({
         command: `FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`,
       });
 
-      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
     it('allows read-only monitor commands by default', async () => {
@@ -463,6 +468,17 @@ describe('MonitorTool', () => {
       });
 
       await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+    });
+
+    it('surfaces a command-substitution warning via getConfirmationDetails (issue #4093)', async () => {
+      const invocation = createInvocation({
+        command: 'echo $(cat secret.txt)',
+      });
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { warnings?: string[] };
+
+      expect(details.warnings?.[0]).toMatch(/command substitution/i);
     });
   });
 

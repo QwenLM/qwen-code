@@ -5011,6 +5011,18 @@ describe('ShellTool', () => {
         expect(details.warnings?.[0]).toMatch(/command substitution/i);
       });
 
+      it('surfaces a warning for >() output process substitution', async () => {
+        const invocation = shellTool.build({
+          command: 'echo data > >(tee log.txt)',
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+      });
+
       it('does not set warnings on commands without substitution', async () => {
         const invocation = shellTool.build({
           command: 'npm install',

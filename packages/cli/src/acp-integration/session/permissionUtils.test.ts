@@ -6,7 +6,10 @@
 
 import { describe, expect, it } from 'vitest';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
-import { toPermissionOptions } from './permissionUtils.js';
+import {
+  buildPermissionRequestContent,
+  toPermissionOptions,
+} from './permissionUtils.js';
 
 describe('permissionUtils', () => {
   describe('toPermissionOptions', () => {
@@ -92,6 +95,48 @@ describe('permissionUtils', () => {
           name: 'Always Allow in project: git',
         }),
       );
+    });
+  });
+
+  // Regression coverage for #4386 review: shell commands flagged with a
+  // command-substitution warning should propagate that warning into the
+  // ACP content channel so IDE clients can surface it. Without this,
+  // IDE users approving substitution commands would see no hint.
+  describe('buildPermissionRequestContent', () => {
+    it('emits ⚠ content entries for each exec warning', () => {
+      const content = buildPermissionRequestContent({
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'python3 -c "print($(echo hello))"',
+        rootCommand: 'python3',
+        warnings: [
+          'Contains command substitution ($(...), backticks, <(...), or >(...)).',
+        ],
+        onConfirm: async () => undefined,
+      });
+
+      expect(content).toHaveLength(1);
+      expect(content[0]).toMatchObject({
+        type: 'content',
+        content: { type: 'text' },
+      });
+      const node = content[0] as {
+        type: 'content';
+        content: { type: 'text'; text: string };
+      };
+      expect(node.content.text).toMatch(/^⚠ .*command substitution/);
+    });
+
+    it('emits no content for exec confirmations without warnings', () => {
+      const content = buildPermissionRequestContent({
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'npm install',
+        rootCommand: 'npm',
+        onConfirm: async () => undefined,
+      });
+
+      expect(content).toEqual([]);
     });
   });
 });
