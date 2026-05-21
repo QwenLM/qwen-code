@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   appendLocalUserTranscriptMessage,
   createDaemonToolPreview,
@@ -404,6 +404,25 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('bounds trimmed tool indexes while keeping recent trimmed diagnostics', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ maxBlocks: 2, now: 1 }),
+      Array.from({ length: 8 }, (_, index) => ({
+        type: 'tool.update' as const,
+        toolCallId: `tool-${index}`,
+        title: `Tool ${index}`,
+        status: 'running',
+      })),
+      { now: 2 },
+    );
+
+    const trimmedToolCallIds = Object.entries(state.toolBlockByCallId)
+      .filter(([, blockId]) => blockId === '__trimmed_tool_block__')
+      .map(([toolCallId]) => toolCallId);
+    expect(trimmedToolCallIds).toHaveLength(2);
+    expect(Object.keys(state.toolBlockByCallId)).toHaveLength(4);
+  });
+
   it('keeps active assistant text open when reporting trimmed tool updates', () => {
     let state = createDaemonTranscriptState({ maxBlocks: 2, now: 1 });
 
@@ -578,7 +597,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
           sessionUpdate: 'tool_call',
           toolCallId: 'large-input',
           title: 'Large input',
-          rawInput: { text: 'x'.repeat(5000) },
+          rawInput: { text: 'x'.repeat(5000), apiKey: 'input-secret' },
         },
       },
     });
@@ -591,7 +610,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
           sessionUpdate: 'tool_call',
           toolCallId: 'large-output',
           title: 'Large output',
-          rawOutput: 'y'.repeat(5000),
+          rawOutput: { text: 'y'.repeat(5000), token: 'output-secret' },
         },
       },
     });
@@ -610,6 +629,12 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(
       outputEvent && 'details' in outputEvent ? outputEvent.details?.length : 0,
     ).toBeLessThan(4200);
+    expect(
+      inputEvent && 'details' in inputEvent ? inputEvent.details : '',
+    ).not.toContain('input-secret');
+    expect(
+      outputEvent && 'details' in outputEvent ? outputEvent.details : '',
+    ).not.toContain('output-secret');
   });
 
   it('marks active assistant block complete when a tool interrupts the stream', () => {
@@ -852,6 +877,37 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('caps normalized plan content before storing it in tool content', () => {
+    const longPlan = 'x'.repeat(5_000);
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent({
+        id: 62,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: longPlan, status: 'in_progress' }],
+          },
+        },
+      }),
+      { now: 2 },
+    );
+
+    const block = state.blocks[0];
+    expect(block).toMatchObject({ kind: 'tool', toolKind: 'updated_plan' });
+    if (block?.kind !== 'tool') throw new Error('expected plan tool block');
+    const firstContent = block.content?.[0];
+    expect(firstContent).toMatchObject({
+      content: {
+        type: 'text',
+        text: expect.stringContaining('[truncated]') as string,
+      },
+    });
+    expect(JSON.stringify(block.content).length).toBeLessThan(4_300);
+  });
+
   it('recreates synthetic plan blocks after transcript trimming', () => {
     let state = createDaemonTranscriptState({ maxBlocks: 1, now: 1 });
     state = reduceDaemonTranscriptEvents(
@@ -1045,6 +1101,36 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(calls).toBe(2);
   });
 
+  it('keeps notifying store listeners when one listener throws', async () => {
+    const store = createDaemonTranscriptStore();
+    const globalWithReportError = globalThis as typeof globalThis & {
+      reportError?: (error: unknown) => void;
+    };
+    const originalReportError = globalWithReportError.reportError;
+    const reportError = vi.fn();
+    globalWithReportError.reportError = reportError;
+    let calls = 0;
+    store.subscribe(() => {
+      throw new Error('listener failed');
+    });
+    store.subscribe(() => {
+      calls += 1;
+    });
+
+    try {
+      store.dispatch({ type: 'status', text: 'ready' });
+      await Promise.resolve();
+      expect(calls).toBe(1);
+      expect(reportError).toHaveBeenCalledWith(expect.any(Error));
+    } finally {
+      if (originalReportError) {
+        globalWithReportError.reportError = originalReportError;
+      } else {
+        delete globalWithReportError.reportError;
+      }
+    }
+  });
+
   it('renders UI events to sanitized terminal text', () => {
     const output = daemonUiEventToTerminalText({
       type: 'shell.output',
@@ -1059,15 +1145,46 @@ describe('daemon UI normalizer and transcript reducer', () => {
 
   it('strips terminal control and bidi spoofing sequences', () => {
     const output = sanitizeTerminalText(
-      '\u202etxt.exe\u001b[31mred\u001bPhidden\u001b\\ok',
+      '\u202etxt.exe\u001b[31mred\roverwrite\u001bPhidden\u001b\\ok',
     );
 
     expect(output).toContain('txt.exe');
     expect(output).toContain('red');
+    expect(output).toContain('overwrite');
     expect(output).toContain('ok');
     expect(output).not.toContain('\u202e');
     expect(output).not.toContain('\u001b[');
+    expect(output).not.toContain('\r');
     expect(output).not.toContain('hidden');
+  });
+
+  it('redacts nested sensitive daemon payload fields', () => {
+    const events = normalizeDaemonEvent({
+      id: 70,
+      v: 1,
+      type: 'future_event',
+      data: {
+        headers: {
+          Authorization: 'Bearer secret',
+          'x-api-key': 'key-secret',
+        },
+        nested: [{ client_secret: 'client-secret' }],
+        credentials: { passphrase: 'pass-secret' },
+      },
+    });
+
+    expect(events).toMatchObject([
+      { type: 'status' },
+      {
+        type: 'debug',
+        text: expect.stringContaining('[redacted]') as string,
+      },
+    ]);
+    const debug = events.find((event) => event.type === 'debug');
+    expect(debug?.text).not.toContain('Bearer secret');
+    expect(debug?.text).not.toContain('key-secret');
+    expect(debug?.text).not.toContain('client-secret');
+    expect(debug?.text).not.toContain('pass-secret');
   });
 
   it('sanitizes unterminated terminal control sequences without swallowing output', () => {
@@ -1088,5 +1205,87 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(createDaemonToolPreview(nested)).toMatchObject({
       kind: 'generic',
     });
+  });
+
+  it('redacts sensitive values in generic tool previews', () => {
+    expect(
+      createDaemonToolPreview({
+        apiKey: 'secret-key',
+        password: 'secret-password',
+        visible: 'ok',
+      }),
+    ).toMatchObject({
+      kind: 'key_value',
+      rows: [
+        { label: 'apiKey', value: '[redacted]' },
+        { label: 'password', value: '[redacted]' },
+        { label: 'visible', value: 'ok' },
+      ],
+    });
+  });
+
+  it('redacts sensitive fields in tool.update rawInput and rawOutput at normalizer boundary (wenshao CRIT #2)', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 't-secret',
+          title: 'Run curl',
+          status: 'completed',
+          name: 'Bash',
+          rawInput: {
+            command: 'curl https://api.example.com',
+            apiKey: 'sk-prod-do-not-leak',
+            headers: { Authorization: 'Bearer secret-do-not-leak' },
+          },
+          rawOutput: {
+            text: 'OK',
+            token: 'returned-secret-do-not-leak',
+          },
+        },
+      },
+    } as never);
+    const event = events[0] as Extract<DaemonUiEvent, { type: 'tool.update' }>;
+
+    expect(event.type).toBe('tool.update');
+    expect(event.rawInput).toBeDefined();
+    expect(event.rawOutput).toBeDefined();
+
+    // Full-event string scan: no secret value can survive end-to-end.
+    // Previously these leaked into `rawInput` / `rawOutput`, exposing them
+    // to any UI component that JSON.stringify-ed the event or rendered
+    // those fields in a debug panel.
+    const serialized = JSON.stringify(event);
+    expect(serialized).not.toContain('sk-prod-do-not-leak');
+    expect(serialized).not.toContain('Bearer secret-do-not-leak');
+    expect(serialized).not.toContain('returned-secret-do-not-leak');
+
+    // Structural keys preserved; only sensitive VALUES are redacted.
+    expect((event.rawInput as Record<string, unknown>).apiKey).toBe(
+      '[redacted]',
+    );
+    expect(
+      (
+        (event.rawInput as Record<string, unknown>).headers as Record<
+          string,
+          unknown
+        >
+      ).Authorization,
+    ).toBe('[redacted]');
+    expect((event.rawOutput as Record<string, unknown>).token).toBe(
+      '[redacted]',
+    );
+    // Non-sensitive fields survive verbatim.
+    expect((event.rawInput as Record<string, unknown>).command).toBe(
+      'curl https://api.example.com',
+    );
+    expect((event.rawOutput as Record<string, unknown>).text).toBe('OK');
+    expect(event.details).toContain('[redacted]');
+    expect(event.details).not.toContain('sk-prod-do-not-leak');
+    expect(event.details).not.toContain('Bearer secret-do-not-leak');
+    expect(event.details).not.toContain('returned-secret-do-not-leak');
   });
 });

@@ -10,13 +10,16 @@ import type {
   DaemonUiPermissionOption,
   NormalizeDaemonEventOptions,
 } from './types.js';
+import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
 import {
   getFirstString,
   getOutputText,
   getString,
   getTextContent,
   isRecord,
+  redactSensitiveFields,
   stringifyJson,
+  stringifyRedactedJson,
 } from './utils.js';
 
 const MAX_DETAILS_LENGTH = 4096;
@@ -237,8 +240,21 @@ function normalizeToolUpdate(
     (metadata ? getString(metadata, 'name') : undefined);
   const toolKind = getString(update, 'kind');
   const title = getString(update, 'title') ?? toolName ?? toolKind;
-  const rawInput = update['rawInput'] ?? update['input'] ?? update['args'];
-  const rawOutput = update['rawOutput'] ?? update['output'] ?? update['result'];
+  const rawInputSource =
+    update['rawInput'] ?? update['input'] ?? update['args'];
+  const rawOutputSource =
+    update['rawOutput'] ?? update['output'] ?? update['result'];
+  // Redact sensitive fields (apiKey / token / password / etc.) at the
+  // normalizer boundary so raw values never reach transcript blocks, terminal
+  // details, or downstream UI components.
+  const rawInput =
+    rawInputSource !== undefined
+      ? redactSensitiveFields(rawInputSource)
+      : undefined;
+  const rawOutput =
+    rawOutputSource !== undefined
+      ? redactSensitiveFields(rawOutputSource)
+      : undefined;
   const content = update['content'];
   const locations = update['locations'];
   const toolCallId = getString(update, 'toolCallId');
@@ -264,9 +280,9 @@ function normalizeToolUpdate(
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(rawInput !== undefined
-      ? { details: capDetails(stringifyJson(rawInput)) }
+      ? { details: capDetails(stringifyRedactedJson(rawInput)) }
       : rawOutput !== undefined
-        ? { details: capDetails(getOutputText(rawOutput)) }
+        ? { details: capDetails(stringifyRedactedJson(rawOutput)) }
         : {}),
   };
 }
@@ -276,11 +292,11 @@ function normalizePlanUpdate(
   base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
 ): DaemonUiEvent {
   const entries = Array.isArray(update['entries']) ? update['entries'] : [];
-  const contentText = formatPlanEntries(entries);
+  const contentText = capDetails(formatPlanEntries(entries));
   return {
     ...base,
     type: 'tool.update',
-    toolCallId: 'daemon-plan',
+    toolCallId: DAEMON_PLAN_TOOL_CALL_ID,
     title: 'Updated Plan',
     status: 'completed',
     toolName: 'TodoWrite',
@@ -445,39 +461,4 @@ function describeToolCall(value: unknown): string {
 function getShellStream(value: unknown): 'stdout' | 'stderr' | undefined {
   const stream = getString(value, 'stream');
   return stream === 'stdout' || stream === 'stderr' ? stream : undefined;
-}
-
-function stringifyRedactedJson(value: unknown): string {
-  return stringifyJson(redactSensitiveFields(value));
-}
-
-function redactSensitiveFields(value: unknown, depth = 0): unknown {
-  if (depth > 16) return '[truncated]';
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactSensitiveFields(entry, depth + 1));
-  }
-  if (!isRecord(value)) return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [
-      key,
-      isSensitiveKey(key)
-        ? '[redacted]'
-        : redactSensitiveFields(entry, depth + 1),
-    ]),
-  );
-}
-
-function isSensitiveKey(key: string): boolean {
-  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
-  return (
-    normalized === 'authorization' ||
-    normalized === 'cookie' ||
-    normalized === 'setcookie' ||
-    normalized === 'password' ||
-    normalized === 'apikey' ||
-    normalized.endsWith('token') ||
-    normalized.endsWith('secret') ||
-    normalized.includes('accesstoken') ||
-    normalized.includes('refreshtoken')
-  );
 }

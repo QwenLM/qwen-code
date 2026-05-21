@@ -19,16 +19,22 @@ import { resolve } from 'path';
  * - TypeScript declarations: dist/index.d.ts
  * - CSS: dist/styles.css (optional styles)
  */
-export default defineConfig({
-  resolve: {
-    alias: {
-      '@qwen-code/sdk/daemon': resolve(
-        __dirname,
-        '../sdk-typescript/src/daemon/index.ts',
-      ),
-      '@qwen-code/sdk': resolve(__dirname, '../sdk-typescript/src/index.ts'),
-    },
-  },
+export default defineConfig(({ command }) => ({
+  resolve:
+    command === 'serve'
+      ? {
+          alias: {
+            '@qwen-code/sdk/daemon': resolve(
+              __dirname,
+              '../sdk-typescript/src/daemon/index.ts',
+            ),
+            '@qwen-code/sdk': resolve(
+              __dirname,
+              '../sdk-typescript/src/index.ts',
+            ),
+          },
+        }
+      : undefined,
   plugins: [
     react(),
     dts({
@@ -73,4 +79,4 @@ export default defineConfig({
     minify: false,
     cssCodeSplit: false,
   },
-});
+}));

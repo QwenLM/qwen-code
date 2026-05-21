@@ -70,7 +70,9 @@ export const ThinkToolCall: FC<BaseToolCallProps> = ({
         ? 'loading'
         : toolCall.status === 'failed'
           ? 'error'
-          : 'default';
+          : toolCall.status === 'cancelled'
+            ? 'warning'
+            : 'default';
     return (
       <ToolCallContainer
         label="Think"

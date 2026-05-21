@@ -19,12 +19,145 @@ import {
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
+import {
+  createPermissionAuditPublisher,
+  PermissionAuditRing,
+} from './permissionAudit.js';
 import { createServeApp, resolveBridgeFsFactory } from './server.js';
+// Wenshao review #4335 / 3272581563 — single runtime source of
+// truth for the closed permission-policy set. `validatePolicyConfig`
+// derives its valid-set from `permission_mediation.modes` so a
+// future 5th policy lands in one place.
+import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 import type { ServeOptions } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
+// Wenshao review #4335 / 3272493805 — use the canonical
+// `PermissionPolicy` union from acp-bridge instead of inlining
+// the four string literals at the let-declaration, the `as`
+// cast, and the validation Set. Same drift-protection rationale
+// as types.ts/3271978342.
+import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+
+/**
+ * Wenshao review #4335 / 3271978374 — boot-time policy validation
+ * errors. Replaces the previous substring-matching of "invalid
+ * policy." in error messages (fragile against unrelated errors
+ * happening to contain that phrase, and against future rewordings
+ * of the validation message). The catch block in `runQwenServe`
+ * matches with `instanceof InvalidPolicyConfigError` to distinguish
+ * operator-misconfiguration (rethrow → fail boot loudly) from
+ * settings-read failures (fall back to defaults).
+ *
+ * Exported so tests can `instanceof`-check; pre-Round-7 the class
+ * was private and the `expect(...).toThrow(InvalidPolicyConfigError)`
+ * assertion couldn't bind the constructor.
+ */
+export class InvalidPolicyConfigError extends Error {
+  override readonly name = 'InvalidPolicyConfigError';
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/**
+ * Parse + validate the `policy.*` section of merged daemon settings.
+ * Extracted from inline boot logic (Round 8 / 3272493818) so the
+ * validation contract can be unit-tested without spinning up a
+ * daemon. Returns the resolved `permissionPolicy` /
+ * `permissionConsensusQuorum` for `BridgeOptions`, or throws
+ * `InvalidPolicyConfigError` for operator misconfiguration.
+ *
+ * - `permissionStrategy` must be one of the four `PermissionPolicy`
+ *   literals if present.
+ * - `consensusQuorum` must be a positive integer if present.
+ * - When `consensusQuorum` is set but `permissionStrategy` is not
+ *   `'consensus'`, the override is silently ignored — emit a
+ *   stderr warning so the operator notices.
+ *
+ * The mismatch warning runs through `onWarning` so tests can
+ * capture it; production passes `writeStderrLine`.
+ *
+ * Wenshao review #4335 / 3272581563 — the runtime valid-policy set
+ * is derived from `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes`
+ * (single source of truth) instead of repeating the four literals
+ * a fourth time. The compile-time check that every entry is a
+ * `PermissionPolicy` ensures registry drift surfaces here.
+ */
+export function validatePolicyConfig(
+  policyConfig: { permissionStrategy?: string; consensusQuorum?: number } = {},
+  onWarning: (message: string) => void = writeStderrLine,
+): {
+  permissionPolicy: PermissionPolicy | undefined;
+  permissionConsensusQuorum: number | undefined;
+} {
+  // Derive from the capability registry so the runtime set, the
+  // settings schema enum, the `PermissionPolicy` union, and the
+  // capability advertisement all stay aligned through a single
+  // edit point. The cast asserts every `modes` entry is a
+  // `PermissionPolicy` — TypeScript's `satisfies Record<string,
+  // ServeCapabilityDescriptor>` on the registry doesn't narrow
+  // `modes` to the union, so the assertion is necessary here. The
+  // `permissionMediation.test.ts` capability-suite asserts the
+  // modes list is exhaustive over `PermissionPolicy`, providing
+  // the runtime guarantee.
+  const validSet: ReadonlySet<string> = new Set<string>(
+    SERVE_CAPABILITY_REGISTRY.permission_mediation.modes,
+  );
+  if (
+    policyConfig.permissionStrategy !== undefined &&
+    !validSet.has(policyConfig.permissionStrategy)
+  ) {
+    throw new InvalidPolicyConfigError(
+      `qwen serve: invalid policy.permissionStrategy ` +
+        `"${String(policyConfig.permissionStrategy)}"; must be one of ` +
+        `${Array.from(validSet).join(', ')}`,
+    );
+  }
+  if (
+    policyConfig.consensusQuorum !== undefined &&
+    (!Number.isInteger(policyConfig.consensusQuorum) ||
+      policyConfig.consensusQuorum < 1)
+  ) {
+    throw new InvalidPolicyConfigError(
+      `qwen serve: invalid policy.consensusQuorum ` +
+        `${String(policyConfig.consensusQuorum)}; must be a positive integer`,
+    );
+  }
+  // Wenshao review #4335 / 3273077270 — when consensusQuorum is set
+  // but the active strategy doesn't use it, the warning previously
+  // promised "the override will be ignored" while the function
+  // STILL propagated the value to BridgeOptions. The downstream
+  // mediator only reads it under the consensus policy, so behavior
+  // was correct, but the public contract contradicted its own
+  // warning text. Adopt option (a): make the public contract match
+  // the warning by dropping the value when the strategy is not
+  // 'consensus'. Operators reading the warning at boot now see
+  // consistent behavior all the way down.
+  const consensusQuorumActive =
+    policyConfig.consensusQuorum !== undefined &&
+    policyConfig.permissionStrategy === 'consensus';
+  if (
+    policyConfig.consensusQuorum !== undefined &&
+    policyConfig.permissionStrategy !== 'consensus'
+  ) {
+    onWarning(
+      'qwen serve: policy.consensusQuorum is set but ' +
+        'policy.permissionStrategy is not "consensus"; the override will ' +
+        'be ignored.',
+    );
+  }
+  return {
+    permissionPolicy: policyConfig.permissionStrategy as
+      | PermissionPolicy
+      | undefined,
+    permissionConsensusQuorum: consensusQuorumActive
+      ? policyConfig.consensusQuorum
+      : undefined,
+  };
+}
 
 /**
  * Wrap raw IPv6 literals in brackets so the printed URL is a valid RFC 3986
@@ -338,51 +471,66 @@ export async function runQwenServe(
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
   };
 
-  // #4282 fold-in 5 (Codex P2-1). Snapshot the workspace's preferred
-  // context filename at boot. The daemon parent doesn't go through
-  // `loadCliConfig` (it spawns an ACP child that does), so the
-  // process-global `getCurrentGeminiMdFilename()` stays on the
-  // default `QWEN.md` even when the workspace has
-  // `context.fileName: 'AGENTS.md'`. Reading merged settings here
-  // and forwarding to the bridge ensures `POST /workspace/init`
-  // writes the same file the ACP child reads. Settings changes made
-  // after daemon boot need a daemon restart to take effect — this
-  // value rarely changes, and a snapshot avoids re-reading on every
-  // init request.
-  //
-  // #4297 fold-in 2 (copilot S2): only accept string-typed values.
-  // Hand-edited `settings.json` could land an object / number /
-  // nested array in `context.fileName`; the previous `String(...)`
-  // coerce would have produced a literal `"[object Object]"`
-  // filename. Falling back to `undefined` makes the bridge use its
-  // own `getCurrentGeminiMdFilename()` default — a sane recovery
-  // posture that keeps the daemon alive instead of writing a
-  // garbage filename.
-  //
-  // #4297 fold-in 7 (qwen-latest critical, addresses #3262625091):
-  // wrap the boot-time `loadSettings` read in try/catch. A
-  // corrupted, malformed, or temporarily unreadable
-  // `settings.json` (partial write by a concurrent editor,
-  // permission denied, transient disk IO) used to throw
-  // synchronously and BLOCK DAEMON BOOT. Pre-PR this never
-  // happened because `loadSettings` was called lazily inside
-  // request handlers (which had their own error handling). We
-  // catch + log + fall back to the bridge's default filename so
-  // the daemon stays bootable.
+  // #4282 fold-in 5 + F3 Commit 5: read settings once at boot for
+  // both the workspace context filename (Codex P2-1) and the new
+  // F3 policy fields (permissionStrategy / consensusQuorum). Wrap
+  // in try/catch (#4297 fold-in 7) so a corrupted settings.json
+  // doesn't block daemon boot — context filename falls back to the
+  // bridge's default; policy validation rethrows because invalid
+  // policy is an explicit operator misconfiguration.
   let contextFilenameForInit: string | undefined;
+  let permissionPolicy: PermissionPolicy | undefined;
+  let permissionConsensusQuorum: number | undefined;
   try {
     const bootSettings = loadSettings(boundWorkspace);
     contextFilenameForInit = extractContextFilename(
       bootSettings.merged.context?.fileName,
     );
+    const policyConfig =
+      (
+        bootSettings.merged as {
+          policy?: {
+            permissionStrategy?: string;
+            consensusQuorum?: number;
+          };
+        }
+      ).policy ?? {};
+    const resolved = validatePolicyConfig(policyConfig);
+    permissionPolicy = resolved.permissionPolicy;
+    permissionConsensusQuorum = resolved.permissionConsensusQuorum;
   } catch (err) {
+    // F3 invariant: invalid policy values must fail startup loudly.
+    // Wenshao review #4335 / 3271978374 — discriminate by error class
+    // rather than substring-matching the message; a future reworded
+    // validation string would have silently downgraded operator
+    // misconfiguration to "fall back to defaults" without this.
+    if (err instanceof InvalidPolicyConfigError) {
+      throw err;
+    }
+    // All other settings-read failures (corrupted JSON, transient
+    // disk IO) fall back to defaults so the daemon stays bootable.
     writeStderrLine(
-      `qwen serve: could not read settings for context.fileName ` +
-        `(${err instanceof Error ? err.message : String(err)}); ` +
-        `falling back to the daemon's default context filename. ` +
-        `Restart with a valid settings.json to use a custom name.`,
+      `qwen serve: could not read settings for context.fileName / ` +
+        `policy.* (${err instanceof Error ? err.message : String(err)}); ` +
+        `falling back to defaults. Restart with a valid settings.json ` +
+        `to apply context.fileName / policy.* overrides.`,
     );
   }
+
+  // F3 Commit 2 — allocate the audit ring + publisher in the daemon
+  // host (here) rather than inside the bridge factory, because the
+  // ring is the seam future PRs will lift up to expose `GET
+  // /workspace/permission/audit`. Wenshao review #4335 (3270622298 /
+  // 3270622304): without this wiring all 5 audit record types were
+  // silently dropped through `createNoOpPermissionAuditPublisher`,
+  // and the timeout breadcrumb the bridge JSDoc promised never
+  // existed. The mediator now writes a stderr line on each timeout
+  // (preserving pre-F3 visibility) and forwards the entry to this
+  // ring for the future query route.
+  const permissionAuditRing = new PermissionAuditRing();
+  const permissionAuditPublisher = createPermissionAuditPublisher({
+    ring: permissionAuditRing,
+  });
 
   // F1 follow-up (#4319): construct `fsFactory` BEFORE the bridge so
   // the bridge can wire it through `BridgeFileSystem` for ACP-side
@@ -409,6 +557,15 @@ export async function runQwenServe(
         : {}),
       boundWorkspace,
       childEnvOverrides,
+      // F3 Commit 5 — wire the validated policy/quorum from
+      // settings into the bridge. Bridge factory does its own
+      // defensive `Number.isInteger` recheck on the quorum so a
+      // direct embedder can't bypass our validation.
+      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+      ...(permissionConsensusQuorum !== undefined
+        ? { permissionConsensusQuorum }
+        : {}),
+      permissionAudit: permissionAuditPublisher,
       // #4175 PR 22b/2: inject the daemon-host status provider so the
       // bridge can pull env / preflight cells through a typed seam
       // instead of importing daemon-host helpers directly. Production

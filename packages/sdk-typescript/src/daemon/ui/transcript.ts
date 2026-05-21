@@ -14,7 +14,9 @@ import type {
   DaemonTranscriptState,
   DaemonUiEvent,
 } from './types.js';
+import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
 import { createDaemonToolPreview } from './toolPreview.js';
+import { isRecord } from './utils.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
 const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
@@ -423,6 +425,7 @@ function trimTranscriptState(
       state.toolBlockByCallId[toolCallId] = TRIMMED_TOOL_BLOCK_ID;
     }
   }
+  pruneTrimmedToolIndexes(state);
   for (const [toolCallId] of Object.entries(
     state.trimmedToolNotificationByCallId,
   )) {
@@ -452,7 +455,8 @@ function shouldRecreateTrimmedToolBlock(
   event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
 ): boolean {
   return (
-    event.toolCallId === 'daemon-plan' || event.toolKind === 'updated_plan'
+    event.toolCallId === DAEMON_PLAN_TOOL_CALL_ID ||
+    event.toolKind === 'updated_plan'
   );
 }
 
@@ -484,7 +488,19 @@ function cloneBlockForWrite(
   if (block.kind === 'permission') {
     return {
       ...block,
-      options: block.options.map((option) => ({ ...option })),
+      options: block.options.map((option) => cloneJsonLike(option)),
+      toolCall: cloneJsonLike(block.toolCall),
+      preview: cloneJsonLike(block.preview),
+    };
+  }
+  if (block.kind === 'tool') {
+    return {
+      ...block,
+      preview: cloneJsonLike(block.preview),
+      content: cloneJsonLike(block.content),
+      locations: cloneJsonLike(block.locations),
+      rawInput: cloneJsonLike(block.rawInput),
+      rawOutput: cloneJsonLike(block.rawOutput),
     };
   }
   return { ...block };
@@ -514,6 +530,31 @@ function truncateText(text: string): string {
     MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
   );
   return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
+}
+
+function pruneTrimmedToolIndexes(state: DaemonTranscriptState): void {
+  const maxTrimmedEntries = Math.max(0, state.maxBlocks);
+  const trimmedToolCallIds = Object.entries(state.toolBlockByCallId)
+    .filter(([, blockId]) => blockId === TRIMMED_TOOL_BLOCK_ID)
+    .map(([toolCallId]) => toolCallId);
+  const overflow = trimmedToolCallIds.length - maxTrimmedEntries;
+  if (overflow <= 0) return;
+  for (const toolCallId of trimmedToolCallIds.slice(0, overflow)) {
+    delete state.toolBlockByCallId[toolCallId];
+    delete state.trimmedToolNotificationByCallId[toolCallId];
+  }
+}
+
+function cloneJsonLike<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneJsonLike(entry)) as T;
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, cloneJsonLike(entry)]),
+    ) as T;
+  }
+  return value;
 }
 
 function assertNever(value: never): never {

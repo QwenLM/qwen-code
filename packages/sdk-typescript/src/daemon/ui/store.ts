@@ -24,7 +24,13 @@ export function createDaemonTranscriptStore(
   let notifyScheduled = false;
 
   const notify = () => {
-    for (const listener of listeners) listener();
+    for (const listener of listeners) {
+      try {
+        listener();
+      } catch (error) {
+        reportListenerError(error);
+      }
+    }
   };
   const scheduleNotify = () => {
     if (notifyScheduled) return;
@@ -63,6 +69,17 @@ export function createDaemonTranscriptStore(
       scheduleNotify();
     },
   };
+}
+
+function reportListenerError(error: unknown): void {
+  const reporter = (
+    globalThis as typeof globalThis & {
+      reportError?: (error: unknown) => void;
+    }
+  ).reportError;
+  if (typeof reporter === 'function') {
+    reporter(error);
+  }
 }
 
 function createState(

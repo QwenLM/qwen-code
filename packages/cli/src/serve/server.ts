@@ -31,6 +31,7 @@ import {
   type DeviceFlowProviderId,
   type DeviceFlowPublicView,
 } from './auth/deviceFlow.js';
+import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
@@ -38,6 +39,7 @@ import { isServeDebugMode } from './debugMode.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
+  CancelSentinelCollisionError,
   createHttpAcpBridge,
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -46,6 +48,8 @@ import {
   MAX_WORKSPACE_PATH_LENGTH,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  PermissionForbiddenError,
+  PermissionPolicyNotImplementedError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -697,6 +701,13 @@ export function createServeApp(
       // #3803 §02: surface the bound workspace so clients can detect
       // mismatch pre-flight and omit `cwd` on `POST /session`.
       workspaceCwd: boundWorkspace,
+      // #4175 F3 Commit 6 — active mediation policy under the
+      // `policy` namespace. Distinct from the `permission_mediation`
+      // capability `modes` list (build-supported set). SDK clients
+      // pre-flight the active strategy and render the matching UX
+      // (e.g. consensus shows partial-vote progress, designated
+      // disables the vote button for non-originators).
+      policy: { permission: bridge.permissionPolicy },
     };
     res.status(200).json(envelope);
   });
@@ -1715,13 +1726,26 @@ export function createServeApp(
     if (response === undefined) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+    // F3 Commit 2: thread the kernel-stamped peer-IP loopback bit
+    // through the bridge context so the `local-only` policy can gate
+    // votes by transport. We always pass a context (even when no
+    // header was supplied) so `fromLoopback` reaches the mediator —
+    // the prior gating shape (`clientId !== undefined ? { clientId }
+    // : undefined`) would silently drop the loopback bit for
+    // anonymous loopback voters, which is the exact `local-only`
+    // happy path.
+    const fromLoopback = detectFromLoopback(req);
+    const context = {
+      ...(clientId !== undefined ? { clientId } : {}),
+      fromLoopback,
+    };
     let accepted: boolean;
     try {
       accepted = bridge.respondToSessionPermission(
         sessionId,
         requestId,
         response,
-        clientId !== undefined ? { clientId } : undefined,
+        context,
       );
     } catch (err) {
       sendPermissionVoteError(res, err, {
@@ -1747,13 +1771,15 @@ export function createServeApp(
     if (response === undefined) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+    // Same F3 Commit 2 rationale as the session-scoped route above.
+    const fromLoopback = detectFromLoopback(req);
+    const context = {
+      ...(clientId !== undefined ? { clientId } : {}),
+      fromLoopback,
+    };
     let accepted: boolean;
     try {
-      accepted = bridge.respondToPermission(
-        requestId,
-        response,
-        clientId !== undefined ? { clientId } : undefined,
-      );
+      accepted = bridge.respondToPermission(requestId, response, context);
     } catch (err) {
       sendPermissionVoteError(res, err, {
         route: 'POST /permission/:requestId',
@@ -1962,6 +1988,37 @@ export function createServeApp(
           const next = await iter!.next();
           if (next.done) break;
           if (res.writableEnded) break;
+          // SSE ring eviction observability (#4360 wenshao review):
+          // EventBus.subscribe emits `state_resync_required` when a
+          // consumer reconnects with `Last-Event-ID` past the ring
+          // boundary. Without a daemon-side log, an operator chasing
+          // "my UI is frozen with stale state" has no breadcrumb to
+          // tell whether the ring is undersized, the client reconnects
+          // too slowly, or a network partition caused repeated
+          // reconnects. Log here (at the SSE write boundary) rather
+          // than inside EventBus — keeps the bus implementation pure
+          // and concentrates daemon-side observability in the route
+          // handler that already logs socket errors / heartbeats.
+          if (next.value.type === 'state_resync_required') {
+            const data = next.value.data as {
+              lastDeliveredId?: number;
+              earliestAvailableId?: number;
+              reason?: string;
+            };
+            const gap =
+              typeof data.earliestAvailableId === 'number' &&
+              typeof data.lastDeliveredId === 'number'
+                ? data.earliestAvailableId - data.lastDeliveredId - 1
+                : undefined;
+            writeStderrLine(
+              `qwen serve: SSE ring eviction detected (session ${sessionId}): ` +
+                `lastEventId=${data.lastDeliveredId ?? '?'}, ` +
+                `earliestInRing=${data.earliestAvailableId ?? '?'}, ` +
+                `gap=${gap ?? '?'} events, ` +
+                `reason=${data.reason ?? '?'}. ` +
+                `Consumer must call loadSession to recover.`,
+            );
+          }
           await writeWithBackpressure(formatSseFrame(next.value));
         }
       } catch (err) {
@@ -1972,11 +2029,37 @@ export function createServeApp(
           // hard-coded `id: 0` would regress the client's `Last-Event-ID`
           // tracker. `formatSseFrame` omits the `id:` line when the input
           // event has no id.
+          //
+          // `errorKind` (#4175 F4 prereq, chiga0 issue #19 P0): stamp the
+          // classified error kind so UIs can render typed responses
+          // (auth retry / file picker / proxy hint / etc.) rather than
+          // regex-matching the human-readable `error` string. Returns
+          // `undefined` for unclassified errors — SDK falls back to
+          // rendering `error` text as before, so adding `errorKind` is
+          // strictly additive / backward-compatible.
+          const errorKind = mapDomainErrorToErrorKind(err);
+          // Bridge iterator error observability (#4360 wenshao review):
+          // forwarding the error to the client via `stream_error` is
+          // good for UX but leaves the daemon side blind. The adjacent
+          // `res.on('error', ...)` handler at line ~1925 already logs
+          // socket-level errors with `writeStderrLine`; mirror that
+          // pattern here for protocol/subprocess errors so operators
+          // can grep daemon stderr for "bridge iterator error" instead
+          // of attaching a debugger to distinguish "subprocess
+          // OOM-killed" from "bridge protocol bug".
+          writeStderrLine(
+            `qwen serve: bridge iterator error (session ${sessionId}): ` +
+              `${errorMessage(err)}` +
+              (errorKind ? ` [${errorKind}]` : ''),
+          );
           await writeWithBackpressure(
             formatSseFrame({
               v: 1,
               type: 'stream_error',
-              data: { error: errorMessage(err) },
+              data: {
+                error: errorMessage(err),
+                ...(errorKind ? { errorKind } : {}),
+              },
             }),
           ).catch(() => {});
         }
@@ -2277,6 +2360,52 @@ function parseClientIdHeader(
 }
 
 /**
+ * #4175 F3 Commit 2 — decide whether a permission vote arrived from a
+ * loopback peer.
+ *
+ * Per RFC 1122 the entire `127.0.0.0/8` block is loopback (and the
+ * IPv4-mapped IPv6 form `::ffff:127.0.0.0/104` mirrors that). IPv6
+ * loopback is `::1` (single literal). Wenshao review #4335 /
+ * 3271185597 — the previous exact-match Set of three literals
+ * (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`) silently fail-CLOSED
+ * on legitimate non-`.0.0.1` loopback addresses (`127.0.0.2`,
+ * `127.0.1.1`, etc.), causing unexpected `remote_not_allowed`
+ * rejections under `local-only` policy. Switched to a prefix
+ * test so the entire `/8` and its dual-stack mirror are accepted.
+ *
+ * **Security**: this function reads `req.socket.remoteAddress` only.
+ * It does NOT consult `X-Forwarded-For` or any HTTP header — those
+ * are forgeable, and `local-only` is meant to be a strong gate that
+ * trusts the kernel-stamped peer IP. Operators who want
+ * loopback-equivalent treatment for a reverse-proxied daemon should
+ * use a dedicated daemon process instead, or pick `designated`
+ * policy where loopback identity is irrelevant.
+ *
+ * Direction is fail-CLOSED: an unrecognized `remoteAddress` shape
+ * (missing socket, non-string) returns `false`, gating votes
+ * conservatively rather than admitting them.
+ */
+// Wenshao review #4335 / 3272581557 — exported for unit testing.
+// supertest in the existing server tests always connects from
+// `127.0.0.1`, so the prefix-match logic for `127.x`-beyond-`.0.0.1`,
+// `::1`, `::ffff:127.*`, and the fail-closed non-string branch had
+// no direct test. The factored-out helper takes a minimal shape so
+// tests can exercise it without spinning up Express.
+export function detectFromLoopback(req: {
+  socket?: { remoteAddress?: string | undefined };
+}): boolean {
+  const addr = req.socket?.remoteAddress;
+  if (typeof addr !== 'string') return false;
+  // IPv6 loopback (single literal).
+  if (addr === '::1') return true;
+  // IPv4 loopback: 127.0.0.0/8.
+  if (addr.startsWith('127.')) return true;
+  // IPv4-mapped IPv6 loopback: ::ffff:127.0.0.0/104.
+  if (addr.startsWith('::ffff:127.')) return true;
+  return false;
+}
+
+/**
  * #4282 fold-in 1 (gpt-5.5 C2). Workspace-level mutation routes validate
  * the parsed `X-Qwen-Client-Id` against `bridge.knownClientIds()` so the
  * `originatorClientId` stamped onto fan-out events is grounded in a
@@ -2467,6 +2596,45 @@ function sendPermissionVoteError(
     });
     return;
   }
+  // F3 Commit 2 — designated voter mismatch / `local-only` remote
+  // rejection. 403 because the request is well-formed and the voter
+  // was authenticated; the policy refuses their vote.
+  if (err instanceof PermissionForbiddenError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'permission_forbidden',
+      requestId: err.requestId,
+      sessionId: err.sessionId,
+      reason: err.reason,
+    });
+    return;
+  }
+  // F3 Commit 2 — operator configured a permission policy whose
+  // implementation has not landed in this build yet. 501 (not 500)
+  // so the SDK can render "your daemon is older than your settings
+  // expect; upgrade" rather than a generic Internal Server Error.
+  if (err instanceof PermissionPolicyNotImplementedError) {
+    res.status(501).json({
+      error: err.message,
+      code: 'permission_policy_not_implemented',
+      policy: err.policy,
+    });
+    return;
+  }
+  // F3 Commit 2 — agent declared an `allowedOptionIds` set that
+  // includes the cancel-vote sentinel. This is a contract violation
+  // between agent and daemon (not a client mistake), so 500 is the
+  // right shape; structured `code` lets the SDK distinguish from
+  // unrelated 500s.
+  if (err instanceof CancelSentinelCollisionError) {
+    res.status(500).json({
+      error: err.message,
+      code: 'cancel_sentinel_collision',
+      requestId: err.requestId,
+      sentinel: err.sentinel,
+    });
+    return;
+  }
   sendBridgeError(res, err, ctx);
 }
 
@@ -2484,7 +2652,40 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // The SDK parser at `sdk-typescript/src/daemon/sse.ts` handles the
   // multi-line variant on the receive side — input/output asymmetry is
   // intentional.
-  const dataJson = JSON.stringify(event);
+  //
+  // `_meta.serverTimestamp` (#4175 F4 prereq, chiga0 issue #19 P0): stamp
+  // the daemon's wall-clock at SSE write time so multi-client transcript
+  // ordering and "X minutes ago" UIs use the server's clock rather than
+  // each client's drifting local clock. Stamped at the wire boundary
+  // (NOT at EventBus.publish) so the in-memory `BridgeEvent` type stays
+  // unchanged and internal consumers don't see `_meta`.
+  //
+  // **Where `_meta` lives**: this code merges with `event._meta` at the
+  // BridgeEvent top level. **No current producer in the daemon sets
+  // `_meta` at the top level** — wenshao #4360 review noted that
+  // ToolCallEmitter's `_meta` lives nested at `event.data._meta` (the
+  // ACP `session/update` payload's own metadata), and `bridgeClient.ts`
+  // publishes via `events.publish({ type: 'session_update', data:
+  // params })` so the emitter's `_meta` stays inside `data`. The
+  // top-level merge here is a **forward-compat escape hatch** — if a
+  // future emitter ever wants to stamp envelope-level metadata, it can
+  // do so via `_meta` and this spread preserves it. Today
+  // `existingMeta` is always `undefined` in production and the spread
+  // is a no-op merge with `{}`.
+  //
+  // SDK consumer plan: a 3-location probe (event.serverTimestamp /
+  // event._meta.serverTimestamp / event.data._meta.serverTimestamp)
+  // is planned in chiga0's separate PR #4353 (not yet merged into
+  // `daemon_mode_b_main`). When that ships, SDK readers find this
+  // field at the `_meta.serverTimestamp` location. Until then this
+  // stamp is daemon-side only; SDK consumers can read it through an
+  // `as any` cast or wait for #4353.
+  const existingMeta = (event as { _meta?: Record<string, unknown> })._meta;
+  const stamped = {
+    ...event,
+    _meta: { ...(existingMeta ?? {}), serverTimestamp: Date.now() },
+  };
+  const dataJson = JSON.stringify(stamped);
   const idLine =
     'id' in event && event.id !== undefined ? `id: ${event.id}\n` : '';
   return `${idLine}event: ${event.type}\ndata: ${dataJson}\n\n`;

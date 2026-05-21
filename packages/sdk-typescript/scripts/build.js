@@ -145,21 +145,40 @@ function assertBrowserSafeBundle(filePath) {
   }
 
   const contents = readFileSync(filePath, 'utf8');
-  const forbidden = [
-    'node:',
-    'require("fs")',
-    "require('fs')",
-    'require("path")',
-    "require('path')",
-    'require("http")',
-    "require('http')",
-    'require("https")',
-    "require('https')",
+  if (contents.includes('node:')) {
+    throw new Error('Browser daemon SDK bundle contains Node-only token node:');
+  }
+  const forbiddenBuiltins = [
+    'assert',
+    'buffer',
+    'child_process',
+    'cluster',
+    'crypto',
+    'fs',
+    'http',
+    'https',
+    'module',
+    'net',
+    'os',
+    'path',
+    'perf_hooks',
+    'process',
+    'readline',
+    'stream',
+    'tls',
+    'tty',
+    'url',
+    'util',
+    'worker_threads',
+    'zlib',
   ];
-  const found = forbidden.find((token) => contents.includes(token));
+  const requirePattern = new RegExp(
+    `require\\((["'])(${forbiddenBuiltins.join('|')})(?:/[^"']*)?\\1\\)`,
+  );
+  const found = contents.match(requirePattern);
   if (found) {
     throw new Error(
-      `Browser daemon SDK bundle contains Node-only token ${found}`,
+      `Browser daemon SDK bundle contains Node-only token ${found[0]}`,
     );
   }
 }

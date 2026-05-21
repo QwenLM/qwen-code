@@ -75,6 +75,21 @@ const DaemonConnectionContext = createContext<
 const DaemonActionsContext = createContext<DaemonUiSessionActions | undefined>(
   undefined,
 );
+const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
+const TERMINAL_SESSION_HTTP_STATUSES = new Set([401, 403, 404, 410]);
+/**
+ * Subset of TERMINAL_SESSION_HTTP_STATUSES that represent **credential
+ * failures** (vs session-not-found 404/410). Auth failures should NOT enter
+ * the reconnect loop even when `autoReconnect: true` — retrying with the
+ * same bad token loops forever, hammering the server with bad credentials
+ * and wiping the user's transcript on each cycle (the sessionId-change
+ * `store.reset()` path at line 143 fires when each fresh attempt produces a
+ * different sessionId).
+ *
+ * 404/410 (session-not-found) keep the reconnect-then-recreate behavior —
+ * those are recoverable by creating a fresh session.
+ */
+const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
 
 export function DaemonSessionProvider({
   baseUrl,
@@ -95,6 +110,10 @@ export function DaemonSessionProvider({
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const promptAbortRef = useRef<AbortController | undefined>(undefined);
   const promptBusyRef = useRef(false);
+  const eventOptionsRef = useRef({ suppressOwnUserEcho, includeRawEvent });
+  const reconnectConfigRef = useRef({ reconnectDelayMs, maxReconnectDelayMs });
+  eventOptionsRef.current = { suppressOwnUserEcho, includeRawEvent };
+  reconnectConfigRef.current = { reconnectDelayMs, maxReconnectDelayMs };
   const modelServiceId = createSessionRequest?.modelServiceId;
   const sessionScope = createSessionRequest?.sessionScope;
   const [connection, setConnection] = useState<DaemonConnectionState>({
@@ -157,10 +176,11 @@ export function DaemonSessionProvider({
               reconnectAttempt = 0;
             }
             try {
+              const eventOptions = eventOptionsRef.current;
               const uiEvents = normalizeDaemonEvent(event, {
                 clientId: session.clientId,
-                suppressOwnUserEcho,
-                includeRawEvent,
+                suppressOwnUserEcho: eventOptions.suppressOwnUserEcho,
+                includeRawEvent: eventOptions.includeRawEvent,
               });
               store.dispatch(uiEvents);
             } catch (error) {
@@ -174,6 +194,8 @@ export function DaemonSessionProvider({
             }
           }
           if (!disposed && !abort.signal.aborted) {
+            // Keep the session handle after a normal SSE close so the next
+            // subscription can resume from DaemonSessionClient.lastEventId.
             store.dispatch({
               type: 'status',
               text: 'SSE stream ended',
@@ -184,10 +206,25 @@ export function DaemonSessionProvider({
           const message =
             error instanceof Error ? error.message : String(error);
           store.dispatch({ type: 'error', text: message, recoverable: true });
-          const sessionMissing = isDaemonHttpNotFound(error);
-          if (sessionMissing) {
+          const terminalSessionError = isTerminalSessionHttpError(error);
+          if (terminalSessionError) {
             session = undefined;
             sessionRef.current = undefined;
+          }
+          // Auth failures (401 / 403) must NOT retry even when
+          // `autoReconnect: true`. Retrying with the same invalid token
+          // loops forever — the daemon keeps returning 401, each cycle
+          // wipes the user's transcript (via the sessionId-change branch
+          // in line 143), and the user sees no actionable error state.
+          // Surface as a terminal 'error' connection state regardless of
+          // the autoReconnect setting; the user must update credentials.
+          if (isAuthFailureHttpError(error)) {
+            sessionRef.current = undefined;
+            setConnection({
+              status: 'error',
+              error: message,
+            });
+            return;
           }
           if (!autoReconnect) {
             sessionRef.current = undefined;
@@ -225,10 +262,11 @@ export function DaemonSessionProvider({
         }
 
         reconnectAttempt += 1;
+        const reconnectConfig = reconnectConfigRef.current;
         const delayMs = getReconnectDelayMs(
           reconnectAttempt,
-          reconnectDelayMs,
-          maxReconnectDelayMs,
+          reconnectConfig.reconnectDelayMs,
+          reconnectConfig.maxReconnectDelayMs,
         );
         setConnection((current) => ({
           ...current,
@@ -257,10 +295,6 @@ export function DaemonSessionProvider({
     modelServiceId,
     sessionScope,
     maxQueued,
-    suppressOwnUserEcho,
-    includeRawEvent,
-    reconnectDelayMs,
-    maxReconnectDelayMs,
     store,
   ]);
 
@@ -294,8 +328,10 @@ export function DaemonSessionProvider({
           return result;
         } catch (error) {
           if (isAbortError(error)) {
+            store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
             return { stopReason: 'cancelled' };
           }
+          store.dispatch({ type: 'assistant.done', reason: 'error' });
           throw dispatchActionError(store, 'Prompt failed', error);
         } finally {
           if (promptAbortRef.current === promptAbort) {
@@ -322,7 +358,7 @@ export function DaemonSessionProvider({
           throw error;
         }
         try {
-          await session.cancel();
+          await withActionTimeout(session.cancel(), 'Cancel timed out');
         } catch (error) {
           throw dispatchActionError(store, 'Cancel failed', error);
         } finally {
@@ -338,7 +374,10 @@ export function DaemonSessionProvider({
           'Set model failed',
         );
         try {
-          return await session.setModel(modelId);
+          return await withActionTimeout(
+            session.setModel(modelId),
+            'Set model timed out',
+          );
         } catch (error) {
           throw dispatchActionError(store, 'Set model failed', error);
         }
@@ -353,7 +392,10 @@ export function DaemonSessionProvider({
           'Permission response failed',
         );
         try {
-          return await session.respondToSessionPermission(requestId, response);
+          return await withActionTimeout(
+            session.respondToSessionPermission(requestId, response),
+            'Permission response timed out',
+          );
         } catch (error) {
           throw dispatchActionError(store, 'Permission response failed', error);
         }
@@ -405,7 +447,8 @@ export function useDaemonTranscriptBlocks(): readonly DaemonTranscriptBlock[] {
 }
 
 export function useDaemonPendingPermissions() {
-  return selectPendingPermissionBlocks(useDaemonTranscriptState());
+  const state = useDaemonTranscriptState();
+  return useMemo(() => selectPendingPermissionBlocks(state), [state]);
 }
 
 export function useDaemonActions(): DaemonUiSessionActions {
@@ -460,15 +503,26 @@ function isAbortError(error: unknown): boolean {
   );
 }
 
-function isDaemonHttpNotFound(error: unknown): boolean {
-  return (
-    (error instanceof DaemonHttpError && error.status === 404) ||
-    (isRecord(error) && error['status'] === 404)
-  );
+function isTerminalSessionHttpError(error: unknown): boolean {
+  const status = extractHttpStatus(error);
+  return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
+}
+
+function isAuthFailureHttpError(error: unknown): boolean {
+  const status = extractHttpStatus(error);
+  return status !== undefined && AUTH_FAILURE_HTTP_STATUSES.has(status);
+}
+
+function extractHttpStatus(error: unknown): number | undefined {
+  if (error instanceof DaemonHttpError) return error.status;
+  if (isRecord(error) && typeof error['status'] === 'number') {
+    return error['status'];
+  }
+  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function getReconnectDelayMs(
@@ -485,7 +539,28 @@ function getReconnectDelayMs(
       ? Math.max(base, maxReconnectDelayMs)
       : base;
   const exponential = base * 2 ** Math.max(0, attempt - 1);
-  return Math.min(exponential, max);
+  const capped = Math.min(exponential, max);
+  const jitter = 0.8 + Math.random() * 0.4;
+  return Math.min(max, Math.max(1, Math.round(capped * jitter)));
+}
+
+async function withActionTimeout<T>(
+  promise: Promise<T>,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${message} after ${DEFAULT_ACTION_TIMEOUT_MS}ms`));
+        }, DEFAULT_ACTION_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function delay(delayMs: number, signal: AbortSignal): Promise<void> {

@@ -6,6 +6,8 @@
 
 import type { DaemonEvent, PermissionResponse } from '../types.js';
 
+export const DAEMON_PLAN_TOOL_CALL_ID = 'daemon-plan';
+
 export type DaemonUiEventType =
   | 'user.text.delta'
   | 'assistant.text.delta'

@@ -30,15 +30,21 @@ describe('daemonTranscriptToUnifiedMessages', () => {
     });
   });
 
-  it('preserves cancelled and unknown daemon tool statuses', () => {
+  it('maps daemon tool statuses without leaving terminal states spinning', () => {
     const messages = daemonTranscriptToUnifiedMessages([
       createToolBlock('cancelled-tool', 'cancelled'),
-      createToolBlock('future-tool', 'waiting_for_input'),
+      createToolBlock('waiting-tool', 'waiting_for_input'),
+      createToolBlock('skipped-tool', 'skipped'),
+      createToolBlock('timeout-tool', 'timeout'),
+      createToolBlock('future-tool', 'future_status'),
     ]);
 
     expect(messages.map((message) => message.toolCall?.status)).toEqual([
       'cancelled',
-      'in_progress',
+      'pending',
+      'cancelled',
+      'failed',
+      'failed',
     ]);
   });
 
@@ -52,6 +58,8 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       createPermissionBlock('reject-permission', 'selected:reject-policy'),
       createPermissionBlock('dismiss-permission', 'selected:dismiss-dialog'),
       createPermissionBlock('question-choice-permission', 'selected:beijing'),
+      createPermissionBlock('disallowed-permission', 'selected:disallow'),
+      createPermissionBlock('unblocked-permission', 'selected:unblock'),
       createPermissionBlock('cancelled-permission', 'cancelled'),
       createPermissionBlock('already-resolved-permission', 'already resolved'),
       createPermissionBlock('denied-permission', 'denied'),
@@ -66,6 +74,8 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       'completed',
       'failed',
       'cancelled',
+      'completed',
+      'failed',
       'completed',
       'cancelled',
       'cancelled',
@@ -90,8 +100,15 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         title: '\u202eRun',
         status: 'completed',
         preview: { kind: 'generic' },
-        rawInput: { '\u202ecommand': '\u202enpm test' },
-        rawOutput: '\u001b]0;bad\u0007ok',
+        rawInput: {
+          '\u202ecommand': '\u202enpm test',
+          apiKey: 'secret-input',
+          headers: { Authorization: 'Bearer secret-auth' },
+        },
+        rawOutput: {
+          token: 'secret-output',
+          text: '\u001b]0;bad\u0007ok',
+        },
         createdAt: 2,
         updatedAt: 2,
       },
@@ -100,9 +117,17 @@ describe('daemonTranscriptToUnifiedMessages', () => {
     expect(messages[0]?.content).toBe('txt.exered');
     expect(messages[1]?.toolCall).toMatchObject({
       title: 'Run',
-      rawInput: { command: 'npm test' },
-      rawOutput: 'ok',
+      rawInput: {
+        command: 'npm test',
+        apiKey: '[redacted]',
+        headers: { Authorization: '[redacted]' },
+      },
+      rawOutput: {
+        token: '[redacted]',
+        text: 'ok',
+      },
     });
+    expect(JSON.stringify(messages[1]?.toolCall)).not.toContain('secret-');
   });
 
   it('renders shell and status text as visible tool content', () => {
@@ -178,6 +203,37 @@ describe('daemonTranscriptToUnifiedMessages', () => {
       ],
       locations: [{ path: 'src/index.ts', line: 3 }],
     });
+  });
+
+  it('truncates deeply nested daemon values instead of returning raw subtrees', () => {
+    let nested: unknown = '\u202eraw';
+    for (let i = 0; i < 20; i += 1) {
+      nested = { child: nested };
+    }
+
+    const messages = daemonTranscriptToUnifiedMessages([
+      {
+        id: 'tool-deep',
+        kind: 'tool',
+        toolCallId: 'tool-deep',
+        title: 'Deep',
+        status: 'completed',
+        preview: { kind: 'generic' },
+        rawOutput: nested,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(messages[0]?.toolCall?.rawOutput).toMatchObject({
+      child: expect.any(Object) as object,
+    });
+    expect(JSON.stringify(messages[0]?.toolCall?.rawOutput)).toContain(
+      '[truncated]',
+    );
+    expect(JSON.stringify(messages[0]?.toolCall?.rawOutput)).not.toContain(
+      '\u202e',
+    );
   });
 
   it('computes grouping after filtering debug blocks and renders status', () => {
