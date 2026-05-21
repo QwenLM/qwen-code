@@ -18,13 +18,15 @@ import type { PermissionRule } from './types.js';
 /**
  * Tokens that, when used as the leading command of a Bash allow rule, let the
  * model execute arbitrary code under the AUTO classifier's nose. Covers
- * shell interpreters, scripting-language interpreters, and build/package
- * tools that themselves run arbitrary scripts (`cargo run`, `npm run`, …).
- * Mirrors and extends ClaudeCode's `DANGEROUS_BASH_PATTERNS`.
+ * shell interpreters, scripting-language interpreters, remote shells, and
+ * build/package tools that themselves run arbitrary scripts (`cargo run`,
+ * `npm run`, …). Mirrors Claude Code's shell and scripting-interpreter
+ * checks, then extends them with additional security-relevant runners.
  */
 const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   // Shells
   'bash',
+  'bash.exe',
   'sh',
   'zsh',
   'fish',
@@ -32,14 +34,19 @@ const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   'tcsh',
   'dash',
   'ksh',
+  'cmd',
+  'cmd.exe',
   'pwsh',
+  'pwsh.exe',
   'powershell',
+  'powershell.exe',
   // Scripting-language interpreters
   'python',
   'python3',
   'python2',
   'node',
   'deno',
+  'tsx',
   'bun',
   'ruby',
   'perl',
@@ -69,10 +76,13 @@ const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   // that without this list would be the cleanest way to bypass the
   // classifier in AUTO mode.
   'npx',
+  'bunx',
   'pnpx',
   'uvx',
   'pipx',
   'dlx',
+  // Remote shells
+  'ssh',
   // Generic eval-y commands
   'eval',
   'exec',
