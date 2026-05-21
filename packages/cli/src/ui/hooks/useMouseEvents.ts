@@ -19,7 +19,12 @@ import {
 } from '../utils/mouse.js';
 
 const MAX_MOUSE_BUFFER_SIZE = 4096;
-const ESC = '';
+// Use the `\x1b` escape so the source survives transports that strip raw
+// 0x1B bytes (terminal copies, code review tools, some linters). The
+// raw form looks identical visually but `indexOf('', 1) === 1` would
+// degrade the buffer scan to a one-byte step and the "drop garbage"
+// branch could never run.
+const ESC = '\x1b';
 
 export type MouseHandler = (event: MouseEvent) => void;
 
@@ -84,7 +89,20 @@ export function useMouseEvents(
 
     stdin.on('data', onData);
 
+    // Belt-and-braces: if the process exits without React unmounting us
+    // (Ctrl+C → exit, SIGTERM, parent killed), the React cleanup below
+    // never runs and the terminal stays in SGR mouse-tracking mode after
+    // qwen exits — wheel events would be echoed as literal escape
+    // sequences. Hook `exit` to write the disable seq one more time as
+    // a fallback. Node never throws from an `exit` listener, so even if
+    // stdout is broken (EPIPE) the process still terminates cleanly.
+    const onExit = () => {
+      disableMouseEvents(stdout);
+    };
+    process.on('exit', onExit);
+
     return () => {
+      process.removeListener('exit', onExit);
       stdin.removeListener('data', onData);
       disableMouseEvents(stdout);
     };

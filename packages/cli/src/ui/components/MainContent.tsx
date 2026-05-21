@@ -379,10 +379,18 @@ export const MainContent = () => {
   const [lastRemountKey, setLastRemountKey] = useState(historyRemountKey);
   if (lastRemountKey !== historyRemountKey) {
     setLastRemountKey(historyRemountKey);
-    setReplayCount(initialReplayCount(mergedLengthRef.current));
+    // VP path consumes the full `allVirtualItems` array and never reads
+    // `replayCount` / `visibleHistoryItemsWithSourceCopyOffsets`. Skip the
+    // chunked-replay reset for VP users so a Ctrl+O / model-change bump
+    // doesn't trigger ~M/CHUNK_SIZE extra setImmediate-scheduled
+    // re-renders (M = mergedHistory.length) that the VP path discards.
+    if (!useVirtualScroll) {
+      setReplayCount(initialReplayCount(mergedLengthRef.current));
+    }
   }
 
   useEffect(() => {
+    if (useVirtualScroll) return;
     if (replayCount >= mergedHistory.length) return;
     const remaining = mergedHistory.length - replayCount;
     if (remaining <= PROGRESSIVE_REPLAY_CHUNK_SIZE) {
@@ -395,7 +403,7 @@ export const MainContent = () => {
       );
     });
     return () => clearImmediate(handle);
-  }, [replayCount, mergedHistory.length]);
+  }, [useVirtualScroll, replayCount, mergedHistory.length]);
 
   // Render the full list when the tail gap is small (≤ CHUNK_SIZE). This
   // covers the normal append path: a pending item finalizes, replayCount is

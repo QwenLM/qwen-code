@@ -9,7 +9,11 @@
  * incomplete-sequence detection, enable/disable helpers).
  */
 
-const ESC = '';
+// `\x1b` text escape rather than the raw 0x1B byte — the byte form is
+// fragile against transports that silently strip control chars (terminal
+// copies, some code-review viewers, certain linters). A previous draft
+// had the raw byte and was caught by review.
+const ESC = '\x1b';
 
 export const SGR_EVENT_PREFIX = `${ESC}[<`;
 export const X11_EVENT_PREFIX = `${ESC}[M`;
@@ -185,8 +189,8 @@ export function isIncompleteMouseSequence(buffer: string): boolean {
 // `?1002h` = button-event tracking (presses, releases, drags, wheel).
 // `?1006h` = SGR extended coordinates (handles cols/rows beyond 223).
 // Sent together — most terminals ignore unknown modes silently.
-const ENABLE_SGR_MOUSE = '[?1002h[?1006h';
-const DISABLE_SGR_MOUSE = '[?1006l[?1002l';
+const ENABLE_SGR_MOUSE = '\x1b[?1002h\x1b[?1006h';
+const DISABLE_SGR_MOUSE = '\x1b[?1006l\x1b[?1002l';
 
 export function enableMouseEvents(stdout: NodeJS.WriteStream): void {
   stdout.write(ENABLE_SGR_MOUSE);
