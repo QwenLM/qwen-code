@@ -1524,6 +1524,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(mockConfig.initialize).toHaveBeenCalledWith({
       skipGeminiInitialization: true,
+      // F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): also
+      // pins that the bootstrap path opts out of MCP discovery (so
+      // bootstrap + per-session don't double-spawn N stdio servers).
+      skipMcpDiscovery: true,
     });
 
     mockConnectionState.resolve();
@@ -1567,6 +1571,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(mockConfig.initialize).toHaveBeenCalledWith({
       skipGeminiInitialization: true,
+      // F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): also
+      // pins that the bootstrap path opts out of MCP discovery (so
+      // bootstrap + per-session don't double-spawn N stdio servers).
+      skipMcpDiscovery: true,
     });
     expect(initialize).toHaveBeenCalledTimes(1);
     expect(fireSessionStartEvent).toHaveBeenCalledTimes(1);

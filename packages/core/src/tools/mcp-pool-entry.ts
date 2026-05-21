@@ -253,18 +253,34 @@ export class PoolEntry {
       // `attach`'s state guard. `localStatus = DISCONNECTED` was
       // already set above; mirrors the W69 sync ordering invariant.
       //
-      // Gate on `!this.restartInFlight`: `doRestart`'s `sweepAndDisconnect`
+      // Gate on `!this.restartInProgress`: `doRestart`'s `sweepAndDisconnect`
       // intentionally disconnects the client mid-restart, which would
       // otherwise trip this listener and flip state to 'failed' before
       // the reconnect completes. Restart's own catch path handles the
       // 'failed' transition on a reconnect FAILURE; the restart's
       // success path leaves state='active'. Don't preempt that.
+      //
+      // F2 (#4175 commit 6 review fix — claude-opus-4-7 W131): also
+      // catch DISCONNECTED in the 'draining' state. Pre-fix the gate
+      // only triggered on 'active', so during the 30s drain window a
+      // silent transport drop did NOT flip state→'failed'. A fresh
+      // acquire arriving inside that window would hit the fast-path,
+      // `attach()` flipped 'draining' → 'active' (cancelling drain
+      // timer) and replayed the stale snapshot — exact same zombie-
+      // attach failure W120 was meant to prevent, just shifted into
+      // the drain window. Cancel the drain timer on the 'draining'
+      // path so the now-terminal entry doesn't fire its old
+      // `forceShutdown('drain_timer')` after we've already evicted.
       if (
         status === MCPServerStatus.DISCONNECTED &&
-        this.state === 'active' &&
+        (this.state === 'active' || this.state === 'draining') &&
         !this.restartInProgress
       ) {
+        const wasDraining = this.state === 'draining';
         this.state = 'failed';
+        if (wasDraining) {
+          this.cancelDrainTimer();
+        }
         // Detach the status listener now that we're terminal —
         // mirrors the cleanup symmetry in forceShutdown / doRestart
         // catch (otherwise the listener leaks across entry recreation).
@@ -272,6 +288,19 @@ export class PoolEntry {
           removeMCPStatusChangeListener(this.statusChangeListener);
           this.statusChangeListener = undefined;
         }
+        // F2 (#4175 commit 6 review fix — claude-opus-4-7 W133-b):
+        // log the silent drop so operators tailing `--debug` see
+        // which server / when / what state, mirroring the doRestart
+        // catch path's `debugLogger.error`. Pre-fix the only signal
+        // was the `'failed'` event itself; manager-side `onFailed`
+        // silently deletes from `pooledConnections` without logging
+        // a cause.
+        debugLogger.error(
+          `PoolEntry ${this.id} silent transport drop ` +
+            `(prev state='${wasDraining ? 'draining' : 'active'}', ` +
+            `localStatus→DISCONNECTED). ` +
+            `Transitioning to 'failed'; manager-side onFailed will evict.`,
+        );
         this.emit({
           kind: 'failed',
           serverName: this.serverName,

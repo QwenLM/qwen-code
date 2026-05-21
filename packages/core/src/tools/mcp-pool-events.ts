@@ -27,7 +27,7 @@ export type PoolEntryState =
   | 'active' // ready, refs ≥ 0 (may be in grace period if refs=0)
   | 'draining' // refs=0 and drain timer running; new acquire cancels
   | 'closed' // transport disconnected; entry is GC-able
-  | 'failed'; // permanent failure (reconnect budget exhausted)
+  | 'failed'; // permanent failure — see PoolEvent['failed'] for the two causes
 
 /**
  * Discriminated union of events emitted by a `PooledConnection` to
@@ -74,7 +74,26 @@ export type PoolEvent =
       kind: 'failed';
       serverName: string;
       generation: number;
-      /** Last error encountered when reconnect attempts were exhausted. */
+      /**
+       * Cause of the terminal failure. Two upstream sources today:
+       *   - **Reconnect-budget exhaustion** — `doRestart`'s catch path
+       *     after an explicit operator-triggered restart fails to
+       *     reconnect (carries the `client.connect()` / discoverAndReturn
+       *     error).
+       *   - **Silent transport drop** — `statusChangeListener` in
+       *     `mcp-pool-entry.ts` observes `McpClient.onerror` writing
+       *     DISCONNECTED to the global registry from outside our
+       *     restart machinery (server crash, EPIPE, network reset).
+       *     Pool mode has no health monitor so there is no
+       *     reconnect-budget concept; this case carries a synthetic
+       *     marker string instead of the upstream cause (threading
+       *     the real `McpClient` error to this emit is tracked as a
+       *     F2 follow-up — W133).
+       * SDK consumers writing reducers around `'failed'` should NOT
+       * assume "reconnect was attempted and exhausted"; the entry is
+       * simply terminal and the manager-side `onFailed` listener has
+       * evicted it from `pooledConnections`.
+       */
       lastError: string;
     };
 

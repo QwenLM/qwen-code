@@ -394,6 +394,64 @@ describe('McpTransportPool', () => {
       ).rejects.toThrow(/Cannot attach to PoolEntry/);
     });
 
+    it('catches silent transport drop during drain window (W131)', async () => {
+      // Pre-W131: W120 gate only triggered on state==='active'. During
+      // the 30s drain window (refs=0, state='draining'), a silent
+      // transport drop did NOT flip state to 'failed'. A new acquire
+      // arriving in that window would hit the fast-path, attach()
+      // accepts 'draining' (flips to 'active'), and replayed the stale
+      // snapshot — same zombie-attach failure, shifted into drain.
+      // Post-W131 the gate extends to ('active' || 'draining') and
+      // cancels the drain timer in the same step.
+      const { updateMCPServerStatus, MCPServerStatus } = await import(
+        './mcp-client.js'
+      );
+      mockMcpSuccess({ toolNames: ['t1'] });
+      const pool = new McpTransportPool(
+        cliConfig,
+        mkPoolOptions({ drainDelayMs: 1_000 }),
+      );
+      const cfg = new MCPServerConfig('node');
+      const r1 = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      // Detach: refs=0 → state='draining', drain timer running.
+      pool.releaseSession('s1');
+
+      // Now simulate silent transport drop DURING drain.
+      const targetId = connectionIdOf('srv', cfg);
+      const entries = (pool as unknown as { entries: Map<string, PoolEntry> })
+        .entries;
+      const entry = entries.get(targetId)!;
+      let failedEventReceived = false;
+      // Re-acquire briefly just to get a PooledConnection handle for
+      // the event subscription, then immediately release.
+      const r2 = mkSessionRegistries();
+      const conn2 = await pool.acquire(
+        'srv',
+        cfg,
+        's-listen',
+        r2.tools,
+        r2.prompts,
+      );
+      conn2.on('event', (e) => {
+        if (e.kind === 'failed') failedEventReceived = true;
+      });
+      pool.releaseSession('s-listen');
+      // After release, state='draining' again. Now fire the drop.
+      const mockClient = (entry as unknown as { client: { status: unknown } })
+        .client;
+      mockClient.status = MCPServerStatus.DISCONNECTED;
+      updateMCPServerStatus('srv', MCPServerStatus.DISCONNECTED);
+
+      expect(failedEventReceived).toBe(true);
+
+      // After W131 the listener also cancels the drain timer — verify
+      // it doesn't subsequently fire a stale `forceShutdown('drain_timer')`
+      // by advancing past the drain window. No additional failed/
+      // disconnected events should fire (entry is already terminal).
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+
     it('rejects attach on terminal-state entry (W90 contract proxy via fast path; in-flight guard reproduction tracked as W109-followup)', async () => {
       // The W90 fix's primary correctness guard catches a concurrent
       // `forceShutdown` that lands on the spawned entry between

@@ -169,25 +169,36 @@ export async function runAcpAgent(
   // MCP clients are never used to serve a session (each session
   // builds its own per-session Config and runs discovery there), so
   // skipping at the bootstrap layer is safe AND closes the 2N
-  // subprocess leak. `waitForMcpReady` + `getFailedMcpServerNames`
-  // below are kept as no-ops (defensive) — no discovery was started,
-  // so they resolve / return empty immediately.
+  // subprocess leak.
+  const bootstrapSkipsMcpDiscovery = true;
   await config.initialize({
     skipGeminiInitialization: true,
-    skipMcpDiscovery: true,
+    skipMcpDiscovery: bootstrapSkipsMcpDiscovery,
   });
-  // No-op when `skipMcpDiscovery: true` — kept for defense against a
-  // future code path that re-introduces bootstrap-level discovery.
-  await config.waitForMcpReady();
-  const failedMcpServers =
-    typeof config.getFailedMcpServerNames === 'function'
-      ? config.getFailedMcpServerNames()
-      : [];
-  if (failedMcpServers.length > 0) {
-    process.stderr.write(
-      `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
-        `Continuing with built-in tools and any servers that did connect.\n`,
-    );
+  // F2 (#4175 commit 6 review fix — claude-opus-4-7 W132): the
+  // `failedMcpServers` warning was unconditional, but
+  // `getMCPServerStatus` defaults to DISCONNECTED for absent entries
+  // (`mcp-client.ts:407-409`). Under `skipMcpDiscovery: true` the
+  // global `serverStatuses` map has no entries for any of this
+  // workspace's MCP servers, so every configured non-disabled server
+  // was reported as failed — false-positive "Warning: MCP server(s)
+  // failed to start" on every `qwen serve` startup, even when the
+  // per-session pool-routed discovery would spin them up successfully
+  // a moment later. Skip the warning when we know discovery was
+  // intentionally bypassed; per-session paths surface real failures
+  // through their own status routes / events.
+  if (!bootstrapSkipsMcpDiscovery) {
+    await config.waitForMcpReady();
+    const failedMcpServers =
+      typeof config.getFailedMcpServerNames === 'function'
+        ? config.getFailedMcpServerNames()
+        : [];
+    if (failedMcpServers.length > 0) {
+      process.stderr.write(
+        `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+          `Continuing with built-in tools and any servers that did connect.\n`,
+      );
+    }
   }
 
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
