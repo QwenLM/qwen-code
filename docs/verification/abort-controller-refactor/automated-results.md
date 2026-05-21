@@ -51,9 +51,9 @@ that requires `--expose-gc`, 2 are pre-existing skips in the headless suite).
 
 Coverage:
 
-- `packages/core/src/utils/abortController.test.ts` — 19 tests: factory cap, child propagation, reverse cleanup, fast path, undefined parent, `combineAbortSignals` semantics, GC safety.
-- `packages/cli/src/utils/warningHandler.test.ts` — 9 tests: idempotency, AbortSignal suppression (including `[AbortSignal{...}]` shape), generic EventTarget NOT suppressed, debug-mode passthrough.
-- `packages/core/src/hooks/combinedAbortSignal.test.ts` — 8 existing tests pass against the new `@deprecated` shim, proving wire compatibility with `httpHookRunner.ts:202`.
+- `packages/core/src/utils/abortController.test.ts` — 26 tests: factory cap (default + custom), child propagation, reverse cleanup, fast path, undefined parent, custom-maxListeners passthrough, `combineAbortSignals` semantics (incl. cleanup-cancels-timeout, timeout-cleans-input-listeners, `timeoutMs <= 0` boundary, mid-iteration defensive check), GC safety (best-effort).
+- `packages/cli/src/utils/warningHandler.test.ts` — 13 tests: idempotency, AbortSignal suppression (including `[AbortSignal{...}]` shape), generic EventTarget NOT suppressed, debug-mode passthrough, fan-out to prior listeners, spawned-child end-to-end stderr integration.
+- `packages/core/src/hooks/httpHookRunner.test.ts` — covers the migrated `combineAbortSignals` consumer (the deprecated `createCombinedAbortSignal` shim plus its test file were removed once the lone caller migrated).
 - `packages/core/src/agents/runtime/{agent-core,agent-interactive,agent-headless,agent-context,agent-statistics}.test.ts` — 102 tests covering the high-impact migrated files.
 - `packages/core/src/core/openaiContentGenerator/**` — 280+ tests including the pipeline that lost the `raiseAbortListenerCap` band-aid.
 - `packages/core/src/followup/**` — 100+ tests including the migrated speculation controller.
@@ -77,8 +77,7 @@ $ node_modules/.bin/prettier --check packages/core/src/agents/runtime/agent-core
     packages/cli/src/utils/warningHandler.ts \
     packages/cli/src/utils/warningHandler.test.ts \
     packages/core/src/utils/abortController.ts \
-    packages/core/src/utils/abortController.test.ts \
-    packages/core/src/hooks/combinedAbortSignal.ts
+    packages/core/src/utils/abortController.test.ts
 Checking formatting...
 All matched files use Prettier code style!
 ```

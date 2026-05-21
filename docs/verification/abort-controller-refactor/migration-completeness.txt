@@ -1,0 +1,3 @@
+$ grep -rn "new AbortController" packages/core/src --include="*.ts" \
+    | grep -v test | grep -v abortController.ts
+(no output)
