@@ -536,4 +536,196 @@ describe('loadServerHierarchicalMemory', () => {
     expect(parentOccurrences).toBe(1);
     expect(childOccurrences).toBe(1);
   });
+
+  describe('QWEN.local.md (project-local context file)', () => {
+    // The local-context-file slot is anchored at `<projectRoot>/.qwen/`, where
+    // projectRoot is the nearest ancestor containing a `.git` directory. Make
+    // sure findProjectRoot resolves to our test projectRoot.
+    beforeEach(async () => {
+      await createEmptyDir(path.join(projectRoot, '.git'));
+    });
+
+    it('loads .qwen/QWEN.local.md from project root when present', async () => {
+      const localFile = await createTestFile(
+        path.join(projectRoot, QWEN_DIR, 'QWEN.local.md'),
+        'local context content',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(1);
+      expect(result.memoryContent).toContain(
+        `--- Context from: ${path.relative(cwd, localFile)} ---\nlocal context content`,
+      );
+    });
+
+    it('orders QWEN.local.md after the project-root QWEN.md', async () => {
+      const projectFile = await createTestFile(
+        path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+        'shared project context',
+      );
+      const localFile = await createTestFile(
+        path.join(projectRoot, QWEN_DIR, 'QWEN.local.md'),
+        'local override',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(2);
+      const projectIdx = result.memoryContent.indexOf(
+        path.relative(cwd, projectFile),
+      );
+      const localIdx = result.memoryContent.indexOf(
+        path.relative(cwd, localFile),
+      );
+      expect(projectIdx).toBeGreaterThanOrEqual(0);
+      expect(localIdx).toBeGreaterThan(projectIdx);
+    });
+
+    it('orders QWEN.local.md after upward-traversed CWD QWEN.md', async () => {
+      const projectFile = await createTestFile(
+        path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+        'project root memory',
+      );
+      const cwdFile = await createTestFile(
+        path.join(cwd, DEFAULT_CONTEXT_FILENAME),
+        'cwd memory',
+      );
+      const localFile = await createTestFile(
+        path.join(projectRoot, QWEN_DIR, 'QWEN.local.md'),
+        'local memory',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(3);
+      const projectIdx = result.memoryContent.indexOf(
+        path.relative(cwd, projectFile),
+      );
+      const cwdIdx = result.memoryContent.indexOf(path.relative(cwd, cwdFile));
+      const localIdx = result.memoryContent.indexOf(
+        path.relative(cwd, localFile),
+      );
+      expect(projectIdx).toBeGreaterThanOrEqual(0);
+      expect(cwdIdx).toBeGreaterThan(projectIdx);
+      expect(localIdx).toBeGreaterThan(cwdIdx);
+    });
+
+    it('silently ignores absent .qwen/QWEN.local.md', async () => {
+      await createTestFile(
+        path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+        'project content',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(1);
+      expect(result.memoryContent).toContain('project content');
+      expect(result.memoryContent).not.toContain('QWEN.local.md');
+    });
+
+    it('does not load QWEN.local.md from untrusted workspaces', async () => {
+      await createTestFile(
+        path.join(projectRoot, QWEN_DIR, 'QWEN.local.md'),
+        'local content',
+      );
+
+      const { fileCount, memoryContent } = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        false, // untrusted
+      );
+
+      expect(fileCount).toBe(0);
+      expect(memoryContent).not.toContain('local content');
+    });
+
+    it('does not load QWEN.local.md in explicit-only mode', async () => {
+      await createTestFile(
+        path.join(projectRoot, QWEN_DIR, 'QWEN.local.md'),
+        'local content',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+        'tree',
+        [],
+        { explicitOnly: true },
+      );
+
+      expect(result.fileCount).toBe(0);
+      expect(result.memoryContent).not.toContain('local content');
+    });
+
+    it('does not search .qwen/QWEN.local.md in CWD subdirectories', async () => {
+      // A `.qwen/QWEN.local.md` placed inside a nested directory (not the
+      // project root) must NOT be picked up — the slot is single, fixed,
+      // and lives at <projectRoot>/.qwen/QWEN.local.md.
+      await createTestFile(
+        path.join(cwd, QWEN_DIR, 'QWEN.local.md'),
+        'misplaced local content',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(0);
+      expect(result.memoryContent).not.toContain('misplaced local content');
+    });
+
+    it('loads QWEN.local.md even when no project QWEN.md exists', async () => {
+      const localFile = await createTestFile(
+        path.join(projectRoot, QWEN_DIR, 'QWEN.local.md'),
+        'standalone local',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(1);
+      expect(result.memoryContent).toContain(
+        `--- Context from: ${path.relative(cwd, localFile)} ---\nstandalone local`,
+      );
+    });
+  });
 });

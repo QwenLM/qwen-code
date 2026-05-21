@@ -8,7 +8,10 @@ import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
-import { getAllGeminiMdFilenames } from '../memory/const.js';
+import {
+  getAllGeminiMdFilenames,
+  LOCAL_CONTEXT_FILENAME,
+} from '../memory/const.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { processImports } from './memoryImportProcessor.js';
 import { QWEN_DIR } from './paths.js';
@@ -373,6 +376,36 @@ export async function loadServerHierarchicalMemory(
     implicitDiscoveryEnabled,
   );
 
+  // Resolve project root once — needed both for the QWEN.local.md slot
+  // (below) and for rules discovery (further down).
+  const resolvedCwd = path.resolve(currentWorkingDirectory);
+  const foundRoot = await findProjectRoot(resolvedCwd);
+  const effectiveRoot = foundRoot ?? resolvedCwd;
+
+  // Append the per-developer local context file slot:
+  // `<projectRoot>/.qwen/QWEN.local.md`. Loaded after all hierarchical
+  // QWEN.md / AGENTS.md files so local instructions can supplement or
+  // override shared ones. Same trust + explicit-only gating as the rest
+  // of the project-level discovery.
+  if (implicitDiscoveryEnabled && folderTrust) {
+    const localContextPath = path.join(
+      effectiveRoot,
+      QWEN_DIR,
+      LOCAL_CONTEXT_FILENAME,
+    );
+    try {
+      await fs.access(localContextPath, fsSync.constants.R_OK);
+      if (!filePaths.includes(localContextPath)) {
+        filePaths.push(localContextPath);
+        logger.debug(
+          `Found readable local ${LOCAL_CONTEXT_FILENAME}: ${localContextPath}`,
+        );
+      }
+    } catch {
+      // Not found, which is the common case — silently skip.
+    }
+  }
+
   let combinedInstructions = '';
   let fileCount = 0;
 
@@ -386,17 +419,16 @@ export async function loadServerHierarchicalMemory(
 
     // Only count files that match configured memory filenames (e.g., QWEN.md),
     // excluding system context files like output-language.md
-    const memoryFilenames = new Set(getAllGeminiMdFilenames());
+    const memoryFilenames = new Set([
+      ...getAllGeminiMdFilenames(),
+      LOCAL_CONTEXT_FILENAME,
+    ]);
     fileCount = contentsWithPaths.filter((item) =>
       memoryFilenames.has(path.basename(item.filePath)),
     ).length;
   }
 
-  // Load path-based context rules from .qwen/rules/ directories
-  const resolvedCwd = path.resolve(currentWorkingDirectory);
-  const foundRoot = await findProjectRoot(resolvedCwd);
-  const effectiveRoot = foundRoot ?? resolvedCwd;
-
+  // Load path-based context rules from .qwen/rules/ directories.
   const {
     content: rulesContent,
     ruleCount,
