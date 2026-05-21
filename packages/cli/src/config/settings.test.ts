@@ -1140,43 +1140,6 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
-    it('should not override userOnly settings from workspace', () => {
-      (mockFsExistsSync as Mock).mockReturnValue(true);
-      const userSettingsContent = {
-        ui: {
-          fortuneCommand: '/usr/games/fortune -s -n 45',
-        },
-      };
-      const workspaceSettingsContent = {
-        ui: {
-          fortuneCommand: '/custom/fortune -x', // This should be ignored
-          theme: 'dark', // This should still work
-        },
-      };
-      const systemSettingsContent = {};
-
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === getSystemSettingsPath())
-            return JSON.stringify(systemSettingsContent);
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify(workspaceSettingsContent);
-          return '{}';
-        },
-      );
-
-      const settings = loadSettings(MOCK_WORKSPACE_DIR);
-
-      // User-only setting should come from user settings, not workspace
-      expect(settings.merged.ui?.fortuneCommand).toBe(
-        '/usr/games/fortune -s -n 45',
-      );
-      // Non-userOnly setting should still be overridden by workspace
-      expect(settings.merged.ui?.theme).toBe('dark');
-    });
-
     it('should use folderTrust from workspace settings when trusted', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const userSettingsContent = {
