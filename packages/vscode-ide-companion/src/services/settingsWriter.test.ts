@@ -33,7 +33,10 @@ import {
 } from './subscriptionPlanDefinitions.js';
 import {
   applyProviderInstallPlanToFile,
+  clearPersistedAuth,
   readQwenSettingsForVSCode,
+  restoreSettingsSnapshot,
+  snapshotSettingsForRollback,
   writeCodingPlanConfig,
   writeModelProvidersConfig,
   writeTokenPlanConfig,
@@ -355,8 +358,114 @@ describe('settingsWriter', () => {
       await applyProviderInstallPlanToFile(plan);
 
       const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      // Value is preserved as a single string with the literal quote.
+      expect(after.API_KEY).toBe('sk-abc",\n"INJECTED": "pwned');
+      // No injected top-level key landed in the file.
       expect(after.INJECTED).toBeUndefined();
       expect(after.env.K).toBe('v');
+    });
+
+    it('writes atomically — no .tmp residue on success', async () => {
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        env: { K: 'v' },
+      };
+      await applyProviderInstallPlanToFile(plan);
+      const dir = path.dirname(settingsPath);
+      const leftovers = fs
+        .readdirSync(dir)
+        .filter((f) => f.startsWith('settings.json.') && f.endsWith('.tmp'));
+      expect(leftovers).toEqual([]);
+    });
+  });
+
+  describe('clearPersistedAuth', () => {
+    it('wipes preset, custom, and subscription-plan env keys without touching unrelated env', () => {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      const initial = {
+        env: {
+          OPENAI_API_KEY: 'sk-openai',
+          DEEPSEEK_API_KEY: 'sk-deepseek',
+          MINIMAX_API_KEY: 'sk-minimax',
+          ZAI_API_KEY: 'sk-zai',
+          IDEALAB_API_KEY: 'sk-idealab',
+          MODELSCOPE_API_KEY: 'sk-modelscope',
+          OPENROUTER_API_KEY: 'sk-openrouter',
+          BAILIAN_CODING_PLAN_API_KEY: 'sk-coding',
+          BAILIAN_TOKEN_PLAN_API_KEY: 'sk-token',
+          QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_FOO_COM_ABC123DEF456:
+            'sk-custom-1',
+          QWEN_CUSTOM_API_KEY_ANTHROPIC_HTTPS_API_BAR_COM_DEAD0BEEF000:
+            'sk-custom-2',
+          NODE_OPTIONS: '--max-old-space-size=8192',
+        },
+        security: { auth: { selectedType: 'openai' } },
+        providerMetadata: {
+          'coding-plan': { version: '1' },
+          deepseek: { version: '1' },
+          openrouter: { version: '2' },
+        },
+      };
+      fs.writeFileSync(settingsPath, JSON.stringify(initial, null, 2), 'utf-8');
+
+      clearPersistedAuth();
+
+      const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(after.env).toEqual({ NODE_OPTIONS: '--max-old-space-size=8192' });
+      expect(after.security?.auth?.selectedType).toBeUndefined();
+      expect(after.providerMetadata['coding-plan']).toBeUndefined();
+      expect(after.providerMetadata['deepseek']).toBeUndefined();
+      expect(after.providerMetadata['openrouter']).toBeUndefined();
+    });
+
+    it('is a no-op when no settings file exists', () => {
+      expect(() => clearPersistedAuth()).not.toThrow();
+    });
+  });
+
+  describe('snapshotSettingsForRollback / restoreSettingsSnapshot', () => {
+    it('round-trips: snapshot → mutate → restore brings the old state back', () => {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      const original = {
+        env: { OPENAI_API_KEY: 'sk-good' },
+        security: { auth: { selectedType: 'openai' } },
+      };
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify(original, null, 2),
+        'utf-8',
+      );
+
+      const snapshot = snapshotSettingsForRollback();
+      expect(snapshot).not.toBeNull();
+
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({ env: { OPENAI_API_KEY: 'sk-bad' } }, null, 2),
+        'utf-8',
+      );
+
+      restoreSettingsSnapshot(snapshot);
+
+      const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(after).toEqual(original);
+    });
+
+    it('snapshot returns null on a malformed file and restore is then a no-op', () => {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(settingsPath, '{ "broken": [1, 2', 'utf-8');
+
+      const snapshot = snapshotSettingsForRollback();
+      expect(snapshot).toBeNull();
+
+      expect(() => restoreSettingsSnapshot(snapshot)).not.toThrow();
+      expect(fs.readFileSync(settingsPath, 'utf-8')).toBe('{ "broken": [1, 2');
+    });
+
+    it('snapshot returns {} (not null) when no settings file exists', () => {
+      const snapshot = snapshotSettingsForRollback();
+      expect(snapshot).toEqual({});
     });
   });
 });
