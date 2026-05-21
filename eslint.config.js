@@ -191,7 +191,14 @@ export default tseslint.config(
   },
   // extra settings for scripts that we run directly with node
   {
-    files: ['./scripts/**/*.js', './scripts/**/*.mjs', 'esbuild.config.js', 'packages/*/scripts/**/*.js'],
+    files: [
+      './scripts/**/*.js',
+      './scripts/**/*.mjs',
+      'esbuild.config.js',
+      'packages/*/scripts/**/*.js',
+      // Verification reproducer scripts under docs/ also run with `node`.
+      'docs/**/*.mjs',
+    ],
     languageOptions: {
       globals: {
         ...globals.node,
