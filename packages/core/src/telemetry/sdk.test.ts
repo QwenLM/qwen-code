@@ -764,6 +764,60 @@ describe('Telemetry SDK', () => {
         }),
       ).toBe(true);
     });
+
+    it('ignoreRequestHook strips #fragment from incoming path for matching', () => {
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'http://collector.example.com:4318',
+      );
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      expect(
+        config.ignoreRequestHook({
+          origin: 'http://collector.example.com:4318',
+          path: '/v1/traces#fragment',
+        }),
+      ).toBe(true);
+    });
+
+    it('ignoreRequestHook normalizes endpoint config quoted in settings.json', () => {
+      // Defense against settings.json `"otlpEndpoint": "\"http://...\""` —
+      // quoted strings would otherwise miss the prefix match and reintroduce
+      // the feedback loop. Per PR review feedback.
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        '"http://collector.example.com:4318"',
+      );
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      expect(
+        config.ignoreRequestHook({
+          origin: 'http://collector.example.com:4318',
+          path: '/v1/traces',
+        }),
+      ).toBe(true);
+    });
+
+    it('ignoreRequestHook strips #fragment from configured endpoint', () => {
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'http://collector.example.com:4318/v1/traces#anchor',
+      );
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      expect(
+        config.ignoreRequestHook({
+          origin: 'http://collector.example.com:4318',
+          path: '/v1/traces',
+        }),
+      ).toBe(true);
+    });
   });
 });
 
