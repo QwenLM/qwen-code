@@ -46,6 +46,9 @@ describe('parseOtelResourceAttributes', () => {
     // past the reserved-key filter as the literal key `service%2Eversion`.
     ['service%2Eversion=99', { 'service.version': '99' }],
     ['my%20key=val', { 'my key': 'val' }],
+    // Invalid percent-encoding in key falls back to raw key with a warn
+    // (mirrors the invalid-value behavior on `a=val%ZZbad`).
+    ['key%ZZ=val', { 'key%ZZ': 'val' }],
   ])('parses %j → %j', (input, expected) => {
     expect(parseOtelResourceAttributes(input)).toEqual(expected);
   });

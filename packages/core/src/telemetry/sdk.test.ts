@@ -573,6 +573,17 @@ describe('Telemetry SDK', () => {
       expect(getResourceAttributes()['service.name']).toBe('qwen-code');
     });
 
+    it('whitespace-only service.name from settings falls back to default', () => {
+      // Reviewer caught: plain `||` lets `" "` through (truthy). The
+      // `.trim() || SERVICE_NAME` fallback covers both empty and
+      // whitespace-only values (env path can produce these via `%20`).
+      vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
+        'service.name': '   ',
+      });
+      initializeTelemetry(mockConfig);
+      expect(getResourceAttributes()['service.name']).toBe('qwen-code');
+    });
+
     it('emits a console summary when resource-attribute warnings are present', () => {
       const consoleWarnSpy = vi
         .spyOn(console, 'warn')

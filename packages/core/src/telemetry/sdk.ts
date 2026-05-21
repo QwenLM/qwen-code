@@ -173,12 +173,13 @@ export function initializeTelemetry(config: Config): void {
   } = userAttrs;
   const resource = resourceFromAttributes({
     ...nonReservedUserAttrs,
-    // `||` rather than `??`: an empty string from
-    // settings.resourceAttributes.service.name would otherwise pass the
-    // null/undefined guard and produce a blank service name on Resource,
-    // which some backends reject. The env path already filters whitespace
-    // values in the resolver.
-    [SemanticResourceAttributes.SERVICE_NAME]: userServiceName || SERVICE_NAME,
+    // `.trim() || SERVICE_NAME`: catches both empty string (`""`) and
+    // whitespace-only values (`" "`, `"\t"`) that would otherwise produce
+    // a blank service name on Resource (some backends reject these). Both
+    // settings (no value trimming there) and env (`%20` decodes to `" "`)
+    // can deliver whitespace-only values, so trim at the fallback point.
+    [SemanticResourceAttributes.SERVICE_NAME]:
+      userServiceName?.trim() || SERVICE_NAME,
     [SemanticResourceAttributes.SERVICE_VERSION]:
       config.getCliVersion() || 'unknown',
   });
