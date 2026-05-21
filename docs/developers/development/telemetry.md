@@ -291,6 +291,43 @@ URLs matching the configured `telemetry.otlpEndpoint` /
 `telemetry.otlpMetricsEndpoint` prefixes. In file-outfile mode there are no
 outbound HTTP uploads, so the hook is a no-op.
 
+### Session correlation header
+
+Alongside `traceparent`, Qwen Code injects a custom HTTP header on every
+outbound LLM request when telemetry is enabled:
+
+```
+X-Qwen-Code-Session-Id: <session id>
+```
+
+Pattern matched from Claude Code's `X-Claude-Code-Session-Id` (see
+`src/services/api/client.ts:108` in the claude-code repo). The header is
+product-namespaced to avoid collision with generic `X-Session-Id` headers
+other tools may inject. Server-side ingestion (e.g. a custom DashScope
+proxy or an OTLP-aware API gateway) can use this header to stitch its
+observation of an LLM request back to the originating Qwen Code session
+without having to parse trace context.
+
+The header value comes from `Config.getSessionId()`, read fresh on every
+outbound request (not captured at SDK construction time). After a session
+reset triggered by `/clear`, subsequent LLM requests carry the new session
+id automatically — see the "Known limitation" note below for the one
+exception.
+
+Empty session ids are not emitted (some HTTP middleware rejects empty
+header values). The header is omitted entirely when telemetry is disabled.
+
+**Known limitation: Gemini provider.** `@google/genai`'s `HttpOptions`
+interface does not expose a `fetch` hook (only static `headers`), so the
+Gemini provider can only inject the session-id header at SDK construction
+time. After a `/clear`-triggered session reset, outbound Gemini requests
+carry the OLD session id in `X-Qwen-Code-Session-Id` until the underlying
+content generator is recreated (the current code does not recreate it on
+reset). All other providers (`openai`-family, `anthropic`) use a fetch
+wrapper and are immune to this. Tracked as a follow-up; in the meantime,
+spans and logs still carry the live session id, so trace/log backends can
+correctly attribute requests to the new session.
+
 ## Aliyun Telemetry
 
 ### Manual OTLP Export

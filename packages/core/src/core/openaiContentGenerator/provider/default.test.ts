@@ -168,6 +168,18 @@ describe('DefaultOpenAICompatibleProvider', () => {
         }),
       );
     });
+
+    it('installs the correlation fetch wrapper on the OpenAI client', () => {
+      provider.buildClient();
+      const callArg = vi.mocked(OpenAI).mock.calls[0]![0] as {
+        fetch?: typeof fetch;
+      };
+      // Wrapper is always installed (so it can read live config per request);
+      // per-call header injection behavior is verified exhaustively in
+      // llm-correlation-fetch.test.ts.
+      expect(typeof callArg.fetch).toBe('function');
+      expect(callArg.fetch).not.toBe(globalThis.fetch);
+    });
   });
 
   describe('buildRequest', () => {

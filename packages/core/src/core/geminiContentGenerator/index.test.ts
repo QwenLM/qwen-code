@@ -23,6 +23,8 @@ describe('createGeminiContentGenerator', () => {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getTelemetryEnabled: vi.fn().mockReturnValue(false),
+      getSessionId: vi.fn().mockReturnValue('test-session'),
     } as unknown as Config;
   });
 
@@ -87,6 +89,44 @@ describe('createGeminiContentGenerator', () => {
           baseUrl: expect.any(String),
         }),
       }),
+    );
+  });
+
+  it('omits X-Qwen-Code-Session-Id from httpOptions.headers when telemetry is disabled', () => {
+    const config = {
+      model: 'gemini-1.5-flash',
+      apiKey: 'k',
+      authType: AuthType.USE_GEMINI,
+    };
+    createGeminiContentGenerator(config, mockConfig);
+    const callArgs = vi.mocked(GeminiContentGenerator).mock.calls[0]?.[0] as
+      | { httpOptions?: { headers?: Record<string, string> } }
+      | undefined;
+    expect(callArgs?.httpOptions?.headers).toBeDefined();
+    expect(callArgs?.httpOptions?.headers ?? {}).not.toHaveProperty(
+      'X-Qwen-Code-Session-Id',
+    );
+  });
+
+  it('includes X-Qwen-Code-Session-Id in httpOptions.headers when telemetry is enabled', () => {
+    mockConfig = {
+      getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getTelemetryEnabled: vi.fn().mockReturnValue(true),
+      getSessionId: vi.fn().mockReturnValue('sess-gemini'),
+    } as unknown as Config;
+    const config = {
+      model: 'gemini-1.5-flash',
+      apiKey: 'k',
+      authType: AuthType.USE_GEMINI,
+    };
+    createGeminiContentGenerator(config, mockConfig);
+    const callArgs = vi.mocked(GeminiContentGenerator).mock.calls[0]?.[0] as {
+      httpOptions: { headers: Record<string, string> };
+    };
+    expect(callArgs.httpOptions.headers['X-Qwen-Code-Session-Id']).toBe(
+      'sess-gemini',
     );
   });
 });
