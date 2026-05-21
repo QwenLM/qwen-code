@@ -52,8 +52,15 @@ describe('Qwen PR review workflow safety rails', () => {
     );
   });
 
-  it('posts fallback comments for failures and cancellations', () => {
-    expect(workflow).toContain('(failure() || cancelled())');
-    expect(workflow).toContain("steps.post-summary.outcome == 'cancelled'");
+  it('posts a fallback comment whenever the summary comment did not succeed', () => {
+    // The fallback runs under always() — it must also cover the SUCCESS
+    // path where a tier step exited 0 but produced no output, the
+    // near-empty guard deleted the file, and 'Post review summary
+    // comment' silently skipped. `outcome != 'success'` captures skipped
+    // (no file), failure (gh error), and cancelled alike.
+    expect(workflow).toContain('always()');
+    expect(workflow).toContain("steps.post-summary.outcome != 'success'");
+    // Still gated so an intentionally size-skipped PR posts nothing.
+    expect(workflow).toContain("steps.size.outputs.should_review == 'true'");
   });
 });

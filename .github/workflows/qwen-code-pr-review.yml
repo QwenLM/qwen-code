@@ -1048,8 +1048,6 @@ jobs:
           cat qwen-review-summary.md 2>/dev/null || echo "(summary file removed by near-empty guard; fallback comment will fire)"
           echo "::endgroup::"
 
-          echo "review_status=$status_label" >> "$GITHUB_OUTPUT"
-
       - name: 'Post dry-run summary'
         if: |-
           steps.size.outputs.should_review == 'true' &&
@@ -1107,25 +1105,26 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --body-file qwen-pr-review-summary-comment.md
 
-      # Fires when the job is failing AND the review did not reach the PR.
-      # Two distinct cases must both trigger it:
-      #   1. no review markdown at all (the always-emit accumulator failed
-      #      to produce even a partial), or
-      #   2. the markdown exists but 'Post review summary comment' itself
-      #      failed (gh rate limit, transient API error, PR deleted) — the
-      #      file is on disk but no comment reached the PR. Without the
-      #      post-summary.outcome check this case is silently swallowed:
-      #      hashFiles() is non-empty, so the fallback would skip and the
-      #      completed review would be lost with nothing on the PR.
+      # Fires whenever a comment was expected but 'Post review summary
+      # comment' did not successfully post one. `always()` is required:
+      # the gap this closes is the SUCCESS path — a tier step can exit 0
+      # yet produce no parseable output, the near-empty guard then deletes
+      # the summary file, 'Post review summary comment' SKIPS (its
+      # hashFiles gate is false, so it does not fail), and the job ends
+      # green. Gating on `failure()`/`cancelled()` alone would let that
+      # run leave nothing on the PR — breaking the always-emit guarantee.
+      # `steps.post-summary.outcome != 'success'` captures all three
+      # misses: skipped (no file), failure (gh error), cancelled. The
+      # `should_review == 'true'` gate keeps this from firing on an
+      # intentionally size-skipped PR (which posts no review by design).
       # The fallback's own `gh pr comment` ends with `|| true` so the step
       # never causes a secondary cascade failure.
       - name: 'Post fallback comment on review failure'
         if: |-
-          (failure() || cancelled()) &&
+          always() &&
+          steps.size.outputs.should_review == 'true' &&
           steps.pr.outputs.should_comment == 'true' &&
-          (hashFiles('qwen-review-summary.md') == '' ||
-           steps.post-summary.outcome == 'failure' ||
-           steps.post-summary.outcome == 'cancelled')
+          steps.post-summary.outcome != 'success'
         env:
           # Same qwen-code-bot identity as the happy-path 'Post review
           # summary comment' step (see comment there).
