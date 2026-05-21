@@ -44,6 +44,7 @@ import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCa
 import type { RequestContext } from '../openaiContentGenerator/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import {
   getErrorMessage,
   getErrorStatus,
@@ -75,6 +76,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   private openaiLogger?: OpenAILogger;
   private schemaCompliance?: 'auto' | 'openapi_30';
   private modalities?: InputModalities;
+  private readonly generatorAuthType: ContentGeneratorConfig['authType'];
 
   constructor(
     private readonly wrapped: ContentGenerator,
@@ -82,6 +84,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     generatorConfig: ContentGeneratorConfig,
   ) {
     this.modalities = generatorConfig.modalities;
+    this.generatorAuthType = generatorConfig.authType;
 
     // Extract fields needed for initialization from passed config
     // (config.getContentGeneratorConfig() may not be available yet during refreshAuth)
@@ -130,7 +133,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         model,
         durationMs,
         prompt_id,
-        this.config.getAuthType(),
+        this.generatorAuthType,
         usageMetadata,
         responseText,
         subagentNameContext.getStore(),
@@ -160,7 +163,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         model,
         durationMs,
         promptId: prompt_id,
-        authType: this.config.getAuthType(),
+        authType: this.generatorAuthType,
         errorMessage,
         errorType,
         statusCode: errorStatus,
@@ -224,6 +227,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     const isInternal = isInternalPromptId(userPromptId);
     const session = this.startCaptureSession();
     try {
+      runtimeDiagnostics.recordGenerateContentRequest(req, {
+        stream: false,
+        source: 'generateContent',
+      });
       if (!isInternal) {
         addSystemPromptAttributes(
           this.config,
@@ -334,6 +341,10 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
+      runtimeDiagnostics.recordGenerateContentRequest(req, {
+        stream: true,
+        source: 'generateContentStream',
+      });
       if (!isInternal) {
         addSystemPromptAttributes(
           this.config,
@@ -520,47 +531,61 @@ export class LoggingContentGenerator implements ContentGenerator {
       const streamResponseText = isInternal
         ? undefined
         : this.extractResponseText(consolidatedResponse);
-      runInSpan(() =>
-        this.safelyLogApiResponse(
-          firstResponseId,
-          durationMs,
-          firstModelVersion || model,
-          userPromptId,
-          lastUsageMetadata,
-          streamResponseText,
-        ),
-      );
-      if (!isInternal && span) {
-        addModelOutputAttributes(this.config, span, streamResponseText);
+      // If the idle timeout already closed the span as failed, do not contradict
+      // it with a "success" api_response log or model-output span attributes.
+      // The OpenAI interaction log is also skipped — telemetry already carries
+      // the timeout signal and a parallel "success" record would be confusing
+      // during incident response (#4212).
+      if (!spanEndedByTimeout) {
+        runInSpan(() =>
+          this.safelyLogApiResponse(
+            firstResponseId,
+            durationMs,
+            firstModelVersion || model,
+            userPromptId,
+            lastUsageMetadata,
+            streamResponseText,
+          ),
+        );
+        if (!isInternal && span) {
+          addModelOutputAttributes(this.config, span, streamResponseText);
+        }
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(
+            openaiRequest,
+            consolidatedResponse,
+            undefined,
+            userPromptId,
+          ),
+        );
       }
-      await runInSpan(() =>
-        this.safelyLogOpenAIInteraction(
-          openaiRequest,
-          consolidatedResponse,
-          undefined,
-          userPromptId,
-        ),
-      );
     } catch (error) {
       errorOccurred = true;
-      const durationMs = Date.now() - startTime;
-      runInSpan(() =>
-        this.safelyLogApiError(
-          firstResponseId,
-          durationMs,
-          error,
-          firstModelVersion || model,
-          userPromptId,
-        ),
-      );
-      await runInSpan(() =>
-        this.safelyLogOpenAIInteraction(
-          openaiRequest,
-          undefined,
-          error,
-          userPromptId,
-        ),
-      );
+      // Same gating as the success path above: if the idle timeout already
+      // closed the span as failed, do not emit a parallel api_error log
+      // (the span is the canonical signal). Otherwise we'd produce the
+      // exact contradictory pair the timeout fix targets — span timed-out
+      // + api_error log — just on the error branch (#4302 review).
+      if (!spanEndedByTimeout) {
+        const durationMs = Date.now() - startTime;
+        runInSpan(() =>
+          this.safelyLogApiError(
+            firstResponseId,
+            durationMs,
+            error,
+            firstModelVersion || model,
+            userPromptId,
+          ),
+        );
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(
+            openaiRequest,
+            undefined,
+            error,
+            userPromptId,
+          ),
+        );
+      }
       throw error;
     } finally {
       if (spanEndTimeout !== undefined) {

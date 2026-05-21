@@ -84,6 +84,8 @@ export default {
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
   'for help on Qwen Code': 'for help on Qwen Code',
   'show version info': 'show version info',
+  'show paths for current session files and logs':
+    'show paths for current session files and logs',
   'submit a bug report': 'submit a bug report',
   Status: 'Status',
 
@@ -190,8 +192,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
-  'Configure authentication information for login':
-    'Configure authentication information for login',
+  'Connect an LLM provider': 'Connect an LLM provider',
   'Copy the last result or code snippet to clipboard':
     'Copy the last result or code snippet to clipboard',
   'Show working-tree change stats versus HEAD':
@@ -1155,9 +1156,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Welcome back! (Last updated: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Overall Goal:',
-  'Select Authentication Method': 'Select Authentication Method',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+  'Connect a Provider': 'Connect a Provider',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'You must connect a provider to proceed. Press Ctrl+C again to exit.',
   'Terms of Services and Privacy Notice':
     'Terms of Services and Privacy Notice',
   'Qwen OAuth': 'Qwen OAuth',
@@ -1894,6 +1895,8 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': 'Open the memory manager.',
+  'Show current process memory diagnostics':
+    'Show current process memory diagnostics',
   'Save a durable memory to the memory system.':
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':

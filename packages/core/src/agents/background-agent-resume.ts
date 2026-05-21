@@ -27,6 +27,10 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
+import {
+  appendStopHookBlockingCapWarning,
+  formatStopHookBlockingCapWarning,
+} from '../hooks/stopHookCap.js';
 import { runWithAgentContext } from './runtime/agent-context.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
@@ -63,7 +67,7 @@ const LEGACY_FORK_RESUME_BLOCKED_REASON =
 const LEGACY_FORK_CAPABILITIES_BLOCKED_REASON =
   'Fork background task cannot be safely resumed because its launch-time runtime constraints are missing.';
 
-type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'yolo';
+type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
 
 interface TranscriptRecovery {
   history: Content[];
@@ -101,6 +105,8 @@ function approvalModeToPermissionMode(mode?: string): PermissionMode {
       return PermissionMode.Yolo;
     case 'auto-edit':
       return PermissionMode.AutoEdit;
+    case 'auto':
+      return PermissionMode.Auto;
     case 'plan':
       return PermissionMode.Plan;
     case 'default':
@@ -117,6 +123,7 @@ function normalizeApprovalMode(
     case 'plan':
     case 'default':
     case 'auto-edit':
+    case 'auto':
     case 'yolo':
       return value;
     default:
@@ -131,7 +138,9 @@ function reconcileResumedApprovalMode(
 ): ApprovalModeValue {
   if (
     isTrustedFolder ||
-    (persistedMode !== 'auto-edit' && persistedMode !== 'yolo')
+    (persistedMode !== 'auto-edit' &&
+      persistedMode !== 'auto' &&
+      persistedMode !== 'yolo')
   ) {
     return persistedMode;
   }
@@ -531,10 +540,11 @@ export class BackgroundAgentResumeService {
       // continuing to read the parent's. Reusing `this.config`
       // directly here would short-circuit that isolation. See the
       // matching wrapper in `agent.ts:createApprovalModeOverride`.
-      const agentConfig = await createApprovalModeOverride(
-        this.config,
-        resolvedApprovalMode as ApprovalMode,
-      );
+      const { config: agentConfig, cleanup: restoreParentPM } =
+        await createApprovalModeOverride(
+          this.config,
+          resolvedApprovalMode as ApprovalMode,
+        );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const bgConfig = Object.create(agentConfig) as any;
       bgConfig.getShouldAvoidPermissionPrompts = () => true;
@@ -729,8 +739,9 @@ export class BackgroundAgentResumeService {
         try {
           await subagent.execute(contextState, bgAbortController.signal);
 
+          let stopHookWarning: string | undefined;
           if (hookSystem && !bgAbortController.signal.aborted) {
-            await this.runSubagentStopHookLoop(subagent, {
+            stopHookWarning = await this.runSubagentStopHookLoop(subagent, {
               agentId: meta.agentId,
               agentType: meta.agentType,
               transcriptPath: outputFile,
@@ -740,7 +751,10 @@ export class BackgroundAgentResumeService {
           }
 
           const terminateMode = subagent.getTerminateMode();
-          const finalText = subagent.getFinalText();
+          const finalText = appendStopHookBlockingCapWarning(
+            subagent.getFinalText(),
+            stopHookWarning,
+          );
           const stats = getCompletionStats(subagent, liveToolCallCount);
           if (terminateMode === AgentTerminateMode.GOAL) {
             registry.complete(meta.agentId, finalText, stats);
@@ -810,6 +824,10 @@ export class BackgroundAgentResumeService {
             .getToolRegistry()
             .stop()
             .catch(() => {});
+          // Restore parent PermissionManager's dangerous allow rules if
+          // this override stripped them. See createApprovalModeOverride
+          // strip-lifecycle comment in agent.ts.
+          restoreParentPM();
         }
       };
 
@@ -977,12 +995,12 @@ export class BackgroundAgentResumeService {
       resolvedMode: PermissionMode;
       signal?: AbortSignal;
     },
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const { agentId, agentType, transcriptPath, resolvedMode, signal } = opts;
     const hookSystem = this.config.getHookSystem();
-    if (!hookSystem) return;
+    if (!hookSystem) return undefined;
     let stopHookActive = false;
-    const maxIterations = 5;
+    const maxIterations = this.config.getStopHookBlockingCap();
 
     for (let i = 0; i < maxIterations; i++) {
       try {
@@ -1001,10 +1019,20 @@ export class BackgroundAgentResumeService {
           !typedStopOutput?.isBlockingDecision() &&
           !typedStopOutput?.shouldStopExecution()
         ) {
-          return;
+          return undefined;
         }
 
         stopHookActive = true;
+        const currentIterationCount = i + 1;
+        if (currentIterationCount >= maxIterations) {
+          const warning = formatStopHookBlockingCapWarning(
+            'SubagentStop',
+            maxIterations,
+          );
+          debugLogger.warn(`[BackgroundAgentResume] ${warning}`);
+          return warning;
+        }
+
         const continueContext = new ContextState();
         continueContext.set(
           'task_prompt',
@@ -1012,17 +1040,15 @@ export class BackgroundAgentResumeService {
         );
         await subagent.execute(continueContext, signal);
 
-        if (signal?.aborted) return;
+        if (signal?.aborted) return undefined;
       } catch (hookError) {
         debugLogger.warn(
           `[BackgroundAgentResume] SubagentStop hook failed, allowing stop: ${hookError}`,
         );
-        return;
+        return undefined;
       }
     }
 
-    debugLogger.warn(
-      `[BackgroundAgentResume] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop`,
-    );
+    return undefined;
   }
 }

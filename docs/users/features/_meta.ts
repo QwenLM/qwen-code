@@ -9,11 +9,13 @@ export default {
   skills: 'Skills',
   memory: 'Memory',
   headless: 'Headless Mode',
+  'structured-output': 'Structured Output',
   'dual-output': 'Dual Output',
   checkpointing: {
     display: 'hidden',
   },
   'approval-mode': 'Approval Mode',
+  'auto-mode': 'Auto Mode',
   mcp: 'MCP',
   lsp: 'LSP (Language Server Protocol)',
   'token-caching': 'Token Caching',

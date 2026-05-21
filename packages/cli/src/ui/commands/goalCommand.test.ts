@@ -31,8 +31,12 @@ describe('goalCommand', () => {
   beforeEach(() => __resetActiveGoalStoreForTests());
   afterEach(() => __resetActiveGoalStoreForTests());
 
-  it('is currently limited to interactive mode', () => {
-    expect(goalCommand.supportedModes).toEqual(['interactive']);
+  it('is available in interactive, non-interactive, and ACP modes', () => {
+    expect(goalCommand.supportedModes).toEqual([
+      'interactive',
+      'non_interactive',
+      'acp',
+    ]);
   });
 
   it('rejects when config is missing', async () => {
@@ -111,6 +115,21 @@ describe('goalCommand', () => {
       type: 'goal_status',
       kind: 'cleared',
       condition: 'write hello',
+    });
+  });
+
+  it('returns a clear message outside interactive mode', async () => {
+    const cfg = makeConfig();
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      services: { config: cfg as unknown as Config },
+    });
+    await goalCommand.action!(ctx, 'write hello');
+    const result = await goalCommand.action!(ctx, 'clear');
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'Goal cleared: write hello',
     });
   });
 
@@ -247,13 +266,10 @@ describe('goalCommand', () => {
     expect(content).toMatch(/Last check: transcript shows completion/);
   });
 
-  it('strict claude alignment: `/goal clear` with no active goal does NOT dismiss the achievement summary', async () => {
-    // Claude Code's `woH` bails (`q.length===0 → return null`) when no active
-    // goal exists — it does NOT write a dismissal sentinel and does NOT wipe
-    // the cache. Subsequent empty `/goal` still surfaces the previous
-    // achievement via `findLastTerminalGoal`. We pin this behavior to prevent
-    // accidental divergence; users who want a true "forget" will need a
-    // separate dedicated keyword (out of scope for this alignment).
+  it('keeps the latest terminal summary when `/goal clear` has no active goal', async () => {
+    // A no-op clear should not write a dismissal sentinel or wipe the cache.
+    // Subsequent empty `/goal` still surfaces the previous achievement
+    // summary.
     const ctx = createMockCommandContext({
       services: { config: makeConfig() as unknown as Config },
     });
@@ -328,5 +344,28 @@ describe('goalCommand', () => {
       kind: 'aborted',
       lastReason: 'Goal max iterations reached',
     });
+  });
+
+  it('after impossible failure, empty /goal shows the failed summary', async () => {
+    const ctx = createMockCommandContext({
+      services: { config: makeConfig() as unknown as Config },
+    });
+    await goalCommand.action!(ctx, 'do x');
+    clearActiveGoal('sess-1');
+    notifyGoalTerminal('sess-1', {
+      kind: 'failed',
+      condition: 'do x',
+      iterations: 2,
+      durationMs: 12_000,
+      lastReason: 'the required branch does not exist',
+    });
+
+    const result = await goalCommand.action!(ctx, '');
+    const content = (result as { content: string }).content;
+    expect(content).toMatch(/Goal could not be achieved/);
+    expect(content).toMatch(/2 turns/);
+    expect(content).toMatch(/12s/);
+    expect(content).toMatch(/Goal: do x/);
+    expect(content).toMatch(/Last check: the required branch does not exist/);
   });
 });

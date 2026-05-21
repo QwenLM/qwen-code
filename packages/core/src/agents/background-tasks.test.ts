@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   BackgroundTaskRegistry,
+  MAX_RETAINED_TERMINAL_AGENTS,
   type BackgroundTaskEntry,
 } from './background-tasks.js';
 import * as transcript from './agent-transcript.js';
@@ -857,6 +858,122 @@ describe('BackgroundTaskRegistry', () => {
     expect(modelText).toContain('&lt;/task-notification&gt;');
     expect(modelText).toContain('&lt;b&gt;bold&lt;/b&gt;');
     expect(modelText).toContain('&amp;');
+  });
+
+  describe('terminal-entry retention cap', () => {
+    function makeRegisteredEntry(id: string, startTime: number) {
+      return {
+        agentId: id,
+        description: id,
+        status: 'running' as const,
+        startTime,
+        abortController: new AbortController(),
+        outputFile: `/tmp/${id}.jsonl`,
+        isBackgrounded: true,
+      };
+    }
+
+    it('retains only a bounded number of fully-finalized terminal entries', () => {
+      // Register and complete one more entry than the cap allows so
+      // the prune kicks in. Use strictly increasing startTimes so the
+      // synthetic endTimes (Date.now() inside complete) preserve a
+      // deterministic eviction order via the startTime tiebreaker.
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS + 2; i++) {
+        registry.register(makeRegisteredEntry(`a-${i}`, i * 1000));
+        registry.complete(`a-${i}`, 'done');
+      }
+      expect(registry.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_AGENTS);
+      // The two oldest (`a-0`, `a-1`) get pruned; the newest survives.
+      expect(registry.get('a-0')).toBeUndefined();
+      expect(registry.get('a-1')).toBeUndefined();
+      expect(
+        registry.get(`a-${MAX_RETAINED_TERMINAL_AGENTS + 1}`),
+      ).toBeDefined();
+    });
+
+    it('never evicts running entries even when terminal entries blow past the cap', () => {
+      // The user's only handle on a live subagent is its row in the
+      // dialog; a prune that drops a running entry would silently
+      // strand work in progress.
+      registry.register(makeRegisteredEntry('live', 1));
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS + 1; i++) {
+        registry.register(makeRegisteredEntry(`done-${i}`, 100 + i * 1000));
+        registry.complete(`done-${i}`, 'done');
+      }
+      // Cap-of-32 terminals + 1 running survivor = 33 entries kept.
+      expect(registry.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_AGENTS + 1);
+      expect(registry.get('live')?.status).toBe('running');
+      // The oldest terminal entry is the one evicted.
+      expect(registry.get('done-0')).toBeUndefined();
+    });
+
+    it('never evicts paused entries (recoverable, awaiting resume/abandon)', () => {
+      // Manually plant a paused entry — the registry exposes
+      // abandon/resume but no public "transition to paused" call;
+      // resume restoration on Config init writes paused entries
+      // directly via register().
+      registry.register({
+        agentId: 'paused-1',
+        description: 'paused',
+        status: 'paused',
+        startTime: 1,
+        abortController: new AbortController(),
+        outputFile: '/tmp/paused-1.jsonl',
+        isBackgrounded: true,
+      });
+      // Push terminal entries past the cap so prune is forced to choose
+      // an eviction set.
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS + 1; i++) {
+        registry.register(makeRegisteredEntry(`done-${i}`, 100 + i * 1000));
+        registry.complete(`done-${i}`, 'done');
+      }
+      expect(registry.get('paused-1')?.status).toBe('paused');
+    });
+
+    it('never evicts cancelled-but-not-yet-notified entries', () => {
+      // cancel() flips the entry to cancelled immediately but defers
+      // the terminal task-notification to the natural handler / grace
+      // timer. Pruning here would break the SDK contract that every
+      // register pairs with exactly one terminal task-notification.
+      registry.setNotificationCallback(() => {});
+      registry.register(makeRegisteredEntry('pending-cancel', 1));
+      registry.cancel('pending-cancel');
+      // Push terminal entries past the cap.
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS + 1; i++) {
+        registry.register(makeRegisteredEntry(`done-${i}`, 100 + i * 1000));
+        registry.complete(`done-${i}`, 'done');
+      }
+      // pending-cancel survives because it has notified=false; it's
+      // still owed a terminal notification.
+      expect(registry.get('pending-cancel')?.status).toBe('cancelled');
+      expect(registry.get('pending-cancel')?.notified).toBeFalsy();
+    });
+
+    it('prunes an abandoned (paused → cancelled) entry the same as any other terminal', () => {
+      // abandon() is the only path that flips notified=true on a
+      // previously-paused entry. Make sure the resulting terminal
+      // counts toward the cap so a session that abandons many
+      // paused agents doesn't bypass the retention bound.
+      registry.register({
+        agentId: 'paused-overflow',
+        description: 'paused',
+        status: 'paused',
+        startTime: 1,
+        abortController: new AbortController(),
+        outputFile: '/tmp/paused-overflow.jsonl',
+        isBackgrounded: true,
+      });
+      registry.abandon('paused-overflow');
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS; i++) {
+        registry.register(makeRegisteredEntry(`done-${i}`, 100 + i * 1000));
+        registry.complete(`done-${i}`, 'done');
+      }
+      // After the loop, terminal count = 1 (abandon) + 32 (complete) =
+      // 33, exceeds the cap → oldest evicted. The abandoned entry
+      // (startTime=1, endTime=earliest) is the one evicted.
+      expect(registry.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_AGENTS);
+      expect(registry.get('paused-overflow')).toBeUndefined();
+    });
   });
 
   describe('queueMessage', () => {

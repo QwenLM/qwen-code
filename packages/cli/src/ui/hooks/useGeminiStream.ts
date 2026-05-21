@@ -26,6 +26,7 @@ import type {
   ToolCallRequestInfo,
   GeminiErrorEventValue,
   StopFailureErrorType,
+  ActiveGoal,
 } from '@qwen-code/qwen-code-core';
 import {
   GeminiEventType as ServerGeminiEventType,
@@ -52,6 +53,9 @@ import {
   getUnsupportedImageFormatWarning,
   generateToolUseSummary,
   getActiveGoal,
+  activeGoalEquals,
+  setActiveGoal,
+  clearActiveGoal,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -1308,12 +1312,9 @@ export const useGeminiStream = (
         setPendingHistoryItem(null);
       }
       // When the active loop is driven by `/goal`, replace the generic
-      // "Ran N stop hooks ⎿ Stop hook error: ..." chip with a goal-aware
-      // `goal_status` `kind:'checking'` item. Claude Code surfaces this
-      // mid-state through a single updating "running" card; qwen-code keeps
-      // a per-iteration history trail (familiar to its other progress
-      // indicators) but drops the `error:` framing — a not-met judge is the
-      // *expected* outcome of every continuation, not a failure.
+      // "Ran N stop hooks" chip with a goal-aware `goal_status`
+      // `kind:'checking'` item. A not-met judge is the expected outcome of a
+      // continuation, not a hook failure.
       const activeGoal = getActiveGoal(config.getSessionId());
       if (activeGoal && activeGoal.condition) {
         addItem(
@@ -1340,6 +1341,25 @@ export const useGeminiStream = (
       );
     },
     [addItem, config, pendingHistoryItemRef, setPendingHistoryItem],
+  );
+
+  const handleActiveGoalEvent = useCallback(
+    (activeGoal: ActiveGoal | null) => {
+      const sessionId = config.getSessionId();
+      const currentActiveGoal = getActiveGoal(sessionId);
+      if (activeGoal) {
+        if (activeGoalEquals(currentActiveGoal, activeGoal)) {
+          return;
+        }
+        setActiveGoal(sessionId, activeGoal);
+        return;
+      }
+      if (!currentActiveGoal) {
+        return;
+      }
+      clearActiveGoal(sessionId);
+    },
+    [config],
   );
 
   const processGeminiStreamEvents = useCallback(
@@ -1454,8 +1474,7 @@ export const useGeminiStream = (
             case ServerGeminiEventType.ToolCallRequest:
               flushBufferedStreamEvents();
               toolCallRequests.push(event.value);
-              // Count tool call args JSON toward token estimation (matches
-              // Claude Code's input_json_delta handling).
+              // Count tool call args JSON toward token estimation.
               try {
                 const argsJson = JSON.stringify(event.value.args);
                 streamingResponseLengthRef.current += argsJson.length;
@@ -1577,6 +1596,9 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
               break;
+            case ServerGeminiEventType.ActiveGoal:
+              handleActiveGoalEvent(event.value);
+              break;
             default: {
               // enforces exhaustive switch-case
               const unreachable: never = event;
@@ -1613,6 +1635,7 @@ export const useGeminiStream = (
       setPendingHistoryItem,
       handleUserPromptSubmitBlockedEvent,
       handleStopHookLoopEvent,
+      handleActiveGoalEvent,
       addItem,
       dualOutput,
     ],
@@ -1692,6 +1715,11 @@ export const useGeminiStream = (
           pendingRetryCountdownItemRef.current ||
           pendingRetryErrorItemRef.current
         ) {
+          const pendingError = pendingRetryErrorItemRef.current;
+          if (pendingError && pendingError.type === 'error') {
+            const { hint: _hint, ...errorWithoutHint } = pendingError;
+            addItem(errorWithoutHint, userMessageTimestamp);
+          }
           clearRetryCountdown();
         }
       }
@@ -2209,9 +2237,8 @@ export const useGeminiStream = (
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
       // Fire tool-use summary generation in parallel with the next API call.
-      // The fast-model Haiku-equivalent latency (~1s) is hidden behind the
-      // main-model streaming (5-30s). Mirrors Claude Code's query.ts:1411-1482
-      // behavior. Fire-and-forget: failures are silent and never block the turn.
+      // The fast-model latency is hidden behind the main-model streaming.
+      // Fire-and-forget: failures are silent and never block the turn.
       // Subagent exclusion is implicit — useGeminiStream only drives the
       // main session; subagents run through agents/runtime/ with their own loop.
       if (config.getEmitToolUseSummaries()) {
@@ -2313,9 +2340,13 @@ export const useGeminiStream = (
           : (midTurnDrainRef?.current?.() ?? []);
       if (drained.length > 0) {
         for (const msg of drained) {
-          responsesToSend.push({
+          const midTurnUserMessage = {
             text: `\n[User message received during tool execution]: ${msg}`,
-          });
+          };
+          responsesToSend.push(midTurnUserMessage);
+          config
+            .getChatRecordingService()
+            ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
           // Record in UI history so the transcript stays complete.
           addItem({ type: MessageType.USER, text: msg }, Date.now());
         }

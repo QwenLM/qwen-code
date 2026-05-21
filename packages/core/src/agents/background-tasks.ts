@@ -32,6 +32,23 @@ const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 const MAX_DESCRIPTION_LENGTH = 40;
 const MAX_RECENT_ACTIVITIES = 5;
 
+/**
+ * Cap on how many fully-finalized terminal entries (those that have
+ * already emitted their terminal `task-notification`) the registry
+ * retains. Without this cap, every short-lived background subagent
+ * leaves a row in the Background tasks dialog and pill forever,
+ * crowding out the running entries the user actually opened the
+ * dialog to find. Mirrors the rationale + retention pattern in
+ * `MonitorRegistry.MAX_RETAINED_TERMINAL_MONITORS` and
+ * `BackgroundShellRegistry.MAX_RETAINED_TERMINAL_SHELLS`.
+ *
+ * Entries that are still `running`, `paused`, or `cancelled` but
+ * not yet notified are NEVER evicted — pruning a not-yet-notified
+ * cancelled entry would break the SDK contract that every
+ * `register` pairs with exactly one terminal `task-notification`.
+ */
+export const MAX_RETAINED_TERMINAL_AGENTS = 32;
+
 // Grace period after cancel() before emitting a fallback cancelled
 // notification. The natural handler (bgBody) almost always settles and
 // emits the terminal notification with the real partial result well
@@ -740,11 +757,56 @@ export class BackgroundTaskRegistry {
   }
 
   private emitStatusChange(entry?: AgentTask): void {
+    this.pruneTerminalEntries();
     if (!this.statusChangeCallback) return;
     try {
       this.statusChangeCallback(entry);
     } catch (error) {
       debugLogger.error('Failed to emit background status change:', error);
+    }
+  }
+
+  /**
+   * Evict the oldest fully-finalized terminal entries (those with
+   * `notified === true`) once their count exceeds
+   * `MAX_RETAINED_TERMINAL_AGENTS`. Sorted by `endTime` (then
+   * `startTime` as a tiebreaker for entries that share an endTime).
+   *
+   * Running, paused, and cancelled-but-not-yet-notified entries are
+   * excluded from the eviction set:
+   *   - running / paused: the user explicitly cares about live work,
+   *     and pruning a paused entry would silently drop a recoverable
+   *     task without giving the user a chance to resume / abandon it.
+   *   - cancelled but not notified: the natural handler (or grace
+   *     timer) is still going to fire `finalizeCancelled` /
+   *     `finalizeCancellationIfPending`. Evicting now would break the
+   *     SDK contract that every `register` pairs with exactly one
+   *     terminal `task-notification`.
+   *
+   * The caller (typically `emitStatusChange`) is responsible for
+   * invoking this after every transition that mutates `notified` or
+   * `endTime`. Cap-exceeded eviction is a best-effort: a transition
+   * that sets `notified = true` outside the status-change path (the
+   * `cancel({ notify: false })` shortcut and `abortAll`'s loop body)
+   * may briefly carry a few extra entries until the next transition
+   * triggers another prune. Both of those paths are reset / shutdown
+   * adjacent — the registry is about to be cleared via `reset()`
+   * anyway, so the extra retention does not leak across sessions.
+   */
+  private pruneTerminalEntries(): void {
+    const evictable = Array.from(this.agents.values())
+      .filter((entry) => entry.notified === true)
+      .sort(
+        (a, b) =>
+          (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) ||
+          a.startTime - b.startTime,
+      );
+
+    while (evictable.length > MAX_RETAINED_TERMINAL_AGENTS) {
+      const oldest = evictable.shift();
+      if (oldest) {
+        this.agents.delete(oldest.agentId);
+      }
     }
   }
 

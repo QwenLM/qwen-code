@@ -7,7 +7,7 @@
 import { SubagentError, SubagentErrorCode } from './types.js';
 import type { SubagentConfig, ValidationResult } from './types.js';
 import type { RunConfig } from '../agents/runtime/agent-types.js';
-import { parseSubagentModelSelection } from './model-selection.js';
+import { resolveModelId } from '../utils/modelId.js';
 
 /**
  * Validates subagent configurations to ensure they are well-formed
@@ -276,7 +276,7 @@ export class SubagentValidator {
     }
 
     try {
-      parseSubagentModelSelection(model);
+      resolveModelId(model);
     } catch (error) {
       errors.push(error instanceof Error ? error.message : 'Invalid model');
     }

@@ -78,6 +78,7 @@ export default {
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
   'for help on Qwen Code': '獲取 Qwen Code 幫助',
   'show version info': '顯示版本信息',
+  'show paths for current session files and logs': '顯示目前會話檔案和日誌路徑',
   'submit a bug report': '提交錯誤報告',
   Status: '狀態',
   'Qwen Code': 'Qwen Code',
@@ -171,7 +172,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     '在瀏覽器中打開完整的 Qwen Code 文檔',
   'Configuration not available.': '配置不可用',
-  'Configure authentication information for login': '配置登錄認證信息',
+  'Connect an LLM provider': '連接 LLM 提供商',
   'Copy the last result or code snippet to clipboard':
     '將最後的結果或代碼片段複製到剪貼板',
   'Show working-tree change stats versus HEAD':
@@ -964,9 +965,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 歡迎回來！（最後更新：{{timeAgo}}）',
   '🎯 Overall Goal:': '🎯 總體目標：',
-  'Select Authentication Method': '選擇認證方式',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    '您必須選擇認證方法才能繼續。再次按 Ctrl+C 退出',
+  'Connect a Provider': '連接服務商',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    '必須連接一個服務商才能繼續。再次按 Ctrl+C 退出',
   'Terms of Services and Privacy Notice': '服務條款和隱私聲明',
   'Qwen OAuth': 'Qwen OAuth (免費)',
   'Discontinued — switch to Coding Plan or API Key':
@@ -1482,6 +1483,7 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': '打開記憶管理器。',
+  'Show current process memory diagnostics': '顯示目前程序的內存診斷。',
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
   'Ask a quick side question without affecting the main conversation':
     '在不影響主對話的情況下快速提問旁支問題',

@@ -18,6 +18,10 @@
       "type": "object",
       "additionalProperties": true
     },
+    "plansDirectory": {
+      "description": "Custom directory for approved Plan Mode files. Relative paths are resolved from the project root, and the resolved path must stay within the project root. Defaults to ~/.qwen/plans.",
+      "type": "string"
+    },
     "env": {
       "description": "Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.",
       "type": "object",
@@ -181,6 +185,11 @@
           "type": "string",
           "default": "Qwen Dark"
         },
+        "autoModeAcknowledged": {
+          "description": "True once the user has seen the first-time information message about the AUTO approval mode. Set automatically; not intended for manual configuration.",
+          "type": "boolean",
+          "default": false
+        },
         "statusLine": {
           "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
           "type": "object",
@@ -190,6 +199,11 @@
           "description": "Custom theme definitions.",
           "type": "object",
           "additionalProperties": true
+        },
+        "hideBuiltinWorktreeIndicator": {
+          "description": "When true, the built-in `⎇ worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself — otherwise an active worktree silently has no UI affordance.",
+          "type": "boolean",
+          "default": false
         },
         "hideWindowTitle": {
           "description": "Hide the window title bar",
@@ -627,6 +641,39 @@
           "items": {
             "type": "string"
           }
+        },
+        "autoMode": {
+          "description": "Settings consumed by the AUTO approval mode classifier.",
+          "type": "object",
+          "properties": {
+            "hints": {
+              "description": "Natural-language hints injected into the classifier system prompt.",
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "description": "Natural-language descriptions of actions AUTO mode should allow.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "deny": {
+                  "description": "Natural-language descriptions of actions AUTO mode should block.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "environment": {
+              "description": "Environment / context lines injected into the classifier system prompt.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     },
@@ -696,12 +743,20 @@
             "type": "string"
           }
         },
+        "disabled": {
+          "description": "Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "approvalMode": {
-          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, yolo",
+          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, auto, yolo",
           "enum": [
             "plan",
             "default",
             "auto-edit",
+            "auto",
             "yolo"
           ],
           "default": "default"
@@ -900,6 +955,11 @@
       "description": "Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).",
       "type": "boolean",
       "default": false
+    },
+    "stopHookBlockingCap": {
+      "description": "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP.",
+      "type": "number",
+      "default": 8
     },
     "hooks": {
       "description": "Hook event configurations for extending CLI behavior at various lifecycle points.",

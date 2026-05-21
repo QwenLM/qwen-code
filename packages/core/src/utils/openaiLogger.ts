@@ -12,6 +12,32 @@ import { createDebugLogger } from './debugLogger.js';
 import { isInternalPromptId } from './internalPromptIds.js';
 
 const debugLogger = createDebugLogger('OPENAI_LOGGER');
+const MAIN_SESSION_PROMPT_ID_DELIMITER = '########';
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export interface OpenAILogContext {
+  promptId?: string;
+  sessionId?: string;
+}
+
+export function resolveOpenAILogDir(
+  customLogDir?: string,
+  cwd?: string,
+): string {
+  const baseCwd = cwd || process.cwd();
+  if (!customLogDir) {
+    return path.join(baseCwd, 'logs', 'openai');
+  }
+
+  let resolvedPath = customLogDir;
+  if (customLogDir === '~' || customLogDir.startsWith('~/')) {
+    resolvedPath = path.join(os.homedir(), customLogDir.slice(1));
+  } else if (!path.isAbsolute(customLogDir)) {
+    resolvedPath = path.resolve(baseCwd, customLogDir);
+  }
+  return path.normalize(resolvedPath);
+}
 
 function sanitizeDiagnosticSuffix(
   suffix: string | undefined,
@@ -45,6 +71,46 @@ function promptIdSuffixForFilename(
   return sanitizeDiagnosticSuffix(extractSubagentSuffix(promptId));
 }
 
+function sessionIdFromPromptId(
+  promptId: string | undefined,
+): string | undefined {
+  if (!promptId) return undefined;
+
+  const mainSessionDelimiterIndex = promptId.indexOf(
+    MAIN_SESSION_PROMPT_ID_DELIMITER,
+  );
+  if (mainSessionDelimiterIndex > 0) {
+    return promptId.slice(0, mainSessionDelimiterIndex);
+  }
+
+  if (UUID_PATTERN.test(promptId)) {
+    return promptId;
+  }
+
+  const parts = promptId.split('#');
+  if (parts.length >= 3 && parts[0]) {
+    return parts[0];
+  }
+
+  return undefined;
+}
+
+function contextForPromptId(
+  promptId: string | undefined,
+): OpenAILogContext | null {
+  const trimmedPromptId = promptId?.trim();
+  const sessionId = sessionIdFromPromptId(trimmedPromptId);
+
+  if (!trimmedPromptId && !sessionId) {
+    return null;
+  }
+
+  return {
+    ...(trimmedPromptId ? { promptId: trimmedPromptId } : {}),
+    ...(sessionId ? { sessionId } : {}),
+  };
+}
+
 /**
  * Logger specifically for OpenAI API requests and responses
  */
@@ -60,21 +126,7 @@ export class OpenAILogger {
    *            pass the project working directory from Config.getWorkingDir().
    */
   constructor(customLogDir?: string, cwd?: string) {
-    const baseCwd = cwd || process.cwd();
-    if (customLogDir) {
-      // Resolve relative paths to absolute paths
-      // Handle ~ expansion
-      let resolvedPath = customLogDir;
-      if (customLogDir === '~' || customLogDir.startsWith('~/')) {
-        resolvedPath = path.join(os.homedir(), customLogDir.slice(1));
-      } else if (!path.isAbsolute(customLogDir)) {
-        // If it's a relative path, resolve it relative to provided working directory
-        resolvedPath = path.resolve(baseCwd, customLogDir);
-      }
-      this.logDir = path.normalize(resolvedPath);
-    } else {
-      this.logDir = path.join(baseCwd, 'logs', 'openai');
-    }
+    this.logDir = resolveOpenAILogDir(customLogDir, cwd);
   }
 
   /**
@@ -129,6 +181,7 @@ export class OpenAILogger {
             stack: error.stack,
           }
         : null,
+      context: contextForPromptId(promptId),
       system: {
         hostname: os.hostname(),
         platform: os.platform(),

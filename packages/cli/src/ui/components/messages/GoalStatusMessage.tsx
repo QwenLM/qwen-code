@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type React from 'react';
+import React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration } from '../../utils/formatters.js';
-import type { GoalStatusKind } from '../../types.js';
+import { isTerminalGoalStatusKind, type GoalStatusKind } from '../../types.js';
 
 interface GoalStatusMessageProps {
   kind: GoalStatusKind;
@@ -20,7 +20,11 @@ interface GoalStatusMessageProps {
 
 const pluralTurns = (n: number) => (n === 1 ? 'turn' : 'turns');
 
-export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
+function assertNeverGoalStatusKind(kind: never): never {
+  throw new Error(`Unexpected goal status kind: ${kind}`);
+}
+
+const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = ({
   kind,
   condition,
   iterations,
@@ -29,18 +33,16 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
 }) => {
   // The "checking" kind is the per-iteration "judge said not met, continuing"
   // marker that replaces the generic `stop_hook_loop` rendering for /goal.
-  // Slim one-liner with a hollow circle to signal "pending" without the
-  // alarming `Stop hook error:` framing. The judge's reason is intentionally
-  // NOT shown here — it would clutter the per-turn chip and the same reason
-  // surfaces as the model's next user prompt anyway. The eventual "Last
-  // check: …" line appears once in the final achieved/aborted card.
+  // Show the active condition and latest judge reason on every iteration so
+  // the user can see why the loop is continuing.
   if (kind === 'checking') {
+    const reason = lastReason?.trim();
     return (
       <Box flexDirection="row">
         <Box width={2} flexShrink={0}>
           <Text color={theme.text.secondary}>○</Text>
         </Box>
-        <Box flexGrow={1}>
+        <Box flexGrow={1} flexDirection="column">
           <Text color={theme.text.secondary}>
             Goal check
             {typeof iterations === 'number' && iterations > 0
@@ -48,6 +50,14 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
               : ''}{' '}
             · not yet met
           </Text>
+          <Text color={theme.text.secondary} wrap="wrap">
+            Goal: {condition}
+          </Text>
+          {reason ? (
+            <Text color={theme.text.secondary} wrap="wrap">
+              Judge: {reason}
+            </Text>
+          ) : null}
         </Box>
       </Box>
     );
@@ -75,13 +85,20 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
           prefixColor: theme.text.secondary,
           title: 'Goal cleared',
         };
+      case 'failed':
+        return {
+          prefix: '✖',
+          prefixColor: theme.status.error,
+          title: 'Goal could not be achieved',
+        };
       case 'aborted':
-      default:
         return {
           prefix: '!',
           prefixColor: theme.status.warning,
           title: 'Goal aborted',
         };
+      default:
+        return assertNeverGoalStatusKind(kind);
     }
   })();
 
@@ -120,7 +137,8 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
             <Text wrap="wrap">{condition}</Text>
           </Box>
         </Box>
-        {/* `lastReason` is shown on terminal cards (achieved / aborted) so
+        {/* `lastReason` is shown on terminal cards (achieved / aborted /
+            failed) so
             the final summary records *why* the judge ruled the goal complete
             or why the loop gave up. Skipped for `cleared` because user-driven
             clears don't carry a judge reason.
@@ -130,7 +148,7 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
             flex-row variant hangs the continuation at the value column's
             left edge (≈12 cols of empty space, easily mistaken for a blank
             line). One Text + natural wrap keeps the continuation flush. */}
-        {(kind === 'achieved' || kind === 'aborted') && lastReason?.trim() ? (
+        {isTerminalGoalStatusKind(kind) && lastReason?.trim() ? (
           <Text color={theme.text.secondary} wrap="wrap">
             Last check: {lastReason.trim()}
           </Text>
@@ -139,3 +157,5 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
     </Box>
   );
 };
+
+export const GoalStatusMessage = React.memo(GoalStatusMessageInternal);

@@ -11,6 +11,7 @@ export type {
   GoalTerminalObserver,
 } from './activeGoalStore.js';
 export {
+  activeGoalEquals,
   getActiveGoal,
   setActiveGoal,
   clearActiveGoal,
@@ -27,6 +28,7 @@ export {
   GOAL_HOOK_TIMEOUT_MS,
   GOAL_HOOK_TIMEOUT_SECONDS,
   createGoalStopHookCallback,
+  abortGoalForStopHookCap,
   registerGoalHook,
   unregisterGoalHook,
 } from './goalHook.js';

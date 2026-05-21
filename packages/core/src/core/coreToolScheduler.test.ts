@@ -32,7 +32,7 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
 import {
   CoreToolScheduler,
@@ -64,9 +64,9 @@ type ToolSpanRecord = {
   ended: boolean;
   /**
    * Metadata passed to endToolSpan / endToolExecutionSpan — captured so
-   * tests can assert success/error values are forwarded correctly.
+   * tests can assert success/error/cancelled values are forwarded correctly.
    */
-  endMetadata?: { success?: boolean; error?: string };
+  endMetadata?: { success?: boolean; error?: string; cancelled?: boolean };
 };
 
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
@@ -154,7 +154,7 @@ vi.mock('../telemetry/session-tracing.js', () => ({
   endToolExecutionSpan: vi.fn(
     (
       span: ToolSpanRecord & ReturnType<typeof createMockToolSpan>,
-      metadata?: { success?: boolean; error?: string },
+      metadata?: { success?: boolean; error?: string; cancelled?: boolean },
     ) => {
       if (metadata) {
         span.endMetadata = metadata;
@@ -416,6 +416,273 @@ async function waitForStatus(
 }
 
 describe('CoreToolScheduler', () => {
+  function createSchedulerForLegacyToolTests(options: {
+    toolsByName: Map<string, MockTool>;
+    approvalMode?: ApprovalMode;
+    getPermissionsDeny?: () => string[] | undefined;
+    messageBus?: { request: ReturnType<typeof vi.fn> };
+    disableHooks?: boolean;
+    onAllToolCallsComplete?: ReturnType<typeof vi.fn>;
+    onToolCallsUpdate?: ReturnType<typeof vi.fn>;
+  }) {
+    const ensureTool = vi.fn(
+      async (name: string) =>
+        options.toolsByName.get(name) as AnyDeclarativeTool,
+    );
+    const mockToolRegistry = {
+      getTool: (name: string) => options.toolsByName.get(name),
+      ensureTool,
+      getFunctionDeclarations: () => [],
+      tools: options.toolsByName,
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: (name: string) => options.toolsByName.get(name),
+      getToolByDisplayName: () => undefined,
+      getTools: () => [...options.toolsByName.values()],
+      discoverTools: async () => {},
+      getAllTools: () => [...options.toolsByName.values()],
+      getToolsByServer: () => [],
+      getAllToolNames: () => [...options.toolsByName.keys()],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = options.onAllToolCallsComplete ?? vi.fn();
+    const onToolCallsUpdate = options.onToolCallsUpdate ?? vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getApprovalMode: () => options.approvalMode ?? ApprovalMode.YOLO,
+        getPermissionsAllow: () => [],
+        getPermissionsDeny: options.getPermissionsDeny ?? (() => undefined),
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'gemini',
+        }),
+        getShellExecutionConfig: () => ({
+          terminalWidth: 90,
+          terminalHeight: 30,
+        }),
+        storage: {
+          getProjectTempDir: () => '/tmp',
+        },
+        getTruncateToolOutputThreshold: () =>
+          DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+        getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getChatRecordingService: () => undefined,
+        getMessageBus: vi.fn().mockReturnValue(options.messageBus),
+        getDisableAllHooks: vi
+          .fn()
+          .mockReturnValue(options.disableHooks ?? true),
+        isInteractive: () => true,
+        getInputFormat: () => undefined,
+        getExperimentalZedIntegration: () => false,
+      } as unknown as Config,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    return {
+      scheduler,
+      ensureTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    };
+  }
+
+  it('dispatches legacy tool names through their canonical registered tools', async () => {
+    const canonicalNamesByLegacyName = new Map(
+      Object.entries(ToolNamesMigration),
+    );
+    const executeByCanonicalName = new Map<string, ReturnType<typeof vi.fn>>();
+    const toolsByName = new Map<string, MockTool>();
+
+    for (const canonicalName of canonicalNamesByLegacyName.values()) {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: `executed ${canonicalName}`,
+        returnDisplay: `executed ${canonicalName}`,
+      });
+      executeByCanonicalName.set(canonicalName, execute);
+      toolsByName.set(
+        canonicalName,
+        new MockTool({
+          name: canonicalName,
+          execute,
+        }),
+      );
+    }
+
+    const { scheduler, ensureTool, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [...canonicalNamesByLegacyName.keys()].map((legacyName, index) => ({
+        callId: `legacy-${index}`,
+        name: legacyName,
+        args: { value: legacyName },
+        isClientInitiated: false,
+        prompt_id: `prompt-${index}`,
+      })),
+      new AbortController().signal,
+    );
+
+    for (const canonicalName of canonicalNamesByLegacyName.values()) {
+      expect(executeByCanonicalName.get(canonicalName)).toHaveBeenCalledOnce();
+      expect(ensureTool).toHaveBeenCalledWith(canonicalName);
+    }
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls.every((call) => call.status === 'success')).toBe(
+      true,
+    );
+  });
+
+  it('applies canonical legacy tool names to the deny-list fallback', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'edited',
+      returnDisplay: 'edited',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.EDIT,
+        new MockTool({
+          name: ToolNames.EDIT,
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, ensureTool, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        getPermissionsDeny: () => [ToolNames.EDIT],
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'legacy-denied',
+          name: 'replace',
+          args: { file_path: '/tmp/file.txt' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-denied',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      expect(completedCall.response.error?.message).toBe(
+        'Qwen Code requires permission to use edit, but that permission was declined.',
+      );
+    }
+    expect(execute).not.toHaveBeenCalled();
+    expect(ensureTool).not.toHaveBeenCalled();
+  });
+
+  it.each(Object.entries(ToolNamesMigration))(
+    'sends canonical hook tool names for legacy %s calls',
+    async (legacyName, canonicalName) => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const toolsByName = new Map<string, MockTool>([
+        [
+          canonicalName,
+          new MockTool({
+            name: canonicalName,
+            getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+            getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+            execute,
+          }),
+        ],
+      ]);
+      const messageBus = {
+        request: vi
+          .fn()
+          .mockImplementation(
+            async (request: {
+              eventName: string;
+            }): Promise<HookExecutionResponse> => {
+              if (request.eventName === 'PermissionRequest') {
+                return {
+                  type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                  correlationId: 'permission-hook',
+                  success: true,
+                  output: {
+                    hookSpecificOutput: {
+                      decision: {
+                        behavior: 'allow',
+                      },
+                    },
+                  },
+                };
+              }
+              return {
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: `${request.eventName}-hook`,
+                success: true,
+                output: { decision: 'allow' },
+              };
+            },
+          ),
+      };
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName,
+          approvalMode: ApprovalMode.DEFAULT,
+          messageBus,
+          disableHooks: false,
+        });
+
+      await scheduler.schedule(
+        [
+          {
+            callId: `legacy-hook-${legacyName}`,
+            name: legacyName,
+            args: { value: legacyName },
+            isClientInitiated: false,
+            prompt_id: 'prompt-hooks',
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
+      for (const eventName of [
+        'PermissionRequest',
+        'PreToolUse',
+        'PostToolUse',
+      ]) {
+        expect(messageBus.request).toHaveBeenCalledWith(
+          expect.objectContaining({
+            eventName,
+            input: expect.objectContaining({
+              tool_name: canonicalName,
+            }),
+          }),
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+      }
+      expect(execute).toHaveBeenCalledOnce();
+    },
+  );
+
   it('should cancel a tool call if the signal is aborted before confirmation', async () => {
     const mockTool = new MockTool({
       name: 'mockTool',
@@ -1715,6 +1982,22 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const cancelled: any = completedCalls[0];
     expect(cancelled.response.resultDisplay).toBe('hello');
+
+    // #4212: When the tool resolves cleanly after observing signal.aborted,
+    // the execution sub-span must end as not-success (cancelled) so it
+    // agrees with the parent tool span instead of misreporting success
+    // alongside a cancelled parent. `toolSpanRecords` accumulates across
+    // tests in this describe scope, so search the most recent record.
+    const execSpanRecord = toolSpanRecords.findLast(
+      (s) => s.name === 'tool.execution',
+    );
+    expect(execSpanRecord?.endMetadata?.success).toBe(false);
+    expect(execSpanRecord?.endMetadata?.error).toBe(
+      'Tool execution cancelled by user',
+    );
+    // #4302 review: cancelled: true so the exec sub-span ends UNSET (not
+    // ERROR) — matches setToolSpanCancelled on the parent tool span.
+    expect(execSpanRecord?.endMetadata?.cancelled).toBe(true);
   });
 });
 
@@ -3449,7 +3732,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     const exec = getExecutionSpan();
     expect(exec).toBeDefined();
     expect(exec!.ended).toBe(true);
-    expect(exec!.endMetadata).toEqual({ success: true });
+    // cancelled: false because signal is not aborted on the success path
+    // (#4302 review: cancelled flag now propagates through endToolExecutionSpan).
+    expect(exec!.endMetadata).toEqual({ success: true, cancelled: false });
   });
 
   it('execution sub-span: ended (success: false) when ToolResult.error is set', async () => {
@@ -3466,7 +3751,16 @@ describe('CoreToolScheduler telemetry spans', () => {
     const exec = getExecutionSpan();
     expect(exec).toBeDefined();
     expect(exec!.ended).toBe(true);
-    expect(exec!.endMetadata).toEqual({ success: false });
+    // Since #4212 the success path also stamps a sanitized `error` reason on
+    // the exec span when ToolResult.error is set, so trace backends can
+    // distinguish a failed-result close from a cancelled one without
+    // cross-referencing the parent tool span. cancelled: false since the
+    // signal isn't aborted (#4302 review).
+    expect(exec!.endMetadata).toEqual({
+      success: false,
+      error: 'Tool execution failed',
+      cancelled: false,
+    });
   });
 
   it('execution sub-span: ended (success: false) with sanitized error on thrown invocation exception', async () => {
@@ -3513,6 +3807,20 @@ describe('CoreToolScheduler telemetry spans', () => {
     // Operators filtering exec spans for errors should NOT see cancellation
     // messages here — only real exception messages.
     expect(exec!.endMetadata?.error).toBe('Tool execution cancelled by user');
+    // #4302 review: catch-path cancellation also threads cancelled: true so
+    // the exec sub-span lands UNSET, not ERROR.
+    expect(exec!.endMetadata?.cancelled).toBe(true);
+  });
+
+  it('execution sub-span: cancelled flag is NOT set on real exceptions (#4302)', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockRejectedValue(new Error('boom')),
+    });
+    const exec = getExecutionSpan();
+    expect(exec).toBeDefined();
+    // signal not aborted — this is a real exception, must surface as ERROR
+    // status. cancelled stays falsy.
+    expect(exec!.endMetadata?.cancelled).toBeFalsy();
   });
 });
 
@@ -4160,6 +4468,89 @@ describe('Fire hook functions integration', () => {
       for (const start of allStarts) {
         expect(start).toBeLessThan(firstEnd);
       }
+    });
+
+    it('should run legacy task agent tools concurrently with safe tools', async () => {
+      const executionLog: string[] = [];
+
+      const agentTool = new MockTool({
+        name: ToolNames.AGENT,
+        kind: Kind.Other,
+        execute: async (params) => {
+          const id = (params as { id: string }).id;
+          executionLog.push(`agent:start:${id}`);
+          await new Promise((r) => setTimeout(r, 50));
+          executionLog.push(`agent:end:${id}`);
+          return {
+            llmContent: `Agent ${id} done`,
+            returnDisplay: `Agent ${id} done`,
+          };
+        },
+      });
+
+      const readTool = new MockTool({
+        name: ToolNames.READ_FILE,
+        kind: Kind.Read,
+        execute: async (params) => {
+          const id = (params as { id: string }).id;
+          executionLog.push(`read:start:${id}`);
+          await new Promise((r) => setTimeout(r, 50));
+          executionLog.push(`read:end:${id}`);
+          return {
+            llmContent: `Read ${id} done`,
+            returnDisplay: `Read ${id} done`,
+          };
+        },
+      });
+
+      const tools = new Map<string, MockTool>([
+        [ToolNames.AGENT, agentTool],
+        [ToolNames.READ_FILE, readTool],
+      ]);
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+      const scheduler = createScheduler(
+        tools,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+      );
+
+      await scheduler.schedule(
+        [
+          {
+            callId: 'legacy-task',
+            name: 'task',
+            args: { id: 'legacy' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+          {
+            callId: 'read',
+            name: ToolNames.READ_FILE,
+            args: { id: 'read' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
+
+      const agentStart = executionLog.indexOf('agent:start:legacy');
+      const readStart = executionLog.indexOf('read:start:read');
+      const firstEnd = Math.min(
+        executionLog.indexOf('agent:end:legacy'),
+        executionLog.indexOf('read:end:read'),
+      );
+      expect(agentStart).not.toBe(-1);
+      expect(readStart).not.toBe(-1);
+      expect(firstEnd).not.toBe(-1);
+      expect(agentStart).toBeLessThan(firstEnd);
+      expect(readStart).toBeLessThan(firstEnd);
     });
 
     it('should partition mixed safe/unsafe tools into correct batches', async () => {
@@ -5159,6 +5550,14 @@ describe('extractToolFilePaths', () => {
     expect(extractToolFilePaths(FS_TOOL, { file_path: '/proj/a.ts' })).toEqual([
       '/proj/a.ts',
     ]);
+  });
+
+  it('extracts notebook_path for notebook_edit', () => {
+    expect(
+      extractToolFilePaths('notebook_edit', {
+        notebook_path: '/proj/analysis.ipynb',
+      }),
+    ).toEqual(['/proj/analysis.ipynb']);
   });
 
   it('extracts filePath for lsp (camelCase convention)', () => {

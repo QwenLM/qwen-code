@@ -236,7 +236,7 @@ describe('ModelsConfig', () => {
     });
 
     // User manually updates credentials via updateCredentials.
-    // Note: In practice, handleAuthSelect prevents using a modelId that matches a provider model,
+    // Note: In practice, the /auth provider-setup flow prevents using a modelId that matches a provider model,
     // but if syncAfterAuthRefresh is called with a modelId that exists in registry,
     // we should use provider config.
     modelsConfig.updateCredentials({ apiKey: 'manual-key' });

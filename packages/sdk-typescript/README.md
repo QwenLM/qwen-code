@@ -151,6 +151,28 @@ reported on the create/attach HTTP response. Raw `DaemonClient` callers should
 pass `{ lastEventId: 0 }` on their first `subscribeEvents()` call when they use
 `modelServiceId`.
 
+The raw event envelope remains available as `DaemonEvent` with `data: unknown`.
+Adapters that want a v1 typed view can layer the schema helpers on top without
+changing the wire stream:
+
+```typescript
+import {
+  asKnownDaemonEvent,
+  createDaemonSessionViewState,
+  reduceDaemonSessionEvent,
+} from '@qwen-code/sdk';
+
+let view = createDaemonSessionViewState();
+for await (const event of session.events()) {
+  view = reduceDaemonSessionEvent(view, event);
+
+  const known = asKnownDaemonEvent(event);
+  if (known?.type === 'permission_request') {
+    console.log(known.data.requestId);
+  }
+}
+```
+
 ### Message Types
 
 The SDK provides type guards to identify different message types:
@@ -205,7 +227,7 @@ The SDK supports different permission modes for controlling tool execution:
 
 - **`default`**: Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`. Read-only tools execute without confirmation.
 - **`plan`**: Blocks all write tools, instructing AI to present a plan first.
-- **`auto-edit`**: Auto-approve edit tools (edit, write_file) while other tools require confirmation.
+- **`auto-edit`**: Auto-approve edit tools (`edit`, `write_file`, `notebook_edit`) while other tools require confirmation.
 - **`yolo`**: All tools execute automatically without confirmation.
 
 ### Permission Priority Chain

@@ -92,7 +92,6 @@ export interface SlashCommandProcessorActions {
   openSettingsDialog: () => void;
   openStatusLineDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
-  openManageModelsDialog: () => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
@@ -110,6 +109,7 @@ export interface SlashCommandProcessorActions {
   openMcpDialog: () => void;
   openHooksDialog: () => void;
   openRewindSelector: () => void;
+  openDiffDialog: () => void;
   openHelpDialog: () => void;
 }
 
@@ -640,6 +640,12 @@ export const useSlashCommandProcessor = (
                       content: result.content,
                       timestamp: new Date(),
                     });
+                  } else if (result.messageType === 'warning') {
+                    addMessage({
+                      type: MessageType.WARNING,
+                      content: result.content,
+                      timestamp: new Date(),
+                    });
                   } else {
                     addMessage({
                       type: MessageType.ERROR,
@@ -686,9 +692,6 @@ export const useSlashCommandProcessor = (
                     case 'fast-model':
                       actions.openModelDialog({ fastModelMode: true });
                       return { type: 'handled' };
-                    case 'manage-models':
-                      actions.openManageModelsDialog();
-                      return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();
                       return { type: 'handled' };
@@ -734,6 +737,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'rewind':
                       actions.openRewindSelector();
+                      return { type: 'handled' };
+                    case 'diff':
+                      actions.openDiffDialog();
                       return { type: 'handled' };
                     case 'help':
                       actions.openHelpDialog();

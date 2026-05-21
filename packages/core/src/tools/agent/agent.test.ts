@@ -138,6 +138,7 @@ describe('AgentTool', () => {
       getSubagentManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
+      getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
@@ -695,7 +696,13 @@ describe('AgentTool', () => {
       expect(result.returnDisplay).toHaveProperty('status', 'completed');
     });
 
-    it('should not require confirmation', async () => {
+    it("L3 default is 'ask' so AUTO mode routes through the classifier", async () => {
+      // Previously this returned 'allow', but launching a sub-agent
+      // hands control to a new instance with its own tool access — a
+      // privileged sink. The AUTO scheduler short-circuits at L4 when
+      // finalPermission === 'allow', so without this override the
+      // classifier projection added in PR #4151 would never be reached
+      // and arbitrary sub-agent spawns would bypass classifier review.
       const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
@@ -707,7 +714,7 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       const permission = await invocation.getDefaultPermission();
 
-      expect(permission).toBe('allow');
+      expect(permission).toBe('ask');
     });
 
     it('should provide correct description', async () => {
@@ -1296,6 +1303,40 @@ describe('AgentTool', () => {
       await invocation.execute();
 
       expect(mockAgent.execute).toHaveBeenCalledTimes(2);
+    });
+
+    it('uses the configured SubagentStop blocking cap', async () => {
+      (
+        config as unknown as {
+          getStopHookBlockingCap: ReturnType<typeof vi.fn>;
+        }
+      ).getStopHookBlockingCap.mockReturnValue(2);
+      const mockBlockOutput = {
+        isBlockingDecision: vi.fn().mockReturnValue(true),
+        shouldStopExecution: vi.fn().mockReturnValue(false),
+        getEffectiveReason: vi.fn().mockReturnValue('Keep working'),
+      };
+
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue(
+        mockBlockOutput as never,
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(2);
+      expect(mockAgent.execute).toHaveBeenCalledTimes(2);
+      expect(partToString(result.llmContent)).toContain(
+        'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
     });
 
     it('should allow stop when SubagentStop hook fails', async () => {

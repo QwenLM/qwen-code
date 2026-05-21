@@ -39,7 +39,11 @@ import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-contex
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
-import { parseSubagentModelSelection } from './model-selection.js';
+import {
+  buildModelIdContext,
+  resolveModelId,
+  type ResolvedModelId,
+} from '../utils/modelId.js';
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
 import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
@@ -725,10 +729,11 @@ export class SubagentManager {
   }
 
   /**
-   * When a subagent's model selector specifies a model (bare ID or
-   * authType-prefixed), build a dedicated ContentGenerator and the view
-   * the agent runtime should publish via AsyncLocalStorage during the
-   * run. Returns `undefined` for inherit selectors (no override needed).
+   * When a subagent's model selector resolves to a concrete model, build a
+   * dedicated ContentGenerator and the view the agent runtime should publish
+   * via AsyncLocalStorage during the run. Returns `undefined` when no
+   * override is needed — including `inherit`, an unset `fast` selector, or
+   * any selector that fails to resolve to a configured model.
    *
    * FileReadCache isolation and tool-registry rebuilding are handled
    * separately in {@link buildSubagentContextOverride} — every subagent
@@ -739,27 +744,13 @@ export class SubagentManager {
     config: SubagentConfig,
     base: Config,
   ): Promise<RuntimeContentGeneratorView | undefined> {
-    const selection = parseSubagentModelSelection(config.model);
-    if (selection.inherits) {
+    const resolvedModel = this.resolveModelOverride(config.model, base);
+    if (!resolvedModel) {
       return undefined;
     }
 
-    let resolvedModelId = selection.modelId;
-    if (selection.usesFastModel) {
-      // getFastModel() returns the fastModel id only when it's valid for
-      // the current authType; otherwise undefined. Treat undefined as
-      // inherit so an unset or invalid fastModel silently falls back to
-      // the parent session model — matching every other getFastModel()
-      // call site (ForkedAgent, sessionTitle, etc.).
-      const fast = base.getFastModel();
-      if (!fast) {
-        return undefined;
-      }
-      resolvedModelId = fast;
-    }
-
     const authType =
-      selection.authType ?? base.getContentGeneratorConfig().authType;
+      resolvedModel.authType ?? base.getContentGeneratorConfig().authType;
     const authOverrides = {
       authType: authType as string,
     };
@@ -767,7 +758,7 @@ export class SubagentManager {
     const view = await createRuntimeContentGeneratorView(
       base,
       base,
-      resolvedModelId,
+      resolvedModel.modelId,
       authOverrides,
     );
 
@@ -776,6 +767,17 @@ export class SubagentManager {
     );
 
     return view;
+  }
+
+  private resolveModelOverride(
+    model: string | undefined,
+    runtimeContext?: Config,
+  ): ResolvedModelId | undefined {
+    // Omit currentModel so `inherit` resolves to undefined; subagents treat
+    // "inherit / no override" as a signal to skip building a dedicated
+    // ContentGenerator entirely.
+    const context = runtimeContext ? buildModelIdContext(runtimeContext) : {};
+    return resolveModelId(model, { ...context, currentModel: undefined });
   }
 
   /**
@@ -793,16 +795,12 @@ export class SubagentManager {
       systemPrompt: config.systemPrompt,
     };
 
-    const selection = parseSubagentModelSelection(config.model);
-    let resolvedModelId = selection.modelId;
-    if (selection.usesFastModel && runtimeContext) {
-      // Resolve `fast` to the configured fastModel. Undefined here means
-      // either unset or invalid for the current authType — leave modelConfig
-      // empty so the agent inherits the parent model (same as `inherit`).
-      resolvedModelId = runtimeContext.getFastModel();
-    }
+    const resolvedModel = this.resolveModelOverride(
+      config.model,
+      runtimeContext,
+    );
     const modelConfig: ModelConfig = {
-      ...(resolvedModelId ? { model: resolvedModelId } : {}),
+      ...(resolvedModel ? { model: resolvedModel.modelId } : {}),
     };
 
     const runConfig: RunConfig = {

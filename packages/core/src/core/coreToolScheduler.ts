@@ -64,6 +64,18 @@ import {
   isPlanModeBlocked,
   isAutoEditApproved,
 } from './permissionFlow.js';
+import {
+  applyAutoModeDecision,
+  evaluateAutoMode,
+  shouldRunAutoModeForCall,
+} from '../permissions/autoMode.js';
+import { MAX_TRANSCRIPT_MESSAGES } from '../permissions/classifier-transcript.js';
+import {
+  isApproveOutcome,
+  recordAllow,
+  recordFallbackApprove,
+  shouldFallback,
+} from '../permissions/denialTracking.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
@@ -302,6 +314,7 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.GLOB,
   ToolNames.LS,
   ToolNames.LSP,
+  ToolNames.NOTEBOOK_EDIT,
 ]);
 
 function canonicalToolName(toolName: string): string {
@@ -371,6 +384,7 @@ function pushLspPathCandidate(out: string[], v: unknown): void {
  * Per-tool dispatcher because the field name and shape differ:
  *
  *  - read_file / edit / write_file → `file_path`
+ *  - notebook_edit → `notebook_path`
  *  - list_directory → `path` (search root)
  *  - glob → `path` (search root, optional) + `pattern` (path-shaped
  *    selector); `<path>/<pattern>` is the effective glob walked
@@ -490,6 +504,13 @@ export function extractToolFilePaths(
     case ToolNames.READ_FILE:
     case ToolNames.EDIT:
     case ToolNames.WRITE_FILE:
+      push(obj['file_path']);
+      return out;
+
+    case ToolNames.NOTEBOOK_EDIT:
+      push(obj['notebook_path']);
+      return out;
+
     default:
       push(obj['file_path']);
       return out;
@@ -680,7 +701,7 @@ interface ToolBatch {
  */
 function isConcurrencySafe(call: ScheduledToolCall): boolean {
   // Agent tools spawn independent sub-agents with no shared state.
-  if (call.request.name === ToolNames.AGENT) return true;
+  if (canonicalToolName(call.request.name) === ToolNames.AGENT) return true;
   // Shell commands: check if the command is read-only (e.g., git log, cat).
   // Uses the synchronous regex+shell-quote checker (not the async AST-based
   // one) because partitioning runs synchronously. The sync checker covers
@@ -1140,12 +1161,14 @@ export class CoreToolScheduler {
 
       const newToolCalls: ToolCall[] = [];
       for (const reqInfo of requestsToProcess) {
+        const canonicalName = canonicalToolName(reqInfo.name);
+
         // Check if the tool is excluded due to permissions/environment restrictions
         // This check should happen before registry lookup to provide a clear permission error
         const pm = this.config.getPermissionManager?.();
-        if (pm && !(await pm.isToolEnabled(reqInfo.name))) {
+        if (pm && !(await pm.isToolEnabled(canonicalName))) {
           const matchingRule = pm.findMatchingDenyRule({
-            toolName: reqInfo.name,
+            toolName: canonicalName,
           });
           const ruleInfo = matchingRule
             ? ` Matching deny rule: "${matchingRule}".`
@@ -1168,7 +1191,7 @@ export class CoreToolScheduler {
         if (!pm) {
           const excludeTools = this.config.getPermissionsDeny?.() ?? undefined;
           if (excludeTools && excludeTools.length > 0) {
-            const normalizedToolName = reqInfo.name.toLowerCase().trim();
+            const normalizedToolName = canonicalName.toLowerCase().trim();
             const excludedMatch = excludeTools.find(
               (excludedTool) =>
                 excludedTool.toLowerCase().trim() === normalizedToolName,
@@ -1190,7 +1213,7 @@ export class CoreToolScheduler {
           }
         }
 
-        const toolInstance = await this.toolRegistry.ensureTool(reqInfo.name);
+        const toolInstance = await this.toolRegistry.ensureTool(canonicalName);
         if (!toolInstance) {
           // Tool is not in registry and not excluded - likely hallucinated or typo
           const errorMessage = await this.getToolNotFoundMessage(reqInfo.name);
@@ -1289,6 +1312,7 @@ export class CoreToolScheduler {
         }
 
         const { request: reqInfo, invocation } = toolCall;
+        const canonicalName = canonicalToolName(reqInfo.name);
 
         try {
           if (signal.aborted) {
@@ -1309,7 +1333,7 @@ export class CoreToolScheduler {
           const flowResult = await evaluatePermissionFlow(
             this.config,
             invocation,
-            reqInfo.name,
+            canonicalName,
             toolParams,
           );
           const { finalPermission, pmForcedAsk, pmCtx, denyMessage } =
@@ -1318,10 +1342,23 @@ export class CoreToolScheduler {
           // ---- L5: Final decision based on permission + ApprovalMode ----
           const approvalMode = this.config.getApprovalMode();
           const isPlanMode = approvalMode === ApprovalMode.PLAN;
-          const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
+          const isExitPlanModeTool = canonicalName === ToolNames.EXIT_PLAN_MODE;
 
           if (finalPermission === 'allow') {
-            // Auto-approve: tool is inherently safe (read-only) or PM allows
+            // Auto-approve: tool is inherently safe (read-only) or PM allows.
+            // In AUTO mode, also reset denialTracking so an L4 allow-rule
+            // match counts as a successful call and clears any in-flight
+            // block streak. Without this, a session sitting at
+            // consecutiveBlock=3 would keep auto-approving the allow-ruled
+            // call (correct), but the very next call that needed the
+            // classifier would still see shouldFallback==='true' and force
+            // manual approval — confusing UX given the previous allow-rule
+            // call just worked silently.
+            if (approvalMode === ApprovalMode.AUTO) {
+              this.config.setAutoModeDenialState(
+                recordAllow(this.config.getAutoModeDenialState()),
+              );
+            }
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
@@ -1344,15 +1381,87 @@ export class CoreToolScheduler {
             continue;
           }
 
+          // ── L5: AUTO mode three-layer filter ──────────────────────────
+          // Fast-paths run BEFORE the fallback check so safe tools (Read,
+          // Grep, LS, in-cwd Edit, …) short-circuit even in a denial-streak
+          // fallback state — otherwise every trivially safe tool would
+          // force manual approval until the user toggles modes.
+          if (shouldRunAutoModeForCall(approvalMode, canonicalName)) {
+            const denialState = this.config.getAutoModeDenialState();
+            const fallback = shouldFallback(denialState);
+            // `buildClassifierContents` retains only the most recent
+            // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
+            // exactly that tail rather than triggering a
+            // `structuredClone` of the whole session on every non-
+            // fast-path AUTO call.
+            const messages =
+              this.config
+                .getGeminiClient?.()
+                ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            const decision = await evaluateAutoMode({
+              ctx: pmCtx,
+              pmForcedAsk,
+              toolParams,
+              messages,
+              config: this.config,
+              signal,
+              skipClassifier: fallback.fallback,
+            });
+
+            const outcome = applyAutoModeDecision(
+              decision,
+              this.config,
+              denialState,
+            );
+            switch (outcome.kind) {
+              case 'approved':
+                this.setToolCallOutcome(
+                  reqInfo.callId,
+                  ToolConfirmationOutcome.ProceedAlways,
+                );
+                this.setStatusInternal(reqInfo.callId, 'scheduled');
+                continue;
+              case 'blocked':
+                this.setStatusInternal(
+                  reqInfo.callId,
+                  'error',
+                  createErrorResponse(
+                    reqInfo,
+                    new Error(outcome.errorMessage),
+                    ToolErrorType.EXECUTION_DENIED,
+                  ),
+                );
+                continue;
+              case 'fallback':
+                // Drop through to the manual-approval flow below. The
+                // pending dialog tells the user what's being asked;
+                // operators see the cause in the debug log (only when
+                // fallback was specifically armed by denialTracking —
+                // a pmForcedAsk fallback isn't an audit-worthy event).
+                if (fallback.fallback) {
+                  debugLogger.warn(
+                    `Auto mode fallback to manual approval (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                  );
+                }
+                break;
+              default: {
+                const _exhaustive: never = outcome;
+                void _exhaustive;
+              }
+            }
+          }
+
           // finalPermission === 'ask' (or 'default' from PM → treat as ask)
           // apply ApprovalMode overrides.
           // ask_user_question always needs confirmation so the user can answer;
           // it must bypass both YOLO auto-approve and plan-mode blocking.
           const isAskUserQuestionTool =
-            reqInfo.name === ToolNames.ASK_USER_QUESTION;
+            canonicalName === ToolNames.ASK_USER_QUESTION;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
-          if (!needsConfirmation(finalPermission, approvalMode, reqInfo.name)) {
+          if (
+            !needsConfirmation(finalPermission, approvalMode, canonicalName)
+          ) {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
@@ -1431,7 +1540,7 @@ export class CoreToolScheduler {
               const permissionMode = String(this.config.getApprovalMode());
               const hookResult = await firePermissionRequestHook(
                 messageBus,
-                reqInfo.name,
+                canonicalName,
                 (reqInfo.args as Record<string, unknown>) || {},
                 permissionMode,
               );
@@ -1623,6 +1732,23 @@ export class CoreToolScheduler {
     }
 
     this.setToolCallOutcome(callId, outcome);
+
+    // AUTO-mode denialTracking recovery: when the user manually approves a
+    // call that fell back from AUTO (either by streak threshold or by an
+    // explicit ask rule), reset the consecutiveBlock counter so subsequent
+    // calls return to classifier flow. Without this, a session that hit
+    // the denial threshold once would stay in fallback for the rest of
+    // the session even after the user explicitly approves the next call.
+    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
+    // signal that the classifier was correct to block.
+    if (
+      this.config.getApprovalMode() === ApprovalMode.AUTO &&
+      isApproveOutcome(outcome)
+    ) {
+      this.config.setAutoModeDenialState(
+        recordFallbackApprove(this.config.getAutoModeDenialState()),
+      );
+    }
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
       // Use custom cancel message from payload if provided, otherwise use default
@@ -1887,6 +2013,7 @@ export class CoreToolScheduler {
     span: Span,
   ): Promise<void> {
     const { callId, name: toolName } = scheduledCall.request;
+    const canonicalName = canonicalToolName(toolName);
     const invocation = scheduledCall.invocation;
     const toolInput = scheduledCall.request.args as Record<string, unknown>;
 
@@ -1923,7 +2050,7 @@ export class CoreToolScheduler {
       const permissionMode = this.config.getApprovalMode();
       const preHookResult = await firePreToolUseHook(
         messageBus,
-        toolName,
+        canonicalName,
         toolInput,
         toolUseId,
         permissionMode,
@@ -2027,17 +2154,30 @@ export class CoreToolScheduler {
       }
 
       const toolResult: ToolResult = await promise;
+      // A tool that observes signal.aborted and resolves with a normal
+      // ToolResult (no .error field) would otherwise close the execution
+      // sub-span as success while the parent tool span ends as cancelled.
+      // Mirror the abort signal here — and pass `cancelled: true` so the
+      // exec sub-span ends UNSET, matching setToolSpanCancelled on the
+      // parent (#4212, #4302 review).
+      const aborted = signal.aborted;
       endToolExecutionSpan(execSpan, {
-        success: toolResult.error === undefined,
+        success: toolResult.error === undefined && !aborted,
+        error: aborted
+          ? TOOL_SPAN_STATUS_TOOL_CANCELLED
+          : toolResult.error
+            ? TOOL_SPAN_STATUS_TOOL_ERROR
+            : undefined,
+        cancelled: aborted,
       });
-      if (signal.aborted) {
+      if (aborted) {
         // PostToolUseFailure Hook
         let cancelMessage = 'User cancelled tool execution.';
         if (hooksEnabled && messageBus) {
           const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
-            toolName,
+            canonicalName,
             toolInput,
             cancelMessage,
             true,
@@ -2074,7 +2214,7 @@ export class CoreToolScheduler {
           const permissionMode = this.config.getApprovalMode();
           const postHookResult = await firePostToolUseHook(
             messageBus,
-            toolName,
+            canonicalName,
             toolInput,
             toolResponse,
             toolUseId,
@@ -2241,7 +2381,7 @@ export class CoreToolScheduler {
           const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
-            toolName,
+            canonicalName,
             toolInput,
             toolResult.error.message,
             false,
@@ -2282,22 +2422,25 @@ export class CoreToolScheduler {
       // Distinguish user cancellation from real tool exceptions on the
       // execution sub-span so trace backends filtering for errors do not
       // see false positives. Both are still success: false; only the
-      // sanitized error message differs.
+      // sanitized error message and (for cancellation) the UNSET status
+      // differ.
+      const aborted = signal.aborted;
       endToolExecutionSpan(execSpan, {
         success: false,
-        error: signal.aborted
+        error: aborted
           ? TOOL_SPAN_STATUS_TOOL_CANCELLED
           : TOOL_SPAN_STATUS_TOOL_EXCEPTION,
+        cancelled: aborted,
       });
 
-      if (signal.aborted) {
+      if (aborted) {
         // PostToolUseFailure Hook (user interrupt)
         let cancelMessage = 'User cancelled tool execution.';
         if (hooksEnabled && messageBus) {
           const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
-            toolName,
+            canonicalName,
             toolInput,
             cancelMessage,
             true,
@@ -2325,7 +2468,7 @@ export class CoreToolScheduler {
           const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
-            toolName,
+            canonicalName,
             toolInput,
             errorMessage,
             false,

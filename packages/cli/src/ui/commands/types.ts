@@ -131,7 +131,7 @@ export interface QuitActionReturn {
  */
 export interface MessageActionReturn {
   type: 'message';
-  messageType: 'info' | 'error';
+  messageType: 'info' | 'warning' | 'error';
   content: string;
 }
 
@@ -142,7 +142,7 @@ export interface MessageActionReturn {
 export interface StreamMessagesActionReturn {
   type: 'stream_messages';
   messages: AsyncGenerator<
-    { messageType: 'info' | 'error'; content: string },
+    { messageType: 'info' | 'warning' | 'error'; content: string },
     void,
     unknown
   >;
@@ -177,7 +177,6 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
-    | 'manage-models'
     | 'subagent_create'
     | 'subagent_list'
     | 'trust'
@@ -189,7 +188,8 @@ export interface OpenDialogActionReturn {
     | 'extensions_manage'
     | 'hooks'
     | 'mcp'
-    | 'rewind';
+    | 'rewind'
+    | 'diff';
 }
 
 /**
@@ -361,6 +361,12 @@ export interface SlashCommand {
    * Example: "<model-id>" / "show|list|set <id>"
    */
   argumentHint?: string;
+
+  /**
+   * Whether command-picker clients should wait for additional user input before
+   * submitting this command. Defaults are inferred from command metadata.
+   */
+  acceptsInput?: boolean;
 
   /**
    * Describes when to use this command — injected into the model-visible

@@ -14,11 +14,9 @@ const debugLogger = createDebugLogger('GOAL_JUDGE');
 /**
  * System prompt for the goal-completion judge.
  *
- * Wording is aligned with Claude Code 2.1.140's `Stop` prompt-hook evaluator
- * (function `cRK` in the compiled binary): it forces the judge to ground its
- * verdict on transcript evidence and to default to "not met" whenever the
- * evidence is ambiguous. The strict JSON shape lets us pair this with the
- * model's structured-output mode below.
+ * The judge grounds its verdict on transcript evidence and defaults to "not
+ * met" whenever the evidence is ambiguous. The strict JSON shape lets us pair
+ * this with the model's structured-output mode below.
  */
 const JUDGE_SYSTEM_PROMPT = `You are evaluating a stop-condition hook in an autonomous coding agent.
 Read the conversation transcript above carefully, then judge whether the
@@ -27,14 +25,22 @@ user-provided condition is satisfied.
 Your response MUST be a JSON object with one of these shapes:
 - {"ok": true, "reason": "<quote evidence from the transcript that satisfies the condition>"}
 - {"ok": false, "reason": "<quote what is missing or what blocks the condition>"}
+- {"ok": false, "impossible": true, "reason": "<explain why the condition can never be satisfied>"}
 
 Always include a "reason" field, quoting specific text from the transcript
 whenever possible. If the transcript does not contain clear evidence that the
-condition is satisfied, return {"ok": false, "reason": "insufficient evidence in transcript"}.`;
+condition is satisfied, return {"ok": false, "reason": "insufficient evidence in transcript"}.
+Only use {"ok": false, "impossible": true} when the condition is genuinely
+unachievable in this session: for example, it is self-contradictory, depends on
+an unavailable resource or capability, or the assistant has exhausted reasonable
+approaches and the transcript confirms there is no path forward. The assistant
+claiming the goal is impossible is evidence, not proof; independently confirm
+the condition is genuinely unachievable rather than deferring to the assistant's
+self-assessment. Do not use it just because progress is slow or evidence is
+currently missing. When in doubt, return {"ok": false} without "impossible".`;
 
 /**
- * Wraps the raw user condition into a transcript-grounded question, matching
- * Claude Code's `Based on the conversation transcript above...` framing so the
+ * Wraps the raw user condition into a transcript-grounded question so the
  * model sees the condition as a binary judgement task, not a new directive.
  */
 const userJudgementPrompt = (condition: string): string =>
@@ -42,21 +48,50 @@ const userJudgementPrompt = (condition: string): string =>
   `condition been satisfied? Answer based on transcript evidence only.\n` +
   `Condition JSON string: ${JSON.stringify(condition)}`;
 
-const RESPONSE_SCHEMA: Schema = {
+export interface JudgeResult {
+  ok: boolean;
+  reason: string;
+  /**
+   * Whether the goal is genuinely impossible in this session.
+   * Only meaningful when `ok` is false. If `ok` is true, this field is always
+   * absent from the parsed verdict.
+   */
+  impossible?: boolean;
+}
+
+export const JUDGE_RESULT_SCHEMA_KEYS = [
+  'ok',
+  'reason',
+  'impossible',
+] as const satisfies ReadonlyArray<keyof JudgeResult>;
+
+type SchemaCoversJudgeResult =
+  Exclude<
+    keyof JudgeResult,
+    (typeof JUDGE_RESULT_SCHEMA_KEYS)[number]
+  > extends never
+    ? true
+    : never;
+
+// Compile-time only: fails if JudgeResult grows a key that the response schema
+// key list does not include.
+const JUDGE_RESULT_SCHEMA_COVERS_INTERFACE: SchemaCoversJudgeResult = true;
+void JUDGE_RESULT_SCHEMA_COVERS_INTERFACE;
+
+const RESPONSE_SCHEMA: Schema & { additionalProperties: boolean } = {
   // Schema typing in @google/genai uses an enum-like Type, but accepts the
   // lower-cased literals at runtime for the upstream JSON-schema payload.
+  // `additionalProperties` is also accepted by the API but absent from the SDK
+  // type, so we keep the local intersection explicit.
   type: 'OBJECT' as unknown as Schema['type'],
   properties: {
     ok: { type: 'BOOLEAN' as unknown as Schema['type'] },
     reason: { type: 'STRING' as unknown as Schema['type'] },
+    impossible: { type: 'BOOLEAN' as unknown as Schema['type'] },
   },
   required: ['ok', 'reason'],
+  additionalProperties: false,
 };
-
-export interface JudgeResult {
-  ok: boolean;
-  reason: string;
-}
 
 const JUDGE_REASON_FALLBACK =
   'Goal judge unavailable; continue working toward the goal and run `/goal clear` to stop early.';
@@ -110,9 +145,9 @@ export async function judgeGoal(
   if (args.signal.aborted) return { ok: false, reason: JUDGE_REASON_FALLBACK };
 
   // Feed the conversation transcript (trailing N messages) plus the framed
-  // judgement prompt — Claude Code's design. The hook input's
-  // `last_assistant_message` is appended only when the live history doesn't
-  // yet contain it (e.g. before the model turn is committed to chat).
+  // judgement prompt. The hook input's `last_assistant_message` is appended
+  // only when the live history doesn't yet contain it (e.g. before the model
+  // turn is committed to chat).
   const transcript = collectTranscript(config, args.lastAssistantText);
   transcript.push({
     role: 'user',
@@ -130,9 +165,8 @@ export async function judgeGoal(
         temperature: 0,
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
-        // Disable extended thinking — the judge is a binary check; thinking
-        // burns latency and tokens for no quality gain. Matches Claude Code's
-        // `thinkingConfig: { type: "disabled" }` for the same call.
+        // Disable extended thinking: the judge is a binary check, and
+        // thinking burns latency and tokens for no quality gain.
         thinkingConfig: { thinkingBudget: 0 },
       },
       args.signal,
@@ -332,7 +366,12 @@ function parseJudgeReply(text: string): JudgeResult | null {
       : ok
         ? 'Goal condition reported as met.'
         : JUDGE_REASON_FALLBACK;
-  return { ok, reason: reasonText };
+  const impossible = (payload as { impossible?: unknown }).impossible === true;
+  return {
+    ok,
+    reason: reasonText,
+    ...(impossible && !ok ? { impossible: true } : {}),
+  };
 }
 
 function stripCodeFence(s: string): string {

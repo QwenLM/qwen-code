@@ -254,6 +254,10 @@ export interface QueryOptions {
    * - 'plan': Blocks all write tools, instructing AI to present a plan first.
    *   Read-only tools execute normally.
    * - 'auto-edit': Auto-approve edit tools (edit, write_file) while other tools require confirmation.
+   * - 'auto': An LLM classifier evaluates each tool call and auto-approves
+   *   safe ones / blocks risky ones. Fail-closed: classifier outages route
+   *   the call to manual approval. Best for long autonomous sessions in
+   *   trusted projects. See `docs/users/features/auto-mode.md`.
    * - 'yolo': All tools execute automatically without confirmation.
    *
    * **Priority Chain (highest to lowest):**
@@ -261,15 +265,16 @@ export interface QueryOptions {
    * 2. `permissionMode: 'plan'` - Blocks non-read-only tools (except exit_plan_mode)
    * 3. `permissionMode: 'yolo'` - Auto-approves all tools
    * 4. `allowedTools` - Auto-approves matching tools
-   * 5. `canUseTool` callback - Custom approval logic
-   * 6. Default behavior - Auto-deny in SDK mode
+   * 5. `permissionMode: 'auto'` - Classifier-mediated approval for the rest
+   * 6. `canUseTool` callback - Custom approval logic
+   * 7. Default behavior - Auto-deny in SDK mode
    *
    * @default 'default'
    * @see canUseTool For custom permission handling
    * @see allowedTools For auto-approving specific tools
    * @see excludeTools For blocking specific tools
    */
-  permissionMode?: 'default' | 'plan' | 'auto-edit' | 'yolo';
+  permissionMode?: 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
 
   /**
    * Custom permission handler for tool execution approval.

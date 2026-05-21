@@ -52,12 +52,29 @@ const goalInstructionPrompt = (condition: string): string =>
 
 const formatTurns = (n: number) => `${n} ${n === 1 ? 'turn' : 'turns'}`;
 
+function assertNeverGoalKind(kind: never): never {
+  throw new Error(`Unexpected terminal goal kind: ${kind}`);
+}
+
+function terminalGoalTitle(kind: GoalTerminalEvent['kind']): string {
+  switch (kind) {
+    case 'achieved':
+      return 'Goal achieved';
+    case 'failed':
+      return 'Goal could not be achieved';
+    case 'aborted':
+      return 'Goal aborted';
+    default:
+      return assertNeverGoalKind(kind);
+  }
+}
+
 function formatTerminalSummary(event: GoalTerminalEvent): string {
   // Mirrors GoalStatusMessage: empty-`/goal` after completion surfaces the
   // most recent terminal event, including the judge's `lastReason` (when
-  // present) so this view matches the inline `Goal achieved / aborted`
+  // present) so this view matches the inline terminal
   // history card.
-  const title = event.kind === 'achieved' ? 'Goal achieved' : 'Goal aborted';
+  const title = terminalGoalTitle(event.kind);
   const stats: string[] = [];
   if (event.iterations > 0) stats.push(formatTurns(event.iterations));
   if (typeof event.durationMs === 'number')
@@ -83,7 +100,7 @@ export const goalCommand: SlashCommand = {
   },
   argumentHint: '[<condition> | clear]',
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive'] as const,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     args: string,
@@ -110,11 +127,9 @@ export const goalCommand: SlashCommand = {
           `Goal active: ${active.condition} (${turns})${lastReason}`,
         );
       }
-      // No active goal — surface a summary of the most recent terminal goal
-      // for this session, matching Claude Code's behavior of rendering the
-      // "Goal achieved" card on empty /goal after completion. Only achieved /
-      // aborted entries flow through `getLastGoalTerminal`; user-initiated
-      // `/goal clear` does not populate it.
+      // No active goal — surface a summary of the most recent automatic
+      // terminal goal for this session. User-initiated `/goal clear` does not
+      // populate it.
       const last = getLastGoalTerminal(sessionId);
       if (last) {
         return infoMessage(formatTerminalSummary(last));
@@ -126,14 +141,10 @@ export const goalCommand: SlashCommand = {
 
     // ── Branch 2: clear keyword ──────────────────────────────────────────
     //
-    // Strict alignment with Claude Code 2.1.140 `woH`: when an active goal
-    // exists, drop the Stop hook + emit a `cleared` history sentinel; when
-    // no active goal exists, this is a no-op that just returns "No goal
-    // set". Claude does NOT wipe the cached "Goal achieved" summary on
-    // clear — subsequent empty `/goal` may still surface the most recent
-    // achievement via `findLastTerminalGoal`. That's intentional: the
-    // `cleared` history item is a sentinel `findLastTerminalGoal` skips,
-    // and the previous non-sentinel achievement remains visible.
+    // When an active goal exists, drop the Stop hook and emit a `cleared`
+    // history sentinel. When no active goal exists, this is a no-op that just
+    // returns "No goal set." The cached terminal summary is left intact so a
+    // later empty `/goal` can still show the latest automatic terminal state.
     if (CLEAR_KEYWORDS.has(q.toLowerCase())) {
       const cleared = unregisterGoalHook(config, sessionId);
       if (!cleared) {
@@ -147,6 +158,9 @@ export const goalCommand: SlashCommand = {
         durationMs: Date.now() - cleared.setAt,
       };
       context.ui.addItem(clearedItem, Date.now());
+      if (context.executionMode !== 'interactive') {
+        return infoMessage(`Goal cleared: ${cleared.condition}`);
+      }
       return;
     }
 

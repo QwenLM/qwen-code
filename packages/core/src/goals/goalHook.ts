@@ -33,20 +33,17 @@ const debugLogger = createDebugLogger('GOAL_HOOK');
  */
 export const MAX_GOAL_ITERATIONS = 50;
 
-/**
- * Default budget (seconds) for a single goal-judge LLM call. Mirrors Claude
- * Code 2.1.140's prompt-hook default of 30s (see `cRK` in the binary, which
- * reads `H.timeout ? H.timeout * 1000 : 30000`).
- *
- * Why this matters in qwen-code specifically: the `FunctionHookRunner` default
- * is 5s, and a real-world session log showed the judge call against a 5K-token
- * context taking ~9.9s — well past 5s but comfortably under 30s. Without
- * passing this through, the hook is killed mid-flight, no `continue:false` is
- * emitted, and the `/goal` loop silently dies after the second turn.
- */
+/** Default budget (seconds) for a single goal-judge LLM call. */
 export const GOAL_JUDGE_TIMEOUT_MS = 25_000;
 export const GOAL_HOOK_TIMEOUT_SECONDS = 30;
 export const GOAL_HOOK_TIMEOUT_MS = GOAL_HOOK_TIMEOUT_SECONDS * 1000;
+/**
+ * Minimum /goal iteration count before accepting an `impossible` judge verdict.
+ * Gives the model at least one continuation turn after the judge first flags
+ * impossibility, reducing premature failure from a single bad-judgment turn.
+ * The goal can terminate as failed on the second impossible verdict.
+ */
+export const MIN_IMPOSSIBLE_GOAL_ITERATIONS = 2;
 
 const GOAL_ABORTED_REASON =
   'Goal max iterations reached; cleared. Re-set with `/goal <condition>` if you still need it.';
@@ -120,6 +117,25 @@ function finishGoal(
   clearGoalTerminalObserver(sessionId);
 }
 
+export function abortGoalForStopHookCap(
+  config: Config,
+  sessionId: string,
+  systemMessage: string,
+): boolean {
+  const goal = getActiveGoal(sessionId);
+  if (!goal) return false;
+
+  finishGoal(config, sessionId, goal, {
+    kind: 'aborted',
+    condition: goal.condition,
+    iterations: goal.iterations,
+    durationMs: Date.now() - goal.setAt,
+    lastReason: goal.lastReason,
+    systemMessage,
+  });
+  return true;
+}
+
 /**
  * Builds the Function hook callback that, on every Stop event, asks a fast
  * model whether the goal condition holds.
@@ -175,6 +191,29 @@ export function createGoalStopHookCallback(args: {
       return { continue: true };
     }
 
+    if (
+      verdict.impossible &&
+      latest.iterations >= MIN_IMPOSSIBLE_GOAL_ITERATIONS
+    ) {
+      debugLogger.debug('Goal judge ruled impossible; clearing goal.', {
+        reason: verdict.reason,
+        iterations: latest.iterations,
+      });
+      finishGoal(config, sessionId, latest, {
+        kind: 'failed',
+        condition: latest.condition,
+        iterations: latest.iterations,
+        durationMs: Date.now() - latest.setAt,
+        lastReason: verdict.reason,
+      });
+      return { continue: true };
+    }
+    if (verdict.impossible) {
+      debugLogger.debug(
+        `Impossible goal verdict suppressed: iterations=${latest.iterations} < MIN_IMPOSSIBLE_GOAL_ITERATIONS=${MIN_IMPOSSIBLE_GOAL_ITERATIONS}; continuing.`,
+      );
+    }
+
     // Give the latest assistant output one final evaluation before aborting.
     // The iteration cap is a safety valve for still-not-met verdicts, not a
     // pre-judge hard stop; otherwise the final generated turn could satisfy
@@ -200,9 +239,12 @@ export function createGoalStopHookCallback(args: {
     recordGoalIteration(sessionId, verdict.reason);
     // Keep the judge's free-form diagnostic in goal state/UI only. The Stop
     // hook reason is fed back to the model as the next continuation prompt, so
-    // it must be a fixed instruction derived from the original user goal rather
-    // than untrusted transcript-derived judge text.
-    return { decision: 'block', reason: continuationReasonForGoal(condition) };
+    // it must be fixed text derived from the original goal rather than
+    // untrusted transcript-derived judge text.
+    return {
+      decision: 'block',
+      reason: continuationReasonForGoal(condition),
+    };
   };
 }
 

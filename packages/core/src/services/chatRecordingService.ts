@@ -222,7 +222,7 @@ export interface ChatRecord {
    * (e.g., chat compression checkpoints) while keeping the original UI history intact.
    */
   type: 'user' | 'assistant' | 'tool_result' | 'system';
-  /** Optional system subtype for distinguishing system behaviors */
+  /** Optional subtype for distinguishing non-standard records */
   subtype?:
     | 'chat_compression'
     | 'slash_command'
@@ -231,6 +231,7 @@ export interface ChatRecord {
     | 'attribution_snapshot'
     | 'notification'
     | 'cron'
+    | 'mid_turn_user_message'
     | 'custom_title'
     | 'rewind'
     | 'agent_bootstrap'
@@ -267,8 +268,9 @@ export interface ChatRecord {
   toolCallResult?: Partial<ToolCallResponseInfo>;
 
   /**
-   * Payload for system records. For chat compression, this stores all data needed
-   * to reconstruct the compressed history without mutating the original UI list.
+   * Payload for records that need non-API metadata. For chat compression, this
+   * stores all data needed to reconstruct the compressed history without
+   * mutating the original UI list.
    */
   systemPayload?:
     | ChatCompressionRecordPayload
@@ -825,6 +827,29 @@ export class ChatRecordingService {
   }
 
   /**
+   * Records a user message drained while tool results are being submitted.
+   *
+   * The model sees these as extra user-role parts in the same API Content as
+   * tool results. Keeping a distinct subtype lets resume reconstruct that shape
+   * instead of replaying consecutive user-role entries.
+   */
+  recordMidTurnUserMessage(message: PartListUnion, displayText?: string): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('user'),
+        subtype: 'mid_turn_user_message',
+        message: createUserContent(message),
+        systemPayload: displayText
+          ? ({ displayText } as NotificationRecordPayload)
+          : undefined,
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving mid-turn user message:', error);
+    }
+  }
+
+  /**
    * Records a cron-fired prompt.
    * Stored as a user-role message with subtype 'cron' so the UI
    * restores it as a notification item instead of a user turn.
@@ -928,11 +953,10 @@ export class ChatRecordingService {
     // Headless/one-shot CLI flows (`qwen -p "…"`, cron, CI scripts) run a
     // single prompt and throw the session away. Spending fast-model tokens
     // on a title no one will ever resume is pure waste; skip entirely.
-    // Checked before `getFastModelForSideQuery()` because it's strictly
-    // cheaper (a bool field read vs. a method that looks up available models).
+    // Checked before `getFastModel()` because it's strictly cheaper (a bool
+    // field read vs. a method that looks up available models).
     if (!this.config.isInteractive()) return;
-    const fastModel =
-      this.config.getFastModelForSideQuery?.() ?? this.config.getFastModel();
+    const fastModel = this.config.getFastModel();
     if (!fastModel) return;
 
     this.autoTitleAttempts++;
@@ -1153,7 +1177,8 @@ export class ChatRecordingService {
       if (
         record.type === 'user' &&
         record.subtype !== 'notification' &&
-        record.subtype !== 'cron'
+        record.subtype !== 'cron' &&
+        record.subtype !== 'mid_turn_user_message'
       ) {
         this.turnParentUuids.push(prevUuid);
       }
