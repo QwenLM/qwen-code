@@ -1242,11 +1242,22 @@ export class GitWorktreeService {
       // through to the generic "PR may not exist" branch even for
       // well-known cases like missing-origin. The git binary itself is
       // unaffected by LANG/LC_ALL beyond message strings.
-      await execFileAsync('git', ['fetch', 'origin', `pull/${prNumber}/head`], {
-        cwd: this.sourceRepoPath,
-        timeout: timeoutMs,
-        env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
-      });
+      //
+      // `--end-of-options` defends against second-order command injection
+      // (git's own `--upload-pack` flag) flagged by CodeQL — even though
+      // `prNumber` is already constrained to a safe positive integer by
+      // the entry guard above, the marker tells git definitively that
+      // every subsequent argv element is a positional, not a flag, and
+      // satisfies the analyzer without runtime cost.
+      await execFileAsync(
+        'git',
+        ['fetch', '--end-of-options', 'origin', `pull/${prNumber}/head`],
+        {
+          cwd: this.sourceRepoPath,
+          timeout: timeoutMs,
+          env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
+        },
+      );
       return { success: true };
     } catch (error) {
       // execFile reports timeouts via `signal: 'SIGTERM'` on the
