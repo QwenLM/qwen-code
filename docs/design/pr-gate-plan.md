@@ -71,7 +71,7 @@ pr-body:
   name: 'PR Template'
   runs-on: ubuntu-latest
   steps:
-    - uses: actions/github-script@v7
+    - uses: actions/github-script@v9
       with:
         script: |
           const body = context.payload.pull_request.body || '';
@@ -125,7 +125,7 @@ pr-size:
   name: 'PR Size'
   runs-on: ubuntu-latest
   steps:
-    - uses: actions/github-script@v7
+    - uses: actions/github-script@v9
       with:
         script: |
           const { data: files } = await github.rest.pulls.listFiles({
@@ -273,7 +273,7 @@ pr-label:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
 
     # do-not-merge label 阻止合并
-    - uses: actions/github-script@v7
+    - uses: actions/github-script@v9
       with:
         script: |
           const labels = context.payload.pull_request.labels.map(l => l.name);

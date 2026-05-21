@@ -1,8 +1,12 @@
-# Code Review 自动化设计（Phase 1-3）
+# Code Review 自动化设计（Phase 1-3 历史背景）
 
-> 本文档只覆盖本 PR 实际交付的 **Phase 1-3**（bundled action 切换、增量评审 cache wiring、本设计文档）。
-> Design Gate / 历史 PR 感知 / Feature Readiness / Override / 轮次抑制 / GitHub App 等属于 Phase 4-7，
-> 设计与实现随对应 PR 一起提交，后续阶段的路线在本 PR 描述中说明。
+> **当前状态**：本文档保留早期 Phase 1-3 的历史设计背景，不再描述
+> `codex/preflight-triage` 分支的当前实现。当前 PR 的实际实现以
+> [`preflight-triage.md`](./preflight-triage.md) 和
+> `.github/workflows/qwen-code-pr-review.yml` 为准：review workflow 已改为
+> preflight tier 路由，LIGHT / STANDARD / DEEP 都是 tool-free 的单发
+> qwen review 路径；早期 bundled `/review` / cross-run review-cache 方案没有在
+> 当前 PR 中继续落地。
 
 ## 问题陈述
 
