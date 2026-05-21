@@ -77,6 +77,19 @@ const DaemonActionsContext = createContext<DaemonUiSessionActions | undefined>(
 );
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const TERMINAL_SESSION_HTTP_STATUSES = new Set([401, 403, 404, 410]);
+/**
+ * Subset of TERMINAL_SESSION_HTTP_STATUSES that represent **credential
+ * failures** (vs session-not-found 404/410). Auth failures should NOT enter
+ * the reconnect loop even when `autoReconnect: true` — retrying with the
+ * same bad token loops forever, hammering the server with bad credentials
+ * and wiping the user's transcript on each cycle (the sessionId-change
+ * `store.reset()` path at line 143 fires when each fresh attempt produces a
+ * different sessionId).
+ *
+ * 404/410 (session-not-found) keep the reconnect-then-recreate behavior —
+ * those are recoverable by creating a fresh session.
+ */
+const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
 
 export function DaemonSessionProvider({
   baseUrl,
@@ -197,6 +210,21 @@ export function DaemonSessionProvider({
           if (terminalSessionError) {
             session = undefined;
             sessionRef.current = undefined;
+          }
+          // Auth failures (401 / 403) must NOT retry even when
+          // `autoReconnect: true`. Retrying with the same invalid token
+          // loops forever — the daemon keeps returning 401, each cycle
+          // wipes the user's transcript (via the sessionId-change branch
+          // in line 143), and the user sees no actionable error state.
+          // Surface as a terminal 'error' connection state regardless of
+          // the autoReconnect setting; the user must update credentials.
+          if (isAuthFailureHttpError(error)) {
+            sessionRef.current = undefined;
+            setConnection({
+              status: 'error',
+              error: message,
+            });
+            return;
           }
           if (!autoReconnect) {
             sessionRef.current = undefined;
@@ -476,13 +504,21 @@ function isAbortError(error: unknown): boolean {
 }
 
 function isTerminalSessionHttpError(error: unknown): boolean {
-  const status =
-    error instanceof DaemonHttpError
-      ? error.status
-      : isRecord(error) && typeof error['status'] === 'number'
-        ? error['status']
-        : undefined;
+  const status = extractHttpStatus(error);
   return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
+}
+
+function isAuthFailureHttpError(error: unknown): boolean {
+  const status = extractHttpStatus(error);
+  return status !== undefined && AUTH_FAILURE_HTTP_STATUSES.has(status);
+}
+
+function extractHttpStatus(error: unknown): number | undefined {
+  if (error instanceof DaemonHttpError) return error.status;
+  if (isRecord(error) && typeof error['status'] === 'number') {
+    return error['status'];
+  }
+  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

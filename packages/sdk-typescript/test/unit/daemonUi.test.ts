@@ -1223,4 +1223,65 @@ describe('daemon UI normalizer and transcript reducer', () => {
       ],
     });
   });
+
+  it('redacts sensitive fields in tool.update rawInput and rawOutput at normalizer boundary (wenshao CRIT #2)', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 't-secret',
+          title: 'Run curl',
+          status: 'completed',
+          name: 'Bash',
+          rawInput: {
+            command: 'curl https://api.example.com',
+            apiKey: 'sk-prod-do-not-leak',
+            headers: { Authorization: 'Bearer secret-do-not-leak' },
+          },
+          rawOutput: {
+            text: 'OK',
+            token: 'returned-secret-do-not-leak',
+          },
+        },
+      },
+    } as never);
+    const event = events[0] as Extract<DaemonUiEvent, { type: 'tool.update' }>;
+
+    expect(event.type).toBe('tool.update');
+    expect(event.rawInput).toBeDefined();
+    expect(event.rawOutput).toBeDefined();
+
+    // Full-event string scan: no secret value can survive end-to-end.
+    // Previously these leaked into `rawInput` / `rawOutput`, exposing them
+    // to any UI component that JSON.stringify-ed the event or rendered
+    // those fields in a debug panel.
+    const serialized = JSON.stringify(event);
+    expect(serialized).not.toContain('sk-prod-do-not-leak');
+    expect(serialized).not.toContain('Bearer secret-do-not-leak');
+    expect(serialized).not.toContain('returned-secret-do-not-leak');
+
+    // Structural keys preserved; only sensitive VALUES are redacted.
+    expect((event.rawInput as Record<string, unknown>).apiKey).toBe(
+      '[redacted]',
+    );
+    expect(
+      (
+        (event.rawInput as Record<string, unknown>).headers as Record<
+          string,
+          unknown
+        >
+      ).Authorization,
+    ).toBe('[redacted]');
+    expect((event.rawOutput as Record<string, unknown>).token).toBe(
+      '[redacted]',
+    );
+    // Non-sensitive fields survive verbatim.
+    expect((event.rawInput as Record<string, unknown>).command).toBe(
+      'curl https://api.example.com',
+    );
+    expect((event.rawOutput as Record<string, unknown>).text).toBe('OK');
+  });
 });

@@ -240,8 +240,27 @@ function normalizeToolUpdate(
     (metadata ? getString(metadata, 'name') : undefined);
   const toolKind = getString(update, 'kind');
   const title = getString(update, 'title') ?? toolName ?? toolKind;
-  const rawInput = update['rawInput'] ?? update['input'] ?? update['args'];
-  const rawOutput = update['rawOutput'] ?? update['output'] ?? update['result'];
+  const rawInputSource =
+    update['rawInput'] ?? update['input'] ?? update['args'];
+  const rawOutputSource =
+    update['rawOutput'] ?? update['output'] ?? update['result'];
+  // Redact sensitive fields (apiKey / token / password / etc.) at the
+  // normalizer boundary so the raw values never reach the UI layer. The
+  // pre-redaction shape goes into `details` / `getOutputText` already, but
+  // `rawInput` / `rawOutput` are also forwarded verbatim onto the
+  // `DaemonToolTranscriptBlock` and any UI component that renders them
+  // (e.g., ShellToolCall, WriteToolCall, JSON debug panels) would expose
+  // the unredacted secret. Redact ONCE here so downstream is uniformly
+  // safe; the `details` / `getOutputText` paths below reuse the same
+  // redacted shape, avoiding redundant traversal.
+  const rawInput =
+    rawInputSource !== undefined
+      ? redactSensitiveFields(rawInputSource)
+      : undefined;
+  const rawOutput =
+    rawOutputSource !== undefined
+      ? redactSensitiveFields(rawOutputSource)
+      : undefined;
   const content = update['content'];
   const locations = update['locations'];
   const toolCallId = getString(update, 'toolCallId');
@@ -267,13 +286,9 @@ function normalizeToolUpdate(
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(rawInput !== undefined
-      ? { details: capDetails(stringifyRedactedJson(rawInput)) }
+      ? { details: capDetails(stringifyJson(rawInput)) }
       : rawOutput !== undefined
-        ? {
-            details: capDetails(
-              getOutputText(redactSensitiveFields(rawOutput)),
-            ),
-          }
+        ? { details: capDetails(getOutputText(rawOutput)) }
         : {}),
   };
 }
