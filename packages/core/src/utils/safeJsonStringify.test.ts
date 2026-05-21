@@ -70,4 +70,63 @@ describe('safeJsonStringify', () => {
     expect(safeJsonStringify(42)).toBe('42');
     expect(safeJsonStringify(true)).toBe('true');
   });
+
+  it('should preserve duplicate sibling references as full copies', () => {
+    // The same object referenced from two sibling properties is not a cycle:
+    // both branches must serialize in full, matching native JSON.stringify.
+    const shared = { name: 'shared', n: 1 };
+    const obj = { a: shared, b: shared };
+
+    const result = safeJsonStringify(obj);
+    expect(result).toBe(
+      '{"a":{"name":"shared","n":1},"b":{"name":"shared","n":1}}',
+    );
+    expect(result).not.toContain('[Circular]');
+  });
+
+  it('should preserve duplicate references repeated in an array', () => {
+    const shared = { id: 1 };
+    const arr = [shared, shared, shared];
+
+    const result = safeJsonStringify(arr);
+    expect(result).toBe('[{"id":1},{"id":1},{"id":1}]');
+    expect(result).not.toContain('[Circular]');
+  });
+
+  it('should preserve a shared leaf appearing on multiple branches', () => {
+    const leaf = { kind: 'leaf' };
+    const tree = { left: { sub: leaf }, right: { sub: leaf } };
+
+    const result = safeJsonStringify(tree);
+    expect(result).toBe(
+      '{"left":{"sub":{"kind":"leaf"}},"right":{"sub":{"kind":"leaf"}}}',
+    );
+    expect(result).not.toContain('[Circular]');
+  });
+
+  it('should detect indirect cycles via an intermediate object', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parent: any = { name: 'parent' };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const child: any = { name: 'child' };
+    parent.child = child;
+    child.parent = parent;
+
+    const result = safeJsonStringify(parent);
+    expect(result).toBe(
+      '{"name":"parent","child":{"name":"child","parent":"[Circular]"}}',
+    );
+  });
+
+  it('should preserve a shared subtree alongside a real cycle', () => {
+    const shared = { tag: 'shared' };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const root: any = { a: shared, b: shared };
+    root.self = root;
+
+    const result = safeJsonStringify(root);
+    expect(result).toBe(
+      '{"a":{"tag":"shared"},"b":{"tag":"shared"},"self":"[Circular]"}',
+    );
+  });
 });
