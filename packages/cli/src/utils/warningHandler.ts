@@ -65,8 +65,6 @@ export function resetWarningHandlerForTests(): void {
 export function initializeWarningHandler(): void {
   if (installedHandler) return;
 
-  const debug = isDebugMode();
-
   // Snapshot everything currently listening on 'warning' (Node's default
   // onWarning printer + any external telemetry subscribers). We will fan
   // out non-suppressed warnings back to them.
@@ -75,7 +73,11 @@ export function initializeWarningHandler(): void {
   >;
 
   installedHandler = (warning: Error) => {
-    if (!debug && isSuppressed(warning)) return;
+    // Evaluate isDebugMode() per warning so DEBUG / QWEN_DEBUG can be
+    // toggled at runtime (e.g. via a `/debug` slash command) without
+    // re-running initializeWarningHandler. Warnings are rare; the cost is
+    // a couple of env lookups.
+    if (!isDebugMode() && isSuppressed(warning)) return;
     for (const fn of priorListeners) {
       try {
         fn(warning);

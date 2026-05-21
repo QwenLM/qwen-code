@@ -134,8 +134,10 @@ export function combineAbortSignals(
     cleanups.push(() => sourceSignal.removeEventListener('abort', handler));
   }
 
+  // Skip timeout if the loop already aborted the controller — its cleanup
+  // wouldn't fire via the post-loop auto-cleanup path below.
   const timeoutMs = options?.timeoutMs;
-  if (timeoutMs !== undefined && timeoutMs > 0) {
+  if (timeoutMs !== undefined && timeoutMs > 0 && !controller.signal.aborted) {
     const timeoutId = setTimeout(() => {
       controller.abort(new DOMException('Operation timed out', 'TimeoutError'));
     }, timeoutMs);
@@ -149,7 +151,15 @@ export function combineAbortSignals(
     for (const fn of cleanups) fn();
   };
 
-  controller.signal.addEventListener('abort', cleanup, { once: true });
+  // Node does not fire 'abort' listeners added to an already-aborted signal,
+  // so if the per-iteration check aborted controller mid-loop we'd orphan
+  // every input listener that was registered before the break. Run cleanup
+  // synchronously instead.
+  if (controller.signal.aborted) {
+    cleanup();
+  } else {
+    controller.signal.addEventListener('abort', cleanup, { once: true });
+  }
 
   return { signal: controller.signal, cleanup };
 }

@@ -176,7 +176,29 @@ describe('combineAbortSignals', () => {
     // Per-iteration check fires when the loop reaches proxied (2nd `aborted`
     // access) and short-circuits → controller aborts, loop breaks before c.
     expect(signal.aborted).toBe(true);
+    // a was iterated before the break and DID get a listener — cleanup must
+    // run synchronously (since adding to an already-aborted signal is a no-op),
+    // otherwise the listener leaks on the long-lived input.
+    expect(getEventListeners(a.signal, 'abort').length).toBe(0);
+    // c never had a listener attached (we broke out of the loop before it).
     expect(getEventListeners(c.signal, 'abort').length).toBe(0);
+  });
+
+  it('does not schedule a timeout if the loop already aborted the controller', () => {
+    vi.useFakeTimers();
+    try {
+      const a = createAbortController();
+      a.abort('pre');
+      const { signal } = combineAbortSignals([a.signal], { timeoutMs: 50 });
+      expect(signal.aborted).toBe(true);
+      // Advancing past the timeout must not change the abort reason — the
+      // controller was already aborted before the timer ran, and if we had
+      // scheduled one anyway it would have replaced `pre` with TimeoutError.
+      vi.advanceTimersByTime(100);
+      expect(signal.reason).toBe('pre');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('auto-cleans listeners on inputs when the combined signal aborts', () => {

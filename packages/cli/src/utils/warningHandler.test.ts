@@ -173,6 +173,28 @@ describe('initializeWarningHandler', () => {
     initializeWarningHandler();
     expect(process.listeners('warning').length).toBe(1);
   });
+
+  it('honors runtime DEBUG toggles — debug check is evaluated per warning', () => {
+    initializeWarningHandler();
+    // Initially DEBUG unset → suppression active.
+    emit(
+      makeWarning(
+        'MaxListenersExceededWarning',
+        'Possible EventTarget memory leak detected. 1500 abort listeners added to [AbortSignal].',
+      ),
+    );
+    expect(priorListener).not.toHaveBeenCalled();
+
+    // Flip DEBUG at runtime → next suppressed-pattern warning passes through.
+    process.env['DEBUG'] = '1';
+    emit(
+      makeWarning(
+        'MaxListenersExceededWarning',
+        'Possible EventTarget memory leak detected. 1500 abort listeners added to [AbortSignal].',
+      ),
+    );
+    expect(priorListener).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('initializeWarningHandler — end-to-end stderr behavior', () => {
