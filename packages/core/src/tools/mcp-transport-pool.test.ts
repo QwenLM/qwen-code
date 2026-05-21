@@ -17,6 +17,7 @@ import {
   McpTransportPool,
   type McpTransportPoolOptions,
 } from './mcp-transport-pool.js';
+import { SessionMcpView } from './session-mcp-view.js';
 import type { ToolRegistry } from './tool-registry.js';
 
 vi.mock('@modelcontextprotocol/sdk/client/index.js');
@@ -384,14 +385,25 @@ describe('McpTransportPool', () => {
 
       expect(failedEventReceived).toBe(true);
 
-      // A fresh acquire for the SAME (name, cfg) must NOT attach to the
-      // zombie via the fast path. With the entry now in 'failed' state,
-      // existing.attach() rejects → acquire falls through to spawn a
-      // fresh entry.
+      // W127: pre-W122 the entry stayed in `pool.entries` because the
+      // listener didn't call `onClosed`, and the fast-path `attach()`
+      // rejected with "Cannot attach to PoolEntry in state failed".
+      // With W122 the listener now evicts the entry from `pool.entries`
+      // synchronously via `onClosed`, AND W125 adds a defense-in-depth
+      // isTerminated() pre-check + try/catch fall-through. So a fresh
+      // acquire for the same (name, cfg) misses the fast-path
+      // entirely and spawns a new entry — pool self-heals.
       const r2 = mkSessionRegistries();
-      await expect(
-        pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts),
-      ).rejects.toThrow(/Cannot attach to PoolEntry/);
+      const conn2 = await pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts);
+      // Different entryIndex confirms a NEW entry was spawned, not a
+      // reuse of the zombie (which would have entryIndex 0).
+      expect(conn2.entryIndex).toBe(1);
+      // pool.entries now holds the fresh entry under the same id;
+      // the old (failed) entry was evicted via the W122 onClosed call.
+      const entriesAfter = (
+        pool as unknown as { entries: Map<string, PoolEntry> }
+      ).entries;
+      expect(entriesAfter.get(targetId)).not.toBe(entry);
     });
 
     it('catches silent transport drop during drain window (W131)', async () => {
@@ -452,33 +464,26 @@ describe('McpTransportPool', () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
 
-    it('rejects attach on terminal-state entry (W90 contract proxy via fast path; in-flight guard reproduction tracked as W109-followup)', async () => {
+    it('PoolEntry.attach rejects on terminal-state entry (W90 contract — direct probe; W125 made the pool fast-path self-heal so we exercise the guard at the entry level)', async () => {
       // The W90 fix's primary correctness guard catches a concurrent
       // `forceShutdown` that lands on the spawned entry between
-      // `spawnEntry.entries.set` and our post-await `attach`.
-      // Reproducing that window in async test code is fragile — the
-      // race window in production is essentially zero microtasks
-      // (markActive → return → inFlight resolution are all sync). To
-      // test the GUARD itself deterministically, we set up the
-      // in-flight scenario via the existing 2-session shared-spawn
-      // path: first session A creates the entry and successfully
-      // attaches; manually force-shutdown the entry; then a SECOND
-      // acquire for the SAME `(name, cfg)` re-enters in-flight (the
-      // entry is closed but `spawnInFlight` is empty so it spawns
-      // again, attaches cleanly — not what we want).
+      // `spawnEntry.entries.set` and our post-await `attach`. The
+      // production race window is essentially zero microtasks
+      // (markActive → return → inFlight resolution are all sync), so
+      // we test the GUARD itself directly rather than reconstructing
+      // the race.
       //
-      // Instead: probe the guard via the EXISTING-ENTRY fast path,
-      // which shares the same `state='closed'` rejection contract.
-      // After forceShutdown, the fast-path attach throws "Cannot
-      // attach to PoolEntry ... in state closed" via PoolEntry.attach
-      // itself (line 276-280) — the W90 post-await guard's branch
-      // is structurally identical (`entry.isTerminated()` is the same
-      // predicate inverted). This validates the terminal-state
-      // contract that the W90 guard relies on, even though the
-      // specific in-flight microtask window is too narrow to reproduce.
-      // A fully synthetic W90 reproduction is tracked as W109-followup
-      // (would require a per-session cancellation marker hook for
-      // deterministic timing).
+      // Pre-W125 the same contract was exposed via the pool fast-path:
+      // a fast-path `attach()` on a terminal entry surfaced the
+      // "Cannot attach to PoolEntry in state closed" error all the
+      // way out of `pool.acquire`. W125 wraps that fast-path call in
+      // try/catch + falls through to spawn so the pool self-heals,
+      // which means a session-level acquire NEVER sees the terminal-
+      // state rejection (validated by the W120 test above). The
+      // entry-level contract is unchanged — `PoolEntry.attach` still
+      // throws on `closed`/`failed`, which is exactly what the W90
+      // post-await guard's `entry.isTerminated()` branch relies on.
+      // Probe it directly via the PoolEntry instance.
       mockMcpSuccess({ toolNames: ['t1'] });
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
@@ -489,14 +494,21 @@ describe('McpTransportPool', () => {
         .entries;
       const entry = entries.get(targetId)!;
       // Drive entry to terminal state synchronously — same precondition
-      // the W90 post-await guard depends on.
+      // the W90 post-await guard depends on. forceShutdown sets
+      // state='closed' synchronously before any await.
       void entry.forceShutdown('manual');
-      // PoolEntry.attach throws on `closed`/`failed` (the exact same
-      // terminal-state contract the W90 guard uses).
-      const r2 = mkSessionRegistries();
-      await expect(
-        pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts),
-      ).rejects.toThrow(/Cannot attach to PoolEntry/);
+      expect(entry.isTerminated()).toBe(true);
+      // Direct probe: PoolEntry.attach must reject on terminal state.
+      const view = new SessionMcpView(
+        mkSessionRegistries().tools,
+        mkSessionRegistries().prompts,
+        's2',
+        'srv',
+        cfg,
+      );
+      expect(() => entry.attach('s2', view)).toThrow(
+        /Cannot attach to PoolEntry/,
+      );
     });
 
     it("re-indexes after attach so concurrent releaseSession during await doesn't leak the ref (W111)", async () => {

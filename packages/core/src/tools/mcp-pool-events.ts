@@ -35,8 +35,10 @@ export type PoolEntryState =
  *
  * See `docs/design/f2-mcp-transport-pool.md` §7 for the full lifecycle
  * (toolsChanged on `notifications/tools/list_changed` and on reconnect;
- * promptsChanged analog; disconnected → reconnected on success path;
- * disconnected → failed on reconnect-budget exhaustion).
+ * promptsChanged analog; disconnected → reconnected on restart success;
+ * disconnected → failed on restart's reconnect-budget exhaustion;
+ * active/draining → failed directly on silent transport drop via
+ * `statusChangeListener` — W120/W131 path, no preceding `disconnected`).
  */
 export type PoolEvent =
   | {

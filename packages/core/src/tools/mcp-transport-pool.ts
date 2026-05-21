@@ -225,7 +225,18 @@ export class McpTransportPool {
     const id = poolable ? connectionIdOf(serverName, cfg) : undefined;
     if (id !== undefined) {
       const existing = this.entries.get(id);
-      if (existing) {
+      // F2 (#4175 commit 6 review fix — wenshao W125): defense-in-depth
+      // against terminal-state attach race. With W122 the silent-drop
+      // listener calls `onClosed` which removes the entry from
+      // `pool.entries`, so the common path is `entries.get(id) ===
+      // undefined` → fall through to spawn. But a narrow race remains:
+      // the listener could fire BETWEEN `entries.get(id)` above and
+      // the `attach` call below. The pre-check + post-attach try/catch
+      // both fall through to spawn so the pool self-heals without
+      // surfacing "Cannot attach to PoolEntry in state failed" to the
+      // session caller. Also handles the leftover stale entry case
+      // (any pre-existing zombie not yet evicted by `onClosed`).
+      if (existing && !existing.isTerminated()) {
         const view = new SessionMcpView(
           sessionToolRegistry,
           sessionPromptRegistry,
@@ -241,11 +252,28 @@ export class McpTransportPool {
         // mapping with no matching `entry.refs.has(sessionId)` —
         // `releaseSession` would later iterate the stale id and call
         // `entry.detach` on a non-attached session.
-        const conn = existing.attach(sessionId, view, {
-          release: () => this.release(id, sessionId),
-        });
-        this.indexAttach(sessionId, id);
-        return conn;
+        try {
+          const conn = existing.attach(sessionId, view, {
+            release: () => this.release(id, sessionId),
+          });
+          this.indexAttach(sessionId, id);
+          return conn;
+        } catch (err) {
+          // W125: a race transitioned the entry to terminal between
+          // the isTerminated() pre-check and the attach call. Evict
+          // and fall through to spawn instead of propagating
+          // "Cannot attach in state failed" out of the pool.
+          if (existing.isTerminated()) {
+            this.entries.delete(id);
+          } else {
+            throw err;
+          }
+        }
+      } else if (existing && existing.isTerminated()) {
+        // W125: stale terminal entry not yet evicted by `onClosed`
+        // (e.g. older code path missed the eviction). Drop it so the
+        // spawn path below creates a fresh entry.
+        this.entries.delete(id);
       }
     }
 

@@ -281,6 +281,27 @@ export class PoolEntry {
         if (wasDraining) {
           this.cancelDrainTimer();
         }
+        // F2 (#4175 commit 6 review fix — wenshao W122 / W123): full
+        // terminal cleanup parity with `forceShutdown` (line 549-608).
+        // Pre-fix the W120/W131 path only set state + emitted +
+        // removed the status listener, leaving:
+        //   - `maxIdleTimer` armed → fired later against an
+        //     already-terminal entry (no-op via forceShutdown
+        //     idempotency, but a leaked Node timer reference)
+        //   - subscribers still attached → views held stale ref to a
+        //     dead entry until session releaseSession bulk-cleanup
+        //   - `pool.entries.get(id)` STILL returned this entry →
+        //     next acquire fast-path hit `existing.attach()` which
+        //     rejects on terminal state → "Cannot attach to PoolEntry
+        //     in state failed" surfaced to caller, no self-heal. Pool
+        //     mode has no health monitor, so the only recovery path
+        //     was operator-triggered `/restart`. With `onClosed`
+        //     wired below, the pool drops the entry from `entries`
+        //     and the next acquire falls through to a fresh spawn.
+        if (this.maxIdleTimer) {
+          clearTimeout(this.maxIdleTimer);
+          this.maxIdleTimer = undefined;
+        }
         // Detach the status listener now that we're terminal —
         // mirrors the cleanup symmetry in forceShutdown / doRestart
         // catch (otherwise the listener leaks across entry recreation).
@@ -301,12 +322,34 @@ export class PoolEntry {
             `localStatus→DISCONNECTED). ` +
             `Transitioning to 'failed'; manager-side onFailed will evict.`,
         );
+        // Emit BEFORE subscriber detach so subscribers receive the
+        // 'failed' event and can route any pending callTool promises
+        // to MCPCallInterruptedError. Mirrors forceShutdown's
+        // emit→detach ordering at line 583-593.
         this.emit({
           kind: 'failed',
           serverName: this.serverName,
           generation: this._generation,
           lastError: 'transport disconnected (silent transport drop)',
         });
+        // Detach all subscriber views (W122 cleanup). Snapshot keys
+        // because detach mutates `subscribers`.
+        for (const [sid] of [...this.subscribers]) {
+          this.detach(sid);
+        }
+        // Notify the pool so it drops this entry from `pool.entries`
+        // (W122). The next `pool.acquire(serverName, cfg)` for the
+        // same fingerprint will then miss the fast-path lookup and
+        // fall through to spawn a fresh entry — pool self-heals
+        // after a silent transport drop without operator intervention.
+        // NOTE: we intentionally do NOT call `sweepAndDisconnect`
+        // here — the transport is already dead (otherwise the
+        // status listener wouldn't have fired DISCONNECTED), and
+        // running an async sweep inside a synchronous listener
+        // would either swallow descendant-pid cleanup errors or
+        // require fire-and-forget. Wrapper-grandchild cleanup for
+        // the silent-drop case is tracked as F2 follow-up W134.
+        this.onClosed(this.id);
       }
     };
     addMCPStatusChangeListener(this.statusChangeListener);
@@ -682,8 +725,11 @@ export class PoolEntry {
     // skips its 'failed' transition for this entry's intentional
     // mid-restart disconnect. `restartInFlight` is set by the outer
     // `restart()` wrapper AFTER doRestart returns its Promise — too
-    // late to gate the synchronous listener fire. Cleared in the
-    // success-path tail AND every throw path below.
+    // late to gate the synchronous listener fire. Cleared by the
+    // `finally` wrapper around `doRestartInner` (W126 doc fix:
+    // pre-fix this comment said "Cleared in the success-path tail
+    // AND every throw path below", but the actual mechanism is
+    // try/finally — there are no per-path manual clears).
     this.restartInProgress = true;
     try {
       return await this.doRestartInner();
