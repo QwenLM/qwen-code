@@ -264,16 +264,40 @@ export class McpTransportPool {
           // and fall through to spawn instead of propagating
           // "Cannot attach in state failed" out of the pool.
           if (existing.isTerminated()) {
-            this.entries.delete(id);
+            // F2 (#4175 commit 6 review fix — wenshao R22 W125-followup
+            // A): route through `evictEntry` so the budget slot is
+            // released. Pre-fix the bare `entries.delete(id)` left
+            // the slot reserved permanently — the entry's own
+            // `onClosed` (when its async terminal-state tail finally
+            // fired) saw `entries.get(id) === undefined` and skipped
+            // budget release. `evictEntry` is identity-checked, so
+            // it's safe under any interleaving with the entry's own
+            // onClosed (the second call no-ops via `current !== entry`).
+            this.evictEntry(id, existing);
+            debugLogger.warn(
+              `pool self-heal: evicted terminal entry ${id} ` +
+                `(state='${existing.currentState}', serverName='${serverName}') ` +
+                `mid-attach race; falling through to spawn fresh entry`,
+            );
           } else {
             throw err;
           }
         }
       } else if (existing && existing.isTerminated()) {
-        // W125: stale terminal entry not yet evicted by `onClosed`
-        // (e.g. older code path missed the eviction). Drop it so the
-        // spawn path below creates a fresh entry.
-        this.entries.delete(id);
+        // F2 (#4175 commit 6 review fix — wenshao R22 W125-followup A):
+        // pre-existing terminal entry that hadn't been evicted yet
+        // (e.g. mid-`forceShutdown` between the sync `state='closed'`
+        // assignment and the async `await sweepAndDisconnect` →
+        // `onClosed` tail). `evictEntry` is identity-checked + budget-
+        // releasing, mirroring the eventual onClosed semantics. Pre-
+        // fix the bare `entries.delete(id)` here permanently leaked
+        // the budget slot for this race.
+        this.evictEntry(id, existing);
+        debugLogger.warn(
+          `pool self-heal: evicted stale terminal entry ${id} ` +
+            `(state='${existing.currentState}', serverName='${serverName}') ` +
+            `before fast-path attach; falling through to spawn fresh entry`,
+        );
       }
     }
 
@@ -779,6 +803,46 @@ export class McpTransportPool {
 
   // ---------- internals ----------
 
+  /**
+   * F2 (#4175 commit 6 review fix — wenshao R22 W125-followup A+B):
+   * Single source of truth for evicting a pooled entry from
+   * `this.entries` AND releasing its budget slot. Used by:
+   *   - The pool-managed onClosed callback (terminal-state transition
+   *     paths: `forceShutdown`, `doRestart` catch, W120/W131 silent-
+   *     drop listener).
+   *   - The W125 fast-path self-heal branches (catch + else-if) which
+   *     pre-fix called `this.entries.delete(id)` directly and bypassed
+   *     budget release entirely → permanent slot leak per occurrence.
+   *
+   * Identity check (`current === entry`):
+   *   The same id can host multiple entry objects across its lifetime
+   *   (eviction + respawn). When `forceShutdown`'s async tail
+   *   (`await sweepAndDisconnect`) runs concurrently with a W125
+   *   fast-path eviction + spawn under the same id, the OLD entry's
+   *   onClosed fires AFTER the NEW entry has been inserted. Without
+   *   this guard, the OLD onClosed would silently evict the NEW
+   *   entry and (incorrectly) release its budget slot. `entry` may
+   *   be `undefined` only during the brief constructor window where
+   *   the assignment hasn't completed; in production the callback
+   *   is never invoked synchronously from the constructor.
+   *
+   * Budget release: matches the prior inline logic exactly —
+   * `hasNameSibling` keeps the slot reserved when divergent-
+   * fingerprint entries (e.g. multi-OAuth) or in-flight spawns share
+   * the name.
+   */
+  private evictEntry(id: ConnectionId, entry: PoolEntry | undefined): void {
+    if (entry === undefined) return;
+    const current = this.entries.get(id);
+    if (current !== entry) return;
+    this.entries.delete(id);
+    if (this.opts.budget !== undefined) {
+      if (!this.hasNameSibling(entry.serverName)) {
+        this.opts.budget.release(entry.serverName);
+      }
+    }
+  }
+
   private async spawnEntry(
     serverName: string,
     cfg: MCPServerConfig,
@@ -802,6 +866,31 @@ export class McpTransportPool {
       this.opts.sendSdkMcpMessage,
     );
 
+    // F2 (#4175 commit 6 review fix — wenshao R22 W125-followup B):
+    // capture `entry` in the onClosed callback closure so the eviction
+    // helper can identity-check against a respawned entry. Pre-fix the
+    // callback did `entries.get(closedId)` and unconditionally
+    // `entries.delete(closedId)` — but if a concurrent W125 fast-path
+    // eviction + spawn replaced this id with a NEW entry between the
+    // OLD entry's terminal-state transition and its async tail
+    // (`forceShutdown`'s `await sweepAndDisconnect`), `onClosed(id)`
+    // would silently evict the new entry and (incorrectly) release
+    // its budget slot. `evictEntry` below short-circuits when the
+    // current map slot doesn't match the captured ref — safe under
+    // any interleaving with W125's self-heal path.
+    // Mutable holder so the onClosed callback can resolve the
+    // captured entry reference at fire time (not construction time —
+    // the entry doesn't exist yet when we build the callback).
+    // `entryRef.current` is guaranteed populated before the callback
+    // is ever invoked: the assignment happens synchronously after the
+    // PoolEntry constructor returns, and onClosed is only called from
+    // terminal-state code paths that fire AFTER construction.
+    const entryRef: { current: PoolEntry | undefined } = {
+      current: undefined,
+    };
+    const onClosedForThisEntry = (closedId: ConnectionId) => {
+      this.evictEntry(closedId, entryRef.current);
+    };
     const entry = new PoolEntry(
       id,
       serverName,
@@ -810,28 +899,10 @@ export class McpTransportPool {
       client,
       this.cliConfig,
       entryOpts,
-      // F2 (#4175 commit 6): when an entry transitions to terminal
-      // `closed` / `failed`, release its budget slot — but ONLY if
-      // no sibling entry (live OR currently spawning) shares the same
-      // `serverName`. Pool tracks slot ownership by NAME; multi-
-      // fingerprint case where two divergent OAuth headers spawned
-      // two entries should keep the slot until the LAST entry for
-      // the name closes. Wenshao R1 fix: previous version checked
-      // only `this.entries` and missed in-flight spawns — entry A
-      // closing during entry B's still-pending spawn would
-      // prematurely release the slot, letting a third name slip
-      // past the cap once B finished.
-      (closedId) => {
-        const closing = this.entries.get(closedId);
-        this.entries.delete(closedId);
-        if (closing && this.opts.budget !== undefined) {
-          if (!this.hasNameSibling(closing.serverName)) {
-            this.opts.budget.release(closing.serverName);
-          }
-        }
-      },
+      onClosedForThisEntry,
       (name) => this.aggregateStatusByName(name),
     );
+    entryRef.current = entry;
 
     try {
       // F2 (#4175 commit 6 review fix — gpt-5.5 W25 + wenshao W43):

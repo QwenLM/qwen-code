@@ -471,6 +471,70 @@ describe('McpTransportPool', () => {
       expect(entry.currentState).toBe('failed');
     });
 
+    it('W125 else-if path: stale terminal entry evicted with budget released (R22 W125-followup A)', async () => {
+      // Reproduces the race where `forceShutdown` has run its sync
+      // portion (state='closed' + listener detach + emit + subscriber
+      // detach) but the async tail (`await sweepAndDisconnect` →
+      // `updateGlobalStatus` → `onClosed`) is still pending. During
+      // that window pool.entries still holds the terminal entry, and
+      // a concurrent `pool.acquire` for the same id hits W125's
+      // else-if path. Pre-R22 the bare `entries.delete(id)` here
+      // permanently leaked the budget slot — the entry's own onClosed
+      // (firing later when sweep finished) saw `entries.get(id) ===
+      // undefined` and skipped budget release. Post-R22 the eviction
+      // routes through `evictEntry` which inline-releases the slot,
+      // and `onClosed`'s identity check makes its later eviction a
+      // safe no-op.
+      const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
+      const budget = new WorkspaceMcpBudget({
+        clientBudget: 1,
+        mode: 'enforce',
+      });
+      mockMcpSuccess({ toolNames: ['t1'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions({ budget }));
+      const cfg = new MCPServerConfig('node');
+      const r1 = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      expect(budget.getReservedSlots()).toEqual(['srv']);
+      const targetId = connectionIdOf('srv', cfg);
+      const entries = (pool as unknown as { entries: Map<string, PoolEntry> })
+        .entries;
+      const oldEntry = entries.get(targetId)!;
+      // Fire-and-forget forceShutdown — sync portion runs (state='closed',
+      // listener detached, subscribers torn down) but the
+      // `await sweepAndDisconnect` and subsequent `onClosed` are
+      // pending in the microtask queue.
+      void oldEntry.forceShutdown('manual');
+      expect(oldEntry.currentState).toBe('closed');
+      // Critical precondition: pool.entries STILL has the terminal
+      // entry (onClosed hasn't run yet). Without this, the else-if
+      // path is unreachable.
+      expect(entries.get(targetId)).toBe(oldEntry);
+
+      // Concurrent acquire for the same fingerprint. Hits the W125
+      // else-if path: existing && existing.isTerminated() → evictEntry
+      // → fall through to spawn → fresh entry.
+      const r2 = mkSessionRegistries();
+      const conn2 = await pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts);
+      // Fresh entry: different object, different entryIndex.
+      const newEntry = entries.get(targetId)!;
+      expect(newEntry).not.toBe(oldEntry);
+      expect(conn2.entryIndex).toBe(1);
+      // Budget slot is held by the fresh spawn (was released by
+      // evictEntry, then re-reserved by the spawn path) — net 1 slot
+      // reserved, not the 0 (leak) of pre-R22 nor the 2 of double-
+      // reserve regression.
+      expect(budget.getReservedSlots()).toEqual(['srv']);
+
+      // Drain the pending forceShutdown microtasks. The OLD entry's
+      // onClosed will fire and hit `evictEntry`'s identity check
+      // (`current === newEntry !== oldEntry` → no-op). New entry must
+      // survive intact.
+      await vi.runAllTimersAsync();
+      expect(entries.get(targetId)).toBe(newEntry);
+      expect(budget.getReservedSlots()).toEqual(['srv']);
+    });
+
     it('PoolEntry.attach rejects on terminal-state entry (W90 contract — direct probe; W125 made the pool fast-path self-heal so we exercise the guard at the entry level)', async () => {
       // The W90 fix's primary correctness guard catches a concurrent
       // `forceShutdown` that lands on the spawned entry between
