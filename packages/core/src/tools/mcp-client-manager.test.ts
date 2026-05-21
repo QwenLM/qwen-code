@@ -5,7 +5,10 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { McpClientManager } from './mcp-client-manager.js';
+import {
+  McpClientManager,
+  type McpClientManagerOptions,
+} from './mcp-client-manager.js';
 import { McpClient } from './mcp-client.js';
 import type { ToolRegistry } from './tool-registry.js';
 import type { Config } from '../config/config.js';
@@ -21,6 +24,37 @@ vi.mock('./mcp-client.js', async () => {
     populateMcpServerCommand: vi.fn((servers) => servers),
   };
 });
+
+/**
+ * F2 (#4175 commit 6 review fix — wenshao R9 / PR A): test factory
+ * for `McpClientManager`. Pre-fix the 80 construction sites in this
+ * file each repeated a 7-positional call with 4 `undefined` sentinels
+ * to reach the trailing `pool` arg. With the options-object ctor +
+ * this factory, each site names only the fields it overrides; default
+ * `mockConfig` + `{} as ToolRegistry` cover the no-arg case.
+ */
+function mkManager(
+  overrides: {
+    config?: Config;
+    toolRegistry?: ToolRegistry;
+    options?: McpClientManagerOptions;
+  } = {},
+): McpClientManager {
+  const config =
+    overrides.config ??
+    ({
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({}),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config);
+  const toolRegistry = overrides.toolRegistry ?? ({} as ToolRegistry);
+  return new McpClientManager(config, toolRegistry, overrides.options ?? {});
+}
 
 describe('McpClientManager', () => {
   afterEach(() => {
@@ -59,15 +93,10 @@ describe('McpClientManager', () => {
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      fakePool,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
     await manager.discoverAllMcpTools(mockConfig);
     expect(acquireSpy).toHaveBeenCalledTimes(1);
     expect(acquireSpy).toHaveBeenCalledWith(
@@ -125,15 +154,10 @@ describe('McpClientManager', () => {
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      fakePool,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
     // Should resolve without throwing — the BudgetExhaustedError on
     // srvB is caught and downgraded to a debug log.
     await manager.discoverAllMcpTools(mockConfig);
@@ -184,15 +208,10 @@ describe('McpClientManager', () => {
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      fakePool,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
 
     // Kick off discovery; it enters in-flight (acquire awaits the gate).
     const discoveryPromise = manager.discoverAllMcpTools(mockConfig);
@@ -247,15 +266,10 @@ describe('McpClientManager', () => {
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      fakePool,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
     // Inject a rejecting in-flight promise (the only way to hit the
     // W108 catch block — internal per-server catches mean the natural
     // path always resolves).
@@ -297,15 +311,10 @@ describe('McpClientManager', () => {
         getSessionId: () => 'sid-1',
         isMcpServerDisabled: () => false,
       } as unknown as Config;
-      const manager = new McpClientManager(
-        mockConfig,
-        {} as ToolRegistry,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        fakePool,
-      );
+      const manager = mkManager({
+        config: mockConfig,
+        options: { pool: fakePool },
+      });
       // Inject a never-settling in-flight promise.
       (
         manager as unknown as { discoveryInFlight?: Promise<void> }
@@ -354,15 +363,10 @@ describe('McpClientManager', () => {
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      fakePool,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
 
     // Simulate a prior timed-out shutdown that set the sticky flag.
     (manager as unknown as { stopTimedOut: boolean }).stopTimedOut = true;
@@ -417,15 +421,10 @@ describe('McpClientManager', () => {
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      fakePool,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
     await manager.discoverAllMcpToolsIncremental(mockConfig);
     expect(acquireSpy).toHaveBeenCalledTimes(1);
     expect(McpClient).not.toHaveBeenCalled();
@@ -454,15 +453,10 @@ describe('McpClientManager', () => {
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      fakePool,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
 
     await manager.discoverMcpToolsForServer('srv', mockConfig);
 
@@ -500,15 +494,10 @@ describe('McpClientManager', () => {
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      fakePool,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
     await manager.discoverAllMcpTools(mockConfig);
 
     const result = await manager.readResource('srv', 'mcp://srv/doc');
@@ -565,15 +554,10 @@ describe('McpClientManager', () => {
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      fakePool,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
     await manager.discoverAllMcpTools(mockConfig);
     // Sanity: healthy fast-path still works.
     await expect(manager.readResource('srv', 'mcp://srv/doc')).resolves.toEqual(
@@ -636,15 +620,13 @@ describe('McpClientManager', () => {
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      { removeMcpToolsByServer: vi.fn() } as unknown as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      fakePool,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      toolRegistry: {
+        removeMcpToolsByServer: vi.fn(),
+      } as unknown as ToolRegistry,
+      options: { pool: fakePool },
+    });
     await manager.discoverAllMcpTools(mockConfig);
     expect(releaseSpy).not.toHaveBeenCalled();
     await manager.disconnectServer('srv');
@@ -687,15 +669,10 @@ describe('McpClientManager', () => {
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      fakePool,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
     const p1 = manager.discoverAllMcpTools(mockConfig);
     const p2 = manager.discoverAllMcpTools(mockConfig);
     // Both passes block on the in-flight `pool.acquire`. Pre-fix
@@ -732,7 +709,7 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
     await manager.discoverAllMcpTools(mockConfig);
     expect(McpClient).toHaveBeenCalledOnce();
     expect(mockedMcpClient.connect).toHaveBeenCalledOnce();
@@ -757,7 +734,7 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
     await manager.discoverAllMcpTools(mockConfig);
     expect(mockedMcpClient.connect).toHaveBeenCalledOnce();
     expect(mockedMcpClient.discover).toHaveBeenCalledOnce();
@@ -782,7 +759,7 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
     await manager.discoverAllMcpTools(mockConfig);
     expect(mockedMcpClient.connect).not.toHaveBeenCalled();
     expect(mockedMcpClient.discover).not.toHaveBeenCalled();
@@ -812,7 +789,7 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
     // First connect to create the clients
     await manager.discoverAllMcpTools({
       isTrustedFolder: () => true,
@@ -848,7 +825,7 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
     await manager.discoverAllMcpTools({
       isTrustedFolder: () => true,
       isMcpServerDisabled: () => false,
@@ -879,7 +856,7 @@ describe('McpClientManager', () => {
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
 
     await manager.discoverMcpToolsForServer(
       'test-server',
@@ -919,7 +896,7 @@ describe('McpClientManager', () => {
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
 
     await manager.discoverMcpToolsForServer(
       'test-server',
@@ -979,7 +956,7 @@ describe('McpClientManager', () => {
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
 
     await manager.discoverMcpToolsForServer(
       'test-server',
@@ -1048,18 +1025,17 @@ describe('McpClientManager', () => {
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      {
-        autoReconnect: true,
-        checkIntervalMs: 10,
-        maxConsecutiveFailures: 1,
-        reconnectDelayMs: 10,
+    const manager = mkManager({
+      config: mockConfig,
+      options: {
+        healthConfig: {
+          autoReconnect: true,
+          checkIntervalMs: 10,
+          maxConsecutiveFailures: 1,
+          reconnectDelayMs: 10,
+        },
       },
-    );
+    });
 
     try {
       await manager.discoverMcpToolsForServer(
@@ -1116,7 +1092,7 @@ describe('McpClientManager', () => {
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
 
     const discovery = manager.discoverMcpToolsForServer(
       'test-server',
@@ -1165,7 +1141,7 @@ describe('McpClientManager', () => {
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
 
     await manager.discoverMcpToolsForServer('unknown-server', {
       isTrustedFolder: () => true,
@@ -1203,9 +1179,12 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {
-      removeMcpToolsByServer: vi.fn(),
-    } as unknown as ToolRegistry);
+    const manager = mkManager({
+      config: mockConfig,
+      toolRegistry: {
+        removeMcpToolsByServer: vi.fn(),
+      } as unknown as ToolRegistry,
+    });
 
     const t0 = Date.now();
     await manager.discoverAllMcpToolsIncremental(mockConfig);
@@ -1254,7 +1233,7 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: (name: string) => name === 'disabled',
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
 
     await manager.discoverAllMcpToolsIncremental(mockConfig);
 
@@ -1297,7 +1276,10 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: (name: string) => name === 'foo' && disabled,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, toolRegistryStub);
+    const manager = mkManager({
+      config: mockConfig,
+      toolRegistry: toolRegistryStub,
+    });
 
     // First pass: server enabled, gets connected.
     await manager.discoverAllMcpToolsIncremental(mockConfig);
@@ -1352,7 +1334,7 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = mkManager({ config: mockConfig });
     await manager.discoverAllMcpToolsIncremental(mockConfig);
 
     // Cleanup the global sink so it doesn't leak into other tests.
@@ -1409,9 +1391,12 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {
-      removeMcpToolsByServer: vi.fn(),
-    } as unknown as ToolRegistry);
+    const manager = mkManager({
+      config: mockConfig,
+      toolRegistry: {
+        removeMcpToolsByServer: vi.fn(),
+      } as unknown as ToolRegistry,
+    });
     await manager.discoverAllMcpToolsIncremental(mockConfig);
     spy.mockRestore();
 
@@ -1461,9 +1446,12 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {
-      removeMcpToolsByServer: vi.fn(),
-    } as unknown as ToolRegistry);
+    const manager = mkManager({
+      config: mockConfig,
+      toolRegistry: {
+        removeMcpToolsByServer: vi.fn(),
+      } as unknown as ToolRegistry,
+    });
     await manager.discoverAllMcpToolsIncremental(mockConfig);
     spy.mockRestore();
 
@@ -1510,9 +1498,10 @@ describe('McpClientManager', () => {
       isMcpServerDisabled: () => false,
     } as unknown as Config;
     const removeMcpToolsByServer = vi.fn();
-    const manager = new McpClientManager(mockConfig, {
-      removeMcpToolsByServer,
-    } as unknown as ToolRegistry);
+    const manager = mkManager({
+      config: mockConfig,
+      toolRegistry: { removeMcpToolsByServer } as unknown as ToolRegistry,
+    });
 
     await manager.discoverAllMcpToolsIncremental(mockConfig);
 
@@ -1562,9 +1551,12 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {
-      removeMcpToolsByServer: vi.fn(),
-    } as unknown as ToolRegistry);
+    const manager = mkManager({
+      config: mockConfig,
+      toolRegistry: {
+        removeMcpToolsByServer: vi.fn(),
+      } as unknown as ToolRegistry,
+    });
 
     await manager.discoverAllMcpToolsIncremental(mockConfig);
 
@@ -1625,11 +1617,10 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
-      mockConfig,
-      {} as ToolRegistry,
-      events,
-    );
+    const manager = mkManager({
+      config: mockConfig,
+      options: { eventEmitter: events },
+    });
 
     await manager.discoverAllMcpToolsIncremental(mockConfig);
 
@@ -1742,14 +1733,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       c: { command: 'node' },
       d: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 2, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 2, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     expect(created).toHaveLength(2); // only 2 McpClient instances created
     const accounting = manager.getMcpClientAccounting();
@@ -1772,14 +1759,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       b: { command: 'node' },
       c: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 2, budgetMode: 'warn' },
-    );
+      options: { budgetConfig: { clientBudget: 2, budgetMode: 'warn' } },
+    });
     await manager.discoverAllMcpTools(config);
     // warn mode: all 3 connect; reservedSlots grows past budget; no refusals.
     expect(created).toHaveLength(3);
@@ -1797,14 +1780,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { budgetMode: 'off' },
-    );
+      options: { budgetConfig: { budgetMode: 'off' } },
+    });
     await manager.discoverAllMcpTools(config);
     const accounting = manager.getMcpClientAccounting();
     expect(accounting.total).toBe(2);
@@ -1826,14 +1805,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       alpha: { command: 'node' },
       mike: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 2, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 2, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     expect(created).toEqual(['zulu', 'alpha']);
     expect(manager.getMcpClientAccounting().refusedServerNames).toEqual([
@@ -1849,14 +1824,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     expect(manager.getMcpClientAccounting().refusedServerNames).toEqual(['b']);
 
@@ -1877,14 +1848,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     // `a` was reserved; `b` was refused. A `readResource('b', ...)` would
     // lazy-spawn — must throw rather than silently exceed the cap.
@@ -1901,14 +1868,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
     await manager.disconnectServer('a');
@@ -1920,7 +1883,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
     process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '7';
     process.env['QWEN_SERVE_MCP_BUDGET_MODE'] = 'enforce';
     const config = configWithServers({});
-    const manager = new McpClientManager(config, {} as ToolRegistry);
+    const manager = mkManager({ config });
     expect(manager.getMcpClientBudget()).toBe(7);
     expect(manager.getMcpBudgetMode()).toBe('enforce');
   });
@@ -1929,7 +1892,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
     process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '5';
     // No mode env var. Resolved mode is `warn` (the safe default).
     const config = configWithServers({});
-    const manager = new McpClientManager(config, {} as ToolRegistry);
+    const manager = mkManager({ config });
     expect(manager.getMcpClientBudget()).toBe(5);
     expect(manager.getMcpBudgetMode()).toBe('warn');
   });
@@ -1937,7 +1900,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
   it('env var fallback rejects non-positive budgets silently', async () => {
     process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '-3';
     const config = configWithServers({});
-    const manager = new McpClientManager(config, {} as ToolRegistry);
+    const manager = mkManager({ config });
     // Invalid values fall through to `undefined` budget + `off` mode —
     // no enforcement, no boot-time crash. Validation lives in the CLI
     // flag handler (`packages/cli/src/commands/serve.ts`).
@@ -1965,14 +1928,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
           name === 'b') as Config['isMcpServerDisabled'],
       },
     );
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 2, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 2, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     expect(created.sort()).toEqual(['a', 'c']);
     expect(manager.getMcpClientAccounting().reservedSlots.sort()).toEqual([
@@ -1994,14 +1953,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     // `b` was refused at startup. A manual `/mcp reconnect b` (which goes
     // through `discoverMcpToolsForServer` → `...Internal`) would have
@@ -2023,14 +1978,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     expect(manager.getMcpClientAccounting().refusedServerNames).toEqual(['b']);
     // Operator action: explicit disconnect of `b` should drop it from
@@ -2059,16 +2010,13 @@ describe('McpClientManager — PR 14 guardrails', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {
+      toolRegistry: {
         removeMcpToolsByServer: () => undefined,
       } as unknown as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 2, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 2, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpToolsIncremental(config);
     expect(manager.getMcpClientAccounting().reservedSlots.sort()).toEqual([
       'a',
@@ -2103,14 +2051,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { budgetMode: 'off' },
-    );
+      options: { budgetConfig: { budgetMode: 'off' } },
+    });
     await manager.discoverAllMcpTools(config);
     const accounting = manager.getMcpClientAccounting();
     expect(accounting.total).toBe(2);
@@ -2140,14 +2084,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       a: { command: 'node' }, // will fail
       b: { command: 'node' }, // would be refused pre-fix
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     // `a` failed → slot freed → `b` ought to fit (budget=1, current=0
     // after `a` released). But discoverAllMcpTools walks all servers
@@ -2186,14 +2126,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
     const config = configWithServers({
       a: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     // No discovery yet → `a` not in clients → lazy spawn path.
     await expect(manager.readResource('a', 'file:///x')).rejects.toThrow(
       'lazy connect boom',
@@ -2216,7 +2152,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
     // `tryReserveSlot` returns 'reserved' when `clientBudget === undefined`,
     // so an "enforce" daemon would let unlimited servers through.
     const config = configWithServers({});
-    const manager = new McpClientManager(config, {} as ToolRegistry);
+    const manager = mkManager({ config });
     expect(manager.getMcpClientBudget()).toBeUndefined();
     // Downgraded — not 'enforce' — because enforce requires a budget.
     expect(manager.getMcpBudgetMode()).toBe('off');
@@ -2238,7 +2174,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
           name === 'a') as Config['isMcpServerDisabled'],
       },
     );
-    const manager = new McpClientManager(config, {} as ToolRegistry);
+    const manager = mkManager({ config });
     await expect(manager.readResource('a', 'file:///x')).rejects.toThrow(
       /'a' is disabled/,
     );
@@ -2261,14 +2197,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
           name === 'b') as Config['isMcpServerDisabled'],
       },
     );
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     // Even though `b` would be budget-refused if not disabled, the
     // disabled gate must trip first.
@@ -2300,14 +2232,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
         }) as unknown as McpClient,
     );
     const config = configWithServers({ x: { command: 'node' } });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     // Server `x` not previously reserved; this call freshly reserves
     // then connect() throws. Pre-fix the slot leaked permanently
     // under enforce mode, blocking any later server in `clients.size=1`.
@@ -2345,19 +2273,21 @@ describe('McpClientManager — PR 14 guardrails', () => {
         }) as unknown as McpClient,
     );
     const config = configWithServers({ a: { command: 'node' } });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      { removeMcpToolsByServer: () => undefined } as unknown as ToolRegistry,
-      undefined,
-      undefined,
-      {
-        autoReconnect: false,
-        checkIntervalMs: 100,
-        maxConsecutiveFailures: 1,
-        reconnectDelayMs: 100,
+      toolRegistry: {
+        removeMcpToolsByServer: () => undefined,
+      } as unknown as ToolRegistry,
+      options: {
+        healthConfig: {
+          autoReconnect: false,
+          checkIntervalMs: 100,
+          maxConsecutiveFailures: 1,
+          reconnectDelayMs: 100,
+        },
+        budgetConfig: { clientBudget: 2, budgetMode: 'enforce' },
       },
-      { clientBudget: 2, budgetMode: 'enforce' },
-    );
+    });
     const discoveryPromise = manager.discoverAllMcpToolsIncremental(config);
     // Advance past the stdio default discovery timeout (30s).
     await vi.advanceTimersByTimeAsync(31_000);
@@ -2383,14 +2313,13 @@ describe('McpClientManager — PR 14 guardrails', () => {
       second: { command: 'node' },
       third: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      { removeMcpToolsByServer: () => undefined } as unknown as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 2, budgetMode: 'enforce' },
-    );
+      toolRegistry: {
+        removeMcpToolsByServer: () => undefined,
+      } as unknown as ToolRegistry,
+      options: { budgetConfig: { clientBudget: 2, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpToolsIncremental(config);
     // First two declared servers fit; third refused. Refusal-order
     // determinism preserved (config-declaration order) — the inner
@@ -2418,14 +2347,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     expect(manager.getMcpClientAccounting().refusedServerNames).toEqual(['b']);
     // Free a slot.
@@ -2450,14 +2375,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     expect(manager.getMcpClientAccounting().refusedServerNames).toEqual(['b']);
     // Free a slot.
@@ -2485,7 +2406,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
           name === 'a') as Config['isMcpServerDisabled'],
       },
     );
-    const manager = new McpClientManager(config, {} as ToolRegistry);
+    const manager = mkManager({ config });
     await manager.discoverMcpToolsForServer('a', config);
     expect(createdCount).toBe(0);
   });
@@ -2508,14 +2429,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
         }) as unknown as McpClient,
     );
     const config = configWithServers({ x: { command: 'node' } });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await manager.discoverMcpToolsForServer('x', config);
     // Slot released on weReservedSlot+catch path AND the transport
     // was closed before dropping the client reference.
@@ -2528,7 +2445,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
     process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = 'abc';
     try {
       const config = configWithServers({});
-      const manager = new McpClientManager(config, {} as ToolRegistry);
+      const manager = mkManager({ config });
       expect(manager.getMcpClientBudget()).toBeUndefined();
       // Operator-visible breadcrumb landed on stderr.
       const calls = writeSpy.mock.calls.map((c) => String(c[0]));
@@ -2560,7 +2477,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
           name === 'a' && disabled) as Config['isMcpServerDisabled'],
       },
     );
-    const manager = new McpClientManager(config, {} as ToolRegistry);
+    const manager = mkManager({ config });
     // First connect while NOT disabled.
     await manager.discoverAllMcpTools(config);
     // Now operator disables 'a' mid-session.
@@ -2594,14 +2511,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
         }) as unknown as McpClient,
     );
     const config = configWithServers({ x: { command: 'node' } });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await expect(manager.readResource('x', 'file:///a')).rejects.toThrow(
       /mid-handshake failure/,
     );
@@ -2615,7 +2528,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
     // No budget → downgrade fires
     try {
       const config = configWithServers({});
-      const manager = new McpClientManager(config, {} as ToolRegistry);
+      const manager = mkManager({ config });
       expect(manager.getMcpBudgetMode()).toBe('off');
       const calls = writeSpy.mock.calls.map((c) => String(c[0]));
       expect(
@@ -2650,14 +2563,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
         }) as unknown as McpClient,
     );
     const config = configWithServers({ a: { command: 'node' } });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     await manager.discoverAllMcpTools(config);
     // Transport closed before client reference dropped + slot released.
     expect(disconnectCalls).toBeGreaterThanOrEqual(1);
@@ -2669,7 +2578,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
     // No budget — pre-fix this passed through with mode='warn',
     // reaching emitBudgetTelemetry with clientBudget=undefined.
     const config = configWithServers({});
-    const manager = new McpClientManager(config, {} as ToolRegistry);
+    const manager = mkManager({ config });
     expect(manager.getMcpClientBudget()).toBeUndefined();
     expect(manager.getMcpBudgetMode()).toBe('off');
   });
@@ -2681,15 +2590,11 @@ describe('McpClientManager — PR 14 guardrails', () => {
     // path's downgrade so a future caller that bypasses validation
     // can't silently fail-open.
     const config = configWithServers({});
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
       // Invalid combination: enforce mode without a budget.
-      { budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { budgetMode: 'enforce' } },
+    });
     // Downgraded to off so tryReserveSlot doesn't masquerade as enforce.
     expect(manager.getMcpBudgetMode()).toBe('off');
   });
@@ -2718,14 +2623,10 @@ describe('McpClientManager — PR 14 guardrails', () => {
         }) as unknown as McpClient,
     );
     const config = configWithServers({ a: { command: 'node' } });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { clientBudget: 1, budgetMode: 'enforce' },
-    );
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
     // First pass: a connects successfully, slot reserved.
     await manager.discoverAllMcpTools(config);
     expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
@@ -2803,18 +2704,16 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       c: { command: 'node' },
       d: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      {
-        clientBudget: 4,
-        budgetMode: 'warn',
-        onBudgetEvent: (e) => events.push(e),
+      options: {
+        budgetConfig: {
+          clientBudget: 4,
+          budgetMode: 'warn',
+          onBudgetEvent: (e) => events.push(e),
+        },
       },
-    );
+    });
     await manager.discoverAllMcpTools(config);
     const warnings = events.filter(
       (e) => (e as { kind: string }).kind === 'budget_warning',
@@ -2845,18 +2744,16 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      {
-        clientBudget: 4,
-        budgetMode: 'warn',
-        onBudgetEvent: (e) => events.push(e),
+      options: {
+        budgetConfig: {
+          clientBudget: 4,
+          budgetMode: 'warn',
+          onBudgetEvent: (e) => events.push(e),
+        },
       },
-    );
+    });
     await manager.discoverAllMcpTools(config);
     expect(
       events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
@@ -2882,18 +2779,16 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
     const config = configWithServers({}, {
       getMcpServers: cfgGetter,
     } as Partial<Config>);
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      {
-        clientBudget: 4,
-        budgetMode: 'warn',
-        onBudgetEvent: (e) => events.push(e),
+      options: {
+        budgetConfig: {
+          clientBudget: 4,
+          budgetMode: 'warn',
+          onBudgetEvent: (e) => events.push(e),
+        },
       },
-    );
+    });
     await manager.discoverAllMcpTools(config);
     expect(
       events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
@@ -2943,14 +2838,15 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { budgetMode: 'off', onBudgetEvent: (e) => events.push(e) },
-    );
+      options: {
+        budgetConfig: {
+          budgetMode: 'off',
+          onBudgetEvent: (e) => events.push(e),
+        },
+      },
+    });
     await manager.discoverAllMcpTools(config);
     expect(events).toEqual([]);
   });
@@ -2966,18 +2862,16 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       b: { httpUrl: 'http://b' },
       c: { url: 'http://c' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      {
-        clientBudget: 1,
-        budgetMode: 'enforce',
-        onBudgetEvent: (e) => events.push(e),
+      options: {
+        budgetConfig: {
+          clientBudget: 1,
+          budgetMode: 'enforce',
+          onBudgetEvent: (e) => events.push(e),
+        },
       },
-    );
+    });
     await manager.discoverAllMcpTools(config);
     const batches = events.filter(
       (e) => (e as { kind: string }).kind === 'refused_batch',
@@ -3003,18 +2897,16 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      {
-        clientBudget: 5,
-        budgetMode: 'enforce',
-        onBudgetEvent: (e) => events.push(e),
+      options: {
+        budgetConfig: {
+          clientBudget: 5,
+          budgetMode: 'enforce',
+          onBudgetEvent: (e) => events.push(e),
+        },
       },
-    );
+    });
     await manager.discoverAllMcpTools(config);
     expect(
       events.filter((e) => (e as { kind: string }).kind === 'refused_batch'),
@@ -3031,18 +2923,16 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      {
-        clientBudget: 1,
-        budgetMode: 'enforce',
-        onBudgetEvent: (e) => events.push(e),
+      options: {
+        budgetConfig: {
+          clientBudget: 1,
+          budgetMode: 'enforce',
+          onBudgetEvent: (e) => events.push(e),
+        },
       },
-    );
+    });
     // First pass fills the budget with `a`. `b` is refused — that's
     // the bulk refusal (length-1 batch).
     await manager.discoverAllMcpTools(config);
@@ -3080,14 +2970,15 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       a: { command: 'node' },
       b: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      { budgetMode: 'off', onBudgetEvent: (e) => events.push(e) },
-    );
+      options: {
+        budgetConfig: {
+          budgetMode: 'off',
+          onBudgetEvent: (e) => events.push(e),
+        },
+      },
+    });
     await manager.discoverAllMcpTools(config);
     // Force discovery refusal would be impossible in off mode (no
     // budget). Disconnect-then-rediscover also no-ops the state
@@ -3110,18 +3001,16 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       d: { tcp: 'ws://d' }, // websocket (refused)
       e: { type: 'sdk', command: 'sdk' }, // sdk (refused)
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      {
-        clientBudget: 1,
-        budgetMode: 'enforce',
-        onBudgetEvent: (e) => events.push(e),
+      options: {
+        budgetConfig: {
+          clientBudget: 1,
+          budgetMode: 'enforce',
+          onBudgetEvent: (e) => events.push(e),
+        },
       },
-    );
+    });
     await manager.discoverAllMcpTools(config);
     const batches = events.filter(
       (e) => (e as { kind: string }).kind === 'refused_batch',
@@ -3142,18 +3031,16 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       b: { command: 'node' },
       c: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      {
-        clientBudget: 1,
-        budgetMode: 'warn',
-        onBudgetEvent: (e) => events.push(e),
+      options: {
+        budgetConfig: {
+          clientBudget: 1,
+          budgetMode: 'warn',
+          onBudgetEvent: (e) => events.push(e),
+        },
       },
-    );
+    });
     await manager.discoverAllMcpTools(config);
     // warn mode: no refusals, but the warning may fire (3/1 ratio crosses 0.75).
     expect(
@@ -3172,18 +3059,16 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       c: { command: 'node' },
       d: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      {
-        clientBudget: 4,
-        budgetMode: 'warn',
-        onBudgetEvent: (e) => events.push(e),
+      options: {
+        budgetConfig: {
+          clientBudget: 4,
+          budgetMode: 'warn',
+          onBudgetEvent: (e) => events.push(e),
+        },
       },
-    );
+    });
     await manager.discoverAllMcpTools(config);
     // First crossing fired one warning.
     expect(
@@ -3218,18 +3103,16 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       c: { command: 'node' },
       d: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      {
-        clientBudget: 1,
-        budgetMode: 'enforce',
-        onBudgetEvent: (e) => events.push(e),
+      options: {
+        budgetConfig: {
+          clientBudget: 1,
+          budgetMode: 'enforce',
+          onBudgetEvent: (e) => events.push(e),
+        },
       },
-    );
+    });
     await manager.discoverAllMcpToolsIncremental(config);
     const batches = events.filter(
       (e) => (e as { kind: string }).kind === 'refused_batch',
@@ -3261,18 +3144,16 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       c: { command: 'node' },
       d: { command: 'node' },
     });
-    const manager = new McpClientManager(
+    const manager = mkManager({
       config,
-      {} as ToolRegistry,
-      undefined,
-      undefined,
-      undefined,
-      {
-        clientBudget: 4,
-        budgetMode: 'warn',
-        onBudgetEvent: (e) => events.push(e),
+      options: {
+        budgetConfig: {
+          clientBudget: 4,
+          budgetMode: 'warn',
+          onBudgetEvent: (e) => events.push(e),
+        },
       },
-    );
+    });
     await manager.discoverAllMcpTools(config);
     expect(
       events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
