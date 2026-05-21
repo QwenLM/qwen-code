@@ -505,10 +505,13 @@ export interface WorktreeSettings {
    * `agent isolation: "worktree"`, and the `--worktree` startup flag).
    *
    * Paths must be relative to the repo root; absolute paths and any
-   * entry containing `..` are rejected by the service. Missing source
-   * dirs and pre-existing destinations are silently skipped.
+   * entry containing `..` are rejected by the service. Entries that
+   * resolve to git-internal paths (`.git`, `.qwen`) are also rejected
+   * — symlinking those would either break git inside the worktree or
+   * create a worktrees-inside-worktrees loop. Missing source dirs and
+   * pre-existing destinations are silently skipped.
    */
-  symlinkDirectories?: string[];
+  symlinkDirectories?: readonly string[];
 }
 
 export interface AgentsCollabSettings {
@@ -2612,7 +2615,7 @@ export class Config {
    * (No general `getWorktreeSettings()` getter yet — add one when a
    * second field on `WorktreeSettings` justifies the broader API.)
    */
-  getWorktreeSymlinkDirectories(): string[] {
+  getWorktreeSymlinkDirectories(): readonly string[] {
     return this.worktreeSettings.symlinkDirectories ?? [];
   }
 

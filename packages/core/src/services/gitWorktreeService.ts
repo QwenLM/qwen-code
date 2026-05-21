@@ -1106,7 +1106,14 @@ export class GitWorktreeService {
    *    that's `<sourceRepoPath>/.git`; for a sibling `git init` it
    *    resolves to `<worktreePath>/.git`. We compare against this repo's
    *    own common-dir to reject the latter.
-   * 2. `--abbrev-ref HEAD` returns the branch name. A detached HEAD
+   * 2. `--show-toplevel` returns git's idea of the worktree top. For a
+   *    real linked worktree this equals `worktreePath`; for a plain
+   *    directory living UNDER the main repo (e.g. `mkdir
+   *    <repo>/.qwen/worktrees/foo`) git walks up to the outer
+   *    `.git` and returns the OUTER repo's root — which would
+   *    otherwise pass the common-dir check and let us "re-attach"
+   *    to a non-worktree directory. Compare paths to reject this.
+   * 3. `--abbrev-ref HEAD` returns the branch name. A detached HEAD
    *    produces `HEAD` here, which we treat as "no real branch" and
    *    return null — the caller's re-attach gate will then refuse, since
    *    the slug-derived branch couldn't possibly be `HEAD`.
@@ -1114,36 +1121,50 @@ export class GitWorktreeService {
   async getRegisteredWorktreeBranch(
     worktreePath: string,
   ): Promise<string | null> {
+    let resolvedWorktreePath: string;
     try {
       const stat = await fs.stat(worktreePath);
       if (!stat.isDirectory()) return null;
+      // `realpath` so macOS /var → /private/var canonicalises before
+      // the toplevel comparison below — otherwise a real worktree
+      // under /var/folders compares unequal to git's `/private/var/…`
+      // answer and we'd reject every legitimate re-attach on macOS.
+      resolvedWorktreePath = await fs.realpath(worktreePath);
     } catch {
       return null;
     }
 
     // Run the two probes in parallel: this repo's common-dir comes from
-    // `this.git`, the candidate's common-dir + branch come from a fresh
-    // simple-git rooted at `worktreePath` via a single combined rev-parse.
-    // `git rev-parse` accepts multiple args in one call and prints each
-    // result on its own line, so we collapse two subprocesses into one
-    // for the candidate side.
+    // `this.git`, the candidate's common-dir + toplevel + branch come
+    // from a fresh simple-git rooted at `worktreePath` via a single
+    // combined rev-parse. `git rev-parse` accepts multiple args in one
+    // call and prints each result on its own line, so we collapse three
+    // subprocesses into one for the candidate side.
     const probeGit = simpleGit(worktreePath);
     let ourCommonDir: string;
     let probeCommonDir: string;
+    let probeToplevel: string;
     let branch: string;
     try {
       const [ourRaw, probeRaw] = await Promise.all([
         this.git.raw(['rev-parse', '--git-common-dir']),
-        probeGit.raw(['rev-parse', '--git-common-dir', '--abbrev-ref', 'HEAD']),
+        probeGit.raw([
+          'rev-parse',
+          '--git-common-dir',
+          '--show-toplevel',
+          '--abbrev-ref',
+          'HEAD',
+        ]),
       ]);
       ourCommonDir = path.resolve(this.sourceRepoPath, ourRaw.trim());
       const lines = probeRaw
         .split('\n')
         .map((l) => l.trim())
         .filter((l) => l.length > 0);
-      if (lines.length < 2) return null;
+      if (lines.length < 3) return null;
       probeCommonDir = path.resolve(worktreePath, lines[0]!);
-      branch = lines[1]!;
+      probeToplevel = path.resolve(lines[1]!);
+      branch = lines[2]!;
     } catch (error) {
       debugLogger.debug(
         `getRegisteredWorktreeBranch: probe at ${worktreePath} failed: ${error}`,
@@ -1154,6 +1175,15 @@ export class GitWorktreeService {
     if (probeCommonDir !== ourCommonDir) {
       debugLogger.debug(
         `getRegisteredWorktreeBranch: ${worktreePath} belongs to a different repo (common-dir=${probeCommonDir}, expected ${ourCommonDir})`,
+      );
+      return null;
+    }
+    if (probeToplevel !== resolvedWorktreePath) {
+      // Plain directory under the main repo — git walked up and
+      // returned the outer repo's toplevel. Refuse to treat as a
+      // worktree.
+      debugLogger.debug(
+        `getRegisteredWorktreeBranch: ${worktreePath} is not a registered worktree (toplevel=${probeToplevel}, expected ${resolvedWorktreePath})`,
       );
       return null;
     }
@@ -1553,6 +1583,32 @@ export class GitWorktreeService {
       ) {
         debugLogger.warn(
           `symlinkConfiguredDirectories: refusing path "${raw}" — resolves outside repo root (${sourceAbs} vs ${repoRootAbs})`,
+        );
+        continue;
+      }
+
+      // Refuse to symlink git-internal paths into the worktree. `.git`
+      // would silently break commits / status / diff inside the
+      // worktree (the worktree's own gitlink file points at the parent
+      // common-dir, and a symlink would shadow it). `.qwen/worktrees`
+      // would create a worktrees-inside-worktrees loop and confuse the
+      // startup sweep that scans for stale ephemeral worktrees.
+      const relFromRoot = path
+        .relative(repoRootAbs, sourceAbs)
+        .split(path.sep)[0];
+      if (relFromRoot === '.git' || sourceAbs === repoRootAbs) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing git-internal path "${raw}"`,
+        );
+        continue;
+      }
+      const qwenWorktreesAbs = path.join(repoRootAbs, '.qwen', 'worktrees');
+      if (
+        sourceAbs === qwenWorktreesAbs ||
+        sourceAbs.startsWith(qwenWorktreesAbs + sep)
+      ) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — would create a worktrees-inside-worktrees loop`,
         );
         continue;
       }

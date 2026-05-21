@@ -261,7 +261,7 @@ _WorktreeExitDialog：_
 4. **新增：** 若 `argv.worktree !== undefined`，调用 `createUserWorktree()`
    - 写入 sidecar（`writeWorktreeSession()`）
    - 设置 `process.chdir(worktreePath)` 同时 `Config.setTargetDir(worktreePath)`
-   - 若 `--resume` 已恢复出 sidecar 状态，**`--worktree` 赢**，覆盖 sidecar 并写一行 INFO 日志
+   - 同一 worktree 的 re-attach 路径：跳过 `git worktree add` 并就地 chdir（Phase 6 修复）。跨 projectHash 的 `--resume` × `--worktree` 组合在 session lookup 阶段会失败，详见下文"与 `--resume` 的优先级"。
 5. 主循环（TUI / headless `-p` / ACP 三种入口都要走第 4 步）
 
 **与 Phase A 简化的差异：** Phase A 的 `EnterWorktreeTool` **不**修改 `Config.targetDir`，依赖模型从工具结果里读到绝对路径并继续使用。Phase D 的 CLI flag 在启动期就生效，没有运行中的模型上下文需要兼容，所以**直接切换 `targetDir` 和 `process.cwd()`** —— 这是更强的隔离保证。两条路径行为不同，需要在用户文档里说明。
@@ -270,13 +270,19 @@ _WorktreeExitDialog：_
 
 **与 `--resume` 的优先级：**
 
-| `--resume` 状态      | `--worktree` 状态 | 结果                                                              |
-| -------------------- | ----------------- | ----------------------------------------------------------------- |
-| 无                   | 无                | 普通会话，无 worktree                                             |
-| 无                   | 有                | 新建 worktree                                                     |
-| 有，sidecar 命中     | 无                | 恢复旧 worktree（Phase C 行为）                                   |
-| 有，sidecar 命中     | 有                | **`--worktree` 赢**：丢弃 sidecar 的 worktree，新建并覆盖 sidecar |
-| 有，sidecar 已 stale | 有                | 新建 worktree（与无 sidecar 等价）                                |
+由于 session 存储以 `projectHash(process.cwd())` 为 key，而 `--worktree` 在 resume picker / `loadCliConfig` 之前就 chdir 到 worktree，所以"在 worktree X 启动的 session，从 worktree Y 内 resume"是**架构上不可达**的（两者的 projectHash 不同，session 文件落在不同目录）。下表反映 D-1 实现 + Phase 6 re-attach 修复后的实际行为：
+
+| `--resume` 状态              | `--worktree` 状态          | 结果                                                                                       |
+| ---------------------------- | -------------------------- | ------------------------------------------------------------------------------------------ |
+| 无                           | 无                         | 普通会话，无 worktree                                                                      |
+| 无                           | 有（新 slug）              | 新建 worktree                                                                              |
+| 无                           | 有（已存在的 slug）        | **re-attach** 到已有 worktree（Phase 6 修复）                                              |
+| 有                           | 无                         | 恢复旧 worktree（Phase C 行为，sidecar 命中则注入 reminder）                               |
+| 有（sid 出自同一 worktree）  | 有（同一 slug，re-attach） | re-attach + session 命中：正常 resume                                                      |
+| 有（sid 出自 main checkout） | 有（任意 slug）            | **session lookup 失败**：`No saved session found with ID …`，exit 1。documented limitation |
+| 有（sid 出自 worktree X）    | 有（slug Y, X != Y）       | 同上，session 跨 projectHash 不可寻                                                        |
+
+跨 projectHash override 的语义（`--worktree` 在不同 worktree / 主 checkout 的 session 之间转移）需要 storage 锚定到 repo root 而非 cwd-derived projectHash，属于未来 Config 重构范畴。`persistStartupWorktreeSidecar` 内的 `overrodeResumedWorktree` 分支代码保留是为该重构落地后能自动生效，目前在生产路径不会触发。
 
 #### D-2：`worktree.symlinkDirectories` 配置项
 

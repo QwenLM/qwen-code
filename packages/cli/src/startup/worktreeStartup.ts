@@ -155,18 +155,27 @@ export async function setupStartupWorktree(
   }
 
   // Capture the launch-time branch and HEAD. These feed the WorktreeSession
-  // sidecar's `originalBranch` / `originalHeadCommit` fields; on re-attach
-  // they record "where the user came from THIS time", which is the more
-  // useful framing for the resume case (the first-create values are no
-  // longer available without round-tripping through the persisted sidecar).
+  // sidecar's `originalBranch` / `originalHeadCommit` fields when we go
+  // through the CREATE path; on re-attach the HEAD baseline is re-captured
+  // from inside the worktree itself (see the re-attach branch below) so
+  // `WorktreeExitDialog`'s `rev-list <originalHeadCommit>..HEAD` counts
+  // only this session's new commits — not every commit the kept worktree
+  // accumulated across prior sessions.
+  //
   // The two probes are independent — run in parallel to shave one
   // subprocess off the critical path. Each is individually try-wrapped
   // so a failure in one (detached HEAD, unborn HEAD, partial init)
-  // doesn't poison the other.
-  const [originalBranch, originalHeadCommit] = await Promise.all([
+  // doesn't poison the other. `getCurrentBranch` returns the literal
+  // string `'HEAD'` on a detached HEAD instead of throwing; normalize
+  // that to `undefined` so callers treat detached and missing the same.
+  const [originalBranchRaw, originalHeadCommit] = await Promise.all([
     service.getCurrentBranch().catch(() => undefined),
     service.getCurrentCommitHash().catch(() => ''),
   ]);
+  const originalBranch =
+    originalBranchRaw && originalBranchRaw !== 'HEAD'
+      ? originalBranchRaw
+      : undefined;
 
   // Re-attach to an existing worktree instead of erroring out. Common
   // case: user did `qwen --worktree foo` previously, exited with Keep,
@@ -203,6 +212,18 @@ export async function setupStartupWorktree(
         error: `--worktree: failed to chdir into ${worktreePath} (${error instanceof Error ? error.message : String(error)}).`,
       };
     }
+    // Re-capture HEAD from INSIDE the worktree we just attached to.
+    // The launch-cwd capture above describes the main checkout — using
+    // it here would make WorktreeExitDialog's `rev-list <head>..HEAD`
+    // count every commit accumulated in the worktree across all prior
+    // sessions as "new work this session". Best-effort: fall back to
+    // the launch-cwd capture if the in-worktree probe fails, which
+    // matches the "treat empty as unknown and skip the count" contract
+    // the dialog already implements.
+    const reattachService = new GitWorktreeService(worktreePath);
+    const reattachHeadCommit = await reattachService
+      .getCurrentCommitHash()
+      .catch(() => originalHeadCommit);
     debugLogger.debug(
       `setupStartupWorktree: re-attached to existing worktree at ${worktreePath} (branch=${registeredBranch})`,
     );
@@ -214,7 +235,7 @@ export async function setupStartupWorktree(
         branch: registeredBranch,
         repoRoot,
         originalBranch: originalBranch ?? 'HEAD',
-        originalHeadCommit,
+        originalHeadCommit: reattachHeadCommit,
         isPullRequest,
         wasReattached: true,
       },
