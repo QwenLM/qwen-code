@@ -108,6 +108,16 @@ export default {
   'View or change the language setting': '查看或更改語言設置',
   'List background tasks (text dump — interactive dialog opens via the footer pill)':
     '列出背景任務（文字列表；互動式對話框可透過頁腳中的「背景任務」入口開啟）',
+  'Run a session-scoped automated repository improvement loop':
+    '執行會話範圍內的自動化儲存庫改進循環',
+  'Configure default context sources for future loops':
+    '設定後續循環的預設上下文來源',
+  'Start a session-scoped automated improvement loop':
+    '啟動會話範圍內的自動化改進循環',
+  'Show the active auto-improve loop status': '顯示目前 auto-improve 循環狀態',
+  'Gracefully stop the active auto-improve loop':
+    '平順停止目前 auto-improve 循環',
+  'Run one scheduled auto-improve tick': '執行一次排程中的 auto-improve tick',
   'Delete a previous session': '刪除先前的會話',
   'Run installation and environment diagnostics': '執行安裝與環境診斷',
   'Browse dynamic model catalogs and choose which models stay enabled locally':

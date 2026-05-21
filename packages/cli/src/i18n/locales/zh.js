@@ -119,6 +119,16 @@ export default {
   'View or change the language setting': '查看或更改语言设置',
   'List background tasks (text dump — interactive dialog opens via the footer pill)':
     '列出后台任务（文本列表；交互式对话框可通过页脚中的“后台任务”入口打开）',
+  'Run a session-scoped automated repository improvement loop':
+    '运行会话范围内的自动仓库改进循环',
+  'Configure default context sources for future loops':
+    '配置后续循环的默认上下文来源',
+  'Start a session-scoped automated improvement loop':
+    '启动会话范围内的自动改进循环',
+  'Show the active auto-improve loop status': '显示当前 auto-improve 循环状态',
+  'Gracefully stop the active auto-improve loop':
+    '平滑停止当前 auto-improve 循环',
+  'Run one scheduled auto-improve tick': '运行一次计划中的 auto-improve tick',
   'Delete a previous session': '删除先前的会话',
   'Run installation and environment diagnostics': '运行安装和环境诊断',
   'Browse dynamic model catalogs and choose which models stay enabled locally':
