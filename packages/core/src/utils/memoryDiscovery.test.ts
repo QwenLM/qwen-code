@@ -539,8 +539,10 @@ describe('loadServerHierarchicalMemory', () => {
 
   describe('QWEN.local.md (project-local context file)', () => {
     // The local-context-file slot is anchored at `<projectRoot>/.qwen/`, where
-    // projectRoot is the nearest ancestor containing a `.git` directory. Make
-    // sure findProjectRoot resolves to our test projectRoot.
+    // projectRoot is the nearest ancestor containing a `.git` directory OR a
+    // `.git` file (the latter is how git worktrees and submodules are marked).
+    // Most tests in this block use the directory form; a few below cover the
+    // file form and the no-project-root case explicitly.
     beforeEach(async () => {
       await createEmptyDir(path.join(projectRoot, '.git'));
     });
@@ -725,6 +727,106 @@ describe('loadServerHierarchicalMemory', () => {
       expect(result.fileCount).toBe(1);
       expect(result.memoryContent).toContain(
         `--- Context from: ${path.relative(cwd, localFile)} ---\nstandalone local`,
+      );
+    });
+
+    it('loads QWEN.local.md when project root is marked by a .git FILE (worktree / submodule layout)', async () => {
+      // Git worktrees and submodules mark the repo root with a `.git` file
+      // (containing `gitdir: <path>`), not a `.git` directory. The loader
+      // must treat that as a valid project root, otherwise `<cwd>` is used
+      // as a silent fallback and the documented project-root slot never
+      // loads. Replace the directory created by beforeEach with a file.
+      await fsPromises.rm(path.join(projectRoot, '.git'), {
+        recursive: true,
+        force: true,
+      });
+      await fsPromises.writeFile(
+        path.join(projectRoot, '.git'),
+        'gitdir: /elsewhere/worktrees/feature/.git\n',
+      );
+
+      const localFile = await createTestFile(
+        path.join(projectRoot, QWEN_DIR, 'QWEN.local.md'),
+        'worktree local',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(1);
+      expect(result.memoryContent).toContain(
+        `--- Context from: ${path.relative(cwd, localFile)} ---\nworktree local`,
+      );
+    });
+
+    it('skips QWEN.local.md when no project root can be found (no .git ancestor)', async () => {
+      // Without a project root, falling back to cwd would silently turn the
+      // single fixed slot into a per-cwd file — opposite of the design.
+      // Pin the "skip" behavior so a future regression doesn't reintroduce
+      // the fallback.
+      await fsPromises.rm(path.join(projectRoot, '.git'), {
+        recursive: true,
+        force: true,
+      });
+
+      await createTestFile(
+        path.join(cwd, QWEN_DIR, 'QWEN.local.md'),
+        'cwd-anchored local that must not load',
+      );
+      await createTestFile(
+        path.join(projectRoot, QWEN_DIR, 'QWEN.local.md'),
+        'projectRoot-anchored local that must not load either',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(0);
+      expect(result.memoryContent).not.toContain(
+        'cwd-anchored local that must not load',
+      );
+      expect(result.memoryContent).not.toContain(
+        'projectRoot-anchored local that must not load either',
+      );
+    });
+
+    it('skips QWEN.local.md when cwd === homedir without .git (avoids global-dir collision)', async () => {
+      // When cwd is the home directory and there is no `.git` there, the
+      // would-be slot path resolves to `<homedir>/.qwen/QWEN.local.md` —
+      // i.e. inside the GLOBAL Qwen dir. Loading that as a project-local
+      // override is wrong: there is no project. Pin the "skip" behavior.
+      await fsPromises.rm(path.join(projectRoot, '.git'), {
+        recursive: true,
+        force: true,
+      });
+      await createTestFile(
+        path.join(homedir, QWEN_DIR, 'QWEN.local.md'),
+        'do not promote this to project-local',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        homedir, // cwd === homedir
+        [],
+        new FileDiscoveryService(homedir),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      // Allowed: global QWEN.md / AGENTS.md in ~/.qwen/ may still load via
+      // the existing global-discovery path. The assertion here is narrow —
+      // the LOCAL slot specifically must not have been loaded.
+      expect(result.memoryContent).not.toContain(
+        'do not promote this to project-local',
       );
     });
   });

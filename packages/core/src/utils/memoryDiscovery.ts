@@ -32,7 +32,10 @@ async function findProjectRoot(startDir: string): Promise<string | null> {
     const gitPath = path.join(currentDir, '.git');
     try {
       const stats = await fs.lstat(gitPath);
-      if (stats.isDirectory()) {
+      // `.git` is a directory in a normal clone, but a regular file in
+      // git worktrees and submodules (it contains `gitdir: <path>`).
+      // Both shapes mark a repo root — accept either.
+      if (stats.isDirectory() || stats.isFile()) {
         return currentDir;
       }
     } catch (error: unknown) {
@@ -387,9 +390,16 @@ export async function loadServerHierarchicalMemory(
   // QWEN.md / AGENTS.md files so local instructions can supplement or
   // override shared ones. Same trust + explicit-only gating as the rest
   // of the project-level discovery.
-  if (implicitDiscoveryEnabled && folderTrust) {
+  //
+  // Requires a real project root (`foundRoot`, not the `resolvedCwd`
+  // fallback). Without that gate, two failure modes appear:
+  //   * Deep cwd in a non-git workspace turns the slot into a per-cwd
+  //     file, breaking the "single fixed slot" invariant.
+  //   * `cwd === homedir` resolves the slot path to `~/.qwen/QWEN.local.md`,
+  //     colliding with the global Qwen directory.
+  if (implicitDiscoveryEnabled && folderTrust && foundRoot) {
     const localContextPath = path.join(
-      effectiveRoot,
+      foundRoot,
       QWEN_DIR,
       LOCAL_CONTEXT_FILENAME,
     );
