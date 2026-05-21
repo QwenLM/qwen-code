@@ -758,7 +758,21 @@ export function clearPersistedAuth(): void {
       for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
         delete env[plan.envKey];
       }
+      // Standard OpenAI bucket (legacy + the api-key flow's default).
       delete env[API_KEY_ENV_KEY];
+      // Every preset provider with a static string envKey.
+      for (const p of ALL_PROVIDERS) {
+        if (typeof p.envKey === 'string') {
+          delete env[p.envKey];
+        }
+      }
+      // Custom-provider env keys are derived dynamically by
+      // generateCustomEnvKey — match the prefix instead of enumerating.
+      for (const key of Object.keys(env)) {
+        if (key.startsWith(CUSTOM_API_KEY_ENV_PREFIX)) {
+          delete env[key];
+        }
+      }
     }
 
     // Remove subscription plan metadata (legacy + new namespace)
@@ -769,6 +783,18 @@ export function clearPersistedAuth(): void {
     if (pm) {
       for (const key of SUBSCRIPTION_PROVIDER_METADATA_KEYS) {
         delete pm[key];
+      }
+      // Every preset with a static models[] writes providerMetadata.<id>.version
+      // via resolveProviderState — wipe them all on clear so stale entries
+      // don't cause phantom "update available" notifications for a provider
+      // the user just signed out of.
+      for (const p of ALL_PROVIDERS) {
+        try {
+          const key = resolveMetadataKey(p);
+          if (key) delete pm[key];
+        } catch {
+          /* skip metadata cleanup for a misconfigured provider id */
+        }
       }
     }
 

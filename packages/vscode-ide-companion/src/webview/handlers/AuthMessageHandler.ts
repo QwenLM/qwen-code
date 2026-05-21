@@ -162,38 +162,43 @@ export class AuthMessageHandler extends BaseMessageHandler {
 
   /**
    * Handle auth — full interactive auth flow.
-   *
-   * Tree (mirrors CLI AuthDialog alibaba group):
-   *   |- Coding Plan -> Region (China/Global) -> API Key -> done
-   *   |- Token Plan -> API Key -> done
-   *   \- API Key
-   *      |- Alibaba Standard -> Region (4 regions) -> API Key -> Model IDs -> done
-   *      \- Custom -> Base URL -> API Key -> Model -> done
+   * Dynamically generates provider choices from the shared registry.
    */
   private async handleAuthInteractive(): Promise<void> {
     try {
-      // Main menu
-      const provider = await this.pick(
-        [
-          {
-            label: 'Alibaba Cloud Coding Plan',
-            description:
-              'Paid · Up to 6,000 requests/5 hrs · All Coding Plan Models',
-            value: 'coding-plan' as const,
-          },
-          {
-            label: 'Alibaba Cloud Token Plan',
-            description: 'For teams · Usage-based billing · Dedicated endpoint',
-            value: 'token-plan' as const,
-          },
-          {
-            label: 'API Key',
-            description: 'Bring your own API key',
-            value: 'api-key' as const,
-          },
-        ],
-        'Qwen Code: Auth',
-        'Select authentication method',
+      // Build grouped provider menu
+      const items: Array<{
+        label: string;
+        description?: string;
+        value: string;
+        kind?: vscode.QuickPickItemKind;
+      }> = [];
+
+      const addGroup = (
+        label: string,
+        providers: readonly ProviderConfig[],
+      ) => {
+        if (providers.length === 0) return;
+        items.push({
+          label,
+          value: '',
+          kind: vscode.QuickPickItemKind.Separator,
+        });
+        for (const p of providers) {
+          items.push({
+            label: p.label,
+            description: p.description,
+            value: p.id,
+          });
+        }
+      };
+
+      addGroup('Alibaba Cloud', ALIBABA_PROVIDERS);
+      addGroup('Third Party', THIRD_PARTY_PROVIDERS);
+
+      // Custom provider is always last
+      const customProviders = ALL_PROVIDERS.filter(
+        (p) => p.uiGroup === 'custom',
       );
       if (customProviders.length > 0) {
         addGroup('Custom', customProviders);
@@ -214,13 +219,8 @@ export class AuthMessageHandler extends BaseMessageHandler {
         return;
       }
 
-      if (provider === 'coding-plan') {
-        await this.authCodingPlan();
-      } else if (provider === 'token-plan') {
-        await this.authTokenPlan();
-      } else {
-        await this.authApiKey();
-      }
+      // Run generic setup flow
+      await this.runProviderSetupFlow(provider);
     } catch (error) {
       const errorMsg = getErrorMessage(error);
       console.error('[AuthMessageHandler] auth failed:', error);
@@ -265,77 +265,58 @@ export class AuthMessageHandler extends BaseMessageHandler {
       protocol = selected as AuthType;
     }
 
-    const apiKey = await this.input({
-      title: 'Qwen Code: API Key',
-      prompt: 'Enter your Coding Plan API key',
-      placeHolder: 'sk-...',
-      password: true,
-      required: true,
-    });
-    if (!apiKey) {
-      return;
-    }
-
-    if (this.authInteractiveHandler) {
-      await this.authInteractiveHandler('coding-plan', region, apiKey);
-    }
-  }
-
-  /**
-   * Token Plan: API key -> connect. Fixed endpoint, no region selection.
-   */
-  private async authTokenPlan(): Promise<void> {
-    const apiKey = await this.input({
-      title: 'Qwen Code: Token Plan API Key',
-      prompt: 'Enter your Token Plan API key',
-      placeHolder: 'sk-...',
-      password: true,
-      required: true,
-    });
-    if (!apiKey) {
-      return;
-    }
-
-    if (this.authInteractiveHandler) {
-      await this.authInteractiveHandler('token-plan', undefined, apiKey);
-    } else {
-      console.error(
-        '[AuthMessageHandler] authInteractiveHandler not set; token-plan config was not written.',
-      );
-      this.sendToWebView({
-        type: 'authError',
-        data: { message: 'Internal error: auth handler not initialized.' },
-      });
-    }
-  }
-
-  /**
-   * API Key: select type -> Alibaba Standard or Custom.
-   */
-  private async authApiKey(): Promise<void> {
-    const keyType = await this.pick(
-      [
-        {
-          label: 'Standard API Key',
-          description: 'Connect with an existing ModelStudio API key',
-          value: 'alibaba-standard' as const,
-        },
-        {
-          label: 'Custom API Key',
-          description:
-            'For other OpenAI / Anthropic / Gemini-compatible providers',
-          value: 'custom' as const,
-        },
-      ],
-      'Qwen Code: Select API Key Type',
-      'Select API key type',
-    );
-    if (!keyType) {
-      return;
-    }
-
-    if (keyType === 'alibaba-standard') {
-      await this.authAlibabaStandard();
+    // Step 1: Base URL (if needed)
+    let baseUrl: string;
+    if (shouldShowStep(provider, 'baseUrl')) {
+      if (Array.isArray(provider.baseUrl)) {
+        const options = provider.baseUrl as BaseUrlOption[];
+        const stepTitle = provider.uiLabels?.baseUrlStepTitle ?? 'Endpoint';
+        const selected = await this.pick(
+          options.map((opt) => ({
+            label: opt.label,
+            description: opt.url,
+            value: opt.url,
+          })),
+          `${flowTitle}: ${stepTitle}`,
+          `Select ${stepTitle.toLowerCase()}`,
+        );
+        if (!selected) return;
+        baseUrl = selected;
+      } else {
+        // Free-form URL input. Show a protocol-specific default as
+        // placeholder (NOT pre-filled value) so picking Anthropic/Gemini
+        // doesn't silently write the OpenAI endpoint when the user hits
+        // Enter on the OpenAI default. Defaults come from core's shared
+        // getDefaultBaseUrlForProtocol so CLI and VS Code stay in sync.
+        const effectiveProtocol = protocol ?? provider.protocol;
+        // No local fallback: getDefaultBaseUrlForProtocol owns the defaults.
+        // Adding an OpenAI fallback here would silently mask a new AuthType
+        // that core hadn't been taught about, diverging from the CLI flow
+        // (which shows an empty placeholder + scheme error in the same case).
+        const placeholder = getDefaultBaseUrlForProtocol(effectiveProtocol);
+        const urlInput = await this.input({
+          title: `${flowTitle}: Base URL`,
+          prompt: 'Enter API base URL',
+          placeHolder: placeholder,
+          value: '',
+        });
+        if (urlInput === undefined) return;
+        baseUrl = urlInput.trim() || placeholder;
+        if (!/^https?:\/\//i.test(baseUrl)) {
+          // authError already clears the webview's connecting state; do NOT
+          // also send authCancelled — the webview clears the error on
+          // cancel, so the two messages race and the error flashes away
+          // before the user can read it. authCancelled is reserved for
+          // user-initiated dismissals (Escape on a QuickPick/InputBox).
+          this.sendToWebView({
+            type: 'authError',
+            data: {
+              message: 'Base URL must start with http:// or https://.',
+            },
+          });
+          return;
+        }
+      }
     } else {
       baseUrl = resolveBaseUrl(provider);
     }

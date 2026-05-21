@@ -1172,59 +1172,6 @@ describe('WebViewProvider settings sync', () => {
     );
   });
 
-  it('syncs VS Code provider settings after Token Plan interactive auth', async () => {
-    const provider = new WebViewProvider(
-      { subscriptions: [] } as never,
-      { fsPath: '/extension-root' } as never,
-    );
-    const syncSpy = vi
-      .spyOn(
-        provider as unknown as {
-          syncQwenConfigToVSCodeSettings: () => Promise<void>;
-        },
-        'syncQwenConfigToVSCodeSettings',
-      )
-      .mockResolvedValue();
-    const initSpy = vi
-      .spyOn(
-        provider as unknown as {
-          doInitializeAgentConnection: (options: {
-            autoAuthenticate: boolean;
-          }) => Promise<void>;
-        },
-        'doInitializeAgentConnection',
-      )
-      .mockResolvedValue();
-    const sendSpy = vi
-      .spyOn(
-        provider as unknown as {
-          sendMessageToWebView: (message: unknown) => void;
-        },
-        'sendMessageToWebView',
-      )
-      .mockImplementation(() => undefined);
-
-    (provider as unknown as { authState: boolean }).authState = true;
-
-    await (
-      provider as unknown as {
-        handleAuthInteractive: (
-          provider: string,
-          region?: string,
-          apiKey?: string,
-        ) => Promise<void>;
-      }
-    ).handleAuthInteractive('token-plan', undefined, 'token-plan-key');
-
-    expect(mockWriteTokenPlanConfig).toHaveBeenCalledWith('token-plan-key');
-    expect(syncSpy).toHaveBeenCalledTimes(1);
-    expect(initSpy).toHaveBeenCalledWith({ autoAuthenticate: false });
-    expect(sendSpy).toHaveBeenCalledWith({
-      type: 'authSuccess',
-      data: { message: 'Provider configured successfully!' },
-    });
-  });
-
   it('ignores non-auth qwen-code setting changes', async () => {
     const provider = new WebViewProvider(
       { subscriptions: [] } as never,
