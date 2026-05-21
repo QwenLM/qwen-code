@@ -492,6 +492,16 @@ function VirtualizedList<T>(
     process.env['NODE_ENV'] === 'test' ||
     (width !== undefined && typeof width === 'number');
 
+  // Surface the "blank viewport because not ready" failure mode in the
+  // debug log so users with `--debug` can diagnose tiny-terminal or
+  // resize-race blank screens instead of seeing nothing. The guard
+  // above intentionally returns []; the warning is the only signal.
+  if (!isReady) {
+    debugLogger.debug(
+      `viewport not ready (containerHeight=${containerHeight}, width=${String(width)}); rendering empty until measurement settles`,
+    );
+  }
+
   const renderRangeStart = renderStatic ? 0 : startIndex;
   const renderRangeEnd = renderStatic ? data.length - 1 : endIndex;
 

@@ -31,7 +31,11 @@ function ScrollableList<T>(
   props: ScrollableListProps<T>,
   ref: React.Ref<ScrollableListRef<T>>,
 ) {
-  const { hasFocus } = props;
+  // Separate ScrollableList-only props from the ones we pass through to
+  // VirtualizedList. Spreading the full props would silently forward
+  // `hasFocus` (which VirtualizedList does not declare) and create a
+  // latent name collision if VirtualizedList ever adds the same prop.
+  const { hasFocus, ...virtualizedListProps } = props;
   const virtualizedListRef = useRef<VirtualizedListRef<T>>(null);
 
   useImperativeHandle(
@@ -122,7 +126,7 @@ function ScrollableList<T>(
   // parent). MainContent passes an explicit `containerHeight`, which
   // VirtualizedList's outermost Box honours, so the wrapper added nothing
   // beyond the dead ref.
-  return <VirtualizedList ref={virtualizedListRef} {...props} />;
+  return <VirtualizedList ref={virtualizedListRef} {...virtualizedListProps} />;
 }
 
 const ScrollableListWithForwardRef = forwardRef(ScrollableList) as <T>(
