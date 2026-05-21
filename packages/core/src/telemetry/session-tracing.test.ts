@@ -1041,8 +1041,12 @@ describe('session-tracing', () => {
         lastBeforeSentinel.length - 1,
       );
       expect(lastCharCode).not.toBeGreaterThanOrEqual(0xd800);
-      // And the result must be valid UTF-16 (no orphan surrogates).
-      expect(() => Buffer.from(truncated, 'utf16le')).not.toThrow();
+      // Validate there are no orphan high surrogates anywhere in the
+      // string — `Buffer.from(s, 'utf16le')` doesn't validate
+      // surrogate pairs (#4321 review-9), so test the property
+      // directly with a regex that matches a high surrogate NOT
+      // followed by a low surrogate.
+      expect(truncated).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
     });
   });
 });

@@ -1997,12 +1997,19 @@ export class CoreToolScheduler {
         payload,
       );
     } catch (error) {
-      // Defensive: any throw from originalOnConfirm / modifyWithEditor /
-      // _applyInlineModify / attemptExecutionOfScheduledCalls would
-      // otherwise leave the blocked + tool spans open until the 30-min
+      // Defensive: a throw from the confirmation flow (originalOnConfirm,
+      // persistPermissionOutcome, autoApproveCompatiblePendingTools,
+      // modifyWithEditor, _applyInlineModify, status transitions) would
+      // otherwise leave A's blocked + tool spans open until the 30-min
       // TTL fires. Finalize both so the trace shows a deterministic
-      // close. finalizeXSpan are idempotent — if the success/cancel path
-      // already closed them, these are no-ops.
+      // close. finalizeXSpan are idempotent — if the success/cancel
+      // path already closed them, these are no-ops.
+      //
+      // attemptExecutionOfScheduledCalls is NOT covered by this catch
+      // (see below). A sister tool's prelude throw escaping through
+      // attemptExecutionOfScheduledCalls would otherwise corrupt A's
+      // span — each executeSingleToolCall handles its own span
+      // lifecycle via its own catch (#4321 review-9 wenshao Critical).
       //
       // Branch on signal.aborted so a throw caused by the abort signal
       // (e.g. ModifyWithEditor child interrupted by Ctrl+C) lands as
@@ -2034,6 +2041,15 @@ export class CoreToolScheduler {
       );
       throw error;
     }
+
+    // Execution phase runs OUTSIDE the catch above so a sister tool's
+    // prelude throw (re-thrown by executeSingleToolCall after SF-H2)
+    // can't be mis-attributed to A's span. Each executeSingleToolCall
+    // handles its own span lifecycle; failures propagate to the caller
+    // as-is. (#4321 review-9 wenshao Critical refines review-2
+    // pushback which became live after SF-H2 added the prelude
+    // re-throw.)
+    await this.attemptExecutionOfScheduledCalls(signal);
   }
 
   private async _handleConfirmationResponseInner(
@@ -2177,7 +2193,10 @@ export class CoreToolScheduler {
           : 'proceed_always';
       this.finalizeBlockedSpan(callId, decision, this.getBlockedSource());
     }
-    await this.attemptExecutionOfScheduledCalls(signal);
+    // attemptExecutionOfScheduledCalls is invoked by the caller
+    // (handleConfirmationResponse, outside its catch) so a sister
+    // tool's prelude throw can't be mis-attributed to this callId
+    // (#4321 review-9 wenshao Critical).
   }
 
   /**
