@@ -467,43 +467,19 @@ const ORPHAN_TOOL_USE_REPAIR_REASON =
  */
 
 /**
- * Walk `history` left-to-right and close every dangling tool_use ↔ tool_result
- * pair so the wire format the next API call sees is always
- * `model[fc] → user[fr]` with the `fr` blocks at the head of the immediately
- * following user turn. Two fix-ups can run for each `model[functionCall]`:
+ * Walk `history` left-to-right and close every dangling
+ * tool_use ↔ tool_result pair. For each `model[functionCall]`:
+ *  - SYNTHESIZE an `error` `functionResponse` for ids with no match;
+ *  - HOIST a real fr from a non-adjacent later user turn into the
+ *    adjacent one;
+ *  - drop duplicate fr copies for the same id.
  *
- *  - SYNTHESIZE: for any `functionCall.id` not echoed back by ANY of the
- *    consecutive user turns that follow it (up to the next model turn or
- *    end-of-history), insert a synthetic `functionResponse` carrying an
- *    `error` field — the close analogue of upstream Claude Code's
- *    `yieldMissingToolResultBlocks` (`query.ts:123-149`).
- *  - HOIST: for any `functionCall.id` whose real `functionResponse` lives in
- *    a non-adjacent following user turn (typical shape:
- *    `model[fc], user[text], user[fr_real]`), MOVE the real `fr` part out
- *    of its original turn into the adjacent one. Required by the wire
- *    layout — see the canonical design note above for the wedge.
- *
- * Mutates `history` in place and returns the set of injected `(callId, name)`
- * tuples so callers (the React tool scheduler) can dedupe a real `tool_result`
- * if the in-flight tool completes after the repair. Hoisted ids are NOT in
- * the returned list — the real `fr` is already present in history, so the
- * scheduler's existing history-based dedup handles them without extra entries.
- *
- * The injection target for synthesized parts follows this rule:
- *  - If the next entry is a `user` turn → insert synthetic parts at the head
- *    (before any non-`functionResponse` parts; after any pre-existing real
- *    `functionResponse` parts so caller-supplied ordering is preserved).
- *  - If the next entry is a `model` turn or end-of-history → insert a new
- *    `user` turn between them carrying just the synthetic parts.
- *
- * This is the qwen-code analogue of upstream Claude Code's
- * `yieldMissingToolResultBlocks` (`query.ts:123-149`). Upstream can call it
- * unconditionally at every error path because their `StreamingToolExecutor`
- * is in-band — they atomically `.discard()` in-flight tools at the synthesis
- * point. Our React scheduler runs out-of-band, so the caller pairs this with
- * dedup in `handleCompletedTools` (which skips submission for any callId
- * already present in history). See PR review thread on #4176 for the full
- * race-class analysis.
+ * Mutates `history` in place. Returns the synthesized (callId, name)
+ * pairs so the React scheduler's dedup can drop late real results for
+ * those ids; hoisted ids are NOT returned (the real fr is still in
+ * history, scheduler dedup handles them naturally). See the canonical
+ * note above `ORPHAN_TOOL_USE_REPAIR_REASON`. qwen-code analogue of
+ * upstream Claude Code's `yieldMissingToolResultBlocks`.
  */
 /** Location of a `functionResponse` part within `history`. */
 interface FrLocation {
@@ -526,20 +502,7 @@ interface ScanResult {
   scanEnd: number;
 }
 
-/**
- * Output of the decision phase for one scanned model turn. Encodes
- * exactly which mutations the next phase should apply:
- *  - `synthesizeIds`: ids that have no matching fr anywhere — synthesize an
- *    `error` `functionResponse` for each.
- *  - `hoistedParts`: parts to MOVE into the adjacent user turn (the
- *    canonical survivor for each id whose fr lives in a non-adjacent
- *    later turn).
- *  - `removalTargets`: parts to SPLICE out of `history` — covers both
- *    hoist survivors (so they only remain in the new location) and
- *    duplicate copies of any id.
- *  - `droppedDuplicates`: callIds whose duplicates we removed; returned
- *    by the function so callers can log the cleanup.
- */
+/** Decision-phase output: exact mutations the next phase will apply. */
 interface RepairPlan {
   modelIdx: number;
   scanEnd: number;
@@ -550,15 +513,10 @@ interface RepairPlan {
 }
 
 /**
- * SCAN PHASE — collect `expected` from the `model[functionCall]` turn
- * at `modelIdx` and `matched` from every consecutive user turn that
- * follows. Pure read; no mutation.
- *
- * Storing ALL locations (not just the first) is load-bearing for the
- * duplicate case: e.g. `model[fc id=cid], user[text], user[fr cid],
- * user[fr cid]` (the React scheduler retries the late `submitQuery`).
- * The downstream decision phase needs every copy so it can drop
- * duplicates — otherwise the wire payload re-triggers the wedge.
+ * SCAN — collect every `functionCall.id → name` from the model turn at
+ * `modelIdx` and EVERY `functionResponse.id → location` from the
+ * consecutive user turns that follow. Pure read. Storing all locations
+ * (not just the first) is what lets the decision phase drop duplicates.
  */
 function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
   const expected = new Map<string, string>();
@@ -587,19 +545,9 @@ function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
 }
 
 /**
- * DECISION PHASE — classify each expected callId into synthesize /
- * hoist / skip-already-adjacent, and collect every duplicate copy for
- * removal. Pure compute; no mutation. The plan returned here drives
- * the mutation phase exactly.
- *
- * Classification rules per callId:
- *   - No matching fr anywhere     → SYNTHESIZE an error fr.
- *   - First match adjacent (modelIdx+1) → SKIP relocation. (Duplicates,
- *     if any, are still removed below.)
- *   - First match non-adjacent    → HOIST: move the canonical part into
- *     the adjacent user turn; remove the original location.
- * In all matched cases, drop EVERY duplicate beyond the first so the
- * wire payload contains exactly one fr per call.
+ * DECISION — classify each expected id: no match → SYNTHESIZE; first
+ * match adjacent → SKIP relocation; first match non-adjacent → HOIST.
+ * Every duplicate beyond the first is always dropped. Pure compute.
  */
 function planRepair(scan: ScanResult): RepairPlan {
   const synthesizeIds: Array<[string, string]> = [];
@@ -645,26 +593,15 @@ function planRepair(scan: ScanResult): RepairPlan {
 }
 
 /**
- * MUTATION PHASE — apply the plan to `history` in place. Returns the
- * number of new user turns inserted before `modelIdx + 1` (currently
- * always 0 or 1), which the caller uses to advance its forward-walk
- * cursor past anything the loop should not revisit.
+ * MUTATION — apply the plan to `history` in place. Returns the count
+ * of new user turns inserted ahead of `modelIdx + 1` (0 or 1) so the
+ * outer loop can advance its cursor.
  *
- * Order matters here:
- *  1. Splice removal targets in (turnIdx desc, partIdx desc) so earlier
- *     removals don't shift indices for later ones.
- *  2. Drop user turns within `[modelIdx + 2, scanEnd)` that are now
- *     empty after the splice. Walk back-to-front for the same reason.
- *     The immediately-adjacent turn (`modelIdx + 1`) is preserved even
- *     if empty — we rewrite its parts in step 3.
- *  3. Inject `[...synthetic, ...hoisted]` at the head of the adjacent
- *     user turn (before any non-fr parts) OR insert a new user turn
- *     between `modelIdx` and whatever follows.
- *
- * Step 3 inserts at the HEAD (before non-fr parts), not the tail —
- * mirrors upstream Claude Code's `hoistToolResults`. See the canonical
- * design note above `ORPHAN_TOOL_USE_REPAIR_REASON` for why a tail
- * append re-triggers the 400. Do not "simplify" the head-insert away.
+ * Order: (1) splice removal targets desc-by-desc, (2) drop empty user
+ * turns in `[modelIdx + 2, scanEnd)`, (3) HEAD-insert at the adjacent
+ * user turn OR splice a new user turn between. The HEAD insert is
+ * load-bearing (mirrors upstream `hoistToolResults`) — see the
+ * canonical note for why tail-append re-triggers the wedge.
  */
 function applyRepair(
   history: Content[],
@@ -825,58 +762,20 @@ export class GeminiChat {
   private hasFailedCompressionAttempt = false;
 
   /**
-   * Index into `this.history` of the model turn that `processStreamResponse`
-   * persisted on the CURRENT in-flight attempt's mid-stream error. `null` if
-   * no partial has been pushed (the common case).
-   *
-   * The retry loop in `sendMessageStream` reads this on every catch to roll
-   * the partial back BEFORE retrying — without that pop, a retryable
-   * mid-stream error (rate limit, transient stream anomaly) leaves the
-   * failed attempt's `model[functionCall]` in history, and the successful
-   * retry's response lands as a SECOND consecutive model turn (invalid
-   * user/model alternation, plus the failed-attempt tool_use is orphan on
-   * the wire — the very wedge this whole subsystem is meant to escape).
-   *
-   * Reset to `null` on every `sendMessageStream` entry so a marker left
-   * over from a prior unretryable break doesn't bleed into the next send.
+   * Partial-push markers — index of the in-memory `model[partial fc]`
+   * and the matching deferred JSONL record. See the canonical note
+   * above `ORPHAN_TOOL_USE_REPAIR_REASON` for the lifecycle and the
+   * wedge they prevent.
    */
   private pendingPartialAssistantTurnIndex: number | null = null;
-
-  /**
-   * Deferred-flush record for the partial assistant turn pushed on a
-   * mid-stream error. Stashed instead of immediately appended to the
-   * chat-recording JSONL so a subsequent retry-success can roll back the
-   * persisted record alongside the in-memory pop. Without deferral, the
-   * JSONL transcript keeps the failed attempt even though live history
-   * dropped it — `--resume` rehydrates the failed `model[functionCall]`
-   * turn and the resumed model context picks up a tool_use the in-session
-   * run intentionally discarded.
-   *
-   * Lifecycle is paired with `pendingPartialAssistantTurnIndex`:
-   *  - Set together on stream-error + hasToolCall + hasContent.
-   *  - Cleared together by `popPartialIfPushed` when the retry loop
-   *    rolls the partial back.
-   *  - Flushed together to JSONL after the retry loop exits if the
-   *    partial survived (unretryable break path → about to throw to
-   *    the caller). At that point the partial is durable in memory and
-   *    the recording must match.
-   *  - Reset on `sendMessageStream` entry / setHistory / clearHistory /
-   *    truncateHistory / addHistory / stripThoughtsFromHistory so a leak
-   *    from any exotic path can't bleed into a future send.
-   */
   private pendingPartialAssistantRecord:
     | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
     | null = null;
 
   /**
-   * Reset both partial-push markers in lockstep. Extracted so the seven
-   * call sites that need to drop both fields (sendMessageStream entry,
-   * popPartialIfPushed, clearHistory, addHistory, setHistory,
-   * truncateHistory, stripThoughtsFromHistory) can't drift apart — a
-   * future history-mutating method that only clears one would leak the
-   * other into a later flush. The fields ARE always paired by lifecycle
-   * (set together on stream-error stash, popped together on retry, flushed
-   * together at the rethrow site), so any single-field reset is a bug.
+   * Reset both partial-push markers in lockstep. Every history-mutation
+   * site uses this — single-field resets are a bug because the fields
+   * are always paired by lifecycle.
    */
   private clearPendingPartialState(): void {
     this.pendingPartialAssistantTurnIndex = null;
@@ -1087,34 +986,13 @@ export class GeminiChat {
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       userContentAdded = true;
-      // Close any dangling `model[functionCall]` whose `functionResponse`
-      // never landed by the time we compose the request. Runs AFTER the
-      // user-supplied turn lands so a tool_result the user is supplying
-      // gets the first chance to close the pair before we synthesize an
-      // `error` `functionResponse`. Covers:
-      //   - Stream errored mid-tool_use (partial assistant push left a
-      //     dangling functionCall), then the React scheduler's eventual
-      //     tool_result lost the race against a Ctrl+Y retry whose
-      //     onAllToolCallsComplete fired into `isResponding=true` and
-      //     skipped submission.
-      //   - The same shape from a process crash / OOM mid-flight (the
-      //     transcript JSONL preserves the dangling model[fc] across
-      //     `--resume`; `startChat()` calls this once on load, but a
-      //     belt-and-suspenders pass here covers anything that slipped
-      //     past — including dangling shapes the load-time repair didn't
-      //     visit because compaction / setHistory ran after it).
-      // The React scheduler's late real result is then dedup'd against
-      // chat.history in `useGeminiStream.handleCompletedTools` so the
-      // synthetic doesn't collide with it on the wire.
-      //
-      // Diagnostic: log non-empty inline-repair results. The startChat()
-      // path logs synthesis events through `repairOrphanedToolUseTurnsInHistory`
-      // (`[REPAIR] Synthesized N functionResponse(s) ...`) and dedup events
-      // through `useGeminiStream.handleCompletedTools` (`[REPAIR] Dropping ...`),
-      // but this inline call site was previously silent — when a dedup-drop
-      // log shows up, investigators had no way to tell whether the
-      // synthetic was planted at session-load or at this per-send pass.
-      // Tag the log site so the lifecycle anchor is unambiguous.
+      // Per-send orphan repair (belt-and-suspenders alongside the
+      // startChat load-time pass). Runs AFTER user content lands so a
+      // user-supplied tool_result closes the pair before we synthesize
+      // anything. Logs are tagged so investigators can distinguish this
+      // pass from the session-load pass and from the React scheduler's
+      // dedup-drop. See the canonical note above
+      // `ORPHAN_TOOL_USE_REPAIR_REASON`.
       const inlineRepair = repairOrphanedToolUseTurns(this.history);
       if (inlineRepair.injected.length > 0) {
         debugLogger.warn(
@@ -1126,8 +1004,6 @@ export class GeminiChat {
         );
       }
       if (inlineRepair.droppedDuplicates.length > 0) {
-        // Symmetrical with the synthesis log: a duplicate-only repair
-        // (no synthesis, no hoist) here would otherwise be silent.
         debugLogger.warn(
           `[REPAIR] sendMessageStream inline pass dropped ` +
             `${inlineRepair.droppedDuplicates.length} duplicate ` +
@@ -1672,59 +1548,19 @@ export class GeminiChat {
         }
       } finally {
         streamDoneResolver!();
-        // Flush any deferred partial-tool_use record into the JSONL
-        // transcript. The retry loop and the post-loop max-tokens
-        // escalation block can BOTH leave one of these on the chat:
-        //
-        //  - Retry loop: any partial rolled back by popPartialIfPushed
-        //    has its stash cleared; any partial that survived (success
-        //    break with no partial set, or unretryable break with the
-        //    partial kept) leaves its record set so we record-and-clear
-        //    it here.
-        //  - Max-tokens escalation: the escalated stream re-enters
-        //    `processStreamResponse`, which sets a NEW
-        //    `pendingPartialAssistantRecord` if it errors mid-tool_use.
-        //    That throw propagates through the for-await above without
-        //    touching the (now-passed) retry-loop catch, so without a
-        //    flush in `finally` the partial would be live in
-        //    `this.history` (the escalated processStreamResponse already
-        //    pushed it) but absent from the JSONL transcript. `--resume`
-        //    would then rehydrate a truncated transcript whose live
-        //    history disagrees with disk, and
-        //    `repairOrphanedToolUseTurnsInHistory` would find nothing to
-        //    repair on load — the React scheduler's late real result
-        //    becomes a permanent orphan, reproducing the exact wedge
-        //    this PR prevents.
-        //
-        // Putting the flush in `finally` covers ALL throw paths
-        // (escalation, post-retry-loop `throw lastError`, the for-await
-        // consumer's `.return()` if it abandons the generator) and the
-        // normal completion path with a single statement. The marker
-        // and stash are dropped together to preserve the
-        // "marker non-null ⇔ stash non-null" invariant.
+        // Flush any deferred partial-tool_use record. Covers both the
+        // post-retry-loop unretryable break AND the max-tokens
+        // escalation throw (the escalated processStreamResponse can
+        // set a new record that escapes the retry-loop catch).
+        // Recording-service errors are logged at error level (sustained
+        // failure = monitoring signal) and swallowed — propagating
+        // would mask the real send outcome.
         if (self.pendingPartialAssistantRecord) {
-          // Recording-service errors (disk full, write permission,
-          // serialization failure) MUST NOT propagate out of the
-          // generator's `finally` — that would mask the real send
-          // outcome (success or original throw) with a JSONL-write
-          // error the caller can't usefully act on. Instead, log and
-          // drop the record: the partial is already durable in
-          // `this.history`, so live behavior is unaffected; only the
-          // disk transcript loses this turn (eventual consistency
-          // restored on the next successful flush of any other turn).
           try {
             self.chatRecordingService?.recordAssistantTurn(
               self.pendingPartialAssistantRecord,
             );
           } catch (recordErr) {
-            // Error-level (not warn): a persistent JSONL write failure
-            // (disk full, permission, serialization) silently loses
-            // every deferred partial after this point — exactly the
-            // class of failure that warrants monitoring attention.
-            // Transient failures still bubble through as a single
-            // error per occurrence; if logs are spammed it's an
-            // operational signal that the recording layer is broken,
-            // not noise.
             debugLogger.error(
               '[PARTIAL_FLUSH] Failed to persist deferred JSONL record: ' +
                 (recordErr instanceof Error
@@ -1895,17 +1731,10 @@ export class GeminiChat {
   }
 
   /**
-   * Returns the set of `functionResponse.id` values present anywhere
-   * in user turns of the raw chat history. Walks `this.history` in
-   * place — no `structuredClone`, no per-part copy — so it is safe to
-   * call on hot paths (e.g. on every tool-completion batch in
-   * `useGeminiStream.handleCompletedTools`).
-   *
-   * The dedup pass only needs id strings; routing it through
-   * {@link getHistory} would deep-clone the entire conversation
-   * (recursive `structuredClone` over every part, including large tool
-   * outputs) on every batch and visibly stall the React UI thread on
-   * long sessions (200+ entries with sizable tool results).
+   * Set of `functionResponse.id` strings in user turns. Walk-only,
+   * no clone — `useGeminiStream.handleCompletedTools` calls this per
+   * tool-completion batch, so {@link getHistory}'s `structuredClone`
+   * would stall the UI on long sessions.
    */
   getHistoryFunctionResponseIds(): Set<string> {
     const ids = new Set<string>();
@@ -2019,14 +1848,8 @@ export class GeminiChat {
   }
 
   /**
-   * Repair the inverse of `stripOrphanedUserEntriesFromHistory`: close every
-   * dangling `model[functionCall]` whose corresponding `user[functionResponse]`
-   * never landed (e.g. process crash between the partial-tool_use push and
-   * tool completion, or Ctrl+Y race before in-flight scheduler completed).
-   *
-   * Returns the list of synthesized `(callId, name)` tuples so the React
-   * tool scheduler can dedupe its eventual real `tool_result` for those
-   * callIds (see `handleCompletedTools` in `useGeminiStream.ts`).
+   * Instance wrapper around the free-function {@link repairOrphanedToolUseTurns}.
+   * See the canonical note above `ORPHAN_TOOL_USE_REPAIR_REASON`.
    */
   repairOrphanedToolUseTurns(reason?: string): {
     injected: Array<{ callId: string; name: string }>;
