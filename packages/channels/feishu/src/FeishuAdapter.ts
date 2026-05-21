@@ -136,12 +136,20 @@ export class FeishuChannel extends ChannelBase {
     // Fetch bot info for @mention detection
     await this.fetchBotInfo();
 
-    // Periodically clean up dedup map
+    // Periodically clean up dedup map and stale card state
+    if (this.dedupTimer) clearInterval(this.dedupTimer);
     this.dedupTimer = setInterval(() => {
       const now = Date.now();
       for (const [id, ts] of this.seenMessages) {
         if (now - ts > DEDUP_TTL_MS) {
           this.seenMessages.delete(id);
+        }
+      }
+      // Clean up stale card sessions (older than 10 minutes without activity)
+      const STALE_MS = 10 * 60 * 1000;
+      for (const [msgId, state] of this.cardSessions) {
+        if (now - state.lastUpdateAt > STALE_MS && !state.creating) {
+          this.cleanupCard(msgId);
         }
       }
     }, 60_000);
@@ -175,7 +183,11 @@ export class FeishuChannel extends ChannelBase {
         this.onMessage(data);
         return {};
       },
-    });
+      'card.action.trigger': (data: unknown) => {
+        this.onCardAction(data as Record<string, unknown>);
+        return { toast: { type: 'info', content: '已停止' } };
+      },
+    } as Record<string, (data: unknown) => unknown>);
 
     this.httpServer = createServer((req, res) => {
       if (req.method === 'POST') {
@@ -236,10 +248,14 @@ export class FeishuChannel extends ChannelBase {
         process.stderr.write(
           `[Feishu:${this.name}] Bot open_id: ${this.botOpenId}\n`,
         );
+      } else {
+        process.stderr.write(
+          `[Feishu:${this.name}] WARNING: Failed to fetch bot info (HTTP ${resp.status}). @mention detection in groups will not work.\n`,
+        );
       }
     } catch (err) {
       process.stderr.write(
-        `[Feishu:${this.name}] Failed to fetch bot info: ${err}\n`,
+        `[Feishu:${this.name}] WARNING: Failed to fetch bot info: ${err}. @mention detection in groups will not work.\n`,
       );
     }
   }
@@ -263,9 +279,6 @@ export class FeishuChannel extends ChannelBase {
       );
 
       const respText = await resp.text();
-      process.stderr.write(
-        `[Feishu:${this.name}] fetchMessageContent response: HTTP ${resp.status}, body=${respText.slice(0, 1000)}\n`,
-      );
 
       if (!resp.ok) {
         return undefined;
@@ -282,9 +295,6 @@ export class FeishuChannel extends ChannelBase {
 
       const item = data.data?.items?.[0];
       if (!item?.body?.content) {
-        process.stderr.write(
-          `[Feishu:${this.name}] fetchMessageContent: no content in item, keys=${JSON.stringify(item ? Object.keys(item) : 'no item')}\n`,
-        );
         return undefined;
       }
 
@@ -599,13 +609,6 @@ export class FeishuChannel extends ChannelBase {
       collapsibleThreshold: this.collapsibleThreshold,
     });
 
-    const cardJson = JSON.stringify(card);
-    const bodyElements =
-      (card as { body?: { elements?: unknown[] } }).body?.elements || [];
-    process.stderr.write(
-      `[Feishu:${this.name}] updateCard: elements=${bodyElements.length}, cardJson length=${cardJson.length}, finished=${finished}\n`,
-    );
-
     try {
       const resp = await fetch(`${BASE_URL}/im/v1/messages/${messageId}`, {
         method: 'PATCH',
@@ -762,11 +765,13 @@ export class FeishuChannel extends ChannelBase {
       clearTimeout(cardState.pendingUpdateTimer);
     }
 
-    // Wait for in-flight card creation
+    // Wait for in-flight card creation (with 10s timeout)
     if (cardState?.creating) {
       await new Promise<void>((resolve) => {
+        let elapsed = 0;
         const check = setInterval(() => {
-          if (!cardState.creating) {
+          elapsed += 50;
+          if (!cardState.creating || elapsed > 10_000) {
             clearInterval(check);
             resolve();
           }
@@ -775,9 +780,6 @@ export class FeishuChannel extends ChannelBase {
     }
 
     if (cardState?.created) {
-      process.stderr.write(
-        `[Feishu:${this.name}] Finalizing card (messageId=${cardState.messageId}), text length=${displayText.length}, tables=${(displayText.match(/\n\|[^\n]+\|\n/g) || []).length}\n`,
-      );
       const updated = await this.updateCard(
         cardState.messageId,
         displayText,
@@ -898,9 +900,9 @@ export class FeishuChannel extends ChannelBase {
         };
       };
       const items = data.data?.items || [];
-      // Find our bot's reaction
+      // Find and remove only our bot's reaction
       for (const item of items) {
-        if (item.reaction_id) {
+        if (item.reaction_id && item.operator?.operator_id === this.botOpenId) {
           await fetch(
             `${BASE_URL}/im/v1/messages/${messageId}/reactions/${item.reaction_id}`,
             {
@@ -920,10 +922,6 @@ export class FeishuChannel extends ChannelBase {
 
   private onCardAction(data: Record<string, unknown>): void {
     try {
-      process.stderr.write(
-        `[Feishu:${this.name}] Card action: ${JSON.stringify(data).slice(0, 300)}\n`,
-      );
-
       // Extract action value and message context
       const action = data['action'] as
         | { value?: { action?: string } }
@@ -955,10 +953,6 @@ export class FeishuChannel extends ChannelBase {
       const cardState = this.cardSessions.get(targetInboundMsgId);
       if (!cardState?.created) return;
 
-      process.stderr.write(
-        `[Feishu:${this.name}] Stop button clicked (messageId=${messageId})\n`,
-      );
-
       // Mark as stopped
       cardState.stopped = true;
       if (cardState.pendingUpdateTimer) {
@@ -980,9 +974,6 @@ export class FeishuChannel extends ChannelBase {
       const handleStop = async () => {
         if (sessionId) {
           await this.bridge.cancelSession(sessionId).catch(() => {});
-          process.stderr.write(
-            `[Feishu:${this.name}] cancelSession(${sessionId})\n`,
-          );
         }
         // Finalize card — show "stopped" notice with sender prefix
         const atPrefix = this.msgToSenderName.get(inboundId) || '';
@@ -992,18 +983,7 @@ export class FeishuChannel extends ChannelBase {
         const finalText = atPrefix
           ? `${atPrefix}\n\n${contentPart}`
           : contentPart;
-        process.stderr.write(
-          `[Feishu:${this.name}] Updating card to stopped state (msgId=${cardState.messageId})\n`,
-        );
-        const updated = await this.updateCard(
-          cardState.messageId,
-          finalText,
-          true,
-          inboundId,
-        );
-        process.stderr.write(
-          `[Feishu:${this.name}] Card update result: ${updated}\n`,
-        );
+        await this.updateCard(cardState.messageId, finalText, true, inboundId);
         this.cleanupCard(inboundId);
       };
 
@@ -1059,11 +1039,6 @@ export class FeishuChannel extends ChannelBase {
     try {
       const msg = data.message;
       const sender = data.sender;
-
-      // Debug: log message structure for reply/quote detection
-      process.stderr.write(
-        `[Feishu:${this.name}] onMessage: parent_id=${msg.parent_id}, root_id=${msg.root_id}, msg keys=${JSON.stringify(Object.keys(msg))}\n`,
-      );
 
       // Skip bot's own messages
       if (sender.sender_type === 'app') return;
@@ -1128,9 +1103,6 @@ export class FeishuChannel extends ChannelBase {
         if (msg.parent_id) {
           const quotedContent = await this.fetchMessageContent(msg.parent_id);
           if (quotedContent) {
-            process.stderr.write(
-              `[Feishu:${this.name}] Quoted (${msg.parent_id}): ${quotedContent.slice(0, 100)}...\n`,
-            );
             envelope.text = `[引用内容]\n${quotedContent}\n[/引用内容]\n\n${envelope.text}`;
           }
         }
@@ -1167,9 +1139,6 @@ export class FeishuChannel extends ChannelBase {
             cardState.messageId = result.messageId;
             cardState.created = true;
             cardState.lastUpdateAt = Date.now();
-            process.stderr.write(
-              `[Feishu:${this.name}] Processing card created: ${result.messageId} for inbound ${msgId}\n`,
-            );
           }
         } catch (err) {
           process.stderr.write(
