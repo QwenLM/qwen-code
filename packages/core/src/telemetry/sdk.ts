@@ -173,10 +173,35 @@ export function initializeTelemetry(config: Config): void {
   } = userAttrs;
   const resource = resourceFromAttributes({
     ...nonReservedUserAttrs,
-    [SemanticResourceAttributes.SERVICE_NAME]: userServiceName ?? SERVICE_NAME,
+    // `||` rather than `??`: an empty string from
+    // settings.resourceAttributes.service.name would otherwise pass the
+    // null/undefined guard and produce a blank service name on Resource,
+    // which some backends reject. The env path already filters whitespace
+    // values in the resolver.
+    [SemanticResourceAttributes.SERVICE_NAME]: userServiceName || SERVICE_NAME,
     [SemanticResourceAttributes.SERVICE_VERSION]:
       config.getCliVersion() || 'unknown',
   });
+
+  // One-time user-visible summary of resource-attribute diagnostics
+  // produced during config resolution. The per-warning `diag.warn` calls
+  // route to the OTel debug log; without this summary, an operator whose
+  // attributes are silently dropped has no console signal that anything
+  // happened. Telemetry init runs before Ink renders, so console output
+  // here does not interleave with the TUI.
+  // `?? []` defends against test mocks (`vi.mock('../config/config.js')`)
+  // that auto-stub Config methods to return undefined.
+  const attrWarnings = config.getTelemetryResourceAttributeWarnings() ?? [];
+  if (attrWarnings.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code telemetry] ${attrWarnings.length} resource attribute issue(s):`,
+    );
+    for (const w of attrWarnings) {
+      // eslint-disable-next-line no-console
+      console.warn(`  - ${w}`);
+    }
+  }
 
   const otlpEndpoint = config.getTelemetryOtlpEndpoint();
   const otlpProtocol = config.getTelemetryOtlpProtocol();

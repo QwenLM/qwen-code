@@ -314,6 +314,16 @@ export interface TelemetrySettings {
   resourceAttributes?: Record<string, string>;
   /** Per-signal cardinality controls. */
   metrics?: TelemetryMetricsSettings;
+  /**
+   * Human-readable diagnostics produced while resolving
+   * `resourceAttributes` (drops, coercions, reserved-key strips).
+   * Populated by `resolveTelemetrySettings()`; the SDK emits a one-time
+   * console summary at startup when this is non-empty so users notice
+   * silent drops without scanning the OTel debug log.
+   *
+   * Not a user-settable field — operators should leave it unset.
+   */
+  resourceAttributeWarnings?: string[];
 }
 
 export interface TelemetryMetricsSettings {
@@ -1010,6 +1020,7 @@ export class Config {
       outfile: params.telemetry?.outfile,
       resourceAttributes: params.telemetry?.resourceAttributes,
       metrics: params.telemetry?.metrics,
+      resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
@@ -2836,6 +2847,10 @@ export class Config {
 
   getTelemetryMetricsIncludeSessionId(): boolean {
     return this.telemetrySettings.metrics?.includeSessionId ?? false;
+  }
+
+  getTelemetryResourceAttributeWarnings(): readonly string[] {
+    return this.telemetrySettings.resourceAttributeWarnings ?? [];
   }
 
   getTelemetryOutfile(): string | undefined {

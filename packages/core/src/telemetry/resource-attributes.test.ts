@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { diag } from '@opentelemetry/api';
+import type { ResourceAttributeWarnings } from './resource-attributes.js';
 import {
   RESERVED_RESOURCE_ATTRIBUTE_KEYS,
   coerceStringResourceAttributes,
@@ -41,6 +42,10 @@ describe('parseOtelResourceAttributes', () => {
     // refactor that switches indexOf('=') to split('=').
     ['a=val=ue', { a: 'val=ue' }],
     ['k=base64==,x=1', { k: 'base64==', x: '1' }],
+    // Key percent-decoding: prevents `service%2Eversion=99` from sneaking
+    // past the reserved-key filter as the literal key `service%2Eversion`.
+    ['service%2Eversion=99', { 'service.version': '99' }],
+    ['my%20key=val', { 'my key': 'val' }],
   ])('parses %j → %j', (input, expected) => {
     expect(parseOtelResourceAttributes(input)).toEqual(expected);
   });
@@ -202,5 +207,63 @@ describe('coerceStringResourceAttributes', () => {
     expect(coerceStringResourceAttributes('not an object')).toEqual({});
     expect(coerceStringResourceAttributes(['a', 'b'])).toEqual({});
     expect(warnSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('trims keys and skips empty/whitespace-only keys', () => {
+    const input = { ' team ': 'platform', '': 'x', '  ': 'y', env: 'prod' };
+    expect(coerceStringResourceAttributes(input)).toEqual({
+      team: 'platform',
+      env: 'prod',
+    });
+    // 2 warnings for the two empty/whitespace keys.
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('warnings accumulator', () => {
+  beforeEach(() => {
+    vi.spyOn(diag, 'warn').mockImplementation(() => {});
+  });
+
+  it('parseOtelResourceAttributes pushes diagnostic strings into the accumulator', () => {
+    const warnings: ResourceAttributeWarnings = [];
+    parseOtelResourceAttributes('a=1,bogus,c=val%ZZ', warnings);
+    expect(warnings.length).toBeGreaterThanOrEqual(2);
+    expect(warnings.some((w) => w.includes('bogus'))).toBe(true);
+    expect(warnings.some((w) => w.includes('Invalid percent-encoding'))).toBe(
+      true,
+    );
+  });
+
+  it('stripReservedResourceAttributes pushes diagnostic for each reserved drop', () => {
+    const warnings: ResourceAttributeWarnings = [];
+    stripReservedResourceAttributes(
+      { 'service.version': 'x', 'session.id': 'y', team: 'z' },
+      'OTEL_RESOURCE_ATTRIBUTES',
+      warnings,
+    );
+    expect(warnings).toHaveLength(2);
+  });
+
+  it('coerceStringResourceAttributes pushes diagnostic for empty key + non-string value', () => {
+    const warnings: ResourceAttributeWarnings = [];
+    coerceStringResourceAttributes(
+      { '': 'empty', team: 'ok', count: 42 },
+      warnings,
+    );
+    expect(warnings).toHaveLength(2);
+  });
+
+  it('accumulator is opt-in (helpers work without one)', () => {
+    expect(() => parseOtelResourceAttributes('a=1,bogus')).not.toThrow();
+    expect(() =>
+      stripReservedResourceAttributes(
+        { 'service.version': 'x' },
+        'OTEL_RESOURCE_ATTRIBUTES',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      coerceStringResourceAttributes({ team: 'ok', count: 1 }),
+    ).not.toThrow();
   });
 });

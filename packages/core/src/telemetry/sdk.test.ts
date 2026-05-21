@@ -139,6 +139,7 @@ describe('Telemetry SDK', () => {
       getTelemetryIncludeSensitiveSpanAttributes: () => false,
       getTelemetryResourceAttributes: () => ({}),
       getTelemetryMetricsIncludeSessionId: () => false,
+      getTelemetryResourceAttributeWarnings: () => [],
       getDebugMode: () => false,
       getSessionId: () => 'test-session',
       getCliVersion: () => '1.0.0-test',
@@ -562,6 +563,53 @@ describe('Telemetry SDK', () => {
       expect(getResourceAttributes()['service.version']).toBe('1.0.0-test');
     });
 
+    it('empty-string service.name from settings falls back to default', () => {
+      // Reviewer caught: `??` would let "" pass; `||` correctly falls back
+      // so backends never see a blank service name.
+      vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
+        'service.name': '',
+      });
+      initializeTelemetry(mockConfig);
+      expect(getResourceAttributes()['service.name']).toBe('qwen-code');
+    });
+
+    it('emits a console summary when resource-attribute warnings are present', () => {
+      const consoleWarnSpy = vi
+        .spyOn(console, 'warn')
+        .mockImplementation(() => {});
+      try {
+        vi.spyOn(
+          mockConfig,
+          'getTelemetryResourceAttributeWarnings',
+        ).mockReturnValue([
+          'OTEL_RESOURCE_ATTRIBUTES cannot override reserved key "service.version"; ignoring',
+          'Skipping malformed OTEL_RESOURCE_ATTRIBUTES entry: "bogus"',
+        ]);
+        initializeTelemetry(mockConfig);
+        const header = consoleWarnSpy.mock.calls[0]?.[0] ?? '';
+        expect(header).toContain('2 resource attribute issue');
+        expect(
+          consoleWarnSpy.mock.calls.some((c) =>
+            String(c[0]).includes('reserved key'),
+          ),
+        ).toBe(true);
+      } finally {
+        consoleWarnSpy.mockRestore();
+      }
+    });
+
+    it('no console output when warnings list is empty', () => {
+      const consoleWarnSpy = vi
+        .spyOn(console, 'warn')
+        .mockImplementation(() => {});
+      try {
+        initializeTelemetry(mockConfig);
+        expect(consoleWarnSpy).not.toHaveBeenCalled();
+      } finally {
+        consoleWarnSpy.mockRestore();
+      }
+    });
+
     it('user-provided session.id is stripped (defense-in-depth)', () => {
       // Simulates a caller that bypasses resolveTelemetrySettings() and feeds
       // raw user input straight into Config. Resource must still not carry
@@ -594,6 +642,7 @@ describe('refreshSessionContext', () => {
       getTelemetryOutfile: () => undefined,
       getTelemetryResourceAttributes: () => ({}),
       getTelemetryMetricsIncludeSessionId: () => false,
+      getTelemetryResourceAttributeWarnings: () => [],
       getDebugMode: () => false,
       getSessionId: () => 'test-session',
       getCliVersion: () => '1.0.0-test',

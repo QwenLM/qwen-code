@@ -297,6 +297,41 @@ describe('telemetry/config helpers', () => {
       expect(resolved.resourceAttributes).toEqual({ team: 'x' });
     });
 
+    it('trims whitespace-only OTEL_SERVICE_NAME (treats as unset)', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_SERVICE_NAME: '   ' },
+      });
+      // No user attrs → resourceAttributes stays undefined.
+      expect(resolved.resourceAttributes).toBeUndefined();
+    });
+
+    it('exposes resourceAttributeWarnings when input has issues', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: {
+          OTEL_RESOURCE_ATTRIBUTES: 'bogus,service.version=1,team=ok',
+        },
+        settings: {
+          resourceAttributes: {
+            '': 'empty-key',
+            // @ts-expect-error — runtime defensive path against bad JSON.
+            count: 42,
+          },
+        },
+      });
+      expect(resolved.resourceAttributeWarnings).toBeDefined();
+      // Expect at least: malformed pair, reserved service.version, empty key, non-string value.
+      expect(resolved.resourceAttributeWarnings!.length).toBeGreaterThanOrEqual(
+        4,
+      );
+    });
+
+    it('leaves resourceAttributeWarnings undefined when input is clean', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { OTEL_RESOURCE_ATTRIBUTES: 'team=platform,env=prod' },
+      });
+      expect(resolved.resourceAttributeWarnings).toBeUndefined();
+    });
+
     it('drops non-string settings values', async () => {
       const resolved = await resolveTelemetrySettings({
         settings: {

@@ -7,6 +7,7 @@
 import type { TelemetrySettings } from '../config/config.js';
 import { FatalConfigError } from '../utils/errors.js';
 import { TelemetryTarget } from './index.js';
+import type { ResourceAttributeWarnings } from './resource-attributes.js';
 import {
   coerceStringResourceAttributes,
   parseOtelResourceAttributes,
@@ -135,21 +136,35 @@ export async function resolveTelemetrySettings(options: {
   // settings.resourceAttributes (settings wins on key conflict). RESERVED
   // keys (`service.version`, `session.id`) are stripped from both sources
   // with a `diag.warn`. OTEL_SERVICE_NAME is a standard escape hatch that
-  // overrides service.name from any other source.
+  // overrides service.name from any other source. All drops/coercions are
+  // accumulated into `resourceAttributeWarnings` so the SDK can emit a
+  // one-time user-visible summary at telemetry init.
+  const resourceAttributeWarnings: ResourceAttributeWarnings = [];
   const envResourceAttrs = stripReservedResourceAttributes(
-    parseOtelResourceAttributes(env['OTEL_RESOURCE_ATTRIBUTES']),
+    parseOtelResourceAttributes(
+      env['OTEL_RESOURCE_ATTRIBUTES'],
+      resourceAttributeWarnings,
+    ),
     'OTEL_RESOURCE_ATTRIBUTES',
+    resourceAttributeWarnings,
   );
   const settingsResourceAttrs = stripReservedResourceAttributes(
-    coerceStringResourceAttributes(settings.resourceAttributes),
+    coerceStringResourceAttributes(
+      settings.resourceAttributes,
+      resourceAttributeWarnings,
+    ),
     'settings.telemetry.resourceAttributes',
+    resourceAttributeWarnings,
   );
   const mergedResourceAttrs: Record<string, string> = {
     ...envResourceAttrs,
     ...settingsResourceAttrs,
   };
-  if (env['OTEL_SERVICE_NAME']) {
-    mergedResourceAttrs['service.name'] = env['OTEL_SERVICE_NAME'];
+  // Trim OTEL_SERVICE_NAME so a whitespace-only value (`' '`, `'\t'`) is
+  // treated as unset rather than producing a blank service name on Resource.
+  const otelServiceName = env['OTEL_SERVICE_NAME']?.trim();
+  if (otelServiceName) {
+    mergedResourceAttrs['service.name'] = otelServiceName;
   }
   const resourceAttributes = Object.keys(mergedResourceAttrs).length
     ? mergedResourceAttrs
@@ -173,5 +188,8 @@ export async function resolveTelemetrySettings(options: {
     outfile,
     resourceAttributes,
     metrics: { includeSessionId: metricsIncludeSessionId },
+    resourceAttributeWarnings: resourceAttributeWarnings.length
+      ? resourceAttributeWarnings
+      : undefined,
   };
 }
