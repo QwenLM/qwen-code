@@ -4968,6 +4968,62 @@ describe('ShellTool', () => {
         shellTool.build({ command: '', is_background: false }),
       ).toThrow();
     });
+
+    // Regression coverage for issue #4093: command substitution must be
+    // visibly flagged in the confirmation prompt rather than silently
+    // denied. See ShellToolInvocation.getConfirmationDetails for context.
+    describe('command substitution warning (issue #4093)', () => {
+      it('surfaces a warning for $() command substitution', async () => {
+        const invocation = shellTool.build({
+          command: 'python3 -c "print($(echo hello))"',
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        expect(details.warnings).toBeDefined();
+        expect(details.warnings).toHaveLength(1);
+        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+      });
+
+      it('surfaces a warning for backtick command substitution', async () => {
+        const invocation = shellTool.build({
+          command: 'echo `whoami`',
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+      });
+
+      it('surfaces a warning for <() process substitution', async () => {
+        const invocation = shellTool.build({
+          command: 'diff <(ls /a) <(ls /b)',
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+      });
+
+      it('does not set warnings on commands without substitution', async () => {
+        const invocation = shellTool.build({
+          command: 'npm install',
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        // `warnings` should be omitted entirely when there's nothing to flag.
+        expect(details.warnings).toBeUndefined();
+      });
+    });
   });
 
   describe('getDescription', () => {

@@ -16,10 +16,7 @@ import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperations } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import {
-  detectCommandSubstitution,
-  normalizeMonitorCommand,
-} from '../utils/shell-utils.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   findDangerousAllowRules,
@@ -348,9 +345,8 @@ export class PermissionManager {
    *
    * When a sub-command returns 'default' (no rule matches), it is resolved to
    * the actual default permission using AST analysis:
-   *   - Command substitution detected → 'deny'
    *   - Read-only command (cd, ls, git status, etc.) → 'allow'
-   *   - Otherwise → 'ask'
+   *   - Otherwise (including command substitution) → 'ask'
    *
    * Example: with rules `allow: [git checkout *]`
    *   - "cd /path && git checkout -b feature" → allow (cd) + allow (rule) → allow
@@ -402,18 +398,24 @@ export class PermissionManager {
    * Resolve 'default' permission to actual permission using AST analysis.
    * This mirrors the logic in ShellToolInvocation.getDefaultPermission().
    *
+   * Command substitution ($(), ``, <(), >()) is NOT a hard deny here — it
+   * falls through to 'ask' along with every other non-read-only command, so
+   * the user (or YOLO mode) can decide. The user-facing warning is surfaced
+   * by ShellToolInvocation.getConfirmationDetails so the confirmation prompt
+   * still flags the substitution clearly. See issue #4093 for why a hard
+   * deny here is wrong: it (a) cannot be overridden by YOLO mode and (b)
+   * fires inconsistently based on whether the PermissionManager has
+   * "relevant" rules for the surrounding compound command.
+   *
    * @param command - The shell command to analyze.
-   * @returns 'deny' for command substitution, 'allow' for read-only, 'ask' otherwise.
+   * @returns 'allow' for read-only, 'ask' otherwise.
    */
   private async resolveDefaultPermission(
     command: string,
-  ): Promise<'allow' | 'ask' | 'deny'> {
-    // Security: command substitution ($(), ``, <(), >()) → deny
-    if (detectCommandSubstitution(command)) {
-      return 'deny';
-    }
-
-    // AST-based read-only detection
+  ): Promise<'allow' | 'ask'> {
+    // AST-based read-only detection. Commands containing command substitution
+    // are never read-only (the AST walker marks any node with a substitution
+    // expansion as non-read-only), so they fall through to 'ask'.
     try {
       const isReadOnly = await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {

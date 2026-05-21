@@ -44,6 +44,7 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { isSubpaths } from '../utils/paths.js';
 import {
+  detectCommandSubstitution,
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
@@ -1464,6 +1465,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
       debugLogger.warn('Failed to extract command rules:', e);
     }
 
+    // Flag command substitution ($(), backticks, <(), >()) so the user
+    // sees a visible warning in the confirmation dialog. We surface this
+    // as an informational warning rather than denying outright; the deny
+    // path was inconsistent and could not be overridden by YOLO mode
+    // (see issue #4093). Substitution is detected on the original
+    // (pre-strip) command so wrappers like `bash -c "..."` are checked
+    // along with their inner contents.
+    const warnings: string[] = [];
+    if (
+      detectCommandSubstitution(command) ||
+      detectCommandSubstitution(this.params.command)
+    ) {
+      warnings.push(
+        'Contains command substitution ($(...), backticks, <(...), or >(...)).',
+      );
+    }
+
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Confirm Shell Command',
@@ -1477,6 +1495,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
+    if (warnings.length > 0) {
+      confirmationDetails.warnings = warnings;
+    }
     return confirmationDetails;
   }
 

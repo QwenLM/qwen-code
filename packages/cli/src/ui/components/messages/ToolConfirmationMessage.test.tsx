@@ -68,6 +68,57 @@ describe('ToolConfirmationMessage', () => {
     );
   });
 
+  // Regression coverage for issue #4093: exec confirmations carry a
+  // user-facing warning for command substitution. Previously such
+  // commands were hard-denied at L4 with an opaque "denied by
+  // permission rules" message; we now ask for confirmation and surface
+  // the substitution clearly.
+  it('renders warnings on exec confirmations when provided', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'python3 -c "print($(echo hello))"',
+      rootCommand: 'python3',
+      warnings: [
+        'Contains command substitution ($(...), backticks, <(...), or >(...)).',
+      ],
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('command substitution');
+  });
+
+  it('omits the warning region when no warnings are provided on exec confirmations', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'echo hello',
+      rootCommand: 'echo',
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame() ?? '').not.toContain('command substitution');
+  });
+
   it('should render plan confirmation with markdown plan content', () => {
     const confirmationDetails: ToolCallConfirmationDetails = {
       type: 'plan',
