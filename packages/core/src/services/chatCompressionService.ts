@@ -106,7 +106,7 @@ export interface CompactionThresholds {
   readonly warn: number;
   /** Token count at which auto-compaction triggers. */
   readonly auto: number;
-  /** Token count at which auto-compaction is forced (resets failure counter). */
+  /** Token count at which auto-compaction is force-triggered (bypasses the consecutive-failure breaker). */
   readonly hard: number;
   /** Window minus SUMMARY_RESERVE; the budget available for input + summary. */
   readonly effectiveWindow: number;
@@ -326,13 +326,16 @@ export class ChatCompressionService {
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
 
-    // Cheap gates first — these don't need the curated history.
+    // Cheap gates first — these don't need the curated history. Forward
+    // originalTokenCount on NOOP (matching the threshold-gate branch below)
+    // so telemetry consumers can distinguish "breaker tripped at N tokens"
+    // from "session has zero tokens".
     if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && !force) {
       return {
         newHistory: null,
         info: {
-          originalTokenCount: 0,
-          newTokenCount: 0,
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
           compressionStatus: CompressionStatus.NOOP,
         },
       };

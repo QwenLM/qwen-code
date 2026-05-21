@@ -45,6 +45,7 @@ import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
   computeThresholds,
+  MAX_CONSECUTIVE_FAILURES,
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
 import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
@@ -584,6 +585,11 @@ export class GeminiChat {
       // MAX_CONSECUTIVE_FAILURES strikes in a row.
       if (!force) {
         this.consecutiveFailures += 1;
+        if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          debugLogger.warn(
+            `[compaction] circuit breaker tripped after ${this.consecutiveFailures} consecutive failures (cheap-gate path); auto-compaction will NOOP until a successful force compaction resets the counter.`,
+          );
+        }
       }
     }
 
@@ -942,10 +948,16 @@ export class GeminiChat {
                     // explicitly as one strike — a single transient error
                     // (network blip, model 5xx) should not permanently latch
                     // the breaker; only repeated reactive failures should.
-                    // Hard-tier rescue (sendMessageStream) resets the counter
-                    // when token usage crosses the hard threshold, which is
-                    // the intended recovery path. (review #4168 R1.2)
+                    // The only recovery path for a latched counter is a
+                    // successful compaction (post-call reset at the COMPRESSED
+                    // branch in tryCompress); hard-rescue forwards the counter
+                    // as-is since force=true bypasses the breaker.
                     self.consecutiveFailures += 1;
+                    if (self.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                      debugLogger.warn(
+                        `[compaction] circuit breaker tripped after ${self.consecutiveFailures} consecutive failures (reactive overflow path); auto-compaction will NOOP on the cheap-gate until a successful force compaction resets the counter.`,
+                      );
+                    }
                   }
                 } catch (compressionError) {
                   if (

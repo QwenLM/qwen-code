@@ -2344,6 +2344,18 @@ describe('computeThresholds', () => {
     expect(t.auto).toBeGreaterThan(0);
     expect(t.warn).toBeLessThanOrEqual(t.auto);
     expect(t.auto).toBeLessThanOrEqual(t.hard);
+    // window < SUMMARY_RESERVE: effectiveWindow is clamped to 0, not negative.
+    // auto/warn/hard remain positive because each is `Math.max(proportional, absolute)`
+    // and the proportional branch dominates whenever the absolute branch goes ≤ 0.
+    expect(t.effectiveWindow).toBe(0);
+  });
+
+  it('zero window returns effectiveWindow=0 and non-negative tiers', () => {
+    const t = computeThresholds(0);
+    expect(t.effectiveWindow).toBe(0);
+    expect(t.warn).toBe(0);
+    expect(t.auto).toBe(0);
+    expect(t.hard).toBe(0);
   });
 
   it('thresholds always satisfy warn <= auto <= hard', () => {

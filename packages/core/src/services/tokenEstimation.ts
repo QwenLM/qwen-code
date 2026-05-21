@@ -7,6 +7,7 @@
 import type { Content } from '@google/genai';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  TOKEN_TO_CHAR_RATIO,
   estimateContentChars,
 } from './compactionInputSlimming.js';
 
@@ -14,11 +15,12 @@ import {
  * Average characters-per-token for char-based token estimation. The inputs
  * are character counts from `estimateContentChars` (i.e. `string.length`),
  * not byte counts — for CJK / multi-byte text the byte/char ratio differs
- * from 1, so a "bytes" name would mislead. Matches the inverse of
- * compactionInputSlimming.ts's TOKEN_TO_CHAR_RATIO and claude-code's
- * roughTokenCountEstimation default. (review #4168 R3.1)
+ * from 1, so a "bytes" name would mislead. Programmatically aliased to
+ * compactionInputSlimming.ts's TOKEN_TO_CHAR_RATIO so the auto-compaction
+ * trigger and the compression splitter can never drift on this constant.
+ * Matches claude-code's roughTokenCountEstimation default. (review #4168 R3.1)
  */
-export const CHARS_PER_TOKEN = 4;
+export const CHARS_PER_TOKEN = TOKEN_TO_CHAR_RATIO;
 
 /**
  * Estimate the token count of a list of Content objects via char/4.

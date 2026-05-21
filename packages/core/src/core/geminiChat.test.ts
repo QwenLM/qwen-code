@@ -2188,6 +2188,31 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[0][1].consecutiveFailures).toBe(
         MAX_CONSECUTIVE_FAILURES,
       );
+
+      // Step 3: verify the post-call reset took effect on the chat. A
+      // follow-up below-hard send (cheap-gate path, force=false) should
+      // forward consecutiveFailures=0, proving geminiChat.ts:614 ran on
+      // the COMPRESSED result.
+      compressSpy.mockClear();
+      compressSpy.mockResolvedValueOnce({
+        newHistory: null,
+        info: {
+          originalTokenCount: 40_000,
+          newTokenCount: 40_000,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      chat.setLastPromptTokenCount(50_000);
+      const followUpStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'after recovery' },
+        'prompt-hard-rescue-after-recovery',
+      );
+      for await (const _ of followUpStream) {
+        /* consume */
+      }
+      expect(compressSpy.mock.calls[0][1].consecutiveFailures).toBe(0);
+      expect(compressSpy.mock.calls[0][1].force).toBe(false);
     });
 
     it('does not force when tokens are below hard threshold (normal auto path)', async () => {
