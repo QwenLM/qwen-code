@@ -1596,22 +1596,54 @@ export class McpClientManager {
     // Stop all health checks first
     this.stopAllHealthChecks();
 
-    // F2 (#4175 commit 6 review fix — qwen-latest W94): drain the
-    // in-flight pool discovery pass BEFORE releasing pool refs.
+    // F2 (#4175 commit 6 review fix — qwen-latest W94 + W108): drain
+    // the in-flight pool discovery pass BEFORE releasing pool refs.
     // Pre-fix `stop()` called `releaseAllPooledConnections()` while a
     // pool-mode `discoverAllMcpToolsViaPool` was still mid-flight (e.g.
     // progressive discovery running during shutdown). The in-flight
     // pass would subsequently call `pool.acquire(...)` and attach a
     // fresh entry to `pooledConnections` AFTER the release loop had
     // already cleared the Map — leaking pool refs that no caller now
-    // tracks. Awaiting it (catching its rejection so a discovery
-    // failure doesn't abort the shutdown) closes the window.
+    // tracks.
+    //
+    // W108 hardening over plain `await`:
+    //   1. Outer 5s deadline via `Promise.race` — a single hung MCP
+    //      server should not block daemon SIGTERM indefinitely;
+    //      individual acquires are bounded by `runWithTimeout`
+    //      (stdio default 30s, remote 5s), but the aggregate
+    //      `discoveryInFlight` promise has no inherent cap. Matches
+    //      the pool's own `drainAll` shutdown-bounded contract (W73).
+    //   2. Debug log on entry + on rejection — pre-fix the empty catch
+    //      silently swallowed rejections; an MCP-discovery hang during
+    //      shutdown left zero log trail. Now operators tailing
+    //      `--debug` see what `stop()` waited on AND whether the wait
+    //      ended via resolution / rejection / timeout.
+    //   3. Timer `unref()` so the grace timer doesn't hold the event
+    //      loop open if discovery actually resolves first.
     if (this.discoveryInFlight) {
+      debugLogger.debug(
+        'stop(): awaiting in-flight pool discovery to drain (5s cap)',
+      );
+      const SHUTDOWN_DISCOVERY_GRACE_MS = 5_000;
       try {
-        await this.discoveryInFlight;
-      } catch {
-        /* discovery errors are surfaced through the original caller;
-           shutdown must proceed regardless */
+        await Promise.race([
+          this.discoveryInFlight,
+          new Promise<void>((resolve) => {
+            const t = setTimeout(() => {
+              debugLogger.debug(
+                'stop(): in-flight discovery did not settle within 5s grace; proceeding',
+              );
+              resolve();
+            }, SHUTDOWN_DISCOVERY_GRACE_MS);
+            t.unref?.();
+          }),
+        ]);
+      } catch (err) {
+        debugLogger.debug(
+          `stop(): in-flight discovery rejected (proceeding): ${getErrorMessage(
+            err,
+          )}`,
+        );
       }
     }
 

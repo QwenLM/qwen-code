@@ -937,12 +937,17 @@ export class McpTransportPool {
       this.opts.sendSdkMcpMessage,
     );
 
-    // Build a SessionMcpView that wraps this session's registries
-    // — but for unpooled entries we use McpClient.discover() (which
-    // registers directly via the registries we just passed) instead
-    // of the pure discoverAndReturn path. The view is constructed
-    // but applyTools/applyPrompts are no-ops for unpooled (registration
-    // already happened inside discover()).
+    // Build a SessionMcpView that wraps this session's registries.
+    // F2 (#4175 commit 6 review fix — qwen-latest W110): post-W81/W87
+    // refactor, the unpooled path uses `client.discoverAndReturn`
+    // (pure) to obtain a snapshot, then routes through `markActive`
+    // + `attach` (no `skipReplay`) — so `view.applyTools` /
+    // `applyPrompts` are the AUTHORITATIVE filtered registration
+    // (apply per-session `includeTools` / `excludeTools` and the
+    // trust copy), not no-ops. Do NOT re-add `skipReplay: true` on
+    // the `attach` call below — that would silently re-introduce
+    // W81 (unpooled servers receiving ALL tools, every tool with
+    // `trust: undefined`).
     const view = new SessionMcpView(
       sessionToolRegistry,
       sessionPromptRegistry,
