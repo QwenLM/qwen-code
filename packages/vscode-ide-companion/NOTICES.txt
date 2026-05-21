@@ -198,12 +198,6 @@ This file contains third-party software notices and license terms.
 
 
 ============================================================
-@qwen-code/sdk@undefined
-(https://github.com/QwenLM/qwen-code.git)
-
-License text not found.
-
-============================================================
 @qwen-code/webui@undefined
 (No repository found)
 
