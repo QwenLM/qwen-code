@@ -292,7 +292,9 @@ shell-only   单发 qwen   单发 qwen   bundled /review
 - 头部插入元信息：`<!-- tier=…; status=…; segments=N; emitted=M -->`
 - 解析失败时落空文件 → 触发 fallback comment（既有兜底，保留）
 
-> **tier-specific 输出（CI dry-run 实测，PR #4373）**：单发的 LIGHT/STANDARD 整个输出就是 review，所有 segment 都是 review 内容，直接 `join`。但 DEEP 走 bundled 多 agent skill，stream 里是**大量 orchestrator 过程叙述**（"Launching 6 agents…"、"Let me compile the review…"、"All agents unanimous"）夹着**一段**真正的合并 review。若全部 join，真 review 会被叙述噪音包夹。因此 `buildOutput` 对 DEEP 只取**最长的那一段**（真 review 远长于任何叙述碎片），`emitted` 字段记录实际落地了几段。
+> **tier-specific 输出（CI dry-run 实测，PR #4373）**：单发的 LIGHT/STANDARD 整个输出就是 review，所有 segment 都是 review 内容，直接 `join`。但 DEEP 走 bundled 多 agent skill，stream 里是**大量 orchestrator 过程叙述**（"Launching 6 agents…"、"Let me compile the review…"、"All agents unanimous"）夹着**一段**真正的合并 review。若全部 join，真 review 会被叙述噪音包夹。因此 `buildOutput` 对 DEEP 只取**最长的那一段**（真 review 远长于任何叙述碎片），`emitted` 字段记录实际落地了几段。注：largest-segment 仅在 `segments > 1` 时生效；一个 `status=complete` 的 DEEP run 必然已产出 review 段，timeout/error 又会被 re-run notice 覆盖，所以"只有 1 段纯叙述"在实际中不可达。
+
+> **DEEP 的工作树副作用**：bundled `/review` skill 为取被 review PR 的代码会 `git checkout` / worktree 操作，把工作树切到**被 review PR 的分支**——该分支没有本 workflow 的 `scripts/`。因此 DEEP step 在跑 qwen **之前**先把 `parse-review-stream.cjs` 拷到 `$RUNNER_TEMP`，跑完从那里调用。LIGHT/STANDARD 是单发 qwen、不动工作树，无此问题。
 
 > 这个改动同时让"调试期看进度"（stream 落盘）与"timeout 时有结果"（本设计目标）都得到满足。
 
