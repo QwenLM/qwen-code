@@ -898,6 +898,16 @@ jobs:
         run: |-
           set -euo pipefail
 
+          # The bundled /review skill checks out the PR-under-review into
+          # the working tree (git checkout / worktree ops). That tree is
+          # the PR's branch — NOT this workflow's branch — so it does not
+          # contain scripts/parse-review-stream.cjs. Copy the parser out
+          # to $RUNNER_TEMP up front, before qwen runs, and invoke it from
+          # there afterwards. (LIGHT/STANDARD are single-shot qwen calls
+          # that never mutate the tree, so only DEEP needs this.)
+          parser="$RUNNER_TEMP/parse-review-stream.cjs"
+          cp scripts/parse-review-stream.cjs "$parser"
+
           # CI-lightweight steering applies to EVERY CI run (comment and
           # dry-run): the full bundled /review (9 agents incl. Agent 7 =
           # npm ci + whole-monorepo build/test) cannot finish a heavy PR
@@ -976,7 +986,9 @@ jobs:
           # On DEEP a timeout/error overwrites the summary with a re-run
           # notice below regardless, but a complete-but-unparseable stream
           # still needs this guard to reach the fallback comment.
-          node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md DEEP "$status_label" \
+          # Invoke the $RUNNER_TEMP copy: the in-repo scripts/ path is no
+          # longer reliable after the bundled skill mutated the tree.
+          node "$parser" "$out" qwen-review-summary.md DEEP "$status_label" \
             || { echo "::warning::parse-review-stream.cjs failed; fallback comment will fire."; : > qwen-review-summary.md; }
 
           # DEEP-specific: a non-clean exit cannot produce a usable partial
