@@ -14,7 +14,7 @@
 | PR body 必填段 (Summary / Validation) | `pr-gate.yml` | ✅ required | 秒级 |
 | PR size 上限 | `pr-gate.yml` | ✅ required (XL 拒) | 秒级 |
 | Lint / Test / CodeQL | `ci.yml` | ✅ required | 分钟级 |
-| **AI 代码 review (本设计)** | `qwen-code-pr-review.yml` | ❌ **informational only** | 5–25 min |
+| **AI 代码 review (本设计)** | `qwen-code-pr-review.yml` | ❌ **informational only** | 5–40 min |
 
 **核心定位**：**AI review 永远不应作为 merge gate**。模型抽风、API 限流、偶发 garbage 输出都不该阻断合并。AI review 提供建议，maintainer 看完后用人工判断决定合不合。
 
@@ -38,7 +38,7 @@
 ## 设计目标
 
 - **G1 — tier 路由前置**：把 tier 决策作为评审流程的**第一步**，不让 deep review 无差别地跑
-- **G2 — 分档耗时上限**：ULTRA_LIGHT ≤ 1 min、LIGHT ≤ 2 min、STANDARD ≤ 6 min、DEEP ≤ 25 min（hard cap，非平均值）
+- **G2 — 分档耗时上限**：ULTRA_LIGHT ≤ 1 min、LIGHT ≤ 2 min、STANDARD ≤ 6 min、DEEP ≤ 40 min（hard cap，非平均值）
 - **G3 — Always-emit 契约（核心）**：**每次 CI run 必须在 PR 上落地一条有用的评论**，无论 deep review 跑多久、是否撞 timeout。当前 workflow 的痛点是：bundled `/review` 跑满 50 min step timeout 后 step failure → 只发一条 `"review did not complete successfully, see logs"` —— 等于花了 50 min token + 1 小时 wall time 换来 0 review 内容。本设计要从机制上根除这个 case。
 - **G4 — 可预测性**：相同 PR 重跑应给出相近 tier 与相近耗时；preflight verdict 是显式 `::notice::` 输出，maintainer 能 audit
 
@@ -83,7 +83,7 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 | **ULTRA_LIGHT** | 几乎为 0：纯文档 / lockfile / 单测 fixture / formatting-only / 不影响运行时的资源文件 | 否（preflight 本身那次不算）| 否 | ~30s–1 min |
 | **LIGHT** | 低且本地：单模块、不导出、无 security/release/API 信号、无跨文件影响 | 1 次单发 | 否 | ~1–2 min |
 | **STANDARD** | 中等：跨多文件 / 同 package 内多模块 / 改了内部 API、但不触及上面 5 个 high-risk 维度 | 1 次单发（带结构化清单） | 否（除非 maintainer override） | ~3–6 min |
-| **DEEP** | 任一 high-risk 维度 = true OR 大幅跨 package 影响 OR `@qwen /review --deep` | 多次（agent fan-out） | 是 | ~10–25 min |
+| **DEEP** | 任一 high-risk 维度 = true OR 大幅跨 package 影响 OR `@qwen /review --deep` | 多次（agent fan-out） | 是 | ~10–40 min |
 
 > Size 在这个表里**不出现**。它只是 preflight LLM 拿到的输入信号之一。判定逻辑完全在 LLM 自身，**不再有 path-glob / keyword 安全网**（早期草稿设计过 `.qwen/review-tier-rules.yml`，后来意识到这与"用内容判 blast radius"的初衷相悖 —— path 也是机械启发式）。LLM 判错由 maintainer 用 `@qwen /review --tier=...` 显式纠正。
 >
@@ -144,14 +144,9 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 - **执行路径**：workflow → bundled `/review` skill（沿用 Phase 1-3 既有 step）
 - **Prompt 文件**：沿用 workflow 内联的 CI-lightweight steering（不改）
 - **输入注入**：`focus_areas` 作为 "additional reviewer focus" 拼到 prompt 末尾
-- **耗时硬上限**：25 min（`timeout 25m qwen ...`），step `timeout-minutes: 30`，比当前的 50 min / 60 min **大幅压缩**
-- **流式累加器（关键差异）**：现有 stream-json 解析只保留最后一段 assistant text；本设计改为**累加所有 assistant text 段**到 `qwen-review-summary.md`，并在每段写入时落盘
-- **超时兜底（always-emit）**：
-  - `timeout 25m` 触发时：发送 SIGTERM，宽限 60s 让 qwen flush 最后输出
-  - 解析累加器文件：取所有 assistant text segments concat
-  - 在头部加 `## ⚠️ Review was time-capped at 25 min — partial output below`
-  - 走 `Post review summary comment` 既有路径
-  - 只有累加器**真的为空**（极少见，模型还没开始输出就被 kill）才走 fallback comment
+- **耗时硬上限**：40 min（`timeout 40m qwen ...`），step `timeout-minutes: 45`，比当前的 50 min / 60 min 压缩
+- **流式累加器**：现有 stream-json 解析只保留最后一段 assistant text；本设计改为**累加所有 assistant text 段**到 `qwen-review-summary.md`，并在每段写入时落盘（注：对 DEEP 顶层流只含 orchestrator 叙述，见 §Failure modes 的 DEEP 说明）
+- **超时兜底（always-emit）**：DEEP 是多 agent skill，timeout flush 出来的是叙述而非 review，因此 **DEEP timeout 不发 partial、改发 re-run 提示评论**（详见 §Failure modes）；累加器的 partial-flush 只对单发的 STANDARD/LIGHT 有效
 
 ### 跨 tier 共享
 
@@ -166,9 +161,9 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 | ULTRA_LIGHT | n/a | 1 | ≤ 60s |
 | LIGHT | 3m | 5 | ≤ 2 min（典型）/ 5 min（硬上限） |
 | STANDARD | 8m | 10 | ≤ 6 min（典型）/ 10 min（硬上限） |
-| DEEP | 25m | 30 | ≤ 25 min（含 partial flush） |
+| DEEP | 40m | 45 | ≤ 40 min（超时改发 re-run 提示） |
 
-**对比当前 workflow（Phase 1-3）**：唯一的 step `Run Qwen Code Review` 配 `timeout 50m` + `timeout-minutes: 60`，且 timeout 时**没有 always-emit 机制**，整个 50 min token 浪费。本设计把"任意 PR 最大 wall time"从 60 min 砍到 30 min，并保证 always-emit。
+**对比当前 workflow（Phase 1-3）**：唯一的 step `Run Qwen Code Review` 配 `timeout 50m` + `timeout-minutes: 60`，且 timeout 时**没有 always-emit 机制**，整个 50 min token 浪费。本设计把"任意 PR 最大 wall time"从 60 min 砍到 45 min，并保证 always-emit（DEEP 超时发 re-run 提示，其余 tier 发 partial review）。
 
 ## 架构
 
@@ -196,10 +191,10 @@ ULTRA_LIGHT  LIGHT      STANDARD     DEEP
    │           │           │           │
    ▼           ▼           ▼           ▼
 shell-only   单发 qwen   单发 qwen   bundled /review
-不调 LLM     timeout 3m  timeout 8m  timeout 25m
-≤ 60s       ≤ 2m        ≤ 6m         ≤ 25m
-                                     + 流式累加器
-                                     + 超时 partial flush
+不调 LLM     timeout 3m  timeout 8m  timeout 40m
+≤ 60s       ≤ 2m        ≤ 6m         ≤ 40m
+                                     + 超时改发
+                                       re-run 提示
                                      ───────────────
                                        always-emit
 ```
@@ -277,11 +272,16 @@ shell-only   单发 qwen   单发 qwen   bundled /review
 | **STANDARD**：`timeout 8m` 触发 | accumulator partial flush → 头部加 `⚠️ time-capped` 警告 → 发出 | partial review markdown |
 | **STANDARD**：非 timeout 非零 exit | 同 LIGHT 同样处理 | partial review markdown |
 | **STANDARD**：accumulator 输出 < 200 字节 | 删 summary → fallback | 既有 fallback |
-| **DEEP**：`timeout 25m` 触发 | accumulator 收集所有 assistant text → SIGTERM + 60s grace → 头部加 `⚠️ time-capped` 警告 → 发出 | partial review markdown |
-| **DEEP**：bundled skill 非 timeout 非零 exit | 同 LIGHT 同样处理 | partial review markdown |
-| **DEEP**：accumulator 输出 < 200 字节 | 删 summary → fallback | 既有 fallback |
+| **DEEP**：`timeout 40m` 触发 | **不发 partial**：改发显式 re-run 提示评论（见下方说明） | re-run 提示评论 |
+| **DEEP**：bundled skill 非 timeout 非零 exit | 同上，re-run 提示评论，原因写 "exited early (status N)" | re-run 提示评论 |
+| **DEEP**：正常完成 | accumulator 收集 orchestrator 最终合并的 review → 发出 | 完整 review markdown |
 
-**Always-emit 不变量**：每次 review 执行阶段的退出路径只有两种 —— "正常 review 评论"或"partial review 评论"或"fallback 评论"，前两者覆盖 ≥ 95% 的失败 case，fallback 只在累加器都空时触发。
+> **DEEP 与 STANDARD/LIGHT 的关键差异（CI dry-run 实测，PR #4110）**：
+> STANDARD/LIGHT 是**单发 qwen 调用**，模型输出的 review 文本本身就在顶层 assistant text 流里，所以 timeout 时 accumulator flush 出来的 partial **就是**一份「写到一半的真 review」，有价值。
+> DEEP 走 **bundled 多 agent skill**：每个子 agent 的 findings 留在该 agent 自己的 transcript 里，**不会**进入 orchestrator 的顶层 assistant text 流 —— 顶层流只有 orchestrator 的过程叙述（"Launching 6 agents…"、"Let me now consolidate the findings…"）。因此 DEEP timeout 时 accumulator flush 出来的只是叙述、不是 review，`< 200 字节`守卫也拦不住（叙述通常 > 200 字节）。
+> 结论：DEEP 的非正常退出**不能**复用 partial-flush，必须改发一条明确的「review 未完成，回复 `@qwen /review` 重跑」提示。25 min → 40 min 的 cap 上调也是为了让 DEEP 尽量真正跑完，而不是依赖一个对它无效的 partial 兜底。
+
+**Always-emit 不变量**：每次 review 执行阶段的退出路径只有三种 —— "正常 review 评论"、"partial / re-run 提示评论"、"fallback 评论"，前两者覆盖 ≥ 95% 的失败 case，fallback 只在累加器都空时触发。
 
 ### 流式累加器实现要点
 
@@ -432,23 +432,24 @@ Deep review verdict: APPROVE
   if: env.EFFECTIVE_TIER == 'DEEP'
   env:
     OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-  timeout-minutes: 30      # 较 Phase 1-3 的 60min 大幅压缩
+  timeout-minutes: 45      # 较 Phase 1-3 的 60min 压缩
   run: |-
     set -euo pipefail
     # 沿用 Phase 1-3 的 CI-lightweight steering，但加 focus_areas 注入
-    # timeout 25m + 30s grace
+    # timeout 40m + 60s grace
     set +e
-    timeout --kill-after=60s 25m qwen --yolo \
+    timeout --kill-after=60s 40m qwen --yolo \
       --output-format stream-json --include-partial-messages \
       --prompt "$prompt" 2>&1 | tee qwen-review-stream.jsonl
     status=${PIPESTATUS[0]}
     set -e
-    # 累加式解析（关键变化：不再覆盖式）
     node scripts/parse-review-stream.cjs qwen-review-stream.jsonl qwen-review-summary.md
-    if [ "$status" -eq 124 ]; then
-      printf '## ⚠️ Review was time-capped at 25 min — partial output below\n\n%s' \
-        "$(cat qwen-review-summary.md)" > qwen-review-summary.md
-      echo "::warning::DEEP review timed out; posting partial output"
+    # DEEP 顶层流只有 orchestrator 叙述，timeout flush 出来不是 review；
+    # 改发 re-run 提示，不发 partial（详见 §Failure modes 的 DEEP 说明）。
+    if [ "$status" -ne 0 ]; then
+      printf '## ⚠️ DEEP review did not finish — reply `@qwen /review` to re-run\n' \
+        > qwen-review-summary.md
+      echo "::warning::DEEP review exited status $status; posting re-run notice"
     fi
 
 # ─── Stage 2: 统一发评论 ──────────────────────────────────────
@@ -548,7 +549,7 @@ Deep review verdict: APPROVE
 - **step-level**：`timeout-minutes: 5` —— 保证整个 step（含 shell 处理）5 min 后被 kill
 - **理由**：单靠 `timeout 3m`，若 qwen 之后的 jq / shell 处理卡住（极少见但可能 —— 比如解析超大 JSON），step 会无限挂；双层叠加最稳
 - **理由**：5 - 3 = 2 min 余量给 schema 验证、`gh` 调用等
-- 同样模式应用到 LIGHT (`timeout 3m` cmd + `timeout-minutes: 5` step)、STANDARD (`timeout 8m` cmd + `timeout-minutes: 10` step)、DEEP (`timeout 25m` cmd + `timeout-minutes: 30` step)
+- 同样模式应用到 LIGHT (`timeout 3m` cmd + `timeout-minutes: 5` step)、STANDARD (`timeout 8m` cmd + `timeout-minutes: 10` step)、DEEP (`timeout 40m` cmd + `timeout-minutes: 45` step)
 
 ## 需要新增的仓库内文件清单
 

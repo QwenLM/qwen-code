@@ -306,6 +306,12 @@ jobs:
           # scripts/compute-pr-size.cjs for the canonical regex list).
           printf '%s' "$pr_json" > /tmp/pr-json-for-size.json
           changed_lines="$(node scripts/compute-pr-size.cjs /tmp/pr-json-for-size.json)"
+          # raw_changed_lines is the unfiltered additions+deletions total.
+          # changed_lines (above) is the "meaningful" count the size gate
+          # uses; contributor-facing comments must display the raw total
+          # instead — otherwise a docs-only PR shows "Changed lines: 0"
+          # and looks broken (caught by CI dry-run on PR #4356).
+          raw_changed_lines=$((additions + deletions))
 
           # Reject empty head_sha / base_sha early. Both are queried via
           # gh pr view; an empty value almost always means gh pr view
@@ -348,6 +354,7 @@ jobs:
           fi
 
           write_output "changed_lines=$changed_lines"
+          write_output "raw_changed_lines=$raw_changed_lines"
           write_output "changed_files=$changed_files"
           write_output "head_sha=$head_sha"
           write_output "base_sha=$base_sha"
@@ -360,7 +367,7 @@ jobs:
           else
             echo "Review merge base: (unresolved; full review this run)"
           fi
-          echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines changed lines)"
+          echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines reviewable lines after excluding docs/lockfiles/snapshots)"
 
           if [ "$changed_lines" -gt "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" ]; then
             # Size > AI-review threshold: skip AI review but DO NOT post a
@@ -486,6 +493,7 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_PR_PREFLIGHT_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           CHANGED_LINES: '${{ steps.size.outputs.changed_lines }}'
+          RAW_CHANGED_LINES: '${{ steps.size.outputs.raw_changed_lines }}'
         timeout-minutes: 5
         run: |-
           set -euo pipefail
@@ -516,7 +524,7 @@ jobs:
           {
             printf '**PR title:** %s\n\n' "$pr_title"
             printf '**Branches:** %s → %s\n\n' "$head_ref" "$base_ref"
-            printf '**Changed lines:** %s\n\n' "$CHANGED_LINES"
+            printf '**Changed lines:** %s total (%s reviewable, excludes docs/lockfiles/snapshots)\n\n' "$RAW_CHANGED_LINES" "$CHANGED_LINES"
             printf '**Changed files (path + line counts):**\n'
             printf '```\n%s\n```\n\n' "$changed_files_block"
             printf '**git diff --stat:**\n'
@@ -646,7 +654,7 @@ jobs:
         env:
           RATIONALE: '${{ steps.triage.outputs.rationale }}'
           CHANGED_FILES: '${{ steps.size.outputs.changed_files }}'
-          CHANGED_LINES: '${{ steps.size.outputs.changed_lines }}'
+          RAW_CHANGED_LINES: '${{ steps.size.outputs.raw_changed_lines }}'
         run: |-
           set -euo pipefail
           {
@@ -658,7 +666,7 @@ jobs:
             # printf needs `--` to stop treating the leading dash as a flag
             # on some bash builds (caught by CI dry-run on 2026-05-20).
             printf -- '- Changed files: %s\n' "$CHANGED_FILES"
-            printf -- '- Changed lines: %s\n\n' "$CHANGED_LINES"
+            printf -- '- Changed lines: %s\n\n' "$RAW_CHANGED_LINES"
             printf '_Reply `@qwen /review --tier=light|standard|deep` to force a deeper review._\n'
           } > qwen-review-summary.md
 
@@ -850,11 +858,15 @@ jobs:
       # live job log in real time, and an explicit `timeout` makes a
       # stall fail fast with a clear error instead of a silent job kill.
       #
-      # Timeout reduced from Phase 1-3's 50m to 25m: with always-emit
-      # accumulator (scripts/parse-review-stream.cjs) timeouts now flush a
-      # partial review instead of failing silently, so the previous "give
-      # it as much time as possible" tradeoff no longer applies. A 25m
-      # hard cap aligns with §G2 wall-time targets.
+      # Timeout is 40m (down from Phase 1-3's 50m). Unlike STANDARD/LIGHT
+      # — which are single-shot, so the accumulator's partial flush IS a
+      # usable partial review — DEEP runs the bundled multi-agent skill:
+      # sub-agent findings never reach the top-level assistant text stream
+      # the accumulator reads, only orchestrator narration does. A DEEP
+      # timeout therefore cannot flush a usable review, so the cap is set
+      # generously (40m) to let the run actually finish; on the rare
+      # timeout we post an explicit re-run notice instead of narration.
+      # CI dry-run on PR #4110 hit the old 25m cap mid-consolidation.
       - name: 'Run DEEP review (bundled skill)'
         id: 'review'
         if: |-
@@ -868,7 +880,7 @@ jobs:
           REVIEW_PROMPT: '${{ steps.pr.outputs.review_prompt }}'
           SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
           FOCUS_AREAS_FILE: '/tmp/qwen-focus-areas.json'
-        timeout-minutes: 30
+        timeout-minutes: 45
         run: |-
           set -euo pipefail
 
@@ -925,7 +937,7 @@ jobs:
           # progress in the live job log. `timeout` bounds a stall.
           echo "::group::Qwen DEEP review (live stream-json events)"
           set +e
-          timeout --kill-after=60s 25m qwen --yolo \
+          timeout --kill-after=60s 40m qwen --yolo \
             --output-format stream-json --include-partial-messages \
             --prompt "$prompt" 2>&1 | tee "$out"
           status=${PIPESTATUS[0]}
@@ -940,27 +952,38 @@ jobs:
           status_label="complete"
           if [ "$status" -eq 124 ]; then
             status_label="timeout"
-            echo "::warning::DEEP review timed out at 25m; flushing partial output."
+            echo "::warning::DEEP review timed out at 40m before consolidating findings."
           elif [ "$status" -ne 0 ]; then
             status_label="error"
-            echo "::warning::DEEP review exited with status $status (non-timeout failure); flushing any partial output via accumulator."
+            echo "::warning::DEEP review exited with status $status (non-timeout failure)."
           fi
 
           node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md DEEP "$status_label"
 
-          if [ "$status_label" = "timeout" ]; then
+          # DEEP-specific: a non-clean exit cannot produce a usable partial
+          # review. The bundled multi-agent skill keeps each agent's
+          # findings inside that agent's own transcript; only the
+          # orchestrator's progress narration reaches the top-level
+          # assistant text stream the accumulator parses. Posting that
+          # narration ("Let me now consolidate the findings…") would be
+          # misleading, so replace the body with an explicit re-run notice.
+          # (STANDARD/LIGHT are single-shot — their partial flush IS the
+          # real review-in-progress text, so they keep partial output.)
+          if [ "$status_label" = "timeout" ] || [ "$status_label" = "error" ]; then
+            if [ "$status_label" = "timeout" ]; then
+              cap_reason='did not finish within the 40 min time cap'
+            else
+              cap_reason="exited early (status $status)"
+            fi
             {
-              printf '## ⚠️ DEEP review was time-capped at 25 min — partial output below\n\n'
-              cat qwen-review-summary.md
-            } > /tmp/qwen-review-summary-with-warning.md
-            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
-          elif [ "$status_label" = "error" ]; then
-            # Same partial-flush treatment for non-timeout failures.
-            {
-              printf '## ⚠️ DEEP review exited with error (status %s) — partial output below\n\n' "$status"
-              cat qwen-review-summary.md
-            } > /tmp/qwen-review-summary-with-warning.md
-            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
+              printf '## ⚠️ DEEP review %s\n\n' "$cap_reason"
+              printf 'The multi-agent DEEP review stopped before it could '
+              printf 'consolidate its findings. Partial agent output is not '
+              printf 'a usable review on its own, so it is omitted here.\n\n'
+              printf '_Reply `@qwen /review` to re-run, or '
+              printf '`@qwen /review --tier=standard` for a faster '
+              printf 'single-pass review._\n'
+            } > qwen-review-summary.md
           fi
 
           # Apply LIGHT's 200-byte near-empty guard: if accumulator only
