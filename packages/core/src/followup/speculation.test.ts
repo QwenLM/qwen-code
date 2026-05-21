@@ -4,9 +4,33 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { ensureToolResultPairing } from './speculation.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { ensureToolResultPairing, startSpeculation } from './speculation.js';
 import type { Content } from '@google/genai';
+import {
+  saveCacheSafeParams,
+  clearCacheSafeParams,
+} from '../utils/forkedAgent.js';
+
+// Stub the forked-agent + overlay infrastructure so startSpeculation's
+// fire-and-forget background loop is a no-op. The tests below only assert
+// the synchronous abort-controller wiring set up by startSpeculation; the
+// loop's actual execution is covered elsewhere.
+vi.mock('../utils/forkedAgent.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../utils/forkedAgent.js')
+  >('../utils/forkedAgent.js');
+  return {
+    ...actual,
+    runWithForkedChatModel: vi.fn(async () => ({ messages: [] })),
+  };
+});
+
+vi.mock('./overlayFs.js', () => ({
+  OverlayFs: vi.fn().mockImplementation(() => ({
+    cleanup: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
 
 describe('ensureToolResultPairing', () => {
   it('returns empty array unchanged', () => {
@@ -109,5 +133,77 @@ describe('ensureToolResultPairing', () => {
     ];
     const result = ensureToolResultPairing(messages);
     expect(result).toEqual(messages);
+  });
+});
+
+describe('startSpeculation — abort-controller wiring', () => {
+  // Minimal Config stub — startSpeculation only calls config.getCwd() in the
+  // synchronous path (OverlayFs ctor), and that's already mocked above.
+  const fakeConfig = {
+    getCwd: () => '/tmp/test-speculation-cwd',
+    getApprovalMode: () => 'default',
+    getFastModel: () => undefined,
+  } as unknown as import('../config/config.js').Config;
+
+  beforeEach(() => {
+    // startSpeculation throws if cache-safe params aren't set; install a stub.
+    saveCacheSafeParams({
+      model: 'fake-model',
+      history: [],
+      tools: [],
+    } as unknown as import('../utils/forkedAgent.js').CacheSafeParams);
+  });
+
+  afterEach(() => {
+    clearCacheSafeParams();
+  });
+
+  it('parent abort propagates to the speculation controller (lifetime contract)', async () => {
+    const parent = new AbortController();
+    const state = await startSpeculation(
+      fakeConfig,
+      'do a thing',
+      parent.signal,
+    );
+    // The mocked runWithForkedChatModel resolves immediately, but the fire-
+    // and-forget .then().finally() chain runs async. The abortController in
+    // the returned state is wired before the background loop starts.
+    expect(state.abortController).toBeTruthy();
+    expect(state.abortController!.signal.aborted).toBe(false);
+    parent.abort('parent reason');
+    expect(state.abortController!.signal.aborted).toBe(true);
+    expect(state.abortController!.signal.reason).toBe('parent reason');
+  });
+
+  it('fast-path: parent already aborted returns aborted state without entering the loop', async () => {
+    const parent = new AbortController();
+    parent.abort('pre');
+    const state = await startSpeculation(
+      fakeConfig,
+      'do a thing',
+      parent.signal,
+    );
+    expect(state.status).toBe('aborted');
+    expect(state.abortController!.signal.aborted).toBe(true);
+    expect(state.abortController!.signal.reason).toBe('pre');
+  });
+
+  it('child controller never strong-pins the parent listener after settling', async () => {
+    const { getEventListeners } = await import('node:events');
+    const parent = new AbortController();
+    const before = getEventListeners(parent.signal, 'abort').length;
+    const state = await startSpeculation(
+      fakeConfig,
+      'do a thing',
+      parent.signal,
+    );
+    // While the loop is running, child has a listener on parent.
+    expect(getEventListeners(parent.signal, 'abort').length).toBe(before + 1);
+    // Let the background promise settle (mocked loop resolves immediately, then
+    // the .finally() calls abortController.abort() which triggers reverse cleanup).
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(state.abortController!.signal.aborted).toBe(true);
+    expect(getEventListeners(parent.signal, 'abort').length).toBe(before);
   });
 });

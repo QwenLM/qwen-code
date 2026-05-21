@@ -541,6 +541,41 @@ index 111..222 100644
       expect(manager.getSessionStatus()).toBe(ArenaSessionStatus.CANCELLED);
     });
 
+    it('cancel cascades the master abort to every spawned agent controller', async () => {
+      // Pins the per-agent abort cascade introduced in PR #4366
+      // (per-agent controllers are now `createChildAbortController(master)`).
+      // If a future refactor reverts to independent controllers, this test
+      // catches the regression — existing cancel tests only check backend
+      // and status, not signal propagation.
+      const manager = new ArenaManager(mockConfig as never);
+      mockBackend.setAutoExit(false);
+
+      const startPromise = manager.start({
+        ...createValidStartOptions(),
+        timeoutSeconds: 30,
+      });
+
+      await waitForCondition(
+        () => mockBackend.spawnAgent.mock.calls.length >= 2,
+      );
+
+      // Before cancel: at least 2 agents, none should be aborted.
+      const beforeStates = manager.getAgentStates();
+      expect(beforeStates.length).toBeGreaterThanOrEqual(2);
+      for (const agent of beforeStates) {
+        expect(agent.abortController.signal.aborted).toBe(false);
+      }
+
+      await manager.cancel();
+
+      // After cancel: every agent's signal must be aborted.
+      for (const agent of beforeStates) {
+        expect(agent.abortController.signal.aborted).toBe(true);
+      }
+
+      await startPromise;
+    });
+
     it('cleanup should release backend and worktree resources after start', async () => {
       const manager = new ArenaManager(mockConfig as never);
 
