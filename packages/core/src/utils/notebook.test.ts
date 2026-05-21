@@ -504,6 +504,31 @@ describe('notebook utilities', () => {
     expect(serialized.endsWith('\n')).toBe(false);
   });
 
+  it('should preserve tab-indented notebook JSON when serializing after edits', () => {
+    const raw = [
+      '{',
+      '\t"cells": [',
+      '\t\t{',
+      '\t\t\t"cell_type": "markdown",',
+      '\t\t\t"source": "# Title",',
+      '\t\t\t"metadata": {}',
+      '\t\t}',
+      '\t],',
+      '\t"metadata": {}',
+      '}',
+      '',
+    ].join('\n');
+    const notebook = parseNotebook(raw);
+    notebook.cells[0]!.source = '# Updated';
+
+    const format = inferNotebookJsonFormat(raw);
+    const serialized = serializeNotebook(notebook, format);
+
+    expect(format).toEqual({ indent: '\t', trailingNewline: true });
+    expect(serialized).toContain('\n\t"cells"');
+    expect(serialized.endsWith('\n')).toBe(true);
+  });
+
   it('should preserve compact notebook JSON when serializing after edits', () => {
     const raw = JSON.stringify({
       cells: [{ cell_type: 'markdown', source: '# Title', metadata: {} }],
