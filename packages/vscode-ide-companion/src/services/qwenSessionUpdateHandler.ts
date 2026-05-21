@@ -74,11 +74,14 @@ export class QwenSessionUpdateHandler {
           meta?.qwenDiscreteMessage === true ||
           meta?.source === 'background_notification';
         if (text && isDiscreteMessage && this.callbacks.onMessage) {
+          const source =
+            typeof meta?.source === 'string' ? meta.source : undefined;
           this.callbacks.onMessage({
             role: 'assistant',
             content: text,
             timestamp:
               typeof meta?.timestamp === 'number' ? meta.timestamp : Date.now(),
+            ...(source ? { source } : {}),
           });
         } else if (text && this.callbacks.onStreamChunk) {
           this.callbacks.onStreamChunk(text);

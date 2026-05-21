@@ -256,6 +256,20 @@ export class WebViewProvider {
       // legitimate history replay messages (e.g., session/load) or
       // assistant replies when a new prompt starts while an async save is
       // still finishing.
+      if (message.source?.startsWith('background_notification')) {
+        const conversationId =
+          this.conversationStore.getCurrentConversationId();
+        if (conversationId) {
+          void this.conversationStore
+            .addMessage(conversationId, message)
+            .catch((error) => {
+              console.warn(
+                '[WebViewProvider] Failed to persist background notification:',
+                error,
+              );
+            });
+        }
+      }
       this.sendMessageToWebView({
         type: 'message',
         data: message,
@@ -418,12 +432,20 @@ export class WebViewProvider {
     // Setup end-turn handler from ACP stopReason notifications
     this.agentManager.onEndTurn((reason, source) => {
       // Ensure WebView exits streaming state even if no explicit streamEnd was emitted elsewhere
+      const data: {
+        timestamp: number;
+        reason: string;
+        source?: string;
+      } = {
+        timestamp: Date.now(),
+        reason: reason || 'end_turn',
+      };
+      if (source) {
+        data.source = source;
+      }
       this.sendMessageToWebView({
         type: 'streamEnd',
-        data: {
-          timestamp: Date.now(),
-          reason: reason || 'end_turn',
-        },
+        data,
       });
       // Fire the idle notification from here (authoritative "task done" event) rather
       // than relying on the webview's isStreaming transition, which fires on every

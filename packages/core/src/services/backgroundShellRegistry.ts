@@ -20,6 +20,7 @@
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
+import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
 
@@ -107,11 +108,18 @@ export type BackgroundShellRegisterCallback = (entry: ShellTask) => void;
  */
 export type BackgroundShellStatusChangeCallback = (entry?: ShellTask) => void;
 
+export type BackgroundShellNotificationCallback = (
+  displayText: string,
+  modelText: string,
+  meta: { shellId: string; status: BackgroundShellStatus },
+) => void;
+
 export class BackgroundShellRegistry {
   private readonly entries = new Map<string, ShellTask>();
 
   private registerCallback: BackgroundShellRegisterCallback | undefined;
   private statusChangeCallback: BackgroundShellStatusChangeCallback | undefined;
+  private notificationCallback: BackgroundShellNotificationCallback | undefined;
 
   /**
    * Subscribe to new-entry events. Called synchronously inside `register()`.
@@ -133,6 +141,12 @@ export class BackgroundShellRegistry {
     cb: BackgroundShellStatusChangeCallback | undefined,
   ): void {
     this.statusChangeCallback = cb;
+  }
+
+  setNotificationCallback(
+    cb: BackgroundShellNotificationCallback | undefined,
+  ): void {
+    this.notificationCallback = cb;
   }
 
   register(registration: ShellTaskRegistration): ShellTask {
@@ -183,6 +197,7 @@ export class BackgroundShellRegistry {
     entry.endTime = endTime;
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
+    this.emitTerminalNotification(entry);
   }
 
   fail(shellId: string, error: string, endTime: number): void {
@@ -193,6 +208,7 @@ export class BackgroundShellRegistry {
     entry.endTime = endTime;
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
+    this.emitTerminalNotification(entry);
   }
 
   cancel(shellId: string, endTime: number): void {
@@ -201,6 +217,7 @@ export class BackgroundShellRegistry {
     this.settleAsCancelled(entry, endTime);
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
+    this.emitTerminalNotification(entry);
   }
 
   /**
@@ -267,6 +284,60 @@ export class BackgroundShellRegistry {
     } catch (error) {
       debugLogger.error('statusChange callback failed:', error);
     }
+  }
+
+  private emitTerminalNotification(entry: ShellTask): void {
+    if (entry.notified) return;
+    entry.notified = true;
+    if (!this.notificationCallback) return;
+
+    const statusText =
+      entry.status === 'completed'
+        ? 'completed'
+        : entry.status === 'failed'
+          ? 'failed'
+          : 'was cancelled';
+    const displayLine = `Background shell "${this.stripDisplayControlChars(entry.command)}" ${statusText}.`;
+
+    const xmlParts = [
+      '<task-notification>',
+      `<task-id>${escapeXml(entry.shellId)}</task-id>`,
+      '<kind>shell</kind>',
+      `<status>${escapeXml(entry.status)}</status>`,
+      `<summary>Shell "${escapeXml(entry.command)}" ${statusText}.</summary>`,
+      `<output-file>${escapeXml(entry.outputFile)}</output-file>`,
+    ];
+    if (entry.exitCode !== undefined) {
+      xmlParts.push(`<exit-code>${entry.exitCode}</exit-code>`);
+    }
+    if (entry.error) {
+      xmlParts.push(`<result>Error: ${escapeXml(entry.error)}</result>`);
+    }
+    xmlParts.push('</task-notification>');
+
+    try {
+      this.notificationCallback(displayLine, xmlParts.join('\n'), {
+        shellId: entry.shellId,
+        status: entry.status,
+      });
+    } catch (error) {
+      debugLogger.error('notification callback failed:', error);
+    }
+  }
+
+  private stripDisplayControlChars(text: string): string {
+    let out = '';
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code === 0x09) {
+        out += text[i];
+        continue;
+      }
+      if (code < 0x20) continue;
+      if (code >= 0x80 && code <= 0x9f) continue;
+      out += text[i];
+    }
+    return out;
   }
 
   /**

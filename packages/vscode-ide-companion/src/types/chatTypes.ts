@@ -18,6 +18,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
+  source?: string;
 }
 
 export interface PlanEntry {

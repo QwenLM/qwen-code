@@ -168,6 +168,7 @@ describe('Session', () => {
     recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
     recordToolResult: ReturnType<typeof vi.fn>;
     recordSlashCommand: ReturnType<typeof vi.fn>;
+    recordNotification: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
   };
   let mockGeminiClient: {
@@ -228,6 +229,7 @@ describe('Session', () => {
       recordUiTelemetryEvent: vi.fn(),
       recordToolResult: vi.fn(),
       recordSlashCommand: vi.fn(),
+      recordNotification: vi.fn(),
       rewindRecording: vi.fn(),
     };
 
@@ -859,6 +861,14 @@ describe('Session', () => {
         },
         expect.stringMatching(/^test-session-id########notification\d+$/),
       );
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
+        [
+          {
+            text: '<task-notification><status>completed</status></task-notification>',
+          },
+        ],
+        'Background agent "worker" completed.',
+      );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
         update: {
@@ -904,6 +914,73 @@ describe('Session', () => {
           source: 'background_notification',
         },
       );
+    });
+
+    it('cancels an in-flight background notification prompt', async () => {
+      const notificationCompression = {
+        signal: undefined as AbortSignal | undefined,
+      };
+      mockGeminiClient.tryCompressChat = vi
+        .fn()
+        .mockResolvedValueOnce({
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: core.CompressionStatus.NOOP,
+        })
+        .mockImplementationOnce(
+          async (_promptId: string, _force: boolean, signal: AbortSignal) => {
+            notificationCompression.signal = signal;
+            await new Promise<void>((resolve) => {
+              signal.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+            });
+            return {
+              originalTokenCount: 0,
+              newTokenCount: 0,
+              compressionStatus: core.CompressionStatus.NOOP,
+            };
+          },
+        );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+      });
+
+      await session.cancelPendingPrompt();
+
+      expect(notificationCompression.signal?.aborted).toBe(true);
+      await vi.waitFor(() => {
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/end_turn',
+          {
+            sessionId: 'test-session-id',
+            reason: 'cancelled',
+            source: 'background_notification',
+          },
+        );
+      });
     });
 
     it('drains background shell notifications through ACP after the prompt is idle', async () => {

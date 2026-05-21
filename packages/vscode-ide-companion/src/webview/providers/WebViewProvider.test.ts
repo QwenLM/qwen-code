@@ -248,6 +248,8 @@ vi.mock('../../services/conversationStore.js', () => ({
       id: 'conversation-1',
       messages: [],
     });
+    addMessage = vi.fn().mockResolvedValue(undefined);
+    getCurrentConversationId = vi.fn(() => null);
   },
 }));
 
@@ -1565,6 +1567,13 @@ describe('Notification & dot indicator', () => {
     vi.advanceTimersByTime(25_000);
     endTurnCallbackRef.current?.('end_turn', 'background_notification');
 
+    expect(mockPanel.webview.postMessage).toHaveBeenCalledWith({
+      type: 'streamEnd',
+      data: expect.objectContaining({
+        reason: 'end_turn',
+        source: 'background_notification',
+      }),
+    });
     expect(mockShowInformationMessage).not.toHaveBeenCalledWith(
       'Qwen Code: Waiting for your input.',
       'Show',

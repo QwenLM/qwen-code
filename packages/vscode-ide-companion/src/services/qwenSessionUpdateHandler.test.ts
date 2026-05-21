@@ -86,6 +86,7 @@ describe('QwenSessionUpdateHandler', () => {
         role: 'assistant',
         content: 'Background agent "worker" completed.',
         timestamp: 1234,
+        source: 'background_notification',
       });
       expect(mockCallbacks.onStreamChunk).not.toHaveBeenCalled();
     });

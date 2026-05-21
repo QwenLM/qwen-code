@@ -138,18 +138,6 @@ interface BackgroundNotificationQueueItem {
   toolUseId?: string;
 }
 
-type ShellNotificationRegistrar = {
-  setNotificationCallback?: (
-    cb:
-      | ((
-          displayText: string,
-          modelText: string,
-          meta: { shellId: string; status: string },
-        ) => void)
-      | undefined,
-  ) => void;
-};
-
 export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
@@ -300,6 +288,7 @@ export class Session implements SessionContext {
   // hook, so the session serializes registry callbacks through this queue.
   private notificationQueue: BackgroundNotificationQueueItem[] = [];
   private notificationProcessing = false;
+  private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
 
   // Modular components
@@ -355,6 +344,17 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  dispose(): void {
+    this.notificationQueue = [];
+    this.notificationAbortController?.abort();
+    this.notificationAbortController = null;
+    this.notificationProcessing = false;
+
+    this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
+    this.config.getMonitorRegistry().setNotificationCallback(undefined);
+    this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+  }
+
   /**
    * Install the message rewrite middleware if configured.
    * Must be called AFTER history replay to avoid rewriting historical messages.
@@ -394,7 +394,13 @@ export class Session implements SessionContext {
       );
     }
 
-    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+    if (
+      this.pendingPrompt ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.notificationProcessing ||
+      this.notificationAbortController
+    ) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind while a prompt is running',
@@ -430,7 +436,13 @@ export class Session implements SessionContext {
   }
 
   restoreHistory(history: Content[]): void {
-    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+    if (
+      this.pendingPrompt ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.notificationProcessing ||
+      this.notificationAbortController
+    ) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot restore history while a prompt is running',
@@ -496,8 +508,10 @@ export class Session implements SessionContext {
   async cancelPendingPrompt(): Promise<void> {
     const hadPrompt = !!this.pendingPrompt;
     const hadCron = !!this.cronAbortController;
+    const hadNotification =
+      !!this.notificationAbortController || this.notificationProcessing;
 
-    if (!hadPrompt && !hadCron) {
+    if (!hadPrompt && !hadCron && !hadNotification) {
       throw new Error('Not currently generating');
     }
 
@@ -513,6 +527,12 @@ export class Session implements SessionContext {
       this.cronQueue = [];
       this.cronProcessing = false;
     }
+
+    if (this.notificationAbortController) {
+      this.notificationAbortController.abort();
+      this.notificationAbortController = null;
+    }
+    this.notificationQueue = [];
 
     // Stop scheduler and emit exit summary
     const scheduler = this.config.isCronEnabled()
@@ -1396,6 +1416,7 @@ export class Session implements SessionContext {
     // Don't process cron while a user prompt is active — the queue will be
     // drained after the prompt completes (see end of prompt()).
     if (this.pendingPrompt) return;
+    if (this.notificationProcessing) return;
     this.cronProcessing = true;
 
     let resolveCompletion!: () => void;
@@ -1590,9 +1611,8 @@ export class Session implements SessionContext {
       });
     });
 
-    const shellRegistry =
-      this.config.getBackgroundShellRegistry() as unknown as ShellNotificationRegistrar;
-    shellRegistry.setNotificationCallback?.((displayText, modelText, meta) => {
+    const shellRegistry = this.config.getBackgroundShellRegistry();
+    shellRegistry.setNotificationCallback((displayText, modelText, meta) => {
       this.#enqueueBackgroundNotification({
         displayText,
         modelText,
@@ -1638,6 +1658,8 @@ export class Session implements SessionContext {
       resolveCompletion();
       this.notificationCompletion = null;
 
+      void this.#drainCronQueue();
+
       if (
         this.notificationQueue.length > 0 &&
         !this.pendingPrompt &&
@@ -1652,113 +1674,156 @@ export class Session implements SessionContext {
   async #executeBackgroundNotificationPrompt(
     item: BackgroundNotificationQueueItem,
   ): Promise<void> {
-    const ac = new AbortController();
-    const promptId =
-      this.config.getSessionId() + '########notification' + Date.now();
+    return Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      async () => {
+        const ac = new AbortController();
+        this.notificationAbortController = ac;
+        const promptId =
+          this.config.getSessionId() + '########notification' + Date.now();
 
-    try {
-      await this.#emitBackgroundNotificationDisplay(item);
+        try {
+          await this.#emitBackgroundNotificationDisplay(item);
 
-      let nextMessage: Content | null = {
-        role: 'user',
-        parts: [{ text: item.modelText }],
-      };
+          const notificationParts: Part[] = [{ text: item.modelText }];
+          this.config
+            .getChatRecordingService()
+            ?.recordNotification(notificationParts, item.displayText);
 
-      while (nextMessage !== null) {
-        if (ac.signal.aborted) return;
+          const notificationReminders =
+            await this.#buildInitialSystemReminders();
+          let nextMessage: Content | null = {
+            role: 'user',
+            parts: [...notificationReminders, ...notificationParts],
+          };
 
-        const functionCalls: FunctionCall[] = [];
-        let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
-        let responseText = '';
-        const streamStartTime = Date.now();
+          while (nextMessage !== null) {
+            if (ac.signal.aborted) {
+              await this.#emitBackgroundNotificationEndTurn('cancelled');
+              return;
+            }
 
-        const sendResult = await this.#sendMessageStreamWithAutoCompression(
-          promptId,
-          nextMessage.parts ?? [],
-          ac.signal,
-        );
-        if (!sendResult.responseStream) {
-          this.#preserveUnsentMessageHistory(
-            nextMessage,
-            sendResult.stopReason === 'cancelled',
-          );
-          await this.#emitBackgroundNotificationEndTurn(sendResult.stopReason);
-          return;
-        }
+            const functionCalls: FunctionCall[] = [];
+            let usageMetadata: GenerateContentResponseUsageMetadata | null =
+              null;
+            let responseText = '';
+            const streamStartTime = Date.now();
 
-        const responseStream = sendResult.responseStream;
-        nextMessage = null;
+            const sendResult = await this.#sendMessageStreamWithAutoCompression(
+              promptId,
+              nextMessage.parts ?? [],
+              ac.signal,
+            );
+            if (!sendResult.responseStream) {
+              this.#preserveUnsentMessageHistory(
+                nextMessage,
+                sendResult.stopReason === 'cancelled',
+              );
+              await this.#emitBackgroundNotificationEndTurn(
+                sendResult.stopReason,
+              );
+              return;
+            }
 
-        for await (const resp of responseStream) {
+            const responseStream = sendResult.responseStream;
+            nextMessage = null;
+
+            for await (const resp of responseStream) {
+              if (ac.signal.aborted) {
+                await this.#emitBackgroundNotificationEndTurn('cancelled');
+                return;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.candidates &&
+                resp.value.candidates.length > 0
+              ) {
+                const candidate = resp.value.candidates[0];
+                for (const part of candidate.content?.parts ?? []) {
+                  if (!part.text) continue;
+                  if (part.thought) {
+                    await this.messageEmitter.emitMessage(
+                      part.text,
+                      'assistant',
+                      true,
+                    );
+                  } else {
+                    responseText += part.text;
+                  }
+                }
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.usageMetadata
+              ) {
+                usageMetadata = resp.value.usageMetadata;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.functionCalls
+              ) {
+                functionCalls.push(...resp.value.functionCalls);
+              }
+            }
+
+            if (responseText.length > 0) {
+              await this.#emitBackgroundNotificationResponse(
+                item,
+                responseText,
+                ac.signal,
+              );
+            }
+
+            if (usageMetadata) {
+              this.#recordPromptTokenCount(usageMetadata);
+              if (this.messageRewriter) {
+                this.messageRewriter.flushTurn(ac.signal);
+              }
+              const durationMs = Date.now() - streamStartTime;
+              await this.messageEmitter.emitUsageMetadata(
+                usageMetadata,
+                '',
+                durationMs,
+              );
+            }
+
+            if (functionCalls.length > 0) {
+              const toolResponseParts = await this.runToolCalls(
+                ac.signal,
+                promptId,
+                functionCalls,
+              );
+              nextMessage = { role: 'user', parts: toolResponseParts };
+            }
+          }
+
+          if (this.messageRewriter) {
+            await this.messageRewriter.waitForPendingRewrites();
+          }
+
+          await this.#emitBackgroundNotificationEndTurn('end_turn');
+        } catch (error) {
           if (ac.signal.aborted) {
             await this.#emitBackgroundNotificationEndTurn('cancelled');
             return;
           }
-
-          if (
-            resp.type === StreamEventType.CHUNK &&
-            resp.value.candidates &&
-            resp.value.candidates.length > 0
-          ) {
-            const candidate = resp.value.candidates[0];
-            for (const part of candidate.content?.parts ?? []) {
-              if (!part.text) continue;
-              if (part.thought) {
-                await this.messageEmitter.emitMessage(
-                  part.text,
-                  'assistant',
-                  true,
-                );
-              } else {
-                responseText += part.text;
-              }
-            }
-          }
-
-          if (resp.type === StreamEventType.CHUNK && resp.value.usageMetadata) {
-            usageMetadata = resp.value.usageMetadata;
-          }
-
-          if (resp.type === StreamEventType.CHUNK && resp.value.functionCalls) {
-            functionCalls.push(...resp.value.functionCalls);
-          }
-        }
-
-        if (usageMetadata) {
-          this.#recordPromptTokenCount(usageMetadata);
-          const durationMs = Date.now() - streamStartTime;
-          await this.messageEmitter.emitUsageMetadata(
-            usageMetadata,
-            '',
-            durationMs,
+          debugLogger.error('Error processing background notification:', error);
+          const msg = error instanceof Error ? error.message : String(error);
+          await this.messageEmitter.emitAgentMessage(
+            `[notification error] ${msg}`,
           );
+          await this.#emitBackgroundNotificationEndTurn('end_turn');
+        } finally {
+          if (this.notificationAbortController === ac) {
+            this.notificationAbortController = null;
+          }
         }
-
-        if (responseText.length > 0) {
-          await this.#emitBackgroundNotificationResponse(item, responseText);
-        }
-
-        if (functionCalls.length > 0) {
-          const toolResponseParts = await this.runToolCalls(
-            ac.signal,
-            promptId,
-            functionCalls,
-          );
-          nextMessage = { role: 'user', parts: toolResponseParts };
-        }
-      }
-
-      await this.#emitBackgroundNotificationEndTurn('end_turn');
-    } catch (error) {
-      if (ac.signal.aborted) {
-        await this.#emitBackgroundNotificationEndTurn('cancelled');
-        return;
-      }
-      debugLogger.error('Error processing background notification:', error);
-      const msg = error instanceof Error ? error.message : String(error);
-      await this.messageEmitter.emitAgentMessage(`[notification error] ${msg}`);
-      await this.#emitBackgroundNotificationEndTurn('end_turn');
-    }
+      },
+    );
   }
 
   async #emitBackgroundNotificationDisplay(
@@ -1783,8 +1848,9 @@ export class Session implements SessionContext {
   async #emitBackgroundNotificationResponse(
     item: BackgroundNotificationQueueItem,
     text: string,
+    signal: AbortSignal,
   ): Promise<void> {
-    await this.sendUpdate({
+    const update: SessionUpdate = {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
       _meta: {
@@ -1797,7 +1863,14 @@ export class Session implements SessionContext {
           toolUseId: item.toolUseId,
         },
       },
-    });
+    };
+
+    if (this.messageRewriter) {
+      await this.messageRewriter.interceptUpdate(update, signal);
+      return;
+    }
+
+    await this.sendUpdate(update);
   }
 
   async #emitBackgroundNotificationEndTurn(

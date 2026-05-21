@@ -64,6 +64,22 @@ describe('BackgroundShellRegistry', () => {
       expect(e.endTime).toBe(2000);
     });
 
+    it('emits a terminal task notification on complete', () => {
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a', command: 'npm test' }));
+
+      reg.complete('a', 0, 2000);
+
+      expect(callback).toHaveBeenCalledOnce();
+      expect(callback).toHaveBeenCalledWith(
+        'Background shell "npm test" completed.',
+        expect.stringContaining('<kind>shell</kind>'),
+        { shellId: 'a', status: 'completed' },
+      );
+    });
+
     it('is a no-op when entry is not running', () => {
       const reg = new BackgroundShellRegistry();
       reg.register(makeEntry({ shellId: 'a' }));

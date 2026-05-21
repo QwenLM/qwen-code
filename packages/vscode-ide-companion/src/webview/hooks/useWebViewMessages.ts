@@ -744,13 +744,17 @@ export const useWebViewMessages = ({
 
         case 'streamEnd': {
           const endData = message.data as
-            | { reason?: string; requestId?: string }
+            | { reason?: string; requestId?: string; source?: string }
             | undefined;
           const endRequestId = endData?.requestId ?? null;
+          const isBackgroundEnd = endData?.source === 'background_notification';
 
           // Drop stale or untagged streamEnd when a tagged stream is active.
           if (activeRequestIdRef.current) {
-            if (endRequestId !== activeRequestIdRef.current) {
+            if (
+              endRequestId !== activeRequestIdRef.current &&
+              !isBackgroundEnd
+            ) {
               console.log(
                 '[useWebViewMessages] Ignoring stale/untagged streamEnd:',
                 endRequestId,
@@ -764,6 +768,7 @@ export const useWebViewMessages = ({
           // Always end local streaming state and clear thinking state
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearThinking();
+          activeRequestIdRef.current = null;
 
           // If stream ended due to explicit user cancellation, proactively clear
           // waiting indicator and reset tracked execution calls.
