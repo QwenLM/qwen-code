@@ -142,7 +142,7 @@ export function AutoImproveSourceDialog({
     const nextConfig: AutoImproveConfig = {
       version: 1,
       sources,
-      customSources: applyDraftSource(customSources, draftSource, editingIndex),
+      customSources: normalizeCustomSources(customSources),
     };
     if (!repoRoot) {
       setError(t('Repository root is not ready yet.'));
@@ -164,15 +164,7 @@ export function AutoImproveSourceDialog({
           saveError instanceof Error ? saveError.message : String(saveError),
         );
       });
-  }, [
-    addItem,
-    customSources,
-    draftSource,
-    editingIndex,
-    onClose,
-    repoRoot,
-    sources,
-  ]);
+  }, [addItem, customSources, onClose, repoRoot, sources]);
 
   const toggleSource = useCallback((key: SourceKey) => {
     setSources((current) => ({
@@ -346,22 +338,33 @@ export function AutoImproveSourceDialog({
             ? t('Add custom source')
             : t('Edit custom source')}
         </Text>
-        <TextInput
-          value={draftSource}
-          onChange={setDraftSource}
-          onSubmit={commitDraftSource}
-          onUp={() =>
-            setActiveIndex(
-              customSources.length > 0
-                ? inputIndex - 1
-                : SOURCE_ROWS.length - 1,
-            )
-          }
-          onDown={() => setActiveIndex(saveIndex)}
-          placeholder={t('Type a source and press Enter')}
-          isActive={activeIndex === inputIndex}
-          inputWidth={80}
-        />
+        {activeIndex === inputIndex ? (
+          <TextInput
+            value={draftSource}
+            onChange={setDraftSource}
+            onSubmit={commitDraftSource}
+            onUp={() =>
+              setActiveIndex(
+                customSources.length > 0
+                  ? inputIndex - 1
+                  : SOURCE_ROWS.length - 1,
+              )
+            }
+            onDown={() => setActiveIndex(saveIndex)}
+            placeholder={t('Type a source and press Enter')}
+            isActive={true}
+            inputWidth={80}
+          />
+        ) : (
+          <Box>
+            <Text color={theme.text.accent}>{'> '}</Text>
+            <Text
+              color={draftSource ? theme.text.primary : theme.text.secondary}
+            >
+              {draftSource || t('Type a source and press Enter')}
+            </Text>
+          </Box>
+        )}
       </Box>
 
       <Box>
