@@ -340,14 +340,8 @@ export function AutoImproveSourceDialog({
       </Box>
 
       <Box flexDirection="column">
-        <Text
-          color={
-            activeIndex === inputIndex
-              ? theme.status.success
-              : theme.text.primary
-          }
-        >
-          {activeIndex === inputIndex ? '› ' : '  '}
+        <Text color={theme.text.primary}>
+          {'  '}
           {editingIndex === null
             ? t('Add custom source')
             : t('Edit custom source')}
