@@ -16,6 +16,7 @@ export {
   isDaemonContentHash,
   isDaemonEventType,
   isKnownDaemonEvent,
+  isWorkspaceScopedBudgetEvent,
   parseSseStream,
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,

@@ -81,6 +81,24 @@ export * from './tools/tools.js';
 // Individual tools — MCP/SDK infrastructure only (tool classes are lazy-loaded)
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
+// F2 (#4175 commit 4): pool primitives consumed by acpAgent (daemon
+// pool construction) and downstream daemon status routes.
+export {
+  McpTransportPool,
+  type DrainResult,
+  type McpPoolSnapshot,
+  type McpTransportPoolOptions,
+} from './tools/mcp-transport-pool.js';
+export {
+  POOLED_TRANSPORTS_DEFAULT,
+  connectionIdOf,
+  mcpTransportOf,
+  parseConnectionId,
+  type McpTransportKind,
+  type PoolKey,
+} from './tools/mcp-pool-key.js';
+export type { ConnectionId, PoolEvent } from './tools/mcp-pool-events.js';
+export { WorkspaceMcpBudget } from './tools/mcp-workspace-budget.js';
 export * from './tools/mcp-tool.js';
 export * from './tools/read-file.js';
 export * from './tools/ripGrep.js';
