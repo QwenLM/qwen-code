@@ -158,16 +158,20 @@ describe('isDangerousBashRule', () => {
       expect(isDangerousBashRule(bashRule(interp))).toBe(true);
     });
 
+    it.each(['tsx -e *', 'ssh prod-host -- *', 'bunx -p dangerous-pkg *'])(
+      'flags Unix shell or runner wildcard %s',
+      (s) => {
+        expect(isDangerousBashRule(bashRule(s))).toBe(true);
+      },
+    );
+
     it.each([
-      'tsx -e *',
-      'ssh prod-host -- *',
-      'bunx -p dangerous-pkg *',
       'cmd /c *',
       'cmd.exe /c *',
       'bash.exe -c *',
       'powershell.exe -Command *',
       'pwsh.exe -Command *',
-    ])('flags Claude-aligned shell or runner wildcard %s', (s) => {
+    ])('flags Windows shell wildcard %s', (s) => {
       expect(isDangerousBashRule(bashRule(s))).toBe(true);
     });
 

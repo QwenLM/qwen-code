@@ -18,13 +18,14 @@ import type { PermissionRule } from './types.js';
 /**
  * Tokens that, when used as the leading command of a Bash allow rule, let the
  * model execute arbitrary code under the AUTO classifier's nose. Covers
- * shell interpreters, scripting-language interpreters, remote shells, and
- * build/package tools that themselves run arbitrary scripts (`cargo run`,
- * `npm run`, …). Mirrors Claude Code's shell and scripting-interpreter
- * checks, then extends them with additional security-relevant runners.
+ * Unix and Windows shell interpreters, scripting-language interpreters,
+ * remote shells, and build/package tools that themselves run arbitrary
+ * scripts (`cargo run`, `npm run`, …). Mirrors Claude Code's shell and
+ * scripting-interpreter checks, then extends them with additional
+ * security-relevant runners.
  */
 const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
-  // Shells
+  // Unix shells
   'bash',
   'bash.exe',
   'sh',
@@ -34,6 +35,7 @@ const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   'tcsh',
   'dash',
   'ksh',
+  // Windows shells
   'cmd',
   'cmd.exe',
   'pwsh',
