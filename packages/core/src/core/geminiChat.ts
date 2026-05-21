@@ -397,6 +397,75 @@ const ORPHAN_TOOL_USE_REPAIR_REASON =
   'Tool execution result was not recorded — likely interrupted by network ' +
   'failure, abort, or process exit. Treat as failure and retry if needed.';
 
+/*
+ * ============================================================================
+ * Partial-tool_use repair subsystem — canonical design note.
+ * ============================================================================
+ *
+ * Every comment block elsewhere in this file that mentions one of the
+ * concepts below points back here. Per-site comments should be one or two
+ * lines stating WHAT the local code does; the WHY lives here.
+ *
+ * --- The wedge ----------------------------------------------------------
+ *
+ * Anthropic-compatible backends (Anthropic, DeepSeek, …) reject a request
+ * whose `user[tool_result]` blocks are not at the HEAD of the user message
+ * immediately following the `model[tool_use]` they answer:
+ *
+ *     "tool_use_id ... must have a corresponding tool_use block in the
+ *      previous message"
+ *
+ * Without a matching pair the session is unrecoverable — `stripOrphanedUser
+ * EntriesFromHistory` only strips trailing user entries, so a lost tool_use
+ * cannot be resurrected and the next send 400s repeatedly.
+ *
+ * --- The race classes that produce dangling tool_uses --------------------
+ *
+ *   Race A (Ctrl+Y mid-flight): user retries before the in-flight tool
+ *     finishes. The scheduler's `onAllToolCallsComplete` is single-shot
+ *     per batch and would otherwise leave the tool stuck in
+ *     `completed-but-not-submitted` forever.
+ *   Race B (process crash / OOM mid-flight): the JSONL transcript captures
+ *     the dangling `model[fc]` and `--resume` rehydrates it.
+ *   Race C (network drop between `content_block_stop` of a tool_use and
+ *     the terminal `message_stop`): `processStreamResponse` re-throws
+ *     after we have already yielded a `functionCall` chunk, so the React
+ *     scheduler is on its way to submit a real `functionResponse` while
+ *     in-memory history has no matching `model[fc]`.
+ *
+ * --- The two-layer fix ---------------------------------------------------
+ *
+ *   (1) Persist the partial assistant turn at the failure point in
+ *       `processStreamResponse` (`this.history.push({role: 'model', parts:
+ *       [...]})` plus the `pendingPartialAssistantTurnIndex` /
+ *       `pendingPartialAssistantRecord` markers) so the matching
+ *       `model[fc]` is on disk and in memory when the late `user[fr]`
+ *       arrives.
+ *   (2) Repair any remaining dangling `model[fc]` whose
+ *       `user[fr]` never landed (`repairOrphanedToolUseTurns`):
+ *         - SYNTHESIZE an `error` fr for ids with no matching response;
+ *         - HOIST the real fr into the immediately-adjacent user turn
+ *           when it landed in a non-adjacent later turn;
+ *         - DROP duplicate fr copies for the same id.
+ *       Then `useGeminiStream.handleCompletedTools` dedupes the
+ *       scheduler's late real result against `chat.history` so the
+ *       synthetic and the real result never collide on the wire.
+ *
+ * --- Partial-push marker lifecycle ---------------------------------------
+ *
+ * Set together on (streamError + hasToolCall + hasContent) inside
+ * `processStreamResponse`. Cleared together by `popPartialIfPushed` on a
+ * retryable error rollback, or flushed together to JSONL by the outer
+ * `finally` after the retry loop exits. Defense-in-depth: every
+ * history-mutation method (clearHistory / addHistory / setHistory /
+ * truncateHistory / stripThoughtsFromHistory /
+ * stripOrphanedUserEntriesFromHistory) resets both markers in lockstep so
+ * a stale index can't shift onto an unrelated model turn and cause
+ * `popPartialIfPushed` to splice the wrong entry. Any single-field reset
+ * is a bug.
+ * ============================================================================
+ */
+
 /**
  * Walk `history` left-to-right and close every dangling tool_use ↔ tool_result
  * pair so the wire format the next API call sees is always
@@ -410,15 +479,9 @@ const ORPHAN_TOOL_USE_REPAIR_REASON =
  *    `yieldMissingToolResultBlocks` (`query.ts:123-149`).
  *  - HOIST: for any `functionCall.id` whose real `functionResponse` lives in
  *    a non-adjacent following user turn (typical shape:
- *    `model[fc], user[text], user[fr_real]` — produced when a user aborts a
- *    long-running tool, types a follow-up, and the React scheduler's late
- *    `submitQuery` appends the real `fr` as a SEPARATE user entry), MOVE the
- *    real `fr` part out of its original turn into the adjacent one. Without
- *    hoisting, the synthesis pass correctly skips the call (a real `fr`
- *    exists somewhere later) but the wire layout still serializes
- *    `model[tool_use] → user[text] → user[tool_result]`, which
- *    Anthropic-compatible backends reject with "tool_use_id ... must have a
- *    corresponding tool_use block in the previous message".
+ *    `model[fc], user[text], user[fr_real]`), MOVE the real `fr` part out
+ *    of its original turn into the adjacent one. Required by the wire
+ *    layout — see the canonical design note above for the wedge.
  *
  * Mutates `history` in place and returns the set of injected `(callId, name)`
  * tuples so callers (the React tool scheduler) can dedupe a real `tool_result`
@@ -492,16 +555,10 @@ interface RepairPlan {
  * follows. Pure read; no mutation.
  *
  * Storing ALL locations (not just the first) is load-bearing for the
- * duplicate case: if the same callId is echoed back more than once
- * across the consecutive user turns (e.g.
- * `model[fc id=cid], user[text], user[fr cid], user[fr cid]` — possible
- * when the React scheduler retries the late `submitQuery` and a
- * duplicate fr lands), hoisting only the first would leave the
- * duplicate behind. The wire payload then serializes
- *   `model[tool_use] -> user[tool_result] -> user[tool_result]`
- * and the backend rejects the trailing block as an orphan
- * ("tool_use_id ... must have a corresponding tool_use block in the
- * previous message").
+ * duplicate case: e.g. `model[fc id=cid], user[text], user[fr cid],
+ * user[fr cid]` (the React scheduler retries the late `submitQuery`).
+ * The downstream decision phase needs every copy so it can drop
+ * duplicates — otherwise the wire payload re-triggers the wedge.
  */
 function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
   const expected = new Map<string, string>();
@@ -604,16 +661,10 @@ function planRepair(scan: ScanResult): RepairPlan {
  *     user turn (before any non-fr parts) OR insert a new user turn
  *     between `modelIdx` and whatever follows.
  *
- * Anthropic-compatible backends require the tool_result blocks at the
- * head of the immediately following user message; appending instead
- * (`[text, fr]`) re-triggers the 400 the synthesis pass exists to
- * escape. Mirrors upstream Claude Code's `hoistToolResults`.
- *
- * CONSEQUENCE OF REMOVAL of the head-insert: dropping this hoist (e.g.
- * naively `next.parts = [...existing, ...partsToInject]`) re-introduces
- * the "tool_use_id ... must have a corresponding tool_use block in the
- * previous message" 400 the synthesis pass exists to prevent. Do not
- * "simplify" this branch.
+ * Step 3 inserts at the HEAD (before non-fr parts), not the tail —
+ * mirrors upstream Claude Code's `hoistToolResults`. See the canonical
+ * design note above `ORPHAN_TOOL_USE_REPAIR_REASON` for why a tail
+ * append re-triggers the 400. Do not "simplify" the head-insert away.
  */
 function applyRepair(
   history: Content[],
@@ -1172,15 +1223,13 @@ export class GeminiChat {
             lastError = error;
 
             // If `processStreamResponse` persisted a partial assistant turn
-            // (mid-stream error after a `functionCall` was already yielded),
-            // every retry-and-continue path below must drop that turn first.
-            // Otherwise a successful retry's response lands AFTER the stale
-            // failed-attempt model turn — two consecutive `model` entries
-            // with an orphan tool_use in the first, re-triggering the
-            // "tool_use_id ... corresponding tool_use" 400 this fix is
-            // supposed to escape. Paths that `break` (unretryable) keep
-            // the partial — the caller will see it as part of the error
-            // surface.
+            // (mid-stream error after a `functionCall` was already
+            // yielded), every retry-and-continue path below must drop
+            // that turn first; otherwise the retry's response lands as
+            // a second consecutive model turn with an orphan tool_use
+            // (the wedge — see the canonical note above
+            // `ORPHAN_TOOL_USE_REPAIR_REASON`). Paths that `break`
+            // (unretryable) keep the partial.
             const popPartialIfPushed = () => {
               const idx = self.pendingPartialAssistantTurnIndex;
               if (idx === null) return;
@@ -1302,21 +1351,10 @@ export class GeminiChat {
                     reactiveInfo.compressionStatus ===
                     CompressionStatus.COMPRESSED
                   ) {
-                    // Defense-in-depth no-op: tryCompress() succeeded
-                    // means it has already replaced this.history via
-                    // setHistory(), which calls clearPendingPartialState()
-                    // — so by the time we reach this line, the marker is
-                    // null and popPartialIfPushed splices nothing. We
-                    // keep the call as a uniformity assertion against
-                    // future refactors that might switch tryCompress to
-                    // an in-place mutation: in that world, the marker
-                    // would NOT be reset by setHistory and this call
-                    // becomes the only thing that drops the stale
-                    // partial before requestContents is rebuilt below.
-                    // Removing it would couple correctness to the
-                    // implementation detail "setHistory always clears
-                    // the marker", which the other retry branches don't
-                    // share.
+                    // No-op today: tryCompress's setHistory has already
+                    // cleared the marker. Kept for uniformity with the
+                    // other retry branches in case a future in-place
+                    // tryCompress stops resetting it.
                     popPartialIfPushed();
                     requestContents = self.getRequestHistory();
                     debugLogger.info(
@@ -1552,47 +1590,13 @@ export class GeminiChat {
               // coalesced back into the preceding model entry after the loop.
               successfulRecoveries++;
             } catch (recoveryError) {
-              // If a recovery attempt fails (e.g., empty response, network
-              // error), stop recovering and let the partial output stand.
-              // Pop the dangling recovery message to keep history valid.
-              //
-              // Order matters: when the recovery stream errors AFTER
-              // yielding a `functionCall` chunk, `processStreamResponse`
-              // pushes a partial `model` turn into history before
-              // re-throwing. The naive "if last is user, pop" check
-              // would then no-op (last is now the partial `model`),
-              // leaving `user(OUTPUT_RECOVERY_MESSAGE)` stranded as a
-              // real user turn the user never sent. Two consequences:
-              //  - the control-prompt text (which carries instructions
-              //    meant only for the model's own continuation context)
-              //    pollutes durable history and biases later turns,
-              //  - the inline repair on the next sendMessageStream
-              //    synthesizes an `error` `functionResponse` for the
-              //    dangling `functionCall`, which the
-              //    `handleCompletedTools` history-based dedup then drops
-              //    when the React scheduler's REAL tool result arrives,
-              //    so the model sees an "execution result was not
-              //    recorded" error for a tool that actually succeeded.
-              // Pop the partial model turn FIRST, then the recovery
-              // user turn. The partial-push markers are also cleared
-              // in lockstep so the outer `finally` JSONL flush can't
-              // resurrect a partial we just deleted from live history.
-              //
-              // Index-checked pop instead of a positional `pop()` so
-              // we match the diagnostic standard set by
-              // `popPartialIfPushed` above (splice at `idx` + warn on
-              // bounds/role mismatch). The two rollback strategies
-              // share an undocumented positional assumption: nothing
-              // mutates `this.history` between
-              // `processStreamResponse`'s push and the for-await
-              // catch here. If a future change inserts a mutation in
-              // that window (compression side-effect, abort-signal
-              // handler, telemetry hook), a naked
-              // `history.pop()` would silently remove the wrong
-              // entry while `clearPendingPartialState()` clears
-              // markers for the actual partial — leaving it
-              // permanently stranded with no log trail. The warn
-              // makes any future violation visible immediately.
+              // Pop the partial `model[fc]` FIRST (if processStreamResponse
+              // pushed one before re-throwing), THEN the recovery user
+              // turn. Reversed order would strand `OUTPUT_RECOVERY_MESSAGE`
+              // as a real user turn. Index-checked pop mirrors
+              // `popPartialIfPushed` above — see the design note above
+              // `ORPHAN_TOOL_USE_REPAIR_REASON` for the wedge mechanism
+              // and the partial-push marker lifecycle.
               const expectedIdx = self.pendingPartialAssistantTurnIndex;
               const lastIdx = self.history.length - 1;
               if (
@@ -1936,34 +1940,18 @@ export class GeminiChat {
    */
   addHistory(content: Content): void {
     this.history.push(content);
-    // The marker is per-send-attempt. Today's callers (cancelled-tool
-    // synthesis in useGeminiStream, ACP session injects,
-    // shellCommandProcessor) only run between sends, so the originating
-    // sendMessageStream has either already popped the partial via the
-    // retry loop or hit an unrecoverable break — in both cases the
-    // marker is no longer load-bearing.
-    //
-    // If a future code path ever calls addHistory BETWEEN the partial
-    // push and the retry attempt, silently clearing the marker would
-    // strand the partial: popPartialIfPushed would no-op, the failed
-    // attempt's `model[functionCall]` would survive into the retry,
-    // and a successful retry's response would land as a SECOND
-    // consecutive model turn (the wedge this whole subsystem exists
-    // to prevent). The log below makes that coupling observable —
-    // anyone investigating a stale-partial bug will see this log line
-    // pointing straight at the offending caller. Error-level (not
-    // warn) because this is a true invariant violation: the existing
-    // call graph cannot legitimately hit this branch, so any
-    // occurrence is a real bug in a future caller, not noise.
+    // addHistory only runs between sends, so the partial-push marker
+    // should already be cleared. If it is not, a new caller is
+    // violating that invariant — surface it at error level so the
+    // offending stack is visible. See the design note above
+    // `ORPHAN_TOOL_USE_REPAIR_REASON` for the marker lifecycle.
     if (
       this.pendingPartialAssistantTurnIndex !== null ||
       this.pendingPartialAssistantRecord !== null
     ) {
       debugLogger.error(
         '[INVARIANT_VIOLATION] addHistory called while a partial-push ' +
-          'marker is active — clearing it. This is unexpected during an active sendMessageStream ' +
-          'and likely indicates a new caller violating the between-sends ' +
-          'invariant. See comment at GeminiChat.addHistory for context.',
+          'marker is active — clearing it.',
       );
     }
     this.clearPendingPartialState();
@@ -2251,30 +2239,20 @@ export class GeminiChat {
       }
     }
 
-    // Mid-stream failure recovery: if the upstream stream threw (typical on
-    // weak networks — SSE cut between a tool_use `content_block_stop` and
-    // the terminal `message_stop`) AND any `functionCall` chunk was already
-    // yielded to consumers, we must persist the partial assistant turn here.
+    // Mid-stream failure recovery (Race C in the canonical note above
+    // `ORPHAN_TOOL_USE_REPAIR_REASON`): if the upstream stream threw
+    // AFTER a `functionCall` chunk was already yielded — typical on
+    // weak networks: SSE cut between a tool_use `content_block_stop`
+    // and the terminal `message_stop` — we persist the partial
+    // assistant turn so the React scheduler's incoming
+    // `user[functionResponse]` has a matching `model[tool_use]` to
+    // pair with.
     //
-    // The content generator (Anthropic / OpenAI) emits a `functionCall` part
-    // only at the end of a tool_use block. Once yielded, `Turn.run` registers
-    // a `ToolCallRequest` event, the React tool scheduler queues the call,
-    // and `handleCompletedTools` will fire `submitQuery(..., ToolResult)` —
-    // pushing a user message with `functionResponse` into history — even
-    // though the parent stream errored. Without preserving the matching
-    // tool_use on the model side, the next request body would have
-    // `user → user[tool_result]` with no tool_use in between, and the
-    // Anthropic-compatible API (DeepSeek, Anthropic, etc.) rejects with
-    //   "tool_use_id ... must have a corresponding tool_use block in the
-    //    previous message"
-    // — an unrecoverable state because Ctrl+Y's `stripOrphanedUserEntries`
-    // only strips trailing user entries; the lost tool_use can't be
-    // resurrected.
-    //
-    // Plain-text partial turns (no functionCall yielded) are deliberately
-    // NOT persisted — the Retry path pops the trailing user prompt and
-    // re-issues it; a stale partial-text model turn between them would
-    // either bias the retry or surface as a duplicate.
+    // Plain-text partial turns (no functionCall yielded) are
+    // deliberately NOT persisted — the Retry path pops the trailing
+    // user prompt and re-issues it; a stale partial-text model turn
+    // between them would either bias the retry or surface as a
+    // duplicate.
     if (streamError !== null) {
       // Reuse the `willPersistToHistory` gate from the recordAssistantTurn
       // block above instead of re-deriving it. When `streamError !== null`,
