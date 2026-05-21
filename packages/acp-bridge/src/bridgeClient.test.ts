@@ -160,6 +160,192 @@ describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {
     });
   });
 
+  describe('FsError preservation over ACP wire (#4175 F4 prereq, Codex #4360 round 2)', () => {
+    // The fix scope: when `BridgeFileSystem.writeText` /
+    // `BridgeFileSystem.readText` throw a structured `FsError`, the
+    // BridgeClient must rethrow as ACP `RequestError` with `data.
+    // errorKind` / `data.hint` / `data.status` preserved. Pre-fix
+    // the ACP SDK serialized only `error.message` so SDK consumers
+    // lost the discriminator and had to regex-match the message.
+    //
+    // FsError lives in `cli/src/serve/fs/errors.ts` — acp-bridge can't
+    // import it (cross-package dep inversion), so we synthesize the
+    // shape directly here. The duck typing in
+    // `preserveFsErrorOverAcp` keys on `err.name === 'FsError'` +
+    // `typeof err.kind === 'string'`.
+
+    function makeFsError(
+      kind: string,
+      message: string,
+      extras: { hint?: string; status?: number } = {},
+    ): Error {
+      const err = new Error(message);
+      err.name = 'FsError';
+      (err as unknown as { kind: string }).kind = kind;
+      if (extras.hint !== undefined) {
+        (err as unknown as { hint: string }).hint = extras.hint;
+      }
+      if (extras.status !== undefined) {
+        (err as unknown as { status: number }).status = extras.status;
+      }
+      return err;
+    }
+
+    it('writeTextFile rethrows FsError as ACP RequestError with errorKind in data', async () => {
+      const writeText = vi.fn(async (): Promise<WriteTextFileResponse> => {
+        throw makeFsError(
+          'untrusted_workspace',
+          'workspace is not trusted; write operations are forbidden',
+          {
+            status: 403,
+            hint: 'enable trust via createWorkspaceFileSystemFactory',
+          },
+        );
+      });
+      const client = makeClient({ writeText, readText: vi.fn() });
+
+      const err = (await client
+        .writeTextFile({
+          path: '/x',
+          content: 'y',
+          sessionId: 'sess:test',
+        })
+        .catch((e) => e)) as Error & { code?: number; data?: unknown };
+
+      // Reshaped as JSON-RPC RequestError (-32603 = internal error)
+      // with structured data field.
+      expect(err.name).toBe('RequestError');
+      expect(err.code).toBe(-32603);
+      expect(err.message).toContain('not trusted');
+      expect(err.data).toMatchObject({
+        errorKind: 'untrusted_workspace',
+        status: 403,
+        hint: expect.any(String),
+      });
+    });
+
+    it('readTextFile rethrows FsError preserving symlink_escape kind', async () => {
+      const readText = vi.fn(async (): Promise<ReadTextFileResponse> => {
+        throw makeFsError(
+          'symlink_escape',
+          'symlink resolves outside workspace',
+          { status: 400 },
+        );
+      });
+      const client = makeClient({ writeText: vi.fn(), readText });
+
+      const err = (await client
+        .readTextFile({ path: '/x', sessionId: 'sess:test' })
+        .catch((e) => e)) as Error & { code?: number; data?: unknown };
+
+      expect(err.name).toBe('RequestError');
+      expect(err.code).toBe(-32603);
+      expect(err.data).toMatchObject({
+        errorKind: 'symlink_escape',
+        status: 400,
+      });
+      // No `hint` field on this FsError → not stamped (spread guard).
+      expect((err.data as { hint?: unknown }).hint).toBeUndefined();
+    });
+
+    it('passes non-FsError errors through unchanged (no RequestError wrap)', async () => {
+      // Plain Error → bridgeClient must NOT wrap it. Only structured
+      // FsError gets the reshape. ACP's default serialization is
+      // adequate for unstructured errors.
+      const writeText = vi.fn(async (): Promise<WriteTextFileResponse> => {
+        throw new Error('boring generic failure');
+      });
+      const client = makeClient({ writeText, readText: vi.fn() });
+
+      const err = (await client
+        .writeTextFile({
+          path: '/x',
+          content: 'y',
+          sessionId: 'sess:test',
+        })
+        .catch((e) => e)) as Error & { code?: number; data?: unknown };
+
+      // Original Error preserved — no JSON-RPC code stamped.
+      expect(err.name).toBe('Error');
+      expect(err.message).toBe('boring generic failure');
+      expect(err.code).toBeUndefined();
+      expect(err.data).toBeUndefined();
+    });
+
+    it('readTextFile passes non-FsError errors through unchanged (wenshao #4360 review)', async () => {
+      // Symmetric guard for the read-side `preserveFsErrorOverAcp`
+      // call. The write- and read-side catch blocks are independent
+      // try/catch wrappers in `bridgeClient.ts`; if a future refactor
+      // diverges them (e.g. adds Error-wrapping to one but not the
+      // other), this test catches the read-side regression.
+      const readText = vi.fn(async (): Promise<ReadTextFileResponse> => {
+        throw new Error('generic read failure');
+      });
+      const client = makeClient({ writeText: vi.fn(), readText });
+
+      const err = (await client
+        .readTextFile({ path: '/x', sessionId: 'sess:test' })
+        .catch((e) => e)) as Error & { code?: number; data?: unknown };
+
+      expect(err.name).toBe('Error');
+      expect(err.message).toBe('generic read failure');
+      expect(err.code).toBeUndefined();
+      expect(err.data).toBeUndefined();
+    });
+
+    it('preserves hint field when present on the FsError', async () => {
+      const writeText = vi.fn(async (): Promise<WriteTextFileResponse> => {
+        throw makeFsError(
+          'file_too_large',
+          'file of 6 MiB exceeds write cap of 5 MiB',
+          { hint: 'split large writes into bounded chunks', status: 413 },
+        );
+      });
+      const client = makeClient({ writeText, readText: vi.fn() });
+
+      const err = (await client
+        .writeTextFile({
+          path: '/x',
+          content: 'y',
+          sessionId: 'sess:test',
+        })
+        .catch((e) => e)) as Error & { code?: number; data?: unknown };
+
+      expect((err.data as { hint?: string }).hint).toBe(
+        'split large writes into bounded chunks',
+      );
+      expect((err.data as { errorKind?: string }).errorKind).toBe(
+        'file_too_large',
+      );
+    });
+
+    it('does not wrap an error that LOOKS like FsError but has wrong name', async () => {
+      // Defensive: an unrelated error class with a `kind` field but
+      // a different `name` should fall through to the unstructured
+      // path. Prevents accidental wrapping of e.g. permission errors
+      // that happen to carry a `kind` discriminator.
+      const writeText = vi.fn(async (): Promise<WriteTextFileResponse> => {
+        const err = new Error('looks-similar');
+        err.name = 'PermissionForbiddenError';
+        (err as unknown as { kind: string }).kind =
+          'designated_originator_mismatch';
+        throw err;
+      });
+      const client = makeClient({ writeText, readText: vi.fn() });
+
+      const err = (await client
+        .writeTextFile({
+          path: '/x',
+          content: 'y',
+          sessionId: 'sess:test',
+        })
+        .catch((e) => e)) as Error & { code?: number };
+
+      expect(err.name).toBe('PermissionForbiddenError');
+      expect(err.code).toBeUndefined();
+    });
+  });
+
   describe('inline fallback when fileSystem is omitted (regression guard)', () => {
     let tmpDir: string;
     beforeEach(async () => {

@@ -57,6 +57,10 @@ export class ToolCallEmitter extends BaseEmitter {
       params.toolName,
       params.args,
     );
+    const provenance = ToolCallEmitter.resolveToolProvenance(
+      params.toolName,
+      params.subagentMeta,
+    );
 
     await this.sendUpdate({
       sessionUpdate: 'tool_call',
@@ -70,6 +74,8 @@ export class ToolCallEmitter extends BaseEmitter {
       _meta: {
         toolName: params.toolName,
         ...params.subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
         ...(BaseEmitter.toEpochMs(params.timestamp) != null && {
           timestamp: BaseEmitter.toEpochMs(params.timestamp),
         }),
@@ -124,6 +130,10 @@ export class ToolCallEmitter extends BaseEmitter {
     }
 
     // Build the update
+    const provenance = ToolCallEmitter.resolveToolProvenance(
+      params.toolName,
+      params.subagentMeta,
+    );
     const update: Parameters<typeof this.sendUpdate>[0] = {
       sessionUpdate: 'tool_call_update',
       toolCallId: params.callId,
@@ -132,6 +142,8 @@ export class ToolCallEmitter extends BaseEmitter {
       _meta: {
         toolName: params.toolName,
         ...params.subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
         ...(BaseEmitter.toEpochMs(params.timestamp) != null && {
           timestamp: BaseEmitter.toEpochMs(params.timestamp),
         }),
@@ -161,6 +173,10 @@ export class ToolCallEmitter extends BaseEmitter {
     error: Error,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
+    const provenance = ToolCallEmitter.resolveToolProvenance(
+      toolName,
+      subagentMeta,
+    );
     await this.sendUpdate({
       sessionUpdate: 'tool_call_update',
       toolCallId: callId,
@@ -171,8 +187,53 @@ export class ToolCallEmitter extends BaseEmitter {
       _meta: {
         toolName,
         ...subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
       },
     });
+  }
+
+  /**
+   * Resolve a tool's provenance for UI dispatch on tool_call events
+   * (#4175 F4 prereq, chiga0 issue #19 P0). The SDK reads `_meta.
+   * provenance` + `_meta.serverId` to render builtin / MCP-server-badge /
+   * subagent-block differently. Without this stamping, the SDK falls
+   * back to string-matching the toolName which can't reliably
+   * distinguish builtin from subagent.
+   *
+   * Resolution rules:
+   *   - `subagentMeta` present → `'subagent'` (a Task tool / Codex
+   *     subagent / etc. wrapping its own tool calls)
+   *   - toolName matches `mcp__<server>__<tool>` → `'mcp'` with
+   *     `serverId: <server>`. Naming convention from
+   *     `packages/core/src/tools/mcp-tool.ts` in the
+   *     `@qwen-code/qwen-code-core` package — mirrors the SDK's same
+   *     heuristic fallback so SDK consumers stay consistent with
+   *     daemon classification.
+   *   - everything else → `'builtin'`
+   *
+   * Static + pure so it can be unit-tested without an emitter
+   * instance. Exported via `ToolCallEmitter.resolveToolProvenance`.
+   */
+  static resolveToolProvenance(
+    toolName: string,
+    subagentMeta?: SubagentMeta,
+  ): { provenance: 'builtin' | 'mcp' | 'subagent'; serverId?: string } {
+    if (subagentMeta !== undefined) {
+      return { provenance: 'subagent' };
+    }
+    if (toolName.startsWith('mcp__')) {
+      // mcp__<serverName>__<toolName> — split is "__", not single "_",
+      // so server / tool segments can contain underscores. Require
+      // both a non-empty server segment and at least one segment past
+      // it; malformed names fall through to 'builtin' rather than
+      // stamping an empty/garbage serverId.
+      const parts = toolName.split('__');
+      if (parts.length >= 3 && parts[1] && parts[1].length > 0) {
+        return { provenance: 'mcp', serverId: parts[1] };
+      }
+    }
+    return { provenance: 'builtin' };
   }
 
   // ==================== Public Utilities ====================

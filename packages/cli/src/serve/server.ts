@@ -27,6 +27,7 @@ import {
   type DeviceFlowProviderId,
   type DeviceFlowPublicView,
 } from './auth/deviceFlow.js';
+import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
@@ -1933,6 +1934,37 @@ export function createServeApp(
           const next = await iter!.next();
           if (next.done) break;
           if (res.writableEnded) break;
+          // SSE ring eviction observability (#4360 wenshao review):
+          // EventBus.subscribe emits `state_resync_required` when a
+          // consumer reconnects with `Last-Event-ID` past the ring
+          // boundary. Without a daemon-side log, an operator chasing
+          // "my UI is frozen with stale state" has no breadcrumb to
+          // tell whether the ring is undersized, the client reconnects
+          // too slowly, or a network partition caused repeated
+          // reconnects. Log here (at the SSE write boundary) rather
+          // than inside EventBus — keeps the bus implementation pure
+          // and concentrates daemon-side observability in the route
+          // handler that already logs socket errors / heartbeats.
+          if (next.value.type === 'state_resync_required') {
+            const data = next.value.data as {
+              lastDeliveredId?: number;
+              earliestAvailableId?: number;
+              reason?: string;
+            };
+            const gap =
+              typeof data.earliestAvailableId === 'number' &&
+              typeof data.lastDeliveredId === 'number'
+                ? data.earliestAvailableId - data.lastDeliveredId - 1
+                : undefined;
+            writeStderrLine(
+              `qwen serve: SSE ring eviction detected (session ${sessionId}): ` +
+                `lastEventId=${data.lastDeliveredId ?? '?'}, ` +
+                `earliestInRing=${data.earliestAvailableId ?? '?'}, ` +
+                `gap=${gap ?? '?'} events, ` +
+                `reason=${data.reason ?? '?'}. ` +
+                `Consumer must call loadSession to recover.`,
+            );
+          }
           await writeWithBackpressure(formatSseFrame(next.value));
         }
       } catch (err) {
@@ -1943,11 +1975,37 @@ export function createServeApp(
           // hard-coded `id: 0` would regress the client's `Last-Event-ID`
           // tracker. `formatSseFrame` omits the `id:` line when the input
           // event has no id.
+          //
+          // `errorKind` (#4175 F4 prereq, chiga0 issue #19 P0): stamp the
+          // classified error kind so UIs can render typed responses
+          // (auth retry / file picker / proxy hint / etc.) rather than
+          // regex-matching the human-readable `error` string. Returns
+          // `undefined` for unclassified errors — SDK falls back to
+          // rendering `error` text as before, so adding `errorKind` is
+          // strictly additive / backward-compatible.
+          const errorKind = mapDomainErrorToErrorKind(err);
+          // Bridge iterator error observability (#4360 wenshao review):
+          // forwarding the error to the client via `stream_error` is
+          // good for UX but leaves the daemon side blind. The adjacent
+          // `res.on('error', ...)` handler at line ~1925 already logs
+          // socket-level errors with `writeStderrLine`; mirror that
+          // pattern here for protocol/subprocess errors so operators
+          // can grep daemon stderr for "bridge iterator error" instead
+          // of attaching a debugger to distinguish "subprocess
+          // OOM-killed" from "bridge protocol bug".
+          writeStderrLine(
+            `qwen serve: bridge iterator error (session ${sessionId}): ` +
+              `${errorMessage(err)}` +
+              (errorKind ? ` [${errorKind}]` : ''),
+          );
           await writeWithBackpressure(
             formatSseFrame({
               v: 1,
               type: 'stream_error',
-              data: { error: errorMessage(err) },
+              data: {
+                error: errorMessage(err),
+                ...(errorKind ? { errorKind } : {}),
+              },
             }),
           ).catch(() => {});
         }
@@ -2540,7 +2598,40 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // The SDK parser at `sdk-typescript/src/daemon/sse.ts` handles the
   // multi-line variant on the receive side — input/output asymmetry is
   // intentional.
-  const dataJson = JSON.stringify(event);
+  //
+  // `_meta.serverTimestamp` (#4175 F4 prereq, chiga0 issue #19 P0): stamp
+  // the daemon's wall-clock at SSE write time so multi-client transcript
+  // ordering and "X minutes ago" UIs use the server's clock rather than
+  // each client's drifting local clock. Stamped at the wire boundary
+  // (NOT at EventBus.publish) so the in-memory `BridgeEvent` type stays
+  // unchanged and internal consumers don't see `_meta`.
+  //
+  // **Where `_meta` lives**: this code merges with `event._meta` at the
+  // BridgeEvent top level. **No current producer in the daemon sets
+  // `_meta` at the top level** — wenshao #4360 review noted that
+  // ToolCallEmitter's `_meta` lives nested at `event.data._meta` (the
+  // ACP `session/update` payload's own metadata), and `bridgeClient.ts`
+  // publishes via `events.publish({ type: 'session_update', data:
+  // params })` so the emitter's `_meta` stays inside `data`. The
+  // top-level merge here is a **forward-compat escape hatch** — if a
+  // future emitter ever wants to stamp envelope-level metadata, it can
+  // do so via `_meta` and this spread preserves it. Today
+  // `existingMeta` is always `undefined` in production and the spread
+  // is a no-op merge with `{}`.
+  //
+  // SDK consumer plan: a 3-location probe (event.serverTimestamp /
+  // event._meta.serverTimestamp / event.data._meta.serverTimestamp)
+  // is planned in chiga0's separate PR #4353 (not yet merged into
+  // `daemon_mode_b_main`). When that ships, SDK readers find this
+  // field at the `_meta.serverTimestamp` location. Until then this
+  // stamp is daemon-side only; SDK consumers can read it through an
+  // `as any` cast or wait for #4353.
+  const existingMeta = (event as { _meta?: Record<string, unknown> })._meta;
+  const stamped = {
+    ...event,
+    _meta: { ...(existingMeta ?? {}), serverTimestamp: Date.now() },
+  };
+  const dataJson = JSON.stringify(stamped);
   const idLine =
     'id' in event && event.id !== undefined ? `id: ${event.id}\n` : '';
   return `${idLine}event: ${event.type}\ndata: ${dataJson}\n\n`;

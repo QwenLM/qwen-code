@@ -6,6 +6,7 @@
 
 import type {
   DaemonEvent,
+  DaemonErrorKind,
   DaemonMcpTransport,
   PermissionOutcome,
 } from './types.js';
@@ -23,6 +24,18 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'client_evicted',
   'slow_client_warning',
   'stream_error',
+  // #4175 F4 prereq (Ilya0527 issue #15) — terminal-style frame
+  // emitted by the daemon when an SSE consumer reconnects with a
+  // `Last-Event-ID` past the ring's earliest available id (the
+  // events between the consumer's last-seen id and the ring head
+  // were evicted before reconnect). The reducer treats this as
+  // "your accumulated state is stale; call `loadSession` and
+  // reseed view state before applying any further deltas". It does
+  // NOT close the stream — the daemon continues replaying surviving
+  // ring frames and live frames, but the reducer auto-skips them
+  // until the consumer reseeds state. Synthetic (no `id`) so it
+  // doesn't burn a slot in the per-session monotonic sequence.
+  'state_resync_required',
   // PR 14b — MCP guardrail push events. See `mcp_guardrail_events`
   // capability tag. Both fire on the per-session SSE bus; consumers
   // should pre-flight `caps.features.includes('mcp_guardrail_events')`
@@ -218,6 +231,51 @@ export interface DaemonSlowClientWarningData {
 
 export interface DaemonStreamErrorData {
   error: string;
+  /**
+   * #4175 F4 prereq (chiga0 issue #19 P0). Classified error kind from
+   * the daemon's `mapDomainErrorToErrorKind` — typed as the closed
+   * `DaemonErrorKind` enum (currently 8 values: `missing_binary` /
+   * `blocked_egress` / `auth_env_error` / `init_timeout` /
+   * `protocol_error` / `missing_file` / `parse_error` /
+   * `budget_exhausted`) with a `(string & {})` widening for forward-
+   * compat. A future daemon may emit additional kinds (e.g.
+   * `stat_failed` already exists on the daemon's `SERVE_ERROR_KINDS`
+   * but is not yet mirrored on this SDK constant) — the union shape
+   * preserves IDE autocomplete on the known values while accepting
+   * forward-compat strings without a type error. Absent for
+   * unclassified errors — the daemon omits the field rather than
+   * stamping a meaningless value. UI consumers key on this for typed
+   * retry / remediation rendering (retry on init_timeout vs install
+   * on missing_binary, etc.) instead of regex-matching the `error`
+   * string.
+   */
+  errorKind?: DaemonErrorKind | (string & {});
+  [key: string]: unknown;
+}
+
+/**
+ * #4175 F4 prereq (Ilya0527 issue #15). Payload for the
+ * `state_resync_required` synthetic frame the daemon emits when an
+ * SSE consumer reconnects with a `Last-Event-ID` past the ring's
+ * earliest available id. The reducer auto-skips subsequent delta
+ * frames until consumer code calls `loadSession` and reseeds view
+ * state — see `DaemonSessionViewState.awaitingResync`.
+ */
+export interface DaemonStateResyncRequiredData {
+  /**
+   * Machine-readable resync reason. Currently always `'ring_evicted'`
+   * (the only case the daemon emits this frame for); reserved for
+   * future causes (e.g. `'schema_version_bump'`).
+   */
+  reason: string;
+  /** Consumer's `Last-Event-ID` at reconnect time. */
+  lastDeliveredId: number;
+  /**
+   * The earliest event id still in the daemon's per-session ring at
+   * reconnect time. The gap is `[lastDeliveredId + 1,
+   * earliestAvailableId - 1]` inclusive.
+   */
+  earliestAvailableId: number;
   [key: string]: unknown;
 }
 
@@ -525,6 +583,10 @@ export type DaemonStreamErrorEvent = DaemonEventEnvelope<
   'stream_error',
   DaemonStreamErrorData
 >;
+export type DaemonStateResyncRequiredEvent = DaemonEventEnvelope<
+  'state_resync_required',
+  DaemonStateResyncRequiredData
+>;
 export type DaemonMcpBudgetWarningEvent = DaemonEventEnvelope<
   'mcp_budget_warning',
   DaemonMcpBudgetWarningData
@@ -613,7 +675,8 @@ export type DaemonControlEvent =
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
   | DaemonSlowClientWarningEvent
-  | DaemonStreamErrorEvent;
+  | DaemonStreamErrorEvent
+  | DaemonStateResyncRequiredEvent;
 
 /**
  * PR 14b: MCP guardrail push events. Grouped as their own union member
@@ -763,6 +826,38 @@ export interface DaemonSessionViewState {
    * `forbiddenVotes`).
    */
   forbiddenVoteCount: number;
+  /**
+   * #4175 F4 prereq (Ilya0527 issue #15). Set to true when the
+   * reducer observes a `state_resync_required` frame from the daemon
+   * (consumer reconnected with `Last-Event-ID` past the daemon's
+   * ring eviction point — events between last-delivered and ring-
+   * head were lost, so the accumulated view state is stale relative
+   * to the daemon's truth).
+   *
+   * While true, the reducer **auto-skips** all non-terminal delta
+   * events (still advances `lastEventId`) to prevent the consumer
+   * from rendering against a known-stale state. Terminal lifecycle
+   * events (`session_died` / `session_closed` / `client_evicted` /
+   * `stream_error`) still apply because they're critical end-of-
+   * stream signals that don't depend on prior state being current.
+   *
+   * Consumer recovery: when this is true, call `loadSession` to
+   * fetch the daemon's canonical session snapshot, then reconstruct
+   * view state via `createDaemonSessionViewState({...loaded state})`.
+   * The fresh state seed clears the flag implicitly (a new reducer
+   * instance starts fresh).
+   */
+  awaitingResync: boolean;
+  /**
+   * Count of `state_resync_required` frames this stream has observed.
+   * Typically 0 (no resync) or 1 (single ring-eviction event);
+   * higher counts indicate the consumer is reconnecting repeatedly
+   * past the ring boundary, which is itself a debuggable signal
+   * (network instability or ring sizing wrong for the workload).
+   */
+  resyncRequiredCount: number;
+  /** Most recent resync payload (reason + gap range). */
+  lastResyncRequired?: DaemonStateResyncRequiredData;
 }
 
 /**
@@ -776,6 +871,34 @@ export interface DaemonSessionViewState {
  * reducer's bounded history.
  */
 const MAX_FORBIDDEN_VOTES_PER_SESSION = 32;
+
+/**
+ * #4175 F4 prereq (Ilya0527 issue #15). Event types that the reducer
+ * still processes when `awaitingResync` is true. Two categories:
+ *
+ *   - **`state_resync_required` itself** — so the reducer can update
+ *     `lastResyncRequired` / `resyncRequiredCount` for *subsequent*
+ *     resync frames (rare but possible: a consumer that reconnects
+ *     past the ring twice in succession).
+ *   - **Terminal lifecycle frames** — `session_died` / `session_closed`
+ *     / `client_evicted` / `stream_error`. Critical end-of-stream
+ *     signals that don't depend on prior state being current. UIs
+ *     must still see "this session died" even if they were in resync
+ *     limbo at the time.
+ *
+ * Everything else (session_update / permission_* / approval_mode_changed
+ * / workspace mutations / mcp guardrail / auth flow events) is auto-
+ * skipped while `awaitingResync` is true; `lastEventId` still advances
+ * via `advanceLastEventId(base)` so the resync recovery sequence stays
+ * monotonic.
+ */
+const RESYNC_PASSTHROUGH_TYPES = new Set<KnownDaemonEvent['type']>([
+  'state_resync_required',
+  'session_died',
+  'session_closed',
+  'client_evicted',
+  'stream_error',
+]);
 
 export function createDaemonSessionViewState(
   seed: Partial<DaemonSessionViewState> = {},
@@ -821,6 +944,14 @@ export function createDaemonSessionViewState(
     permissionVoteProgress: { ...seed.permissionVoteProgress },
     forbiddenVotes: seed.forbiddenVotes ? [...seed.forbiddenVotes] : [],
     forbiddenVoteCount: seed.forbiddenVoteCount ?? 0,
+    // #4175 F4 prereq (Ilya0527 issue #15) — fresh view state always
+    // starts without a resync requirement. A consumer calling
+    // `createDaemonSessionViewState` after `loadSession` to recover
+    // from an earlier resync implicitly clears the flag through this
+    // default.
+    awaitingResync: seed.awaitingResync ?? false,
+    resyncRequiredCount: seed.resyncRequiredCount ?? 0,
+    lastResyncRequired: seed.lastResyncRequired,
   };
 }
 
@@ -898,6 +1029,10 @@ export function asKnownDaemonEvent(
       return isStreamErrorData(event.data)
         ? (event as DaemonStreamErrorEvent)
         : undefined;
+    case 'state_resync_required':
+      return isStateResyncRequiredData(event.data)
+        ? (event as DaemonStateResyncRequiredEvent)
+        : undefined;
     case 'mcp_budget_warning':
       return isMcpBudgetWarningData(event.data)
         ? (event as DaemonMcpBudgetWarningEvent)
@@ -972,6 +1107,20 @@ export function reduceDaemonSessionEvent(
       unrecognizedKnownEventCount: base.unrecognizedKnownEventCount + 1,
       lastUnrecognizedKnownEvent: rawEvent,
     };
+  }
+
+  // #4175 F4 prereq (Ilya0527 issue #15). When `awaitingResync` is
+  // set, the consumer's accumulated view state is known stale —
+  // the daemon's ring evicted events between the consumer's last
+  // delivered id and reconnect. Auto-skip non-terminal delta events
+  // (still advance `lastEventId` via `base`) so the consumer doesn't
+  // render against stale state. Terminal lifecycle events still
+  // apply — they're critical end-of-stream signals that don't
+  // depend on prior state. The flag clears when the consumer calls
+  // `loadSession` and reconstructs view state via
+  // `createDaemonSessionViewState`.
+  if (base.awaitingResync && !RESYNC_PASSTHROUGH_TYPES.has(event.type)) {
+    return base;
   }
 
   switch (event.type) {
@@ -1168,6 +1317,24 @@ export function reduceDaemonSessionEvent(
         // Wenshao review #4335 / 3272576003 (Critical) — see session_died.
         forbiddenVotes: [],
         forbiddenVoteCount: 0,
+      };
+    case 'state_resync_required':
+      // #4175 F4 prereq (Ilya0527 issue #15). Mark the accumulated
+      // view state as stale; subsequent non-terminal deltas are
+      // auto-skipped at the top-of-reducer gate above until consumer
+      // recovery via `loadSession` + `createDaemonSessionViewState`.
+      // `alive` and `terminalEvent` are NOT touched — the stream is
+      // still healthy; only the consumer's local accumulation is
+      // suspect. `pendingPermissions` is intentionally preserved
+      // (cleared by `loadSession`-driven recovery, not by the
+      // resync signal itself) so we don't synthesize a no-op
+      // "permission no longer pending" state transition while the
+      // consumer is still figuring out what's real.
+      return {
+        ...base,
+        awaitingResync: true,
+        resyncRequiredCount: base.resyncRequiredCount + 1,
+        lastResyncRequired: event.data,
       };
     case 'mcp_budget_warning':
       // Non-terminal: budget pressure is a status signal, not a stream
@@ -1679,6 +1846,17 @@ function isClientEvictedData(value: unknown): value is DaemonClientEvictedData {
     isRecord(value) &&
     isNonEmptyString(value['reason']) &&
     isOptionalNumber(value['droppedAfter'])
+  );
+}
+
+function isStateResyncRequiredData(
+  value: unknown,
+): value is DaemonStateResyncRequiredData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['reason']) &&
+    isFiniteNumber(value['lastDeliveredId']) &&
+    isFiniteNumber(value['earliestAvailableId'])
   );
 }
 
