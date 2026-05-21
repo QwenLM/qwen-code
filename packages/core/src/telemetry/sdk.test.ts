@@ -52,6 +52,8 @@ vi.mock('@opentelemetry/exporter-trace-otlp-http');
 vi.mock('@opentelemetry/exporter-logs-otlp-http');
 vi.mock('@opentelemetry/exporter-metrics-otlp-http');
 vi.mock('@opentelemetry/sdk-node');
+vi.mock('@opentelemetry/instrumentation-http');
+vi.mock('@opentelemetry/instrumentation-undici');
 vi.mock('./gcp-exporters.js');
 vi.mock('./log-to-span-processor.js');
 vi.mock('./session-context.js');
@@ -62,6 +64,8 @@ vi.mock('./tracer.js', () => ({
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import { setSessionContext } from './session-context.js';
 import { createSessionRootContext } from './tracer.js';
+import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
+import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 
 describe('resolveHttpOtlpUrl', () => {
   it('appends signal path to base collector URL', () => {
@@ -633,6 +637,132 @@ describe('Telemetry SDK', () => {
       const attrs = getResourceAttributes();
       expect(attrs['session.id']).toBeUndefined();
       expect(attrs['team']).toBe('x');
+    });
+  });
+
+  describe('Instrumentations', () => {
+    function getInstrumentations(): unknown[] {
+      const constructorCall = vi.mocked(NodeSDK).mock.calls[0]![0]!;
+      return (constructorCall.instrumentations ?? []) as unknown[];
+    }
+
+    it('registers both HttpInstrumentation and UndiciInstrumentation', () => {
+      initializeTelemetry(mockConfig);
+      const instrumentations = getInstrumentations();
+      // The mocks make HttpInstrumentation / UndiciInstrumentation auto-mocked
+      // classes; instance-of checks against the mocked class still work.
+      expect(
+        instrumentations.some((i) => i instanceof HttpInstrumentation),
+      ).toBe(true);
+      expect(
+        instrumentations.some((i) => i instanceof UndiciInstrumentation),
+      ).toBe(true);
+    });
+
+    it('UndiciInstrumentation receives ignoreRequestHook that skips configured OTLP endpoints', () => {
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'http://collector.example.com:4318',
+      );
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      // Configured OTLP endpoint must be skipped to avoid feedback loops.
+      expect(
+        config.ignoreRequestHook({
+          origin: 'http://collector.example.com:4318',
+          path: '/v1/traces',
+        }),
+      ).toBe(true);
+      // Non-OTLP URLs (e.g. an LLM provider) must be traced.
+      expect(
+        config.ignoreRequestHook({
+          origin: 'https://dashscope.aliyuncs.com',
+          path: '/compatible-mode/v1/chat/completions',
+        }),
+      ).toBe(false);
+    });
+
+    it('ignoreRequestHook is a pure no-op when no OTLP endpoint is configured', () => {
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+        undefined,
+      );
+      vi.spyOn(mockConfig, 'getTelemetryOtlpLogsEndpoint').mockReturnValue(
+        undefined,
+      );
+      vi.spyOn(mockConfig, 'getTelemetryOtlpMetricsEndpoint').mockReturnValue(
+        undefined,
+      );
+      vi.spyOn(mockConfig, 'getTelemetryOutfile').mockReturnValue('/tmp/x');
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      // No OTLP endpoint → nothing to ignore. Returning false means every
+      // request gets a client span (the desired behavior in outfile mode).
+      expect(
+        config.ignoreRequestHook({
+          origin: 'https://api.openai.com',
+          path: '/v1/chat/completions',
+        }),
+      ).toBe(false);
+    });
+
+    it('ignoreRequestHook handles per-signal endpoint configuration', () => {
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+        'http://traces.example.com:4318/v1/traces',
+      );
+      vi.spyOn(mockConfig, 'getTelemetryOtlpLogsEndpoint').mockReturnValue(
+        'http://logs.example.com:4318/v1/logs',
+      );
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      // Traces endpoint matched verbatim.
+      expect(
+        config.ignoreRequestHook({
+          origin: 'http://traces.example.com:4318',
+          path: '/v1/traces',
+        }),
+      ).toBe(true);
+      // Logs endpoint matched verbatim.
+      expect(
+        config.ignoreRequestHook({
+          origin: 'http://logs.example.com:4318',
+          path: '/v1/logs',
+        }),
+      ).toBe(true);
+      // Unrelated host not skipped.
+      expect(
+        config.ignoreRequestHook({
+          origin: 'https://api.openai.com',
+          path: '/v1/chat/completions',
+        }),
+      ).toBe(false);
+    });
+
+    it('ignoreRequestHook strips query string from incoming path for matching', () => {
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'http://collector.example.com:4318',
+      );
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      // OTel SDK may append query params to OTLP requests; we still want
+      // those to be ignored.
+      expect(
+        config.ignoreRequestHook({
+          origin: 'http://collector.example.com:4318',
+          path: '/v1/traces?token=secret',
+        }),
+      ).toBe(true);
     });
   });
 });

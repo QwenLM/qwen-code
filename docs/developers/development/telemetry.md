@@ -262,6 +262,35 @@ and logs still carry `session.id`, and trace / log backends (Jaeger, Tempo,
 Loki, Aliyun SLS / ARMS Tracing) handle per-session slicing natively without
 cardinality pressure.
 
+### Trace context propagation
+
+When telemetry is enabled, Qwen Code instruments outgoing `fetch()` requests
+(used by `openai`, `@google/genai`, and `@anthropic-ai/sdk`) and automatically
+injects the standard W3C `traceparent` header on every LLM service call:
+
+```
+traceparent: 00-<32-hex traceId>-<16-hex parentSpanId>-<01-sampled | 00-not-sampled>
+```
+
+The traceId is the qwen-code interaction trace id; the parent span is the
+active `api.generateContent` span. Any OTel-instrumented LLM service (e.g.
+DashScope serving from an ARMS Tracing backend) that reads this header will
+make its server-side spans children of qwen-code's trace, giving you a single
+end-to-end trace tree across the process boundary.
+
+You also get a free client-side HTTP span per LLM call — useful for separating
+network latency (TTFB / response body transfer) from upstream model processing
+time, which the existing `api.generateContent` span alone can't distinguish.
+
+**Feedback-loop avoidance.** OTel SDK uses `fetch` internally to upload OTLP
+data. Without protection, instrumenting `fetch` would trace those uploads,
+which would themselves be uploaded, causing an infinite loop. Qwen Code's
+undici instrumentation is configured with an `ignoreRequestHook` that skips
+URLs matching the configured `telemetry.otlpEndpoint` /
+`telemetry.otlpTracesEndpoint` / `telemetry.otlpLogsEndpoint` /
+`telemetry.otlpMetricsEndpoint` prefixes. In file-outfile mode there are no
+outbound HTTP uploads, so the hook is a no-op.
+
 ## Aliyun Telemetry
 
 ### Manual OTLP Export

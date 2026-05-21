@@ -20,6 +20,7 @@ import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
 import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
+import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 import type { Config } from '../config/config.js';
 import { SERVICE_NAME } from './constants.js';
 import { initializeMetrics } from './metrics.js';
@@ -314,6 +315,20 @@ export function initializeTelemetry(config: Config): void {
   }
   // If no exporter is configured for a signal, it is silently skipped.
 
+  // Build OTLP exporter URL prefixes once. The undici instrumentation must
+  // ignore requests to these endpoints — otherwise it would create a client
+  // span for every OTLP upload, that span would be exported, creating an
+  // infinite feedback loop. Strip trailing slash and query string so prefix
+  // matching against undici's `request.origin + request.path` is robust.
+  const otlpUrlPrefixes = [
+    config.getTelemetryOtlpEndpoint(),
+    config.getTelemetryOtlpTracesEndpoint(),
+    config.getTelemetryOtlpLogsEndpoint(),
+    config.getTelemetryOtlpMetricsEndpoint(),
+  ]
+    .filter((u): u is string => !!u)
+    .map((u) => u.replace(/\?.*$/, '').replace(/\/$/, ''));
+
   sdk = new NodeSDK({
     resource,
     // Disable async host/process/env resource detectors: they leave attributes
@@ -327,7 +342,24 @@ export function initializeTelemetry(config: Config): void {
         ? [logToSpanProcessor]
         : [],
     ...(metricReader && { metricReader }),
-    instrumentations: [new HttpInstrumentation()],
+    instrumentations: [
+      new HttpInstrumentation(),
+      // Modern fetch (`globalThis.fetch` / undici) is the HTTP layer used by
+      // `openai`, `@google/genai`, and `@anthropic-ai/sdk`. Without this
+      // instrumentation, outbound LLM requests carry no `traceparent` header
+      // and the trace tree terminates at the qwen-code process boundary.
+      new UndiciInstrumentation({
+        ignoreRequestHook: (request) => {
+          if (otlpUrlPrefixes.length === 0) return false;
+          const path =
+            typeof request.path === 'string'
+              ? request.path.replace(/\?.*$/, '')
+              : '';
+          const url = `${request.origin}${path}`;
+          return otlpUrlPrefixes.some((prefix) => url.startsWith(prefix));
+        },
+      }),
+    ],
   });
 
   try {
