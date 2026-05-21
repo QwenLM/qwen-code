@@ -104,15 +104,37 @@ function accumulateSegments(raw) {
 
 /**
  * Build the final on-disk markdown body from accumulated segments.
+ *
+ * Tier matters here. Single-shot tiers (LIGHT/STANDARD) emit the review
+ * as their whole output, so every segment is review content and they are
+ * joined as-is. DEEP runs the bundled multi-agent skill: its stream
+ * carries many short orchestrator-narration segments ("Launching 6
+ * agents…", "Let me compile the review…", "All agents unanimous") plus
+ * ONE large segment that is the actual consolidated review. Joining them
+ * all would sandwich the review in narration noise, so for DEEP we emit
+ * only the largest segment.
+ *
  * Empty input gets a placeholder so downstream `gh pr comment
  * --body-file` always has a non-empty body to post.
+ *
+ * Exposed for unit tests.
  */
 function buildOutput(segments, tier, status) {
-  const header = `<!-- tier=${tier}; status=${status}; segments=${segments.length} -->\n`;
-  const body =
-    segments.length > 0
-      ? segments.join('\n\n')
-      : '(no assistant text parsed; see the raw stream in the job log)';
+  let body;
+  let emitted;
+  if (tier === 'DEEP' && segments.length > 1) {
+    body = segments.reduce((a, b) => (b.length > a.length ? b : a));
+    emitted = 1;
+  } else if (segments.length > 0) {
+    body = segments.join('\n\n');
+    emitted = segments.length;
+  } else {
+    body = '(no assistant text parsed; see the raw stream in the job log)';
+    emitted = 0;
+  }
+  const header =
+    `<!-- tier=${tier}; status=${status}; ` +
+    `segments=${segments.length}; emitted=${emitted} -->\n`;
   return { header, body, full: header + body };
 }
 

@@ -133,31 +133,56 @@ describe('accumulateSegments', () => {
 });
 
 describe('buildOutput', () => {
-  it('joins multi-segment body with blank lines + writes header', () => {
-    const out = buildOutput(['s1', 's2'], 'DEEP', 'complete');
+  it('joins multi-segment body with blank lines for single-shot tiers', () => {
+    const out = buildOutput(['s1', 's2'], 'STANDARD', 'complete');
     expect(out.header).toBe(
-      '<!-- tier=DEEP; status=complete; segments=2 -->\n',
+      '<!-- tier=STANDARD; status=complete; segments=2; emitted=2 -->\n',
     );
     expect(out.body).toBe('s1\n\ns2');
     expect(out.full).toBe(
-      '<!-- tier=DEEP; status=complete; segments=2 -->\ns1\n\ns2',
+      '<!-- tier=STANDARD; status=complete; segments=2; emitted=2 -->\ns1\n\ns2',
     );
+  });
+
+  it('DEEP emits only the largest segment (drops orchestrator narration)', () => {
+    // The bundled multi-agent skill streams many short narration
+    // segments plus one large segment that is the real review.
+    const narrationA = 'Launching all 6 review agents in parallel.';
+    const review =
+      '# Code Review — PR #1\n\n## Findings\n\n' +
+      'A real consolidated review, much longer than any narration line.';
+    const narrationB = 'All agents unanimous. Review closed.';
+    const out = buildOutput(
+      [narrationA, review, narrationB],
+      'DEEP',
+      'complete',
+    );
+    expect(out.body).toBe(review);
+    expect(out.header).toBe(
+      '<!-- tier=DEEP; status=complete; segments=3; emitted=1 -->\n',
+    );
+  });
+
+  it('DEEP with a single segment keeps it as-is', () => {
+    const out = buildOutput(['only one'], 'DEEP', 'complete');
+    expect(out.body).toBe('only one');
+    expect(out.header).toContain('emitted=1');
   });
 
   it('writes placeholder body when no segments parsed', () => {
     const out = buildOutput([], 'LIGHT', 'timeout');
     expect(out.header).toContain('segments=0');
+    expect(out.header).toContain('emitted=0');
     expect(out.body).toBe(
       '(no assistant text parsed; see the raw stream in the job log)',
     );
-    expect(out.full).toContain('segments=0');
     expect(out.full).toContain('(no assistant text parsed');
   });
 
   it('embeds the provided tier and status verbatim', () => {
     const out = buildOutput(['x'], 'ULTRA_LIGHT', 'error');
     expect(out.header).toBe(
-      '<!-- tier=ULTRA_LIGHT; status=error; segments=1 -->\n',
+      '<!-- tier=ULTRA_LIGHT; status=error; segments=1; emitted=1 -->\n',
     );
   });
 });

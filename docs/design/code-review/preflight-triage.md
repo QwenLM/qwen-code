@@ -288,11 +288,13 @@ shell-only   单发 qwen   单发 qwen   bundled /review
 当前 `Phase 1-3` 的 stream-json 解析器（`packages/core/src/skills/bundled/review/SKILL.md` 之外，在 workflow yaml 里）只保留**最后一段** assistant text。本设计要改：
 
 - 收集**所有** `type === "assistant" || type === "message"` 事件的 text 内容
-- 每收到一段就 append 到 `qwen-review-summary.md`（增量落盘，进程被 kill 也不丢）
-- 头部插入元信息：`<!-- tier=STANDARD; status=timeout|complete; segments=N -->`
-- 解析失败时 `cp $stream qwen-review-summary.md`（既有兜底，保留）
+- 每收到一段就 append 到 `qwen-review-stream.jsonl`（增量落盘，进程被 kill 也不丢）
+- 头部插入元信息：`<!-- tier=…; status=…; segments=N; emitted=M -->`
+- 解析失败时落空文件 → 触发 fallback comment（既有兜底，保留）
 
-> 这个改动同时让"调试期看进度"（用户之前关心的）与"timeout 时有结果"（本设计目标）都得到满足 —— 之前是覆盖式只为前者牺牲后者，现在是累加式两者兼得。
+> **tier-specific 输出（CI dry-run 实测，PR #4373）**：单发的 LIGHT/STANDARD 整个输出就是 review，所有 segment 都是 review 内容，直接 `join`。但 DEEP 走 bundled 多 agent skill，stream 里是**大量 orchestrator 过程叙述**（"Launching 6 agents…"、"Let me compile the review…"、"All agents unanimous"）夹着**一段**真正的合并 review。若全部 join，真 review 会被叙述噪音包夹。因此 `buildOutput` 对 DEEP 只取**最长的那一段**（真 review 远长于任何叙述碎片），`emitted` 字段记录实际落地了几段。
+
+> 这个改动同时让"调试期看进度"（stream 落盘）与"timeout 时有结果"（本设计目标）都得到满足。
 
 ## Maintainer override
 
