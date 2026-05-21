@@ -75,14 +75,14 @@ PR #4336 shipped F2 as 6 atomic commits + 6 fix commits over ~4 hours. Wenshao r
 
 #### Declined-with-reply (filed as F2 follow-ups)
 
-| #   | Site                                                | Reason for declining                                                                                                                    |
-| --- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| W7  | Test coverage gaps (4 untested critical paths)      | 1/4 added (W6 regression test); rest deferred to focused test-coverage PR after F2 series merges                                        |
-| W8  | `maxReconnectAttempts` / `reconnectStrategy` unused | Forward-compat placeholders for the deferred health-monitor-driven reconnect (design §6.6); removing + re-adding churns the public type |
-| W11 | Duplicate fast-path / in-flight-path attach blocks  | Refactor opportunity touching the entire `acquire` signature; not blocking F2 merge                                                     |
-| W12 | `passesSessionFilter` O(M×N) per `applyTools`       | Micro-perf optimization measurable only with hundreds of tools × large filter lists                                                     |
-| R9  | `McpClientManager` ctor 7-positional sentinels      | Refactor to options-object touches every call site (test fixtures, ToolRegistry); out of F2 scope                                       |
-| R10 | `pgrep -P <pid>` per-PID-per-level cost             | Single `ps -eo pid,ppid` requires platform-specific column flags + tree builder; current 16s worst-case bound is acceptable             |
+| #   | Site                                                | Reason for declining                                                                                                                                                             |
+| --- | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W7  | Test coverage gaps (4 untested critical paths)      | 1/4 added (W6 regression test); rest deferred to focused test-coverage PR after F2 series merges                                                                                 |
+| W8  | `maxReconnectAttempts` / `reconnectStrategy` unused | Forward-compat placeholders for the deferred health-monitor-driven reconnect (design §6.6); removing + re-adding churns the public type                                          |
+| W11 | Duplicate fast-path / in-flight-path attach blocks  | ✅ Done in PR A: `attachPooledSession` + `rollbackReservationOnSpawnFailure` private helpers (commit `2d546efca`)                                                                |
+| W12 | `passesSessionFilter` O(M×N) per `applyTools`       | ✅ Done in PR A: `applyTools` / `applyPrompts` precompute filter `Set`s once per pass; predicate becomes O(1) per tool (commit `a4a855ab3`)                                      |
+| R9  | `McpClientManager` ctor 7-positional sentinels      | ✅ Done in PR A: options-object ctor + `mkManager` test factory (commit `0cb1eaa27`)                                                                                             |
+| R10 | `pgrep -P <pid>` per-PID-per-level cost             | ✅ Done in PR A: single `ps -A -o pid=,ppid=` snapshot + in-memory BFS walk; pgrep BFS retained as fallback for BusyBox <v1.28 / distroless (commit landing as final PR A piece) |
 
 #### Bug count
 
@@ -462,36 +462,54 @@ Hard idle cap: drain timer can be cancelled+restarted indefinitely (acquire/rele
 
 ### 6.4 Cross-platform descendant-pid sweep
 
+**R10 / R23 T7 / PR A update (2026-05-22)**: switched from per-pid BFS (one `pgrep -P <pid>` / `Get-CimInstance -Filter` subprocess per node) to a single process-table snapshot followed by in-memory tree walk. Two motivations: (1) one fork instead of B^D forks on the hot pool-shutdown path; (2) snapshot consistency — pre-fix BFS could miss descendants that forked between adjacent BFS levels. Per-pid path retained as fallback for BusyBox `ps` <v1.28 (no `-o` support) and distroless containers without `ps`.
+
 ```ts
 // packages/core/src/tools/pid-descendants.ts
 export async function listDescendantPids(rootPid: number): Promise<number[]> {
-  if (process.platform === 'win32') return listDescendantPidsWin(rootPid);
-  return listDescendantPidsUnix(rootPid);
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
+  try {
+    if (process.platform === 'win32')
+      return await listDescendantPidsWin(rootPid);
+    return await listDescendantPidsUnix(rootPid);
+  } catch {
+    return []; // OS reaps orphans; pool shutdown still proceeds.
+  }
 }
 
 async function listDescendantPidsUnix(root: number): Promise<number[]> {
-  const all: number[] = [];
-  const queue = [root];
-  while (queue.length) {
-    const parent = queue.shift()!;
-    const { stdout } = await execFile('pgrep', ['-P', String(parent)], {
-      timeout: 2000,
-    }).catch(() => ({ stdout: '' }));
-    const children = stdout.split('\n').map(Number).filter(Number.isFinite);
-    all.push(...children);
-    queue.push(...children);
+  let tree: Map<number, number[]> | undefined;
+  try {
+    tree = await snapshotProcessTreeUnix(); // ps -A -o pid=,ppid=
+  } catch {
+    /* fall through to fallback */
   }
-  return all;
+  if (tree) return walkDescendants(tree, root); // O(descendants), 1 fork
+  return await listDescendantPidsUnixPgrepFallback(root); // legacy BFS
 }
 
-async function listDescendantPidsWin(root: number): Promise<number[]> {
-  // PowerShell CIM query — wmic deprecated on modern Windows
-  const script = `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq <ROOT> } | Select-Object -ExpandProperty ProcessId`;
-  // ... recursive walk, return aggregated pids
+async function snapshotProcessTreeUnix(): Promise<Map<number, number[]>> {
+  // -A: all processes (POSIX, equivalent to -e but unambiguous on BSD).
+  // -o pid=,ppid=: pid + ppid columns, trailing `=` suppresses headers.
+  const { stdout } = await execFile('ps', ['-A', '-o', 'pid=,ppid='], {
+    timeout: 2000,
+    maxBuffer: 8 * 1024 * 1024, // covers >250k-process pathological hosts
+  });
+  const childrenByPpid = new Map<number, number[]>();
+  for (const line of stdout.split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)$/);
+    if (!m) continue;
+    /* parse, push into childrenByPpid */
+  }
+  return childrenByPpid;
 }
+
+// Windows: single Get-CimInstance Win32_Process | ConvertTo-Csv snapshot
+// of all (ProcessId, ParentProcessId) rows + in-memory walk; per-pid
+// `Get-CimInstance -Filter "ParentProcessId=$p"` retained as fallback.
 ```
 
-Called from `PoolEntry.shutdown()` before `client.disconnect()`. Handles `npx @modelcontextprotocol/server-X`, `uvx ...`, `pnpm dlx ...` wrapper leaks.
+Called from `PoolEntry.shutdown()` before `client.disconnect()`. Handles `npx @modelcontextprotocol/server-X`, `uvx ...`, `pnpm dlx ...` wrapper leaks. MAX_DESCENDANTS=256 / MAX_DEPTH=8 caps preserved.
 
 ### 6.5 Spawn failure handling
 
