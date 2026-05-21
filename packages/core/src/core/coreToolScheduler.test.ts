@@ -5552,6 +5552,14 @@ describe('extractToolFilePaths', () => {
     ]);
   });
 
+  it('extracts notebook_path for notebook_edit', () => {
+    expect(
+      extractToolFilePaths('notebook_edit', {
+        notebook_path: '/proj/analysis.ipynb',
+      }),
+    ).toEqual(['/proj/analysis.ipynb']);
+  });
+
   it('extracts filePath for lsp (camelCase convention)', () => {
     expect(extractToolFilePaths('lsp', { filePath: '/proj/b.ts' })).toEqual([
       '/proj/b.ts',

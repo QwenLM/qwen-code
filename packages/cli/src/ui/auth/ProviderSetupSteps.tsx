@@ -13,10 +13,7 @@ import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import type {
-  ProviderConfig,
-  BaseUrlOption,
-} from '../../auth/providerConfig.js';
+import type { ProviderConfig, BaseUrlOption } from '@qwen-code/qwen-code-core';
 import type { ProviderSetupFlow } from './useProviderSetupFlow.js';
 
 // ---------------------------------------------------------------------------
@@ -109,7 +106,9 @@ function BaseUrlInputStep({
           value={flow.state.baseUrl}
           onChange={flow.changeBaseUrl}
           onSubmit={flow.submitBaseUrl}
-          placeholder="https://api.openai.com/v1"
+          placeholder={
+            flow.state.baseUrlPlaceholder || 'https://api.openai.com/v1'
+          }
         />
       </Box>
       {flow.state.baseUrlError && (

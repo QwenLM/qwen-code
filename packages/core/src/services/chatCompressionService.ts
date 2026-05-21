@@ -282,14 +282,6 @@ export interface CompressOptions {
    */
   originalTokenCount: number;
   /**
-   * Bypass the token-count threshold gate and the failed-attempt latch while
-   * preserving automatic compaction semantics. Used for temporary heap-pressure
-   * relief where `force=true` would be too broad because it means manual
-   * `/compress`. The heap-pressure check that sets this lives in
-   * `GeminiChat.tryCompress()`.
-   */
-  bypassTokenThreshold?: boolean;
-  /**
    * Hook trigger to report for this compression. `force=true` bypasses the
    * threshold gate but does not always mean the user manually requested
    * compaction; reactive overflow recovery is forced but still automatic.
@@ -307,7 +299,7 @@ export interface CompressOptions {
   /**
    * Pre-computed effective-token count from `estimatePromptTokens()`. When
    * provided, the cheap-gate skips its own estimation pass (and the
-   * accompanying `chat.getHistory(true)` clone). Callers that already
+   * accompanying `chat.getHistoryShallow(true)` clone). Callers that already
    * computed this value upstream — primarily `sendMessageStream` for the
    * hard-tier rescue — pass it through to avoid duplicate work.
    * (review #4168 R1.3 / R1.4)
@@ -327,7 +319,6 @@ export class ChatCompressionService {
       config,
       consecutiveFailures,
       originalTokenCount,
-      bypassTokenThreshold = false,
       trigger,
       signal,
     } = opts;
@@ -335,15 +326,8 @@ export class ChatCompressionService {
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
 
-    // Cheap gates first — these don't need the curated history. Heap-pressure
-    // bypass must also bypass the consecutive-failure breaker, otherwise N
-    // failed compactions would disable this memory-pressure safety net for
-    // the rest of the chat.
-    if (
-      consecutiveFailures >= MAX_CONSECUTIVE_FAILURES &&
-      !force &&
-      !bypassTokenThreshold
-    ) {
+    // Cheap gates first — these don't need the curated history.
+    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && !force) {
       return {
         newHistory: null,
         info: {
@@ -354,10 +338,7 @@ export class ChatCompressionService {
       };
     }
 
-    // Don't compress if not forced and we are under the token limit. This is
-    // the steady-state path on every send; heap pressure may bypass it because
-    // the JS heap can become the limiting resource before token count does.
-    if (!force && !bypassTokenThreshold) {
+    if (!force) {
       const contextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
@@ -366,7 +347,7 @@ export class ChatCompressionService {
       //   1. Caller already computed it (sendMessageStream hard-tier rescue)
       //   2. Compute it here from history + pending user message
       //   3. Fall back to the raw API-reported count
-      // Path 1 avoids a second `getHistory(true)` clone per send when
+      // Path 1 avoids a second `getHistoryShallow(true)` clone per send when
       // sendMessageStream already paid for one. (R1.3 / R1.4)
       const pendingUserMessage = opts.pendingUserMessage;
       const effectiveTokens =
@@ -374,7 +355,7 @@ export class ChatCompressionService {
           ? opts.precomputedEffectiveTokens
           : pendingUserMessage
             ? estimatePromptTokens(
-                chat.getHistory(true),
+                chat.getHistoryShallow(true),
                 pendingUserMessage,
                 originalTokenCount,
                 slimmingConfig.imageTokenEstimate,
@@ -392,7 +373,12 @@ export class ChatCompressionService {
       }
     }
 
-    const curatedHistory = chat.getHistory(true);
+    // Compression only reads the existing history while deciding the split and
+    // preparing the side-query payload. Avoid `getHistory(true)` here: long
+    // tool-heavy sessions can make a defensive deep clone larger than the
+    // remaining V8 heap headroom at exactly the moment compaction is trying to
+    // reduce memory pressure.
+    const curatedHistory = chat.getHistoryShallow(true);
     if (curatedHistory.length === 0) {
       return {
         newHistory: null,

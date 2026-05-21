@@ -104,12 +104,14 @@ describe('AnthropicContentGenerator', () => {
     vi.restoreAllMocks();
   });
 
-  it('uses claude-cli identity (User-Agent + x-app + Bearer auth) for non-Anthropic baseURLs', async () => {
+  it('uses claude-cli identity (User-Agent + x-app + Bearer auth + x-api-key) for non-Anthropic baseURLs', async () => {
     // Non-Anthropic-native baseURL → IdeaLab-style proxy path:
     //  - User-Agent presents as `claude-cli/<version> (external, cli)`
     //  - `x-app: cli` is sent
     //  - SDK is constructed with `authToken` (sends `Authorization: Bearer`)
-    //    rather than `apiKey` (`x-api-key`), avoiding dual-header conflicts.
+    //  - `x-api-key` is *also* added via defaultHeaders so standards-compliant
+    //    Anthropic-compatible servers (OpenCode-Go, Claude proxies — #4323)
+    //    that only read the canonical `x-api-key` header authenticate too.
     const { AnthropicContentGenerator } = await importGenerator();
     void new AnthropicContentGenerator(
       {
@@ -129,8 +131,89 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
     expect(headers['User-Agent']).toContain('(external, cli)');
     expect(headers['x-app']).toBe('cli');
+    expect(headers['x-api-key']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
+  });
+
+  it('does NOT add x-api-key for Anthropic-native baseURLs (SDK apiKey path already supplies it)', async () => {
+    // On the native branch the SDK is constructed with `apiKey` and emits
+    // `x-api-key` itself. Adding the same header via defaultHeaders would
+    // duplicate it on the wire (and a stale defaultHeaders entry could
+    // override a future SDK rotation). Keep the native path SDK-driven.
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-opus-4-7',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.anthropic.com',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+      {}) as Record<string, string>;
+    expect(headers['x-api-key']).toBeUndefined();
+  });
+
+  it('does NOT add x-api-key when apiKey is falsy on the proxy branch', async () => {
+    // Guard branch on the `useProxyIdentity && apiKey` predicate: an
+    // empty / undefined apiKey would otherwise ship `x-api-key:` (empty)
+    // — a meaningless header that could confuse server-side debugging
+    // or trip strict input validation. Pin the guard so a future
+    // refactor that drops the truthy check fails this test, not prod.
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-test',
+        apiKey: '',
+        baseUrl: 'https://example.invalid',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+      {}) as Record<string, string>;
+    expect(headers['x-api-key']).toBeUndefined();
+  });
+
+  it('customHeaders cannot override x-api-key on the proxy branch (post-buildHeaders ordering invariant)', async () => {
+    // The injection lives AFTER `buildHeaders` (which merges customHeaders
+    // into defaultHeaders), so a user-supplied
+    // `customHeaders: { 'x-api-key': … }` is overwritten by the canonical
+    // value. This is a security-relevant invariant: a refactor that
+    // accidentally moved the injection above the customHeaders merge
+    // would let user config swap the auth header for an arbitrary value
+    // — defeating the dual-auth contract. Pin the ordering here so any
+    // such regression flips this test before review.
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-test',
+        apiKey: 'canonical-key',
+        baseUrl: 'https://example.invalid',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+        customHeaders: {
+          'x-api-key': 'user-override',
+        },
+      },
+      mockConfig,
+    );
+
+    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+      {}) as Record<string, string>;
+    expect(headers['x-api-key']).toBe('canonical-key');
   });
 
   it('uses QwenCode identity + apiKey auth when baseURL is api.anthropic.com', async () => {
@@ -230,6 +313,7 @@ describe('AnthropicContentGenerator', () => {
       {}) as Record<string, string>;
     expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
     expect(headers['x-app']).toBe('cli');
+    expect(headers['x-api-key']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
   });
@@ -260,6 +344,7 @@ describe('AnthropicContentGenerator', () => {
       {}) as Record<string, string>;
     expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
     expect(headers['x-app']).toBe('cli');
+    expect(headers['x-api-key']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
   });
@@ -315,6 +400,7 @@ describe('AnthropicContentGenerator', () => {
       {}) as Record<string, string>;
     expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
     expect(headers['x-app']).toBe('cli');
+    expect(headers['x-api-key']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
   });
@@ -426,6 +512,7 @@ describe('AnthropicContentGenerator', () => {
         {}) as Record<string, string>;
       expect(headers['User-Agent']).toContain('claude-cli/1.2.3');
       expect(headers['x-app']).toBe('cli');
+      expect(headers['x-api-key']).toBe('idealab-token');
       expect(anthropicState.constructorOptions?.['authToken']).toBe(
         'idealab-token',
       );

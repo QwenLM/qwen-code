@@ -735,6 +735,7 @@ export interface ConfigInitializeOptions {
 const DEFAULT_BARE_CORE_TOOLS = [
   ToolNames.READ_FILE,
   ToolNames.EDIT,
+  ToolNames.NOTEBOOK_EDIT,
   ToolNames.SHELL,
 ];
 
@@ -3610,6 +3611,10 @@ export class Config {
         const { EditTool } = await import('../tools/edit.js');
         return new EditTool(this);
       });
+      await registerLazy(ToolNames.NOTEBOOK_EDIT, async () => {
+        const { NotebookEditTool } = await import('../tools/notebook-edit.js');
+        return new NotebookEditTool(this);
+      });
       await registerLazy(ToolNames.SHELL, async () => {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
@@ -3693,6 +3698,10 @@ export class Config {
     await registerLazy(ToolNames.EDIT, async () => {
       const { EditTool } = await import('../tools/edit.js');
       return new EditTool(this);
+    });
+    await registerLazy(ToolNames.NOTEBOOK_EDIT, async () => {
+      const { NotebookEditTool } = await import('../tools/notebook-edit.js');
+      return new NotebookEditTool(this);
     });
     await registerLazy(ToolNames.WRITE_FILE, async () => {
       const { WriteFileTool } = await import('../tools/write-file.js');

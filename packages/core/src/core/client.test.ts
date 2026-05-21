@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
 import { GeminiClient, SendMessageType } from './client.js';
 import { findCompressSplitPoint } from '../services/chatCompressionService.js';
+import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   AuthType,
   createContentGenerator,
@@ -137,6 +138,13 @@ vi.mock('../utils/getFolderStructure', () => ({
   getFolderStructure: vi.fn().mockResolvedValue('Mock Folder Structure'),
 }));
 vi.mock('../utils/errorReporting', () => ({ reportError: vi.fn() }));
+vi.mock('../utils/gitUtils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/gitUtils.js')>();
+  return {
+    ...actual,
+    getRecentGitStatus: vi.fn().mockReturnValue(null),
+  };
+});
 vi.mock('../utils/nextSpeakerChecker', () => ({
   checkNextSpeaker: vi.fn().mockResolvedValue(null),
 }));
@@ -456,6 +464,7 @@ describe('Gemini Client (client.ts)', () => {
       getSkipNextSpeakerCheck: vi.fn().mockReturnValue(false),
       getUseModelRouter: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
+      getCwd: vi.fn().mockReturnValue('/test/project/root'),
       storage: {
         getProjectTempDir: vi.fn().mockReturnValue('/test/temp'),
         getProjectDir: vi
@@ -1180,6 +1189,39 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('resetChat', () => {
+    it('clears cached git status so it can be recomputed for the next session', async () => {
+      vi.mocked(getRecentGitStatus)
+        .mockReturnValueOnce('Git snapshot A')
+        .mockReturnValueOnce('Git snapshot B');
+      vi.mocked(getRecentGitStatus).mockClear();
+
+      const instructionBeforeReset = (
+        client as unknown as {
+          getMainSessionSystemInstruction: () => string;
+        }
+      ).getMainSessionSystemInstruction();
+      const instructionBeforeSecondCall = (
+        client as unknown as {
+          getMainSessionSystemInstruction: () => string;
+        }
+      ).getMainSessionSystemInstruction();
+
+      expect(instructionBeforeReset).toContain('Git snapshot A');
+      expect(instructionBeforeSecondCall).toContain('Git snapshot A');
+      expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
+
+      await client.resetChat();
+
+      const instructionAfterReset = (
+        client as unknown as {
+          getMainSessionSystemInstruction: () => string;
+        }
+      ).getMainSessionSystemInstruction();
+
+      expect(instructionAfterReset).toContain('Git snapshot B');
+      expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
+    });
+
     it('should create a new chat session, clearing the old history', async () => {
       // 1. Get the initial chat instance and add some history.
       const initialChat = client.getChat();
@@ -5512,7 +5554,49 @@ Other open files:
       );
     });
 
-    it('propagates error when content generation fails', async () => {
+    it('caches git status across repeated system instruction generation', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.mocked(getRecentGitStatus).mockReturnValue('Git snapshot cached');
+      vi.mocked(getRecentGitStatus).mockClear();
+      vi.mocked(getCoreSystemPrompt).mockReturnValue('Core prompt');
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
+      expect(mockContentGenerator.generateContent).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          config: expect.objectContaining({
+            systemInstruction: 'Core prompt\n\nGit snapshot cached',
+          }),
+        }),
+        'test-session-id',
+      );
+      expect(mockContentGenerator.generateContent).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          config: expect.objectContaining({
+            systemInstruction: 'Core prompt\n\nGit snapshot cached',
+          }),
+        }),
+        'test-session-id',
+      );
+    });
+
+    it('sets a generic span status when content generation fails', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
       mockGenerateContentFn.mockRejectedValueOnce(

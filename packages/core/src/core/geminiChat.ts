@@ -17,7 +17,6 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from '@google/genai';
-import { getHeapStatistics } from 'node:v8';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -61,10 +60,6 @@ import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
-
-// Leave roughly 30% V8 heap headroom for compression's transient allocations.
-const HEAP_PRESSURE_COMPRESSION_RATIO = 0.7;
-const HEAP_PRESSURE_COMPRESSION_COOLDOWN_MS = 30_000;
 
 /**
  * Replaces the args on a `structured_output` `functionCall` with the
@@ -370,6 +365,13 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
   return curatedHistory;
 }
 
+function copyContentContainer(content: Content): Content {
+  return {
+    ...content,
+    ...(content.parts ? { parts: [...content.parts] } : {}),
+  };
+}
+
 function stripThoughtPartsFromContent(content: Content): Content | null {
   if (!content.parts) {
     return content;
@@ -476,14 +478,6 @@ export class GeminiChat {
   private consecutiveFailures = 0;
 
   /**
-   * Heap-pressure compaction is process-wide pressure applied per chat. If one
-   * heap-triggered attempt cannot reduce history, briefly back off this chat
-   * so every subsequent send does not immediately pay for another compression
-   * side query while memory is already tight.
-   */
-  private heapPressureCompressionCooldownUntil = 0;
-
-  /**
    * Creates a new GeminiChat instance.
    *
    * @param config - The configuration object.
@@ -517,6 +511,18 @@ export class GeminiChat {
   }
 
   /**
+   * Builds request contents for the content generator without deep-cloning the
+   * whole chat history. This is an internal hot path: long sessions can make a
+   * full `structuredClone` larger than the remaining V8 heap headroom.
+   *
+   * Public history readers still use {@link getHistory}, which returns a
+   * defensive deep copy for caller mutation safety.
+   */
+  private getRequestHistory(): Content[] {
+    return extractCuratedHistory(this.history).map(copyContentContainer);
+  }
+
+  /**
    * Seed the last-prompt-token-count for chats created with inherited
    * history (forks, subagents, speculation). Without this, the auto-compress
    * threshold check sees `0` and refuses to compress — so the first API call
@@ -543,33 +549,6 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
-    const heapPressureRatio = force ? null : this.getHeapPressureRatio();
-    const heapPressureCooldownActive =
-      !force && Date.now() < this.heapPressureCompressionCooldownUntil;
-    const bypassTokenThreshold =
-      heapPressureRatio !== null &&
-      heapPressureRatio >= HEAP_PRESSURE_COMPRESSION_RATIO &&
-      !heapPressureCooldownActive;
-    if (bypassTokenThreshold) {
-      // Temporary safety net: token-based compaction can be too late for
-      // large-context sessions because JS heap pressure may hit first.
-      // Do not use force=true here because that carries manual /compress
-      // semantics in ChatCompressionService.
-      debugLogger.warn(
-        `Heap pressure at ${(heapPressureRatio * 100).toFixed(1)}%; ` +
-          'attempting auto-compaction before token threshold.',
-      );
-    } else if (
-      heapPressureRatio !== null &&
-      heapPressureRatio >= HEAP_PRESSURE_COMPRESSION_RATIO &&
-      heapPressureCooldownActive
-    ) {
-      debugLogger.debug(
-        `Heap pressure at ${(heapPressureRatio * 100).toFixed(1)}%; ` +
-          'skipping heap-pressure auto-compaction during cooldown.',
-      );
-    }
-
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
       promptId,
@@ -579,7 +558,6 @@ export class GeminiChat {
       consecutiveFailures: this.consecutiveFailures,
       originalTokenCount:
         options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
-      bypassTokenThreshold,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
@@ -591,35 +569,15 @@ export class GeminiChat {
         info,
         compressedHistory: newHistory,
       });
-      // Auto-compaction replaces history in place — no env-context refresh
-      // here. Manual /compress goes through GeminiClient.tryCompressChat,
-      // which calls startChat() to re-prepend a fresh env snapshot. See
-      // GeminiClient.sendMessageStream for the rationale behind the split.
       this.setHistory(newHistory);
-      // Compaction summarises away prior full-Read tool results, but the
-      // FileReadCache still treats those reads as "in this conversation".
-      // A follow-up Read could then return the file_unchanged placeholder
-      // pointing at content the model can no longer retrieve from history.
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       this.lastPromptTokenCount = info.newTokenCount;
-      // Mirror to the global singleton only when wired (main session).
-      // Subagents pass `telemetryService=undefined` to keep their context
-      // usage out of the main agent's UI counters.
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
-      // tripped. Also clear the heap-pressure cooldown — pressure has eased
-      // enough that compaction worked.
+      // tripped.
       this.consecutiveFailures = 0;
-      this.heapPressureCompressionCooldownUntil = 0;
-    } else if (bypassTokenThreshold) {
-      // Heap-pressure compaction failed: skip touching the failure counter
-      // (it tracks token-threshold compaction health, not memory pressure)
-      // and start a short cooldown so we don't burn API calls / clones while
-      // pressure remains high.
-      this.heapPressureCompressionCooldownUntil =
-        Date.now() + HEAP_PRESSURE_COMPRESSION_COOLDOWN_MS;
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
       // Track failed attempts (only count if not forced) so we stop spending
       // compression-API calls on a chat that can't shrink after
@@ -630,24 +588,6 @@ export class GeminiChat {
     }
 
     return info;
-  }
-
-  private getHeapPressureRatio(): number | null {
-    try {
-      const { used_heap_size: usedHeapSize, heap_size_limit: heapLimit } =
-        getHeapStatistics();
-      if (
-        !Number.isFinite(usedHeapSize) ||
-        usedHeapSize < 0 ||
-        !Number.isFinite(heapLimit) ||
-        heapLimit <= 0
-      ) {
-        return null;
-      }
-      return usedHeapSize / heapLimit;
-    } catch {
-      return null;
-    }
   }
 
   setSystemInstruction(sysInstr: string) {
@@ -773,7 +713,7 @@ export class GeminiChat {
       // overflow path at line 944 is the documented safety net when this
       // under-count causes hard-rescue to miss.
       const effectiveTokens = estimatePromptTokens(
-        this.lastPromptTokenCount > 0 ? [] : this.getHistory(true),
+        this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
         userContent,
         this.lastPromptTokenCount,
         imageTokenEstimate,
@@ -807,7 +747,7 @@ export class GeminiChat {
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       userContentAdded = true;
-      requestContents = this.getHistory(true);
+      requestContents = this.getRequestHistory();
     } catch (error) {
       if (userContentAdded) {
         this.history.pop();
@@ -972,7 +912,7 @@ export class GeminiChat {
                     reactiveInfo.compressionStatus ===
                     CompressionStatus.COMPRESSED
                   ) {
-                    requestContents = self.getHistory(true);
+                    requestContents = self.getRequestHistory();
                     debugLogger.info(
                       `Reactive compression succeeded: ` +
                         `${reactiveInfo.originalTokenCount} -> ` +
@@ -1184,7 +1124,7 @@ export class GeminiChat {
             // model's continuation appends to the previous partial output.
             yield { type: StreamEventType.RETRY, isContinuation: true };
             // Re-send with the updated history (includes partial + recovery)
-            const recoveryContents = self.getHistory(true);
+            const recoveryContents = self.getRequestHistory();
             escalatedFinishReason = undefined;
             try {
               const recoveryStream = await self.makeApiCallAndProcessStream(
@@ -1352,12 +1292,64 @@ export class GeminiChat {
   }
 
   /**
+   * Returns a shallow copy of the history and each entry's parts array without
+   * cloning large part payloads. Use only for read-only consumers or consumers
+   * that replace touched entries before mutating them.
+   */
+  getHistoryShallow(curated: boolean = false): Content[] {
+    const history = curated
+      ? extractCuratedHistory(this.history)
+      : this.history;
+    return history.map(copyContentContainer);
+  }
+
+  /**
+   * Shallow tail variant for hot paths that only need recent history.
+   */
+  getHistoryTailShallow(count: number, curated: boolean = false): Content[] {
+    if (count <= 0) return [];
+    const history = curated
+      ? extractCuratedHistory(this.history)
+      : this.history;
+    return history.slice(-count).map(copyContentContainer);
+  }
+
+  /**
    * Returns a defensive copy of the last raw history entry without cloning the
    * full conversation. This avoids O(history) cloning, though cloning the last
    * entry is still proportional to that entry's own size.
    */
   getLastHistoryEntry(): Content | undefined {
     return this.getHistoryTail(1)[0];
+  }
+
+  /**
+   * Returns the last raw history entry for read-only checks. Callers must not
+   * mutate the returned object.
+   */
+  peekLastHistoryEntry(): Content | undefined {
+    return this.history.at(-1);
+  }
+
+  /**
+   * Returns concatenated text from the last model entry without cloning the
+   * full history. Used by stop hooks, where only the latest assistant text is
+   * needed.
+   */
+  getLastModelMessageText(): string | undefined {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const message = this.history[i];
+      if (message?.role !== 'model') continue;
+      const text =
+        message.parts
+          ?.filter(
+            (part): part is { text: string } => typeof part.text === 'string',
+          )
+          .map((part) => part.text)
+          .join('') ?? '';
+      return text || undefined;
+    }
+    return undefined;
   }
 
   /**

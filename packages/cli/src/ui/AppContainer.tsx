@@ -106,9 +106,9 @@ import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
+import { usePreferredEditor } from './hooks/usePreferredEditor.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
-import { useManageModelsCommand } from './hooks/useManageModelsCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useBranchCommand } from './hooks/useBranchCommand.js';
@@ -779,6 +779,8 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, []);
 
+  const preferredEditor = usePreferredEditor();
+
   const buffer = useTextBuffer({
     initialText: '',
     viewport: { height: 10, width: inputWidth },
@@ -786,6 +788,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setRawMode,
     isValidPath,
     shellModeActive,
+    preferredEditor,
   });
 
   useEffect(() => {
@@ -899,7 +902,7 @@ export const AppContainer = (props: AppContainerProps) => {
     refreshStatic,
   );
   const { state: authState, actions: authActions } = auth;
-  const { onAuthError, openAuthDialog, handleAuthSelect } = authActions;
+  const { onAuthError, openAuthDialog, closeAuthDialog } = authActions;
   const { isAuthDialogOpen, isAuthenticating, pendingAuthType } = authState;
 
   useInitializationAuthError(initializationResult.authError, onAuthError);
@@ -973,11 +976,6 @@ export const AppContainer = (props: AppContainerProps) => {
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
-  const {
-    isManageModelsDialogOpen,
-    openManageModelsDialog,
-    closeManageModelsDialog,
-  } = useManageModelsCommand();
   const { activeArenaDialog, openArenaDialog, closeArenaDialog } =
     useArenaCommand();
 
@@ -1071,7 +1069,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openSettingsDialog,
       openStatusLineDialog,
       openModelDialog,
-      openManageModelsDialog,
       openTrustDialog,
       openArenaDialog,
       openPermissionsDialog,
@@ -1107,7 +1104,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openSettingsDialog,
       openStatusLineDialog,
       openModelDialog,
-      openManageModelsDialog,
       openArenaDialog,
       setDebugMessage,
       dispatchExtensionStateUpdate,
@@ -2266,7 +2262,6 @@ export const AppContainer = (props: AppContainerProps) => {
     isStatusLineDialogOpen ||
     isMemoryDialogOpen ||
     isModelDialogOpen ||
-    isManageModelsDialogOpen ||
     isTrustDialogOpen ||
     activeArenaDialog !== null ||
     isPermissionsDialogOpen ||
@@ -2735,7 +2730,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen,
     handleApprovalModeSelect,
     isAuthDialogOpen,
-    handleAuthSelect,
+    closeAuthDialog,
     pendingAuthType,
     isEditorDialogOpen,
     exitEditorDialog,
@@ -3194,7 +3189,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
-      isManageModelsDialogOpen,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3319,7 +3313,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
-      isManageModelsDialogOpen,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3448,8 +3441,6 @@ export const AppContainer = (props: AppContainerProps) => {
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
-      openManageModelsDialog,
-      closeManageModelsDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -3529,8 +3520,6 @@ export const AppContainer = (props: AppContainerProps) => {
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
-      openManageModelsDialog,
-      closeManageModelsDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,

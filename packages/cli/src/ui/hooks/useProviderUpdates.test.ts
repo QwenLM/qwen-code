@@ -6,22 +6,18 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
-import { AuthType } from '@qwen-code/qwen-code-core';
-import { useProviderUpdates } from './useProviderUpdates.js';
 import {
+  AuthType,
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_ENV_KEY,
   codingPlanProvider,
-} from '../../auth/providers/alibaba/codingPlan.js';
-import {
   TOKEN_PLAN_BASE_URL,
   tokenPlanProvider,
-} from '../../auth/providers/alibaba/tokenPlan.js';
-import {
   buildProviderTemplate,
   computeModelListVersion,
   PROVIDER_METADATA_NS,
-} from '../../auth/providerConfig.js';
+} from '@qwen-code/qwen-code-core';
+import { useProviderUpdates } from './useProviderUpdates.js';
 
 vi.mock('../../utils/settingsUtils.js', () => ({
   backupSettingsFile: vi.fn(),

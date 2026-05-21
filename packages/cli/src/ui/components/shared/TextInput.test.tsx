@@ -14,6 +14,8 @@ vi.mock('../../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
 }));
 
+vi.mock('../../hooks/usePreferredEditor.js');
+
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
     text: { accent: 'cyan' },

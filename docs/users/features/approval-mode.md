@@ -163,6 +163,8 @@ You can review each proposed change and approve or reject it individually.
 
 Auto-Edit Mode instructs Qwen Code to automatically approve file edits while requiring manual approval for shell commands, ideal for accelerating development workflows while maintaining system safety.
 
+Auto-approved edit tools include `edit`, `write_file`, and `notebook_edit`.
+
 ### When to use Auto-Accept Edits Mode
 
 - **Daily development**: Ideal for most coding tasks

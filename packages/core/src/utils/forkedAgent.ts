@@ -66,7 +66,7 @@ import {
 export interface CacheSafeParams {
   /** Full generation config including systemInstruction and tools */
   generationConfig: GenerateContentConfig;
-  /** Curated conversation history (deep clone) */
+  /** Curated conversation history (shallow copy; consumers must not mutate) */
   history: Content[];
   /** Model identifier */
   model: string;
