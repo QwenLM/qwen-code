@@ -106,6 +106,7 @@ export class HookAggregator {
       case HookEventName.PostToolUseFailure:
       case HookEventName.Stop:
       case HookEventName.UserPromptSubmit:
+      case HookEventName.UserPromptExpansion:
       case HookEventName.SubagentStop:
       case HookEventName.TodoCreated:
       case HookEventName.TodoCompleted:

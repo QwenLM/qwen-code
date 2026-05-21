@@ -122,6 +122,7 @@ describe('useSlashCommandProcessor', () => {
   mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
     recordSlashCommand: vi.fn(),
   });
+  const mockFireUserPromptExpansionEvent = vi.fn();
   const mockSettings = { merged: {} } as LoadedSettings;
 
   const createMockActions = (): SlashCommandProcessorActions => ({
@@ -161,6 +162,12 @@ describe('useSlashCommandProcessor', () => {
     mockMcpLoadCommands.mockResolvedValue([]);
     mockOpenModelDialog.mockClear();
     mockOpenMemoryDialog.mockClear();
+    mockFireUserPromptExpansionEvent.mockResolvedValue(undefined);
+    mockConfig.getHookSystem = vi.fn().mockReturnValue({
+      addFunctionHook: vi.fn().mockReturnValue('goal-hook-id'),
+      removeFunctionHook: vi.fn().mockReturnValue(true),
+      fireUserPromptExpansionEvent: mockFireUserPromptExpansionEvent,
+    });
   });
 
   const setupProcessorHook = (
@@ -631,6 +638,50 @@ describe('useSlashCommandProcessor', () => {
 
       expect(mockAddItem).toHaveBeenCalledWith(
         { type: MessageType.USER, text: '/filecmd' },
+        expect.any(Number),
+      );
+      expect(mockFireUserPromptExpansionEvent).toHaveBeenCalledWith(
+        'filecmd',
+        '',
+        'The actual prompt from the TOML file.',
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('should block submit_prompt actions when UserPromptExpansion blocks', async () => {
+      mockFireUserPromptExpansionEvent.mockResolvedValue({
+        getBlockingError: () => ({
+          blocked: true,
+          reason: 'Blocked by policy',
+        }),
+        shouldStopExecution: () => false,
+      });
+      const fileCommand = createTestCommand(
+        {
+          name: 'filecmd',
+          description: 'A command from a file',
+          action: async () => ({
+            type: 'submit_prompt',
+            content: 'The actual prompt from the TOML file.',
+          }),
+        },
+        CommandKind.FILE,
+      );
+
+      const result = setupProcessorHook([], [fileCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand('/filecmd');
+      });
+
+      expect(actionResult).toEqual({ type: 'handled' });
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.ERROR,
+          text: 'UserPromptExpansion blocked: Blocked by policy',
+        },
         expect.any(Number),
       );
     });

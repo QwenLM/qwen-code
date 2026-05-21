@@ -11,6 +11,7 @@ import {
   uiTelemetryService,
   type Config,
   createDebugLogger,
+  partToString,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
@@ -166,6 +167,40 @@ function handleCommandResult(
       };
     }
   }
+}
+
+async function fireUserPromptExpansionHook(
+  config: Config,
+  commandName: string,
+  commandArgs: string,
+  content: PartListUnion,
+  signal: AbortSignal,
+): Promise<NonInteractiveSlashCommandResult | null> {
+  const hookSystem = config.getHookSystem();
+  if (!hookSystem) {
+    return null;
+  }
+
+  const output = await hookSystem.fireUserPromptExpansionEvent(
+    commandName,
+    commandArgs,
+    partToString(content, { verbose: true }),
+    signal,
+  );
+  if (!output) {
+    return null;
+  }
+
+  const blockingError = output.getBlockingError();
+  if (blockingError.blocked || output.shouldStopExecution()) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: `UserPromptExpansion blocked: ${blockingError.reason || output.getEffectiveReason()}`,
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -355,6 +390,19 @@ export const handleSlashCommand = async (
       messageType: 'info',
       content: 'Command executed successfully.',
     };
+  }
+
+  if (result.type === 'submit_prompt') {
+    const hookResult = await fireUserPromptExpansionHook(
+      config,
+      commandToExecute.name,
+      args,
+      result.content,
+      abortController.signal,
+    );
+    if (hookResult) {
+      return hookResult;
+    }
   }
 
   // Handle different result types

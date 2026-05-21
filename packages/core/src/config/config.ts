@@ -1207,6 +1207,14 @@ export class Config {
                   signal,
                 );
                 break;
+              case 'UserPromptExpansion':
+                result = await hookSystem.fireUserPromptExpansionEvent(
+                  (input['command_name'] as string) || '',
+                  (input['command_args'] as string) || '',
+                  (input['prompt'] as string) || '',
+                  signal,
+                );
+                break;
               case 'Stop': {
                 const stopResult = await hookSystem.fireStopEvent(
                   (input['stop_hook_active'] as boolean) || false,

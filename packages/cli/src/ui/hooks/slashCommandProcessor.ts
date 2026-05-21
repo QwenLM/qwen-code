@@ -26,6 +26,7 @@ import {
   ToolConfirmationOutcome,
   IdeClient,
   type SessionListItem,
+  partToString,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
@@ -765,6 +766,31 @@ export const useSlashCommandProcessor = (
                   return { type: 'handled' };
 
                 case 'submit_prompt':
+                  {
+                    const invocation = fullCommandContext.invocation;
+                    const output = await config
+                      ?.getHookSystem()
+                      ?.fireUserPromptExpansionEvent(
+                        invocation?.name ?? '',
+                        invocation?.args ?? '',
+                        partToString(result.content, { verbose: true }),
+                        abortController.signal,
+                      );
+                    if (output) {
+                      const blockingError = output.getBlockingError();
+                      if (
+                        blockingError.blocked ||
+                        output.shouldStopExecution()
+                      ) {
+                        addMessage({
+                          type: MessageType.ERROR,
+                          content: `UserPromptExpansion blocked: ${blockingError.reason || output.getEffectiveReason()}`,
+                          timestamp: new Date(),
+                        });
+                        return { type: 'handled' };
+                      }
+                    }
+                  }
                   return {
                     type: 'submit_prompt',
                     content: result.content,

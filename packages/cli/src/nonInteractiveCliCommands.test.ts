@@ -33,6 +33,7 @@ describe('handleSlashCommand', () => {
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
   let abortController: AbortController;
+  let mockFireUserPromptExpansionEvent: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -52,6 +53,7 @@ describe('handleSlashCommand', () => {
       getCommandsForMode: mockGetCommandsForMode,
       getModelInvocableCommands: mockGetModelInvocableCommands,
     });
+    mockFireUserPromptExpansionEvent = vi.fn().mockResolvedValue(undefined);
 
     mockConfig = {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -65,6 +67,7 @@ describe('handleSlashCommand', () => {
       getHookSystem: vi.fn().mockReturnValue({
         addFunctionHook: vi.fn().mockReturnValue('goal-hook-id'),
         removeFunctionHook: vi.fn().mockReturnValue(true),
+        fireUserPromptExpansionEvent: mockFireUserPromptExpansionEvent,
       }),
       setModelInvocableCommandsProvider: vi.fn(),
       setModelInvocableCommandsExecutor: vi.fn(),
@@ -349,6 +352,67 @@ describe('handleSlashCommand', () => {
     if (result.type === 'submit_prompt') {
       expect(result.content).toEqual([{ text: 'Custom prompt' }]);
     }
+  });
+
+  it('should fire UserPromptExpansion hooks for submit_prompt commands', async () => {
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Expanded prompt' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom with args',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    expect(mockFireUserPromptExpansionEvent).toHaveBeenCalledWith(
+      'custom',
+      'with args',
+      'Expanded prompt',
+      abortController.signal,
+    );
+  });
+
+  it('should block submit_prompt commands when UserPromptExpansion blocks', async () => {
+    mockFireUserPromptExpansionEvent.mockResolvedValue({
+      getBlockingError: () => ({
+        blocked: true,
+        reason: 'Blocked by policy',
+      }),
+      shouldStopExecution: () => false,
+    });
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'UserPromptExpansion blocked: Blocked by policy',
+    });
   });
 
   it('should return unsupported for other built-in commands like /quit', async () => {

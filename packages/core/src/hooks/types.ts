@@ -30,6 +30,8 @@ export enum HookEventName {
   Notification = 'Notification',
   // UserPromptSubmit - When the user submits a prompt
   UserPromptSubmit = 'UserPromptSubmit',
+  // UserPromptExpansion - When a slash command expands into a prompt
+  UserPromptExpansion = 'UserPromptExpansion',
   // SessionStart - When a new session is started
   SessionStart = 'SessionStart',
   // Stop - Right before Claude concludes its response
@@ -678,6 +680,25 @@ export interface UserPromptSubmitInput extends HookInput {
 export interface UserPromptSubmitOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'UserPromptSubmit';
+    additionalContext?: string;
+  };
+}
+
+/**
+ * UserPromptExpansion hook input
+ */
+export interface UserPromptExpansionInput extends HookInput {
+  command_name: string;
+  command_args: string;
+  prompt: string;
+}
+
+/**
+ * UserPromptExpansion hook output
+ */
+export interface UserPromptExpansionOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'UserPromptExpansion';
     additionalContext?: string;
   };
 }

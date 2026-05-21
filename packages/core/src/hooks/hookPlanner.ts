@@ -13,6 +13,7 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 type HookMatcherTargetKind =
   | 'toolName'
+  | 'commandName'
   | 'agentType'
   | 'trigger'
   | 'sessionTrigger'
@@ -55,6 +56,9 @@ export function getHookMatcherTarget(
         kind: 'notificationType',
         target: context?.notificationType ?? '',
       };
+
+    case HookEventName.UserPromptExpansion:
+      return { kind: 'commandName', target: context?.commandName ?? '' };
 
     case HookEventName.UserPromptSubmit:
     case HookEventName.Stop:
@@ -151,6 +155,9 @@ export class HookPlanner {
       case 'toolName':
         return this.matchesToolName(matcher, matcherTarget.target);
 
+      case 'commandName':
+        return this.matchesCommandName(matcher, matcherTarget.target);
+
       case 'agentType':
         return this.matchesAgentType(matcher, matcherTarget.target);
 
@@ -216,6 +223,13 @@ export class HookPlanner {
   }
 
   /**
+   * Match slash command name against matcher pattern.
+   */
+  private matchesCommandName(matcher: string, commandName: string): boolean {
+    return this.matchesToolName(matcher, commandName);
+  }
+
+  /**
    * Match trigger/source against matcher pattern
    */
   private matchesTrigger(matcher: string, trigger: string): boolean {
@@ -263,6 +277,7 @@ export class HookPlanner {
  */
 export interface HookEventContext {
   toolName?: string;
+  commandName?: string;
   trigger?: string;
   notificationType?: string;
   /** Agent type for SubagentStart/SubagentStop matcher filtering */

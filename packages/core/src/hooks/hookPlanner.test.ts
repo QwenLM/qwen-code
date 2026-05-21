@@ -76,6 +76,14 @@ describe('HookPlanner', () => {
       });
     });
 
+    it('returns command name targets for user prompt expansion events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.UserPromptExpansion, {
+          commandName: 'goal',
+        }),
+      ).toEqual({ kind: 'commandName', target: 'goal' });
+    });
+
     it('returns undefined for events without matcher semantics', () => {
       expect(getHookMatcherTarget(HookEventName.UserPromptSubmit)).toBe(
         undefined,
@@ -201,6 +209,25 @@ describe('HookPlanner', () => {
       expect(result).not.toBeNull();
       expect(result!.hookConfigs).toHaveLength(2);
       expect(result!.hookConfigs).toEqual([entry1.config, entry2.config]);
+    });
+
+    it('matches user prompt expansion hooks by command name', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.UserPromptExpansion,
+        matcher: 'goal',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.UserPromptExpansion,
+        { commandName: 'goal' },
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.hookConfigs).toEqual([entry.config]);
     });
   });
 
