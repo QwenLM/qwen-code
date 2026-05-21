@@ -153,13 +153,27 @@ const EXPECTED_STAGE1_FEATURES = [
 // truth ORDER puts `require_auth` between PR 11 (`session_metadata`)
 // and PR 21 (`auth_device_flow`); reflect that here so the assertion
 // matches the real ordering.
+//
+// F2 (#4175 commit 5): `mcp_workspace_pool` + `mcp_pool_restart` are
+// also conditional (gated on `mcpPoolActive` toggle, default-true at
+// call site in server.ts but default-OFF at the predicate so a
+// no-toggle invocation matches the established `require_auth`
+// pattern). Both insert AFTER `workspace_mcp_restart` and BEFORE
+// `require_auth` so the registry order matches `capabilities.ts`.
 const EXPECTED_REGISTERED_FEATURES = [
   // Same order as `SERVE_CAPABILITY_REGISTRY` declaration:
-  // ...always-on PR16/17/19/20/21 features, then conditional `require_auth`,
-  // then `auth_device_flow`, then F3 `permission_mediation` (latest).
+  // ...always-on PR16/17/19/20/21 features, then F2's conditional
+  // pair (mcp_workspace_pool + mcp_pool_restart inserted after
+  // workspace_mcp_restart), then conditional `require_auth`, then
+  // `auth_device_flow`, then F3 `permission_mediation` (latest).
+  // All four conditional tags filtered from the stage1 baseline so
+  // they appear here in their registry-declaration order, not the
+  // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.filter(
     (f) => f !== 'auth_device_flow' && f !== 'permission_mediation',
   ),
+  'mcp_workspace_pool',
+  'mcp_pool_restart',
   'require_auth',
   'auth_device_flow',
   'permission_mediation',
@@ -246,6 +260,7 @@ interface FakeBridgeOpts {
   restartMcpServerImpl?: (
     serverName: string,
     originatorClientId: string | undefined,
+    opts?: { entryIndex?: number },
   ) => Promise<
     | { serverName: string; restarted: true; durationMs: number }
     | {
@@ -333,6 +348,7 @@ interface FakeBridge extends HttpAcpBridge {
   restartMcpServerCalls: Array<{
     serverName: string;
     originatorClientId?: string;
+    opts?: { entryIndex?: number };
   }>;
   closeCalls: Array<{
     sessionId: string;
@@ -696,12 +712,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return initWorkspaceImpl(initOpts, originatorClientId);
     },
-    async restartMcpServer(serverName, originatorClientId) {
+    async restartMcpServer(serverName, originatorClientId, restartOpts) {
       restartMcpServerCalls.push({
         serverName,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+        ...(restartOpts !== undefined ? { opts: restartOpts } : {}),
       });
-      return restartMcpServerImpl(serverName, originatorClientId);
+      return restartMcpServerImpl(serverName, originatorClientId, restartOpts);
     },
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
@@ -881,6 +898,27 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (
+          feature === 'mcp_workspace_pool' ||
+          feature === 'mcp_pool_restart'
+        ) {
+          // F2 (#4175 commit 5): both pool tags share the
+          // `mcpPoolActive` predicate and advertise in lockstep.
+          // Default-OFF at the predicate (matches `require_auth`'s
+          // pattern); the server.ts call site flips to default-ON via
+          // `opts.mcpPoolActive !== false`, so a daemon booted without
+          // the kill switch advertises both tags by default.
+          expect(predicate({ mcpPoolActive: true })).toBe(true);
+          expect(predicate({ mcpPoolActive: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { mcpPoolActive: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         // Future conditional tag. Authors must add a branch above with
         // the toggle field that drives this predicate. Failing here is
         // intentional: it forces the new conditional tag to ship with a
@@ -961,8 +999,34 @@ describe('createServeApp', () => {
       expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
       expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
       expect(res.body.mode).toBe('http-bridge');
-      expect(res.body.features).toEqual(getAdvertisedServeFeatures());
+      // F2 (#4175 commit 5): the server.ts call site flips
+      // `mcpPoolActive` to default-ON via `opts.mcpPoolActive !== false`
+      // (so a daemon booted without the kill switch advertises the F2
+      // pool surface by default). Anchor the expectation against the
+      // same toggle so the assertion reflects the runtime contract,
+      // not the registry default-OFF predicate.
+      expect(res.body.features).toEqual(
+        getAdvertisedServeFeatures(undefined, { mcpPoolActive: true }),
+      );
       expect(res.body.modelServices).toEqual([]);
+    });
+
+    it('omits mcp_workspace_pool / mcp_pool_restart when mcpPoolActive=false (F2 #4175 commit 5)', async () => {
+      // Mirrors the env-var kill switch path: `runQwenServe.ts` infers
+      // `mcpPoolActive: false` when the parent process has
+      // `QWEN_SERVE_NO_MCP_POOL=1`. Verify the capability envelope
+      // tracks the toggle so SDK clients pre-flighting on the tags
+      // observe accurate "pool is off" semantics.
+      const app = createServeApp({ ...baseOpts, mcpPoolActive: false });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('mcp_workspace_pool');
+      expect(res.body.features).not.toContain('mcp_pool_restart');
+      // The legacy MCP surface tags still advertise.
+      expect(res.body.features).toContain('workspace_mcp');
+      expect(res.body.features).toContain('workspace_mcp_restart');
     });
 
     it('reports the bound workspace (#3803 §02)', async () => {
@@ -2602,6 +2666,28 @@ describe('createServeApp', () => {
       });
       expect(bridge.restartMcpServerCalls).toHaveLength(1);
       expect(bridge.restartMcpServerCalls[0]?.serverName).toBe('docs');
+    });
+
+    it('forwards entryIndex=0 to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart?entryIndex=0'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(bridge.restartMcpServerCalls[0]?.opts).toEqual({
+        entryIndex: 0,
+      });
+    });
+
+    it('treats entryIndex=* as all entries', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart?entryIndex=*'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(bridge.restartMcpServerCalls[0]?.opts).toBeUndefined();
     });
 
     it('200 on soft skip with structured reason', async () => {

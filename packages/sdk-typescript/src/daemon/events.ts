@@ -300,6 +300,17 @@ export interface DaemonMcpBudgetWarningData {
   budget: number;
   thresholdRatio: 0.75;
   mode: 'warn' | 'enforce';
+  /**
+   * F2 (#4175 commit 6): scope of the budget event. Absent on
+   * pre-F2 daemons (means `'session'`) and on F2 daemons running with
+   * `--no-mcp-pool` or without a configured budget. `'workspace'`
+   * indicates the event was fired by the pool's
+   * `WorkspaceMcpBudget` and fanned out simultaneously to every
+   * attached session — so the SDK reducer's `mcpBudgetWarningCount`
+   * will increment in lockstep across all sessions on this
+   * connection. Use `isWorkspaceScopedBudgetEvent` to branch.
+   */
+  scope?: 'workspace' | 'session';
   [key: string]: unknown;
 }
 
@@ -329,6 +340,17 @@ export interface DaemonMcpChildRefusedBatchData {
   liveCount: number;
   reservedCount: number;
   mode: 'enforce';
+  /**
+   * F2 (#4175 commit 6): same `scope` semantics as
+   * `DaemonMcpBudgetWarningData.scope`. Absent on pre-F2 daemons
+   * (means `'session'`); `'workspace'` when fired by the pool's
+   * workspace-scoped budget. Workspace-scoped refused_batch events
+   * fan out to every attached session, so SDK consumers tracking
+   * refusal counts across sessions on the same connection should
+   * gate on `scope` when reconciling event-driven state with the
+   * snapshot route's `refusedServerNames`.
+   */
+  scope?: 'workspace' | 'session';
   [key: string]: unknown;
 }
 
@@ -505,11 +527,19 @@ export interface DaemonWorkspaceInitializedData {
  * `POST /workspace/mcp/:server/restart` successfully reconnected and
  * rediscovered the named MCP server. `durationMs` measures the full
  * disconnect+reconnect+rediscover sequence on the ACP-child side.
+ *
+ * F2 (#4175 commit 5): under pool mode, multi-entry restarts fan
+ * out one event per entry. `entryIndex` (additive, optional)
+ * disambiguates per-entry events when one server name maps to
+ * several pool entries with different fingerprints. Pre-F2 single-
+ * entry restarts omit the field; SDK reducers that ignore unknown
+ * fields keep working.
  */
 export interface DaemonMcpServerRestartedData {
   serverName: string;
   durationMs: number;
   originatorClientId?: string;
+  entryIndex?: number;
   [key: string]: unknown;
 }
 
@@ -519,11 +549,31 @@ export interface DaemonMcpServerRestartedData {
  * (`skipped: true`). `reason` is the same closed enum surfaced on
  * the route's response body, so SDK consumers can branch on a single
  * union when reconciling event-driven state with HTTP-call results.
+ *
+ * F2 (#4175 commit 5): pool-mode hard restart failures fan out one
+ * `mcp_server_restart_refused` event per failed entry with
+ * `reason: 'restart_failed'` (additive enum value) plus a free-form
+ * `details` string carrying the underlying error text. This lets
+ * new SDK reducers track hard failures alongside the existing
+ * soft-skip flow without inventing a new event type. **Old SDK
+ * reducers that pre-date the additive enum** silently DROP these
+ * events: the `MCP_RESTART_REFUSED_REASONS` closed-set predicate in
+ * `isMcpServerRestartRefusedData` rejects unknown reasons, so
+ * `parseDaemonEvent` returns undefined and the reducer never sees
+ * the event. That's the additive-protocol contract — pre-PR SDKs
+ * shouldn't have been observing pool-mode multi-entry restarts in
+ * the first place (the SDK gates on the `mcp_pool_restart` capability
+ * tag before sending `entryIndex`, and the bridge only emits these
+ * events via the pool branch). New SDKs receive both the new
+ * `restart_failed` reason and the optional `entryIndex` / `details`
+ * fields.
  */
 export interface DaemonMcpServerRestartRefusedData {
   serverName: string;
-  reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+  reason: 'in_flight' | 'disabled' | 'budget_would_exceed' | 'restart_failed';
   originatorClientId?: string;
+  entryIndex?: number;
+  details?: string;
   [key: string]: unknown;
 }
 
@@ -747,6 +797,20 @@ export interface DaemonSessionViewState {
    * one warning per crossing episode. Adapters tap this counter to
    * surface MCP-pressure UI; the snapshot at `GET /workspace/mcp`
    * still carries the authoritative state-after-reconnect.
+   *
+   * **F2 (#4175 commit 6) workspace-scope multiplier**: when the
+   * daemon advertises `mcp_workspace_pool` and the budget is workspace-
+   * scoped (`scope: 'workspace'` on the event payload), a SINGLE
+   * underlying budget crossing fans out as N notifications — one per
+   * attached session. Each session's reducer increments its OWN
+   * counter independently, so this counter is per-stream NOT
+   * per-budget-event. Consumers aggregating `mcpBudgetWarningCount`
+   * across multiple sessions on the same connection will count an
+   * N× multiplier; gate on `isWorkspaceScopedBudgetEvent` (or branch
+   * on `lastMcpBudgetWarning?.scope === 'workspace'`) and divide by
+   * the active session count if a workspace-level "events fired"
+   * tally is needed. The per-stream counter remains the right shape
+   * for "did THIS session see budget pressure" UI.
    */
   mcpBudgetWarningCount: number;
   lastMcpBudgetWarning?: DaemonMcpBudgetWarningData;
@@ -756,6 +820,11 @@ export interface DaemonSessionViewState {
    * length-1 from `readResource`'s lazy-spawn refusal); the count
    * reflects batches not refused-server entries. Mirrors the
    * snapshot's `disabledReason: 'budget'` per-server tag.
+   *
+   * **F2 (#4175 commit 6) workspace-scope multiplier**: same N×
+   * fan-out semantics as `mcpBudgetWarningCount` — one workspace-
+   * scoped refused_batch event becomes N reducer increments across
+   * N attached sessions on the daemon's connection.
    */
   mcpChildRefusedBatchCount: number;
   lastMcpChildRefusedBatch?: DaemonMcpChildRefusedBatchData;
@@ -967,6 +1036,33 @@ export function isDaemonEventType<TType extends KnownDaemonEvent['type']>(
 ): event is Extract<KnownDaemonEvent, { type: TType }> {
   const known = asKnownDaemonEvent(event);
   return known?.type === type;
+}
+
+/**
+ * F2 (#4175 commit 6): branch on whether an MCP guardrail event is
+ * scoped to the entire workspace (one shared budget across all
+ * sessions on this daemon's connection) or per-session (legacy PR 14
+ * v1 path; one budget per ACP child). SDK reducers maintain a single
+ * counter (`mcpBudgetWarningCount` / `mcpChildRefusedBatchCount`)
+ * regardless of scope, but UI consumers rendering "this workspace
+ * just hit budget pressure" vs "this session just got refused" can
+ * use this helper to disambiguate.
+ *
+ * Returns `true` only when the event carries an explicit
+ * `scope === 'workspace'`. Pre-F2 daemons and F2 daemons running
+ * with `--no-mcp-pool` / no configured budget keep the field absent
+ * (semantically `'session'`); this helper returns `false` for both
+ * cases so existing UI logic ("treat all events as per-session")
+ * keeps working without a code change.
+ *
+ * Accepts both `mcp_budget_warning` and `mcp_child_refused_batch`
+ * data shapes — the only two events that carry the `scope` field
+ * today.
+ */
+export function isWorkspaceScopedBudgetEvent(
+  data: DaemonMcpBudgetWarningData | DaemonMcpChildRefusedBatchData,
+): boolean {
+  return data.scope === 'workspace';
 }
 
 export function asKnownDaemonEvent(
@@ -2096,6 +2192,11 @@ const MCP_RESTART_REFUSED_REASONS: ReadonlySet<string> = new Set([
   'in_flight',
   'disabled',
   'budget_would_exceed',
+  // F2 (#4175 commit 5): pool-mode hard restart failure (entry's
+  // `client.connect()` or rediscover threw). Carried alongside the
+  // soft-skip reasons so SDK reducers maintain a single union for
+  // narrowing the event's `reason` field.
+  'restart_failed',
 ]);
 
 function isMcpServerRestartRefusedData(

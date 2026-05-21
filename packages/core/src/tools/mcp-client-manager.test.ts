@@ -27,6 +27,717 @@ describe('McpClientManager', () => {
     vi.restoreAllMocks();
   });
 
+  it('routes discovery through the pool when one is injected (F2 commit 4)', async () => {
+    // F2 contract: when a McpTransportPool is wired into the manager
+    // ctor, `discoverAllMcpTools` MUST go through `pool.acquire`
+    // instead of constructing its own McpClient. This catches a
+    // regression where the pool branch is silently bypassed and N
+    // sessions revert to N spawns.
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      // F2 (#4175 commit 6): pool exposes `getBudget()` so the
+      // manager's `discoverAllMcpToolsViaPool` can bracket the pass
+      // with `beginBulkPass` / `endBulkPass`. The fake returns
+      // undefined to disable the bulk-pass scope (no budget is
+      // wired in this test path).
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+    expect(acquireSpy).toHaveBeenCalledWith(
+      'srv',
+      {},
+      'sid-1',
+      expect.anything(),
+      expect.anything(),
+    );
+    // Critical inverse invariant: pool path must NOT also spawn its
+    // own McpClient (would double-spawn one process per session).
+    expect(McpClient).not.toHaveBeenCalled();
+  });
+
+  it('swallows BudgetExhaustedError from pool.acquire and logs at debug (F2 commit 6 W23)', async () => {
+    // Wenshao W23 review fold-in: the manager's `discoverAllMcpToolsViaPool`
+    // catch block now branches on `instanceof BudgetExhaustedError`
+    // (deliberate refusal → debug log; other errors still go to
+    // error-level). The `Promise.all` await must NOT see the
+    // rejection — refusals are non-fatal for sibling acquires. This
+    // test wires a fake pool whose `acquire` throws
+    // BudgetExhaustedError for `srvB` and succeeds for `srvA`, then
+    // asserts (a) the discovery completes (`Promise.all` resolves),
+    // (b) only `srvA` lands in `pooledConnections`, (c) `endBulkPass`
+    // fires once via the budget mock so the refused_batch contract
+    // is preserved.
+    const { BudgetExhaustedError } = await import('./mcp-client-manager.js');
+    const acquireSpy = vi.fn().mockImplementation((name: string) => {
+      if (name === 'srvB') {
+        throw new BudgetExhaustedError('srvB', 1, 1);
+      }
+      return Promise.resolve({
+        release: vi.fn(),
+        on: vi.fn(),
+        id: `${name}::abc`,
+        serverName: name,
+        entryIndex: 0,
+      });
+    });
+    const beginBulkPass = vi.fn();
+    const endBulkPass = vi.fn();
+    const fakeBudget = { beginBulkPass, endBulkPass };
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(fakeBudget),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srvA: {}, srvB: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    // Should resolve without throwing — the BudgetExhaustedError on
+    // srvB is caught and downgraded to a debug log.
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(beginBulkPass).toHaveBeenCalledTimes(1);
+    expect(endBulkPass).toHaveBeenCalledTimes(1);
+    expect(acquireSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('stop() awaits in-flight pool discovery before releasing pool connections (W94/W108/W112)', async () => {
+    // Pre-W94 fix: stop() called releaseAllPooledConnections() while
+    // discoverAllMcpToolsViaPool was still mid-flight; the in-flight
+    // pass would subsequently call pool.acquire(...) and attach a
+    // fresh entry to pooledConnections AFTER the release loop had
+    // already cleared the Map → leaked pool ref.
+    let releaseAcquire!: () => void;
+    const acquireGate = new Promise<void>((resolve) => {
+      releaseAcquire = resolve;
+    });
+    const events: string[] = [];
+    const acquireSpy = vi.fn().mockImplementation(async (name: string) => {
+      events.push(`acquire-start-${name}`);
+      await acquireGate;
+      events.push(`acquire-end-${name}`);
+      // Returned connection's release() is what releaseAllPooledConnections
+      // invokes. Tracking THAT lets the test assert the ordering.
+      return {
+        release: vi.fn().mockImplementation(() => {
+          events.push(`release-${name}`);
+        }),
+        on: vi.fn(),
+        id: `${name}::abc`,
+        serverName: name,
+        entryIndex: 0,
+      };
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+
+    // Kick off discovery; it enters in-flight (acquire awaits the gate).
+    const discoveryPromise = manager.discoverAllMcpTools(mockConfig);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(events).toEqual(['acquire-start-srv']);
+
+    // Concurrently call stop(); it must AWAIT discoveryInFlight before
+    // calling releaseAllPooledConnections (which invokes each conn.release).
+    const stopPromise = manager.stop();
+    await Promise.resolve();
+    // Pre-fix: stop() would proceed past discoveryInFlight immediately
+    // and release-srv would fire BEFORE acquire-end-srv. Post-fix the
+    // outer Promise.race waits up to 5s for in-flight discovery.
+    expect(events).toEqual(['acquire-start-srv']);
+
+    // Release the gate; discovery completes, then stop() proceeds.
+    releaseAcquire();
+    await discoveryPromise;
+    await stopPromise;
+
+    // Ordering invariant: acquire-end MUST precede release-srv.
+    const acquireEndIdx = events.indexOf('acquire-end-srv');
+    const releaseIdx = events.indexOf('release-srv');
+    expect(acquireEndIdx).toBeGreaterThan(-1);
+    expect(releaseIdx).toBeGreaterThan(acquireEndIdx);
+  });
+
+  it('stop() proceeds when injected discoveryInFlight rejects (W94/W108/W112/W116 rejection path)', async () => {
+    // Pre-W116: the previous test wrapped manager.discoverAllMcpTools
+    // and expected the rejection to bubble up to discoveryInFlight,
+    // but runDiscoverAllMcpToolsViaPool catches per-server acquire
+    // failures internally — so Promise.all resolves, discoveryInFlight
+    // resolves, .finally sets it to undefined, and by the time stop()
+    // runs the `if (this.discoveryInFlight)` guard skips the entire
+    // W108 catch block. The test passed but exercised zero W108 code.
+    //
+    // Post-W116: directly inject a rejecting promise into the private
+    // field to actually exercise the W108 catch + debug log path.
+    const fakePool = {
+      acquire: vi.fn(),
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({}),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    // Inject a rejecting in-flight promise (the only way to hit the
+    // W108 catch block — internal per-server catches mean the natural
+    // path always resolves).
+    const rejected = Promise.reject(new Error('synthetic-discovery-failure'));
+    rejected.catch(() => {
+      /* attach a noop catch to avoid Node's UnhandledPromiseRejection
+         warning; the manager.stop() flow will attach its own catch */
+    });
+    (
+      manager as unknown as { discoveryInFlight?: Promise<void> }
+    ).discoveryInFlight = rejected;
+
+    // stop() must NOT throw even though discoveryInFlight rejects.
+    await expect(manager.stop()).resolves.toBeUndefined();
+  });
+
+  it('stop() proceeds when discoveryInFlight exceeds the 5s grace cap (W108/W116 timeout path)', async () => {
+    // Pre-W108: no shutdown-level deadline; a single hung MCP server
+    // could block daemon SIGTERM for the full 30s acquire timeout.
+    // Post-W108: outer Promise.race against a 5s grace timer caps the
+    // shutdown wait. Test: inject a never-settling discoveryInFlight,
+    // advance fake timers past the 5s mark, assert stop() resolves
+    // AND the W115 stopTimedOut flag is set so any late-resolving
+    // pool.acquire skips its pooledConnections.set.
+    vi.useFakeTimers();
+    try {
+      const fakePool = {
+        acquire: vi.fn(),
+        releaseSession: vi.fn(),
+        getBudget: vi.fn().mockReturnValue(undefined),
+      } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getMcpServers: () => ({}),
+        getMcpServerCommand: () => undefined,
+        getPromptRegistry: () => ({}),
+        getWorkspaceContext: () => ({}),
+        getDebugMode: () => false,
+        getSessionId: () => 'sid-1',
+        isMcpServerDisabled: () => false,
+      } as unknown as Config;
+      const manager = new McpClientManager(
+        mockConfig,
+        {} as ToolRegistry,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        fakePool,
+      );
+      // Inject a never-settling in-flight promise.
+      (
+        manager as unknown as { discoveryInFlight?: Promise<void> }
+      ).discoveryInFlight = new Promise<void>(() => {
+        /* never resolves */
+      });
+
+      const stopPromise = manager.stop();
+      // Advance past the 5s grace cap; grace timer fires, stop()
+      // proceeds, W115 stopTimedOut flag set.
+      await vi.advanceTimersByTimeAsync(5_100);
+      await expect(stopPromise).resolves.toBeUndefined();
+      expect(
+        (manager as unknown as { stopTimedOut: boolean }).stopTimedOut,
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('discovery resets stopTimedOut so manager remains usable after a timed-out shutdown (W118)', async () => {
+    // Pre-W118: stopTimedOut was sticky across stop() calls. Once set
+    // by a 5s grace timeout, every subsequent discovery pass would
+    // release/skip every acquired connection, silently leaving the
+    // manager unable to reattach pooled MCP servers. Post-W118 the
+    // flag is reset at the start of every discovery pass.
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+
+    // Simulate a prior timed-out shutdown that set the sticky flag.
+    (manager as unknown as { stopTimedOut: boolean }).stopTimedOut = true;
+
+    // A fresh discovery pass should reset the flag at the top so the
+    // acquired connection is tracked normally — pre-W118 it would be
+    // released and the pooledConnections Map would stay empty.
+    await manager.discoverAllMcpTools(mockConfig);
+    expect((manager as unknown as { stopTimedOut: boolean }).stopTimedOut).toBe(
+      false,
+    );
+    // Connection MUST have been tracked (not silently released by the
+    // sticky-flag guard).
+    expect(
+      (
+        manager as unknown as {
+          pooledConnections: Map<string, unknown>;
+        }
+      ).pooledConnections.has('srv'),
+    ).toBe(true);
+  });
+
+  it('routes incremental discovery through the pool when injected (F2 commit 4 C7 / W38)', async () => {
+    // Wenshao W38 review fold-in: the C7 fix added the pool gate to
+    // `discoverAllMcpToolsIncremental` (the default progressive-mode
+    // boot path) but no test covered it — only `discoverAllMcpTools`
+    // had pool-routing coverage. A regression that misplaced or
+    // removed the gate would silently bypass the pool during daemon
+    // boot, spawning N per-session McpClient processes instead of
+    // sharing one pool entry. This mirrors the existing "routes
+    // discovery through the pool" test but exercises the
+    // `discoverAllMcpToolsIncremental` path.
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+    expect(McpClient).not.toHaveBeenCalled();
+  });
+
+  it('routes single-server discovery through the pool when injected', async () => {
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+
+    await manager.discoverMcpToolsForServer('srv', mockConfig);
+
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+    expect(McpClient).not.toHaveBeenCalled();
+  });
+
+  it('routes readResource through an existing pooled connection', async () => {
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const readResource = vi.fn().mockResolvedValue({
+      contents: [{ uri: 'mcp://srv/doc', text: 'pooled' }],
+    });
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+      // R24 T19: pooled fast-path now health-checks via
+      // `client.getStatus()` before delegating; mocks must provide it.
+      client: { readResource, getStatus: () => MCPServerStatus.CONNECTED },
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    await manager.discoverAllMcpTools(mockConfig);
+
+    const result = await manager.readResource('srv', 'mcp://srv/doc');
+
+    expect(readResource).toHaveBeenCalledWith('mcp://srv/doc', undefined);
+    expect(result).toEqual({
+      contents: [{ uri: 'mcp://srv/doc', text: 'pooled' }],
+    });
+    expect(McpClient).not.toHaveBeenCalled();
+  });
+
+  it('readResource self-heals when pooled handle is dead (R24 T19)', async () => {
+    // R24 T19: pre-fix the pooled fast-path
+    // (`pooledConnections.get` → `pooled.client.readResource`) skipped
+    // any health check on the McpClient. In the narrow window between
+    // a silent transport drop (W120/W131 flips entry to 'failed' +
+    // emits the 'failed' event) and the manager's `onFailed`
+    // listener evicting the handle from `pooledConnections`, a
+    // `readResource` would delegate to a dead transport and surface
+    // an opaque MCP `"Transport is closed"` error. Post-fix the
+    // pooled path checks `pooled.client.getStatus()`; if not
+    // CONNECTED, it evicts the handle inline (so the next call
+    // re-acquires through the legacy spawn path) and throws a clear
+    // server-unavailable error.
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const readResource = vi.fn().mockResolvedValue({
+      contents: [{ uri: 'mcp://srv/doc', text: 'pooled' }],
+    });
+    let mockedStatus: (typeof MCPServerStatus)[keyof typeof MCPServerStatus] =
+      MCPServerStatus.CONNECTED;
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+      client: {
+        readResource,
+        getStatus: () => mockedStatus,
+      },
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    await manager.discoverAllMcpTools(mockConfig);
+    // Sanity: healthy fast-path still works.
+    await expect(manager.readResource('srv', 'mcp://srv/doc')).resolves.toEqual(
+      {
+        contents: [{ uri: 'mcp://srv/doc', text: 'pooled' }],
+      },
+    );
+
+    // Simulate the silent-drop window: pooled handle is still in
+    // pooledConnections (onFailed listener hasn't run yet), but the
+    // McpClient's status has flipped to DISCONNECTED.
+    mockedStatus = MCPServerStatus.DISCONNECTED;
+
+    // Pre-R24 this delegated to readResource on the dead transport
+    // and surfaced an opaque MCP error. Post-R24 self-heal: clear
+    // server-unavailable error + handle evicted from pooledConnections.
+    await expect(manager.readResource('srv', 'mcp://srv/doc')).rejects.toThrow(
+      /pool entry disconnected; retry after discovery/,
+    );
+
+    // Handle evicted — confirms self-heal cleanup ran.
+    const pooledMap = (
+      manager as unknown as {
+        pooledConnections: Map<string, unknown>;
+      }
+    ).pooledConnections;
+    expect(pooledMap.has('srv')).toBe(false);
+  });
+
+  it('disconnectServer releases pooled connection in pool mode (F2 commit 4 / W39)', async () => {
+    // Wenshao W39 review fold-in: the manager's `disconnectServer`
+    // pool-mode branch (`pooledConnections.get(name).release()` +
+    // `pooledConnections.delete(name)`) had no test coverage. If the
+    // release call is missing/broken, the pool entry's refcount
+    // never reaches 0, the drain timer never fires, and the shared
+    // subprocess leaks for the daemon's lifetime. This test wires a
+    // pool fake, populates `pooledConnections` via discovery, then
+    // asserts `disconnectServer` calls `release()` and removes the
+    // map entry.
+    const releaseSpy = vi.fn();
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: releaseSpy,
+      on: vi.fn(),
+      id: 'srv::abc',
+      serverName: 'srv',
+      entryIndex: 0,
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      { removeMcpToolsByServer: vi.fn() } as unknown as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(releaseSpy).not.toHaveBeenCalled();
+    await manager.disconnectServer('srv');
+    expect(releaseSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes concurrent discovery passes via mutex (F2 commit 6 W6)', async () => {
+    // Wenshao W6 review fold-in: pre-fix two concurrent
+    // `discoverAllMcpTools[Incremental]` invocations could both see
+    // `pooledConnections.has(name) === false` and both call
+    // `pool.acquire`, with the second `set(name, conn2)` silently
+    // overwriting the first → conn1 leaked. Mutex ensures the second
+    // caller awaits the first promise.
+    let resolveAcquire: (() => void) | undefined;
+    const blockedAcquire = new Promise<void>((resolve) => {
+      resolveAcquire = resolve;
+    });
+    const acquireSpy = vi.fn().mockImplementation(async () => {
+      await blockedAcquire;
+      return {
+        release: vi.fn(),
+        on: vi.fn(),
+        id: 'srv::abc',
+        serverName: 'srv',
+        entryIndex: 0,
+      };
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      mockConfig,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fakePool,
+    );
+    const p1 = manager.discoverAllMcpTools(mockConfig);
+    const p2 = manager.discoverAllMcpTools(mockConfig);
+    // Both passes block on the in-flight `pool.acquire`. Pre-fix
+    // each pass would call `acquire` independently → 2 calls.
+    // Post-fix the second pass awaits the same `discoveryInFlight`
+    // promise → still 1 call.
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+    resolveAcquire?.();
+    await Promise.all([p1, p2]);
+    // After both resolve, total acquire count is still 1 — mutex
+    // prevented the second pass from re-acquiring the same server.
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to per-session McpClient spawn when no pool injected (backward compat)', async () => {
+    // The 70+ existing tests already assert this implicitly. This
+    // adds an explicit assertion so future refactors that flip the
+    // default break this test.
+    const mockedMcpClient = {
+      connect: vi.fn(),
+      discover: vi.fn(),
+      disconnect: vi.fn(),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ srv: {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(McpClient).toHaveBeenCalledOnce();
+    expect(mockedMcpClient.connect).toHaveBeenCalledOnce();
+  });
+
   it('should discover tools from all servers', async () => {
     const mockedMcpClient = {
       connect: vi.fn(),

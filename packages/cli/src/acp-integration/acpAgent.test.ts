@@ -119,6 +119,25 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   MCPServerConfig: vi.fn().mockImplementation((...args: unknown[]) => ({
     _args: args,
   })),
+  McpTransportPool: vi.fn().mockImplementation(() => ({
+    drainAll: vi.fn().mockResolvedValue({ drained: 0, forced: 0, errors: [] }),
+    getSnapshot: vi.fn().mockReturnValue({
+      total: 0,
+      subprocessCount: 0,
+      byName: {},
+    }),
+    releaseSession: vi.fn(),
+    restartByName: vi.fn().mockResolvedValue([]),
+    getBudget: vi.fn().mockReturnValue(undefined),
+  })),
+  POOLED_TRANSPORTS_DEFAULT: new Set(['stdio', 'websocket']),
+  WorkspaceMcpBudget: vi.fn().mockImplementation(() => ({
+    getReservedCount: vi.fn().mockReturnValue(0),
+    getBudget: vi.fn().mockReturnValue(undefined),
+    getMode: vi.fn().mockReturnValue('off'),
+    getRefusedServerNames: vi.fn().mockReturnValue([]),
+  })),
+  MCP_BUDGET_WARN_FRACTION: 0.75,
   SessionService: vi.fn(),
   SESSION_TITLE_MAX_LENGTH: 200,
   tokenLimit: vi.fn().mockReturnValue(128_000),
@@ -743,6 +762,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
+      getWorkspaceContext: vi.fn().mockReturnValue({}),
+      getDebugMode: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     processExitSpy = vi
@@ -1503,6 +1524,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(mockConfig.initialize).toHaveBeenCalledWith({
       skipGeminiInitialization: true,
+      // F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): also
+      // pins that the bootstrap path opts out of MCP discovery (so
+      // bootstrap + per-session don't double-spawn N stdio servers).
+      skipMcpDiscovery: true,
     });
 
     mockConnectionState.resolve();
@@ -1546,6 +1571,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(mockConfig.initialize).toHaveBeenCalledWith({
       skipGeminiInitialization: true,
+      // F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): also
+      // pins that the bootstrap path opts out of MCP discovery (so
+      // bootstrap + per-session don't double-spawn N stdio servers).
+      skipMcpDiscovery: true,
     });
     expect(initialize).toHaveBeenCalledTimes(1);
     expect(fireSessionStartEvent).toHaveBeenCalledTimes(1);
@@ -2296,6 +2325,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
+      getWorkspaceContext: vi.fn().mockReturnValue({}),
+      getDebugMode: vi.fn().mockReturnValue(false),
     } as unknown as Config;
   });
 
@@ -2523,6 +2554,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
+      getWorkspaceContext: vi.fn().mockReturnValue({}),
+      getDebugMode: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     processExitSpy = vi
