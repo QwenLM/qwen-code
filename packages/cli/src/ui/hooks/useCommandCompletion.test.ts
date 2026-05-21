@@ -617,7 +617,7 @@ describe('useCommandCompletion', () => {
       );
     });
 
-    it('should append trailing space for directory completions when cursor is mid-line', async () => {
+    it('should preserve existing space after directory completions at mid-line cursor', async () => {
       const text = '@src/com is a dir';
       const cursorOffset = 8; // after "m"
 
