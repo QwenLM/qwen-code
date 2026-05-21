@@ -11,7 +11,6 @@ import {
   uiTelemetryService,
   type Config,
   createDebugLogger,
-  partToString,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
@@ -29,6 +28,10 @@ import { createNonInteractiveUI } from './ui/noninteractive/nonInteractiveUi.js'
 import type { LoadedSettings } from './config/settings.js';
 import type { SessionStatsState } from './ui/contexts/SessionContext.js';
 import { t } from './i18n/index.js';
+import {
+  formatUserPromptExpansionBlockedMessage,
+  serializeUserPromptExpansionPrompt,
+} from './utils/userPromptExpansionHook.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
 
@@ -184,7 +187,7 @@ async function fireUserPromptExpansionHook(
   const output = await hookSystem.fireUserPromptExpansionEvent(
     commandName,
     commandArgs,
-    partToString(content, { verbose: true }),
+    serializeUserPromptExpansionPrompt(content),
     signal,
   );
   if (!output) {
@@ -196,7 +199,9 @@ async function fireUserPromptExpansionHook(
     return {
       type: 'message',
       messageType: 'error',
-      content: `UserPromptExpansion blocked: ${blockingError.reason || output.getEffectiveReason()}`,
+      content: formatUserPromptExpansionBlockedMessage(
+        blockingError.reason || output.getEffectiveReason(),
+      ),
     };
   }
 

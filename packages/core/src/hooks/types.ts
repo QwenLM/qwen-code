@@ -686,6 +686,9 @@ export interface UserPromptSubmitOutput extends HookOutput {
 
 /**
  * UserPromptExpansion hook input
+ *
+ * Field names intentionally follow the JSON hook payload convention rather
+ * than TypeScript camelCase, matching UserPromptSubmit and other hook inputs.
  */
 export interface UserPromptExpansionInput extends HookInput {
   command_name: string;

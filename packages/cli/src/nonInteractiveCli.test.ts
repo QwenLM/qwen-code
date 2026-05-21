@@ -197,6 +197,7 @@ describe('runNonInteractive', () => {
       }),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getCronScheduler: vi.fn().mockReturnValue(null),
       setModelInvocableCommandsProvider: vi.fn(),

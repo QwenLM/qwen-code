@@ -58,6 +58,8 @@ export function getHookMatcherTarget(
       };
 
     case HookEventName.UserPromptExpansion:
+      // Unlike UserPromptSubmit, command expansions are matchable by the slash
+      // command name that produced the submitted prompt.
       return { kind: 'commandName', target: context?.commandName ?? '' };
 
     case HookEventName.UserPromptSubmit:
@@ -277,6 +279,7 @@ export class HookPlanner {
  */
 export interface HookEventContext {
   toolName?: string;
+  /** Command name for UserPromptExpansion matcher filtering */
   commandName?: string;
   trigger?: string;
   notificationType?: string;

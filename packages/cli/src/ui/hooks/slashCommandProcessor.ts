@@ -26,7 +26,6 @@ import {
   ToolConfirmationOutcome,
   IdeClient,
   type SessionListItem,
-  partToString,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
@@ -58,6 +57,10 @@ import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
 } from '../state/extensions.js';
+import {
+  formatUserPromptExpansionBlockedMessage,
+  serializeUserPromptExpansionPrompt,
+} from '../../utils/userPromptExpansionHook.js';
 
 type SerializableHistoryItem = Record<string, unknown>;
 const debugLogger = createDebugLogger('SLASH_COMMAND_PROCESSOR');
@@ -773,7 +776,7 @@ export const useSlashCommandProcessor = (
                       ?.fireUserPromptExpansionEvent(
                         invocation?.name ?? '',
                         invocation?.args ?? '',
-                        partToString(result.content, { verbose: true }),
+                        serializeUserPromptExpansionPrompt(result.content),
                         abortController.signal,
                       );
                     if (output) {
@@ -784,7 +787,10 @@ export const useSlashCommandProcessor = (
                       ) {
                         addMessage({
                           type: MessageType.ERROR,
-                          content: `UserPromptExpansion blocked: ${blockingError.reason || output.getEffectiveReason()}`,
+                          content: formatUserPromptExpansionBlockedMessage(
+                            blockingError.reason ||
+                              output.getEffectiveReason(),
+                          ),
                           timestamp: new Date(),
                         });
                         return { type: 'handled' };
