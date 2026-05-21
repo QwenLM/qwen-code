@@ -151,6 +151,7 @@ export async function atomicWriteFile(
     rename?: (s: string, d: string) => Promise<void>;
     writeFile?: typeof fs.writeFile;
     chmod?: typeof fs.chmod;
+    fchmod?: (fh: fs.FileHandle, mode: number) => Promise<void>;
   },
 ): Promise<void> {
   const retries = options?.retries ?? 3;
@@ -160,6 +161,8 @@ export async function atomicWriteFile(
   const renameImpl = _testFs?.rename ?? fs.rename;
   const writeFileImpl = _testFs?.writeFile ?? fs.writeFile;
   const chmodImpl = _testFs?.chmod ?? fs.chmod;
+  const fchmodImpl =
+    _testFs?.fchmod ?? ((fh: fs.FileHandle, mode: number) => fh.chmod(mode));
 
   const targetPath = options?.noFollow
     ? filePath
@@ -239,35 +242,52 @@ export async function atomicWriteFile(
               fsSync.constants.O_EXCL,
             desiredMode ?? 0o666,
           );
+          let writeOk = false;
           try {
-            await fd.writeFile(
-              typeof data === 'string' ? Buffer.from(data, encoding) : data,
-            );
-            if (flush) await fd.sync();
-            // fchmod via the open fd — immune to symlink swap between
-            // close and a path-based chmod, which would otherwise redirect
-            // the 0o600 onto an attacker-pointed target and silently
-            // defeat noFollow on the EXDEV fallback path.
-            //
-            // Narrow the catch to FAT/exFAT signatures (ENOSYS / ENOTSUP).
-            // Operations on credential files are security-sensitive enough
-            // that a sandbox EPERM, transient EIO, or read-only EROFS
-            // should fail loudly rather than leave the file at the
-            // umask-masked open() mode with no diagnostic trail.
-            if (desiredMode !== undefined) {
-              try {
-                await fd.chmod(desiredMode);
-              } catch (chmodErr) {
-                if (
-                  !isNodeError(chmodErr) ||
-                  (chmodErr.code !== 'ENOSYS' && chmodErr.code !== 'ENOTSUP')
-                ) {
-                  throw chmodErr;
+            try {
+              await fd.writeFile(
+                typeof data === 'string' ? Buffer.from(data, encoding) : data,
+              );
+              if (flush) await fd.sync();
+              // fchmod via the open fd — immune to symlink swap between
+              // close and a path-based chmod, which would otherwise redirect
+              // the 0o600 onto an attacker-pointed target and silently
+              // defeat noFollow on the EXDEV fallback path.
+              //
+              // Narrow the catch to FAT/exFAT signatures (ENOSYS / ENOTSUP).
+              // Operations on credential files are security-sensitive enough
+              // that a sandbox EPERM, transient EIO, or read-only EROFS
+              // should fail loudly rather than leave the file at the
+              // umask-masked open() mode with no diagnostic trail.
+              if (desiredMode !== undefined) {
+                try {
+                  await fchmodImpl(fd, desiredMode);
+                } catch (chmodErr) {
+                  if (
+                    !isNodeError(chmodErr) ||
+                    (chmodErr.code !== 'ENOSYS' && chmodErr.code !== 'ENOTSUP')
+                  ) {
+                    throw chmodErr;
+                  }
                 }
               }
+              writeOk = true;
+            } finally {
+              await fd.close();
             }
-          } finally {
-            await fd.close();
+          } catch (writeErr) {
+            // O_EXCL created targetPath; if any of write/sync/fchmod
+            // threw, remove the orphan so the next retry doesn't
+            // deadlock on EEXIST (e.g. credential refresh loop after
+            // a transient seccomp EPERM on `fchmod`).
+            if (!writeOk) {
+              try {
+                await fs.unlink(targetPath);
+              } catch {
+                // best effort
+              }
+            }
+            throw writeErr;
           }
         } else {
           await writeFileImpl(targetPath, data, writeOptions);
@@ -434,6 +454,7 @@ export function atomicWriteFileSync(
     rename?: (s: string, d: string) => void;
     writeFile?: typeof fsSync.writeFileSync;
     chmod?: typeof fsSync.chmodSync;
+    fchmod?: (fd: number, mode: number) => void;
   },
 ): void {
   const retries = options?.retries ?? 3;
@@ -443,6 +464,7 @@ export function atomicWriteFileSync(
   const renameImpl = _testFs?.rename ?? fsSync.renameSync;
   const writeFileImpl = _testFs?.writeFile ?? fsSync.writeFileSync;
   const chmodImpl = _testFs?.chmod ?? fsSync.chmodSync;
+  const fchmodImpl = _testFs?.fchmod ?? fsSync.fchmodSync;
 
   const targetPath = options?.noFollow
     ? filePath
@@ -513,29 +535,44 @@ export function atomicWriteFileSync(
               fsSync.constants.O_EXCL,
             desiredMode ?? 0o666,
           );
+          let writeOk = false;
           try {
-            const buf =
-              typeof data === 'string' ? Buffer.from(data, encoding) : data;
-            fsSync.writeSync(fd, buf);
-            if (flush) fsSync.fsyncSync(fd);
-            // fchmod on the open fd (see atomicWriteFile for rationale).
-            // Narrow the catch to FAT/exFAT signatures so EPERM/EIO/EROFS
-            // surface instead of leaving a credential file at the
-            // umask-masked open() mode silently.
-            if (desiredMode !== undefined) {
-              try {
-                fsSync.fchmodSync(fd, desiredMode);
-              } catch (chmodErr) {
-                if (
-                  !isNodeError(chmodErr) ||
-                  (chmodErr.code !== 'ENOSYS' && chmodErr.code !== 'ENOTSUP')
-                ) {
-                  throw chmodErr;
+            try {
+              const buf =
+                typeof data === 'string' ? Buffer.from(data, encoding) : data;
+              fsSync.writeSync(fd, buf);
+              if (flush) fsSync.fsyncSync(fd);
+              // fchmod on the open fd (see atomicWriteFile for rationale).
+              // Narrow the catch to FAT/exFAT signatures so EPERM/EIO/EROFS
+              // surface instead of leaving a credential file at the
+              // umask-masked open() mode silently.
+              if (desiredMode !== undefined) {
+                try {
+                  fchmodImpl(fd, desiredMode);
+                } catch (chmodErr) {
+                  if (
+                    !isNodeError(chmodErr) ||
+                    (chmodErr.code !== 'ENOSYS' && chmodErr.code !== 'ENOTSUP')
+                  ) {
+                    throw chmodErr;
+                  }
                 }
               }
+              writeOk = true;
+            } finally {
+              fsSync.closeSync(fd);
             }
-          } finally {
-            fsSync.closeSync(fd);
+          } catch (writeErr) {
+            // O_EXCL created targetPath; remove the orphan on failure
+            // so subsequent retries don't deadlock on EEXIST.
+            if (!writeOk) {
+              try {
+                fsSync.unlinkSync(targetPath);
+              } catch {
+                // best effort
+              }
+            }
+            throw writeErr;
           }
         } else {
           writeFileImpl(targetPath, data, writeOptions);
