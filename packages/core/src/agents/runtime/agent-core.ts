@@ -1324,17 +1324,23 @@ export class AgentCore {
         }
       };
       abortController.signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        // If already aborted before the listener was registered, resolve
+        // immediately to avoid blocking forever.
+        if (abortController.signal.aborted) {
+          onAbort();
+        }
 
-      // If already aborted before the listener was registered, resolve
-      // immediately to avoid blocking forever.
-      if (abortController.signal.aborted) {
-        onAbort();
+        await scheduler.schedule(requests, abortController.signal);
+        await batchDone;
+      } finally {
+        // Always remove `onAbort` — otherwise a throw from scheduler.schedule
+        // or batchDone would leak it on the round controller, and the round's
+        // outer try/finally `.abort()` would later fire spurious cancellation
+        // TOOL_RESULT events for every un-emitted callId (corrupting the
+        // transcript and misleading the model on the next round).
+        abortController.signal.removeEventListener('abort', onAbort);
       }
-
-      await scheduler.schedule(requests, abortController.signal);
-      await batchDone;
-
-      abortController.signal.removeEventListener('abort', onAbort);
     }
 
     // If all tool calls failed, inform the model so it can re-evaluate.

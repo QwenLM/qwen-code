@@ -66,8 +66,23 @@ export function initializeWarningHandler(): void {
   if (installedHandler) return;
 
   // Snapshot everything currently listening on 'warning' (Node's default
-  // onWarning printer + any external telemetry subscribers). We will fan
+  // onWarning printer + any third-party telemetry subscribers). We will fan
   // out non-suppressed warnings back to them.
+  //
+  // Trade-offs to be aware of (documented for future readers):
+  //  - Listeners ADDED via `process.on('warning', ...)` after this init are
+  //    independent of our snapshot. They receive `process.emit('warning')`
+  //    directly and bypass the suppression filter. Node's default printer
+  //    is in our snapshot (not added later), so stderr stays clean; late
+  //    telemetry will see the full warning stream including AbortSignal
+  //    leaks. This is intentional — telemetry should see what's happening.
+  //  - Listeners REMOVED via `process.removeListener('warning', fn)` after
+  //    this init have no effect: we hold our own strong reference in the
+  //    snapshot. Re-snapshotting per warning doesn't fix this because the
+  //    listeners are already removed from Node's list (we called
+  //    `process.removeAllListeners` to disable Node's default printing of
+  //    suppressed warnings). Callers who need conditional fan-out should
+  //    install BEFORE initializeWarningHandler.
   const priorListeners = [...process.listeners('warning')] as Array<
     (warning: Error) => void
   >;
@@ -75,8 +90,7 @@ export function initializeWarningHandler(): void {
   installedHandler = (warning: Error) => {
     // Evaluate isDebugMode() per warning so DEBUG / QWEN_DEBUG can be
     // toggled at runtime (e.g. via a `/debug` slash command) without
-    // re-running initializeWarningHandler. Warnings are rare; the cost is
-    // a couple of env lookups.
+    // re-running initializeWarningHandler.
     if (!isDebugMode() && isSuppressed(warning)) return;
     for (const fn of priorListeners) {
       try {

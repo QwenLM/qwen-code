@@ -98,6 +98,12 @@ describe('createChildAbortController', () => {
     child.abort('manual');
     expect(child.signal.aborted).toBe(true);
   });
+
+  it('forwards a custom maxListeners through to the child signal', () => {
+    const parent = createAbortController();
+    const child = createChildAbortController(parent, 123);
+    expect(getMaxListeners(child.signal)).toBe(123);
+  });
 });
 
 describe('combineAbortSignals', () => {
@@ -176,6 +182,35 @@ describe('combineAbortSignals', () => {
     const { cleanup } = combineAbortSignals([a.signal]);
     cleanup();
     expect(() => cleanup()).not.toThrow();
+  });
+
+  it('manual cleanup() cancels a pending timeout so it never fires', () => {
+    vi.useFakeTimers();
+    try {
+      const { signal, cleanup } = combineAbortSignals([], { timeoutMs: 50 });
+      cleanup();
+      vi.advanceTimersByTime(100);
+      // Without the clearTimeout in cleanups[], the timer would still fire
+      // and abort the (already-cleaned) signal with TimeoutError.
+      expect(signal.aborted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats timeoutMs <= 0 as "no timeout"', () => {
+    vi.useFakeTimers();
+    try {
+      const zero = combineAbortSignals([], { timeoutMs: 0 });
+      const negative = combineAbortSignals([], { timeoutMs: -1 });
+      vi.advanceTimersByTime(1_000_000);
+      expect(zero.signal.aborted).toBe(false);
+      expect(negative.signal.aborted).toBe(false);
+      zero.cleanup();
+      negative.cleanup();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('aborts and stops registering listeners once an input is found aborted mid-iteration', () => {

@@ -18,21 +18,16 @@
 
 import { getEventListeners, setMaxListeners } from 'node:events';
 
-// Inline copy of the production helper so this script has no build-step
-// dependency on the @qwen-code/qwen-code-core package.
+// Inline copy of the production helper (packages/core/src/utils/abortController.ts)
+// so this script has no build-step dependency on @qwen-code/qwen-code-core.
+// Kept in sync — the child is held STRONGLY by the parent's listener closure
+// (no WeakRef on child) so propagation works even when a caller drops the
+// controller and keeps only the signal. WeakRef is used only on the PARENT,
+// to keep child cleanup from pinning a long-lived parent in memory.
 function createAbortController(maxListeners = 50) {
   const c = new AbortController();
   setMaxListeners(maxListeners, c.signal);
   return c;
-}
-function propagateAbort(weakChild) {
-  const parent = this.deref();
-  weakChild.deref()?.abort(parent?.reason);
-}
-function removeAbortHandler(weakHandler) {
-  const parent = this.deref();
-  const handler = weakHandler.deref();
-  if (parent && handler) parent.removeEventListener('abort', handler);
 }
 function createChildAbortController(parent) {
   const child = createAbortController();
@@ -42,13 +37,16 @@ function createChildAbortController(parent) {
     child.abort(parentSignal.reason);
     return child;
   }
-  const weakChild = new WeakRef(child);
   const weakParent = new WeakRef(parentSignal);
-  const handler = propagateAbort.bind(weakParent, weakChild);
+  const handler = () => {
+    child.abort(weakParent.deref()?.reason);
+  };
   parentSignal.addEventListener('abort', handler, { once: true });
   child.signal.addEventListener(
     'abort',
-    removeAbortHandler.bind(weakParent, new WeakRef(handler)),
+    () => {
+      weakParent.deref()?.removeEventListener('abort', handler);
+    },
     { once: true },
   );
   return child;
