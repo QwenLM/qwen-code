@@ -499,6 +499,17 @@ export class McpClientManager {
    */
   private discoveryInFlight?: Promise<void>;
 
+  /**
+   * F2 (#4175 commit 6 review fix — qwen-latest W115): set true by
+   * `stop()` when its 5s shutdown-grace timer wins the race against
+   * `discoveryInFlight`. The in-flight discovery pass checks this
+   * flag before calling `pooledConnections.set(...)` so a late-
+   * resolving `pool.acquire` (whose 30s default timeout exceeds the
+   * shutdown cap) doesn't orphan an entry by re-populating the Map
+   * after `releaseAllPooledConnections` cleared it.
+   */
+  private stopTimedOut = false;
+
   constructor(
     config: Config,
     toolRegistry: ToolRegistry,
@@ -1536,6 +1547,24 @@ export class McpClientManager {
               conn.off('event', onFailed);
             };
             conn.on('event', onFailed);
+            // F2 (#4175 commit 6 review fix — qwen-latest W115): skip
+            // the set if shutdown already passed its 5s grace cap and
+            // released pool connections. A late-resolving pool.acquire
+            // (whose own 30s stdio timeout exceeds the shutdown cap)
+            // would otherwise repopulate `pooledConnections` AFTER
+            // `releaseAllPooledConnections` cleared it — orphan entry
+            // (refcount never reaches 0, drain timer never fires).
+            // Release the just-acquired connection so the pool's
+            // refcount drops back to where it would have been if the
+            // acquire had been refused.
+            if (this.stopTimedOut) {
+              try {
+                conn.release();
+              } catch {
+                /* best effort — shutdown in progress */
+              }
+              return;
+            }
             this.pooledConnections.set(name, conn);
           } catch (err) {
             // Pool acquire failure for one server is non-fatal for
@@ -1625,17 +1654,36 @@ export class McpClientManager {
         'stop(): awaiting in-flight pool discovery to drain (5s cap)',
       );
       const SHUTDOWN_DISCOVERY_GRACE_MS = 5_000;
+      // F2 (#4175 commit 6 review fix — qwen-latest W114): clear the
+      // grace timer in `finally` so its callback doesn't fire after
+      // discovery settles cleanly. Without this, every clean shutdown
+      // logs the false-positive "did not settle within 5s grace"
+      // debug line 5s later (whenever the event loop happens to still
+      // be alive). `t.unref()` only prevents the timer from holding
+      // the loop open — it does NOT prevent the callback from
+      // executing if other refs keep the loop alive.
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      // F2 (#4175 commit 6 review fix — qwen-latest W115): set the
+      // `stopTimedOut` flag BEFORE the race so the in-flight discovery
+      // pass can detect a timed-out shutdown via
+      // `runDiscoverAllMcpToolsViaPool`'s pre-set guard at line
+      // ~1539. Pre-fix a slow `pool.acquire` (stdio default 30s
+      // timeout) that resolved at 8s did `pooledConnections.set` AFTER
+      // the release loop had cleared the Map — orphan entry in the
+      // pool. Now the discovery pass aborts the set if shutdown is
+      // already past its 5s cap.
       try {
         await Promise.race([
           this.discoveryInFlight,
           new Promise<void>((resolve) => {
-            const t = setTimeout(() => {
+            graceTimer = setTimeout(() => {
+              this.stopTimedOut = true;
               debugLogger.debug(
                 'stop(): in-flight discovery did not settle within 5s grace; proceeding',
               );
               resolve();
             }, SHUTDOWN_DISCOVERY_GRACE_MS);
-            t.unref?.();
+            graceTimer.unref?.();
           }),
         ]);
       } catch (err) {
@@ -1644,6 +1692,8 @@ export class McpClientManager {
             err,
           )}`,
         );
+      } finally {
+        if (graceTimer) clearTimeout(graceTimer);
       }
     }
 

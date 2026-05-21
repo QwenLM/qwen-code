@@ -221,21 +221,25 @@ describe('McpClientManager', () => {
     expect(releaseIdx).toBeGreaterThan(acquireEndIdx);
   });
 
-  it('stop() proceeds when in-flight pool discovery rejects (W94/W108/W112 rejection path)', async () => {
-    // Pre-W94 fix: rejection swallowed silently with no log trail and
-    // no shutdown-deadline cap. Post-W108: debugLogger.debug records
-    // the rejection; stop() proceeds without throwing.
-    const acquireSpy = vi
-      .fn()
-      .mockRejectedValue(new Error('discovery-blew-up'));
+  it('stop() proceeds when injected discoveryInFlight rejects (W94/W108/W112/W116 rejection path)', async () => {
+    // Pre-W116: the previous test wrapped manager.discoverAllMcpTools
+    // and expected the rejection to bubble up to discoveryInFlight,
+    // but runDiscoverAllMcpToolsViaPool catches per-server acquire
+    // failures internally — so Promise.all resolves, discoveryInFlight
+    // resolves, .finally sets it to undefined, and by the time stop()
+    // runs the `if (this.discoveryInFlight)` guard skips the entire
+    // W108 catch block. The test passed but exercised zero W108 code.
+    //
+    // Post-W116: directly inject a rejecting promise into the private
+    // field to actually exercise the W108 catch + debug log path.
     const fakePool = {
-      acquire: acquireSpy,
+      acquire: vi.fn(),
       releaseSession: vi.fn(),
       getBudget: vi.fn().mockReturnValue(undefined),
     } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
     const mockConfig = {
       isTrustedFolder: () => true,
-      getMcpServers: () => ({ srv: {} }),
+      getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () => ({}),
       getWorkspaceContext: () => ({}),
@@ -252,21 +256,74 @@ describe('McpClientManager', () => {
       undefined,
       fakePool,
     );
-
-    // Start discovery — will reject when the inner pool.acquire rejects.
-    // Catch here so the rejection doesn't surface as unhandled.
-    const discoveryPromise = manager
-      .discoverAllMcpTools(mockConfig)
-      .catch(() => {
-        /* expected — manager's discoverAllMcpToolsViaPool internally
-           catches per-server but this test's specific shape makes the
-           outer caller see the rejection */
-      });
-    await Promise.resolve();
+    // Inject a rejecting in-flight promise (the only way to hit the
+    // W108 catch block — internal per-server catches mean the natural
+    // path always resolves).
+    const rejected = Promise.reject(new Error('synthetic-discovery-failure'));
+    rejected.catch(() => {
+      /* attach a noop catch to avoid Node's UnhandledPromiseRejection
+         warning; the manager.stop() flow will attach its own catch */
+    });
+    (
+      manager as unknown as { discoveryInFlight?: Promise<void> }
+    ).discoveryInFlight = rejected;
 
     // stop() must NOT throw even though discoveryInFlight rejects.
     await expect(manager.stop()).resolves.toBeUndefined();
-    await discoveryPromise;
+  });
+
+  it('stop() proceeds when discoveryInFlight exceeds the 5s grace cap (W108/W116 timeout path)', async () => {
+    // Pre-W108: no shutdown-level deadline; a single hung MCP server
+    // could block daemon SIGTERM for the full 30s acquire timeout.
+    // Post-W108: outer Promise.race against a 5s grace timer caps the
+    // shutdown wait. Test: inject a never-settling discoveryInFlight,
+    // advance fake timers past the 5s mark, assert stop() resolves
+    // AND the W115 stopTimedOut flag is set so any late-resolving
+    // pool.acquire skips its pooledConnections.set.
+    vi.useFakeTimers();
+    try {
+      const fakePool = {
+        acquire: vi.fn(),
+        releaseSession: vi.fn(),
+        getBudget: vi.fn().mockReturnValue(undefined),
+      } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getMcpServers: () => ({}),
+        getMcpServerCommand: () => undefined,
+        getPromptRegistry: () => ({}),
+        getWorkspaceContext: () => ({}),
+        getDebugMode: () => false,
+        getSessionId: () => 'sid-1',
+        isMcpServerDisabled: () => false,
+      } as unknown as Config;
+      const manager = new McpClientManager(
+        mockConfig,
+        {} as ToolRegistry,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        fakePool,
+      );
+      // Inject a never-settling in-flight promise.
+      (
+        manager as unknown as { discoveryInFlight?: Promise<void> }
+      ).discoveryInFlight = new Promise<void>(() => {
+        /* never resolves */
+      });
+
+      const stopPromise = manager.stop();
+      // Advance past the 5s grace cap; grace timer fires, stop()
+      // proceeds, W115 stopTimedOut flag set.
+      await vi.advanceTimersByTimeAsync(5_100);
+      await expect(stopPromise).resolves.toBeUndefined();
+      expect(
+        (manager as unknown as { stopTimedOut: boolean }).stopTimedOut,
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('routes incremental discovery through the pool when injected (F2 commit 4 C7 / W38)', async () => {

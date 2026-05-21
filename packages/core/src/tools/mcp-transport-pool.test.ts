@@ -344,7 +344,7 @@ describe('McpTransportPool', () => {
   });
 
   describe('pooled in-flight acquire (W90)', () => {
-    it('throws "torn down before attach" when entry transitions terminal mid in-flight acquire (W90)', async () => {
+    it('rejects attach on terminal-state entry (W90 contract proxy via fast path; in-flight guard reproduction tracked as W109-followup)', async () => {
       // The W90 fix's primary correctness guard catches a concurrent
       // `forceShutdown` that lands on the spawned entry between
       // `spawnEntry.entries.set` and our post-await `attach`.
