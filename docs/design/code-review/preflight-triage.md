@@ -2,7 +2,7 @@
 
 > 本文档定义 PR review 进入 bundled `/review` 深审**之前**的 tier 路由机制。
 > 设计独立，但实现复用 `code-review-design.md` 落地的 workflow wiring（PR ctx 解析、cache、fallback comment）。
-> 本文档当前是**草稿（draft）**，未填部分用 `TODO` 标记。
+> 本设计已在本 PR 落地，文档与实现一致。
 
 ## 与 PR 合规门禁的关系（重要）
 
@@ -347,7 +347,7 @@ Deep review verdict: APPROVE
 
 > 校准数据存放位置见 §关键决策 D5：dedicated tracking issue 结构化评论。
 
-## Workflow step 草稿（伪 YAML）
+## Workflow step 结构（伪 YAML）
 
 四条独立的 tier 路径，共用一套 `Post review summary comment` + fallback。
 
@@ -496,7 +496,7 @@ Deep review verdict: APPROVE
     # 沿用 Phase 1-3 fallback ("see logs")
 ```
 
-> 完整 YAML 在实现阶段补；本草稿列骨架与依赖关系。`scripts/parse-review-stream.cjs` 是新工具（累加式解析），需要新增。
+> 上面是骨架与依赖关系；完整 YAML 见 `.github/workflows/qwen-code-pr-review.yml`。`scripts/parse-review-stream.cjs` 是配套新增的累加式解析工具。
 
 ## 分阶段实施
 
@@ -581,7 +581,7 @@ Deep review verdict: APPROVE
 | `.qwen/preflight-light-review-prompt.md`           | LIGHT tier 的单发 review prompt                                                                     | D3                        |
 | `.qwen/preflight-standard-review-prompt.md`        | STANDARD tier 的单发 review prompt                                                                  | D3                        |
 | `scripts/parse-review-stream.cjs`                  | 累加式 stream-json 解析器（替换 workflow inline node 脚本）                                         | §Failure modes 流式累加器 |
-| (修改) `.github/workflows/qwen-code-pr-review.yml` | 加 preflight + 4 tier 执行 + 累加式解析                                                             | §Workflow step 草稿       |
+| (修改) `.github/workflows/qwen-code-pr-review.yml` | 加 preflight + 4 tier 执行 + 累加式解析                                                             | §Workflow step 结构       |
 | (修改) `.gitignore`                                | 已对 `.qwen/*` 例外 `review-rules.md`、`commands/`、`skills/`、`agents/`；需追加例外上述 3 个新文件 | 配套                      |
 
 ## 需要新增的仓库 vars / secrets
@@ -693,4 +693,4 @@ preflight LLM 失败？
 
 ---
 
-> 草稿状态：本文档由今天的实测数据 + 讨论沉淀。下一步是把 §"待定决策" 敲定，然后进入 Phase A 实现。
+> 本文档由实测数据 + 讨论沉淀，设计已在本 PR 实现并验证。
