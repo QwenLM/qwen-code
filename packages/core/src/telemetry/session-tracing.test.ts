@@ -1522,5 +1522,151 @@ describe('session-tracing', () => {
       // Defensive: endSubagentSpan after TTL is a no-op (already ended).
       endSubagentSpan(span, { status: 'completed' });
     });
+
+    describe('child span parenting (#4410 DeepSeek 3290820352)', () => {
+      // Regression: foreground subagent's child LLM/tool/hook spans were
+      // parenting to the OUTER interaction span instead of the subagent
+      // span because `resolveParentContext` always prefers
+      // `interactionContext.getStore()` over the active OTel span. The
+      // fix introduces `subagentContext` ALS, which child startXSpan
+      // calls now check before falling back to interactionContext.
+      it('startLLMRequestSpan inside runInSubagentSpanContext parents under the subagent span', async () => {
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        const subagentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'foreground',
+        });
+        const subagentRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.subagent',
+        )!;
+
+        await runInSubagentSpanContext(subagentSpan, async () => {
+          startLLMRequestSpan('qwen3-coder-plus', 'prompt-1');
+        });
+
+        const llmRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.llm_request',
+        );
+        expect(llmRecord).toBeDefined();
+        // mock trace.setSpan stamps __parentSpan onto the context object.
+        const parentSpan = (
+          llmRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        expect(parentSpan).toBeDefined();
+        // The LLM span MUST parent to the subagent span, NOT the
+        // interaction span.
+        expect(parentSpan).toBe(subagentRecord);
+        endSubagentSpan(subagentSpan, { status: 'completed' });
+        endInteractionSpan('ok');
+      });
+
+      it('startToolSpan inside runInSubagentSpanContext parents under the subagent span', async () => {
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        const subagentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'foreground',
+        });
+        const subagentRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.subagent',
+        )!;
+
+        await runInSubagentSpanContext(subagentSpan, async () => {
+          startToolSpan('read_file');
+        });
+
+        const toolRecord = mockSpans.find((s) => s.name === 'qwen-code.tool');
+        expect(toolRecord).toBeDefined();
+        const parentSpan = (
+          toolRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        expect(parentSpan).toBe(subagentRecord);
+        endSubagentSpan(subagentSpan, { status: 'completed' });
+        endInteractionSpan('ok');
+      });
+
+      it('nested subagent: innermost subagent shadows outer for child parenting', async () => {
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        const outerSubagent = startSubagentSpan({
+          ...baseOpts,
+          agentId: 'outer',
+          subagentName: 'outer-agent',
+          invocationKind: 'foreground',
+        });
+        const innerSubagent = startSubagentSpan({
+          ...baseOpts,
+          agentId: 'inner',
+          subagentName: 'inner-agent',
+          invocationKind: 'foreground',
+        });
+        const innerRecord = mockSpans.find(
+          (s) =>
+            s.name === 'qwen-code.subagent' &&
+            s.attributes['qwen-code.subagent.id'] === 'inner',
+        )!;
+
+        await runInSubagentSpanContext(outerSubagent, async () => {
+          await runInSubagentSpanContext(innerSubagent, async () => {
+            startLLMRequestSpan('qwen3-coder-plus', 'prompt-1');
+          });
+        });
+
+        const llmRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.llm_request',
+        );
+        const parentSpan = (
+          llmRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        expect(parentSpan).toBe(innerRecord);
+        endSubagentSpan(innerSubagent, { status: 'completed' });
+        endSubagentSpan(outerSubagent, { status: 'completed' });
+        endInteractionSpan('ok');
+      });
+
+      it('after runInSubagentSpanContext exits, child spans go back to interactionContext', async () => {
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        const interactionRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.interaction',
+        )!;
+        const subagentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'foreground',
+        });
+
+        await runInSubagentSpanContext(subagentSpan, async () => {});
+        // Now outside the subagent ALS frame.
+        startLLMRequestSpan('qwen3-coder-plus', 'prompt-1');
+
+        const llmRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.llm_request',
+        );
+        const parentSpan = (
+          llmRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        // Parented under interaction span, NOT subagent (ALS frame exited).
+        expect(parentSpan).toBe(interactionRecord);
+        endSubagentSpan(subagentSpan, { status: 'completed' });
+        endInteractionSpan('ok');
+      });
+    });
   });
 });

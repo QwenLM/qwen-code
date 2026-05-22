@@ -715,6 +715,16 @@ function deriveSubagentOutcomeMetadata(opts: {
       resultSummaryPresent,
     };
   }
+  // SHUTDOWN is a graceful arena/team-session-end, not a failure — group it
+  // with cancellations so dashboards don't count it against subagent error
+  // rate. Review wenshao @ #4410.
+  if (terminateMode === AgentTerminateMode.SHUTDOWN) {
+    return {
+      status: 'cancelled',
+      terminateReason: 'subagent_shutdown',
+      resultSummaryPresent,
+    };
+  }
   if (terminateMode === AgentTerminateMode.GOAL) {
     return { status: 'completed', resultSummaryPresent };
   }
@@ -735,6 +745,12 @@ function deriveSubagentExceptionMetadata(
     errorType:
       error instanceof Error ? error.constructor.name : 'NonErrorThrown',
     terminateReason: signalAborted ? 'signal_aborted' : 'exception',
+    // Exception path always lacks a subagent-produced summary (we never got
+    // through getFinalText()). Setting this explicitly keeps attribute
+    // shape symmetric with the success-path derive so dashboards filtering
+    // on result_summary_present don't silently exclude failed runs.
+    // Review wenshao @ #4410.
+    resultSummaryPresent: false,
   };
 }
 
@@ -1261,8 +1277,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // The throw-derived fallbacks below only fire if the body somehow
     // rejects (synchronous setup throw or a bug). Review wenshao @ #4410.
     let recordedMetadata: SubagentSpanMetadata | undefined;
+    // First-write-wins. The previous review noticed runSubagentWithHooks
+    // and bgBody can call this twice (success path + inner catch chains),
+    // and last-write would silently turn a real `completed` into the
+    // catch's `failed` when an UpdateDisplay throws mid-success. Pinning
+    // the first call protects the publish-first ordering. Review wenshao
+    // @ #4410 (DeepSeek bot 3290820357).
     const recordOutcome: SubagentOutcomeSink = (m) => {
-      recordedMetadata = m;
+      recordedMetadata ??= m;
     };
     try {
       return await runInSubagentSpanContext(span, () => body(recordOutcome));

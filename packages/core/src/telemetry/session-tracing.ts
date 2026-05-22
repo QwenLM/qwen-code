@@ -153,6 +153,17 @@ const NOOP_SPAN = trace.wrapSpanContext({
 
 const interactionContext = new AsyncLocalStorage<SpanContext | undefined>();
 const toolContext = new AsyncLocalStorage<SpanContext | undefined>();
+/**
+ * ALS for the active `qwen-code.subagent` span. Child LLM/tool/hook spans
+ * created inside a subagent body read this BEFORE interactionContext so
+ * they parent under the subagent (not the outer interaction). Without
+ * this, foreground subagent spans are empty shells: `resolveParentContext`
+ * picks `interactionContext.getStore()` whenever it is non-null — which is
+ * always true during foreground execution — and re-parents every child
+ * span back to the interaction, bypassing the subagent span entirely.
+ * Review wenshao @ #4410 (DeepSeek bot 3290820352).
+ */
+const subagentContext = new AsyncLocalStorage<SpanContext | undefined>();
 
 const activeSpans = new Map<string, WeakRef<SpanContext>>();
 const strongSpans = new Map<string, SpanContext>();
@@ -401,7 +412,10 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
     return NOOP_SPAN;
   }
 
-  const parentCtx = interactionContext.getStore();
+  // Prefer subagentContext over interactionContext so LLM spans inside a
+  // foreground subagent nest under the subagent span instead of escaping
+  // back to the outer interaction. wenshao @ #4410 (DeepSeek 3290820352).
+  const parentCtx = subagentContext.getStore() ?? interactionContext.getStore();
   // resolveParentContext() also re-parents to the active OTel span when
   // present, so a side-query LLM call nested inside a tool span still
   // attaches to the tool span instead of skipping back to the session root.
@@ -550,7 +564,9 @@ export function startToolSpan(
     return NOOP_SPAN;
   }
 
-  const parentCtx = interactionContext.getStore();
+  // Prefer subagentContext over interactionContext (see startLLMRequestSpan
+  // for rationale; wenshao @ #4410 DeepSeek 3290820352).
+  const parentCtx = subagentContext.getStore() ?? interactionContext.getStore();
   // Same fallback as startLLMRequestSpan: prefer active OTel span for
   // tools-inside-tools cases before falling back to the session root.
   const ctx = resolveParentContext(parentCtx);
@@ -904,9 +920,14 @@ export function startHookSpan(opts: StartHookSpanOptions): Span {
   // Hooks fire from inside `runInToolSpanContext` so toolContext is the
   // natural parent. resolveParentContext also covers the rare case where a
   // hook span is started outside any tool (defensive — keeps the trace tree
-  // correlated with the session).
+  // correlated with the session). subagentContext sits between tool and
+  // interaction so hooks fired inside a subagent but outside any tool
+  // still nest under the subagent. wenshao @ #4410 DeepSeek 3290820352.
   const parentCtx =
-    toolContext.getStore() ?? interactionContext.getStore() ?? undefined;
+    toolContext.getStore() ??
+    subagentContext.getStore() ??
+    interactionContext.getStore() ??
+    undefined;
   const ctx = resolveParentContext(parentCtx);
 
   const attributes: Attributes = {
@@ -1147,9 +1168,16 @@ export function runInSubagentSpanContext<T>(
   // an AsyncLocalStorage.run() per invocation just to wrap a noop span.
   // Review wenshao @ #4410.
   const spanId = getSpanId(span);
-  if (!activeSpans.has(spanId)) return fn();
-  const ctx = trace.setSpan(otelContext.active(), span);
-  return otelContext.with(ctx, fn);
+  const spanCtx = activeSpans.get(spanId)?.deref();
+  if (!spanCtx) return fn();
+  // Enter subagentContext so child startLLMRequestSpan/startToolSpan/
+  // startHookSpan calls inside the body parent under this subagent
+  // instead of escaping back to the outer interactionContext.
+  // wenshao @ #4410 (DeepSeek 3290820352).
+  const otelCtxWithSpan = trace.setSpan(otelContext.active(), span);
+  return subagentContext.run(spanCtx, () =>
+    otelContext.with(otelCtxWithSpan, fn),
+  );
 }
 
 /**
@@ -1171,10 +1199,19 @@ export function endSubagentSpan(
   // legitimately finishes a few seconds past 4h has its `'completed'`
   // outcome silently overwritten by the sweep's `'aborted'/'ttl_swept'`
   // stamp with no log trail. Review wenshao @ #4410.
+  //
+  // Gate on `isTelemetrySdkInitialized()` so the warn doesn't fire on
+  // every subagent invocation when telemetry is OFF: in that case
+  // `startSubagentSpan` returns NOOP_SPAN which was never registered in
+  // `activeSpans`, so `!spanCtx` is the normal teardown — not a race.
+  // Review wenshao @ #4410 (DeepSeek bot 3290820392) + own silent-failure
+  // hunter follow-up.
   if (!spanCtx) {
-    debugLogger.warn(
-      `endSubagentSpan: span ${spanId} not found in activeSpans (already swept?) — intended status=${metadata.status}, reason=${metadata.terminateReason ?? 'none'}`,
-    );
+    if (isTelemetrySdkInitialized()) {
+      debugLogger.warn(
+        `endSubagentSpan: span ${spanId} not found in activeSpans (already swept?) — intended status=${metadata.status}, reason=${metadata.terminateReason ?? 'none'}`,
+      );
+    }
     return;
   }
   if (spanCtx.ended) {

@@ -72,6 +72,13 @@ export function getCurrentAgentId(): string | null {
  * inside a top-level subagent (or no subagent at all — but in that case
  * the caller won't typically need this). Used by telemetry to populate
  * `qwen-code.subagent.depth` on subagent spans.
+ *
+ * @remarks Returns 0 for two semantically distinct states: (a) no agent
+ * frame exists, and (b) a top-level frame exists with `depth=0`. Callers
+ * that need to discriminate MUST first check {@link getCurrentAgentId} —
+ * it returns `null` only in state (a). See `runWithSubagentSpan` in
+ * `tools/agent/agent.ts` for the canonical disambiguation pattern.
+ * Review wenshao @ #4410 (DeepSeek bot 3290820381).
  */
 export function getCurrentAgentDepth(): number {
   return storage.getStore()?.depth ?? 0;
