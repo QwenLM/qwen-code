@@ -315,6 +315,23 @@ export interface TelemetrySettings {
   /** Per-signal cardinality controls. */
   metrics?: TelemetryMetricsSettings;
   /**
+   * Hostnames (or `*.suffix` patterns) that receive the
+   * `X-Qwen-Code-Session-Id` outbound correlation header.
+   *
+   * Default (when unset): Alibaba/DashScope first-party endpoints only —
+   * see `DEFAULT_SESSION_ID_HEADER_HOSTS` in `telemetry/trusted-llm-hosts.ts`.
+   * The default is deliberately narrow so the stable session identifier
+   * does not get broadcast to arbitrary third-party LLM providers
+   * (OpenAI, Anthropic, OpenRouter, ...) configured under the
+   * OpenAI-compatible provider. PR #4390 review (LaZzyMan) for rationale.
+   *
+   * Overrides:
+   *   - `[]`     fully disables the header (no destinations)
+   *   - `["*"]`  restores the broadcast behavior across all destinations
+   *   - `["api.mycompany.com", "*.internal.mycompany.com"]` custom allowlist
+   */
+  sessionIdHeaderHosts?: string[];
+  /**
    * Human-readable diagnostics produced while resolving
    * `resourceAttributes` (drops, coercions, reserved-key strips).
    * Populated by `resolveTelemetrySettings()`; the SDK emits a one-time
@@ -1020,6 +1037,7 @@ export class Config {
       outfile: params.telemetry?.outfile,
       resourceAttributes: params.telemetry?.resourceAttributes,
       metrics: params.telemetry?.metrics,
+      sessionIdHeaderHosts: params.telemetry?.sessionIdHeaderHosts,
       resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
     this.gitCoAuthor = {
@@ -2847,6 +2865,17 @@ export class Config {
 
   getTelemetryMetricsIncludeSessionId(): boolean {
     return this.telemetrySettings.metrics?.includeSessionId ?? false;
+  }
+
+  /**
+   * Returns the configured host allowlist for the
+   * `X-Qwen-Code-Session-Id` outbound header, or `undefined` to indicate
+   * "use `DEFAULT_SESSION_ID_HEADER_HOSTS`". The caller (`llm-correlation-fetch`)
+   * resolves the default — keeping it out of Config avoids importing the
+   * telemetry helper from here.
+   */
+  getTelemetrySessionIdHeaderHosts(): readonly string[] | undefined {
+    return this.telemetrySettings.sessionIdHeaderHosts;
   }
 
   getTelemetryResourceAttributeWarnings(): readonly string[] {

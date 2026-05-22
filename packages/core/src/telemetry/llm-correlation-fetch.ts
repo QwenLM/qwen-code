@@ -6,14 +6,24 @@
 
 import { diag } from '@opentelemetry/api';
 import type { Config } from '../config/config.js';
+import {
+  DEFAULT_SESSION_ID_HEADER_HOSTS,
+  extractRequestHost,
+  matchesTrustedHost,
+} from './trusted-llm-hosts.js';
 
 /**
- * Custom HTTP header attached to every outbound LLM service request when
- * telemetry is enabled. Product-namespaced (matching claude-code's
+ * Custom HTTP header attached to outbound LLM service requests when
+ * telemetry is enabled AND the destination is on the trusted-host
+ * allowlist. Product-namespaced (matching claude-code's
  * `X-Claude-Code-Session-Id` pattern from `src/services/api/client.ts:108`)
  * to avoid collision with generic `X-Session-Id` headers other tools may
  * inject. Server-side ingestion can use this to stitch its observation of
  * an LLM request back to the originating qwen-code session.
+ *
+ * Scope: see `DEFAULT_SESSION_ID_HEADER_HOSTS` for the default destination
+ * set and PR #4390 review (LaZzyMan) for the rationale behind not
+ * broadcasting to every third-party LLM provider.
  */
 export const SESSION_ID_HEADER = 'X-Qwen-Code-Session-Id';
 
@@ -36,9 +46,21 @@ type FetchLikeLoose = (
 ) => Promise<Response>;
 
 /**
- * Wrap a fetch implementation so every outbound request gets the
- * `X-Qwen-Code-Session-Id` correlation header populated from the **current**
- * session id, not the value captured when the SDK client was constructed.
+ * Wrap a fetch implementation so outbound requests to trusted LLM
+ * destinations get the `X-Qwen-Code-Session-Id` correlation header
+ * populated from the **current** session id, not the value captured
+ * when the SDK client was constructed.
+ *
+ * Three gates, in order:
+ *   1. Telemetry enabled (`config.getTelemetryEnabled()`)
+ *   2. Destination host is on the trusted allowlist
+ *      (`config.getTelemetrySessionIdHeaderHosts()` ?? default in-vendor set)
+ *   3. Session id is non-empty
+ *
+ * Any failed gate falls through to `baseFetch(input, init)` unchanged —
+ * no header attached, no behavior change. This means a request to
+ * `api.openai.com` from a default-config install goes out exactly the
+ * same as it did before this PR landed.
  *
  * Why per-request and not `defaultHeaders`: SDK clients (and their static
  * `defaultHeaders`) are constructed once at content-generator init and are
@@ -52,10 +74,6 @@ type FetchLikeLoose = (
  * `runtimeOptions?.fetch ?? globalThis.fetch` so proxy-aware fetch (set up
  * by `buildRuntimeFetchOptions`) is preserved when ProxyAgent is in use.
  *
- * When telemetry is disabled, returns baseFetch unchanged — no correlation
- * header added. (Consistent with #4367's gating: opt-out of telemetry means
- * no telemetry-related wire signal, including correlation.)
- *
  * Safety: the wrapper catches its own exceptions and falls through to
  * baseFetch on any internal error. Telemetry must never break the LLM
  * request path — if Config getters throw, header construction fails, etc.,
@@ -65,6 +83,27 @@ export function wrapFetchWithCorrelation<TFetch extends FetchLikeLoose>(
   baseFetch: TFetch,
   config: Config,
 ): TFetch {
+  // Resolve the host allowlist once at wrap time (Config snapshot).
+  // Operators override via `telemetry.sessionIdHeaderHosts` in
+  // settings.json (e.g. `["*.api.openai.com"]` for a specific OpenAI-
+  // compatible proxy, or `["*"]` to restore the broadcast behavior the
+  // initial design proposed). Defensive try/catch + optional-chaining
+  // so a Config implementation that pre-dates this getter (or a partial
+  // test mock without the stub) falls back to the default allowlist
+  // rather than crashing at buildClient time.
+  let trustedHosts: readonly string[];
+  try {
+    trustedHosts =
+      config.getTelemetrySessionIdHeaderHosts?.() ??
+      DEFAULT_SESSION_ID_HEADER_HOSTS;
+  } catch {
+    trustedHosts = DEFAULT_SESSION_ID_HEADER_HOSTS;
+  }
+  // Wildcard escape hatch so operators who want the old broadcast
+  // behavior can opt in via `["*"]` without us extending the pattern
+  // grammar in `matchesTrustedHost` (which would tempt other globbing).
+  const broadcastAll = trustedHosts.some((p) => p === '*');
+
   const wrapped: FetchLikeLoose = async function correlationFetch(
     input: string | URL | Request,
     init?: RequestInit,
@@ -73,6 +112,15 @@ export function wrapFetchWithCorrelation<TFetch extends FetchLikeLoose>(
     try {
       if (!config.getTelemetryEnabled()) {
         return baseFetch(input, init);
+      }
+      if (!broadcastAll) {
+        // Host gate: skip injection for destinations not on the allowlist.
+        // This is what scopes the "stable client fingerprint" exposure to
+        // first-party endpoints only. PR #4390 review (LaZzyMan).
+        const host = extractRequestHost(input);
+        if (!host || !matchesTrustedHost(host, trustedHosts)) {
+          return baseFetch(input, init);
+        }
       }
       const sid = config.getSessionId();
       if (!sid) {
@@ -113,11 +161,18 @@ export function wrapFetchWithCorrelation<TFetch extends FetchLikeLoose>(
  * limitation). Prefer `wrapFetchWithCorrelation` whenever the SDK exposes
  * a `fetch` hook.
  *
- * When telemetry is disabled, returns `{}` so the caller can spread it
- * unconditionally without changing wire behavior.
+ * Host scope: same trusted-host allowlist as `wrapFetchWithCorrelation`,
+ * but evaluated once against the `destinationUrl` known at SDK
+ * construction. Callers that can't determine the destination should pass
+ * `undefined` — the helper returns `{}` (no header, same as telemetry off).
+ *
+ * When telemetry is disabled or the destination isn't trusted, returns
+ * `{}` so the caller can spread it unconditionally without changing wire
+ * behavior.
  */
 export function staticCorrelationHeaders(
   config: Config,
+  destinationUrl?: string,
 ): Record<string, string> {
   // Mirror the safety contract of `wrapFetchWithCorrelation`: telemetry must
   // never break the LLM request path. This helper is called from the Gemini
@@ -126,6 +181,21 @@ export function staticCorrelationHeaders(
   // Fall through to `{}` instead. See PR #4390 review feedback (wenshao).
   try {
     if (!config.getTelemetryEnabled()) return {};
+    if (!destinationUrl) return {};
+    const trustedHosts =
+      config.getTelemetrySessionIdHeaderHosts?.() ??
+      DEFAULT_SESSION_ID_HEADER_HOSTS;
+    const broadcastAll = trustedHosts.some((p) => p === '*');
+    if (!broadcastAll) {
+      let host: string;
+      try {
+        host = new URL(destinationUrl).hostname;
+      } catch {
+        // Unparseable destination → treat as not on allowlist (fail closed).
+        return {};
+      }
+      if (!matchesTrustedHost(host, trustedHosts)) return {};
+    }
     const sid = config.getSessionId();
     if (!sid) return {};
     return { [SESSION_ID_HEADER]: sid };

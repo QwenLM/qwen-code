@@ -24,6 +24,7 @@ describe('createContentGenerator', () => {
       getCliVersion: () => '1.0.0',
       getTelemetryEnabled: () => false,
       getSessionId: () => 'test-session',
+      getTelemetrySessionIdHeaderHosts: () => undefined,
     } as unknown as Config;
 
     const mockGenerator = {
@@ -61,6 +62,7 @@ describe('createContentGenerator', () => {
       getCliVersion: () => '1.0.0',
       getTelemetryEnabled: () => false,
       getSessionId: () => 'test-session',
+      getTelemetrySessionIdHeaderHosts: () => undefined,
     } as unknown as Config;
     const mockGenerator = {
       models: {},

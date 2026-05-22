@@ -301,19 +301,20 @@ knowing:
 - **Trace ID leakage.** The W3C `traceparent` header carries the trace ID
   to every destination, including third-party URLs supplied at runtime
   (e.g. a `WebFetch` to an arbitrary domain). The trace ID is not a
-  secret per the W3C spec, but operators with stricter requirements
-  should be aware that the qwen-code trace ID becomes observable to any
-  endpoint the user instructs the agent to call. If this is unacceptable
-  for a deployment, disable telemetry entirely (`telemetry.enabled: false`)
-  until a per-destination scoping toggle ships (tracked as a follow-up).
+  secret per the W3C spec — the value is `sha256(sessionId).slice(0, 32)`
+  (a one-way hash, not the session id itself). Operators with stricter
+  requirements who don't want even the hashed trace ID reaching
+  third-party endpoints can disable telemetry entirely
+  (`telemetry.enabled: false`); a per-destination scoping toggle for
+  trace propagation specifically is tracked as a follow-up.
 - **Span volume.** Non-LLM `fetch` calls show up as client HTTP spans in
   your OTLP backend. Filter on `http.url` or `peer.service` if you want
   to isolate the LLM-only subset.
 
 ### Session correlation header
 
-Alongside `traceparent`, Qwen Code injects a custom HTTP header on every
-outbound LLM request when telemetry is enabled:
+Alongside `traceparent`, Qwen Code can inject a custom HTTP header on
+outbound LLM requests when telemetry is enabled:
 
 ```
 X-Qwen-Code-Session-Id: <session id>
@@ -322,30 +323,66 @@ X-Qwen-Code-Session-Id: <session id>
 Pattern matched from Claude Code's `X-Claude-Code-Session-Id` (see
 `src/services/api/client.ts:108` in the claude-code repo). The header is
 product-namespaced to avoid collision with generic `X-Session-Id` headers
-other tools may inject. Server-side ingestion (e.g. a custom DashScope
-proxy or an OTLP-aware API gateway) can use this header to stitch its
+other tools may inject. Server-side ingestion (e.g. a DashScope
+gateway or an OTLP-aware API gateway) can use this header to stitch its
 observation of an LLM request back to the originating Qwen Code session
 without having to parse trace context.
 
+**Default scope: first-party Alibaba/DashScope endpoints only.** The
+header is sent only to destinations whose hostname matches the
+`telemetry.sessionIdHeaderHosts` allowlist. The default allowlist is:
+
+```
+dashscope.aliyuncs.com
+dashscope-intl.aliyuncs.com
+*.dashscope.aliyuncs.com
+*.dashscope-intl.aliyuncs.com
+*.alibaba-inc.com
+*.aliyun-inc.com
+```
+
+Requests to third-party LLM providers (OpenAI, Anthropic, OpenRouter,
+MiniMax, ModelScope, Mistral, DeepSeek, vanilla Gemini, ...) **do not
+receive this header by default** — avoids broadcasting a stable
+client-side session identifier to providers who don't need it for the
+API call itself. See [PR #4390 review discussion](https://github.com/QwenLM/qwen-code/pull/4390)
+for the full rationale.
+
+Operators with broader correlation requirements can override the scope
+in `settings.json`:
+
+```jsonc
+"telemetry": {
+  "sessionIdHeaderHosts": ["*"]                          // restore broadcast
+  "sessionIdHeaderHosts": []                              // fully disable header
+  "sessionIdHeaderHosts": ["api.mycompany.com",
+                           "*.gateway.mycompany.internal"] // custom allowlist
+}
+```
+
 The header value comes from `Config.getSessionId()`, read fresh on every
-outbound request (not captured at SDK construction time). After a session
-reset triggered by `/clear`, subsequent LLM requests carry the new session
-id automatically — see the "Known limitation" note below for the one
-exception.
+outbound request (not captured at SDK construction time) on the OpenAI/
+Anthropic providers. After a session reset triggered by `/clear`,
+subsequent requests carry the new session id automatically — see the
+"Known limitation" note below for the one exception.
 
 Empty session ids are not emitted (some HTTP middleware rejects empty
-header values). The header is omitted entirely when telemetry is disabled.
+header values). The header is omitted entirely when telemetry is disabled
+or the destination host is outside the allowlist.
 
 **Known limitation: Gemini provider.** `@google/genai`'s `HttpOptions`
 interface does not expose a `fetch` hook (only static `headers`), so the
 Gemini provider can only inject the session-id header at SDK construction
-time. After a `/clear`-triggered session reset, outbound Gemini requests
-carry the OLD session id in `X-Qwen-Code-Session-Id` until the underlying
-content generator is recreated (the current code does not recreate it on
-reset). All other providers (`openai`-family, `anthropic`) use a fetch
-wrapper and are immune to this. Tracked as a follow-up; in the meantime,
-spans and logs still carry the live session id, so trace/log backends can
-correctly attribute requests to the new session.
+time. The host-allowlist check happens once against the SDK's
+`baseUrl` (defaults to `generativelanguage.googleapis.com` — not on the
+default allowlist, so no header by default). When operators do put the
+Gemini SDK on a first-party endpoint via `baseUrl` and the allowlist
+matches, the header IS attached but goes stale on `/clear` until the
+content generator is recreated. All other providers (`openai`-family,
+`anthropic`) use a fetch wrapper and are immune to this. Tracked as a
+follow-up; in the meantime, spans and logs still carry the live session
+id, so trace/log backends can correctly attribute requests to the new
+session.
 
 ## Aliyun Telemetry
 

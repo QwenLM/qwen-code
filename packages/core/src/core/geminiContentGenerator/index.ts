@@ -45,7 +45,20 @@ export function createGeminiContentGenerator(
   // Known limitation: after a `/clear`-triggered session reset, the Gemini
   // SDK's cached headers retain the OLD session id until the contentGenerator
   // is recreated. See design doc §8.6 + #4384 follow-up sub-issue tracking.
-  headers = { ...headers, ...staticCorrelationHeaders(gcConfig) };
+  //
+  // Destination passed in is what the host-allowlist check uses. With the
+  // default `DEFAULT_SESSION_ID_HEADER_HOSTS` (Alibaba/DashScope-only),
+  // Google's default endpoint `generativelanguage.googleapis.com` is NOT
+  // on the list, so the header is naturally omitted for vanilla Gemini API
+  // calls — matching the "first-party only" scope. Operators who deliberately
+  // want correlation against a Google endpoint can add it via
+  // `telemetry.sessionIdHeaderHosts` in settings.
+  const destinationUrl =
+    config.baseUrl ?? 'https://generativelanguage.googleapis.com';
+  headers = {
+    ...headers,
+    ...staticCorrelationHeaders(gcConfig, destinationUrl),
+  };
   const httpOptions = config.baseUrl
     ? {
         headers,

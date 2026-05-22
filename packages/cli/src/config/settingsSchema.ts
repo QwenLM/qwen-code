@@ -1032,6 +1032,12 @@ const SETTINGS_SCHEMA = {
             },
           },
         },
+        sessionIdHeaderHosts: {
+          description:
+            'Destination hostnames (or "*.suffix" patterns) that receive the X-Qwen-Code-Session-Id outbound correlation header. Defaults to Alibaba/DashScope first-party endpoints (dashscope.aliyuncs.com, dashscope-intl.aliyuncs.com, *.dashscope.aliyuncs.com, *.dashscope-intl.aliyuncs.com, *.alibaba-inc.com, *.aliyun-inc.com) so the stable session identifier is not broadcast to third-party LLM providers like OpenAI or Anthropic. Set to ["*"] to restore the broadcast-to-everywhere behavior, or [] to fully disable the header.',
+          type: 'array',
+          items: { type: 'string' },
+        },
       },
       additionalProperties: true,
     },

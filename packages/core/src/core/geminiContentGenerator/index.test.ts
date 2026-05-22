@@ -108,13 +108,70 @@ describe('createGeminiContentGenerator', () => {
     );
   });
 
-  it('includes X-Qwen-Code-Session-Id in httpOptions.headers when telemetry is enabled', () => {
+  it('omits X-Qwen-Code-Session-Id for vanilla Gemini endpoint even when telemetry is enabled (third-party scope)', () => {
+    // PR #4390 review (LaZzyMan): the session id header is scoped to
+    // first-party (Alibaba/DashScope) destinations by default. A vanilla
+    // Gemini API call resolves to `generativelanguage.googleapis.com`,
+    // which is NOT on the default allowlist, so no header.
     mockConfig = {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getTelemetryEnabled: vi.fn().mockReturnValue(true),
       getSessionId: vi.fn().mockReturnValue('sess-gemini'),
+      getTelemetrySessionIdHeaderHosts: vi.fn().mockReturnValue(undefined),
+    } as unknown as Config;
+    const config = {
+      model: 'gemini-1.5-flash',
+      apiKey: 'k',
+      authType: AuthType.USE_GEMINI,
+    };
+    createGeminiContentGenerator(config, mockConfig);
+    const callArgs = vi.mocked(GeminiContentGenerator).mock.calls[0]?.[0] as {
+      httpOptions: { headers: Record<string, string> };
+    };
+    expect(callArgs.httpOptions.headers).not.toHaveProperty(
+      'X-Qwen-Code-Session-Id',
+    );
+  });
+
+  it('includes X-Qwen-Code-Session-Id when baseUrl points at a trusted DashScope endpoint', () => {
+    mockConfig = {
+      getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getTelemetryEnabled: vi.fn().mockReturnValue(true),
+      getSessionId: vi.fn().mockReturnValue('sess-gemini'),
+      getTelemetrySessionIdHeaderHosts: vi.fn().mockReturnValue(undefined),
+    } as unknown as Config;
+    const config = {
+      model: 'qwen-vl-plus',
+      apiKey: 'k',
+      authType: AuthType.USE_GEMINI,
+      // Operator has pointed the Gemini SDK at a DashScope-compatible
+      // endpoint via baseUrl override. This IS on the default allowlist.
+      baseUrl: 'https://dashscope.aliyuncs.com/api/v1',
+    };
+    createGeminiContentGenerator(config, mockConfig);
+    const callArgs = vi.mocked(GeminiContentGenerator).mock.calls[0]?.[0] as {
+      httpOptions: { headers: Record<string, string> };
+    };
+    expect(callArgs.httpOptions.headers['X-Qwen-Code-Session-Id']).toBe(
+      'sess-gemini',
+    );
+  });
+
+  it('includes X-Qwen-Code-Session-Id when allowlist override covers googleapis.com', () => {
+    // Operator opts back in for Google's endpoint via settings override.
+    mockConfig = {
+      getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getTelemetryEnabled: vi.fn().mockReturnValue(true),
+      getSessionId: vi.fn().mockReturnValue('sess-gemini'),
+      getTelemetrySessionIdHeaderHosts: vi
+        .fn()
+        .mockReturnValue(['*.googleapis.com']),
     } as unknown as Config;
     const config = {
       model: 'gemini-1.5-flash',

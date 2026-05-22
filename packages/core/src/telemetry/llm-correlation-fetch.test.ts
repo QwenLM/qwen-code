@@ -22,13 +22,28 @@ type FetchLike = (
 function mockConfig(opts: {
   enabled?: boolean;
   sessionId?: string | (() => string);
+  /**
+   * Host allowlist returned by `getTelemetrySessionIdHeaderHosts`.
+   *
+   * - Key OMITTED: returns `['*']` (broadcast) so the bulk of tests below
+   *   — which exercise header-injection mechanics, not host-gating —
+   *   keep operating against the `api.example.com` test URLs.
+   * - Key PRESENT and `undefined`: returns `undefined`, letting the
+   *   wrapper fall back to `DEFAULT_SESSION_ID_HEADER_HOSTS` (the real
+   *   default allowlist). Used by host-gate tests.
+   * - Key PRESENT and an array: returns that array verbatim.
+   */
+  hosts?: readonly string[];
 }): Config {
+  const hostsKeyPresent = 'hosts' in opts;
   return {
     getTelemetryEnabled: () => opts.enabled ?? true,
     getSessionId: () =>
       typeof opts.sessionId === 'function'
         ? opts.sessionId()
         : (opts.sessionId ?? ''),
+    getTelemetrySessionIdHeaderHosts: () =>
+      hostsKeyPresent ? opts.hosts : ['*'],
   } as unknown as Config;
 }
 
@@ -218,12 +233,16 @@ describe('wrapFetchWithCorrelation', () => {
     const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
     const m = makeFetchMock();
     // Config getter that throws — simulates a runtime bug that must not
-    // propagate and break the LLM request.
+    // propagate and break the LLM request. Use a TRUSTED destination
+    // (broadcast allowlist) so we reach the throwing getSessionId() — a
+    // third-party destination would short-circuit at the host gate before
+    // ever calling getSessionId.
     const config = {
       getTelemetryEnabled: () => true,
       getSessionId: () => {
         throw new Error('config bug');
       },
+      getTelemetrySessionIdHeaderHosts: () => ['*'],
     } as unknown as Config;
     const wrapped = wrapFetchWithCorrelation(m.fetch, config);
     const userInit = { method: 'POST' };
@@ -242,10 +261,16 @@ describe('wrapFetchWithCorrelation', () => {
 });
 
 describe('staticCorrelationHeaders', () => {
+  // Tests pass `hosts: ['*']` (broadcast) unless they're specifically
+  // exercising the host gate, since broadcast was the original behavior
+  // before the LaZzyMan-review-driven scope narrowing.
+  const TRUSTED = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+
   it('returns header when telemetry enabled and sessionId non-empty', () => {
     expect(
       staticCorrelationHeaders(
         mockConfig({ enabled: true, sessionId: 'sess-A' }),
+        TRUSTED,
       ),
     ).toEqual({ [SESSION_ID_HEADER]: 'sess-A' });
   });
@@ -254,13 +279,106 @@ describe('staticCorrelationHeaders', () => {
     expect(
       staticCorrelationHeaders(
         mockConfig({ enabled: false, sessionId: 'sess-A' }),
+        TRUSTED,
       ),
     ).toEqual({});
   });
 
   it('returns {} when sessionId is empty', () => {
     expect(
-      staticCorrelationHeaders(mockConfig({ enabled: true, sessionId: '' })),
+      staticCorrelationHeaders(
+        mockConfig({ enabled: true, sessionId: '' }),
+        TRUSTED,
+      ),
+    ).toEqual({});
+  });
+
+  it('returns {} when destinationUrl is undefined (fail closed)', () => {
+    expect(
+      staticCorrelationHeaders(
+        mockConfig({ enabled: true, sessionId: 'sess-A' }),
+      ),
+    ).toEqual({});
+  });
+
+  it('returns {} when destinationUrl host is not on the trusted allowlist', () => {
+    // Default allowlist is Alibaba/DashScope only. A vanilla Gemini API call
+    // to googleapis.com should NOT receive the header. PR #4390 review
+    // (LaZzyMan): "the header should not be broadcast to every LLM provider".
+    expect(
+      staticCorrelationHeaders(
+        mockConfig({
+          enabled: true,
+          sessionId: 'sess-A',
+          hosts: undefined, // use real default allowlist
+        }),
+        'https://generativelanguage.googleapis.com/v1beta',
+      ),
+    ).toEqual({});
+  });
+
+  it('returns header when destinationUrl host matches the default allowlist (DashScope)', () => {
+    expect(
+      staticCorrelationHeaders(
+        mockConfig({
+          enabled: true,
+          sessionId: 'sess-A',
+          hosts: undefined, // use real default allowlist
+        }),
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      ),
+    ).toEqual({ [SESSION_ID_HEADER]: 'sess-A' });
+  });
+
+  it('returns header when destinationUrl host matches the default allowlist (internal alibaba-inc)', () => {
+    expect(
+      staticCorrelationHeaders(
+        mockConfig({
+          enabled: true,
+          sessionId: 'sess-A',
+          hosts: undefined,
+        }),
+        'https://idealab.alibaba-inc.com/api/openai/v1',
+      ),
+    ).toEqual({ [SESSION_ID_HEADER]: 'sess-A' });
+  });
+
+  it('respects ["*"] override to restore broadcast', () => {
+    expect(
+      staticCorrelationHeaders(
+        mockConfig({
+          enabled: true,
+          sessionId: 'sess-A',
+          hosts: ['*'],
+        }),
+        'https://api.openai.com/v1',
+      ),
+    ).toEqual({ [SESSION_ID_HEADER]: 'sess-A' });
+  });
+
+  it('respects [] override to fully disable', () => {
+    expect(
+      staticCorrelationHeaders(
+        mockConfig({
+          enabled: true,
+          sessionId: 'sess-A',
+          hosts: [],
+        }),
+        TRUSTED,
+      ),
+    ).toEqual({});
+  });
+
+  it('returns {} when destinationUrl is unparseable', () => {
+    expect(
+      staticCorrelationHeaders(
+        mockConfig({
+          enabled: true,
+          sessionId: 'sess-A',
+          hosts: undefined,
+        }),
+        'not a url',
+      ),
     ).toEqual({});
   });
 
@@ -271,7 +389,7 @@ describe('staticCorrelationHeaders', () => {
     // after construction won't update the header — known limitation.
     let current = 'sess-A';
     const config = mockConfig({ enabled: true, sessionId: () => current });
-    const snapshot = staticCorrelationHeaders(config);
+    const snapshot = staticCorrelationHeaders(config, TRUSTED);
     current = 'sess-B';
     expect(snapshot[SESSION_ID_HEADER]).toBe('sess-A');
   });
@@ -287,11 +405,144 @@ describe('staticCorrelationHeaders', () => {
         throw new Error('config exploded');
       },
       getSessionId: () => 'unreached',
+      getTelemetrySessionIdHeaderHosts: () => ['*'],
     } as unknown as Config;
-    expect(staticCorrelationHeaders(exploding)).toEqual({});
+    expect(staticCorrelationHeaders(exploding, TRUSTED)).toEqual({});
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('staticCorrelationHeaders'),
     );
     warnSpy.mockRestore();
+  });
+});
+
+describe('wrapFetchWithCorrelation — host allowlist gating', () => {
+  // Dedicated block for the LaZzyMan-review-driven host gate. Uses the
+  // real default allowlist (no `hosts: ['*']` override) and exercises
+  // both the trusted-host pass and the third-party-host skip.
+
+  it('injects header for default-allowlisted host (dashscope.aliyuncs.com)', async () => {
+    const m = makeFetchMock();
+    const wrapped = wrapFetchWithCorrelation(
+      m.fetch,
+      mockConfig({
+        enabled: true,
+        sessionId: 'sess-A',
+        hosts: undefined, // real default allowlist
+      }),
+    );
+    await wrapped('https://dashscope.aliyuncs.com/compatible-mode/v1/chat');
+    expect((m.lastInit()?.headers as Headers).get(SESSION_ID_HEADER)).toBe(
+      'sess-A',
+    );
+  });
+
+  it('injects header for sub-domain of allowlisted suffix (*.alibaba-inc.com)', async () => {
+    const m = makeFetchMock();
+    const wrapped = wrapFetchWithCorrelation(
+      m.fetch,
+      mockConfig({
+        enabled: true,
+        sessionId: 'sess-A',
+        hosts: undefined,
+      }),
+    );
+    await wrapped('https://idealab.alibaba-inc.com/api/openai/v1');
+    expect((m.lastInit()?.headers as Headers).get(SESSION_ID_HEADER)).toBe(
+      'sess-A',
+    );
+  });
+
+  it('skips header for third-party host (api.openai.com) under default allowlist', async () => {
+    // This is the core LaZzyMan-review fix: the stable session id no longer
+    // gets broadcast to third-party LLM providers by default.
+    const m = makeFetchMock();
+    const wrapped = wrapFetchWithCorrelation(
+      m.fetch,
+      mockConfig({
+        enabled: true,
+        sessionId: 'sess-A',
+        hosts: undefined,
+      }),
+    );
+    await wrapped('https://api.openai.com/v1/chat/completions');
+    expect(m.lastInit()?.headers).toBeUndefined();
+  });
+
+  it('skips header for third-party host (api.anthropic.com) under default allowlist', async () => {
+    const m = makeFetchMock();
+    const wrapped = wrapFetchWithCorrelation(
+      m.fetch,
+      mockConfig({
+        enabled: true,
+        sessionId: 'sess-A',
+        hosts: undefined,
+      }),
+    );
+    await wrapped('https://api.anthropic.com/v1/messages');
+    expect(m.lastInit()?.headers).toBeUndefined();
+  });
+
+  it('respects ["*"] override to restore broadcast behavior', async () => {
+    const m = makeFetchMock();
+    const wrapped = wrapFetchWithCorrelation(
+      m.fetch,
+      mockConfig({
+        enabled: true,
+        sessionId: 'sess-A',
+        hosts: ['*'],
+      }),
+    );
+    await wrapped('https://api.openai.com/v1/chat/completions');
+    expect((m.lastInit()?.headers as Headers).get(SESSION_ID_HEADER)).toBe(
+      'sess-A',
+    );
+  });
+
+  it('respects [] override to fully disable injection', async () => {
+    const m = makeFetchMock();
+    const wrapped = wrapFetchWithCorrelation(
+      m.fetch,
+      mockConfig({
+        enabled: true,
+        sessionId: 'sess-A',
+        hosts: [],
+      }),
+    );
+    // Even an otherwise-trusted destination is skipped when allowlist is [].
+    await wrapped('https://dashscope.aliyuncs.com/compatible-mode/v1');
+    expect(m.lastInit()?.headers).toBeUndefined();
+  });
+
+  it('respects custom allowlist (operator-supplied host)', async () => {
+    const m = makeFetchMock();
+    const wrapped = wrapFetchWithCorrelation(
+      m.fetch,
+      mockConfig({
+        enabled: true,
+        sessionId: 'sess-A',
+        hosts: ['gateway.mycompany.internal'],
+      }),
+    );
+    await wrapped('https://gateway.mycompany.internal/llm/v1');
+    expect((m.lastInit()?.headers as Headers).get(SESSION_ID_HEADER)).toBe(
+      'sess-A',
+    );
+    // Default allowlist hosts are NOT included when operator overrides.
+    await wrapped('https://dashscope.aliyuncs.com/v1');
+    expect(m.lastInit()?.headers).toBeUndefined();
+  });
+
+  it('skips header when destination URL is unparseable (fail closed)', async () => {
+    const m = makeFetchMock();
+    const wrapped = wrapFetchWithCorrelation(
+      m.fetch,
+      mockConfig({
+        enabled: true,
+        sessionId: 'sess-A',
+        hosts: undefined,
+      }),
+    );
+    await wrapped('not a valid url');
+    expect(m.lastInit()?.headers).toBeUndefined();
   });
 });
