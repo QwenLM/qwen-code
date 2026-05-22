@@ -504,6 +504,41 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     );
   }
 
+  /**
+   * Return a clone of this tool with a different `trust` value while
+   * keeping every other field (including the shared underlying
+   * `CallableTool` / MCP transport) identical.
+   *
+   * F2 (#4175) pool path: a single shared pool entry produces one
+   * `DiscoveredMCPTool` snapshot; each `SessionMcpView` clones with
+   * its own per-session trust before registering into its session's
+   * `ToolRegistry`. Without this clone, mutating `trust` on the shared
+   * instance would cross-contaminate sessions.
+   *
+   * Trust is the only field that legitimately varies per session;
+   * everything else (transport, schema, name) is transport-level.
+   */
+  withTrust(trust: boolean | undefined): DiscoveredMCPTool {
+    if (trust === this.trust) return this;
+    return new DiscoveredMCPTool(
+      this.mcpTool,
+      this.serverName,
+      this.serverToolName,
+      this.description,
+      this.parameterSchema,
+      trust,
+      // Preserve the original name (do NOT re-call generateValidName)
+      // — equal-by-name is the registry's deduplication key, and a
+      // different name would race-register two tools in the same
+      // session.
+      this.name,
+      this.cliConfig,
+      this.mcpClient,
+      this.mcpTimeout,
+      this.annotations,
+    );
+  }
+
   protected createInvocation(
     params: ToolParams,
   ): ToolInvocation<ToolParams, ToolResult> {

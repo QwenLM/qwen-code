@@ -201,6 +201,15 @@ export class ToolRegistry {
       this,
       eventEmitter,
       sendSdkMcpMessage,
+      // F2 (#4175 commit 4): forward the workspace-shared MCP transport
+      // pool from Config (set by daemon-mode QwenAgent in
+      // newSessionConfig). When undefined, McpClientManager keeps its
+      // pre-F2 per-session spawn behavior. When defined, non-SDK MCP
+      // discovery goes through pool.acquire so N sessions in the same
+      // workspace share one transport per unique server config.
+      undefined, // healthConfig: keep manager defaults
+      undefined, // budgetConfig: keep manager defaults
+      this.config.getMcpTransportPool(),
     );
   }
 

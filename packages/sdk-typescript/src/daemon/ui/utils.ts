@@ -77,8 +77,11 @@ export function isSensitiveKey(key: string): boolean {
     normalized === 'xapikey' ||
     normalized === 'xauthkey' ||
     normalized === 'xauthtoken' ||
+    normalized.endsWith('password') ||
     normalized.endsWith('token') ||
     normalized.endsWith('secret') ||
+    normalized.endsWith('secretkey') ||
+    normalized.endsWith('accesskey') ||
     normalized.endsWith('apikey') ||
     normalized.endsWith('privatekey') ||
     normalized.includes('accesstoken') ||

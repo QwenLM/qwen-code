@@ -463,6 +463,18 @@ export async function runQwenServe(
   // set both keys explicitly (to value or `undefined`) so each
   // child's MCP budget env is fully determined by this handle's
   // options, with no inheritance from process.env's current state.
+  //
+  // F2 (#4175 commit 5): if the daemon parent process has the pool
+  // kill switch (`QWEN_SERVE_NO_MCP_POOL=1`) in its own env, infer
+  // `mcpPoolActive: false` so the capabilities envelope drops the
+  // `mcp_workspace_pool` + `mcp_pool_restart` tags. The ACP child
+  // inherits the env directly so its `QwenAgent.mcpPool` field stays
+  // undefined; advertising the tags would lie about the daemon's
+  // actual feature set.
+  const inheritedNoPool = process.env['QWEN_SERVE_NO_MCP_POOL'] === '1';
+  if (opts.mcpPoolActive === undefined && inheritedNoPool) {
+    opts.mcpPoolActive = false;
+  }
   const childEnvOverrides: Record<string, string | undefined> = {
     QWEN_SERVE_MCP_CLIENT_BUDGET:
       opts.mcpClientBudget !== undefined

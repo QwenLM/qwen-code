@@ -67,7 +67,14 @@ const sdkMocks = vi.hoisted(() => {
       sessions.length = 0;
       capabilities.mockReset();
       capabilities.mockResolvedValue({ workspaceCwd: '/mock-workspace' });
-      MockDaemonSessionClient.createOrAttach.mockClear();
+      MockDaemonSessionClient.createOrAttach.mockReset();
+      MockDaemonSessionClient.createOrAttach.mockImplementation(
+        async (_client: unknown, _req: unknown): Promise<MockSession> => {
+          const session = sessions.shift();
+          if (!session) throw new Error('No mock daemon session queued');
+          return session;
+        },
+      );
     },
   };
 });
@@ -715,92 +722,248 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
-  it('breaks out of the reconnect loop on 401 / 403 auth failures even when autoReconnect is true (wenshao CRIT #1)', async () => {
-    // Simulates a daemon that consistently returns 401 (bad token). Pre-fix,
-    // autoReconnect: true would loop forever calling createOrAttach,
-    // generating a reconnection storm and wiping the user's transcript on
-    // every cycle. After the fix, the provider treats 401/403 as terminal
-    // regardless of autoReconnect.
-    let createAttempts = 0;
-    sdkMocks.MockDaemonSessionClient.createOrAttach.mockImplementation(
-      async () => {
-        createAttempts += 1;
-        throw Object.assign(new Error('Unauthorized'), { status: 401 });
-      },
-    );
+  it.each([401, 403])(
+    'breaks out of the reconnect loop on %d auth failures even when autoReconnect is true (wenshao CRIT #1)',
+    async (status) => {
+      // Simulates a daemon that consistently returns 401 (bad token). Pre-fix,
+      // autoReconnect: true would loop forever calling createOrAttach,
+      // generating a reconnection storm and wiping the user's transcript on
+      // every cycle. After the fix, the provider treats 401/403 as terminal
+      // regardless of autoReconnect.
+      let createAttempts = 0;
+      sdkMocks.MockDaemonSessionClient.createOrAttach.mockImplementation(
+        async () => {
+          createAttempts += 1;
+          throw Object.assign(new Error('Unauthorized'), { status });
+        },
+      );
 
-    let connection: DaemonConnectionState | undefined;
-    function Harness() {
-      connection = useDaemonConnection();
-      return null;
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoReconnect: true, // ← critical: must NOT loop
+        reconnectDelayMs: 1, // keep timing tight in case it does loop
+        maxReconnectDelayMs: 1,
+      });
+
+      await act(async () => {
+        await flushPromises();
+      });
+      // Give any potential reconnect timer a window to fire.
+      await act(async () => {
+        await wait(20);
+        await flushPromises();
+      });
+
+      expect(connection).toMatchObject({
+        status: 'error',
+        error: 'Unauthorized',
+      });
+      // No sessionId on auth-failure terminal state.
+      expect(connection?.sessionId).toBeUndefined();
+      // Crucial: only ONE attempt happened. Pre-fix, multiple attempts would
+      // have occurred during the wait above. We assert exactly 1 to lock in
+      // the no-storm invariant.
+      expect(createAttempts).toBe(1);
+    },
+  );
+
+  it.each([404, 410])(
+    'still reconnects on %d session-not-found errors when autoReconnect is true',
+    async (status) => {
+      // Verifies the fix did NOT over-correct: 404/410 are session-not-found
+      // (recoverable by creating a fresh session), not credential failures.
+      // Pre-fix and post-fix behavior should be identical for these statuses.
+      let createAttempts = 0;
+      sdkMocks.MockDaemonSessionClient.createOrAttach.mockImplementation(
+        async () => {
+          createAttempts += 1;
+          if (createAttempts === 1) {
+            throw Object.assign(new Error('session gone'), { status });
+          }
+          // Second attempt succeeds.
+          return createMockSession({ sessionId: `session-${createAttempts}` });
+        },
+      );
+
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoReconnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+
+      await act(async () => {
+        await wait(30);
+        await flushPromises();
+      });
+
+      // 410 path: SHOULD have retried at least once (so connect succeeded on
+      // attempt #2). This is the contrast case with the 401 test above.
+      expect(createAttempts).toBeGreaterThanOrEqual(2);
+      expect(connection?.status).not.toBe('error');
+    },
+  );
+
+  it.each([401, 403])(
+    'preserves transcript and clears prompt state on %d auth failures from the SSE stream',
+    async (status) => {
+      const streamFailure = createDeferred<void>();
+      const session = createMockSession({
+        prompt: vi.fn(
+          (_req: unknown, signal?: AbortSignal) =>
+            new Promise<PromptResult>((_resolve, reject) => {
+              signal?.addEventListener(
+                'abort',
+                () => reject(createAbortError()),
+                { once: true },
+              );
+            }),
+        ),
+        events: async function* authFailureEvents() {
+          await streamFailure.promise;
+          yield* [];
+          throw Object.assign(new Error('Unauthorized'), { status });
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let actions: DaemonUiSessionActions | undefined;
+      let connection: DaemonConnectionState | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+
+      function Harness() {
+        actions = useDaemonActions();
+        connection = useDaemonConnection();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoReconnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      const providerActions = requireActions(actions);
+
+      let promptResult: Promise<unknown> | undefined;
+      await act(async () => {
+        promptResult = providerActions.sendPrompt('keep transcript');
+        await flushPromises();
+      });
+      expect(blocks).toMatchObject([{ kind: 'user', text: 'keep transcript' }]);
+
+      streamFailure.resolve();
+      await act(async () => {
+        await wait(20);
+        await flushPromises();
+      });
+
+      const runningPrompt = promptResult;
+      if (!runningPrompt) throw new Error('prompt was not started');
+      await expect(runningPrompt).resolves.toEqual({
+        stopReason: 'cancelled',
+      });
+      expect(connection).toMatchObject({
+        status: 'error',
+        error: 'Unauthorized',
+      });
+      expect(blocks[0]).toMatchObject({
+        kind: 'user',
+        text: 'keep transcript',
+      });
+      expect(blocks).toContainEqual(
+        expect.objectContaining({
+          kind: 'error',
+          text: 'Unauthorized',
+        }) as DaemonTranscriptBlock,
+      );
+      expect(
+        sdkMocks.MockDaemonSessionClient.createOrAttach,
+      ).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await expect(providerActions.sendPrompt('after auth')).rejects.toThrow(
+          'Daemon session is not connected',
+        );
+      });
+    },
+  );
+
+  it.each([
+    [
+      'cancel',
+      (actions: DaemonUiSessionActions) => actions.cancel(),
+      'Cancel failed: Cancel timed out after 30000ms',
+    ],
+    [
+      'setModel',
+      (actions: DaemonUiSessionActions) => actions.setModel('qwen-plus'),
+      'Set model failed: Set model timed out after 30000ms',
+    ],
+    [
+      'respondToPermission',
+      (actions: DaemonUiSessionActions) =>
+        actions.respondToPermission('perm-1', {
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        }),
+      'Permission response failed: Permission response timed out after 30000ms',
+    ],
+  ])('times out hung %s actions', async (_name, invoke, expectedError) => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession({
+        cancel: vi.fn(() => new Promise<void>(() => {})),
+        setModel: vi.fn(() => new Promise<{ modelId: string }>(() => {})),
+        respondToSessionPermission: vi.fn(() => new Promise<boolean>(() => {})),
+        events: createIdleEvents(),
+      });
+      sdkMocks.sessions.push(session);
+      let actions: DaemonUiSessionActions | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+
+      function Harness() {
+        actions = useDaemonActions();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      const providerActions = requireActions(actions);
+
+      let actionResult: Promise<unknown> | undefined;
+      let actionError: Promise<unknown> | undefined;
+      await act(async () => {
+        actionResult = invoke(providerActions);
+        actionError = actionResult.catch((error: unknown) => error);
+        await flushPromises();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+        await flushPromises();
+      });
+
+      const pendingAction = actionResult;
+      if (!pendingAction) throw new Error('action was not started');
+      const observedError = await actionError;
+      expect(observedError).toBeInstanceOf(Error);
+      expect((observedError as Error).message).toBe(
+        expectedError.replace(/^.*?: /, ''),
+      );
+      expect(blocks.at(-1)).toMatchObject({ text: expectedError });
+    } finally {
+      vi.useRealTimers();
     }
-
-    await renderWithProvider(<Harness />, {
-      autoConnect: true,
-      autoReconnect: true, // ← critical: must NOT loop
-      reconnectDelayMs: 1, // keep timing tight in case it does loop
-      maxReconnectDelayMs: 1,
-    });
-
-    await act(async () => {
-      await flushPromises();
-    });
-    // Give any potential reconnect timer a window to fire.
-    await act(async () => {
-      await wait(20);
-      await flushPromises();
-    });
-
-    expect(connection).toMatchObject({
-      status: 'error',
-      error: 'Unauthorized',
-    });
-    // No sessionId on auth-failure terminal state.
-    expect(connection?.sessionId).toBeUndefined();
-    // Crucial: only ONE attempt happened. Pre-fix, multiple attempts would
-    // have occurred during the wait above. We assert exactly 1 to lock in
-    // the no-storm invariant.
-    expect(createAttempts).toBe(1);
-  });
-
-  it('still reconnects on 404 / 410 session-not-found errors when autoReconnect is true', async () => {
-    // Verifies the fix did NOT over-correct: 404/410 are session-not-found
-    // (recoverable by creating a fresh session), not credential failures.
-    // Pre-fix and post-fix behavior should be identical for these statuses.
-    let createAttempts = 0;
-    sdkMocks.MockDaemonSessionClient.createOrAttach.mockImplementation(
-      async () => {
-        createAttempts += 1;
-        if (createAttempts === 1) {
-          throw Object.assign(new Error('session gone'), { status: 410 });
-        }
-        // Second attempt succeeds.
-        return createMockSession({ sessionId: `session-${createAttempts}` });
-      },
-    );
-
-    let connection: DaemonConnectionState | undefined;
-    function Harness() {
-      connection = useDaemonConnection();
-      return null;
-    }
-
-    await renderWithProvider(<Harness />, {
-      autoConnect: true,
-      autoReconnect: true,
-      reconnectDelayMs: 1,
-      maxReconnectDelayMs: 1,
-    });
-
-    await act(async () => {
-      await wait(30);
-      await flushPromises();
-    });
-
-    // 410 path: SHOULD have retried at least once (so connect succeeded on
-    // attempt #2). This is the contrast case with the 401 test above.
-    expect(createAttempts).toBeGreaterThanOrEqual(2);
-    expect(connection?.status).not.toBe('error');
   });
 
   async function renderWithProvider(

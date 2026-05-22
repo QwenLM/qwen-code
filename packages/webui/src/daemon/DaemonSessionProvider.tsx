@@ -82,9 +82,8 @@ const TERMINAL_SESSION_HTTP_STATUSES = new Set([401, 403, 404, 410]);
  * failures** (vs session-not-found 404/410). Auth failures should NOT enter
  * the reconnect loop even when `autoReconnect: true` — retrying with the
  * same bad token loops forever, hammering the server with bad credentials
- * and wiping the user's transcript on each cycle (the sessionId-change
- * `store.reset()` path at line 143 fires when each fresh attempt produces a
- * different sessionId).
+ * and risking transcript wipes if reconnect later attaches a different
+ * session and hits the sessionId-change `store.reset()` branch.
  *
  * 404/410 (session-not-found) keep the reconnect-then-recreate behavior —
  * those are recoverable by creating a fresh session.
@@ -214,11 +213,14 @@ export function DaemonSessionProvider({
           // Auth failures (401 / 403) must NOT retry even when
           // `autoReconnect: true`. Retrying with the same invalid token
           // loops forever — the daemon keeps returning 401, each cycle
-          // wipes the user's transcript (via the sessionId-change branch
-          // in line 143), and the user sees no actionable error state.
+          // risks transcript wipes via the sessionId-change branch above,
+          // and the user sees no actionable error state.
           // Surface as a terminal 'error' connection state regardless of
           // the autoReconnect setting; the user must update credentials.
           if (isAuthFailureHttpError(error)) {
+            promptAbortRef.current?.abort();
+            promptAbortRef.current = undefined;
+            promptBusyRef.current = false;
             sessionRef.current = undefined;
             setConnection({
               status: 'error',

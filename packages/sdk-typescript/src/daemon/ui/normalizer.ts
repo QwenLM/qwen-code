@@ -144,7 +144,9 @@ function createBase(
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
-    ...(opts.includeRawEvent ? { rawEvent: event } : {}),
+    ...(opts.includeRawEvent
+      ? { rawEvent: { ...event, data: redactSensitiveFields(event.data) } }
+      : {}),
   };
 }
 
@@ -255,8 +257,14 @@ function normalizeToolUpdate(
     rawOutputSource !== undefined
       ? redactSensitiveFields(rawOutputSource)
       : undefined;
-  const content = update['content'];
-  const locations = update['locations'];
+  const content =
+    update['content'] !== undefined
+      ? redactSensitiveFields(update['content'])
+      : undefined;
+  const locations =
+    update['locations'] !== undefined
+      ? redactSensitiveFields(update['locations'])
+      : undefined;
   const toolCallId = getString(update, 'toolCallId');
   const status = getString(update, 'status');
   if (!toolCallId) {
@@ -293,10 +301,14 @@ function normalizePlanUpdate(
 ): DaemonUiEvent {
   const entries = Array.isArray(update['entries']) ? update['entries'] : [];
   const contentText = capDetails(formatPlanEntries(entries));
+  const planCallId =
+    base.eventId !== undefined
+      ? `${DAEMON_PLAN_TOOL_CALL_ID}-${base.eventId}`
+      : DAEMON_PLAN_TOOL_CALL_ID;
   return {
     ...base,
     type: 'tool.update',
-    toolCallId: DAEMON_PLAN_TOOL_CALL_ID,
+    toolCallId: planCallId,
     title: 'Updated Plan',
     status: 'completed',
     toolName: 'TodoWrite',
@@ -364,7 +376,10 @@ function normalizePermissionRequest(
     ];
   }
 
-  const toolCall = event.data['toolCall'];
+  const toolCall =
+    event.data['toolCall'] !== undefined
+      ? redactSensitiveFields(event.data['toolCall'])
+      : undefined;
   return [
     {
       ...base,

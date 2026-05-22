@@ -694,8 +694,15 @@ export function createServeApp(
       // ONLY when the operator opted in. Tag presence = behavior is
       // on; older daemons without this PR omit the tag and SDKs that
       // post-PR feature-detect on it stay backward compatible.
+      //
+      // F2 (#4175 commit 5): `mcpPoolActive` advertises
+      // `mcp_workspace_pool` + `mcp_pool_restart` together. Defaults
+      // to `true` when omitted so daemons that don't explicitly set
+      // the option still advertise the F2 surface; operators flip it
+      // to `false` only when `QWEN_SERVE_NO_MCP_POOL=1` is in scope.
       features: getAdvertisedServeFeatures(undefined, {
         requireAuth: opts.requireAuth === true,
+        mcpPoolActive: opts.mcpPoolActive !== false,
       }),
       modelServices: [],
       // #3803 §02: surface the bound workspace so clients can detect
@@ -1605,8 +1612,40 @@ export function createServeApp(
       // identity rather than a forged header.
       const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
+      // F2 (#4175 commit 5): parse `?entryIndex=` query parameter for
+      // pool-mode targeted restarts. Accepts a non-negative integer
+      // (restart only entry #N) or `*` / omitted (restart all entries
+      // matching the server name). Anything else returns 400 — pool
+      // entry indices are bounded small integers, so `entryIndex=foo`
+      // or `entryIndex=-1` is almost certainly a client bug we want
+      // to surface loudly rather than silently route to "all".
+      let entryIndex: number | undefined;
+      const rawEntryIndex = req.query['entryIndex'];
+      if (rawEntryIndex !== undefined && rawEntryIndex !== '*') {
+        const candidate =
+          typeof rawEntryIndex === 'string' ? rawEntryIndex : undefined;
+        const parsed =
+          candidate !== undefined ? Number.parseInt(candidate, 10) : NaN;
+        if (
+          !Number.isInteger(parsed) ||
+          parsed < 0 ||
+          String(parsed) !== candidate
+        ) {
+          res.status(400).json({
+            error:
+              '`entryIndex` query parameter must be a non-negative integer or "*"',
+            code: 'invalid_entry_index',
+          });
+          return;
+        }
+        entryIndex = parsed;
+      }
       try {
-        const result = await bridge.restartMcpServer(serverName, clientId);
+        const result = await bridge.restartMcpServer(
+          serverName,
+          clientId,
+          entryIndex !== undefined ? { entryIndex } : undefined,
+        );
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, {

@@ -12,6 +12,7 @@ import {
   createDaemonTranscriptStore,
   daemonUiEventToTerminalText,
   getOutputText,
+  isDaemonUiSensitiveKey,
   normalizeDaemonEvent,
   reduceDaemonTranscriptEvents,
   sanitizeTerminalText,
@@ -179,6 +180,9 @@ describe('daemon UI normalizer and transcript reducer', () => {
         update: {
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: 'hello' },
+          rawInput: {
+            apiKey: 'raw-event-secret',
+          },
         },
       },
     } as const;
@@ -186,9 +190,23 @@ describe('daemon UI normalizer and transcript reducer', () => {
     const [withoutRaw] = normalizeDaemonEvent(event);
     expect(withoutRaw).toMatchObject({ type: 'assistant.text.delta' });
     expect(withoutRaw).not.toHaveProperty('rawEvent');
-    expect(
-      normalizeDaemonEvent(event, { includeRawEvent: true }),
-    ).toMatchObject([{ type: 'assistant.text.delta', rawEvent: event }]);
+    const [withRaw] = normalizeDaemonEvent(event, { includeRawEvent: true });
+    expect(withRaw).toMatchObject({
+      type: 'assistant.text.delta',
+      rawEvent: {
+        ...event,
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'hello' },
+            rawInput: {
+              apiKey: '[redacted]',
+            },
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(withRaw)).not.toContain('raw-event-secret');
   });
 
   it('projects AskUserQuestion into a semantic tool preview', () => {
@@ -862,7 +880,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks).toMatchObject([
       {
         kind: 'tool',
-        toolCallId: 'daemon-plan',
+        toolCallId: 'daemon-plan-60',
         toolKind: 'updated_plan',
         content: [
           {
@@ -873,6 +891,53 @@ describe('daemon UI normalizer and transcript reducer', () => {
             },
           },
         ],
+      },
+    ]);
+  });
+
+  it('keeps each plan session update as a separate visible block', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 63,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: 'Design API', status: 'in_progress' }],
+          },
+        },
+      }),
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 64,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: 'Design API', status: 'completed' }],
+          },
+        },
+      }),
+      { now: 3 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'tool',
+        toolCallId: 'daemon-plan-63',
+        toolKind: 'updated_plan',
+      },
+      {
+        kind: 'tool',
+        toolCallId: 'daemon-plan-64',
+        toolKind: 'updated_plan',
       },
     ]);
   });
@@ -949,7 +1014,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks).toMatchObject([
       {
         kind: 'tool',
-        toolCallId: 'daemon-plan',
+        toolCallId: 'daemon-plan-61',
         content: [
           {
             type: 'content',
@@ -1224,6 +1289,34 @@ describe('daemon UI normalizer and transcript reducer', () => {
     });
   });
 
+  it('recognizes common secret-key aliases before rendering previews', () => {
+    expect(
+      [
+        'secret_key',
+        'access_key',
+        'DATABASE_PASSWORD',
+        'db_password',
+        'aws_secret_access_key',
+      ].every((key) => isDaemonUiSensitiveKey(key)),
+    ).toBe(true);
+    expect(
+      createDaemonToolPreview({
+        secret_key: 'secret-key',
+        access_key: 'access-key',
+        DATABASE_PASSWORD: 'database-password',
+        db_password: 'db-password',
+      }),
+    ).toMatchObject({
+      kind: 'key_value',
+      rows: [
+        { label: 'secret_key', value: '[redacted]' },
+        { label: 'access_key', value: '[redacted]' },
+        { label: 'DATABASE_PASSWORD', value: '[redacted]' },
+        { label: 'db_password', value: '[redacted]' },
+      ],
+    });
+  });
+
   it('redacts sensitive fields in tool.update rawInput and rawOutput at normalizer boundary (wenshao CRIT #2)', () => {
     const events = normalizeDaemonEvent({
       id: 1,
@@ -1245,6 +1338,22 @@ describe('daemon UI normalizer and transcript reducer', () => {
             text: 'OK',
             token: 'returned-secret-do-not-leak',
           },
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                apiKey: 'content-secret-do-not-leak',
+                text: 'visible content',
+              },
+            },
+          ],
+          locations: [
+            {
+              path: '/tmp/output.txt',
+              access_key: 'location-secret-do-not-leak',
+            },
+          ],
         },
       },
     } as never);
@@ -1287,5 +1396,89 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(event.details).not.toContain('sk-prod-do-not-leak');
     expect(event.details).not.toContain('Bearer secret-do-not-leak');
     expect(event.details).not.toContain('returned-secret-do-not-leak');
+    expect(serialized).not.toContain('content-secret-do-not-leak');
+    expect(serialized).not.toContain('location-secret-do-not-leak');
+    expect(event.content).toMatchObject([
+      {
+        content: {
+          apiKey: '[redacted]',
+          text: 'visible content',
+        },
+      },
+    ]);
+    expect(event.locations).toMatchObject([
+      {
+        path: '/tmp/output.txt',
+        access_key: '[redacted]',
+      },
+    ]);
+  });
+
+  it('redacts permission tool calls at the normalizer boundary', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'perm-secret',
+        toolCall: {
+          name: 'Bash',
+          rawInput: {
+            command: 'curl https://api.example.com',
+            Authorization: 'Bearer permission-secret-do-not-leak',
+          },
+        },
+        options: [{ optionId: 'allow', label: 'Allow' }],
+      },
+    } as never);
+
+    expect(event).toMatchObject({
+      type: 'permission.request',
+      toolCall: {
+        rawInput: {
+          command: 'curl https://api.example.com',
+          Authorization: '[redacted]',
+        },
+      },
+    });
+    expect(JSON.stringify(event)).not.toContain(
+      'Bearer permission-secret-do-not-leak',
+    );
+  });
+
+  it('reports subscriber errors when reportError is unavailable', async () => {
+    const previousReportError = (
+      globalThis as typeof globalThis & {
+        reportError?: (error: unknown) => void;
+      }
+    ).reportError;
+    const consoleError = vi
+      .spyOn(globalThis.console, 'error')
+      .mockImplementation(() => {});
+    try {
+      (
+        globalThis as typeof globalThis & {
+          reportError?: (error: unknown) => void;
+        }
+      ).reportError = undefined;
+      const store = createDaemonTranscriptStore();
+      const listenerError = new Error('listener failed');
+      store.subscribe(() => {
+        throw listenerError;
+      });
+
+      store.dispatch({ type: 'status', text: 'notify' });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(consoleError).toHaveBeenCalledWith(listenerError);
+    } finally {
+      consoleError.mockRestore();
+      (
+        globalThis as typeof globalThis & {
+          reportError?: (error: unknown) => void;
+        }
+      ).reportError = previousReportError;
+    }
   });
 });

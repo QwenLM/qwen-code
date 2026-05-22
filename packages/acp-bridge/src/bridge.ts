@@ -1227,6 +1227,33 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     return response as unknown as T;
   };
 
+  const notifyAgentSessionClose = async (
+    entry: SessionEntry,
+    ci: ChannelInfo | undefined,
+    label: 'closeSession' | 'killSession',
+  ): Promise<void> => {
+    if (!ci || ci.channel !== entry.channel) return;
+    try {
+      await Promise.race([
+        withTimeout(
+          entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+            sessionId: entry.sessionId,
+          }),
+          initTimeoutMs,
+          SERVE_CONTROL_EXT_METHODS.sessionClose,
+        ),
+        getTransportClosedReject(entry),
+      ]);
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: ${label} ACP session close notification failed ` +
+          `for session ${JSON.stringify(entry.sessionId)}: ${String(
+            err instanceof Error ? err.message : err,
+          )}`,
+      );
+    }
+  };
+
   /**
    * Fan-out an event to every live session bus. PR 17 mutation events
    * (`tool_toggled`, `workspace_initialized`, `mcp_server_restart*`,
@@ -2237,6 +2264,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
+      await notifyAgentSessionClose(entry, ci, 'closeSession');
       // F3 Commit 3 — mediator-driven cancel cascade replaces the
       // pre-F3 per-id resolvePending loop. Same effect (each pending
       // settles as cancelled, SSE permission_resolved emits, audit
@@ -2874,7 +2902,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return { toolName, enabled };
     },
 
-    async restartMcpServer(serverName, originatorClientId) {
+    async restartMcpServer(serverName, originatorClientId, opts) {
       // #4175 Wave 4 PR 17. The restart logic lives inside the ACP
       // child (it owns the `McpClientManager`); the bridge's role is
       // to (a) pick a live channel to forward through, (b) translate
@@ -2885,37 +2913,55 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // not connected) are translated via `data.errorKind` into typed
       // bridge errors that `sendBridgeError` maps to stable HTTP
       // responses (#4282 gpt-5.5 C4/C5 fold-in).
+      //
+      // F2 (#4175 commit 5): `opts.entryIndex` is forwarded to the
+      // ACP child for pool-mode restart targeting. The agent's
+      // handler falls back to legacy single-entry semantics when no
+      // pool entry matches, so older daemons that don't yet honor
+      // `entryIndex` keep the pre-F2 response shape — clients
+      // gated on the `mcp_pool_restart` capability tag are the only
+      // ones that send `entryIndex`.
       const info = liveChannelInfo();
       if (!info) {
         throw new SessionNotFoundError(`mcp:${serverName}`);
       }
-      let response:
-        | { serverName: string; restarted: true; durationMs: number }
-        | {
-            serverName: string;
-            restarted: false;
-            skipped: true;
-            reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
-          };
+      type LegacyOk = {
+        serverName: string;
+        restarted: true;
+        durationMs: number;
+      };
+      type LegacySkip = {
+        serverName: string;
+        restarted: false;
+        skipped: true;
+        reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      };
+      type PoolEntries = {
+        serverName: string;
+        entries: Array<{
+          entryIndex: number;
+          restarted: boolean;
+          durationMs?: number;
+          reason?: string;
+        }>;
+      };
+      let response: LegacyOk | LegacySkip | PoolEntries;
+      const params: Record<string, unknown> = { serverName };
+      if (opts?.entryIndex !== undefined) {
+        params['entryIndex'] = opts.entryIndex;
+      }
       try {
         response = (await Promise.race([
           withTimeout(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
-              { serverName },
+              params,
             ),
             MCP_RESTART_TIMEOUT_MS,
             SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
           ),
           getChannelClosedReject(info),
-        ])) as
-          | { serverName: string; restarted: true; durationMs: number }
-          | {
-              serverName: string;
-              restarted: false;
-              skipped: true;
-              reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
-            };
+        ])) as LegacyOk | LegacySkip | PoolEntries;
       } catch (err) {
         // Detect structured ACP error payloads and re-instantiate as
         // typed bridge errors. JSON-RPC strips class names across the
@@ -2938,7 +2984,66 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         }
         throw err;
       }
-      if (response.restarted === true) {
+      // F2 (#4175 commit 5): pool-mode `entries[]` shape fans out one
+      // typed event per entry so SDK reducers see a stable per-entry
+      // count regardless of whether the underlying restart was
+      // single-entry (legacy) or multi-entry (pool-mode). Reusing the
+      // existing `mcp_server_restarted` / `mcp_server_restart_refused`
+      // event types keeps `KnownDaemonEvent` schema additive — clients
+      // gated only on `entryCount > 1` get accurate per-entry signals
+      // without a new event type.
+      // F2 (#4175 commit 6 review fix — wenshao W15): the response
+      // arrives as untyped JSON from `info.connection.extMethod(...)`
+      // — a buggy/out-of-sync ACP child returning a malformed shape
+      // (e.g. `entries` is a string, or per-entry objects miss
+      // `entryIndex`) would otherwise crash this route with a
+      // TypeError. Add a runtime shape check and degrade-with-error
+      // for entries that don't match the typed wire contract.
+      if ('entries' in response) {
+        const entries = Array.isArray(response.entries) ? response.entries : [];
+        if (!Array.isArray(response.entries)) {
+          writeStderrLine(
+            `qwen serve: pool restart response carried 'entries' field ` +
+              `but it is not an array (server=${response.serverName}); ` +
+              `treating as empty.`,
+          );
+        }
+        for (const entry of entries) {
+          if (
+            typeof entry !== 'object' ||
+            entry === null ||
+            typeof (entry as { entryIndex?: unknown }).entryIndex !== 'number'
+          ) {
+            writeStderrLine(
+              `qwen serve: skipping malformed pool restart entry ` +
+                `(server=${response.serverName}): ${JSON.stringify(entry)}`,
+            );
+            continue;
+          }
+          if (entry.restarted) {
+            broadcastWorkspaceEvent({
+              type: 'mcp_server_restarted',
+              data: {
+                serverName: response.serverName,
+                durationMs: entry.durationMs ?? 0,
+                entryIndex: entry.entryIndex,
+              },
+              ...(originatorClientId ? { originatorClientId } : {}),
+            });
+          } else {
+            broadcastWorkspaceEvent({
+              type: 'mcp_server_restart_refused',
+              data: {
+                serverName: response.serverName,
+                reason: 'restart_failed',
+                entryIndex: entry.entryIndex,
+                ...(entry.reason ? { details: entry.reason } : {}),
+              },
+              ...(originatorClientId ? { originatorClientId } : {}),
+            });
+          }
+        }
+      } else if (response.restarted === true) {
         broadcastWorkspaceEvent({
           type: 'mcp_server_restarted',
           data: {
@@ -3307,6 +3412,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
+      await notifyAgentSessionClose(entry, ci, 'killSession');
       // PR 14b fix (codex round 5): tombstone the killed sessionId
       // so any in-flight `extNotification` from the (about-to-be-
       // killed) child can't seed the early-event buffer for a
@@ -3331,16 +3437,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       }
       entry.events.close();
       // Only kill the channel when no other sessions remain AND no
-      // restore is in flight. ACP doesn't expose a per-session "close"
-      // call on the agent side, so the agent's `sessions: Map<string,
-      // Session>` grows by one until the channel dies — bounded by
-      // `maxSessions` (default 20) so memory is capped. FIXME(stage-
-      // 1.5): if ACP grows a `closeSession` notification, send it
-      // here so the agent can drop the entry from its map immediately
-      // rather than at channel exit. (`channelInfo` itself is cleared
-      // by the `channel.exited` handler once the OS reaps the child —
-      // tanzhenxin BkUyD invariant.)
-      //
+      // restore is in flight.
       // `pendingRestoreIds` covers in-flight `session/load` and
       // `session/resume` calls that haven't yet registered into
       // `sessionIds`. Killing the channel out from under them would
