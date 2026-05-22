@@ -309,7 +309,7 @@ export async function atomicWriteFile(
             // a transient seccomp EPERM on `fchmod`).
             if (!writeOk) {
               try {
-                await fs.unlink(targetPath);
+                await unlinkImpl(targetPath);
               } catch (orphanErr) {
                 // Best-effort cleanup, but log so incident response
                 // can correlate the original write error with a
@@ -625,7 +625,7 @@ export function atomicWriteFileSync(
             // so subsequent retries don't deadlock on EEXIST.
             if (!writeOk) {
               try {
-                fsSync.unlinkSync(targetPath);
+                unlinkImpl(targetPath);
               } catch (orphanErr) {
                 debugLogger.debug(
                   `orphan unlink failed for ${targetPath}:`,

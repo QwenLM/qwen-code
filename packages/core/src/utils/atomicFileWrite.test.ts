@@ -1203,4 +1203,185 @@ describe('noFollow option — symlink protection', () => {
       );
     },
   );
+
+  // Round-13 narrowed the path-level tryChmod / tryChmodSync catch to
+  // ENOSYS/ENOTSUP only — same shape as the round-8 fd-level fchmod
+  // narrowing — but unlike fchmod the tryChmod path had zero direct
+  // coverage. The existing EXDEV tests pass `options: undefined`, so
+  // `desiredMode === undefined` short-circuits before chmod is even
+  // attempted. Inject `_testFs.chmod` and exercise both sides of the
+  // narrowed catch.
+  it.each(['ENOSYS', 'ENOTSUP'] as const)(
+    'atomicWriteFile: tryChmod swallows %s (FAT/exFAT — non-noFollow EXDEV path)',
+    async (chmodCode) => {
+      const target = path.join(tmpDir, `trychmod-${chmodCode}.txt`);
+      const exdevRename = async () => {
+        const e: NodeJS.ErrnoException = new Error('EXDEV');
+        e.code = 'EXDEV';
+        throw e;
+      };
+      const chmod = async () => {
+        const e: NodeJS.ErrnoException = new Error(chmodCode);
+        e.code = chmodCode;
+        throw e;
+      };
+
+      await atomicWriteFile(
+        target,
+        'NEW',
+        { mode: 0o600 },
+        { rename: exdevRename, chmod },
+      );
+
+      expect(await fs.readFile(target, 'utf-8')).toBe('NEW');
+    },
+  );
+
+  it('atomicWriteFile: tryChmod propagates EPERM (non-noFollow EXDEV path)', async () => {
+    const target = path.join(tmpDir, 'trychmod-eperm.txt');
+    const exdevRename = async () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+    const chmod = async () => {
+      const e: NodeJS.ErrnoException = new Error('EPERM');
+      e.code = 'EPERM';
+      throw e;
+    };
+
+    await expect(
+      atomicWriteFile(
+        target,
+        'NEW',
+        { mode: 0o600 },
+        { rename: exdevRename, chmod },
+      ),
+    ).rejects.toThrow(/EPERM/);
+  });
+
+  it.each(['ENOSYS', 'ENOTSUP'] as const)(
+    'atomicWriteFileSync: tryChmodSync swallows %s (FAT/exFAT — non-noFollow EXDEV path)',
+    (chmodCode) => {
+      const target = path.join(tmpDir, `trychmod-sync-${chmodCode}.txt`);
+      const exdevRename = () => {
+        const e: NodeJS.ErrnoException = new Error('EXDEV');
+        e.code = 'EXDEV';
+        throw e;
+      };
+      const chmod = () => {
+        const e: NodeJS.ErrnoException = new Error(chmodCode);
+        e.code = chmodCode;
+        throw e;
+      };
+
+      atomicWriteFileSync(
+        target,
+        'NEW',
+        { mode: 0o600 },
+        { rename: exdevRename, chmod },
+      );
+
+      expect(fsSync.readFileSync(target, 'utf-8')).toBe('NEW');
+    },
+  );
+
+  it('atomicWriteFileSync: tryChmodSync propagates EPERM (non-noFollow EXDEV path)', () => {
+    const target = path.join(tmpDir, 'trychmod-sync-eperm.txt');
+    const exdevRename = () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+    const chmod = () => {
+      const e: NodeJS.ErrnoException = new Error('EPERM');
+      e.code = 'EPERM';
+      throw e;
+    };
+
+    expect(() =>
+      atomicWriteFileSync(
+        target,
+        'NEW',
+        { mode: 0o600 },
+        { rename: exdevRename, chmod },
+      ),
+    ).toThrow(/EPERM/);
+  });
+
+  // Round-13's orphan-cleanup unlink (after a failed write/sync/fchmod
+  // on the noFollow EXDEV path) was using raw `fs.unlink` /
+  // `fsSync.unlinkSync` instead of the injected `unlinkImpl` seam
+  // every other fs op flows through. These tests inject a spy on
+  // unlinkImpl and assert it's invoked with targetPath on the
+  // failure path — guards against silently bypassing the seam in
+  // any future refactor.
+  it('atomicWriteFile: orphan cleanup on fchmod failure goes through unlinkImpl', async () => {
+    const target = path.join(tmpDir, 'orphan-via-seam.txt');
+    const exdevRename = async () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+    const fchmod = async () => {
+      const e: NodeJS.ErrnoException = new Error('EPERM');
+      e.code = 'EPERM';
+      throw e;
+    };
+    const unlinkSpy = vi.fn(fs.unlink);
+
+    await expect(
+      atomicWriteFile(
+        target,
+        'NEW',
+        { noFollow: true, mode: 0o600 },
+        {
+          rename: exdevRename,
+          fchmod,
+          unlink: unlinkSpy as typeof fs.unlink,
+        },
+      ),
+    ).rejects.toThrow(/EPERM/);
+
+    const orphanCleanupCalls = unlinkSpy.mock.calls.filter(
+      ([p]) => p === target,
+    );
+    // Pre-open unlink + post-failure orphan cleanup: target appears twice.
+    expect(orphanCleanupCalls.length).toBeGreaterThanOrEqual(2);
+    expect(fsSync.existsSync(target)).toBe(false);
+  });
+
+  it('atomicWriteFileSync: orphan cleanup on fchmod failure goes through unlinkImpl', () => {
+    const target = path.join(tmpDir, 'orphan-via-seam-sync.txt');
+    const exdevRename = () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+    const fchmod = () => {
+      const e: NodeJS.ErrnoException = new Error('EPERM');
+      e.code = 'EPERM';
+      throw e;
+    };
+    const unlinkSpy = vi.fn(fsSync.unlinkSync);
+
+    expect(() =>
+      atomicWriteFileSync(
+        target,
+        'NEW',
+        { noFollow: true, mode: 0o600 },
+        {
+          rename: exdevRename,
+          fchmod,
+          unlink: unlinkSpy as typeof fsSync.unlinkSync,
+        },
+      ),
+    ).toThrow(/EPERM/);
+
+    const orphanCleanupCalls = unlinkSpy.mock.calls.filter(
+      ([p]) => p === target,
+    );
+    expect(orphanCleanupCalls.length).toBeGreaterThanOrEqual(2);
+    expect(fsSync.existsSync(target)).toBe(false);
+  });
 });
