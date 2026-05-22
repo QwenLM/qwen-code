@@ -21,6 +21,14 @@ def tool_index(request: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def tool_name_counts(request: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for idx, tool in enumerate(request.get("tools") or []):
+        name = tool.get("name") or f"<unnamed-{idx}>"
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
 def compare_request(idx: int, left: dict[str, Any], right: dict[str, Any]) -> list[str]:
     diffs: list[str] = []
     prefix = f"request[{idx}]"
@@ -28,6 +36,7 @@ def compare_request(idx: int, left: dict[str, Any], right: dict[str, Any]) -> li
         "method",
         "url_path",
         "body_keys",
+        "body_values",
         "model",
         "stream",
         "response_status",
@@ -39,7 +48,27 @@ def compare_request(idx: int, left: dict[str, Any], right: dict[str, Any]) -> li
     right_roles = [item.get("role") for item in right.get("messages") or []]
     if left_roles != right_roles:
         diffs.append(f"{prefix}.message_roles: {left_roles!r} != {right_roles!r}")
+    for msg_idx, (left_msg, right_msg) in enumerate(
+        zip(left.get("messages") or [], right.get("messages") or [])
+    ):
+        if left_msg.get("content_hash") != right_msg.get("content_hash"):
+            diffs.append(
+                f"{prefix}.messages[{msg_idx}].content_hash: "
+                f"{left_msg.get('content_hash')!r} != "
+                f"{right_msg.get('content_hash')!r}"
+            )
 
+    left_tool_list = left.get("tools") or []
+    right_tool_list = right.get("tools") or []
+    if len(left_tool_list) != len(right_tool_list):
+        diffs.append(
+            f"{prefix}.tools_count: {len(left_tool_list)} != {len(right_tool_list)}"
+        )
+    if tool_name_counts(left) != tool_name_counts(right):
+        diffs.append(
+            f"{prefix}.tool_name_counts: "
+            f"{tool_name_counts(left)!r} != {tool_name_counts(right)!r}"
+        )
     left_tools = tool_index(left)
     right_tools = tool_index(right)
     missing = sorted(set(left_tools) - set(right_tools))

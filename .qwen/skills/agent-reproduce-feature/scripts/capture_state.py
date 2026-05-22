@@ -150,7 +150,7 @@ def looks_like_text_path(path: Path) -> bool:
 
 def redact_text(text: str) -> str:
     home = str(Path.home())
-    text = text.replace(home, "~")
+    text = re.sub(re.escape(home) + r"(?=[/\s\"',;]|$)", "~", text)
     text = BEARER_RE.sub("Bearer <redacted>", text)
     text = OPENAI_STYLE_KEY_RE.sub("sk-<redacted>", text)
     text = GITHUB_TOKEN_RE.sub("gh_<redacted>", text)
@@ -224,6 +224,14 @@ def entry_for_file(
     return entry
 
 
+def entry_for_symlink(path: Path) -> dict[str, Any]:
+    try:
+        target = os.readlink(path)
+    except OSError:
+        target = None
+    return {"kind": "symlink", "target": target}
+
+
 def collect_entries(
     root: Path,
     max_hash_bytes: int,
@@ -237,7 +245,7 @@ def collect_entries(
             rel_path = path.relative_to(root).as_posix()
             try:
                 if path.is_symlink():
-                    entries[rel_path] = {"kind": "symlink"}
+                    entries[rel_path] = entry_for_symlink(path)
                 else:
                     walkable_dirnames.append(dirname)
             except OSError as exc:
@@ -248,7 +256,7 @@ def collect_entries(
             rel_path = path.relative_to(root).as_posix()
             try:
                 if path.is_symlink():
-                    entries[rel_path] = {"kind": "symlink"}
+                    entries[rel_path] = entry_for_symlink(path)
                 elif path.is_file():
                     entries[rel_path] = entry_for_file(
                         path,
@@ -318,6 +326,7 @@ def changed_fields(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
         "sha256",
         "hash_status",
         "text_status",
+        "target",
     ):
         if before.get(field) != after.get(field):
             fields.append(field)
@@ -441,7 +450,7 @@ def build_diff(
 
 def metadata_line(entry: dict[str, Any]) -> str:
     parts = [f"kind={entry.get('kind')}"]
-    for key in ("size", "mode", "sha256", "hash_status", "text_status"):
+    for key in ("size", "mode", "sha256", "hash_status", "text_status", "target"):
         value = entry.get(key)
         if value is not None:
             parts.append(f"{key}={value}")

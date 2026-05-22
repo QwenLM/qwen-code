@@ -112,5 +112,12 @@ REPRO_CAPTURE_OUT="${http_out}" \
 status=$?
 set -e
 
+sleep "${REPRO_MITM_DRAIN_SECONDS:-1}"
+
 echo "${status}" > "${out_dir}/command.exit"
+if [[ "${status}" -ne 0 ]]; then
+  echo "command_failed: exit=${status}" >&2
+  echo "stdout=${out_dir}/command.stdout" >&2
+  echo "stderr=${out_dir}/command.stderr" >&2
+fi
 exit "${status}"

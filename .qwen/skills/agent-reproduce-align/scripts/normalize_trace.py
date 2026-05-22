@@ -40,6 +40,37 @@ SCHEMA_KEYS = (
     "allOf",
     "oneOf",
     "additionalProperties",
+    "description",
+    "default",
+    "examples",
+    "format",
+    "minimum",
+    "maximum",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "$ref",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "nullable",
+)
+
+PARITY_BODY_VALUE_KEYS = (
+    "model",
+    "stream",
+    "temperature",
+    "max_tokens",
+    "max_completion_tokens",
+    "tool_choice",
+    "top_p",
+    "top_k",
+    "n",
+    "stop",
+    "response_format",
+    "seed",
+    "reasoning_effort",
+    "parallel_tool_calls",
 )
 
 
@@ -146,6 +177,12 @@ def summarize_messages(value: Any) -> list[dict[str, Any]]:
     return summary
 
 
+def summarize_body_values(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        return {}
+    return {key: body[key] for key in PARITY_BODY_VALUE_KEYS if key in body}
+
+
 def normalize(path: Path) -> dict[str, Any]:
     requests = []
     for line_num, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -171,6 +208,7 @@ def normalize(path: Path) -> dict[str, Any]:
                 "method": req.get("method"),
                 "url_path": url_path,
                 "body_keys": sorted(body.keys()) if isinstance(body, dict) else [],
+                "body_values": summarize_body_values(body),
                 "model": body.get("model") if isinstance(body, dict) else None,
                 "stream": body.get("stream") if isinstance(body, dict) else None,
                 "messages": summarize_messages(body),

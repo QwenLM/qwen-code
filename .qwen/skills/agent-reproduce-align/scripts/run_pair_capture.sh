@@ -108,6 +108,10 @@ echo "normalize_reference_status=${normalize_ref_status}"
 echo "normalize_qwen_status=${normalize_qwen_status}"
 echo "compare_status=${compare_status}"
 echo "diff=${out_dir}/trace.diff"
+echo "reference_stdout=${out_dir}/reference/command.stdout"
+echo "reference_stderr=${out_dir}/reference/command.stderr"
+echo "qwen_stdout=${out_dir}/qwen/command.stdout"
+echo "qwen_stderr=${out_dir}/qwen/command.stderr"
 
 if [[ "${reference_status}" -ne 0 || "${qwen_status}" -ne 0 || "${normalize_ref_status}" -ne 0 || "${normalize_qwen_status}" -ne 0 || "${compare_status}" -ne 0 ]]; then
   exit 1

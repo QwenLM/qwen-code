@@ -10,6 +10,7 @@ import base64
 import json
 import os
 import re
+import sys
 import time
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -133,10 +134,13 @@ def _decode(content: bytes | None) -> dict[str, Any]:
 
 
 def _write_record(record: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(OUT)), exist_ok=True)
-    with open(OUT, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-    os.chmod(os.path.abspath(OUT), 0o600)
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(OUT)), exist_ok=True)
+        with open(OUT, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        os.chmod(os.path.abspath(OUT), 0o600)
+    except Exception as exc:
+        print(f"[llm_dump] FAILED to write record: {exc}", file=sys.stderr)
 
 
 def _interesting(flow: http.HTTPFlow) -> bool:
@@ -165,7 +169,7 @@ def response(flow: http.HTTPFlow) -> None:
             "method": flow.request.method,
             "url": _redact_url(flow.request.pretty_url),
             "headers": _headers(flow.request.headers),
-            "body": _decode(flow.request.raw_content),
+            "body": _decode(flow.request.content),
         },
         "response": None,
     }
@@ -173,6 +177,6 @@ def response(flow: http.HTTPFlow) -> None:
         record["response"] = {
             "status_code": flow.response.status_code,
             "headers": _headers(flow.response.headers),
-            "body": _decode(flow.response.raw_content),
+            "body": _decode(flow.response.content),
         }
     _write_record(record)
