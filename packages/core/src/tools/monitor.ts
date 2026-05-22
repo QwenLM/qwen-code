@@ -34,7 +34,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
-  detectCommandSubstitution,
+  buildShellExecWarnings,
   getCommandRoot,
   getShellConfiguration,
   hasUnsafeMonitorBackgroundOperator,
@@ -261,15 +261,10 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Checked against both the normalized safety command and the
     // original params.command so wrappers like `bash -c "..."` still
     // trigger the warning.
-    const warnings: string[] = [];
-    if (
-      detectCommandSubstitution(normalized.safetyCommand) ||
-      detectCommandSubstitution(this.params.command)
-    ) {
-      warnings.push(
-        'Contains command substitution ($(...), backticks, <(...), or >(...)).',
-      );
-    }
+    const warnings = buildShellExecWarnings(
+      normalized.safetyCommand,
+      this.params.command,
+    );
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
@@ -284,7 +279,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         _payload?: ToolConfirmationPayload,
       ) => {},
     };
-    if (warnings.length > 0) {
+    if (warnings) {
       confirmationDetails.warnings = warnings;
     }
     return confirmationDetails;

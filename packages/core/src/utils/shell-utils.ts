@@ -1202,6 +1202,39 @@ export function detectCommandSubstitution(command: string): boolean {
 }
 
 /**
+ * User-facing warning emitted when a shell-tool invocation contains
+ * command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`).
+ * Shared across the shell-tool and monitor-tool confirmation paths so
+ * the wording can't drift between sites — see #4386 review (round 3).
+ */
+export const COMMAND_SUBSTITUTION_WARNING =
+  'Contains command substitution ($(...), backticks, <(...), or >(...)).';
+
+/**
+ * Build the warnings array for a shell-like tool's exec confirmation.
+ * Checks substitution against both the stripped command (post
+ * `stripShellWrapper`) and the original command (pre-strip) so wrappers
+ * like `bash -c "...$(...)..."` are flagged even when the substitution
+ * lives inside the wrapper's quoted argument.
+ *
+ * Returns `undefined` when nothing to flag — callers should only assign
+ * the `warnings` field when the result is truthy, mirroring the
+ * existing `if (warnings.length > 0)` pattern at each call site.
+ */
+export function buildShellExecWarnings(
+  strippedCommand: string,
+  rawCommand: string,
+): string[] | undefined {
+  if (
+    detectCommandSubstitution(strippedCommand) ||
+    detectCommandSubstitution(rawCommand)
+  ) {
+    return [COMMAND_SUBSTITUTION_WARNING];
+  }
+  return undefined;
+}
+
+/**
  * Checks a shell command against security policies and permission rules.
  *
  * Uses PermissionManager (via config.getPermissionManager()) to evaluate each

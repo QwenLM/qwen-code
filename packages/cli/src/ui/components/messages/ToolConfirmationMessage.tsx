@@ -307,7 +307,7 @@ export const ToolConfirmationMessage: React.FC<
         </Box>
         {warningsCount > 0 ? (
           <Box flexDirection="column" paddingX={1} marginLeft={1} marginTop={1}>
-            {executionProps.warnings!.map((warning, idx) => (
+            {warnings.map((warning, idx) => (
               <Text key={idx} color={theme.status.warning}>
                 ⚠ {warning}
               </Text>
