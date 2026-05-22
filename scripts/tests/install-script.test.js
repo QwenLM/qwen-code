@@ -1397,6 +1397,78 @@ describe('standalone release packaging', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('redacts credentials in release base URL validation errors', async () => {
+    const { verifyReleaseBaseUrl } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    const fetchImpl = vi.fn();
+
+    await expect(
+      verifyReleaseBaseUrl('https://user:secret@127.0.0.1/release/', {
+        fetchImpl,
+      }),
+    ).rejects.toThrow(
+      /--base-url must not target a private network: https:\/\/127\.0\.0\.1\/release\//,
+    );
+    await expect(
+      verifyReleaseBaseUrl('https://user:secret@127.0.0.1/release/', {
+        fetchImpl,
+      }),
+    ).rejects.not.toThrow(/user:secret|secret/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('redacts credentials in invalid release base URL errors', async () => {
+    const { verifyReleaseBaseUrl } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+
+    for (const baseUrl of [
+      'https://user:p@ss@example.com:bad/release/',
+      'https://user:my secret@example.com:bad/release/',
+    ]) {
+      await expect(verifyReleaseBaseUrl(baseUrl)).rejects.toThrow(
+        /--base-url must be a valid URL: <redacted URL>/,
+      );
+      await expect(verifyReleaseBaseUrl(baseUrl)).rejects.not.toThrow(
+        /user:|p@ss|my secret|ss@example/,
+      );
+    }
+  });
+
+  it('redacts credentials in remote release URL errors', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
+      await import(installationReleaseVerificationScriptUrl);
+    const checksumContent = placeholderChecksumContent(
+      EXPECTED_STANDALONE_ARCHIVE_NAMES,
+    );
+    const fetchedUrls = [];
+    const fetchImpl = async (url) => {
+      fetchedUrls.push(url);
+      if (url.endsWith('/SHA256SUMS')) {
+        return new Response(checksumContent);
+      }
+      return new Response('missing', { status: 404, statusText: 'Not Found' });
+    };
+
+    await expect(
+      verifyReleaseBaseUrl('https://user:secret@example.com/qwen-code/v0.0.0', {
+        fetchImpl,
+      }),
+    ).rejects.toThrow(
+      /check --base-url: https:\/\/example\.com\/qwen-code\/v0\.0\.0\//,
+    );
+    await expect(
+      verifyReleaseBaseUrl('https://user:secret@example.com/qwen-code/v0.0.0', {
+        fetchImpl,
+      }),
+    ).rejects.not.toThrow(/user:secret|secret/);
+    for (const url of fetchedUrls) {
+      expect(url).not.toContain('user:secret');
+      expect(url).not.toContain('secret');
+    }
+  });
+
   it('downloads release archive bodies instead of relying on HEAD probes', async () => {
     const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
       await import(installationReleaseVerificationScriptUrl);
@@ -1767,6 +1839,22 @@ describe('standalone release packaging', () => {
     expect(workflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
+    const buildStandaloneStepIndex = workflow.indexOf(
+      "name: 'Build Standalone Archives'",
+    );
+    const localVerifyStepIndex = workflow.indexOf(
+      "name: 'Verify Installation Release Assets'",
+    );
+    const npmPackagePublishStepIndex = workflow.indexOf(
+      "name: 'Publish @qwen-code/qwen-code'",
+    );
+    const npmChannelPublishStepIndex = workflow.indexOf(
+      "name: 'Publish @qwen-code/channel-base'",
+    );
+    expect(buildStandaloneStepIndex).toBeGreaterThanOrEqual(0);
+    expect(localVerifyStepIndex).toBeGreaterThan(buildStandaloneStepIndex);
+    expect(npmPackagePublishStepIndex).toBeGreaterThan(localVerifyStepIndex);
+    expect(npmChannelPublishStepIndex).toBeGreaterThan(localVerifyStepIndex);
     expect(workflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
     expect(workflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_SECRET');
     expect(workflow).toContain('vars.ALIYUN_OSS_BUCKET');
@@ -1788,6 +1876,7 @@ describe('standalone release packaging', () => {
       "name: 'Create GitHub Release and Tag'",
     );
     expect(createReleaseStepIndex).toBeGreaterThanOrEqual(0);
+    expect(createReleaseStepIndex).toBeGreaterThan(localVerifyStepIndex);
     const createReleaseStep = workflow.slice(createReleaseStepIndex);
     expect(createReleaseStep).toContain('mapfile -t release_assets');
     expect(createReleaseStep).toContain('"${release_assets[@]}"');
@@ -2722,6 +2811,24 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
 
     try {
       const archive = createSymlinkStandaloneArchive(tmpDir);
+
+      expect(() =>
+        runUnixInstaller(
+          archive,
+          path.join(tmpDir, 'install'),
+          path.join(tmpDir, 'home'),
+        ),
+      ).toThrow(/Archive contains symlinks/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnUnix('rejects standalone zip archives containing symlinks', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = createZipSymlinkStandaloneArchive(tmpDir);
 
       expect(() =>
         runUnixInstaller(
@@ -3961,6 +4068,33 @@ function createSymlinkStandaloneArchive(tmpDir) {
       stdio: 'ignore',
     },
   );
+  writeChecksumFile(outDir, path.basename(archive));
+  return archive;
+}
+
+function createZipSymlinkStandaloneArchive(tmpDir) {
+  const maliciousRoot = path.join(tmpDir, 'zip-malicious');
+  const packageRoot = path.join(maliciousRoot, 'qwen-code');
+  mkdirSync(path.join(packageRoot, 'bin'), { recursive: true });
+  mkdirSync(path.join(packageRoot, 'node', 'bin'), { recursive: true });
+  symlinkSync('/usr/bin/env', path.join(packageRoot, 'bin', 'qwen'));
+  writeFileSync(
+    path.join(packageRoot, 'node', 'bin', 'node'),
+    '#!/usr/bin/env sh\necho 0.0.0-smoke\n',
+  );
+  chmodSync(path.join(packageRoot, 'node', 'bin', 'node'), 0o755);
+  writeFileSync(
+    path.join(packageRoot, 'manifest.json'),
+    JSON.stringify({ name: '@qwen-code/qwen-code', target: 'linux-x64' }),
+  );
+
+  const outDir = path.join(tmpDir, 'out');
+  mkdirSync(outDir, { recursive: true });
+  const archive = path.join(outDir, 'qwen-code-linux-x64.zip');
+  execFileSync('zip', ['-qry', archive, 'qwen-code'], {
+    cwd: maliciousRoot,
+    stdio: 'ignore',
+  });
   writeChecksumFile(outDir, path.basename(archive));
   return archive;
 }

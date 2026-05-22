@@ -154,6 +154,7 @@ async function verifyReleaseDirectory(dir, options = {}) {
 async function verifyReleaseBaseUrl(baseUrl, options = {}) {
   const { fetchImpl = fetch } = options;
   const normalizedBaseUrl = normalizeHttpsBaseUrl(baseUrl);
+  const displayBaseUrl = redactUrlForLog(normalizedBaseUrl);
   const checksumUrl = new URL('SHA256SUMS', normalizedBaseUrl).toString();
   const checksums = parseSha256Sums(await fetchText(checksumUrl, fetchImpl));
   assertExpectedChecksumEntries(checksums);
@@ -161,7 +162,7 @@ async function verifyReleaseBaseUrl(baseUrl, options = {}) {
   await assertRemoteAssetChecksums(normalizedBaseUrl, checksums, fetchImpl);
 
   console.log(
-    `Verified ${EXPECTED_RELEASE_ASSET_NAMES.length} installation release assets at ${baseUrl}`,
+    `Verified ${EXPECTED_RELEASE_ASSET_NAMES.length} installation release assets at ${displayBaseUrl}`,
   );
 }
 
@@ -225,8 +226,9 @@ async function assertRemoteAssetChecksums(
     return;
   }
   if (failures.length === EXPECTED_STANDALONE_ARCHIVE_NAMES.length) {
+    const displayBaseUrl = redactUrlForLog(normalizedBaseUrl);
     fail(
-      `All ${failures.length} release asset URLs are unavailable; check --base-url: ${normalizedBaseUrl}`,
+      `All ${failures.length} release asset URLs are unavailable; check --base-url: ${displayBaseUrl}`,
     );
   }
   fail(
@@ -237,14 +239,15 @@ async function assertRemoteAssetChecksums(
 }
 
 async function fetchSha256(url, fetchImpl) {
+  const displayUrl = redactUrlForLog(url);
   const response = await fetchWithTimeout(fetchImpl, url);
   if (!response.ok) {
     fail(
-      `Failed to download ${url}: ${response.status} ${response.statusText}`,
+      `Failed to download ${displayUrl}: ${response.status} ${response.statusText}`,
     );
   }
   if (!response.body) {
-    fail(`Downloaded response has no body: ${url}`);
+    fail(`Downloaded response has no body: ${displayUrl}`);
   }
 
   const hash = crypto.createHash('sha256');
@@ -260,10 +263,11 @@ function formatErrorReason(reason) {
 }
 
 async function fetchText(url, fetchImpl) {
+  const displayUrl = redactUrlForLog(url);
   const response = await fetchWithTimeout(fetchImpl, url);
   if (!response.ok) {
     fail(
-      `Failed to download ${url}: ${response.status} ${response.statusText}`,
+      `Failed to download ${displayUrl}: ${response.status} ${response.statusText}`,
     );
   }
   return response.text();
@@ -281,18 +285,33 @@ function normalizeHttpsBaseUrl(baseUrl) {
   try {
     parsed = new URL(baseUrl);
   } catch {
-    fail(`--base-url must be a valid URL: ${baseUrl}`);
+    fail(`--base-url must be a valid URL: ${redactUrlForLog(baseUrl)}`);
   }
+  const displayBaseUrl = redactUrlForLog(parsed.toString());
   if (parsed.protocol !== 'https:') {
-    fail(`--base-url must use https: ${baseUrl}`);
+    fail(`--base-url must use https: ${displayBaseUrl}`);
   }
   if (isPrivateOrReservedHost(parsed.hostname)) {
-    fail(`--base-url must not target a private network: ${baseUrl}`);
+    fail(`--base-url must not target a private network: ${displayBaseUrl}`);
   }
+  parsed.username = '';
+  parsed.password = '';
   if (!parsed.pathname.endsWith('/')) {
     parsed.pathname = `${parsed.pathname}/`;
   }
   return parsed.toString();
+}
+
+function redactUrlForLog(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    const value = String(url);
+    return value.includes('@') ? '<redacted URL>' : value;
+  }
 }
 
 function standaloneArchiveName(qwenTarget) {
