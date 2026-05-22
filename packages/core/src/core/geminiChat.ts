@@ -101,6 +101,30 @@ function isCompressionFailureStatus(status: CompressionStatus): boolean {
   );
 }
 
+/**
+ * Defensive coercion for API-reported token counts.
+ *
+ * Hostile providers (broken upstream, OpenAI-compat proxy returning
+ * `null`/`NaN`, misconfigured override) can yield non-finite or negative
+ * `usageMetadata.{prompt,candidates,cached,total}TokenCount`. Letting those
+ * values flow into the compaction gate arithmetic is catastrophic:
+ *
+ * - `lastPromptTokenCount + NaN >= hard` is always false → hard-rescue is
+ *   silently disabled, eventually OOMing the V8 heap.
+ * - `Infinity >= hard` is always true → hard-rescue fires on every send.
+ *
+ * Coercing unknown / negative / non-finite to `0` keeps the gate well-defined
+ * and is a no-op for any provider returning sane values.
+ *
+ * `Number.isFinite(-1)` is `true`, so the explicit `>= 0` check is required
+ * in addition to `isFinite`.
+ */
+function coerceUsageCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : 0;
+}
+
 export enum StreamEventType {
   /** A regular content chunk from the API. */
   CHUNK = 'chunk',
@@ -2382,8 +2406,16 @@ export class GeminiChat {
         if (chunk.usageMetadata) {
           usageMetadata = chunk.usageMetadata;
           // Context usage tracks prompt size; output isn't in history yet.
-          const lastPromptTokenCount =
-            usageMetadata.promptTokenCount || usageMetadata.totalTokenCount;
+          // Coerce hostile-provider values (NaN / Infinity / negative) to 0
+          // so the compaction gate arithmetic stays well-defined; see
+          // `coerceUsageCount` for the failure modes this guards against.
+          const promptTokenCount = coerceUsageCount(
+            usageMetadata.promptTokenCount,
+          );
+          const totalTokenCount = coerceUsageCount(
+            usageMetadata.totalTokenCount,
+          );
+          const lastPromptTokenCount = promptTokenCount || totalTokenCount;
           if (lastPromptTokenCount) {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
@@ -2395,9 +2427,12 @@ export class GeminiChat {
               lastPromptTokenCount,
             );
           }
-          if (usageMetadata.cachedContentTokenCount && this.telemetryService) {
+          const cachedContentTokenCount = coerceUsageCount(
+            usageMetadata.cachedContentTokenCount,
+          );
+          if (cachedContentTokenCount && this.telemetryService) {
             this.telemetryService.setLastCachedContentTokenCount(
-              usageMetadata.cachedContentTokenCount,
+              cachedContentTokenCount,
             );
           }
         }
