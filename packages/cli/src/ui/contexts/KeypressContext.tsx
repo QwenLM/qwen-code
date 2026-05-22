@@ -21,6 +21,7 @@ import {
 } from 'react';
 import readline from 'node:readline';
 import { PassThrough } from 'node:stream';
+import { noteInteraction } from '../../utils/housekeeping/lastInteractionAt.js';
 import {
   BACKSLASH_ENTER_DETECTION_WINDOW_MS,
   CHAR_CODE_ESC,
@@ -653,6 +654,11 @@ export function KeypressProvider({
     };
 
     const broadcast = (key: Key) => {
+      // Mark interaction so background housekeeping can defer work when the
+      // user is actively typing. Pre-filters above (DA1/DA2/Kitty queries,
+      // FOCUS_IN/OUT) early-return before reaching broadcast, so terminal
+      // protocol noise does not count as user activity.
+      noteInteraction();
       for (const handler of subscribers) {
         handler(key);
       }
