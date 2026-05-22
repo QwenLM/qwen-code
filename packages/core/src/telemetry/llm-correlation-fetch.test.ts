@@ -498,6 +498,25 @@ describe('wrapFetchWithCorrelation — host allowlist gating', () => {
     );
   });
 
+  it('tolerates whitespace around "*" so [" * "] still enables broadcast', async () => {
+    // Defensive: settings.json hand-edits are easy to get a stray space
+    // wrong. Without trim() the operator would silently get "no host
+    // matches" instead of broadcast.
+    const m = makeFetchMock();
+    const wrapped = wrapFetchWithCorrelation(
+      m.fetch,
+      mockConfig({
+        enabled: true,
+        sessionId: 'sess-A',
+        hosts: [' * '],
+      }),
+    );
+    await wrapped('https://api.openai.com/v1/chat/completions');
+    expect((m.lastInit()?.headers as Headers).get(SESSION_ID_HEADER)).toBe(
+      'sess-A',
+    );
+  });
+
   it('respects [] override to fully disable injection', async () => {
     const m = makeFetchMock();
     const wrapped = wrapFetchWithCorrelation(

@@ -161,17 +161,21 @@ describe('createGeminiContentGenerator', () => {
     );
   });
 
-  it('includes X-Qwen-Code-Session-Id when allowlist override covers googleapis.com', () => {
-    // Operator opts back in for Google's endpoint via settings override.
+  it('omits X-Qwen-Code-Session-Id when baseUrl is unset, even with allowlist override (factory fail-closed for unknown destination)', () => {
+    // The factory only passes a destinationUrl to staticCorrelationHeaders
+    // when `config.baseUrl` is set, because the Gemini SDK has two
+    // invisible defaults (generativelanguage.googleapis.com for public,
+    // {region}-aiplatform.googleapis.com for Vertex). Guessing one would
+    // mis-bucket the other under a googleapis-covering allowlist override.
+    // Operators who want correlation against Google endpoints must set
+    // `baseUrl` explicitly.
     mockConfig = {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getTelemetryEnabled: vi.fn().mockReturnValue(true),
       getSessionId: vi.fn().mockReturnValue('sess-gemini'),
-      getTelemetrySessionIdHeaderHosts: vi
-        .fn()
-        .mockReturnValue(['*.googleapis.com']),
+      getTelemetrySessionIdHeaderHosts: vi.fn().mockReturnValue(['*']),
     } as unknown as Config;
     const config = {
       model: 'gemini-1.5-flash',
@@ -182,8 +186,8 @@ describe('createGeminiContentGenerator', () => {
     const callArgs = vi.mocked(GeminiContentGenerator).mock.calls[0]?.[0] as {
       httpOptions: { headers: Record<string, string> };
     };
-    expect(callArgs.httpOptions.headers['X-Qwen-Code-Session-Id']).toBe(
-      'sess-gemini',
+    expect(callArgs.httpOptions.headers).not.toHaveProperty(
+      'X-Qwen-Code-Session-Id',
     );
   });
 });

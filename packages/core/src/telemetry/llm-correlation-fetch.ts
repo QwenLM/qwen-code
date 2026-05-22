@@ -70,6 +70,15 @@ type FetchLikeLoose = (
  * Reading `config.getSessionId()` from inside the wrapper on every call
  * gives the live value.
  *
+ * Note on `trustedHosts`: snapshotted once at wrap time, not read per
+ * request. The session id is live-read but the allowlist is not — a
+ * mid-session change to `telemetry.sessionIdHeaderHosts` in settings.json
+ * takes effect at next content-generator init (any change that mutates
+ * Config snapshot the wrapper retains is by definition a Config-level
+ * concern, not a request-time concern). Operators tuning the scope live
+ * should restart, or call the openai/anthropic clients via a fresh
+ * provider after settings reload.
+ *
  * The caller is responsible for choosing the base fetch — usually
  * `runtimeOptions?.fetch ?? globalThis.fetch` so proxy-aware fetch (set up
  * by `buildRuntimeFetchOptions`) is preserved when ProxyAgent is in use.
@@ -102,7 +111,9 @@ export function wrapFetchWithCorrelation<TFetch extends FetchLikeLoose>(
   // Wildcard escape hatch so operators who want the old broadcast
   // behavior can opt in via `["*"]` without us extending the pattern
   // grammar in `matchesTrustedHost` (which would tempt other globbing).
-  const broadcastAll = trustedHosts.some((p) => p === '*');
+  // `.trim()` so `[" * "]` (whitespace from settings.json hand-edit) still
+  // triggers broadcast rather than silently degrading to "no host matches".
+  const broadcastAll = trustedHosts.some((p) => p.trim() === '*');
 
   const wrapped: FetchLikeLoose = async function correlationFetch(
     input: string | URL | Request,
@@ -185,7 +196,7 @@ export function staticCorrelationHeaders(
     const trustedHosts =
       config.getTelemetrySessionIdHeaderHosts?.() ??
       DEFAULT_SESSION_ID_HEADER_HOSTS;
-    const broadcastAll = trustedHosts.some((p) => p === '*');
+    const broadcastAll = trustedHosts.some((p) => p.trim() === '*');
     if (!broadcastAll) {
       let host: string;
       try {

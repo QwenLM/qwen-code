@@ -46,18 +46,19 @@ export function createGeminiContentGenerator(
   // SDK's cached headers retain the OLD session id until the contentGenerator
   // is recreated. See design doc §8.6 + #4384 follow-up sub-issue tracking.
   //
-  // Destination passed in is what the host-allowlist check uses. With the
-  // default `DEFAULT_SESSION_ID_HEADER_HOSTS` (Alibaba/DashScope-only),
-  // Google's default endpoint `generativelanguage.googleapis.com` is NOT
-  // on the list, so the header is naturally omitted for vanilla Gemini API
-  // calls — matching the "first-party only" scope. Operators who deliberately
-  // want correlation against a Google endpoint can add it via
-  // `telemetry.sessionIdHeaderHosts` in settings.
-  const destinationUrl =
-    config.baseUrl ?? 'https://generativelanguage.googleapis.com';
+  // Destination resolution: only pass when we KNOW the destination — i.e.
+  // when the operator has explicitly set `config.baseUrl`. The SDK has two
+  // different invisible defaults (`generativelanguage.googleapis.com` for
+  // public Gemini, `{region}-aiplatform.googleapis.com` for Vertex AI) and
+  // guessing wrong here would mis-bucket Vertex traffic if the operator
+  // overrides `telemetry.sessionIdHeaderHosts` to include any googleapis
+  // domain. Passing `undefined` makes `staticCorrelationHeaders` return
+  // `{}` (no header) — the fail-closed default. Operators who want
+  // correlation against a Google endpoint set `baseUrl` explicitly
+  // (which is the same input the SDK uses to resolve the destination).
   headers = {
     ...headers,
-    ...staticCorrelationHeaders(gcConfig, destinationUrl),
+    ...staticCorrelationHeaders(gcConfig, config.baseUrl),
   };
   const httpOptions = config.baseUrl
     ? {

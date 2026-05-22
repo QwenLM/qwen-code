@@ -99,6 +99,35 @@ describe('extractRequestHost', () => {
     ).toBe('api.anthropic.com');
   });
 
+  it('strips explicit port (URL.hostname does not include port)', () => {
+    expect(extractRequestHost('https://dashscope.aliyuncs.com:443/v1')).toBe(
+      'dashscope.aliyuncs.com',
+    );
+  });
+
+  it('strips userinfo (URL.hostname does not include user/password)', () => {
+    expect(
+      extractRequestHost('https://user:pw@dashscope.aliyuncs.com/v1'),
+    ).toBe('dashscope.aliyuncs.com');
+  });
+
+  it('ignores query string and fragment', () => {
+    expect(
+      extractRequestHost('https://dashscope.aliyuncs.com/v1?key=secret#frag'),
+    ).toBe('dashscope.aliyuncs.com');
+  });
+
+  it('returns bracketed form for IPv6 (will never match a string pattern, behaves as fail-closed)', () => {
+    // Document the IPv6 behavior so it's intentional rather than a
+    // surprise: URL.hostname returns `[::1]` (with brackets), our
+    // pattern grammar has no `[…]` form, so IPv6 destinations are
+    // effectively never on the allowlist. This is acceptable because
+    // qwen-code's allowlist is for named first-party endpoints, not
+    // raw IPs. If/when raw-IP correlation becomes a real ask, extend
+    // matchesTrustedHost — don't change extractRequestHost.
+    expect(extractRequestHost('http://[::1]:8080/x')).toBe('[::1]');
+  });
+
   it('returns undefined for unparseable string', () => {
     expect(extractRequestHost('not a url')).toBeUndefined();
   });
