@@ -244,6 +244,25 @@ describe('setupStartupWorktree', () => {
           'utf8',
         );
         expect(prFile).toBe('from PR 42\n');
+
+        // Phase D-3 round 4: `originalHeadCommit` for PR worktrees must
+        // be the resolved FETCH_HEAD SHA (the PR tip), NOT the parent
+        // repo's HEAD. `WorktreeExitDialog`'s `rev-list <head>..HEAD`
+        // later relies on this to count only the user's own commits in
+        // the worktree, not the entire PR's history.
+        expect(res!.context.originalHeadCommit).toMatch(/^[0-9a-f]{40}$/);
+        // Resolve the PR ref directly and compare: must match.
+        const expectedSha = (
+          await exec('git', ['rev-parse', 'refs/pull/42/head'], {
+            cwd: upstreamResolved,
+          })
+        ).stdout.trim();
+        expect(res!.context.originalHeadCommit).toBe(expectedSha);
+        // Sanity: must NOT equal the parent repo's main HEAD.
+        const parentHead = (
+          await exec('git', ['rev-parse', 'HEAD'], { cwd: tempRepo })
+        ).stdout.trim();
+        expect(res!.context.originalHeadCommit).not.toBe(parentHead);
       }
     } finally {
       // Restore cwd before rm so the upstream cleanup doesn't hit EBUSY.

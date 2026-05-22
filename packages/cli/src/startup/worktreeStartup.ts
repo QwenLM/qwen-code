@@ -258,17 +258,35 @@ export async function setupStartupWorktree(
   // base ref (FETCH_HEAD) is available to `git worktree add`. Skipped
   // on re-attach above. Fail-close: any fetch error stops startup before
   // we create disk state.
+  //
+  // Lock FETCH_HEAD to an immutable SHA *immediately* after the fetch:
+  //   - closes a TOCTOU window in which a concurrent `git fetch` from
+  //     any other process sharing this repo would overwrite FETCH_HEAD
+  //     before `git worktree add` reads it, branching the new worktree
+  //     off an unrelated commit;
+  //   - lets us pass that same SHA back as `originalHeadCommit`, so
+  //     `WorktreeExitDialog`'s `rev-list <head>..HEAD` later inside the
+  //     worktree counts only the user's own new commits — not the
+  //     entire fetched PR's history.
+  let pullRequestHeadSha: string | null = null;
   if (prNumber !== null) {
     const fetchRes = await service.fetchPullRequestRef(prNumber);
     if (!fetchRes.success) {
       return { ok: false, error: `--worktree: ${fetchRes.error}` };
     }
+    pullRequestHeadSha = await service.resolveRef('FETCH_HEAD');
+    if (pullRequestHeadSha === null) {
+      return {
+        ok: false,
+        error: `--worktree: fetched PR #${prNumber} but FETCH_HEAD did not resolve to a commit SHA. Refusing to proceed (the worktree would otherwise branch off an unknown commit).`,
+      };
+    }
   }
 
-  // For PR worktrees the base ref is FETCH_HEAD (just landed via
-  // fetchPullRequestRef above); for regular slugs we anchor at the
-  // parent session's currently checked-out branch.
-  const baseRef = isPullRequest ? 'FETCH_HEAD' : originalBranch;
+  // For PR worktrees the base ref is the SHA we just locked in (NOT the
+  // literal `FETCH_HEAD`, which is mutable); for regular slugs we anchor
+  // at the parent session's currently checked-out branch.
+  const baseRef = isPullRequest ? pullRequestHeadSha! : originalBranch;
   const result = await service.createUserWorktree(slug, baseRef, {
     symlinkDirectories: options?.symlinkDirectories,
   });
@@ -301,7 +319,13 @@ export async function setupStartupWorktree(
       branch: result.worktree.branch,
       repoRoot,
       originalBranch: originalBranch ?? DETACHED_HEAD,
-      originalHeadCommit,
+      // For PR worktrees, the worktree's HEAD starts at the fetched PR
+      // tip — not at the parent repo's HEAD. Use the SHA we locked in
+      // post-fetch so the exit-dialog rev-list counts only the user's
+      // new commits, not the entire PR history.
+      originalHeadCommit: isPullRequest
+        ? pullRequestHeadSha!
+        : originalHeadCommit,
       isPullRequest,
       wasReattached: false,
     },

@@ -198,6 +198,51 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     }
   });
 
+  it('rejects paths inside .git (security guard)', async () => {
+    // `.git` is git-internal; symlinking any of it into the worktree
+    // would shadow the worktree's gitlink file and silently break
+    // commits / status / diff. Verify the guard fires.
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('reject-git', 'main', {
+      symlinkDirectories: ['.git/hooks'],
+    });
+    expect(result.success).toBe(true);
+
+    const wt = result.worktree!.path;
+    // Nothing at <worktree>/.git/hooks beyond what `git worktree add`
+    // itself populates — and certainly NOT a symlink that we wrote.
+    // The guard rejects pre-mkdir, so no `hooks` entry should exist
+    // (the worktree gets its own per-worktree .git file, not directory).
+    const wrote = await fs
+      .lstat(path.join(wt, '.git', 'hooks'))
+      .then((s) => s.isSymbolicLink())
+      .catch(() => false);
+    expect(wrote).toBe(false);
+  });
+
+  it('rejects paths inside .qwen (security guard)', async () => {
+    // `.qwen` is CLI metadata: symlinking `.qwen/worktrees` would create
+    // a worktrees-inside-worktrees loop; symlinking `.qwen/projects` or
+    // `.qwen/tmp` would alias session metadata users have no legitimate
+    // reason to share across worktrees. Guard rejects the whole subtree.
+    await fs.mkdir(path.join(repoRoot, '.qwen'), { recursive: true });
+    await fs.writeFile(path.join(repoRoot, '.qwen', 'projects'), 'data');
+
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('reject-qwen', 'main', {
+      symlinkDirectories: ['.qwen/projects'],
+    });
+    expect(result.success).toBe(true);
+
+    const wt = result.worktree!.path;
+    // No symlink at <worktree>/.qwen/projects.
+    const wrote = await fs
+      .lstat(path.join(wt, '.qwen', 'projects'))
+      .then((s) => s.isSymbolicLink())
+      .catch(() => false);
+    expect(wrote).toBe(false);
+  });
+
   it("rejects any entry containing a '..' segment (docs contract)", async () => {
     // `foo/../bar` resolves to `bar` (inside the repo), so the
     // post-resolve isWithinRoot check would accept it. But the

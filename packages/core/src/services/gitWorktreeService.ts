@@ -376,6 +376,26 @@ export class GitWorktreeService {
   }
 
   /**
+   * Resolves a git ref name to a 40-char commit SHA. Returns `null` when
+   * the ref is unknown / unborn / not a commit.
+   *
+   * Used by Phase D-3 to lock in `FETCH_HEAD` immediately after
+   * `fetchPullRequestRef` succeeds, so the SHA passed to
+   * `git worktree add` is immutable against a concurrent `git fetch` from
+   * another process sharing the same repo, AND so `WorktreeExitDialog`'s
+   * `rev-list <originalHeadCommit>..HEAD` counts only THIS session's new
+   * work rather than every commit in the fetched PR.
+   */
+  async resolveRef(ref: string): Promise<string | null> {
+    try {
+      const out = (await this.git.raw(['rev-parse', '--verify', ref])).trim();
+      return /^[0-9a-f]{40}$/.test(out) ? out : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Creates a single worktree.
    */
   async createWorktree(
@@ -1033,20 +1053,6 @@ export class GitWorktreeService {
   }
 
   /**
-   * Validates a worktree slug. Returns null on success, or an error message.
-   *
-   * Rules (mirrors claude-code's `validateWorktreeSlug`):
-   * - Non-empty, ≤ 64 chars
-   * - Only `[a-zA-Z0-9._-]` characters; no path separators
-   * - No `..` or leading/trailing dots (would resolve outside the worktrees dir)
-   * - Must not start with `agent-`: that prefix is reserved for the
-   *   ephemeral worktrees `AgentTool isolation:'worktree'` produces.
-   *   The startup sweep auto-removes anything matching
-   *   {@link AGENT_WORKTREE_SLUG_PATTERN}, so a user-named
-   *   `agent-1234567` would be silently deleted after 30 days along
-   *   with any work it contained.
-   */
-  /**
    * Parses a PR reference from a string. Recognised forms:
    *
    * - `#123` — shorthand PR number
@@ -1339,6 +1345,20 @@ export class GitWorktreeService {
     }
   }
 
+  /**
+   * Validates a worktree slug. Returns null on success, or an error message.
+   *
+   * Rules (mirrors claude-code's `validateWorktreeSlug`):
+   * - Non-empty, ≤ 64 chars
+   * - Only `[a-zA-Z0-9._-]` characters; no path separators
+   * - No `..` or leading/trailing dots (would resolve outside the worktrees dir)
+   * - Must not start with `agent-`: that prefix is reserved for the
+   *   ephemeral worktrees `AgentTool isolation:'worktree'` produces.
+   *   The startup sweep auto-removes anything matching
+   *   {@link AGENT_WORKTREE_SLUG_PATTERN}, so a user-named
+   *   `agent-1234567` would be silently deleted after 30 days along
+   *   with any work it contained.
+   */
   static validateUserWorktreeSlug(slug: string): string | null {
     if (typeof slug !== 'string' || slug.length === 0) {
       return 'Worktree name must be a non-empty string.';
