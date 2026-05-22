@@ -18,7 +18,7 @@
  * status.
  */
 
-import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
+import * as fs from 'node:fs';
 
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -26,6 +26,7 @@ import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
 const MAX_NOTIFICATION_COMMAND_LENGTH = 80;
+const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
 export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
 
 /**
@@ -69,14 +70,14 @@ function readOutputTail(
 ): { text: string; truncated: boolean } | undefined {
   let fd: number | undefined;
   try {
-    fd = openSync(outputFile, 'r');
-    const stat = fstatSync(fd);
+    fd = fs.openSync(outputFile, getReadOutputOpenFlags());
+    const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size <= 0) return undefined;
 
     const length = Math.min(stat.size, MAX_NOTIFICATION_OUTPUT_TAIL_BYTES);
     const start = stat.size - length;
     const buffer = Buffer.allocUnsafe(length);
-    const bytesRead = readSync(fd, buffer, 0, length, start);
+    const bytesRead = fs.readSync(fd, buffer, 0, length, start);
     const text = stripOutputControlChars(
       buffer.subarray(0, bytesRead).toString('utf8'),
     ).trimEnd();
@@ -92,12 +93,17 @@ function readOutputTail(
   } finally {
     if (fd !== undefined) {
       try {
-        closeSync(fd);
+        fs.closeSync(fd);
       } catch {
         /* best effort */
       }
     }
   }
+}
+
+function getReadOutputOpenFlags(): number {
+  const constants = fs.constants;
+  return (constants?.O_RDONLY ?? 0) | (constants?.O_NOFOLLOW ?? 0);
 }
 
 function truncateCommandForDisplay(command: string): string {
@@ -106,6 +112,24 @@ function truncateCommandForDisplay(command: string): string {
     return normalized;
   }
   return normalized.slice(0, MAX_NOTIFICATION_COMMAND_LENGTH - 3) + '...';
+}
+
+function truncateCommandForModel(command: string): {
+  text: string;
+  truncated: boolean;
+} {
+  const sanitized = stripDisplayControlChars(command);
+  if (sanitized.length <= MAX_NOTIFICATION_MODEL_COMMAND_LENGTH) {
+    return {
+      text: sanitized,
+      truncated: false,
+    };
+  }
+
+  return {
+    text: sanitized.slice(0, MAX_NOTIFICATION_MODEL_COMMAND_LENGTH - 3) + '...',
+    truncated: true,
+  };
 }
 
 /**
@@ -389,6 +413,7 @@ export class BackgroundShellRegistry {
           ? 'failed'
           : 'was cancelled';
     const commandLabel = truncateCommandForDisplay(entry.command);
+    const commandForModel = truncateCommandForModel(entry.command);
     const displayText = `Background shell "${commandLabel}" ${statusText}.`;
 
     const xmlParts: string[] = [
@@ -397,7 +422,9 @@ export class BackgroundShellRegistry {
       '<kind>shell</kind>',
       `<status>${escapeXml(entry.status)}</status>`,
       `<summary>Shell command "${escapeXml(commandLabel)}" ${statusText}.</summary>`,
-      `<command>${escapeXml(entry.command)}</command>`,
+      commandForModel.truncated
+        ? `<command truncated="true">${escapeXml(commandForModel.text)}</command>`
+        : `<command>${escapeXml(commandForModel.text)}</command>`,
       `<cwd>${escapeXml(entry.cwd)}</cwd>`,
     ];
     if (entry.pid !== undefined) {

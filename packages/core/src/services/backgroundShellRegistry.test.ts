@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  constants as fsConstants,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -30,6 +36,12 @@ function makeOutputFile(content: string): string {
   const file = join(dir, 'shell.output');
   writeFileSync(file, content);
   return file;
+}
+
+function makeTempDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'qwen-shell-notification-'));
+  tmpDirs.push(dir);
+  return dir;
 }
 
 function makeEntry(
@@ -248,6 +260,30 @@ describe('BackgroundShellRegistry', () => {
       });
     });
 
+    it('truncates long commands for display, summary, and model XML', () => {
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      const command = `node -e ${'a'.repeat(700)}`;
+      const displayCommand = command.slice(0, 77) + '...';
+      const modelCommand = command.slice(0, 497) + '...';
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a', command }));
+
+      reg.complete('a', 0, 2000);
+
+      const [displayText, modelText] = callback.mock.calls[0];
+      expect(displayText).toBe(
+        `Background shell "${displayCommand}" completed.`,
+      );
+      expect(modelText).toContain(
+        `<summary>Shell command "${displayCommand}" completed.</summary>`,
+      );
+      expect(modelText).toContain(
+        `<command truncated="true">${modelCommand}</command>`,
+      );
+      expect(modelText).not.toContain(command);
+    });
+
     it('escapes XML and strips display control characters on failure', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
@@ -293,6 +329,40 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain('<output-tail truncated="true">');
       expect(modelText).toContain('last line</output-tail>');
       expect(modelText).not.toContain('prefix-');
+    });
+
+    const itNoFollow = fsConstants.O_NOFOLLOW === undefined ? it.skip : it;
+
+    itNoFollow('does not follow symlinked output files', () => {
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      const dir = makeTempDir();
+      const secretPath = join(dir, 'secret.txt');
+      const outputPath = join(dir, 'shell.output');
+      writeFileSync(secretPath, 'secret credentials');
+      symlinkSync(secretPath, outputPath);
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a', outputPath }));
+
+      reg.complete('a', 0, 2000);
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).not.toContain('secret credentials');
+      expect(modelText).not.toContain('<output-tail');
+    });
+
+    it('keeps the registry usable when the notification callback throws', () => {
+      const reg = new BackgroundShellRegistry();
+      reg.setNotificationCallback(() => {
+        throw new Error('subscriber blew up');
+      });
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.register(makeEntry({ shellId: 'b' }));
+
+      expect(() => reg.complete('a', 0, 2000)).not.toThrow();
+      expect(() => reg.fail('b', 'boom', 3000)).not.toThrow();
+      expect(reg.get('a')!.status).toBe('completed');
+      expect(reg.get('b')!.status).toBe('failed');
     });
 
     it('does not emit more than once for late terminal transitions', () => {
