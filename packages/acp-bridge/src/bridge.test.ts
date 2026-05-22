@@ -273,11 +273,13 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
-  // #4175 F1 test split: 1 of 4 daemon-host integration tests moved to
-  // cli/src/serve/daemonStatusProvider.test.ts (the ones that wire real
-  // `createDaemonStatusProvider()`). The two remaining "Mode A fallback"
-  // tests below cover no-provider / throwing-provider semantics, which
-  // are pure bridge resilience logic with no daemon-host coupling.
+  // #4175 F1 test split: the 4 daemon-host integration tests that
+  // wire real `createDaemonStatusProvider()` moved to
+  // cli/src/serve/daemonStatusProvider.test.ts (env real / preflight
+  // idle / preflight merged-live / preflight extMethod-throws). The
+  // 4 "Mode A fallback" tests below cover no-provider / throwing-
+  // provider semantics for env + preflight surfaces, which are pure
+  // bridge resilience logic with no daemon-host coupling.
 
   it('returns idle env envelope when statusProvider is omitted (Mode A fallback)', async () => {
     // PR 22b/2 fold-in: covers the no-provider branch in
@@ -383,10 +385,10 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
-  // #4175 F1 test split: 3 more daemon-host integration tests moved to
-  // cli/src/serve/daemonStatusProvider.test.ts (preflight idle, preflight
-  // merged-live, preflight extMethod throws — all assert real daemon
-  // cells from `createDaemonStatusProvider()`).
+  // #4175 F1 test split (continued): the 3 preflight integration tests
+  // (idle / merged-live / extMethod-throws) that moved to
+  // cli/src/serve/daemonStatusProvider.test.ts originally sat here,
+  // between the Mode A fallback tests and the session status tests.
 
   it('requests session status through the existing ACP channel', async () => {
     const handles: ChannelHandle[] = [];

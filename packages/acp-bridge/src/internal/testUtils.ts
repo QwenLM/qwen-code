@@ -13,10 +13,24 @@
  * `FakeAgent` / `makeChannel` / `makeBridge` helpers without
  * cross-package duplication.
  *
- * Not exported via `package.json` "exports" — resolved only through the
- * monorepo's `@qwen-code/acp-bridge/*` tsconfig wildcard for in-repo
- * vitest. External consumers of `@qwen-code/acp-bridge` should NOT
- * depend on these helpers.
+ * Cross-package resolution uses two channels because TypeScript's
+ * `nodenext` moduleResolution will not fall back to tsconfig `paths`
+ * once a package's `exports` rejects a subpath. So:
+ *
+ *   1. `package.json` lists `./internal/testUtils` in `exports` so
+ *      TypeScript can resolve types at compile time (and the cli's
+ *      vitest run can resolve it at runtime even without an alias).
+ *   2. `packages/cli/vitest.config.ts` adds a `resolve.alias` for
+ *      the same specifier that points at `src/` instead of `dist/`,
+ *      so the cli test reads source directly — editing
+ *      `testUtils.ts` doesn't require rebuilding acp-bridge.
+ *
+ * External consumers of `@qwen-code/acp-bridge` should NOT depend on
+ * these helpers — the `internal/` directory + `@internal` JSDoc tag
+ * match the neighboring `internal/stderrLine.ts` convention. The
+ * file does ship in `dist/internal/testUtils.js` (alpha-stage 0.0.1
+ * tradeoff); a future `stripInternal` tsconfig flag or `.npmignore`
+ * entry could exclude it once external consumers exist.
  */
 
 import * as path from 'node:path';
@@ -230,11 +244,11 @@ export interface ChannelHandle {
  * fake agent sees `agentStream`. Each `TransformStream` carries one
  * direction.
  *
- * Not migrated to `createInMemoryChannel()` (used by the other 10 sites
- * in the suite): `kill()` below needs the underlying `ab` / `ba`
- * writables to simulate child-process termination, which the bare
- * helper deliberately does not expose. See `inMemoryChannel.ts` JSDoc
- * for the rationale.
+ * Not migrated to `createInMemoryChannel()` (used by the other
+ * `createInMemoryChannel` sites in `bridge.test.ts`): `kill()` below
+ * needs the underlying `ab` / `ba` writables to simulate
+ * child-process termination, which the bare helper deliberately does
+ * not expose. See `inMemoryChannel.ts` JSDoc for the rationale.
  */
 export function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
   const ab = new TransformStream<Uint8Array, Uint8Array>();

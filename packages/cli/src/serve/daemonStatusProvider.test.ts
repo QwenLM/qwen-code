@@ -23,9 +23,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createHttpAcpBridge } from './httpAcpBridge.js';
+import {
+  createHttpAcpBridge,
+  type BridgeOptions,
+  type HttpAcpBridge,
+} from './httpAcpBridge.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
-import type { BridgeOptions, HttpAcpBridge } from '@qwen-code/acp-bridge';
 import {
   type ChannelHandle,
   makeChannel,

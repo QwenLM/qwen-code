@@ -12,6 +12,18 @@ export default defineConfig({
   resolve: {
     alias: {
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
+      // #4175 F1 test split — daemonStatusProvider.test.ts imports the
+      // shared FakeAgent / makeChannel fixtures that live in
+      // acp-bridge's package-private `internal/testUtils` module. We
+      // route through this alias rather than declaring a package
+      // subpath export so `internal/*` stays out of the published npm
+      // surface (matches the `internal/stderrLine.ts` convention) and
+      // cli tests read source directly instead of the
+      // build-then-stale `dist/` copy.
+      '@qwen-code/acp-bridge/internal/testUtils': path.resolve(
+        __dirname,
+        '../acp-bridge/src/internal/testUtils.ts',
+      ),
     },
   },
   test: {
