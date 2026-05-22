@@ -26,10 +26,12 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { gitOpt } from './lib/git.js';
+import { requireFetchReport } from './lib/session.js';
 
 interface LoadRulesArgs {
   base_ref: string;
   out: string;
+  pr?: string;
 }
 
 function showFile(baseRef: string, path: string): string | null {
@@ -116,7 +118,13 @@ function loadCombined(baseRef: string): {
 }
 
 async function runLoadRules(args: LoadRulesArgs): Promise<void> {
-  const { base_ref: baseRef, out } = args;
+  const { base_ref: baseRef, out, pr } = args;
+  // For PR reviews, refuse to load rules unless fetch-pr already ran. This
+  // catches the case where the LLM driver tried to skip straight to rules
+  // without setting up a worktree.
+  if (pr) {
+    requireFetchReport(pr);
+  }
   const { combined, loaded } = loadCombined(baseRef);
 
   mkdirSync(dirname(out), { recursive: true });
@@ -150,6 +158,11 @@ export const loadRulesCommand: CommandModule = {
         demandOption: true,
         describe:
           'Output Markdown path (will be overwritten — empty if no rules found)',
+      })
+      .option('pr', {
+        type: 'string',
+        describe:
+          'PR number — when provided, validates that an active fetch-pr session exists. Omit for local-uncommitted or file-path reviews.',
       }),
   handler: async (argv) => {
     await runLoadRules(argv as unknown as LoadRulesArgs);

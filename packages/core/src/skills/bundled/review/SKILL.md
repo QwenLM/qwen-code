@@ -10,6 +10,13 @@ allowedTools:
   - write_file
   - edit
   - glob
+hooks:
+  PreToolUse:
+    - matcher: 'run_shell_command'
+      hooks:
+        - type: command
+          command: 'bash "$QWEN_SKILL_ROOT/guard.sh"'
+          timeout: 5
 ---
 
 # Code Review
@@ -19,7 +26,8 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 **Critical rules (most commonly violated — read these first):**
 
 1. **For same-repo PR reviews (PR number, or URL whose owner/repo matches a local remote), the worktree is MANDATORY.** After argument parsing and remote detection (early in Step 1), the first command that touches code state MUST be `qwen review fetch-pr`. Do NOT use `gh pr checkout`, `git checkout <branch>`, `git switch`, `git pull`, `git reset --hard`, or any other command that modifies the user's current HEAD or working tree. After `fetch-pr` returns, ALL subsequent reads, linters, builds, tests, and edits MUST happen inside the `worktreePath` it created. Violating this contaminates the user's local branch state. (Cross-repo PRs with no matching remote use lightweight mode and do NOT create a worktree — see Step 1.)
-2. **If `--comment` was specified, Step 8 (Autofix) is SKIPPED entirely.** `--comment` means the user wants inline PR comments posted, not code mutations. Do not ask "Apply auto-fixes? (y/n)" — go straight from Step 7 to Step 9.
+   - **Enforcement:** `pr-context`, `presubmit`, and `deterministic --pr <n>` / `load-rules --pr <n>` hard-fail if no fetch-pr report exists at `.qwen/tmp/qwen-review-pr-<n>-fetch.json`. A PreToolUse hook also blocks the forbidden shell commands above for the duration of this skill session. Both are deterministic backstops — your job is still to call `fetch-pr` first.
+2. **If `--comment` was specified, Step 8 (Autofix) is SKIPPED entirely.** Pass `--comment` through to `qwen review fetch-pr` so the flag is recorded in the session JSON, and call `qwen review autofix-gate` in Step 8 — its `decision` field tells you whether to skip / noop / prompt deterministically. Never ask "Apply auto-fixes? (y/n)" without consulting the gate.
 3. **Match the language of the PR.** If the PR is in English, ALL your output (terminal + PR comments) MUST be in English. If in Chinese, use Chinese. Do NOT switch languages. For **local reviews** (no PR), if the system prompt includes an output language preference, use that language; otherwise follow the user's input language.
 4. **Step 9: use Create Review API** with `comments` array for inline comments. Do NOT use `gh api .../pulls/.../comments` to post individual comments. See Step 9 for the JSON format.
 
@@ -53,10 +61,11 @@ Based on the remaining arguments:
     ```bash
     qwen review fetch-pr <pr_number> <owner>/<repo> \
       --remote <remote> \
-      --out .qwen/tmp/qwen-review-pr-<pr_number>-fetch.json
+      --out .qwen/tmp/qwen-review-pr-<pr_number>-fetch.json \
+      [--comment]
     ```
 
-    `<remote>` is the matched remote from the URL-based detection above (e.g. `upstream` for fork workflows), or `origin` by default for pure integer PR numbers. Read `.qwen/tmp/qwen-review-pr-<n>-fetch.json` for: `worktreePath`, `baseRefName`, `headRefName`, `fetchedSha` (use as the **pre-autofix HEAD commit SHA** for Step 9), `isCrossRepository`, `diffStat` (files / additions / deletions). If the command fails (auth, network, PR not found), inform the user and stop.
+    `<remote>` is the matched remote from the URL-based detection above (e.g. `upstream` for fork workflows), or `origin` by default for pure integer PR numbers. **Pass `--comment` if and only if the user supplied `--comment` in the original `/review` arguments** — this records the flag in the report's `commentMode` field so `autofix-gate` in Step 8 can skip deterministically. Read `.qwen/tmp/qwen-review-pr-<n>-fetch.json` for: `worktreePath`, `baseRefName`, `headRefName`, `fetchedSha` (use as the **pre-autofix HEAD commit SHA** for Step 9), `isCrossRepository`, `commentMode`, `diffStat` (files / additions / deletions). If the command fails (auth, network, PR not found), inform the user and stop.
 
     Worktree isolation: all subsequent steps (linting, agents, build/test, autofix) operate inside `worktreePath`, not the user's working tree. Cache and reports (Step 10) are written to the **main project directory**, not the worktree.
 
@@ -90,8 +99,11 @@ Run `qwen review load-rules` to read project-specific rules. **For PR reviews, r
 
 ```bash
 qwen review load-rules <resolved_base_ref> \
-  --out .qwen/tmp/qwen-review-<target>-rules.md
+  --out .qwen/tmp/qwen-review-<target>-rules.md \
+  [--pr <pr_number>]
 ```
+
+Pass `--pr <pr_number>` for PR reviews; the subcommand will hard-fail if no fetch-pr report exists, catching the case where the worktree setup was skipped. Omit the flag for local-uncommitted or file-path reviews.
 
 `<resolved_base_ref>` is the base ref to load from: prefer `<base>` if it exists locally, otherwise `<remote>/<base>` (run `git fetch <remote> <base>` first if not yet fetched). For local-uncommitted or file-path reviews use `HEAD`.
 
@@ -116,8 +128,11 @@ Extract the list of changed files from the diff output. For local uncommitted re
      > .qwen/tmp/qwen-review-<target>-changed.json
    qwen review deterministic <worktree> \
      --changed-files .qwen/tmp/qwen-review-<target>-changed.json \
-     --out .qwen/tmp/qwen-review-<target>-deterministic.json
+     --out .qwen/tmp/qwen-review-<target>-deterministic.json \
+     [--pr <pr_number>]
    ```
+
+   Pass `--pr <pr_number>` for PR reviews — the subcommand will then refuse to run if `<worktree>` doesn't match the path recorded by `fetch-pr`, blocking accidental analysis of the user's main working tree. Omit for local / file reviews.
 
    Tools currently covered:
 
@@ -446,21 +461,27 @@ If the user responds with "post comments" (or similar intent like "yes post them
 
 ## Step 8: Autofix
 
-**Skip this entire step (do not even ask) if EITHER of the following is true:**
+**The decision to skip / noop / prompt is made by `qwen review autofix-gate`, NOT by you.** Run it before doing anything else in this step:
 
-- `--comment` was specified in the arguments — the user explicitly asked for inline PR comments, not code edits. Go straight to Step 9.
-- The review target is a cross-repo PR running in lightweight mode (no local files to edit).
+```bash
+qwen review autofix-gate <target> --findings-count <N>
+```
 
-Otherwise, if there are **Critical** or **Suggestion** findings with clear, unambiguous fixes, offer to auto-apply them. (If there are no such findings, this step is also a no-op — fall through to Step 9.)
+Where `<target>` is `pr-<n>` for PR reviews, `local` for uncommitted-changes reviews, or the filename for a file review. `<N>` is the count of Critical/Suggestion findings with concrete, unambiguous fixes that can be expressed as file edits. The command prints a single JSON line: `{"decision": "skip" | "ask" | "noop", "reason": "..."}`.
 
-1. Count the number of auto-fixable findings (those with concrete suggested fixes that can be expressed as file edits).
-2. If there are fixable findings, ask the user:
+- **`decision: "skip"`** — fall through to Step 9 immediately. This is the deterministic rule for `--comment` (the user wanted inline PR comments, not code mutations) and for cross-repo lightweight PRs (no local files to edit). Do NOT ask the user; do NOT prompt for autofix.
+- **`decision: "noop"`** — there are no auto-fixable findings; fall through to Step 9.
+- **`decision: "ask"`** — proceed with the prompt below.
+
+When `decision: "ask"`:
+
+1. Ask the user:
    "Found N issues with auto-fixable suggestions. Apply auto-fixes? (y/n)"
-3. If the user agrees:
+2. If the user agrees:
    - For each fixable finding, apply the fix using the appropriate file editing approach
    - After all fixes are applied, re-run only per-file deterministic checks (e.g., `eslint`, `ruff check`, `flake8`) on the modified files to verify fixes don't introduce new issues. Skip whole-project checks (`tsc --noEmit`, `go vet ./...`) as they are too slow for a quick verification pass.
    - Show a summary of applied fixes with file paths and brief descriptions
-4. If the user declines, continue with text-only suggestions.
+3. If the user declines, continue with text-only suggestions.
 
 **After autofix**: Re-evaluate the verdict for the **terminal output** (Step 7). If all Critical findings were fixed, update the displayed verdict accordingly (e.g., from "Request changes" to "Comment" or "Approve"). However, for **PR review submission** (Step 9), always use the **pre-fix verdict** — the remote PR still contains the original unfixed code until the user pushes the autofix commit.
 

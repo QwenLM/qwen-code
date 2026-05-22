@@ -42,6 +42,7 @@ import {
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { ensureWorktreeMatches, requireFetchReport } from './lib/session.js';
 
 const TIMEOUT_TYPECHECK_MS = 120_000;
 const TIMEOUT_LINTER_MS = 60_000;
@@ -642,12 +643,20 @@ interface DeterministicArgs {
   worktree: string;
   'changed-files': string;
   out: string;
+  pr?: string;
 }
 
 async function runDeterministic(args: DeterministicArgs): Promise<void> {
   const worktree = resolve(args.worktree);
   if (!existsSync(worktree)) {
     throw new Error(`Worktree not found: ${worktree}`);
+  }
+  // For PR reviews, require an active fetch-pr session and refuse to operate
+  // on a worktree that doesn't match the report. SKILL.md instructs the LLM
+  // driver to pass `--pr <n>` for PR targets; local / file reviews omit it.
+  if (args.pr) {
+    const report = requireFetchReport(args.pr);
+    ensureWorktreeMatches(report, worktree);
   }
 
   let changedFiles: string[] = [];
@@ -735,6 +744,11 @@ export const deterministicCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'Output JSON path (will be overwritten)',
+      })
+      .option('pr', {
+        type: 'string',
+        describe:
+          'PR number — when provided, validates that an active fetch-pr session exists and the worktree arg matches the report. Omit for local-uncommitted or file-path reviews.',
       }),
   handler: async (argv) => {
     await runDeterministic(argv as unknown as DeterministicArgs);

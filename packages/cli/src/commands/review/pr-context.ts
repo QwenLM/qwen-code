@@ -18,6 +18,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, ghApiAll } from './lib/gh.js';
+import { requireFetchReport } from './lib/session.js';
 
 interface PrMetadata {
   title: string;
@@ -248,6 +249,11 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     throw new Error('owner_repo must look like "owner/repo"');
   }
   const [owner, repo] = ownerRepo.split('/');
+
+  // Hard precondition: a fetch-pr report must exist for this PR. Without it
+  // the LLM driver bypassed the worktree setup (e.g. with `gh pr checkout`),
+  // which contaminates the user's local branch state. Refuse to continue.
+  requireFetchReport(prNumber);
 
   ensureAuthenticated();
 

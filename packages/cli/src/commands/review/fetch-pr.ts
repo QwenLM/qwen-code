@@ -22,11 +22,12 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh } from './lib/gh.js';
 import { git, refExists } from './lib/git.js';
 import { REVIEW_TMP_DIR, reviewBranch, worktreePath } from './lib/paths.js';
+import { fetchReportPath } from './lib/session.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -43,6 +44,7 @@ interface FetchPrArgs {
   owner_repo: string;
   remote: string;
   out: string;
+  comment: boolean;
 }
 
 interface FetchPrResult {
@@ -56,6 +58,13 @@ interface FetchPrResult {
   headRefName: string;
   isCrossRepository: boolean;
   diffStat: { files: number; additions: number; deletions: number };
+  /**
+   * Records whether `/review` was invoked with `--comment`. Downstream
+   * subcommands (notably `autofix-gate`) read this to decide deterministically
+   * whether Step 8 (autofix) should be skipped, instead of relying on the LLM
+   * driver to remember the flag.
+   */
+  commentMode: boolean;
 }
 
 function tryRemove(action: () => void): void {
@@ -84,7 +93,13 @@ function cleanStale(prNumber: string): void {
 }
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
-  const { pr_number: prNumber, owner_repo: ownerRepo, remote, out } = args;
+  const {
+    pr_number: prNumber,
+    owner_repo: ownerRepo,
+    remote,
+    out,
+    comment,
+  } = args;
 
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
@@ -160,10 +175,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       additions: meta.additions,
       deletions: meta.deletions,
     },
+    commentMode: !!comment,
   };
 
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-  writeFileSync(out, JSON.stringify(result, null, 2) + '\n', 'utf8');
+  const json = JSON.stringify(result, null, 2) + '\n';
+  writeFileSync(out, json, 'utf8');
+  // Also mirror to the canonical path so downstream subcommands can locate the
+  // session even when `--out` was given a non-canonical destination. When the
+  // caller already used the canonical path, this is a no-op overwrite of
+  // identical content.
+  const canonical = fetchReportPath(prNumber);
+  if (resolve(canonical) !== resolve(out)) {
+    writeFileSync(canonical, json, 'utf8');
+  }
   writeStdoutLine(`Wrote fetch-pr report to ${out}`);
   // Surface diff stats to stderr so a human running the command interactively
   // sees something useful even without inspecting the JSON.
@@ -198,6 +223,12 @@ export const fetchPrCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'Output JSON path (will be overwritten)',
+      })
+      .option('comment', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Record that /review was invoked with --comment. Persisted in the JSON report so `qwen review autofix-gate` can deterministically skip Step 8 (autofix) without relying on the LLM driver to remember the flag.',
       }),
   handler: async (argv) => {
     await runFetchPr(argv as unknown as FetchPrArgs);
