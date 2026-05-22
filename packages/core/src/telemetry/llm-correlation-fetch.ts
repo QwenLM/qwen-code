@@ -80,11 +80,12 @@ export function wrapFetchWithCorrelation<TFetch extends FetchLikeLoose>(
         // Skip injection rather than send `X-Qwen-Code-Session-Id: `.
         return baseFetch(input, init);
       }
-      // Seed headers from BOTH the init.headers (if any) AND the Request's
-      // own headers when input is a Request and init doesn't override.
-      // Otherwise `new Headers(undefined)` would drop the Request's headers
-      // (including Authorization) when we then pass `{...init, headers}`
-      // back to baseFetch. See PR #4393 review feedback.
+      // Seed headers: prefer init.headers when caller provided them (their
+      // intent overrides). Otherwise, if input is a Request, copy its own
+      // headers so they aren't lost when we pass `{...init, headers}` back
+      // to baseFetch — `new Headers(undefined)` would otherwise produce an
+      // empty Headers and drop the Request's headers (including
+      // Authorization). See PR #4393 review feedback.
       headers = new Headers(init?.headers);
       if (init?.headers === undefined && input instanceof Request) {
         input.headers.forEach((value, key) => headers.set(key, value));
