@@ -753,6 +753,7 @@ const SETTINGS_SCHEMA = {
         type: 'boolean',
         label: 'Enable Fortune Quotes',
         category: 'UI',
+        requiresRestart: false,
         default: false,
         description:
           'Display random fortune quotes during loading instead of static phrases. Requires the `fortune` command to be installed.',
@@ -763,6 +764,7 @@ const SETTINGS_SCHEMA = {
         type: 'string',
         label: 'Fortune Command',
         category: 'UI',
+        requiresRestart: false,
         default: DEFAULT_FORTUNE_COMMAND,
         description:
           'Command to execute for fortune quotes. Use -s for short fortunes, -n <chars> to limit length. Set `enableFortunes` to false to disable.',
