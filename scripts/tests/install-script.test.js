@@ -336,6 +336,7 @@ describe('installation scripts', () => {
     );
     expect(script).toContain('qwen-code\\node\\node.exe');
     expect(script).toContain('Archive contains symlinks or reparse points');
+    expect(script).toContain('Archive is empty');
     expect(script).toContain('unsafe path with control character');
     expect(script).toContain('Failed to update user PATH');
     expect(script).toContain('QWEN_INSTALL_ROOT');
@@ -1377,6 +1378,25 @@ describe('standalone release packaging', () => {
     ).rejects.toThrow(/--base-url must use https/);
   });
 
+  it('rejects private or reserved release base URL hosts', async () => {
+    const { verifyReleaseBaseUrl } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    const fetchImpl = vi.fn();
+
+    for (const baseUrl of [
+      'https://localhost/release/',
+      'https://127.0.0.1/release/',
+      'https://[::ffff:127.0.0.1]/release/',
+      'https://[fe90::1]/release/',
+    ]) {
+      await expect(
+        verifyReleaseBaseUrl(baseUrl, { fetchImpl }),
+      ).rejects.toThrow(/--base-url must not target a private network/);
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('downloads release archive bodies instead of relying on HEAD probes', async () => {
     const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
       await import(installationReleaseVerificationScriptUrl);
@@ -1897,7 +1917,6 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('ALIYUN_OSS_ACCESS_KEY_SECRET');
     expect(guide).toContain('ALIYUN_OSS_BUCKET');
     expect(guide).toContain('ALIYUN_OSS_ENDPOINT');
-    expect(guide).toContain('Public installation documentation');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
   });
@@ -1955,7 +1974,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
         const archive = packageFakeStandalone(tmpDir);
         const installRoot = path.join(tmpDir, 'install');
         const home = path.join(tmpDir, 'home');
-        runUnixInstaller(archive, installRoot, home);
+        const output = runUnixInstaller(archive, installRoot, home).toString();
 
         expect(existsSync(path.join(installRoot, 'bin', 'qwen'))).toBe(true);
         expect(

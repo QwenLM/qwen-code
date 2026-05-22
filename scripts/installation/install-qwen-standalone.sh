@@ -884,6 +884,22 @@ validate_archive_entry_path() {
     esac
 }
 
+archive_contains_symlinks() {
+    local archive_path="$1"
+
+    case "${archive_path}" in
+        *.zip)
+            unzip -Z -v "${archive_path}" 2>/dev/null | grep -E 'Unix file attributes \(12[0-7]{4} octal\)' >/dev/null
+            ;;
+        *.tar.gz|*.tgz|*.tar.xz)
+            tar -tvf "${archive_path}" 2>/dev/null | awk '$1 ~ /^l/ { found=1 } END { exit found ? 0 : 1 }'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 validate_archive_contents() {
     local archive_path="$1"
     local entries
@@ -911,6 +927,16 @@ validate_archive_contents() {
             return 1
             ;;
     esac
+
+    if [[ -z "${entries}" ]]; then
+        log_error "Archive is empty: ${archive_path}"
+        return 1
+    fi
+
+    if archive_contains_symlinks "${archive_path}"; then
+        log_error "Archive contains symlinks; refusing to install."
+        return 1
+    fi
 
     while IFS= read -r entry; do
         validate_archive_entry_path "${entry}" || return 1

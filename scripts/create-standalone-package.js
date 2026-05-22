@@ -608,4 +608,4 @@ function fail(message) {
   throw new Error(`Error: ${message}`);
 }
 
-export { writeSha256Sums };
+export { TARGETS, writeSha256Sums };
