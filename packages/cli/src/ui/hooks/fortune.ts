@@ -18,6 +18,15 @@ const debugLogger = createDebugLogger('fortune');
  */
 export async function getFortuneQuote(command: string): Promise<string | null> {
   try {
+    // Detect environment variables in command
+    if (/\$[a-zA-Z_][a-zA-Z0-9_]*|\$\{[^}]+\}/.test(command)) {
+      debugLogger.warn(
+        'Environment variables ($VAR, ${VAR}) are not supported in fortuneCommand; ignoring command: %s',
+        command,
+      );
+      return null;
+    }
+
     const parsed = parse(command);
     const args: string[] = [];
     let executable: string | null = null;
