@@ -121,6 +121,15 @@ describe('bundled review skill', () => {
       'echo x|git checkout main',
       'false||git pull',
       'eval "git checkout main"',
+      // `$IFS` / `${IFS}` parameter-expansion bypasses — bash splits these
+      // into whitespace at runtime, so the literal command string seen by
+      // the regex doesn't contain a `git <verb>` sequence. Rule 6 denies
+      // any `$IFS` in the command outright.
+      'git$IFS checkout main',
+      'git${IFS}checkout main',
+      'git${IFS:1}reset --hard HEAD',
+      'gh$IFS pr checkout 123',
+      'gh${IFS}pr checkout 123',
     ])('denies %s', (cmd) => {
       const { stdout } = runGuard({
         tool_name: 'run_shell_command',

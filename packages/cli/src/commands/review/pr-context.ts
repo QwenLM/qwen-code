@@ -18,7 +18,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, ghApiAll } from './lib/gh.js';
-import { requireFetchReport } from './lib/session.js';
+import { requireFetchReportFor } from './lib/session.js';
 
 interface PrMetadata {
   title: string;
@@ -250,10 +250,13 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   }
   const [owner, repo] = ownerRepo.split('/');
 
-  // Hard precondition: a fetch-pr report must exist for this PR. Without it
-  // the LLM driver bypassed the worktree setup (e.g. with `gh pr checkout`),
-  // which contaminates the user's local branch state. Refuse to continue.
-  requireFetchReport(prNumber);
+  // Hard precondition: a fetch-pr report must exist for this PR AND be bound
+  // to this owner/repo. Bypassing the worktree setup (e.g. `gh pr checkout`)
+  // contaminates the user's local branch state; a stale report from reviewing
+  // PR #N in another repo must not satisfy the gate for PR #N in this repo.
+  // (Cross-repo lightweight mode skips this command entirely — SKILL.md
+  // Step 1 routes those flows directly to `gh api .../pulls/.../comments`.)
+  requireFetchReportFor({ prNumber, ownerRepo });
 
   ensureAuthenticated();
 

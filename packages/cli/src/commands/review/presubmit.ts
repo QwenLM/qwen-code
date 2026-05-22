@@ -20,7 +20,7 @@ import {
   currentUser,
   ensureAuthenticated,
 } from './lib/gh.js';
-import { requireFetchReport } from './lib/session.js';
+import { requireFetchReportFor } from './lib/session.js';
 
 interface FindingAnchor {
   path: string;
@@ -160,11 +160,14 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const owner = ownerRepo.slice(0, slash);
   const repo = ownerRepo.slice(slash + 1);
 
-  // Hard precondition: a fetch-pr report must exist for this PR. presubmit
-  // is only meaningful inside an active /review session that started with
-  // fetch-pr; running it standalone means the rest of the pipeline was
-  // bypassed (e.g. `gh pr checkout`).
-  requireFetchReport(prNumber);
+  // Hard precondition: a fetch-pr report must exist for this PR AND be bound
+  // to this owner/repo. presubmit is only meaningful inside an active /review
+  // session started by `fetch-pr` for the same repo; running it standalone
+  // or against a stale cross-repo session means the rest of the pipeline was
+  // bypassed (e.g. `gh pr checkout`) or pointed at the wrong target. Step 9
+  // for cross-repo lightweight reviews submits via raw `gh api`, not this
+  // command — see SKILL.md.
+  requireFetchReportFor({ prNumber, ownerRepo });
 
   ensureAuthenticated();
 

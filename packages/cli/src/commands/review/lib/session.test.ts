@@ -12,6 +12,7 @@ import {
   fetchReportPath,
   readFetchReport,
   requireFetchReport,
+  requireFetchReportFor,
   ensureWorktreeMatches,
   type FetchReport,
 } from './session.js';
@@ -108,5 +109,42 @@ describe('review/lib/session', () => {
     expect(() => ensureWorktreeMatches(report, '/some/other/path')).toThrow(
       /Worktree path mismatch/,
     );
+  });
+
+  it('requireFetchReportFor accepts a report bound to the same owner/repo', () => {
+    writeFileSync(
+      fetchReportPath('42'),
+      JSON.stringify(REPORT_FIXTURE),
+      'utf8',
+    );
+    const got = requireFetchReportFor({
+      prNumber: '42',
+      ownerRepo: 'octo/repo',
+    });
+    expect(got.ownerRepo).toBe('octo/repo');
+  });
+
+  it('requireFetchReportFor rejects a report bound to a different repo', () => {
+    // Stale report from reviewing PR #42 in repoA must not satisfy a /review
+    // pointed at PR #42 in repoB — the LLM driver should be told to re-run
+    // fetch-pr for the correct repo rather than silently reusing the
+    // mis-targeted worktree.
+    writeFileSync(
+      fetchReportPath('42'),
+      JSON.stringify({ ...REPORT_FIXTURE, ownerRepo: 'attacker/repo' }),
+      'utf8',
+    );
+    expect(() =>
+      requireFetchReportFor({ prNumber: '42', ownerRepo: 'octo/repo' }),
+    ).toThrow(/bound to a different repo/);
+    expect(() =>
+      requireFetchReportFor({ prNumber: '42', ownerRepo: 'octo/repo' }),
+    ).toThrow(/qwen review fetch-pr 42 octo\/repo/);
+  });
+
+  it('requireFetchReportFor surfaces the missing-report message when no report exists', () => {
+    expect(() =>
+      requireFetchReportFor({ prNumber: '42', ownerRepo: 'octo/repo' }),
+    ).toThrow(/Missing fetch-pr report/);
   });
 });

@@ -154,6 +154,32 @@ describe('review subcommand gates (require fetch-pr report)', () => {
     expect(err?.message).toMatch(/Missing fetch-pr report for PR #7/);
   });
 
+  it('pr-context refuses when report.ownerRepo does not match the command arg', async () => {
+    writeReport('7', { ownerRepo: 'attacker/repo' });
+    const err = await runOrCapture([
+      'pr-context',
+      '7',
+      'octo/repo',
+      '--out',
+      '.qwen/tmp/ctx.md',
+    ]);
+    expect(err).not.toBeNull();
+    expect(err?.message).toMatch(/bound to a different repo/);
+  });
+
+  it('presubmit refuses when report.ownerRepo does not match the command arg', async () => {
+    writeReport('7', { ownerRepo: 'attacker/repo' });
+    const err = await runOrCapture([
+      'presubmit',
+      '7',
+      'b'.repeat(40),
+      'octo/repo',
+      '.qwen/tmp/presubmit.json',
+    ]);
+    expect(err).not.toBeNull();
+    expect(err?.message).toMatch(/bound to a different repo/);
+  });
+
   it('deterministic --pr refuses when worktree path does not match the report', async () => {
     writeReport('7', { worktreePath: '.qwen/tmp/review-pr-7' });
     mkdirSync('.qwen/tmp/some-other-dir', { recursive: true });

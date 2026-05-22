@@ -81,6 +81,37 @@ export function requireFetchReport(prNumber: string | number): FetchReport {
 }
 
 /**
+ * Like `requireFetchReport`, but additionally checks that the report was
+ * written for the same `owner/repo`. Without this binding, a stale
+ * `pr-<n>-fetch.json` left over from reviewing PR #N in repo A can satisfy
+ * a `/review N` invocation pointed at repo B, and downstream subcommands
+ * proceed as if a worktree had been fetched for B.
+ *
+ * Same recovery message shape as `requireFetchReport` — the LLM driver can
+ * always fix the mismatch by re-running `fetch-pr` with the right repo arg.
+ */
+export function requireFetchReportFor({
+  prNumber,
+  ownerRepo,
+}: {
+  prNumber: string | number;
+  ownerRepo: string;
+}): FetchReport {
+  const report = requireFetchReport(prNumber);
+  if (report.ownerRepo !== ownerRepo) {
+    const path = fetchReportPath(prNumber);
+    throw new Error(
+      `Fetch-pr report for PR #${prNumber} is bound to a different repo.\n` +
+        `  report.ownerRepo: ${report.ownerRepo}\n` +
+        `  this command's owner_repo: ${ownerRepo}\n\n` +
+        `Re-run \`qwen review fetch-pr ${prNumber} ${ownerRepo} --out ${path}\` ` +
+        `to refresh the session for the correct repo.`,
+    );
+  }
+  return report;
+}
+
+/**
  * Refuse to operate on a worktree path that doesn't match the fetch-pr report.
  * Catches the case where the LLM tries to run the deterministic / autofix step
  * against a path it picked manually instead of `report.worktreePath`.
