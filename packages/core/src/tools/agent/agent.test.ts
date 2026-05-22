@@ -893,6 +893,52 @@ describe('AgentTool', () => {
         expect(spec.depth).toBe(1);
         expect(spec.parentAgentId).toBe('outer-parent');
       });
+
+      it('CANCELLED terminateMode + aborted signal → status="cancelled" + terminateReason="signal_aborted"', async () => {
+        // The signalAborted=true branch in deriveSubagentOutcomeMetadata —
+        // user-initiated stop (Ctrl-C / task_stop) must classify as
+        // signal_aborted, not subagent_cancelled. wenshao @ #4410.
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.CANCELLED,
+        );
+        const params: AgentParams = {
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+        };
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        const controller = new AbortController();
+        controller.abort();
+        await invocation.execute(controller.signal);
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('cancelled');
+        expect(meta.terminateReason).toBe('signal_aborted');
+      });
+
+      it('throw + aborted signal → status="aborted" + terminateReason="signal_aborted"', async () => {
+        // The signalAborted=true branch in deriveSubagentExceptionMetadata.
+        // A throw under an already-aborted signal is user-cancellation,
+        // not a programmer error — must classify as aborted, not failed.
+        vi.mocked(mockAgent.execute).mockRejectedValue(
+          new Error('boom mid-cancel'),
+        );
+        const params: AgentParams = {
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+        };
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        const controller = new AbortController();
+        controller.abort();
+        await invocation.execute(controller.signal);
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('aborted');
+        expect(meta.terminateReason).toBe('signal_aborted');
+      });
     });
   });
 

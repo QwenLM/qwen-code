@@ -1267,19 +1267,27 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     try {
       return await runInSubagentSpanContext(span, () => body(recordOutcome));
     } catch (error) {
-      const aborted = signal?.aborted ?? false;
-      recordedMetadata = {
-        status: aborted ? 'aborted' : 'failed',
-        error: error instanceof Error ? error.message : String(error),
-        errorType:
-          error instanceof Error ? error.constructor.name : 'NonErrorThrown',
-        terminateReason: aborted ? 'signal_aborted' : 'exception',
-      };
+      // ??= so a body that already published its real terminal state
+      // (e.g. recordOutcome('completed')) is not clobbered by a late
+      // cleanup throw — a downstream `restoreParentPM()` failure should
+      // not retroactively turn a successful subagent run into a failure.
+      // Review wenshao @ #4410.
+      recordedMetadata ??= deriveSubagentExceptionMetadata(
+        error,
+        signal?.aborted ?? false,
+      );
       throw error;
     } finally {
       // No `recordOutcome` call AND no throw → body resolved normally
-      // without opting in. Treat as completed (matches caller intent for
-      // historical paths that don't yet record outcomes).
+      // without opting in. Treat as completed and surface a warn so the
+      // missing wiring is observable in production (every current site
+      // calls recordOutcome; future paths might forget). Review wenshao
+      // @ #4410.
+      if (!recordedMetadata) {
+        debugLogger.warn(
+          `runWithSubagentSpan: body did not call recordOutcome for ${spec.subagentName}/${spec.agentId} — defaulting span status to completed`,
+        );
+      }
       endSubagentSpan(span, recordedMetadata ?? { status: 'completed' });
     }
   }
@@ -1353,6 +1361,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const success = terminateMode === AgentTerminateMode.GOAL;
       const executionSummary = subagent.getExecutionSummary();
 
+      // Publish span outcome BEFORE side-effectful UI/registry calls — if
+      // updateDisplay throws, the subagent's real terminal state must
+      // still reach telemetry instead of being clobbered by the catch
+      // branch's exception derivation. Review wenshao @ #4410.
+      opts.recordSpanOutcome?.(
+        deriveSubagentOutcomeMetadata({
+          terminateMode,
+          signalAborted: signal?.aborted ?? false,
+          resultSummaryPresent: Boolean(finalText && finalText.length > 0),
+        }),
+      );
+
       if (signal?.aborted) {
         this.updateDisplay(
           {
@@ -1373,15 +1393,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           updateOutput,
         );
       }
-      opts.recordSpanOutcome?.(
-        deriveSubagentOutcomeMetadata({
-          terminateMode,
-          signalAborted: signal?.aborted ?? false,
-          resultSummaryPresent: Boolean(finalText && finalText.length > 0),
-        }),
-      );
       return stopHookWarning;
     } catch (error) {
+      // Same ordering rule as the success path: publish first so any
+      // downstream updateDisplay throw can't lose telemetry.
+      opts.recordSpanOutcome?.(
+        deriveSubagentExceptionMetadata(error, signal?.aborted ?? false),
+      );
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.error(
@@ -1393,9 +1411,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           terminateReason: `Failed to run subagent: ${errorMessage}`,
         },
         updateOutput,
-      );
-      opts.recordSpanOutcome?.(
-        deriveSubagentExceptionMetadata(error, signal?.aborted ?? false),
       );
       return undefined;
     }
@@ -2170,13 +2185,29 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // MAX_TURNS, TIMEOUT, and SHUTDOWN are surfaced as failures so
             // the parent model (and the UI) don't treat incomplete runs as
             // completed.
+            //
+            // Snapshot the span-relevant terminal state and PUBLISH IT
+            // FIRST — if the worktree cleanup / registry update / patch
+            // throws, telemetry must still see the subagent's actual
+            // outcome (review wenshao @ #4410).
             const terminateMode = bgSubagent.getTerminateMode();
+            const subagentRawText = bgSubagent.getFinalText();
+            recordSpanOutcome?.(
+              deriveSubagentOutcomeMetadata({
+                terminateMode,
+                signalAborted: bgAbortController.signal.aborted,
+                resultSummaryPresent: Boolean(
+                  subagentRawText && subagentRawText.length > 0,
+                ),
+              }),
+            );
+
             const wtSuffix = formatWorktreeSuffix(
               await cleanupWorktreeIsolation(),
             );
             const finalText =
               appendStopHookBlockingCapWarning(
-                bgSubagent.getFinalText(),
+                subagentRawText,
                 stopHookWarning,
               ) + wtSuffix;
             const completionStats = getCompletionStats();
@@ -2211,16 +2242,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   finalText || `Agent terminated with mode: ${terminateMode}`,
               });
             }
-            recordSpanOutcome?.(
-              deriveSubagentOutcomeMetadata({
-                terminateMode,
-                signalAborted: bgAbortController.signal.aborted,
-                resultSummaryPresent: Boolean(
-                  finalText && finalText.length > 0,
-                ),
-              }),
-            );
           } catch (error) {
+            // Publish first — same reason as the success path.
+            recordSpanOutcome?.(
+              deriveSubagentExceptionMetadata(
+                error,
+                bgAbortController.signal.aborted,
+              ),
+            );
             const baseErrorMsg =
               error instanceof Error ? error.message : String(error);
             debugLogger.error(
@@ -2264,12 +2293,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 lastError: errorMsg,
               });
             }
-            recordSpanOutcome?.(
-              deriveSubagentExceptionMetadata(
-                error,
-                bgAbortController.signal.aborted,
-              ),
-            );
           } finally {
             bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
             bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
@@ -2379,7 +2402,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               isBuiltIn: subagentConfig.level === 'builtin',
               modelOverride: subagentConfig.model,
             },
-            hookOpts.signal,
+            // Forks are fire-and-forget. The parent turn's signal is the
+            // wrong abort source for span classification here — if the
+            // parent turn happens to be cancelled at the same instant the
+            // fork throws an unrelated internal error, the catch fallback
+            // would otherwise misclassify it as 'aborted'. Pass undefined
+            // so the fallback classifies as 'failed' (review wenshao @
+            // #4410). The fork's actual abort wiring still flows through
+            // runSubagentWithHooks → recordOutcome, which is the
+            // load-bearing path.
+            undefined,
             (recordSpanOutcome) =>
               runWithAgentContext(hookOpts.agentId, async () => {
                 try {

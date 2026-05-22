@@ -164,18 +164,42 @@ const SPAN_TTL_MS_DEFAULT = 30 * 60 * 1000; //   30 min — user walk-away
 const SPAN_TTL_MS_LONG = 4 * 60 * 60 * 1000; //   4 h  — long fire-and-forget subagent
 
 /**
+ * Invocation kinds that legitimately run for hours and need the long TTL.
+ * Typed against `SubagentInvocationKind` so adding a new kind to the union
+ * (e.g. `'scheduled'`) without revisiting this Set causes a TS error in
+ * the ttlFor() comparison instead of silently falling through to the
+ * 30-min default. Review wenshao @ #4410.
+ */
+const LONG_TTL_SUBAGENT_KINDS = new Set<SubagentInvocationKind>([
+  'fork',
+  'background',
+]);
+
+/**
  * TTL per span type. Default is 30 min — picked for `tool.blocked_on_user`
  * (user think-time). Subagent fork/background invocations can legitimately
  * run hours (large analysis, slow builds, deep research), so they need a
- * wider safety-net window (#3731 Phase 3). The check on
- * `invocation_kind === 'foreground'` keeps foreground subagents at the
- * default TTL — those are bound to the user-facing request and should
+ * wider safety-net window (#3731 Phase 3). Foreground subagents stay at
+ * the default TTL — those are bound to the user-facing request and should
  * never legitimately exceed the default window.
+ *
+ * KNOWN LIMITATION (deferred): only the subagent span itself gets the long
+ * TTL. Child LLM/tool/hook spans emitted inside a 2-hour background agent
+ * still use the 30-min default, so the trace can show a gap (early child
+ * spans swept at 30 min, later child spans present). Fixing this needs
+ * either ALS propagation of the "long TTL bucket" into resolveParentContext
+ * or a TTL-inheritance walk at sweep time — both warrant a follow-up PR.
+ * See wenshao @ #4410 review.
  */
 function ttlFor(ctx: SpanContext): number {
   if (ctx.type === 'subagent') {
     const kind = ctx.attributes['qwen-code.subagent.invocation_kind'];
-    if (kind === 'fork' || kind === 'background') return SPAN_TTL_MS_LONG;
+    if (
+      typeof kind === 'string' &&
+      LONG_TTL_SUBAGENT_KINDS.has(kind as SubagentInvocationKind)
+    ) {
+      return SPAN_TTL_MS_LONG;
+    }
   }
   return SPAN_TTL_MS_DEFAULT;
 }
@@ -1117,6 +1141,13 @@ export function runInSubagentSpanContext<T>(
   span: Span,
   fn: () => Promise<T>,
 ): Promise<T> {
+  // Skip the context wrapping when telemetry is off / span is untracked
+  // (startSubagentSpan returns NOOP_SPAN, which is never added to
+  // activeSpans). Mirrors runInToolSpanContext's pattern — avoids paying
+  // an AsyncLocalStorage.run() per invocation just to wrap a noop span.
+  // Review wenshao @ #4410.
+  const spanId = getSpanId(span);
+  if (!activeSpans.has(spanId)) return fn();
   const ctx = trace.setSpan(otelContext.active(), span);
   return otelContext.with(ctx, fn);
 }
@@ -1135,7 +1166,23 @@ export function endSubagentSpan(
 ): void {
   const spanId = getSpanId(span);
   const spanCtx = activeSpans.get(spanId)?.deref();
-  if (!spanCtx || spanCtx.ended) return;
+  // Surface the silent-skip case so a TTL-sweep race that loses the real
+  // terminal state is observable in production. Without this, a fork that
+  // legitimately finishes a few seconds past 4h has its `'completed'`
+  // outcome silently overwritten by the sweep's `'aborted'/'ttl_swept'`
+  // stamp with no log trail. Review wenshao @ #4410.
+  if (!spanCtx) {
+    debugLogger.warn(
+      `endSubagentSpan: span ${spanId} not found in activeSpans (already swept?) — intended status=${metadata.status}, reason=${metadata.terminateReason ?? 'none'}`,
+    );
+    return;
+  }
+  if (spanCtx.ended) {
+    debugLogger.warn(
+      `endSubagentSpan: span ${spanId} already ended — intended status=${metadata.status}, reason=${metadata.terminateReason ?? 'none'} (possible TTL sweep race)`,
+    );
+    return;
+  }
 
   spanCtx.ended = true;
 
