@@ -191,6 +191,10 @@ selectToolProgress(state, toolCallId); // → { ratio?, step? } | undefined
 selectPendingPermissionBlocks(state); // → ReadonlyArray<DaemonPermissionTranscriptBlock>
 selectTranscriptBlocks(state); // → ReadonlyArray<DaemonTranscriptBlock>
 selectTranscriptBlocksOrderedByEventId(state); // sorted by daemon-monotonic id
+
+// PR-K — sub-agent nesting
+selectSubagentChildBlocks(state, parentToolCallId); // direct children only
+isSubagentChildBlock(block); // type guard: was this tool invoked inside a sub-agent?
 ```
 
 `currentToolCallId` is automatically maintained by the reducer:
@@ -206,6 +210,62 @@ in-flight tool block and force-sets its status to `'cancelled'`. Daemon
 does not guarantee a terminal `tool_call_update` for every in-flight
 tool when the parent prompt is cancelled — this propagation prevents UI
 spinners from spinning forever.
+
+Sub-agent children are cancelled together with their parent because
+cancellation iterates every in-flight tool block in `toolBlockByCallId`,
+not just the current pointer.
+
+## Sub-agent nesting (PR-K)
+
+When the main agent delegates to a sub-agent (the `Task` tool, or
+equivalent), the daemon stamps `parentToolCallId` and `subagentType` on
+the **child** tool calls via `tool_call._meta`. The reducer reads both
+and:
+
+- Mirrors `parentToolCallId` + `subagentType` onto
+  `DaemonToolTranscriptBlock`
+- Resolves `parentBlockId` (the parent's transcript block `id`) when the
+  parent block is already in state; otherwise leaves it `undefined` and
+  back-fills when the parent block later appears
+
+Out-of-order arrival (child before parent) is handled transparently. A
+child whose parent gets trimmed by `maxBlocks` keeps `parentToolCallId`
+for selector queries, but `parentBlockId` is nulled (the dangling id
+would no longer resolve via `blockIndexById`).
+
+```ts
+import {
+  selectSubagentChildBlocks,
+  isSubagentChildBlock,
+} from '@qwen-code/sdk/daemon';
+
+// Render a parent tool block, then walk children:
+function renderToolBlock(state, block) {
+  if (block.kind !== 'tool') return renderOther(block);
+  const children = selectSubagentChildBlocks(state, block.toolCallId);
+  return (
+    <ToolBlock block={block}>
+      {children.length > 0 && (
+        <Indent>
+          {children.map((c) => renderToolBlock(state, c))}
+        </Indent>
+      )}
+    </ToolBlock>
+  );
+}
+
+// Or filter top-level vs. nested at render time:
+const topLevel = state.blocks.filter((b) => !isSubagentChildBlock(b));
+```
+
+`selectSubagentChildBlocks` returns **direct** children only. Walk
+recursively to render nested sub-agents (a sub-agent inside a
+sub-agent). Daemon does not emit cycles, but renderers walking up via
+`parentBlockId` should still detect them defensively (e.g., depth cap or
+visited set).
+
+Self-references (`parentToolCallId === toolCallId`) are dropped by the
+normalizer before reaching the reducer.
 
 ## Time semantics (PR-B)
 

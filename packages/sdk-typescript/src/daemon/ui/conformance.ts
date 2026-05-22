@@ -491,4 +491,52 @@ export const DAEMON_UI_CONFORMANCE_FIXTURES: readonly DaemonUiConformanceFixture
       expectedContains: [],
       expectedAbsent: ['Available commands updated'],
     },
+    {
+      name: 'subagent-nesting',
+      description:
+        'PR-K: tool calls invoked inside a sub-agent delegation carry parentToolCallId + subagentType via tool_call._meta. The parent Task tool call lands first, then a grep tool call from inside the sub-agent. Adapters must render both blocks without throwing; nested-aware adapters should be able to identify the sub-agent child via parentToolCallId. Order-resilient: the child arrives after the parent.',
+      envelopes: [
+        {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'task-1',
+              title: 'Delegate to code-reviewer',
+              status: 'running',
+              name: 'Task',
+              rawInput: {
+                subagent_type: 'code-reviewer',
+                prompt: 'review the diff',
+              },
+            },
+          },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'grep-1',
+              title: 'grep -r TODO src/',
+              status: 'completed',
+              rawInput: { pattern: 'TODO', path: 'src/' },
+              _meta: {
+                parentToolCallId: 'task-1',
+                subagentType: 'code-reviewer',
+              },
+            },
+          },
+        },
+      ],
+      // Phrases chosen to be markdown-safe: backslash escaping of `-` in
+      // titles means we cannot rely on substrings containing hyphens.
+      // Sub-agent type token appears in backticks (unescaped). `TODO` is
+      // a clean substring from the child's rawInput.
+      expectedContains: ['code-reviewer', 'review the diff', 'TODO'],
+    },
   ];

@@ -360,13 +360,21 @@ function upsertToolBlock(
     if (event.toolName) existing.toolName = event.toolName;
     if (event.toolKind) existing.toolKind = event.toolKind;
     // PR-K subagent nesting — daemon may stamp parent context on later
-    // updates (e.g., when SubAgentTracker first sees the call). Adopt
-    // if not yet correlated; never overwrite an established correlation.
+    // updates (e.g., when SubAgentTracker first sees the call) AND the
+    // parent block may also appear later than the child. Track two
+    // resolutions independently:
+    //   (a) parentToolCallId: adopt first non-empty stamp; never overwrite
+    //   (b) parentBlockId: back-fill whenever the parent block becomes
+    //       visible AND we don't yet have it, regardless of when (a)
+    //       happened. This handles the out-of-order case where the child
+    //       arrived with parent stamp before the parent block existed.
     if (event.parentToolCallId && !existing.parentToolCallId) {
       existing.parentToolCallId = event.parentToolCallId;
-      const parentBlockId = state.toolBlockByCallId[event.parentToolCallId];
-      if (parentBlockId && parentBlockId !== TRIMMED_TOOL_BLOCK_ID) {
-        existing.parentBlockId = parentBlockId;
+    }
+    if (existing.parentToolCallId && !existing.parentBlockId) {
+      const candidateId = state.toolBlockByCallId[existing.parentToolCallId];
+      if (candidateId && candidateId !== TRIMMED_TOOL_BLOCK_ID) {
+        existing.parentBlockId = candidateId;
       }
     }
     if (event.subagentType && !existing.subagentType) {
@@ -419,6 +427,23 @@ function upsertToolBlock(
   };
   appendBlock(state, block);
   state.toolBlockByCallId[event.toolCallId] = block.id;
+  // PR-K back-fill: if any previously created child block recorded this
+  // tool call as its parent (child-before-parent ordering) but couldn't
+  // resolve `parentBlockId` at the time, fill it in now. Cheap O(n) scan;
+  // only walks the live block array (no trimmed entries). Skipped entirely
+  // for the common case (top-level tool with no children waiting).
+  for (const candidate of state.blocks) {
+    if (
+      candidate.kind === 'tool' &&
+      candidate.parentToolCallId === event.toolCallId &&
+      !candidate.parentBlockId
+    ) {
+      const writable = getWritableBlockById(state, candidate.id);
+      if (writable?.kind === 'tool') {
+        writable.parentBlockId = block.id;
+      }
+    }
+  }
   updateCurrentToolPointer(state, event.toolCallId, event.status);
   clearActiveText(state);
 }
@@ -681,6 +706,22 @@ function trimTranscriptState(
       state.permissionBlockByRequestId[requestId] = TRIMMED_PERMISSION_BLOCK_ID;
     }
   }
+  // PR-K: tool blocks that survived trimming may still reference a
+  // `parentBlockId` whose parent was just trimmed. The dangling id no
+  // longer resolves via `blockIndexById`. Null it to give renderers a
+  // clear "parent gone" signal. `parentToolCallId` stays — selectors keyed
+  // on tool call id (not block id) survive trimming, and a downstream
+  // re-fetch could resurrect the relationship if the parent ever
+  // re-enters state via replay.
+  for (const block of state.blocks) {
+    if (block.kind !== 'tool') continue;
+    if (block.parentBlockId && !keptIds.has(block.parentBlockId)) {
+      const writable = getWritableBlockById(state, block.id);
+      if (writable?.kind === 'tool') {
+        writable.parentBlockId = undefined;
+      }
+    }
+  }
   if (!keptIds.has(state.activeUserBlockId ?? '')) {
     state.activeUserBlockId = undefined;
   }
@@ -880,16 +921,23 @@ export function selectToolProgress(
 }
 
 /**
- * PR-K (post-rebase): return the tool blocks that were invoked inside a
- * given sub-agent delegation, identified by the parent tool call id (the
+ * PR-K (post-rebase): return the **direct** child tool blocks of a given
+ * sub-agent delegation, identified by the parent tool call id (the
  * `toolCallId` of the `Task`-equivalent tool the main agent called).
  *
  * Renderers use this to draw a nested view: render the parent tool block
- * as a folder header and the children as indented descendants.
+ * as a folder header and the children as indented descendants. To walk
+ * transitive descendants (nested sub-agents), call recursively on each
+ * child's `toolCallId`.
  *
  * Returns an empty array when the parent has no recorded children, e.g.,
  * the daemon hasn't seen any sub-agent activity yet or the children were
- * already trimmed by `maxBlocks`.
+ * already trimmed by `maxBlocks`. Blocks are returned in insertion order
+ * (i.e., the order the reducer accumulated them).
+ *
+ * Daemon does not emit cycles, but a hypothetical buggy emit (A→B, B→A)
+ * would surface as mutual children here; renderers walking parents must
+ * detect cycles defensively.
  */
 export function selectSubagentChildBlocks(
   state: DaemonTranscriptState,
@@ -909,9 +957,7 @@ export function selectSubagentChildBlocks(
 export function isSubagentChildBlock(
   block: DaemonTranscriptBlock,
 ): block is DaemonToolTranscriptBlock {
-  return (
-    block.kind === 'tool' && (block as DaemonToolTranscriptBlock).parentToolCallId !== undefined
-  );
+  return block.kind === 'tool' && block.parentToolCallId !== undefined;
 }
 
 function compareBlocksByEventOrder(

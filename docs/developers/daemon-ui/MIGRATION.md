@@ -232,9 +232,50 @@ stream_error for this to populate. SDK already reads it.
 
 In v1, cancelled prompts left in-flight tool blocks spinning forever.
 In v2 (PR-E), `propagateCancellationToInFlightTools` runs automatically
-on `assistant.done.reason === 'cancelled'`.
+on `assistant.done.reason === 'cancelled'`. Sub-agent children are
+cancelled together with their parent.
 
 **No adapter changes needed** — your spinners will resolve correctly.
+
+### 8a. Sub-agent nesting — opt in to nested rendering (PR-K)
+
+Tool blocks invoked inside a sub-agent delegation now carry
+`parentToolCallId`, `subagentType`, and (when the parent is in state)
+`parentBlockId`. Adapters can opt in to nested rendering:
+
+**Before** (flat list, sub-agent calls visually indistinguishable from
+top-level):
+
+```tsx
+state.blocks.map((b) => <ToolBlock block={b} />);
+```
+
+**After** (recursive nested rendering):
+
+```tsx
+import {
+  selectSubagentChildBlocks,
+  isSubagentChildBlock,
+} from '@qwen-code/sdk/daemon';
+
+function renderTool(block) {
+  const children = selectSubagentChildBlocks(state, block.toolCallId);
+  return (
+    <ToolBlock block={block}>
+      {block.subagentType && <SubagentBadge type={block.subagentType} />}
+      {children.length > 0 && (
+        <Indent>{children.map(renderTool)}</Indent>
+      )}
+    </ToolBlock>
+  );
+}
+
+const topLevel = state.blocks.filter((b) => !isSubagentChildBlock(b));
+return topLevel.map(renderTool);
+```
+
+**No adapter changes needed if you prefer the flat view** — the new
+fields are additive and ignored by code that doesn't read them.
 
 ### 9. Tool preview taxonomy — pick subset to render with custom components
 

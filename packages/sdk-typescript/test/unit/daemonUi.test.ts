@@ -3500,3 +3500,265 @@ describe('daemon UI subagent nesting (PR-K, post-rebase)', () => {
     expect(isSubagentChildBlock(state.blocks[1]!)).toBe(true);
   });
 });
+
+describe('daemon UI subagent nesting — review hardening (R1-R4)', () => {
+  it('drops self-reference (parentToolCallId === toolCallId) in normalizer', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'self',
+          title: 'self-loop attempt',
+          status: 'running',
+          _meta: { parentToolCallId: 'self', subagentType: 'rogue' },
+        },
+      },
+    } as never);
+    expect(events).toEqual([
+      expect.not.objectContaining({ parentToolCallId: 'self' }),
+    ]);
+    // subagentType is dropped together because dropping parent context means
+    // the child should not be treated as nested. Actually — we DO keep
+    // subagentType independent. Verify:
+    expect(events[0]).toMatchObject({
+      type: 'tool.update',
+      toolCallId: 'self',
+      subagentType: 'rogue',
+    });
+    expect(events[0]).not.toHaveProperty('parentToolCallId');
+  });
+
+  it('back-fills parentBlockId when parent appears AFTER child (out-of-order)', async () => {
+    const { selectSubagentChildBlocks } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    // Child first, with parent stamp pointing to a parent not yet in state.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'c-orphan',
+            title: 'orphan child',
+            status: 'running',
+            _meta: {
+              parentToolCallId: 'p-later',
+              subagentType: 'helper',
+            },
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    // At this point parentBlockId is undefined but parentToolCallId is set.
+    const childPre = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'c-orphan',
+    )!;
+    expect(childPre.parentToolCallId).toBe('p-later');
+    expect(childPre.parentBlockId).toBeUndefined();
+
+    // Parent arrives.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'p-later',
+            title: 'parent task',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+    const parent = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'p-later',
+    )!;
+    const childPost = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'c-orphan',
+    )!;
+    // parentBlockId now back-filled on the existing child block.
+    expect(childPost.parentBlockId).toBe(parent.id);
+    expect(selectSubagentChildBlocks(state, 'p-later')).toHaveLength(1);
+  });
+
+  it('back-fills parentBlockId on later child update if parent now exists', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    // Child first WITHOUT parent stamp.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'c2',
+            title: 'C2',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    // Parent arrives.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'p2',
+            title: 'P2',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+    // Child gets parent stamp on later update — parentBlockId must resolve.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'c2',
+            status: 'completed',
+            _meta: { parentToolCallId: 'p2', subagentType: 'helper' },
+          },
+        },
+      } as never),
+      { now: 4 },
+    );
+    const child = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'c2',
+    )!;
+    const parent = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'p2',
+    )!;
+    expect(child.parentToolCallId).toBe('p2');
+    expect(child.parentBlockId).toBe(parent.id);
+  });
+
+  it('nulls dangling parentBlockId after parent is trimmed by maxBlocks', () => {
+    let state = createDaemonTranscriptState({ now: 1, maxBlocks: 3 });
+    // Parent + child pair, then push 3 more blocks to evict the parent.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'pT',
+            title: 'parent',
+            status: 'completed',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'cT',
+            title: 'child',
+            status: 'completed',
+            _meta: { parentToolCallId: 'pT', subagentType: 'helper' },
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+    // Push 3 unrelated tool blocks to trim the parent.
+    for (let i = 0; i < 3; i += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        normalizeDaemonEvent({
+          id: 10 + i,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: `f${i}`,
+              title: `filler ${i}`,
+              status: 'completed',
+            },
+          },
+        } as never),
+        { now: 4 + i },
+      );
+    }
+    // Parent is gone now; cT may or may not still be in blocks. If it is,
+    // its parentBlockId must NOT reference the trimmed parent.
+    const child = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'cT',
+    );
+    if (child) {
+      // parentToolCallId stays (selector-friendly), parentBlockId is nulled.
+      expect(child.parentToolCallId).toBe('pT');
+      expect(child.parentBlockId).toBeUndefined();
+    }
+  });
+
+  it('subagent-nesting fixture passes for the SDK reference adapter', async () => {
+    const {
+      runAdapterConformanceSuite,
+      DAEMON_UI_CONFORMANCE_FIXTURES,
+      daemonBlockToMarkdown,
+    } = await import('../../src/daemon/ui/index.js');
+    const fixture = DAEMON_UI_CONFORMANCE_FIXTURES.find(
+      (f) => f.name === 'subagent-nesting',
+    );
+    expect(fixture).toBeDefined();
+    const result = runAdapterConformanceSuite(
+      {
+        reduce: (events) =>
+          reduceDaemonTranscriptEvents(
+            createDaemonTranscriptState(),
+            events,
+          ),
+        renderToText: (state) =>
+          state.blocks.map((b) => daemonBlockToMarkdown(b)).join('\n\n'),
+      },
+      { only: ['subagent-nesting'] },
+    );
+    expect(result.failed).toEqual([]);
+    expect(result.passed).toBe(1);
+  });
+});

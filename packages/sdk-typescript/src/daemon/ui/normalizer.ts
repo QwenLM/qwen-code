@@ -437,9 +437,17 @@ function normalizeToolUpdate(
   // these into the typed UI event so the reducer can correlate sub-agent
   // blocks under their parent for nested rendering. Both undefined for
   // top-level (non-sub-agent) tool calls.
-  const parentToolCallId =
+  //
+  // Self-reference guard: defensively drop `parentToolCallId === toolCallId`.
+  // The daemon should never emit this, but accepting it would make the
+  // block its own parent — selectors loop, renderers cycle.
+  const rawParentToolCallId =
     getString(update, 'parentToolCallId') ??
     (metadata ? getString(metadata, 'parentToolCallId') : undefined);
+  const parentToolCallId =
+    rawParentToolCallId && rawParentToolCallId !== toolCallId
+      ? rawParentToolCallId
+      : undefined;
   const subagentType =
     getString(update, 'subagentType') ??
     (metadata ? getString(metadata, 'subagentType') : undefined);
