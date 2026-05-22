@@ -1,5 +1,6 @@
 import type { ACPToolCall } from '../../../adapters/types';
 import { ToolStatus } from './ToolStatus';
+import styles from './LegacyTool.module.css';
 
 interface GenericToolProps {
   tool: ACPToolCall;
@@ -11,7 +12,7 @@ export function GenericTool({ tool }: GenericToolProps) {
   const output = extractOutput(tool);
 
   return (
-    <div className="tool-generic">
+    <div className={styles.tool}>
       <ToolStatus
         status={tool.status}
         toolName={tool.toolName}
@@ -20,12 +21,12 @@ export function GenericTool({ tool }: GenericToolProps) {
       {tool.args &&
         Object.keys(tool.args).length > 0 &&
         tool.status !== 'completed' && (
-          <div className="tool-generic-args">
+          <div className={styles.args}>
             <pre>{JSON.stringify(tool.args, null, 2)}</pre>
           </div>
         )}
       {output && (
-        <div className="tool-generic-output">
+        <div className={styles.output}>
           <pre>{output}</pre>
         </div>
       )}

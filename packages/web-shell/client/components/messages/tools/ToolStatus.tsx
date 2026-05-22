@@ -1,4 +1,5 @@
 import type { ToolCallStatus } from '../../../adapters/types';
+import styles from './ToolStatus.module.css';
 
 interface ToolStatusProps {
   status: ToolCallStatus;
@@ -14,10 +15,10 @@ const STATUS_ICONS: Record<ToolCallStatus, string> = {
 };
 
 const STATUS_CLASSES: Record<ToolCallStatus, string> = {
-  pending: 'status-pending',
-  in_progress: 'status-running',
-  completed: 'status-done',
-  failed: 'status-error',
+  pending: styles.pending,
+  in_progress: styles.running,
+  completed: styles.done,
+  failed: styles.error,
 };
 
 function formatElapsed(ms: number): string {
@@ -27,13 +28,13 @@ function formatElapsed(ms: number): string {
 
 export function ToolStatus({ status, toolName, elapsed }: ToolStatusProps) {
   return (
-    <div className={`tool-status ${STATUS_CLASSES[status]}`}>
-      <span className="tool-status-icon">{STATUS_ICONS[status]}</span>
-      <span className="tool-status-name">{toolName}</span>
+    <div className={`${styles.status} ${STATUS_CLASSES[status]}`}>
+      <span className={styles.icon}>{STATUS_ICONS[status]}</span>
+      <span className={styles.name}>{toolName}</span>
       {elapsed !== undefined && status === 'completed' && (
-        <span className="tool-status-elapsed">{formatElapsed(elapsed)}</span>
+        <span className={styles.elapsed}>{formatElapsed(elapsed)}</span>
       )}
-      {status === 'in_progress' && <span className="tool-status-spinner" />}
+      {status === 'in_progress' && <span className={styles.spinner} />}
     </div>
   );
 }

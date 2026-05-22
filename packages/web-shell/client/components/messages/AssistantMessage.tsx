@@ -1,28 +1,33 @@
+import { memo } from 'react';
 import { Markdown } from './Markdown';
+import styles from './AssistantMessage.module.css';
 
 interface AssistantMessageProps {
   content: string;
   thinking?: string;
 }
 
-export function AssistantMessage({ content, thinking }: AssistantMessageProps) {
+export const AssistantMessage = memo(function AssistantMessage({
+  content,
+  thinking,
+}: AssistantMessageProps) {
   return (
-    <div className="msg msg-assistant">
+    <div className={styles.message}>
       {thinking && (
-        <div className="msg-thinking-inline">
-          <span className="msg-prefix-assist">✦</span>
+        <div className={styles.thinking}>
+          <span className={styles.prefix}>✦</span>
           <pre>{thinking}</pre>
         </div>
       )}
 
       {content && (
-        <div className="msg-content">
-          <span className="msg-prefix-assist">✦</span>
-          <div className="msg-content-body">
+        <div className={styles.content}>
+          <span className={styles.prefix}>✦</span>
+          <div className={styles.contentBody}>
             <Markdown content={content} />
           </div>
         </div>
       )}
     </div>
   );
-}
+});

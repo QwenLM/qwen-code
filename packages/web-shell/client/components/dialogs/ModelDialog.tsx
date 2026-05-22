@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { ModelInfo } from '../../adapters/types';
+import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 
 interface ModelDialogProps {
   mode?: 'main' | 'fast';
@@ -65,8 +66,8 @@ export function ModelDialog({
     }
   }, [filtered, selectedIdx, onSelect, onClose]);
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
+  useDelayedGlobalKeyDown(
+    (e: KeyboardEvent) => {
       if (customMode) {
         if (e.key === 'Escape') {
           e.preventDefault();
@@ -153,26 +154,19 @@ export function ModelDialog({
         setCustomMode(true);
         return;
       }
-    };
-    const timer = setTimeout(
-      () => window.addEventListener('keydown', handler),
-      50,
-    );
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener('keydown', handler);
-    };
-  }, [
-    searchMode,
-    searchQuery,
-    filtered,
-    selectedIdx,
-    onClose,
-    handleSelect,
-    customMode,
-    customInput,
-    onSelect,
-  ]);
+    },
+    [
+      searchMode,
+      searchQuery,
+      filtered,
+      selectedIdx,
+      onClose,
+      handleSelect,
+      customMode,
+      customInput,
+      onSelect,
+    ],
+  );
 
   return (
     <div className="resume-picker">

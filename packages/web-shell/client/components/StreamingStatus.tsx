@@ -3,6 +3,7 @@ import {
   PHRASE_CHANGE_INTERVAL_MS,
   getLoadingPhrases,
 } from '../constants/loadingPhrases';
+import styles from './StreamingStatus.module.css';
 
 interface StreamingStatusProps {
   streamingState: 'idle' | 'waiting' | 'responding' | 'thinking';
@@ -63,12 +64,12 @@ export function StreamingStatus({
   const tokenStr = tokenCount > 0 ? ` · ${arrow} ${tokenCount} tokens` : '';
 
   return (
-    <div className="streaming-status">
-      <span className="streaming-status-spinner">{spinnerChar}</span>
+    <div className={styles.status}>
+      <span className={styles.spinner}>{spinnerChar}</span>
       {loadingPhrase && (
-        <span className="streaming-status-label">{loadingPhrase}</span>
+        <span className={styles.label}>{loadingPhrase}</span>
       )}
-      <span className="streaming-status-meta">
+      <span className={styles.meta}>
         ({elapsed}s{tokenStr} · esc to cancel)
       </span>
     </div>

@@ -96,9 +96,25 @@ export function useInputHistory() {
     return null;
   }, []);
 
+  const getReverseMatches = useCallback((query: string): string[] => {
+    const lowerQuery = query.trim().toLowerCase();
+    return historyRef.current
+      .slice()
+      .reverse()
+      .filter((item) => !lowerQuery || item.toLowerCase().includes(lowerQuery));
+  }, []);
+
   const resetSearch = useCallback(() => {
     searchIndexRef.current = -1;
   }, []);
 
-  return { push, navigateUp, navigateDown, reset, searchReverse, resetSearch };
+  return {
+    push,
+    navigateUp,
+    navigateDown,
+    reset,
+    searchReverse,
+    getReverseMatches,
+    resetSearch,
+  };
 }

@@ -1,9 +1,17 @@
-import { useState } from 'react';
-import type { ACPToolCall, PermissionRequest } from '../../adapters/types';
+import { memo, useState } from 'react';
+import type {
+  ACPToolCall,
+  PermissionRequest,
+  TodoItem,
+} from '../../adapters/types';
+import { isSubAgentToolCall } from '../../adapters/toolClassification';
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { DiffView } from './tools/DiffView';
 import { ToolApproval } from './ToolApproval';
 import { parseAnsi, hasAnsi } from '../../utils/ansi';
+import { extractTodosFromToolCall } from '../../utils/todos';
+import { formatElapsed, StatusIcon, truncateText } from './tools/toolDisplay';
+import styles from './tools/ToolChrome.module.css';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];
@@ -15,25 +23,13 @@ interface ToolGroupProps {
   ) => void;
 }
 
-const AGENT_NAMES = new Set(['Agent', 'agent', 'task']);
-
-function isSubAgent(tool: ACPToolCall): boolean {
-  if (AGENT_NAMES.has(tool.toolName)) return true;
-  if (tool.subTools || tool.subContent) return true;
-  if (tool.rawOutput && typeof tool.rawOutput === 'object') {
-    const raw = tool.rawOutput as Record<string, unknown>;
-    if (raw.type === 'task_execution') return true;
-  }
-  return false;
-}
-
 function getToolDescription(tool: ACPToolCall): string {
   // Use server-provided title (contains the full human-readable description from the CLI)
   if (tool.title) {
     // Title often starts with "ToolName: description", strip the tool name prefix
     const colonIdx = tool.title.indexOf(': ');
     const desc = colonIdx > 0 ? tool.title.slice(colonIdx + 2) : tool.title;
-    return truncateStr(desc, 80);
+    return truncateText(desc, 80);
   }
 
   const args = tool.args || {};
@@ -41,7 +37,7 @@ function getToolDescription(tool: ACPToolCall): string {
 
   if (args.command) {
     const cmd = args.command as string;
-    return cmd.length > 60 ? cmd.slice(0, 60) + '...' : cmd;
+    return truncateText(cmd, 60);
   }
   if (args.file_path) {
     const fp = args.file_path as string;
@@ -51,24 +47,19 @@ function getToolDescription(tool: ACPToolCall): string {
   if (args.url) {
     const url = args.url as string;
     const prompt = args.prompt as string | undefined;
-    const desc = prompt ? `${url} — "${truncateStr(prompt, 40)}"` : url;
-    return truncateStr(desc, 80);
+    const desc = prompt ? `${url} — "${truncateText(prompt, 40)}"` : url;
+    return truncateText(desc, 80);
   }
   if (args.path) return args.path as string;
   if (args.query) {
     const q = args.query as string;
-    return q.length > 60 ? q.slice(0, 60) + '...' : q;
+    return truncateText(q, 60);
   }
   if (name === 'list_directory' || name === 'listfiles') {
     return (args.path as string) || (args.directory as string) || '';
   }
   if (args.description) return args.description as string;
   return '';
-}
-
-function truncateStr(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max) + '...';
 }
 
 function extractText(tool: ACPToolCall): string | null {
@@ -124,8 +115,7 @@ function getToolResultSummary(tool: ACPToolCall): string {
   if (name === 'bash' || name === 'shell' || name === 'execute_command') {
     if (lineCount > 3) return `${lineCount} lines of output`;
     const firstLine = lines[0] || '';
-    if (firstLine.length > 80) return firstLine.slice(0, 80) + '...';
-    return firstLine;
+    return truncateText(firstLine, 80);
   }
 
   if (name === 'grep' || name === 'search') {
@@ -139,8 +129,7 @@ function getToolResultSummary(tool: ACPToolCall): string {
 
   if (name === 'webfetch' || name === 'web_fetch' || name === 'fetch') {
     const firstLine = lines[0] || '';
-    if (firstLine.length > 80) return firstLine.slice(0, 80) + '...';
-    return firstLine;
+    return truncateText(firstLine, 80);
   }
 
   if (name === 'websearch' || name === 'web_search') {
@@ -150,29 +139,7 @@ function getToolResultSummary(tool: ACPToolCall): string {
   }
 
   const firstLine = lines[0] || '';
-  if (firstLine.length > 80) return firstLine.slice(0, 80) + '...';
-  return firstLine;
-}
-
-function StatusIcon({ status }: { status: string }) {
-  switch (status) {
-    case 'completed':
-      return <span className="tool-icon tool-icon-done">✓</span>;
-    case 'failed':
-      return <span className="tool-icon tool-icon-error">✗</span>;
-    case 'in_progress':
-      return <span className="tool-icon tool-icon-spin">⟳</span>;
-    default:
-      return <span className="tool-icon tool-icon-pending">○</span>;
-  }
-}
-
-function formatElapsed(startTime?: number, endTime?: number): string {
-  if (!startTime) return '';
-  const end = endTime || Date.now();
-  const seconds = Math.round((end - startTime) / 1000);
-  if (seconds < 3) return '';
-  return `${seconds}s`;
+  return truncateText(firstLine, 80);
 }
 
 function hasExpandableContent(tool: ACPToolCall): boolean {
@@ -253,8 +220,8 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
     isLong && !showAll ? lines.slice(0, MAX_BASH_LINES).join('\n') : output;
 
   return (
-    <div className="tool-expanded-bash">
-      <pre className="tool-expanded-output">
+    <div className={styles.expandedBash}>
+      <pre className={styles.expandedOutput}>
         {hasAnsi(displayText)
           ? parseAnsi(displayText).map((seg, i) => (
               <span
@@ -272,7 +239,7 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
       </pre>
       {isLong && (
         <button
-          className="tool-expand-btn"
+          className={styles.expandBtn}
           onClick={() => setShowAll(!showAll)}
         >
           {showAll ? `▲ Show less` : `▼ ${lines.length} lines total`}
@@ -291,11 +258,11 @@ function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
     isLong && !showAll ? lines.slice(0, MAX_READ_LINES).join('\n') : content;
 
   return (
-    <div className="tool-expanded-read">
-      <pre className="tool-expanded-output">{displayText}</pre>
+    <div className={styles.expandedRead}>
+      <pre className={styles.expandedOutput}>{displayText}</pre>
       {isLong && (
         <button
-          className="tool-expand-btn"
+          className={styles.expandBtn}
           onClick={() => setShowAll(!showAll)}
         >
           {showAll ? `▲ Show less` : `▼ ${lines.length} lines total`}
@@ -309,7 +276,7 @@ function ExpandedEditDiff({ tool }: { tool: ACPToolCall }) {
   const diff = extractDiff(tool);
   if (!diff) return null;
   return (
-    <div className="tool-expanded-edit">
+    <div className={styles.expandedEdit}>
       <DiffView diff={diff} />
     </div>
   );
@@ -341,15 +308,15 @@ function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
   if (!content) return null;
 
   return (
-    <div className="tool-expanded-write">
-      <pre className="tool-expanded-output">
+    <div className={styles.expandedWrite}>
+      <pre className={styles.expandedOutput}>
         {displayLines.map((line, i) => (
-          <span key={i} className="diff-add">{`+${line}\n`}</span>
+          <span key={i} className={styles.writeAdd}>{`+${line}\n`}</span>
         ))}
       </pre>
       {isLong && (
         <button
-          className="tool-expand-btn"
+          className={styles.expandBtn}
           onClick={() => setShowAll(!showAll)}
         >
           {showAll ? `▲ Show less` : `▼ ${lines.length} lines total`}
@@ -360,26 +327,66 @@ function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
 }
 
 function TodoWriteContent({ tool }: { tool: ACPToolCall }) {
+  const todos = extractTodosFromToolCall(tool);
+  if (todos) {
+    return (
+      <div className={styles.todoList}>
+        {todos.map((todo, i) => (
+          <div
+            key={todo.id || i}
+            className={`${styles.todoItem} ${getTodoClass(todo.status)}`}
+          >
+            {getTodoIcon(todo.status)} {todo.content}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   const text = extractText(tool) || '';
   const lines = text.split('\n').filter((l) => l.trim());
+  if (lines.length === 0) return null;
+
   return (
-    <div className="tool-todo-list">
+    <div className={styles.todoList}>
       {lines.map((line, i) => {
         const isCompleted = line.startsWith('●');
         const isInProgress = line.startsWith('◐');
         const cls = isCompleted
-          ? 'tool-todo-done'
+          ? styles.todoDone
           : isInProgress
-            ? 'tool-todo-active'
-            : 'tool-todo-pending';
+            ? styles.todoActive
+            : styles.todoPending;
         return (
-          <div key={i} className={`tool-todo-item ${cls}`}>
+          <div key={i} className={`${styles.todoItem} ${cls}`}>
             {line}
           </div>
         );
       })}
     </div>
   );
+}
+
+function getTodoClass(status: TodoItem['status']): string {
+  switch (status) {
+    case 'completed':
+      return styles.todoDone;
+    case 'in_progress':
+      return styles.todoActive;
+    case 'pending':
+      return styles.todoPending;
+  }
+}
+
+function getTodoIcon(status: TodoItem['status']): string {
+  switch (status) {
+    case 'completed':
+      return '●';
+    case 'in_progress':
+      return '◐';
+    case 'pending':
+      return '○';
+  }
 }
 
 interface ToolLineProps {
@@ -395,9 +402,13 @@ function shouldAutoExpand(tool: ACPToolCall): boolean {
   return false;
 }
 
-function ToolLine({ tool, approval, onConfirm }: ToolLineProps) {
+const ToolLine = memo(function ToolLine({
+  tool,
+  approval,
+  onConfirm,
+}: ToolLineProps) {
   const [expanded, setExpanded] = useState(() => shouldAutoExpand(tool));
-  if (isSubAgent(tool)) return <SubAgentPanel tool={tool} />;
+  if (isSubAgentToolCall(tool)) return <SubAgentPanel tool={tool} />;
 
   const description = getToolDescription(tool);
   const result = getToolResultSummary(tool);
@@ -410,17 +421,17 @@ function ToolLine({ tool, approval, onConfirm }: ToolLineProps) {
   const hasApproval = approval && approval.toolCallId === tool.callId;
 
   return (
-    <div className="tool-line">
+    <div className={styles.line}>
       <div
-        className={`tool-line-main ${expandable ? 'tool-line-expandable' : ''}`}
+        className={`${styles.lineMain} ${expandable ? styles.lineExpandable : ''}`}
         onClick={expandable ? () => setExpanded(!expanded) : undefined}
       >
         <StatusIcon status={tool.status} />
-        <span className="tool-line-name">{tool.toolName}</span>
-        {description && <span className="tool-line-arg">{description}</span>}
-        {elapsed && <span className="tool-line-elapsed">{elapsed}</span>}
+        <span className={styles.lineName}>{tool.toolName}</span>
+        {description && <span className={styles.lineArg}>{description}</span>}
+        {elapsed && <span className={styles.lineElapsed}>{elapsed}</span>}
         {expandable && (
-          <span className="tool-line-chevron">{expanded ? '▼' : '▶'}</span>
+          <span className={styles.lineChevron}>{expanded ? '▼' : '▶'}</span>
         )}
       </div>
       {hasApproval && onConfirm && (
@@ -428,10 +439,10 @@ function ToolLine({ tool, approval, onConfirm }: ToolLineProps) {
       )}
       {isTodo && <TodoWriteContent tool={tool} />}
       {!isTodo && !expanded && result && (
-        <div className="tool-line-output">{result}</div>
+        <div className={styles.lineOutput}>{result}</div>
       )}
       {!isTodo && expanded && (
-        <div className="tool-line-detail">
+        <div className={styles.lineDetail}>
           {(name === 'bash' ||
             name === 'shell' ||
             name === 'execute_command') && <ExpandedBashOutput tool={tool} />}
@@ -448,15 +459,15 @@ function ToolLine({ tool, approval, onConfirm }: ToolLineProps) {
       )}
     </div>
   );
-}
+});
 
-export function ToolGroup({
+export const ToolGroup = memo(function ToolGroup({
   tools,
   pendingApproval,
   onConfirm,
 }: ToolGroupProps) {
   return (
-    <div className="tool-group">
+    <div className={styles.group}>
       {tools.map((tool) => (
         <ToolLine
           key={tool.callId}
@@ -467,4 +478,4 @@ export function ToolGroup({
       ))}
     </div>
   );
-}
+});

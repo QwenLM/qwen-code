@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
 import { ToolStatus } from './ToolStatus';
 import { DiffView } from './DiffView';
+import styles from './LegacyTool.module.css';
 
 interface EditToolProps {
   tool: ACPToolCall;
@@ -20,16 +21,16 @@ export function EditTool({ tool }: EditToolProps) {
     : filePath;
 
   return (
-    <div className="tool-edit">
-      <div className="tool-edit-header" onClick={() => setExpanded(!expanded)}>
+    <div className={styles.tool}>
+      <div className={styles.editHeader} onClick={() => setExpanded(!expanded)}>
         <ToolStatus status={tool.status} toolName="Edit" elapsed={elapsed} />
         {locationStr && (
-          <div className="tool-edit-file">
+          <div className={styles.editFile}>
             <code>{locationStr}</code>
           </div>
         )}
         {diff && (
-          <span className="tool-edit-toggle">{expanded ? '▼' : '▶'}</span>
+          <span className={styles.editToggle}>{expanded ? '▼' : '▶'}</span>
         )}
       </div>
       {diff && expanded && <DiffView diff={diff} />}

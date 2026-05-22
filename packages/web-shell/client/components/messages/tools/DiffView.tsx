@@ -1,4 +1,5 @@
 import { memo } from 'react';
+import styles from './DiffView.module.css';
 
 interface DiffViewProps {
   diff: string;
@@ -44,15 +45,18 @@ export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
   const { lines, additions, deletions } = parseDiff(diff);
 
   return (
-    <div className="diff-view">
-      <div className="diff-stats">
-        {additions > 0 && <span className="diff-stat-add">+{additions}</span>}
-        {deletions > 0 && <span className="diff-stat-del">-{deletions}</span>}
+    <div className={styles.view}>
+      <div className={styles.stats}>
+        {additions > 0 && <span className={styles.statAdd}>+{additions}</span>}
+        {deletions > 0 && <span className={styles.statDel}>-{deletions}</span>}
       </div>
-      <div className="diff-lines">
+      <div className={styles.lines}>
         {lines.map((line, i) => (
-          <div key={i} className={`diff-line diff-line-${line.type}`}>
-            <span className="diff-line-marker">
+          <div
+            key={i}
+            className={`${styles.line} ${styles[`line${line.type[0].toUpperCase()}${line.type.slice(1)}`]}`}
+          >
+            <span className={styles.marker}>
               {line.type === 'add'
                 ? '+'
                 : line.type === 'del'
@@ -61,7 +65,7 @@ export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
                     ? ''
                     : ' '}
             </span>
-            <span className="diff-line-content">{line.content}</span>
+            <span className={styles.content}>{line.content}</span>
           </div>
         ))}
       </div>

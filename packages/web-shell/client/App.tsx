@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDaemonSession } from './hooks/useDaemonSession';
 import {
   transcriptBlocksToMessages,
@@ -6,7 +6,8 @@ import {
   extractStreamingState,
 } from './adapters/transcriptAdapter';
 import { MessageList } from './components/MessageList';
-import { Editor, type PastedImage } from './components/Editor';
+import { Editor } from './components/Editor';
+import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar } from './components/StatusBar';
 import { ShortcutsPanel } from './components/ShortcutsPanel';
 import { StreamingStatus } from './components/StreamingStatus';
@@ -17,12 +18,19 @@ import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { McpDialog } from './components/dialogs/McpDialog';
 import { MemoryDialog } from './components/dialogs/MemoryDialog';
+import type { MemoryDialogInitialMode } from './components/dialogs/MemoryDialog';
 import { AgentsDialog } from './components/dialogs/AgentsDialog';
+import type { AgentsDialogInitialMode } from './components/dialogs/AgentsDialog';
 import { SkillsDialog } from './components/dialogs/SkillsDialog';
+import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { LOCAL_COMMANDS } from './constants/localCommands';
 import { getDaemonBaseUrl, getDaemonToken } from './config/daemon';
+import { mergeCommands } from './hooks/daemonSessionMappers';
+import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import type { DaemonApprovalMode } from '@qwen-code/sdk/daemon';
-import type { CommandInfo, StreamingState } from './adapters/types';
+import type { Message, StreamingState, TodoItem } from './adapters/types';
+import { extractTodosFromToolCall, hasActiveTodos } from './utils/todos';
+import styles from './App.module.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
 const DAEMON_TOKEN = getDaemonToken();
@@ -42,6 +50,10 @@ function replaceSessionUrl(sessionId: string): void {
   window.history.replaceState(null, '', url);
 }
 
+function formatError(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
 function parseRenameArgument(
   raw: string,
 ):
@@ -59,6 +71,24 @@ function parseRenameArgument(
   return { type: 'manual', displayName: trimmed };
 }
 
+function getFloatingTodos(messages: readonly Message[]): TodoItem[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === 'plan') {
+      return hasActiveTodos(message.todos) ? message.todos : [];
+    }
+    if (message.role === 'tool_group') {
+      for (let j = message.tools.length - 1; j >= 0; j--) {
+        const todos = extractTodosFromToolCall(message.tools[j]);
+        if (todos) {
+          return hasActiveTodos(todos) ? todos : [];
+        }
+      }
+    }
+  }
+  return [];
+}
+
 export function App() {
   const initialSessionId = useMemo(() => getSessionIdFromUrl(), []);
   const { store, state, connection, actions, promptStatus } = useDaemonSession({
@@ -67,23 +97,16 @@ export function App() {
     initialSessionId,
   });
 
+  const messageBlocks = useAnimationFrameValue(state.blocks);
   const messages = useMemo(
-    () => transcriptBlocksToMessages(state.blocks),
-    [state.blocks],
+    () => transcriptBlocksToMessages(messageBlocks),
+    [messageBlocks],
   );
   const pendingApproval = useMemo(
-    () => extractPendingPermission(state),
-    [state],
+    () => extractPendingPermission(state.blocks),
+    [state.blocks],
   );
-  const floatingTodos = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i];
-      if (message.role === 'plan') {
-        return message.todos;
-      }
-    }
-    return [];
-  }, [messages]);
+  const floatingTodos = useMemo(() => getFloatingTodos(messages), [messages]);
   const transcriptStreamingState = useMemo(
     () => extractStreamingState(state),
     [state],
@@ -97,6 +120,7 @@ export function App() {
     }
     return promptStatus === 'waiting' ? 'waiting' : 'responding';
   }, [promptStatus, transcriptStreamingState]);
+  const streamingStateRef = useRef<StreamingState>(streamingState);
   const connected = connection.status === 'connected';
 
   const [modelDialogMode, setModelDialogMode] = useState<
@@ -106,13 +130,31 @@ export function App() {
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showMcpDialog, setShowMcpDialog] = useState(false);
   const [showSkillsDialog, setShowSkillsDialog] = useState(false);
-  const [showMemoryDialog, setShowMemoryDialog] = useState(false);
-  const [agentsDialogMode, setAgentsDialogMode] = useState<
-    'create' | 'manage' | null
-  >(null);
+  const [showToolsDialog, setShowToolsDialog] = useState(false);
+  const [toolsDialogDescriptions, setToolsDialogDescriptions] = useState(false);
+  const [memoryDialogMode, setMemoryDialogMode] =
+    useState<MemoryDialogInitialMode | null>(null);
+  const [agentsDialogMode, setAgentsDialogMode] =
+    useState<AgentsDialogInitialMode | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [currentModel, setCurrentModel] = useState('');
   const [currentMode, setCurrentMode] = useState('default');
+  const dialogOpen =
+    !!modelDialogMode ||
+    showModeDialog ||
+    showResumeDialog ||
+    showMcpDialog ||
+    showSkillsDialog ||
+    showToolsDialog ||
+    !!memoryDialogMode ||
+    !!agentsDialogMode;
+
+  const reportError = useCallback(
+    (error: unknown, fallback: string) => {
+      store.dispatch([{ type: 'error', text: formatError(error, fallback) }]);
+    },
+    [store],
+  );
 
   const handleToggleShortcuts = useCallback(() => {
     setShowShortcuts((prev) => !prev);
@@ -125,10 +167,16 @@ export function App() {
         .then((result) => {
           setCurrentMode(result.mode || modeId);
         })
-        .catch(() => {});
+        .catch((error: unknown) => {
+          reportError(error, '切换审批模式失败');
+        });
     },
-    [actions],
+    [actions, reportError],
   );
+
+  useEffect(() => {
+    streamingStateRef.current = streamingState;
+  }, [streamingState]);
 
   useEffect(() => {
     if (connection.currentModel) {
@@ -155,8 +203,8 @@ export function App() {
   }, [currentMode, handleSetMode]);
 
   const handleSubmit = useCallback(
-    (text: string, images?: PastedImage[]) => {
-      const promptBlocked = streamingState !== 'idle';
+    (text: string, images?: PromptImage[]) => {
+      const promptBlocked = streamingStateRef.current !== 'idle';
       if (text.startsWith('/')) {
         const match = text.match(/^\/([\w-]+)/);
         if (match) {
@@ -170,7 +218,11 @@ export function App() {
             }
             if (modelArg.startsWith('--fast ')) {
               if (promptBlocked) return false;
-              actions.sendPrompt(text, images).catch(() => {});
+              actions
+                .sendPrompt(text, images)
+                .catch((error: unknown) =>
+                  reportError(error, '发送 /model --fast 失败'),
+                );
               return true;
             }
             if (modelArg) {
@@ -179,7 +231,9 @@ export function App() {
                 .then(() => {
                   setCurrentModel(modelArg);
                 })
-                .catch(() => {});
+                .catch((error: unknown) => {
+                  reportError(error, '切换模型失败');
+                });
             } else {
               setModelDialogMode('main');
             }
@@ -193,10 +247,16 @@ export function App() {
               .then(() => {
                 setCurrentMode('plan');
                 if (prompt) {
-                  actions.sendPrompt(prompt, images).catch(() => {});
+                  actions
+                    .sendPrompt(prompt, images)
+                    .catch((error: unknown) =>
+                      reportError(error, '发送 plan prompt 失败'),
+                    );
                 }
               })
-              .catch(() => {});
+              .catch((error: unknown) => {
+                reportError(error, '切换 plan 模式失败');
+              });
             return true;
           }
           if (cmd === 'approval-mode' || cmd === 'mode') {
@@ -216,19 +276,63 @@ export function App() {
             const skillArg = text.slice(match[0].length).trim();
             if (skillArg) {
               if (promptBlocked) return false;
-              actions.sendPrompt(text, images).catch(() => {});
+              actions
+                .sendPrompt(text, images)
+                .catch((error: unknown) =>
+                  reportError(error, '发送 /skills 命令失败'),
+                );
             } else {
               setShowSkillsDialog(true);
             }
             return true;
           }
+          if (cmd === 'tools') {
+            const toolsArg = text.slice(match[0].length).trim();
+            setToolsDialogDescriptions(
+              toolsArg === 'desc' || toolsArg === 'descriptions',
+            );
+            setShowToolsDialog(true);
+            return true;
+          }
           if (cmd === 'memory') {
-            setShowMemoryDialog(true);
+            const memoryArg = text.slice(match[0].length).trim().toLowerCase();
+            if (memoryArg === 'show') {
+              setMemoryDialogMode('show');
+            } else if (memoryArg === 'refresh') {
+              setMemoryDialogMode('refresh');
+            } else if (memoryArg === 'add user' || memoryArg === 'add global') {
+              setMemoryDialogMode('add-user');
+            } else if (
+              memoryArg === 'add project' ||
+              memoryArg === 'add workspace'
+            ) {
+              setMemoryDialogMode('add-project');
+            } else if (memoryArg.startsWith('add')) {
+              setMemoryDialogMode('add');
+            } else {
+              setMemoryDialogMode('menu');
+            }
             return true;
           }
           if (cmd === 'agents') {
-            const subCommand = text.slice(match[0].length).trim();
-            setAgentsDialogMode(subCommand === 'create' ? 'create' : 'manage');
+            const subCommand = text.slice(match[0].length).trim().toLowerCase();
+            if (subCommand === 'create') {
+              setAgentsDialogMode('create');
+            } else if (
+              subCommand === 'create user' ||
+              subCommand === 'create global'
+            ) {
+              setAgentsDialogMode('create-user');
+            } else if (
+              subCommand === 'create project' ||
+              subCommand === 'create workspace'
+            ) {
+              setAgentsDialogMode('create-project');
+            } else if (subCommand === 'manage') {
+              setAgentsDialogMode('manage');
+            } else {
+              setAgentsDialogMode('menu');
+            }
             return true;
           }
           if (cmd === 'clear') {
@@ -236,14 +340,20 @@ export function App() {
             return true;
           }
           if (cmd === 'new' || cmd === 'reset') {
-            actions.newSession().catch(() => {});
+            actions.newSession().catch((error: unknown) => {
+              reportError(error, '创建新会话失败');
+            });
             return true;
           }
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
               if (promptBlocked) return false;
-              actions.sendPrompt(text, images).catch(() => {});
+              actions
+                .sendPrompt(text, images)
+                .catch((error: unknown) =>
+                  reportError(error, '发送 /rename 命令失败'),
+                );
               return true;
             }
             const displayName = renameArg.displayName;
@@ -280,7 +390,9 @@ export function App() {
           if (cmd === 'resume') {
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
-              actions.loadSession(sessionId).catch(() => {});
+              actions.loadSession(sessionId).catch((error: unknown) => {
+                reportError(error, '加载会话失败');
+              });
             } else {
               setShowResumeDialog(true);
             }
@@ -289,47 +401,62 @@ export function App() {
         }
         // Forward slash commands as prompts
         if (promptBlocked) return false;
-        actions.sendPrompt(text, images).catch(() => {});
+        actions
+          .sendPrompt(text, images)
+          .catch((error: unknown) => reportError(error, '发送命令失败'));
         return true;
       } else if (text.startsWith('!')) {
         if (promptBlocked) return false;
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
         actions
-          .sendPrompt(
-            `Run the following shell command exactly, do not modify it:\n\`\`\`sh\n${cmd}\n\`\`\``,
-          )
-          .catch(() => {});
+          .sendPrompt(formatShellCommandPrompt(cmd))
+          .catch((error: unknown) => {
+            reportError(error, '发送 shell 命令失败');
+          });
         return true;
       } else {
         if (promptBlocked) return false;
-        actions.sendPrompt(text, images).catch(() => {});
+        actions
+          .sendPrompt(text, images)
+          .catch((error: unknown) => reportError(error, '发送消息失败'));
         return true;
       }
     },
-    [actions, store, handleSetMode, streamingState],
+    [actions, store, handleSetMode, reportError],
   );
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
-      actions.respondToPermission(id, selectedOption, answers).catch(() => {});
+      actions
+        .respondToPermission(id, selectedOption, answers)
+        .catch((error: unknown) => {
+          reportError(error, '提交权限选择失败');
+        });
     },
-    [actions],
+    [actions, reportError],
   );
 
   const handleCancel = useCallback(() => {
-    actions.cancel().catch(() => {});
-  }, [actions]);
+    actions.cancel().catch((error: unknown) => {
+      reportError(error, '取消生成失败');
+    });
+  }, [actions, reportError]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && streamingState !== 'idle' && !pendingApproval) {
+      if (
+        e.key === 'Escape' &&
+        streamingState !== 'idle' &&
+        !pendingApproval &&
+        !dialogOpen
+      ) {
         handleCancel();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [streamingState, handleCancel, pendingApproval]);
+  }, [streamingState, handleCancel, pendingApproval, dialogOpen]);
 
   const isDisabled = !connected;
 
@@ -340,17 +467,21 @@ export function App() {
         .then(() => {
           setCurrentModel(modelId);
         })
-        .catch(() => {});
+        .catch((error: unknown) => {
+          reportError(error, '切换模型失败');
+        });
     },
-    [actions],
+    [actions, reportError],
   );
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') return;
-      actions.sendPrompt(`/model --fast ${modelId}`).catch(() => {});
+      actions.sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
+        reportError(error, '切换 fast model 失败');
+      });
     },
-    [actions, streamingState],
+    [actions, streamingState, reportError],
   );
 
   const commands = useMemo(
@@ -359,7 +490,7 @@ export function App() {
   );
 
   return (
-    <div className="app">
+    <div className={styles.app}>
       {modelDialogMode ? (
         <ModelDialog
           mode={modelDialogMode}
@@ -377,7 +508,9 @@ export function App() {
           currentSessionId={connection.sessionId}
           loadSessions={actions.listSessions}
           onSelect={(sessionId) => {
-            actions.loadSession(sessionId).catch(() => {});
+            actions.loadSession(sessionId).catch((error: unknown) => {
+              reportError(error, '加载会话失败');
+            });
           }}
           onClose={() => setShowResumeDialog(false)}
         />
@@ -390,6 +523,7 @@ export function App() {
       ) : showMcpDialog ? (
         <McpDialog
           loadStatus={actions.loadMcpStatus}
+          loadTools={actions.loadMcpTools}
           restartServer={actions.restartMcpServer}
           onClose={() => setShowMcpDialog(false)}
         />
@@ -398,11 +532,19 @@ export function App() {
           loadStatus={actions.loadSkillsStatus}
           onClose={() => setShowSkillsDialog(false)}
         />
-      ) : showMemoryDialog ? (
+      ) : showToolsDialog ? (
+        <ToolsDialog
+          showDescriptions={toolsDialogDescriptions}
+          loadStatus={actions.loadToolsStatus}
+          setToolEnabled={actions.setWorkspaceToolEnabled}
+          onClose={() => setShowToolsDialog(false)}
+        />
+      ) : memoryDialogMode ? (
         <MemoryDialog
+          initialMode={memoryDialogMode}
           loadStatus={actions.loadMemoryStatus}
           writeMemory={actions.writeMemory}
-          onClose={() => setShowMemoryDialog(false)}
+          onClose={() => setMemoryDialogMode(null)}
         />
       ) : agentsDialogMode ? (
         <AgentsDialog
@@ -418,8 +560,8 @@ export function App() {
           <div
             className={
               messages.length > 0 || streamingState !== 'idle'
-                ? 'app-content app-content-has-messages'
-                : 'app-content'
+                ? `${styles.content} ${styles.contentHasMessages}`
+                : styles.content
             }
           >
             <MessageList
@@ -442,9 +584,9 @@ export function App() {
             />
           </div>
 
-          <div className="app-footer">
+          <div className={styles.footer}>
             {floatingTodos.length > 0 && <TodoPanel todos={floatingTodos} />}
-            <div className="composer">
+            <div className={styles.composer}>
               <Editor
                 onSubmit={handleSubmit}
                 onCycleMode={handleCycleMode}
@@ -482,15 +624,11 @@ export function App() {
   );
 }
 
-function mergeCommands(...groups: CommandInfo[][]): CommandInfo[] {
-  const byName = new Map<string, CommandInfo>();
-  for (const group of groups) {
-    for (const command of group) {
-      byName.set(command.name, {
-        ...byName.get(command.name),
-        ...command,
-      });
-    }
-  }
-  return [...byName.values()];
+function formatShellCommandPrompt(cmd: string): string {
+  const longestBacktickRun = Math.max(
+    0,
+    ...Array.from(cmd.matchAll(/`+/g), (match) => match[0].length),
+  );
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
+  return `Run the following shell command exactly, do not modify it:\n${fence}sh\n${cmd}\n${fence}`;
 }

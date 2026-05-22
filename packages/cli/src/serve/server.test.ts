@@ -65,9 +65,11 @@ import type {
   ServeSessionSupportedCommandsStatus,
   ServeWorkspaceEnvStatus,
   ServeWorkspaceMcpStatus,
+  ServeWorkspaceMcpToolsStatus,
   ServeWorkspacePreflightStatus,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceSkillsStatus,
+  ServeWorkspaceToolsStatus,
 } from './status.js';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
@@ -226,7 +228,11 @@ interface FakeBridgeOpts {
   ) => boolean;
   listImpl?: (workspaceCwd: string) => BridgeSessionSummary[];
   workspaceMcpImpl?: () => Promise<ServeWorkspaceMcpStatus>;
+  workspaceMcpToolsImpl?: (
+    serverName: string,
+  ) => Promise<ServeWorkspaceMcpToolsStatus>;
   workspaceSkillsImpl?: () => Promise<ServeWorkspaceSkillsStatus>;
+  workspaceToolsImpl?: () => Promise<ServeWorkspaceToolsStatus>;
   workspaceProvidersImpl?: () => Promise<ServeWorkspaceProvidersStatus>;
   workspaceEnvImpl?: () => Promise<ServeWorkspaceEnvStatus>;
   workspacePreflightImpl?: () => Promise<ServeWorkspacePreflightStatus>;
@@ -323,7 +329,9 @@ interface FakeBridge extends HttpAcpBridge {
   }>;
   listCalls: string[];
   workspaceMcpCalls: number;
+  workspaceMcpToolsCalls: string[];
   workspaceSkillsCalls: number;
+  workspaceToolsCalls: number;
   workspaceProvidersCalls: number;
   workspaceEnvCalls: number;
   workspacePreflightCalls: number;
@@ -386,7 +394,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
   let workspaceMcpCalls = 0;
+  const workspaceMcpToolsCalls: string[] = [];
   let workspaceSkillsCalls = 0;
+  let workspaceToolsCalls = 0;
   let workspaceProvidersCalls = 0;
   let workspaceEnvCalls = 0;
   let workspacePreflightCalls = 0;
@@ -446,6 +456,25 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspaceCwd: WS_BOUND,
       initialized: false,
       skills: [],
+    }));
+  const workspaceToolsImpl =
+    opts.workspaceToolsImpl ??
+    (async () => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      initialized: true,
+      acpChannelLive: false,
+      tools: [],
+    }));
+  const workspaceMcpToolsImpl =
+    opts.workspaceMcpToolsImpl ??
+    (async (serverName: string) => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      serverName,
+      initialized: true,
+      acpChannelLive: false,
+      tools: [],
     }));
   const workspaceProvidersImpl =
     opts.workspaceProvidersImpl ??
@@ -562,6 +591,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     permissionVotes,
     sessionPermissionVotes,
     listCalls,
+    workspaceMcpToolsCalls,
     sessionContextCalls,
     sessionSupportedCommandsCalls,
     setModelCalls,
@@ -581,6 +611,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     get workspaceSkillsCalls() {
       return workspaceSkillsCalls;
+    },
+    get workspaceToolsCalls() {
+      return workspaceToolsCalls;
     },
     get workspaceProvidersCalls() {
       return workspaceProvidersCalls;
@@ -664,9 +697,17 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspaceMcpCalls += 1;
       return workspaceMcpImpl();
     },
+    async getWorkspaceMcpToolsStatus(serverName) {
+      workspaceMcpToolsCalls.push(serverName);
+      return workspaceMcpToolsImpl(serverName);
+    },
     async getWorkspaceSkillsStatus() {
       workspaceSkillsCalls += 1;
       return workspaceSkillsImpl();
+    },
+    async getWorkspaceToolsStatus() {
+      workspaceToolsCalls += 1;
+      return workspaceToolsImpl();
     },
     async getWorkspaceProvidersStatus() {
       workspaceProvidersCalls += 1;
@@ -1263,6 +1304,42 @@ describe('createServeApp', () => {
       expect(providersRes.body).toEqual(providers);
       expect(bridge.workspaceSkillsCalls).toBe(1);
       expect(bridge.workspaceProvidersCalls).toBe(1);
+    });
+
+    it('returns workspace tools status from the bridge', async () => {
+      const tools: ServeWorkspaceToolsStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        acpChannelLive: true,
+        tools: [
+          {
+            name: 'ReadFile',
+            displayName: 'Read',
+            description: 'Read a file',
+            enabled: true,
+          },
+          {
+            name: 'Shell',
+            displayName: 'Shell',
+            description: 'Run shell commands',
+            enabled: false,
+          },
+        ],
+      };
+      const bridge = fakeBridge({ workspaceToolsImpl: async () => tools });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/tools')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(tools);
+      expect(bridge.workspaceToolsCalls).toBe(1);
     });
 
     it('returns workspace env status from the bridge', async () => {
@@ -2350,6 +2427,49 @@ describe('createServeApp', () => {
         ]),
       );
       expect(bridge.listCalls).toEqual([WS_BOUND]);
+    });
+
+    it('preserves persisted createdAt when a live entry exists', async () => {
+      const sessionId = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:01:00.000Z',
+        prompt: 'stored live prompt',
+        mtime: new Date('2026-05-17T12:11:00.000Z'),
+      });
+
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:30:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId,
+          createdAt: '2026-05-17T12:01:00.000Z',
+          updatedAt: '2026-05-17T12:11:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      ]);
     });
 
     it('returns an empty array when no sessions exist for the workspace', async () => {

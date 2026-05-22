@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { codeToHtml, type BundledLanguage } from 'shiki';
+import styles from './Markdown.module.css';
 
 interface MarkdownProps {
   content: string;
@@ -58,6 +59,32 @@ const SUPPORTED_LANGUAGES = new Set([
   'diff',
 ]);
 
+function sanitizeSvg(svg: string): string {
+  if (typeof DOMParser === 'undefined') return '';
+  const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+  if (doc.querySelector('parsererror')) return '';
+
+  doc
+    .querySelectorAll('script, foreignObject, iframe, object, embed, link')
+    .forEach((node) => node.remove());
+
+  for (const element of Array.from(doc.querySelectorAll('*'))) {
+    for (const attr of Array.from(element.attributes)) {
+      const name = attr.name.toLowerCase();
+      const value = attr.value.trim().toLowerCase();
+      if (
+        name.startsWith('on') ||
+        ((name === 'href' || name.endsWith(':href')) &&
+          value.startsWith('javascript:'))
+      ) {
+        element.removeAttribute(attr.name);
+      }
+    }
+  }
+
+  return doc.documentElement.outerHTML;
+}
+
 function MermaidBlock({ code }: { code: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [svg, setSvg] = useState<string | null>(null);
@@ -68,11 +95,22 @@ function MermaidBlock({ code }: { code: string }) {
     import('mermaid').then(async (mod) => {
       if (cancelled) return;
       const mermaid = mod.default;
-      mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'dark',
+        securityLevel: 'strict',
+      });
       try {
         const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const { svg: rendered } = await mermaid.render(id, code);
-        if (!cancelled) setSvg(rendered);
+        const safeSvg = sanitizeSvg(rendered);
+        if (!cancelled) {
+          if (safeSvg) {
+            setSvg(safeSvg);
+          } else {
+            setError('Mermaid render failed');
+          }
+        }
       } catch (error: unknown) {
         if (!cancelled) {
           setError(
@@ -88,11 +126,11 @@ function MermaidBlock({ code }: { code: string }) {
 
   if (error) {
     return (
-      <div className="code-block">
-        <div className="code-block-header">
-          <span className="code-block-lang">mermaid (error)</span>
+      <div className={styles.codeBlock}>
+        <div className={styles.codeBlockHeader}>
+          <span className={styles.codeBlockLang}>mermaid (error)</span>
         </div>
-        <pre className="code-block-content code-block-plain">
+        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
           <code>{code}</code>
         </pre>
       </div>
@@ -101,7 +139,7 @@ function MermaidBlock({ code }: { code: string }) {
 
   if (!svg) {
     return (
-      <div className="mermaid-block mermaid-loading">
+      <div className={`${styles.mermaidBlock} ${styles.mermaidLoading}`}>
         <span>Rendering diagram...</span>
       </div>
     );
@@ -110,7 +148,7 @@ function MermaidBlock({ code }: { code: string }) {
   return (
     <div
       ref={containerRef}
-      className="mermaid-block"
+      className={styles.mermaidBlock}
       dangerouslySetInnerHTML={{ __html: svg }}
     />
   );
@@ -138,19 +176,23 @@ function CodeBlock({
     }
 
     let cancelled = false;
-    codeToHtml(code, {
-      lang: resolvedLang as BundledLanguage,
-      theme: 'github-dark-default',
-    })
-      .then((result) => {
-        if (!cancelled) setHtml(result);
+    setHtml(null);
+    const timer = setTimeout(() => {
+      codeToHtml(code, {
+        lang: resolvedLang as BundledLanguage,
+        theme: 'github-dark-default',
       })
-      .catch(() => {
-        if (!cancelled) setHtml(null);
-      });
+        .then((result) => {
+          if (!cancelled) setHtml(result);
+        })
+        .catch(() => {
+          if (!cancelled) setHtml(null);
+        });
+    }, 120);
 
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [code, lang, resolvedLang]);
 
@@ -165,20 +207,20 @@ function CodeBlock({
   }
 
   return (
-    <div className="code-block">
-      <div className="code-block-header">
-        <span className="code-block-lang">{lang || 'text'}</span>
-        <button className="code-block-copy" onClick={handleCopy}>
+    <div className={styles.codeBlock}>
+      <div className={styles.codeBlockHeader}>
+        <span className={styles.codeBlockLang}>{lang || 'text'}</span>
+        <button className={styles.codeBlockCopy} onClick={handleCopy}>
           {copied ? 'Copied!' : 'Copy'}
         </button>
       </div>
       {html ? (
         <div
-          className="code-block-content"
+          className={styles.codeBlockContent}
           dangerouslySetInnerHTML={{ __html: html }}
         />
       ) : (
-        <pre className="code-block-content code-block-plain">
+        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
           <code>{code}</code>
         </pre>
       )}
@@ -187,7 +229,7 @@ function CodeBlock({
 }
 
 function InlineCode({ children }: { children: ReactNode }) {
-  return <code className="inline-code">{children}</code>;
+  return <code className={styles.inlineCode}>{children}</code>;
 }
 
 const components: Components = {
@@ -210,7 +252,7 @@ const components: Components = {
         href={href}
         target="_blank"
         rel="noopener noreferrer"
-        className="md-link"
+        className={styles.link}
       >
         {children}
       </a>
@@ -218,13 +260,13 @@ const components: Components = {
   },
   table({ children }: { children?: ReactNode }) {
     return (
-      <div className="md-table-wrapper">
-        <table className="md-table">{children}</table>
+      <div className={styles.tableWrapper}>
+        <table className={styles.table}>{children}</table>
       </div>
     );
   },
   img({ src, alt }: { src?: string; alt?: string }) {
-    return <img src={src} alt={alt || ''} className="md-image" />;
+    return <img src={src} alt={alt || ''} className={styles.image} />;
   },
 };
 
@@ -232,7 +274,7 @@ export const Markdown = memo(function Markdown({ content }: MarkdownProps) {
   if (!content) return null;
 
   return (
-    <div className="markdown-content">
+    <div className={styles.content}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}

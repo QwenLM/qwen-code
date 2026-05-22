@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
+import { isEditableTarget } from '../../utils/dom';
+import styles from './ToolApproval.module.css';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
@@ -52,6 +54,7 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (e.defaultPrevented || isEditableTarget(e.target)) return;
       const optCount = request.options.length;
       if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
@@ -88,42 +91,38 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   const command = getCommandFromRawInput(request);
 
   return (
-    <div className="tool-approval">
-      <div className="tool-approval-header">
-        <span className="tool-approval-icon">?</span>
-        <span className="tool-approval-name">{toolName}</span>
-        {description && (
-          <span className="tool-approval-desc">{description}</span>
-        )}
+    <div className={styles.approval}>
+      <div className={styles.header}>
+        <span className={styles.icon}>?</span>
+        <span className={styles.name}>{toolName}</span>
+        {description && <span className={styles.desc}>{description}</span>}
       </div>
 
       {isExec && command ? (
-        <div className="tool-approval-code">
-          <pre className="tool-approval-code-block">{command}</pre>
+        <div className={styles.code}>
+          <pre className={styles.codeBlock}>{command}</pre>
         </div>
       ) : contentText ? (
-        <pre className="tool-approval-content">{contentText}</pre>
+        <pre className={styles.content}>{contentText}</pre>
       ) : null}
 
-      <div className="tool-approval-question">
+      <div className={styles.question}>
         {isExec ? `Allow execution of: '${toolName}'?` : 'Apply this change?'}
       </div>
 
-      <div className="tool-approval-options">
+      <div className={styles.options}>
         {request.options.map((option, i) => {
           const isSelected = i === selected;
           return (
             <div
               key={option.id}
-              className={`tool-approval-option ${isSelected ? 'tool-approval-option-active' : ''}`}
+              className={`${styles.option} ${isSelected ? styles.optionActive : ''}`}
               onClick={() => onConfirm(request.id, option.id)}
               onMouseEnter={() => setSelected(i)}
             >
-              <span className="tool-approval-option-pointer">
-                {isSelected ? '›' : ' '}
-              </span>
-              <span className="tool-approval-option-num">{i + 1}.</span>
-              <span className="tool-approval-option-label">{option.label}</span>
+              <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>
+              <span className={styles.num}>{i + 1}.</span>
+              <span className={styles.label}>{option.label}</span>
             </div>
           );
         })}

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 
 function formatRelativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -82,8 +83,8 @@ export function ResumeDialog({
     }
   }, [filtered, selectedIdx, onSelect, onClose]);
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
+  useDelayedGlobalKeyDown(
+    (e: KeyboardEvent) => {
       if (searchMode) {
         if (e.key === 'Escape') {
           e.preventDefault();
@@ -148,16 +149,9 @@ export function ResumeDialog({
         setSearchMode(true);
         return;
       }
-    };
-    const timer = setTimeout(
-      () => window.addEventListener('keydown', handler),
-      50,
-    );
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener('keydown', handler);
-    };
-  }, [searchMode, searchQuery, filtered, selectedIdx, onClose, handleSelect]);
+    },
+    [searchMode, searchQuery, filtered, selectedIdx, onClose, handleSelect],
+  );
 
   return (
     <div className="resume-picker">

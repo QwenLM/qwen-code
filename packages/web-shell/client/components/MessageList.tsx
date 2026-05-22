@@ -4,6 +4,7 @@ import type { PermissionRequest } from '../adapters/types';
 import { MessageItem } from './MessageItem';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
+import styles from './MessageList.module.css';
 
 interface MessageListProps {
   messages: Message[];
@@ -36,6 +37,14 @@ function approvalMatchesToolGroup(
   return false;
 }
 
+function getLastUserMessageId(messages: Message[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === 'user') return msg.id;
+  }
+  return null;
+}
+
 export function MessageList({
   messages,
   pendingApproval,
@@ -46,6 +55,9 @@ export function MessageList({
   const containerRef = useRef<HTMLDivElement>(null);
   const shouldAutoScroll = useRef(true);
   const prevMsgCount = useRef(messages.length);
+  const prevLastUserMessageId = useRef<string | null>(
+    getLastUserMessageId(messages),
+  );
 
   const handleScroll = useCallback(() => {
     const el = containerRef.current;
@@ -68,13 +80,28 @@ export function MessageList({
   }, [messages, pendingApproval]);
 
   useEffect(() => {
+    const lastUserMessageId = getLastUserMessageId(messages);
+    if (
+      lastUserMessageId &&
+      lastUserMessageId !== prevLastUserMessageId.current
+    ) {
+      shouldAutoScroll.current = true;
+      if (containerRef.current) {
+        containerRef.current.scrollTop = containerRef.current.scrollHeight;
+      }
+    }
+    prevLastUserMessageId.current = lastUserMessageId;
+  }, [messages]);
+
+  useEffect(() => {
     if (forceScrollToBottom && containerRef.current) {
       shouldAutoScroll.current = true;
+      containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
   }, [forceScrollToBottom]);
 
   return (
-    <div ref={containerRef} className="message-list" onScroll={handleScroll}>
+    <div ref={containerRef} className={styles.list} onScroll={handleScroll}>
       {welcomeHeader}
 
       {messages.map((msg) => (

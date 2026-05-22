@@ -21,11 +21,16 @@ export const LOCAL_COMMANDS: CommandInfo[] = [
   },
   { name: 'mcp', description: '管理 MCP servers' },
   { name: 'skills', description: '查看可用 skills' },
-  { name: 'memory', description: '查看和写入 memory' },
+  { name: 'tools', description: '查看可用工具；输入 /tools desc 显示描述' },
+  {
+    name: 'memory',
+    description: '管理 memory',
+    argumentHint: 'show|add|refresh',
+  },
   {
     name: 'agents',
     description: '管理 subagents',
-    argumentHint: 'create|manage',
+    argumentHint: 'manage|create user|create project',
   },
   { name: 'clear', description: '清空对话' },
   { name: 'new', description: '开始新对话' },

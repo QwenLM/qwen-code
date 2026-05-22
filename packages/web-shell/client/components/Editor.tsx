@@ -11,10 +11,12 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import {
   autocompletion,
   completionStatus,
+  startCompletion,
   type CompletionSource,
 } from '@codemirror/autocomplete';
 import { minimalSetup } from 'codemirror';
 import type { CommandInfo } from '../adapters/types';
+import type { PromptImage } from '../adapters/promptTypes';
 import { slashCompletionSource } from '../completions/slashCompletion';
 import { atCompletionSource } from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
@@ -22,14 +24,11 @@ import {
   inputHighlight,
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
-
-export interface PastedImage {
-  data: string;
-  media_type: string;
-}
+import { isEditableTarget } from '../utils/dom';
+import styles from './Editor.module.css';
 
 interface EditorProps {
-  onSubmit: (text: string, images?: PastedImage[]) => boolean | void;
+  onSubmit: (text: string, images?: PromptImage[]) => boolean | void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
@@ -49,11 +48,11 @@ function getModeClass(mode: string, shellMode: boolean): string {
   if (shellMode) return '';
   switch (mode) {
     case 'plan':
-      return 'editor-mode-plan';
+      return styles.modePlan;
     case 'auto-edit':
-      return 'editor-mode-auto-edit';
+      return styles.modeAutoEdit;
     case 'yolo':
-      return 'editor-mode-yolo';
+      return styles.modeYolo;
     default:
       return '';
   }
@@ -80,6 +79,8 @@ export function Editor({
   onCycleModeRef.current = onCycleMode;
   const onToggleShortcutsRef = useRef(onToggleShortcuts);
   onToggleShortcutsRef.current = onToggleShortcuts;
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
   const skillsRef = useRef(skills);
@@ -87,17 +88,27 @@ export function Editor({
   const [shellMode, setShellMode] = useState(false);
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchMatches, setSearchMatches] = useState<string[]>([]);
+  const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const [pastedImages, setPastedImages] = useState<PastedImage[]>([]);
-  const pastedImagesRef = useRef<PastedImage[]>([]);
+  const searchDraftRef = useRef('');
+  const [pastedImages, setPastedImages] = useState<PromptImage[]>([]);
+  const pastedImagesRef = useRef<PromptImage[]>([]);
 
-  const { push, navigateUp, navigateDown, reset, searchReverse, resetSearch } =
-    useInputHistory();
+  const {
+    push,
+    navigateUp,
+    navigateDown,
+    reset,
+    getReverseMatches,
+    resetSearch,
+  } = useInputHistory();
   const historyActionsRef = useRef({
     push,
     navigateUp,
     navigateDown,
     reset,
+    getReverseMatches,
     resetSearch,
   });
   historyActionsRef.current = {
@@ -105,6 +116,7 @@ export function Editor({
     navigateUp,
     navigateDown,
     reset,
+    getReverseMatches,
     resetSearch,
   };
   pastedImagesRef.current = pastedImages;
@@ -112,10 +124,29 @@ export function Editor({
   useEffect(() => {
     if (!containerRef.current) return;
 
+    const submitText = (view: EditorView, textOverride?: string) => {
+      const text = (textOverride ?? view.state.doc.toString()).trim();
+      if (!text) return true;
+      const images = pastedImagesRef.current;
+      const accepted = onSubmitRef.current(
+        text,
+        images.length > 0 ? [...images] : undefined,
+      );
+      if (accepted === false) return true;
+      historyActionsRef.current.push(text);
+      historyActionsRef.current.reset();
+      setPastedImages([]);
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: '' },
+      });
+      return true;
+    };
+
     const completionSources: CompletionSource[] = [
       slashCompletionSource(
         () => commandsRef.current,
         () => skillsRef.current,
+        submitText,
       ),
       atCompletionSource,
     ];
@@ -125,26 +156,16 @@ export function Editor({
         key: 'Enter',
         run: (view) => {
           if (completionStatus(view.state) === 'active') return false;
-          const text = view.state.doc.toString().trim();
-          if (!text) return true;
-          const images = pastedImagesRef.current;
-          const accepted = onSubmitRef.current(
-            text,
-            images.length > 0 ? [...images] : undefined,
-          );
-          if (accepted === false) return true;
-          historyActionsRef.current.push(text);
-          historyActionsRef.current.reset();
-          setPastedImages([]);
-          view.dispatch({
-            changes: { from: 0, to: view.state.doc.length, insert: '' },
-          });
-          return true;
+          return submitText(view);
         },
       },
       {
         key: 'Shift-Enter',
         run: () => false,
+      },
+      {
+        key: 'Ctrl-o',
+        run: () => true,
       },
       {
         key: 'ArrowUp',
@@ -177,9 +198,13 @@ export function Editor({
       },
       {
         key: 'Ctrl-r',
-        run: () => {
+        run: (view) => {
+          const query = view.state.doc.toString();
+          searchDraftRef.current = query;
           setSearchMode(true);
-          setSearchQuery('');
+          setSearchQuery(query);
+          setSearchMatches(historyActionsRef.current.getReverseMatches(query));
+          setSearchActiveIndex(0);
           historyActionsRef.current.resetSearch();
           setTimeout(() => searchInputRef.current?.focus(), 0);
           return true;
@@ -205,6 +230,40 @@ export function Editor({
       },
     );
 
+    const slashCompletionRestarter = EditorView.updateListener.of((update) => {
+      if (!update.docChanged || completionStatus(update.state) === 'active') {
+        return;
+      }
+      const selection = update.state.selection.main;
+      if (!selection.empty) return;
+      const line = update.state.doc.lineAt(selection.head);
+      const textBefore = line.text.slice(0, selection.head - line.from);
+      const shouldCompleteSlash =
+        line.from === 0 &&
+        textBefore.startsWith('/') &&
+        !textBefore.includes('\n') &&
+        !/\s$/.test(textBefore);
+      if (!shouldCompleteSlash) return;
+      window.setTimeout(() => {
+        const view = viewRef.current;
+        if (!view || completionStatus(view.state) === 'active') return;
+        const nextSelection = view.state.selection.main;
+        if (!nextSelection.empty) return;
+        const nextLine = view.state.doc.lineAt(nextSelection.head);
+        const nextTextBefore = nextLine.text.slice(
+          0,
+          nextSelection.head - nextLine.from,
+        );
+        if (
+          nextLine.from === 0 &&
+          nextTextBefore.startsWith('/') &&
+          !/\s$/.test(nextTextBefore)
+        ) {
+          startCompletion(view);
+        }
+      }, 0);
+    });
+
     const state = EditorState.create({
       doc: '',
       extensions: [
@@ -227,6 +286,7 @@ export function Editor({
         inputHighlight,
         inputHighlightTheme,
         shellModeDetector,
+        slashCompletionRestarter,
         EditorView.inputHandler.of((view, from, to, insert) => {
           if (
             insert === '?' &&
@@ -365,31 +425,127 @@ export function Editor({
     view.focus();
   }, [draftText, draftVersion]);
 
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (disabledRef.current || searchMode) return;
+      if (event.defaultPrevented) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key.length !== 1) return;
+      if (isEditableTarget(event.target)) return;
+
+      const view = viewRef.current;
+      if (!view || view.hasFocus) return;
+
+      event.preventDefault();
+      const selection = view.state.selection.main;
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert: event.key },
+        selection: { anchor: selection.from + event.key.length },
+        scrollIntoView: true,
+      });
+      view.focus();
+      if (event.key === '/' || event.key === '@') {
+        window.setTimeout(() => {
+          const nextView = viewRef.current;
+          if (nextView && nextView.hasFocus) {
+            startCompletion(nextView);
+          }
+        }, 0);
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [searchMode]);
+
   const focus = useCallback(() => {
     viewRef.current?.focus();
   }, []);
 
+  const replaceEditorText = useCallback((text: string) => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: text },
+      selection: { anchor: text.length },
+      scrollIntoView: true,
+    });
+  }, []);
+
+  const closeSearch = useCallback(
+    (restoreDraft: boolean) => {
+      if (restoreDraft) {
+        replaceEditorText(searchDraftRef.current);
+      }
+      setSearchMode(false);
+      setSearchQuery('');
+      setSearchMatches([]);
+      setSearchActiveIndex(0);
+      historyActionsRef.current.resetSearch();
+      viewRef.current?.focus();
+    },
+    [replaceEditorText],
+  );
+
+  const submitSearchMatch = useCallback(
+    (match: string) => {
+      const view = viewRef.current;
+      if (!view) return;
+      closeSearch(false);
+      const text = match.trim();
+      if (!text) return;
+      const images = pastedImagesRef.current;
+      const accepted = onSubmitRef.current(
+        text,
+        images.length > 0 ? [...images] : undefined,
+      );
+      if (accepted === false) {
+        replaceEditorText(match);
+        return;
+      }
+      historyActionsRef.current.push(text);
+      historyActionsRef.current.reset();
+      setPastedImages([]);
+      replaceEditorText('');
+    },
+    [closeSearch, replaceEditorText],
+  );
+
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Escape') {
-      setSearchMode(false);
-      resetSearch();
-      viewRef.current?.focus();
+      e.preventDefault();
+      closeSearch(true);
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      const match = searchMatches[searchActiveIndex];
+      if (match) {
+        replaceEditorText(match);
+      }
+      closeSearch(false);
     } else if (e.key === 'Enter') {
-      setSearchMode(false);
-      resetSearch();
-      viewRef.current?.focus();
+      e.preventDefault();
+      const match = searchMatches[searchActiveIndex];
+      if (match) {
+        submitSearchMatch(match);
+      } else {
+        closeSearch(false);
+      }
     } else if (e.key === 'r' && e.ctrlKey) {
       e.preventDefault();
-      const result = searchReverse(searchQuery);
-      if (result && viewRef.current) {
-        viewRef.current.dispatch({
-          changes: {
-            from: 0,
-            to: viewRef.current.state.doc.length,
-            insert: result,
-          },
-          selection: { anchor: result.length },
-        });
+      if (searchMatches.length > 0) {
+        setSearchActiveIndex((index) => (index + 1) % searchMatches.length);
+      }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (searchMatches.length > 0) {
+        setSearchActiveIndex((index) => (index + 1) % searchMatches.length);
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (searchMatches.length > 0) {
+        setSearchActiveIndex(
+          (index) => (index - 1 + searchMatches.length) % searchMatches.length,
+        );
       }
     }
   };
@@ -397,54 +553,85 @@ export function Editor({
   const handleSearchInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const q = e.target.value;
     setSearchQuery(q);
-    resetSearch();
-    if (q) {
-      const result = searchReverse(q);
-      if (result && viewRef.current) {
-        viewRef.current.dispatch({
-          changes: {
-            from: 0,
-            to: viewRef.current.state.doc.length,
-            insert: result,
-          },
-          selection: { anchor: result.length },
-        });
-      }
-    }
+    setSearchMatches(historyActionsRef.current.getReverseMatches(q));
+    setSearchActiveIndex(0);
+    historyActionsRef.current.resetSearch();
   };
 
   const modeClass = getModeClass(currentMode, shellMode);
   const containerClass = [
-    'editor-container',
-    shellMode ? 'editor-shell-mode' : '',
+    styles.container,
+    shellMode ? styles.shellMode : '',
     modeClass,
   ]
     .filter(Boolean)
     .join(' ');
+  const visibleSearchStart = Math.max(
+    0,
+    Math.min(searchActiveIndex - 2, searchMatches.length - 6),
+  );
+  const visibleSearchMatches = searchMatches.slice(
+    visibleSearchStart,
+    visibleSearchStart + 6,
+  );
 
   return (
     <div className={containerClass} onClick={focus}>
-      <div className="editor-border-top" />
+      <div className={styles.borderTop} />
       {searchMode && (
-        <div className="editor-search-bar">
-          <span className="editor-search-label">reverse-i-search:</span>
+        <div className={styles.searchBar}>
+          <span className={styles.searchLabel}>reverse-i-search:</span>
           <input
             ref={searchInputRef}
-            className="editor-search-input"
+            className={styles.searchInput}
             value={searchQuery}
             onChange={handleSearchInput}
             onKeyDown={handleSearchKeyDown}
             placeholder="type to search..."
           />
+          <span className={styles.searchHint}>
+            ctrl+r next · tab accept · enter send · esc cancel
+          </span>
         </div>
       )}
+      {searchMode && searchMatches.length > 0 && (
+        <div className={styles.searchResults}>
+          {visibleSearchMatches.map((match, index) => {
+            const matchIndex = visibleSearchStart + index;
+            return (
+              <button
+                key={`${match}-${matchIndex}`}
+                type="button"
+                className={`${styles.searchResult} ${
+                  matchIndex === searchActiveIndex
+                    ? styles.searchResultActive
+                    : ''
+                }`}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  replaceEditorText(match);
+                  closeSearch(false);
+                }}
+              >
+                <span className={styles.searchResultMarker}>
+                  {matchIndex === searchActiveIndex ? '›' : ''}
+                </span>
+                <span className={styles.searchResultText}>{match}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {searchMode && searchMatches.length === 0 && (
+        <div className={styles.searchEmpty}>No matching history</div>
+      )}
       {pastedImages.length > 0 && (
-        <div className="editor-images">
+        <div className={styles.images}>
           {pastedImages.map((img, i) => (
-            <div key={i} className="editor-image-thumb">
+            <div key={i} className={styles.imageThumb}>
               <img src={`data:${img.media_type};base64,${img.data}`} alt="" />
               <button
-                className="editor-image-remove"
+                className={styles.imageRemove}
                 onClick={(e) => {
                   e.stopPropagation();
                   setPastedImages((prev) => prev.filter((_, idx) => idx !== i));
@@ -456,15 +643,13 @@ export function Editor({
           ))}
         </div>
       )}
-      <div className="editor-line">
-        <span
-          className={`editor-prefix ${shellMode ? 'editor-prefix-shell' : ''}`}
-        >
+      <div className={styles.line}>
+        <span className={`${styles.prefix} ${shellMode ? styles.prefixShell : ''}`}>
           {shellMode ? '!' : prefix}
         </span>
-        <div ref={containerRef} className="editor-wrapper" />
+        <div ref={containerRef} className={styles.wrapper} />
       </div>
-      <div className="editor-border-bottom" />
+      <div className={styles.borderBottom} />
     </div>
   );
 }

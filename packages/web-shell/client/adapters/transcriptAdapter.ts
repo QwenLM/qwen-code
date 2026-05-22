@@ -5,6 +5,7 @@ import type {
   DaemonToolTranscriptBlock,
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
+  DaemonPermissionTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import type {
   Message,
@@ -12,10 +13,11 @@ import type {
   PermissionRequest,
   PermissionOptionKind,
   TodoItem,
-  ToolGroupMessage,
   ToolCallStatus,
   ToolKind,
 } from './types';
+import { parseTodoItemsFromEntries } from '../utils/todos';
+import { isSubAgentToolCall } from './toolClassification';
 
 interface ActiveSubAgent {
   tool: ACPToolCall;
@@ -52,7 +54,11 @@ export function transcriptBlocksToMessages(
         }
         const lastMsg = messages[messages.length - 1];
         if (lastMsg && lastMsg.role === 'assistant' && lastMsg.isStreaming) {
-          lastMsg.content += textBlock.text;
+          messages[messages.length - 1] = {
+            ...lastMsg,
+            content: lastMsg.content + textBlock.text,
+            isStreaming: textBlock.streaming,
+          };
         } else {
           messages.push({
             id: block.id,
@@ -74,7 +80,11 @@ export function transcriptBlocksToMessages(
         }
         const lastMsg = messages[messages.length - 1];
         if (lastMsg && lastMsg.role === 'assistant') {
-          lastMsg.thinking = (lastMsg.thinking || '') + textBlock.text;
+          messages[messages.length - 1] = {
+            ...lastMsg,
+            thinking: (lastMsg.thinking || '') + textBlock.text,
+            isStreaming: textBlock.streaming,
+          };
         } else {
           messages.push({
             id: block.id,
@@ -89,15 +99,6 @@ export function transcriptBlocksToMessages(
 
       case 'tool': {
         const toolBlock = block as DaemonToolTranscriptBlock;
-        const todos = parsePlanToolBlock(toolBlock);
-        if (todos) {
-          messages.push({
-            id: block.id,
-            role: 'plan',
-            todos,
-          });
-          break;
-        }
         const toolCall = daemonToolBlockToACPToolCall(toolBlock);
         const activeSubAgent = getActiveSubAgent(subAgentStack);
 
@@ -150,8 +151,15 @@ export function transcriptBlocksToMessages(
         if (lastMsg && lastMsg.role === 'tool_group') {
           const lastTool = lastMsg.tools[lastMsg.tools.length - 1];
           if (lastTool) {
-            lastTool.rawOutput =
-              ((lastTool.rawOutput as string) || '') + shellBlock.text;
+            const nextTool = {
+              ...lastTool,
+              rawOutput:
+                ((lastTool.rawOutput as string) || '') + shellBlock.text,
+            };
+            messages[messages.length - 1] = {
+              ...lastMsg,
+              tools: [...lastMsg.tools.slice(0, -1), nextTool],
+            };
           }
         }
         break;
@@ -213,7 +221,7 @@ function closeCompletedSubAgentsBefore(
 ): void {
   while (stack.length > 0) {
     const active = stack[stack.length - 1];
-    if (!active?.closeAt || timestamp <= active.closeAt) {
+    if (!active?.closeAt || timestamp < active.closeAt) {
       return;
     }
     stack.pop();
@@ -229,16 +237,11 @@ function appendToolCallMessage(
   blockId: string,
   toolCall: ACPToolCall,
 ): void {
-  const lastMsg = messages[messages.length - 1];
-  if (lastMsg && lastMsg.role === 'tool_group') {
-    (lastMsg as ToolGroupMessage).tools.push(toolCall);
-  } else {
-    messages.push({
-      id: `tg-${blockId}`,
-      role: 'tool_group',
-      tools: [toolCall],
-    });
-  }
+  messages.push({
+    id: `tg-${blockId}`,
+    role: 'tool_group',
+    tools: [toolCall],
+  });
 }
 
 function mergeToolCall(target: ACPToolCall, source: ACPToolCall): void {
@@ -253,59 +256,43 @@ function mergeToolCall(target: ACPToolCall, source: ACPToolCall): void {
   target.locations = source.locations || target.locations;
 }
 
-function isSubAgentToolCall(tool: ACPToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  if (name === 'agent' || name === 'task') return true;
-  if (tool.subTools || tool.subContent) return true;
-  if (tool.rawOutput && isTaskExecutionRaw(tool.rawOutput)) return true;
-  if (tool.args?.subagent_type) return true;
-  return false;
-}
-
 function isAgentCompletion(tool: ACPToolCall): boolean {
   if (!isSubAgentToolCall(tool)) return false;
   return tool.status === 'completed' || tool.status === 'failed';
 }
 
-function isTaskExecutionRaw(raw: unknown): boolean {
-  return (
-    !!raw &&
-    typeof raw === 'object' &&
-    (raw as Record<string, unknown>).type === 'task_execution'
-  );
-}
-
 export function extractPendingPermission(
-  state: DaemonTranscriptState,
+  blocks: readonly DaemonTranscriptBlock[],
 ): PermissionRequest | null {
-  for (const block of state.blocks) {
-    if (block.kind !== 'permission') continue;
-    const perm = block as unknown as Record<string, unknown>;
-    if (perm['resolved']) continue;
-    const options = Array.isArray(perm['options']) ? perm['options'] : [];
+  for (const block of blocks) {
+    if (!isPermissionBlock(block)) continue;
+    const perm = block;
+    if (perm.resolved) continue;
     return {
-      id: getString(perm, 'requestId') || '',
-      sessionId: getString(perm, 'sessionId'),
-      toolCallId: getString(perm, 'toolCallId'),
-      title: getString(perm, 'title'),
+      id: perm.requestId,
+      sessionId: perm.sessionId,
+      title: perm.title,
       content: [
         {
           type: 'text',
-          text: getString(perm, 'title') || 'Tool permission',
+          text: perm.title || 'Tool permission',
         },
       ],
-      options: options.map((rawOpt) => {
-        const opt = getRecord(rawOpt) ?? {};
-        return {
-          id: getString(opt, 'optionId') || '',
-          label: getString(opt, 'label') || getString(opt, 'name') || '',
-          kind: getPermissionOptionKind(opt['raw']),
-        };
-      }),
-      rawInput: getPermissionRawInput(perm['toolCall']),
+      options: perm.options.map((opt) => ({
+        id: opt.optionId,
+        label: opt.label,
+        kind: getPermissionOptionKind(opt.raw),
+      })),
+      rawInput: getPermissionRawInput(perm.toolCall),
     };
   }
   return null;
+}
+
+function isPermissionBlock(
+  block: DaemonTranscriptBlock,
+): block is DaemonPermissionTranscriptBlock {
+  return block.kind === 'permission';
 }
 
 function parsePlanTodos(text: string): TodoItem[] | undefined {
@@ -325,55 +312,10 @@ function parsePlanTodos(text: string): TodoItem[] | undefined {
     ) {
       return undefined;
     }
-    return entriesToTodos(record['entries']);
+    return parseTodoItemsFromEntries(record['entries']);
   } catch {
     return undefined;
   }
-}
-
-function parsePlanToolBlock(
-  block: DaemonToolTranscriptBlock,
-): TodoItem[] | undefined {
-  if (block.toolName !== 'TodoWrite' && block.toolKind !== 'updated_plan') {
-    return undefined;
-  }
-  const raw = getRecord(block.rawOutput);
-  const entries = Array.isArray(raw?.['entries']) ? raw['entries'] : undefined;
-  if (!entries) {
-    return undefined;
-  }
-  return entriesToTodos(entries);
-}
-
-function entriesToTodos(entries: readonly unknown[]): TodoItem[] | undefined {
-  const todos = entries.flatMap((entry, index): TodoItem[] => {
-    const item = getRecord(entry);
-    const content = getString(item, 'content');
-    if (!content) return [];
-    return [
-      {
-        id: getString(item, 'id') ?? `plan-${index}`,
-        content,
-        status: getTodoStatus(getString(item, 'status')),
-        priority: getTodoPriority(getString(item, 'priority')),
-      },
-    ];
-  });
-  return todos.length > 0 ? todos : undefined;
-}
-
-function getTodoStatus(value: string | undefined): TodoItem['status'] {
-  return value === 'completed' || value === 'in_progress' || value === 'pending'
-    ? value
-    : 'pending';
-}
-
-function getTodoPriority(
-  value: string | undefined,
-): TodoItem['priority'] | undefined {
-  return value === 'high' || value === 'medium' || value === 'low'
-    ? value
-    : undefined;
 }
 
 function getPermissionRawInput(

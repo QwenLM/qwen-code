@@ -1,7 +1,9 @@
 import type {
+  Completion,
   CompletionContext,
   CompletionResult,
 } from '@codemirror/autocomplete';
+import type { EditorView } from '@codemirror/view';
 import type { CommandInfo } from '../adapters/types';
 
 interface SubcommandNode {
@@ -10,7 +12,32 @@ interface SubcommandNode {
   children?: SubcommandNode[];
 }
 
+type SubmitCompletionCommand = (view: EditorView, command: string) => void;
+
 const SUBCOMMAND_TREE: Record<string, SubcommandNode[]> = {
+  agents: [
+    { name: 'manage', description: '管理现有 subagents' },
+    {
+      name: 'create',
+      description: '创建新的 subagent',
+      children: [
+        { name: 'user', description: '创建 User subagent' },
+        { name: 'project', description: '创建 Project subagent' },
+      ],
+    },
+  ],
+  memory: [
+    {
+      name: 'add',
+      description: '新增 memory',
+      children: [
+        { name: 'user', description: '写入 User memory' },
+        { name: 'project', description: '写入 Project memory' },
+      ],
+    },
+    { name: 'show', description: '查看 memory 文件' },
+    { name: 'refresh', description: '刷新 memory 文件列表' },
+  ],
   export: [
     { name: 'md', description: '将会话导出为 Markdown 文件' },
     { name: 'html', description: '将会话导出为 HTML 文件' },
@@ -79,9 +106,36 @@ function resolveSubcommands(
   return nodes;
 }
 
+function commandHasSubcommands(command: CommandInfo): boolean {
+  return !!SUBCOMMAND_TREE[command.name] || !!command.subcommands?.length;
+}
+
+function shouldSubmitSubcommand(node: SubcommandNode): boolean {
+  return !node.children;
+}
+
+function applyAndSubmitCommand(
+  command: string,
+  submitCompletionCommand: SubmitCompletionCommand,
+) {
+  return (
+    view: EditorView,
+    _completion: Completion,
+    from: number,
+    to: number,
+  ) => {
+    view.dispatch({
+      changes: { from, to, insert: command },
+      selection: { anchor: command.length },
+    });
+    submitCompletionCommand(view, command);
+  };
+}
+
 export function slashCompletionSource(
   getCommands: () => CommandInfo[],
   getSkills: () => string[] = () => [],
+  submitCompletionCommand?: SubmitCompletionCommand,
 ) {
   return (context: CompletionContext): CompletionResult | null => {
     const line = context.state.doc.lineAt(context.pos);
@@ -108,11 +162,18 @@ export function slashCompletionSource(
       const prefix = `/${cmdName} ${completedParts.length > 0 ? completedParts.join(' ') + ' ' : ''}`;
       const options = nodes
         .filter((n) => !currentTyping || n.name.toLowerCase().includes(lp))
-        .map((n) => ({
-          label: n.name,
-          detail: n.description || undefined,
-          apply: `${prefix}${n.name}${n.children ? ' ' : ''}`,
-        }));
+        .map((n): Completion => {
+          const command = `${prefix}${n.name}`;
+          const submitOnApply = shouldSubmitSubcommand(n);
+          return {
+            label: n.name,
+            detail: n.description || undefined,
+            apply:
+              submitOnApply && submitCompletionCommand
+                ? applyAndSubmitCommand(command, submitCompletionCommand)
+                : `${command}${n.children || submitOnApply ? ' ' : ''}`,
+          };
+        });
 
       if (options.length === 0) return null;
 
@@ -139,11 +200,18 @@ export function slashCompletionSource(
           c.description.toLowerCase().includes(lp)
         );
       })
-      .map((c) => ({
-        label: `/${c.name}`,
-        detail: c.description || undefined,
-        apply: `/${c.name}${c.argumentHint || c.subcommands?.length ? ' ' : ''}`,
-      }));
+      .map((c): Completion => {
+        const command = `/${c.name}`;
+        const hasSubcommands = commandHasSubcommands(c);
+        return {
+          label: command,
+          detail: c.description || undefined,
+          apply:
+            !hasSubcommands && submitCompletionCommand
+              ? applyAndSubmitCommand(command, submitCompletionCommand)
+              : `${command}${hasSubcommands ? ' ' : ''}`,
+        };
+      });
 
     if (options.length === 0) return null;
 

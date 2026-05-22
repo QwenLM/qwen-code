@@ -1,12 +1,18 @@
+import { memo } from 'react';
+import styles from './SystemMessage.module.css';
+
 interface SystemMessageProps {
   content: string;
   variant: 'info' | 'error' | 'warning';
 }
 
-export function SystemMessage({ content, variant }: SystemMessageProps) {
+export const SystemMessage = memo(function SystemMessage({
+  content,
+  variant,
+}: SystemMessageProps) {
   return (
-    <div className={`msg-system msg-system-${variant}`}>
+    <div className={`${styles.message} ${styles[variant]}`}>
       <pre>{content}</pre>
     </div>
   );
-}
+});

@@ -30,6 +30,7 @@ export {
 export { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
 export type {
   DaemonShellTranscriptBlock,
+  DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextTranscriptBlock,
   DaemonToolPreview,

@@ -1,0 +1,25 @@
+.message {
+  margin-left: 22px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+
+.info {
+  background: rgba(74, 158, 255, 0.08);
+  border: 1px solid rgba(74, 158, 255, 0.2);
+  color: var(--accent-color);
+}
+
+.error {
+  background: rgba(252, 129, 129, 0.08);
+  border: 1px solid rgba(252, 129, 129, 0.2);
+  color: var(--error-color);
+}
+
+.warning {
+  background: rgba(236, 201, 75, 0.08);
+  border: 1px solid rgba(236, 201, 75, 0.2);
+  color: var(--warning-color);
+}

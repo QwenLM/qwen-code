@@ -1,0 +1,81 @@
+.panel {
+  flex-shrink: 0;
+  padding: 10px 16px;
+  margin: 0 16px 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  border-left: 3px solid var(--accent-color);
+}
+
+.header {
+  margin-bottom: 6px;
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: 4px;
+}
+
+.item {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+}
+
+.num {
+  flex-shrink: 0;
+  color: var(--text-dimmed);
+  min-width: 20px;
+}
+
+.icon {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.pending .icon {
+  color: var(--text-dimmed);
+}
+
+.pending .content {
+  color: var(--text-dimmed);
+}
+
+.inProgress .icon {
+  color: var(--success-color);
+}
+
+.inProgress .content {
+  color: var(--success-color);
+}
+
+.completed .icon {
+  color: var(--success-color);
+}
+
+.completed .content {
+  color: var(--text-dimmed);
+}
+
+.content {
+  color: var(--text-secondary);
+}
+
+.more .content {
+  color: var(--text-dimmed);
+  font-size: 12px;
+}

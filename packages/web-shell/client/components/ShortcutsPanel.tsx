@@ -1,10 +1,11 @@
+import styles from './ShortcutsPanel.module.css';
+
 interface Shortcut {
   key: string;
   description: string;
 }
 
 const SHORTCUTS: Shortcut[] = [
-  { key: '!', description: 'for shell mode' },
   { key: '/', description: 'for commands' },
   { key: '@', description: 'for file paths' },
   { key: 'shift+tab', description: 'to cycle approvals' },
@@ -22,20 +23,20 @@ export function ShortcutsPanel() {
   const col2 = SHORTCUTS.slice(mid);
 
   return (
-    <div className="shortcuts-panel">
-      <div className="shortcuts-column">
+    <div className={styles.panel}>
+      <div className={styles.column}>
         {col1.map((s) => (
-          <div key={s.key} className="shortcuts-item">
-            <span className="shortcuts-key">{s.key}</span>
-            <span className="shortcuts-desc">{s.description}</span>
+          <div key={s.key} className={styles.item}>
+            <span className={styles.key}>{s.key}</span>
+            <span className={styles.desc}>{s.description}</span>
           </div>
         ))}
       </div>
-      <div className="shortcuts-column">
+      <div className={styles.column}>
         {col2.map((s) => (
-          <div key={s.key} className="shortcuts-item">
-            <span className="shortcuts-key">{s.key}</span>
-            <span className="shortcuts-desc">{s.description}</span>
+          <div key={s.key} className={styles.item}>
+            <span className={styles.key}>{s.key}</span>
+            <span className={styles.desc}>{s.description}</span>
           </div>
         ))}
       </div>

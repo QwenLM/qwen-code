@@ -1,0 +1,69 @@
+.progress {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  padding-left: 2ch;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.spinner {
+  color: var(--accent-color);
+  animation: spinFrames 0.8s steps(6) infinite;
+}
+
+@keyframes spinFrames {
+  0% {
+    content: '⠋';
+  }
+  16% {
+    content: '⠙';
+  }
+  33% {
+    content: '⠹';
+  }
+  50% {
+    content: '⠸';
+  }
+  66% {
+    content: '⠼';
+  }
+  83% {
+    content: '⠴';
+  }
+}
+
+.bar {
+  color: var(--accent-color);
+  letter-spacing: 0;
+  font-size: 11px;
+}
+
+.stage {
+  color: var(--text-secondary);
+}
+
+.icon {
+  font-weight: 700;
+  width: 14px;
+  text-align: center;
+}
+
+.done .icon {
+  color: var(--success-color);
+}
+
+.error .icon {
+  color: var(--error-color);
+}
+
+.error .stage {
+  color: var(--error-color);
+}
+
+.detail {
+  color: var(--text-dimmed);
+  font-size: 12px;
+}

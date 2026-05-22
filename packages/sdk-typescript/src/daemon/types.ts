@@ -297,6 +297,26 @@ export interface DaemonWorkspaceMcpStatus {
   budgets?: DaemonMcpBudgetStatusCell[];
 }
 
+export interface DaemonWorkspaceMcpToolStatus {
+  name: string;
+  serverToolName?: string;
+  description?: string;
+  schema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+  isValid: boolean;
+  invalidReason?: string;
+}
+
+export interface DaemonWorkspaceMcpToolsStatus {
+  v: 1;
+  workspaceCwd: string;
+  serverName: string;
+  initialized: boolean;
+  acpChannelLive: boolean;
+  tools: DaemonWorkspaceMcpToolStatus[];
+  errors?: DaemonStatusCell[];
+}
+
 export type DaemonSkillLevel = 'project' | 'user' | 'extension' | 'bundled';
 
 export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
@@ -666,6 +686,22 @@ export interface DaemonWorkspacePreflightStatus {
   initialized: true;
   acpChannelLive: boolean;
   cells: DaemonPreflightCell[];
+  errors?: DaemonStatusCell[];
+}
+
+export interface DaemonWorkspaceToolStatus {
+  name: string;
+  displayName?: string;
+  description?: string;
+  enabled: boolean;
+}
+
+export interface DaemonWorkspaceToolsStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: true;
+  acpChannelLive: boolean;
+  tools: DaemonWorkspaceToolStatus[];
   errors?: DaemonStatusCell[];
 }
 

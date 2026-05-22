@@ -3,6 +3,7 @@ import type {
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
+import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 
 interface SkillsDialogProps {
   loadStatus: () => Promise<DaemonWorkspaceSkillsStatus>;
@@ -67,8 +68,8 @@ export function SkillsDialog({ loadStatus, onClose }: SkillsDialogProps) {
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
+  useDelayedGlobalKeyDown(
+    (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
         onClose();
@@ -88,16 +89,9 @@ export function SkillsDialog({ loadStatus, onClose }: SkillsDialogProps) {
         e.preventDefault();
         reload();
       }
-    };
-    const timer = setTimeout(
-      () => window.addEventListener('keydown', handler),
-      50,
-    );
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener('keydown', handler);
-    };
-  }, [onClose, reload, skills.length]);
+    },
+    [onClose, reload, skills.length],
+  );
 
   const summary = useMemo(() => {
     if (!status) return '';

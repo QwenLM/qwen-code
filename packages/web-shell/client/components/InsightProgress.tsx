@@ -1,3 +1,5 @@
+import styles from './InsightProgress.module.css';
+
 export interface InsightProgressData {
   stage: string;
   progress: number;
@@ -21,28 +23,28 @@ export function InsightProgress({ progress }: InsightProgressProps) {
 
   if (error) {
     return (
-      <div className="insight-progress insight-progress-error">
-        <span className="insight-progress-icon">✕</span>
-        <span className="insight-progress-stage">{stage}</span>
-        <div className="insight-progress-detail">{error}</div>
+      <div className={`${styles.progress} ${styles.error}`}>
+        <span className={styles.icon}>✕</span>
+        <span className={styles.stage}>{stage}</span>
+        <div className={styles.detail}>{error}</div>
       </div>
     );
   }
 
   if (isComplete) {
     return (
-      <div className="insight-progress insight-progress-done">
-        <span className="insight-progress-icon">✓</span>
-        <span className="insight-progress-stage">{stage}</span>
+      <div className={`${styles.progress} ${styles.done}`}>
+        <span className={styles.icon}>✓</span>
+        <span className={styles.stage}>{stage}</span>
       </div>
     );
   }
 
   return (
-    <div className="insight-progress">
-      <span className="insight-progress-spinner">⠋</span>
-      <span className="insight-progress-bar">{bar}</span>
-      <span className="insight-progress-stage">
+    <div className={styles.progress}>
+      <span className={styles.spinner}>⠋</span>
+      <span className={styles.bar}>{bar}</span>
+      <span className={styles.stage}>
         {stage}
         {detail ? ` (${detail})` : ''}
       </span>

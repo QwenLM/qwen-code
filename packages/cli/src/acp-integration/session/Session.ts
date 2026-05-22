@@ -549,6 +549,10 @@ export class Session implements SessionContext {
           .map((block) => (block.type === 'text' ? block.text : ''))
           .join(' ');
 
+        if (promptText) {
+          await this.messageEmitter.emitUserMessage(promptText);
+        }
+
         // Log user prompt
         logUserPrompt(
           this.config,

@@ -1,0 +1,56 @@
+.message {
+  margin: 0 0 12px 14px;
+  padding: 2px 0;
+}
+
+.title {
+  color: var(--text-primary);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.num {
+  width: 24px;
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--text-dimmed);
+}
+
+.marker {
+  width: 14px;
+  flex-shrink: 0;
+  color: var(--text-dimmed);
+}
+
+.content {
+  color: var(--text-secondary);
+}
+
+.inProgress .marker,
+.inProgress .content {
+  color: var(--success-color);
+}
+
+.completed .marker {
+  color: var(--success-color);
+}
+
+.completed .content {
+  color: var(--text-dimmed);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-dimmed);
+}

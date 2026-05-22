@@ -1,6 +1,14 @@
 import { useState, useMemo } from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
 import { Markdown } from '../Markdown';
+import {
+  formatDurationMs,
+  formatElapsed,
+  StatusIcon,
+  truncateText,
+} from './toolDisplay';
+import chromeStyles from './ToolChrome.module.css';
+import styles from './SubAgentPanel.module.css';
 
 interface SubAgentPanelProps {
   tool: ACPToolCall;
@@ -40,21 +48,6 @@ function isTaskExecution(raw: unknown): raw is TaskExecution {
   );
 }
 
-function StatusIcon({ status }: { status: string }) {
-  switch (status) {
-    case 'completed':
-    case 'success':
-      return <span className="tool-icon tool-icon-done">✓</span>;
-    case 'failed':
-    case 'error':
-      return <span className="tool-icon tool-icon-error">✗</span>;
-    case 'in_progress':
-      return <span className="tool-icon tool-icon-spin">⟳</span>;
-    default:
-      return <span className="tool-icon tool-icon-pending">○</span>;
-  }
-}
-
 function getToolSummary(tool: ACPToolCall): string {
   if (tool.title) {
     const colonIdx = tool.title.indexOf(': ');
@@ -91,15 +84,17 @@ function SubToolLine({ tool }: { tool: ACPToolCall }) {
   const output = getToolOutput(tool);
 
   return (
-    <div className="tool-line">
-      <div className="tool-line-main">
+    <div className={chromeStyles.line}>
+      <div className={chromeStyles.lineMain}>
         <StatusIcon status={tool.status} />
-        <span className="tool-line-name">{tool.toolName}</span>
+        <span className={chromeStyles.lineName}>{tool.toolName}</span>
         {summary && (
-          <span className="tool-line-arg">{truncate(summary, 70)}</span>
+          <span className={chromeStyles.lineArg}>
+            {truncateText(summary, 70)}
+          </span>
         )}
       </div>
-      {output && <div className="tool-line-output">{output}</div>}
+      {output && <div className={chromeStyles.lineOutput}>{output}</div>}
     </div>
   );
 }
@@ -107,11 +102,13 @@ function SubToolLine({ tool }: { tool: ACPToolCall }) {
 function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
   const desc = tc.description || '';
   return (
-    <div className="tool-line">
-      <div className="tool-line-main">
+    <div className={chromeStyles.line}>
+      <div className={chromeStyles.lineMain}>
         <StatusIcon status={tc.status} />
-        <span className="tool-line-name">{tc.name}</span>
-        {desc && <span className="tool-line-arg">{truncate(desc, 70)}</span>}
+        <span className={chromeStyles.lineName}>{tc.name}</span>
+        {desc && (
+          <span className={chromeStyles.lineArg}>{truncateText(desc, 70)}</span>
+        )}
       </div>
     </div>
   );
@@ -135,26 +132,6 @@ function getAgentResultText(tool: ACPToolCall): string {
     if (typeof raw.text === 'string') return raw.text;
   }
   return '';
-}
-
-function formatElapsed(start?: number, end?: number): string {
-  if (!start) return '';
-  const ms = (end || Date.now()) - start;
-  const s = Math.round(ms / 1000);
-  if (s < 3) return '';
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  const rs = s % 60;
-  return `${m}m ${rs}s`;
-}
-
-function formatDurationMs(ms?: number): string {
-  if (!ms) return '';
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  const rs = s % 60;
-  return `${m}m ${rs}s`;
 }
 
 function formatTokens(summary?: TaskExecution['executionSummary']): string {
@@ -194,45 +171,45 @@ export function SubAgentPanel({ tool }: SubAgentPanelProps) {
   }, [tool.subTools, taskExec]);
 
   return (
-    <div className="sub-agent-panel">
-      <div className="sub-agent-header" onClick={() => setExpanded(!expanded)}>
+    <div className={styles.panel}>
+      <div className={styles.header} onClick={() => setExpanded(!expanded)}>
         <StatusIcon status={tool.status} />
-        <span className="tool-line-name">{agentType}:</span>
+        <span className={chromeStyles.lineName}>{agentType}:</span>
         {description && (
-          <span className="sub-agent-desc">{truncate(description, 50)}</span>
+          <span className={styles.desc}>{truncateText(description, 50)}</span>
         )}
         {isComplete && subToolCount > 0 && (
-          <span className="sub-agent-meta">· {subToolCount} tools</span>
+          <span className={styles.meta}>· {subToolCount} tools</span>
         )}
-        {elapsed && <span className="sub-agent-meta">· {elapsed}</span>}
-        {tokens && <span className="sub-agent-meta">· {tokens}</span>}
+        {elapsed && <span className={styles.meta}>· {elapsed}</span>}
+        {tokens && <span className={styles.meta}>· {tokens}</span>}
         {!isComplete && (
-          <span className="sub-agent-toggle">{expanded ? '▼' : '▶'}</span>
+          <span className={styles.toggle}>{expanded ? '▼' : '▶'}</span>
         )}
       </div>
 
       {expanded && (
-        <div className="sub-agent-body">
+        <div className={styles.body}>
           {(tool.subContent || (!tool.subContent && resultText)) && (
-            <div className="sub-agent-content">
+            <div className={styles.content}>
               {isComplete ? (
                 <Markdown content={tool.subContent || resultText} />
               ) : (
                 tool.subContent && (
-                  <pre className="sub-agent-stream">{tool.subContent}</pre>
+                  <pre className={styles.stream}>{tool.subContent}</pre>
                 )
               )}
             </div>
           )}
           {tool.subTools && tool.subTools.length > 0 && (
-            <div className="sub-agent-tools">
+            <div className={styles.tools}>
               {tool.subTools.map((sub) => (
                 <SubToolLine key={sub.callId} tool={sub} />
               ))}
             </div>
           )}
           {taskToolCalls && taskToolCalls.length > 0 && (
-            <div className="sub-agent-tools">
+            <div className={styles.tools}>
               {taskToolCalls.map((tc) => (
                 <TaskToolCallLine key={tc.callId} tc={tc} />
               ))}
@@ -242,9 +219,4 @@ export function SubAgentPanel({ tool }: SubAgentPanelProps) {
       )}
     </div>
   );
-}
-
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max) + '...';
 }

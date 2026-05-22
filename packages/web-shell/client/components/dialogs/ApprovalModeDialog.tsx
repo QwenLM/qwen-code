@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 
 interface ApprovalModeDialogProps {
   currentMode: string;
@@ -39,8 +40,8 @@ export function ApprovalModeDialog({
     }
   }, [selectedIdx, onSelect, onClose]);
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
+  useDelayedGlobalKeyDown(
+    (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
         onClose();
@@ -61,16 +62,9 @@ export function ApprovalModeDialog({
         handleSelect();
         return;
       }
-    };
-    const timer = setTimeout(
-      () => window.addEventListener('keydown', handler),
-      50,
-    );
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener('keydown', handler);
-    };
-  }, [selectedIdx, onClose, handleSelect]);
+    },
+    [selectedIdx, onClose, handleSelect],
+  );
 
   return (
     <div className="resume-picker">

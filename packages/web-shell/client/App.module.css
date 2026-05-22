@@ -1,0 +1,30 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 12px 24px;
+  background: #111;
+  overflow: hidden;
+}
+
+.content {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.contentHasMessages {
+  flex: 0 1 auto;
+}
+
+.footer {
+  margin: 0 -12px;
+  flex-shrink: 0;
+}
+
+.composer {
+  flex-shrink: 0;
+  padding: 0;
+}

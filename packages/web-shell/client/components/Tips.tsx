@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import styles from './Tips.module.css';
 
 const TIPS = [
   '试试 /insight, 从聊天记录中生成个性化洞察。',
@@ -17,9 +18,9 @@ export function Tips() {
   const tip = useMemo(() => pickTip(), []);
 
   return (
-    <div className="tips-line">
-      <span className="tips-label">提示：</span>
-      <span className="tips-text">{tip}</span>
+    <div className={styles.line}>
+      <span className={styles.label}>提示：</span>
+      <span className={styles.text}>{tip}</span>
     </div>
   );
 }

@@ -1,12 +1,17 @@
+import { memo } from 'react';
+import styles from './UserMessage.module.css';
+
 interface UserMessageProps {
   content: string;
 }
 
-export function UserMessage({ content }: UserMessageProps) {
+export const UserMessage = memo(function UserMessage({
+  content,
+}: UserMessageProps) {
   return (
-    <div className="msg msg-user">
-      <span className="msg-prefix">&gt;</span>
-      <span className="msg-body">{content}</span>
+    <div className={styles.message}>
+      <span className={styles.prefix}>&gt;</span>
+      <span className={styles.body}>{content}</span>
     </div>
   );
-}
+});

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import type {
   DaemonAgentMutationResult,
   DaemonCreateAgentRequest,
@@ -6,9 +13,17 @@ import type {
   DaemonWorkspaceAgentSummary,
   DaemonWorkspaceAgentsStatus,
 } from '@qwen-code/sdk/daemon';
+import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+
+export type AgentsDialogInitialMode =
+  | 'menu'
+  | 'create'
+  | 'create-user'
+  | 'create-project'
+  | 'manage';
 
 interface AgentsDialogProps {
-  initialMode?: 'create' | 'manage';
+  initialMode?: AgentsDialogInitialMode;
   listAgents: () => Promise<DaemonWorkspaceAgentsStatus>;
   getAgent: (agentType: string) => Promise<DaemonWorkspaceAgentDetail>;
   createAgent: (
@@ -27,15 +42,29 @@ function scopeForLevel(level: string): 'workspace' | 'global' | undefined {
   return undefined;
 }
 
+function initialDialogMode(
+  mode: AgentsDialogInitialMode,
+): 'menu' | 'create-scope' | 'create' | 'manage' {
+  if (mode === 'create') return 'create-scope';
+  if (mode === 'create-user' || mode === 'create-project') return 'create';
+  return mode;
+}
+
+function initialScope(mode: AgentsDialogInitialMode): 'workspace' | 'global' {
+  return mode === 'create-user' ? 'global' : 'workspace';
+}
+
 export function AgentsDialog({
-  initialMode = 'manage',
+  initialMode = 'menu',
   listAgents,
   getAgent,
   createAgent,
   deleteAgent,
   onClose,
 }: AgentsDialogProps) {
-  const [mode, setMode] = useState<'create' | 'manage'>(initialMode);
+  const [mode, setMode] = useState<
+    'menu' | 'create-scope' | 'create' | 'manage'
+  >(() => initialDialogMode(initialMode));
   const [agents, setAgents] = useState<DaemonWorkspaceAgentSummary[]>([]);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [detail, setDetail] = useState<DaemonWorkspaceAgentDetail | null>(null);
@@ -45,10 +74,52 @@ export function AgentsDialog({
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
-  const [scope, setScope] = useState<'workspace' | 'global'>('workspace');
+  const [scope, setScope] = useState<'workspace' | 'global'>(() =>
+    initialScope(initialMode),
+  );
   const listRef = useRef<HTMLDivElement>(null);
+  const directCreateMode =
+    initialMode === 'create' ||
+    initialMode === 'create-user' ||
+    initialMode === 'create-project';
 
   const selected = agents[selectedIdx];
+  const scopeItems = useMemo(
+    () => [
+      {
+        label: 'User',
+        description: 'Create a user-level subagent',
+        scope: 'global' as const,
+      },
+      {
+        label: 'Project',
+        description: 'Create a project-level subagent',
+        scope: 'workspace' as const,
+      },
+    ],
+    [],
+  );
+  const menuItems = useMemo(
+    () => [
+      {
+        label: 'Manage',
+        description: 'Manage existing subagents',
+        onSelect: () => {
+          setSelectedIdx(0);
+          setMode('manage' as const);
+        },
+      },
+      {
+        label: 'Create',
+        description: 'Create a new subagent',
+        onSelect: () => {
+          setSelectedIdx(scope === 'global' ? 0 : 1);
+          setMode('create-scope' as const);
+        },
+      },
+    ],
+    [scope],
+  );
 
   const reload = useCallback(() => {
     setLoading(true);
@@ -68,10 +139,11 @@ export function AgentsDialog({
   }, [reload]);
 
   useEffect(() => {
+    if (mode !== 'manage') return;
     if (selectedIdx >= agents.length && agents.length > 0) {
       setSelectedIdx(agents.length - 1);
     }
-  }, [agents.length, selectedIdx]);
+  }, [agents.length, mode, selectedIdx]);
 
   useEffect(() => {
     const el = listRef.current?.children[selectedIdx] as
@@ -114,6 +186,10 @@ export function AgentsDialog({
       scope,
     })
       .then((result) => {
+        if (directCreateMode) {
+          onClose();
+          return;
+        }
         setMessage(`Created ${result.agent.name}`);
         setName('');
         setDescription('');
@@ -125,7 +201,16 @@ export function AgentsDialog({
         setMessage(error instanceof Error ? error.message : String(error));
       })
       .finally(() => setBusy(false));
-  }, [createAgent, description, name, reload, scope, systemPrompt]);
+  }, [
+    createAgent,
+    description,
+    directCreateMode,
+    name,
+    onClose,
+    reload,
+    scope,
+    systemPrompt,
+  ]);
 
   const handleDelete = useCallback(
     (agent: DaemonWorkspaceAgentSummary) => {
@@ -149,33 +234,72 @@ export function AgentsDialog({
     [deleteAgent, reload],
   );
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
+  const handleCreateKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        if (!busy) handleCreate();
+      }
+    },
+    [busy, handleCreate],
+  );
+
+  useDelayedGlobalKeyDown(
+    (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        if (mode === 'menu' || initialMode !== 'menu') {
+          onClose();
+        } else {
+          setMode('menu');
+          setSelectedIdx(0);
+          setMessage(null);
+        }
         return;
       }
       if (mode === 'create') return;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
-        setSelectedIdx((i) => Math.min(i + 1, Math.max(agents.length - 1, 0)));
+        if (mode === 'menu') {
+          setSelectedIdx((i) =>
+            Math.min(i + 1, Math.max(menuItems.length - 1, 0)),
+          );
+        } else if (mode === 'create-scope') {
+          setSelectedIdx((i) =>
+            Math.min(i + 1, Math.max(scopeItems.length - 1, 0)),
+          );
+        } else {
+          setSelectedIdx((i) =>
+            Math.min(i + 1, Math.max(agents.length - 1, 0)),
+          );
+        }
         return;
       }
       if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
         setSelectedIdx((i) => Math.max(i - 1, 0));
+        return;
       }
-    };
-    const timer = setTimeout(
-      () => window.addEventListener('keydown', handler),
-      50,
-    );
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener('keydown', handler);
-    };
-  }, [agents.length, mode, onClose]);
+      if (e.key === 'Enter' && mode === 'menu') {
+        e.preventDefault();
+        menuItems[selectedIdx]?.onSelect();
+      } else if (e.key === 'Enter' && mode === 'create-scope') {
+        e.preventDefault();
+        const nextScope = scopeItems[selectedIdx]?.scope ?? 'workspace';
+        setScope(nextScope);
+        setMode('create');
+      }
+    },
+    [
+      agents.length,
+      initialMode,
+      menuItems,
+      mode,
+      onClose,
+      scopeItems,
+      selectedIdx,
+    ],
+  );
 
   return (
     <div className="resume-picker">
@@ -185,45 +309,67 @@ export function AgentsDialog({
       </div>
 
       <div className="resume-picker-search">
-        <button
-          className="dialog-inline-button"
-          onClick={() => setMode('manage')}
-        >
-          Manage
-        </button>
-        <button
-          className="dialog-inline-button"
-          onClick={() => setMode('create')}
-        >
-          Create
-        </button>
         <span className="resume-picker-search-hint">
-          {message || (loading ? 'Loading agents...' : '')}
+          {message ||
+            (loading
+              ? 'Loading agents...'
+              : mode === 'menu'
+                ? 'Select an action'
+                : mode === 'create-scope'
+                  ? 'Choose where to save the subagent'
+                  : '')}
         </span>
       </div>
 
       <div className="resume-picker-sep" />
 
-      {mode === 'create' ? (
-        <div className="dialog-form">
-          <div className="dialog-form-row">
-            <label>
-              Name
-              <input value={name} onChange={(e) => setName(e.target.value)} />
-            </label>
-            <label>
-              Scope
-              <select
-                value={scope}
-                onChange={(e) =>
-                  setScope(e.target.value as 'workspace' | 'global')
-                }
-              >
-                <option value="workspace">workspace</option>
-                <option value="global">global</option>
-              </select>
-            </label>
-          </div>
+      {mode === 'menu' ? (
+        <div className="resume-picker-list" ref={listRef}>
+          {menuItems.map((item, index) => (
+            <div
+              key={item.label}
+              className={`resume-picker-item ${index === selectedIdx ? 'selected' : ''}`}
+              onClick={() => item.onSelect()}
+              onMouseEnter={() => setSelectedIdx(index)}
+            >
+              <div className="resume-picker-item-row">
+                <span className="resume-picker-item-prefix">
+                  {index === selectedIdx ? '›' : ' '}
+                </span>
+                <span className="resume-picker-item-title">{item.label}</span>
+              </div>
+              <div className="resume-picker-item-meta">{item.description}</div>
+            </div>
+          ))}
+        </div>
+      ) : mode === 'create-scope' ? (
+        <div className="resume-picker-list" ref={listRef}>
+          {scopeItems.map((item, index) => (
+            <div
+              key={item.scope}
+              className={`resume-picker-item ${index === selectedIdx ? 'selected' : ''}`}
+              onClick={() => {
+                setScope(item.scope);
+                setMode('create');
+              }}
+              onMouseEnter={() => setSelectedIdx(index)}
+            >
+              <div className="resume-picker-item-row">
+                <span className="resume-picker-item-prefix">
+                  {index === selectedIdx ? '›' : ' '}
+                </span>
+                <span className="resume-picker-item-title">{item.label}</span>
+              </div>
+              <div className="resume-picker-item-meta">{item.description}</div>
+            </div>
+          ))}
+        </div>
+      ) : mode === 'create' ? (
+        <div className="dialog-form" onKeyDown={handleCreateKeyDown}>
+          <label>
+            Name
+            <input value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
           <label>
             Description
             <input
@@ -310,7 +456,19 @@ export function AgentsDialog({
       <div className="resume-picker-sep" />
 
       <div className="resume-picker-footer">
-        {mode === 'manage' ? '↑↓ to navigate · Esc to close' : 'Esc to close'}
+        {mode === 'menu'
+          ? '↑↓ to navigate · Enter to select · Esc to close'
+          : mode === 'create-scope'
+            ? initialMode === 'menu'
+              ? '↑↓ to navigate · Enter to select · Esc to menu'
+              : '↑↓ to navigate · Enter to select · Esc to close'
+            : mode === 'manage'
+              ? initialMode === 'menu'
+                ? '↑↓ to navigate · Esc to menu'
+                : '↑↓ to navigate · Esc to close'
+              : initialMode === 'menu'
+                ? '⌘/Ctrl+Enter to save · Esc to menu'
+                : '⌘/Ctrl+Enter to save · Esc to close'}
       </div>
     </div>
   );

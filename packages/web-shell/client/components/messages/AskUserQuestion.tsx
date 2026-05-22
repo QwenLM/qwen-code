@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
+import styles from './AskUserQuestion.module.css';
 
 interface Question {
   question: string;
@@ -37,6 +38,7 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
   const current = questions[currentIdx];
   const isMulti = current?.multiSelect ?? false;
   const totalOptions = (current?.options.length ?? 0) + 1; // +1 for "Other"
+  const otherOptionIdx = current?.options.length ?? 0;
 
   const handleSubmit = useCallback(() => {
     const result: Record<string, string> = {};
@@ -92,12 +94,33 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
     onConfirm(request.id, cancelOption?.id || '', undefined);
   }, [request, onConfirm]);
 
+  const switchQuestion = useCallback(
+    (direction: 1 | -1) => {
+      if (questions.length <= 1) return;
+      setCurrentIdx((idx) => {
+        const next = (idx + direction + questions.length) % questions.length;
+        const nextQuestion = questions[next];
+        setSelectedIdx(0);
+        setCustomFocused(false);
+        return nextQuestion ? next : idx;
+      });
+    },
+    [questions],
+  );
+
+  const focusCustomInput = useCallback((initialValue?: string) => {
+    if (initialValue !== undefined) {
+      setCustomInputs((prev) => ({ ...prev, [currentIdx]: initialValue }));
+    }
+    setCustomFocused(true);
+  }, [currentIdx]);
+
   const handleSelectOption = useCallback(
     (idx: number) => {
       if (!current) return;
       const isOther = idx === current.options.length;
       if (isOther) {
-        setCustomFocused(true);
+        focusCustomInput();
         return;
       }
       const label = current.options[idx].label;
@@ -126,46 +149,71 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
       answers,
       questions,
       submitWithAnswer,
+      focusCustomInput,
     ],
   );
 
   useEffect(() => {
     if (customFocused) return;
+    const claimKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    };
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'ArrowDown' || e.key === 'j') {
-        e.preventDefault();
+        claimKey(e);
         setSelectedIdx((i) => Math.min(i + 1, totalOptions - 1));
       } else if (e.key === 'ArrowUp' || e.key === 'k') {
-        e.preventDefault();
+        claimKey(e);
         setSelectedIdx((i) => Math.max(i - 1, 0));
+      } else if (e.key === 'ArrowRight') {
+        claimKey(e);
+        switchQuestion(1);
+      } else if (e.key === 'ArrowLeft') {
+        claimKey(e);
+        switchQuestion(-1);
       } else if (e.key === 'Enter') {
-        e.preventDefault();
+        claimKey(e);
         handleSelectOption(selectedIdx);
       } else if (e.key === 'Escape') {
-        e.preventDefault();
+        claimKey(e);
         handleCancel();
       } else if (e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key) - 1;
         if (idx < totalOptions) {
-          e.preventDefault();
+          claimKey(e);
           setSelectedIdx(idx);
           handleSelectOption(idx);
         }
+      } else if (
+        selectedIdx === otherOptionIdx &&
+        e.key.length === 1 &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        claimKey(e);
+        focusCustomInput(e.key);
       }
     };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    window.addEventListener('keydown', handler, { capture: true });
+    return () => window.removeEventListener('keydown', handler, true);
   }, [
     customFocused,
     totalOptions,
     selectedIdx,
+    otherOptionIdx,
     handleSelectOption,
     handleCancel,
+    switchQuestion,
+    focusCustomInput,
   ]);
 
   const handleCustomKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       e.preventDefault();
+      e.stopPropagation();
       const val = customInputs[currentIdx];
       if (val) {
         if (!isMulti) {
@@ -174,12 +222,17 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
             submitWithAnswer(currentIdx, val);
             return;
           }
+          setCurrentIdx(currentIdx + 1);
+          setSelectedIdx(0);
+          setCustomFocused(false);
+          return;
         }
         setCustomFocused(false);
         handleSubmit();
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      e.stopPropagation();
       setCustomFocused(false);
     }
   };
@@ -187,12 +240,12 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
   if (questions.length === 0 || !current) return null;
 
   return (
-    <div className="ask-question">
+    <div className={styles.question}>
       {/* Header line like CLI */}
-      <div className="ask-question-title-line">
-        <span className="ask-question-icon">?</span>
-        <span className="ask-question-tool-name">AskUserQuestion</span>
-        <span className="ask-question-tool-desc">
+      <div className={styles.titleLine}>
+        <span className={styles.icon}>?</span>
+        <span className={styles.toolName}>AskUserQuestion</span>
+        <span className={styles.toolDesc}>
           Ask user {questions.length} question{questions.length > 1 ? 's' : ''}{' '}
           ←
         </span>
@@ -200,14 +253,17 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
 
       {/* Tabs for multi-question */}
       {questions.length > 1 && (
-        <div className="ask-question-tabs">
+        <div className={styles.tabs}>
           {questions.map((q, i) => (
             <button
               key={i}
-              className={`ask-question-tab ${i === currentIdx ? 'active' : ''}`}
+              className={`${styles.tab} ${
+                i === currentIdx ? styles.tabActive : ''
+              }`}
               onClick={() => {
                 setCurrentIdx(i);
                 setSelectedIdx(0);
+                setCustomFocused(false);
               }}
             >
               {q.header}
@@ -217,13 +273,13 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
       )}
 
       {/* Header label */}
-      <div className="ask-question-header">{current.header}</div>
+      <div className={styles.header}>{current.header}</div>
 
       {/* Question text */}
-      <p className="ask-question-text">{current.question}</p>
+      <p className={styles.text}>{current.question}</p>
 
       {/* Options list */}
-      <div className="ask-question-options">
+      <div className={styles.options}>
         {current.options.map((opt, i) => {
           const isActive = i === selectedIdx;
           const isSelected = isMulti
@@ -233,29 +289,25 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
           return (
             <div
               key={opt.label}
-              className={`ask-question-option ${isActive ? 'active' : ''} ${isSelected ? 'selected' : ''}`}
+              className={`${styles.option} ${
+                isActive ? styles.optionActive : ''
+              } ${isSelected ? styles.optionSelected : ''}`}
               onClick={() => {
                 setSelectedIdx(i);
                 handleSelectOption(i);
               }}
               onMouseEnter={() => setSelectedIdx(i)}
             >
-              <span className="ask-question-pointer">
-                {isActive ? '›' : ' '}
-              </span>
-              <span className="ask-question-option-num">{i + 1}.</span>
-              <span className="ask-question-option-content">
-                <span className="ask-question-option-label">{opt.label}</span>
+              <span className={styles.pointer}>{isActive ? '›' : ' '}</span>
+              <span className={styles.optionNum}>{i + 1}.</span>
+              <span className={styles.optionContent}>
+                <span className={styles.optionLabel}>{opt.label}</span>
                 {opt.description && (
-                  <span className="ask-question-option-desc">
-                    {opt.description}
-                  </span>
+                  <span className={styles.optionDesc}>{opt.description}</span>
                 )}
               </span>
               {isMulti && (
-                <span className="ask-question-check">
-                  {isSelected ? '☑' : '☐'}
-                </span>
+                <span className={styles.check}>{isSelected ? '☑' : '☐'}</span>
               )}
             </div>
           );
@@ -263,23 +315,25 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
 
         {/* Other / custom input option */}
         <div
-          className={`ask-question-option ${selectedIdx === current.options.length ? 'active' : ''}`}
+          className={`${styles.option} ${
+            selectedIdx === current.options.length ? styles.optionActive : ''
+          }`}
           onClick={() => {
             setSelectedIdx(current.options.length);
-            setCustomFocused(true);
+            focusCustomInput();
           }}
           onMouseEnter={() => setSelectedIdx(current.options.length)}
         >
-          <span className="ask-question-pointer">
+          <span className={styles.pointer}>
             {selectedIdx === current.options.length ? '›' : ' '}
           </span>
-          <span className="ask-question-option-num">
+          <span className={styles.optionNum}>
             {current.options.length + 1}.
           </span>
           {customFocused ? (
             <input
               type="text"
-              className="ask-question-custom-input"
+              className={styles.customInput}
               placeholder="Type something..."
               value={customInputs[currentIdx] || ''}
               onChange={(e) =>
@@ -293,7 +347,9 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
               autoFocus
             />
           ) : (
-            <span className="ask-question-option-label ask-question-option-placeholder">
+            <span
+              className={`${styles.optionLabel} ${styles.optionPlaceholder}`}
+            >
               Type something...
             </span>
           )}
@@ -302,9 +358,9 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
 
       {/* Multi-select actions */}
       {isMulti && (
-        <div className="ask-question-actions">
+        <div className={styles.actions}>
           <button
-            className="ask-question-btn ask-question-btn-submit"
+            className={`${styles.button} ${styles.submitButton}`}
             onClick={handleSubmit}
           >
             Submit
@@ -313,8 +369,8 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
       )}
 
       {/* Footer hint */}
-      <div className="ask-question-footer">
-        ↑/↓: Navigate | Enter: Select | Esc: Cancel
+      <div className={styles.footer}>
+        ↑/↓: Navigate | ←/→: Questions | Enter: Select | Esc: Cancel
       </div>
     </div>
   );

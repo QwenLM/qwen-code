@@ -1,4 +1,5 @@
 import type { TodoItem } from '../../adapters/types';
+import styles from './TodoPanel.module.css';
 
 interface TodoPanelProps {
   todos: TodoItem[];
@@ -6,6 +7,17 @@ interface TodoPanelProps {
 }
 
 const MAX_VISIBLE = 5;
+
+function getStatusClass(status: TodoItem['status']): string {
+  switch (status) {
+    case 'completed':
+      return styles.completed;
+    case 'in_progress':
+      return styles.inProgress;
+    case 'pending':
+      return styles.pending;
+  }
+}
 
 export function TodoPanel({ todos, title = '当前任务' }: TodoPanelProps) {
   if (todos.length === 0) return null;
@@ -33,31 +45,31 @@ export function TodoPanel({ todos, title = '当前任务' }: TodoPanelProps) {
       : [...Array(todos.length).keys()];
 
   return (
-    <div className="todo-panel">
-      <div className="todo-panel-header">
-        <span className="todo-panel-title">{title}</span>
+    <div className={styles.panel}>
+      <div className={styles.header}>
+        <span className={styles.title}>{title}</span>
       </div>
-      <div className="todo-panel-list">
+      <div className={styles.list}>
         {visible.map((todo, i) => (
           <div
             key={todo.id || i}
-            className={`todo-item todo-item-${todo.status}`}
+            className={`${styles.item} ${getStatusClass(todo.status)}`}
           >
-            <span className="todo-item-num">{originalIndices[i] + 1}.</span>
-            <span className="todo-item-icon">
+            <span className={styles.num}>{originalIndices[i] + 1}.</span>
+            <span className={styles.icon}>
               {todo.status === 'completed'
                 ? '●'
                 : todo.status === 'in_progress'
                   ? '◐'
                   : '○'}
             </span>
-            <span className="todo-item-content">{todo.content}</span>
+            <span className={styles.content}>{todo.content}</span>
           </div>
         ))}
         {remaining > 0 && (
-          <div className="todo-item todo-item-more">
-            <span className="todo-item-num"></span>
-            <span className="todo-item-content">
+          <div className={`${styles.item} ${styles.more}`}>
+            <span className={styles.num}></span>
+            <span className={styles.content}>
               ... 以及其他 {remaining} 个
             </span>
           </div>

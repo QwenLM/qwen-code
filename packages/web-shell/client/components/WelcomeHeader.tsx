@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import styles from './WelcomeHeader.module.css';
 
 const TIPS = [
   '输入 / 打开命令弹窗；Tab 可以补全斜杠命令和已保存的 prompt。',
@@ -65,47 +66,47 @@ export function WelcomeHeader({
   const mode = formatMode(currentMode);
 
   return (
-    <div className="welcome-header">
-      <div className="welcome-banner">
-        <pre className="welcome-logo" aria-hidden="true">
+    <div className={styles.header}>
+      <div className={styles.banner}>
+        <pre className={styles.logo} aria-hidden="true">
           {ASCII_LOGO}
         </pre>
 
-        <div className="welcome-panel">
-          <div className="welcome-title-row">
-            <span className="welcome-title">{'>_ Qwen Code'}</span>
-            {version && <span className="welcome-version">(v{version})</span>}
+        <div className={styles.panel}>
+          <div className={styles.titleRow}>
+            <span className={styles.title}>{'>_ Qwen Code'}</span>
+            {version && <span className={styles.version}>(v{version})</span>}
           </div>
 
-          <div className="welcome-subtitle" aria-hidden="true">
+          <div className={styles.subtitle} aria-hidden="true">
             &nbsp;
           </div>
 
-          <div className="welcome-meta-line">
+          <div className={styles.metaLine}>
             <span>Web Shell</span>
-            <span className="welcome-sep">|</span>
-            <span className="welcome-model">{model}</span>
-            <span className="welcome-model-hint">(/model to change)</span>
+            <span className={styles.sep}>|</span>
+            <span className={styles.model}>{model}</span>
+            <span className={styles.modelHint}>(/model to change)</span>
           </div>
 
-          <div className="welcome-meta-line">
+          <div className={styles.metaLine}>
             <span>{mode}</span>
-            <span className="welcome-model-hint">
+            <span className={styles.modelHint}>
               Shift+Tab or /approval-mode
             </span>
           </div>
 
           {displayPath && (
-            <div className="welcome-cwd" title={cwd}>
+            <div className={styles.cwd} title={cwd}>
               {displayPath}
             </div>
           )}
         </div>
       </div>
 
-      <div className="welcome-tip">
-        <span className="welcome-tip-label">Tips:</span>
-        <span className="welcome-tip-text">{tip}</span>
+      <div className={styles.tip}>
+        <span className={styles.tipLabel}>Tips:</span>
+        <span className={styles.tipText}>{tip}</span>
       </div>
     </div>
   );

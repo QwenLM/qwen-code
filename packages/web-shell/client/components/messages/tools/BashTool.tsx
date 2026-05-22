@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
 import { ToolStatus } from './ToolStatus';
 import { parseAnsi, hasAnsi } from '../../../utils/ansi';
+import chromeStyles from './ToolChrome.module.css';
+import styles from './LegacyTool.module.css';
 
 interface BashToolProps {
   tool: ACPToolCall;
@@ -25,19 +27,17 @@ export function BashTool({ tool }: BashToolProps) {
       : output;
 
   return (
-    <div className="tool-bash">
+    <div className={styles.tool}>
       <ToolStatus status={tool.status} toolName="Bash" elapsed={elapsed} />
-      {description && (
-        <div className="tool-bash-description">{description}</div>
-      )}
+      {description && <div className={styles.description}>{description}</div>}
       {command && (
-        <div className="tool-bash-command">
-          <span className="tool-bash-prompt">$</span>
+        <div className={styles.command}>
+          <span className={styles.prompt}>$</span>
           <code>{command}</code>
         </div>
       )}
       {output && tool.status !== 'pending' && (
-        <div className="tool-bash-output">
+        <div className={styles.output}>
           <pre>
             {hasAnsi(displayOutput)
               ? parseAnsi(displayOutput).map((seg, i) => (
@@ -56,7 +56,7 @@ export function BashTool({ tool }: BashToolProps) {
           </pre>
           {isLong && (
             <button
-              className="tool-expand-btn"
+              className={chromeStyles.expandBtn}
               onClick={() => setExpanded(!expanded)}
             >
               {expanded ? '▲ Collapse' : `▼ Show all (${lines.length} lines)`}

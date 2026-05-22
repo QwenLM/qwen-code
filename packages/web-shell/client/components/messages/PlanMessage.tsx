@@ -1,4 +1,6 @@
+import { memo } from 'react';
 import type { TodoItem } from '../../adapters/types';
+import styles from './PlanMessage.module.css';
 
 interface PlanMessageProps {
   todos: TodoItem[];
@@ -10,26 +12,37 @@ function markerForStatus(status: TodoItem['status']): string {
   return ' ';
 }
 
-export function PlanMessage({ todos }: PlanMessageProps) {
+function getStatusClass(status: TodoItem['status']): string {
+  switch (status) {
+    case 'completed':
+      return styles.completed;
+    case 'in_progress':
+      return styles.inProgress;
+    case 'pending':
+      return '';
+  }
+}
+
+export const PlanMessage = memo(function PlanMessage({
+  todos,
+}: PlanMessageProps) {
   if (todos.length === 0) return null;
 
   return (
-    <div className="plan-message">
-      <div className="plan-message-title">Plan</div>
-      <div className="plan-message-list">
+    <div className={styles.message}>
+      <div className={styles.title}>Plan</div>
+      <div className={styles.list}>
         {todos.map((todo, index) => (
           <div
             key={todo.id || index}
-            className={`plan-message-item plan-message-item-${todo.status}`}
+            className={`${styles.item} ${getStatusClass(todo.status)}`}
           >
-            <span className="plan-message-num">{index + 1}.</span>
-            <span className="plan-message-marker">
-              {markerForStatus(todo.status)}
-            </span>
-            <span className="plan-message-content">{todo.content}</span>
+            <span className={styles.num}>{index + 1}.</span>
+            <span className={styles.marker}>{markerForStatus(todo.status)}</span>
+            <span className={styles.content}>{todo.content}</span>
           </div>
         ))}
       </div>
     </div>
   );
-}
+});

@@ -1,5 +1,6 @@
 import type { ACPToolCall } from '../../../adapters/types';
 import { ToolStatus } from './ToolStatus';
+import styles from './LegacyTool.module.css';
 
 interface ReadToolProps {
   tool: ACPToolCall;
@@ -12,16 +13,16 @@ export function ReadTool({ tool }: ReadToolProps) {
   const content = extractContent(tool);
 
   return (
-    <div className="tool-read">
+    <div className={styles.tool}>
       <ToolStatus status={tool.status} toolName="Read" elapsed={elapsed} />
       {filePath && (
-        <div className="tool-read-file">
-          <span className="tool-read-file-icon">📖</span>
+        <div className={styles.file}>
+          <span className={styles.fileIcon}>📖</span>
           <code>{filePath}</code>
         </div>
       )}
       {content && (
-        <div className="tool-read-content">
+        <div className={styles.content}>
           <pre>{truncate(content, 30)}</pre>
         </div>
       )}

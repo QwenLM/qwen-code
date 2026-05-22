@@ -1194,12 +1194,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   const requestWorkspaceStatus = async <T>(
     method: string,
     idle: () => T,
+    params: Record<string, unknown> = {},
   ): Promise<T> => {
     const info = liveChannelInfo();
     if (!info) return idle();
     const response = await withTimeout(
       Promise.race([
-        info.connection.extMethod(method, { cwd: boundWorkspace }),
+        info.connection.extMethod(method, { cwd: boundWorkspace, ...params }),
         getChannelClosedReject(info),
       ]),
       initTimeoutMs,
@@ -2514,10 +2515,52 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       );
     },
 
+    async getWorkspaceMcpToolsStatus(serverName) {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcpTools,
+        () => ({
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd: boundWorkspace,
+          serverName,
+          initialized: false,
+          acpChannelLive: false,
+          tools: [],
+          errors: [
+            {
+              kind: 'mcp_tools',
+              status: 'not_started' as const,
+              hint: 'spawn a session to populate',
+            },
+          ],
+        }),
+        { serverName },
+      );
+    },
+
     async getWorkspaceSkillsStatus() {
       return requestWorkspaceStatus(
         SERVE_STATUS_EXT_METHODS.workspaceSkills,
         () => createIdleWorkspaceSkillsStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceToolsStatus() {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceTools,
+        () => ({
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd: boundWorkspace,
+          initialized: true as const,
+          acpChannelLive: false,
+          tools: [],
+          errors: [
+            {
+              kind: 'tools',
+              status: 'not_started' as const,
+              hint: 'spawn a session to populate',
+            },
+          ],
+        }),
       );
     },
 

@@ -6,7 +6,14 @@ const daemonProxy: ProxyOptions = {
   target: 'http://127.0.0.1:4170',
   changeOrigin: true,
   bypass: (req) => {
-    if (req.headers.accept?.includes('text/html')) {
+    const fetchMode = req.headers['sec-fetch-mode'];
+    const fetchDest = req.headers['sec-fetch-dest'];
+    const accept = req.headers.accept ?? '';
+    const isDocumentNavigation =
+      fetchMode === 'navigate' ||
+      fetchDest === 'document' ||
+      accept.trim().toLowerCase().startsWith('text/html');
+    if (isDocumentNavigation) {
       return '/index.html';
     }
     return undefined;

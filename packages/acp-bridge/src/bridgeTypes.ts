@@ -21,10 +21,12 @@ import type {
   ServeSessionContextStatus,
   ServeSessionSupportedCommandsStatus,
   ServeWorkspaceEnvStatus,
+  ServeWorkspaceMcpToolsStatus,
   ServeWorkspaceMcpStatus,
   ServeWorkspacePreflightStatus,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceSkillsStatus,
+  ServeWorkspaceToolsStatus,
 } from './status.js';
 
 export interface BridgeSpawnRequest {
@@ -269,9 +271,21 @@ export interface HttpAcpBridge {
   getWorkspaceMcpStatus(): Promise<ServeWorkspaceMcpStatus>;
 
   /**
+   * Read discovered MCP tools for one server from the live ACP registry.
+   */
+  getWorkspaceMcpToolsStatus(
+    serverName: string,
+  ): Promise<ServeWorkspaceMcpToolsStatus>;
+
+  /**
    * Read daemon-runtime skill status for the bound workspace.
    */
   getWorkspaceSkillsStatus(): Promise<ServeWorkspaceSkillsStatus>;
+
+  /**
+   * Read the live built-in tool registry for the bound workspace.
+   */
+  getWorkspaceToolsStatus(): Promise<ServeWorkspaceToolsStatus>;
 
   /**
    * Read daemon-runtime model-provider status for the bound workspace.

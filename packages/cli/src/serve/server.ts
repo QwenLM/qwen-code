@@ -196,6 +196,7 @@ async function listWorkspaceSessionsForResponse(
     bySessionId.set(live.sessionId, {
       ...existing,
       ...live,
+      createdAt: existing?.createdAt ?? live.createdAt,
       title: live.title ?? existing?.title,
       updatedAt: live.updatedAt ?? existing?.updatedAt,
       clientCount: live.clientCount,
@@ -727,11 +728,42 @@ export function createServeApp(
     }
   });
 
+  app.get('/workspace/mcp/:server/tools', async (req, res) => {
+    const serverName = req.params['server'];
+    if (!serverName || typeof serverName !== 'string') {
+      res.status(400).json({
+        error: 'Server name path parameter is required',
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    if (serverName.length > MAX_SERVER_NAME_LENGTH) {
+      res.status(400).json({
+        error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    try {
+      res.status(200).json(await bridge.getWorkspaceMcpToolsStatus(serverName));
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/mcp/:server/tools' });
+    }
+  });
+
   app.get('/workspace/skills', async (_req, res) => {
     try {
       res.status(200).json(await bridge.getWorkspaceSkillsStatus());
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/skills' });
+    }
+  });
+
+  app.get('/workspace/tools', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceToolsStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/tools' });
     }
   });
 
@@ -1486,8 +1518,13 @@ export function createServeApp(
       const sessions = await listWorkspaceSessionsForResponse(bridge, key);
       res.status(200).json({ sessions });
     } catch (err) {
+      writeStderrLine(
+        `qwen serve: failed to list sessions for workspace ${safeLogValue(
+          key,
+        )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+      );
       res.status(500).json({
-        error: err instanceof Error ? err.message : String(err),
+        error: 'Failed to list sessions',
         code: 'session_list_failed',
       });
     }
