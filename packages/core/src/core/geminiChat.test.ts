@@ -2094,6 +2094,11 @@ describe('GeminiChat', async () => {
       expect(compressSpy).toHaveBeenCalledTimes(1);
       const passedOpts = compressSpy.mock.calls[0][1];
       expect(passedOpts.force).toBe(true);
+      // trigger='auto' is the orphan-strip safety wire: without it the
+      // service would see force=true, default compactTrigger to 'manual',
+      // and strip the trailing model+functionCall mid tool-loop. Asserting
+      // the wiring here guards C1 from silent regression.
+      expect(passedOpts.trigger).toBe('auto');
       expect(passedOpts.pendingUserMessage).toBeDefined();
       expect(passedOpts.pendingUserMessage?.role).toBe('user');
       expect(

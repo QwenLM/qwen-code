@@ -465,13 +465,19 @@ export class GeminiChat {
    *   - Auto-compaction failures (cheap-gate path): increment by 1.
    *   - Manual `/compress` failures: skipped (`force=true` → `!force`
    *     guard in the failure branch).
-   *   - Hard-tier rescue failures: skipped (force=true) AND the counter
-   *     is reset to 0 BEFORE the rescue call (sendMessageStream), so
-   *     repeated hard-rescue failures never accumulate here. The rationale
-   *     is fail-open: hard predicts imminent overflow, so we should keep
-   *     trying regardless of recent failures. Reactive overflow is the
-   *     real safety net for that path — it bumps the counter by +1 so
-   *     N reactive failures will still trip the breaker.
+   *   - Hard-tier rescue failures: skipped (force=true → `!force` guard
+   *     in tryCompress's failure branch). The counter is NOT pre-reset
+   *     before the rescue call — force=true already bypasses the breaker
+   *     check in compress's cheap-gate, and pre-resetting would in fact
+   *     defeat the breaker entirely (hard-rescue failures don't increment
+   *     via tryCompress, and a pre-reset every send would wipe the
+   *     reactive-overflow increment). The forwarded counter value is
+   *     whatever the chat carried; on COMPRESSED success the post-call
+   *     branch in tryCompress's COMPRESSED handler resets to 0, which is
+   *     the correct recovery path for a previously-latched session.
+   *     Reactive overflow remains the explicit-increment safety net for
+   *     the force=true path — its handler bumps the counter by +1 so N
+   *     reactive failures will still trip the breaker.
    *
    * If you're debugging "why is hard-rescue firing but the counter is 0",
    * that's by design.
