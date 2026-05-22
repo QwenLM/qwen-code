@@ -2322,7 +2322,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Phase 1 of stream-driven tool dispatch (issue #4387). When enabled, the OpenAI-compatible converter surfaces each tool call as soon as its arguments JSON is complete during the stream, instead of waiting for `finish_reason`. Downstream consumers still buffer and dispatch after stream end, so this is a no-op for observable behavior and prepares the ground for later phases that begin tool execution early. Can be overridden with QWEN_CODE_STREAMING_TOOL_DISPATCH=1 to force on or =0 to force off.',
+          'When enabled, the OpenAI-compatible converter surfaces each tool call as soon as its arguments JSON is complete during the stream, rather than waiting for `finish_reason`. Downstream consumers still buffer and dispatch after stream end, so observable behavior is unchanged today; this prepares the ground for later phases that begin tool execution early. Can be overridden with QWEN_CODE_STREAMING_TOOL_DISPATCH=1 to force on or =0 to force off.',
         showInDialog: true,
       },
     },

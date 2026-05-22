@@ -20,13 +20,9 @@ export interface ToolCallParseResult {
   repaired?: boolean;
   /**
    * The actual storage index this chunk was routed to. May differ from the
-   * caller-supplied index when collision handling reassigned the chunk. Always
-   * populated, regardless of `complete`. Callers driving Phase 1 of
-   * stream-driven tool dispatch (issue #4387) use this together with
-   * `markEmitted()` to de-duplicate against `getCompletedToolCalls()` at
-   * stream end.
+   * caller-supplied index when collision handling reassigned the chunk.
    */
-  index?: number;
+  index: number;
   /** Tool call ID known at this point (mirrors metadata for convenience) */
   id?: string;
   /** Tool call function name known at this point (mirrors metadata) */
@@ -53,18 +49,14 @@ export class StreamingToolCallParser {
   /** Whether the next character should be treated as escaped for each tool call index */
   private escapes: Map<number, boolean> = new Map();
   /** Metadata for each tool call index */
-  private toolCallMeta: Map<number, { id?: string; name?: string }> = new Map();
+  private toolCallMeta: Map<
+    number,
+    { id?: string; name?: string; emitted?: boolean }
+  > = new Map();
   /** Map from tool call ID to actual index used for storage */
   private idToIndexMap: Map<string, number> = new Map();
   /** Counter for generating new indices when collisions occur */
   private nextAvailableIndex: number = 0;
-  /**
-   * Indices already emitted as `functionCall` parts during the stream. Used by
-   * Phase 1 of stream-driven tool dispatch (issue #4387) so that the
-   * `finish_reason` flush via `getCompletedToolCalls()` does not re-emit a
-   * tool call that was already surfaced mid-stream.
-   */
-  private emittedIndices: Set<number> = new Set();
 
   /**
    * Processes a new chunk of tool call data and attempts to parse complete JSON objects
@@ -251,11 +243,10 @@ export class StreamingToolCallParser {
    * Marks the given storage index as already emitted as a mid-stream
    * `functionCall` part. `getCompletedToolCalls()` then omits this index so
    * the `finish_reason` flush does not produce a duplicate.
-   *
-   * Phase 1 of stream-driven tool dispatch (issue #4387).
    */
   markEmitted(index: number): void {
-    this.emittedIndices.add(index);
+    const meta = this.toolCallMeta.get(index);
+    if (meta) meta.emitted = true;
   }
 
   /**
@@ -263,7 +254,7 @@ export class StreamingToolCallParser {
    * `markEmitted()`.
    */
   isEmitted(index: number): boolean {
-    return this.emittedIndices.has(index);
+    return this.toolCallMeta.get(index)?.emitted === true;
   }
 
   /**
@@ -273,7 +264,9 @@ export class StreamingToolCallParser {
    * @returns Object containing id and name if available
    */
   getToolCallMeta(index: number): { id?: string; name?: string } {
-    return this.toolCallMeta.get(index) || {};
+    const meta = this.toolCallMeta.get(index);
+    if (!meta) return {};
+    return { id: meta.id, name: meta.name };
   }
 
   /**
@@ -303,12 +296,8 @@ export class StreamingToolCallParser {
     }> = [];
 
     for (const [index, buffer] of this.buffers.entries()) {
-      // Skip indices that were already surfaced mid-stream by
-      // streamingToolDispatch — the converter emits them once and marks them
-      // via `markEmitted()` so the finish_reason flush is duplicate-free.
-      if (this.emittedIndices.has(index)) continue;
-
       const meta = this.toolCallMeta.get(index);
+      if (meta?.emitted) continue;
       if (meta?.name && buffer.trim()) {
         let args: Record<string, unknown> = {};
 
@@ -443,7 +432,6 @@ export class StreamingToolCallParser {
     this.toolCallMeta.clear();
     this.idToIndexMap.clear();
     this.nextAvailableIndex = 0;
-    this.emittedIndices.clear();
   }
 
   /**

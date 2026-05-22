@@ -2991,15 +2991,12 @@ export class Config {
   }
 
   /**
-   * Phase 1 of stream-driven tool dispatch (issue #4387). When true, the
-   * OpenAI-compatible converter emits each `functionCall` part as soon as its
-   * arguments JSON closes during the stream, rather than waiting for
-   * `finish_reason`. Downstream consumers still buffer until stream end, so
-   * this is observable-behavior neutral and only changes the *timing* at which
-   * `ToolCallRequest` events appear on the internal `Turn` stream.
+   * Whether the OpenAI-compatible converter should emit each `functionCall`
+   * part as soon as its arguments JSON closes during the stream rather than
+   * waiting for `finish_reason`. Defaults to off.
    *
    * Env overrides: `QWEN_CODE_STREAMING_TOOL_DISPATCH=1` to force on, `=0` to
-   * force off. Defaults to off.
+   * force off.
    */
   getStreamingToolDispatch(): boolean {
     const env = process.env['QWEN_CODE_STREAMING_TOOL_DISPATCH'];

@@ -72,9 +72,6 @@ describe('ContentGenerationPipeline', () => {
       shouldSuppressErrorLogging: vi.fn().mockReturnValue(false),
     } as unknown as ErrorHandler;
 
-    // Mock configs. `getStreamingToolDispatch` is the only Config method the
-    // pipeline now reads when building RequestContext (#4387 Phase 1); stub it
-    // to the default-off so existing fixtures stay byte-identical.
     mockCliConfig = {
       getStreamingToolDispatch: vi.fn().mockReturnValue(false),
     } as unknown as Config;

@@ -230,10 +230,7 @@ describe('OpenAIContentConverter', () => {
     });
   });
 
-  describe('streamingToolDispatch (Phase 1, #4387)', () => {
-    // Helpers — build the canonical three-chunk shape (opener with name+id,
-    // continuation with args tail, finisher with finish_reason) so each test
-    // controls exactly when JSON closure happens relative to finish_reason.
+  describe('streamingToolDispatch', () => {
     const opener = (
       callId: string,
       name: string,
@@ -298,17 +295,14 @@ describe('OpenAIContentConverter', () => {
         ],
       }) as unknown as OpenAI.Chat.ChatCompletionChunk;
 
-    const functionCallsOf = (resp: ReturnType<
-      typeof converter.convertOpenAIChunkToGemini
-    >) =>
+    const functionCallsOf = (
+      resp: ReturnType<typeof converter.convertOpenAIChunkToGemini>,
+    ) =>
       (resp.candidates?.[0]?.content?.parts ?? [])
         .map((p: Part) => p.functionCall)
         .filter(Boolean);
 
-    it('flag-off: tool calls are emitted only on the finish_reason chunk (no behavior change)', () => {
-      // Default RequestContext has streamingToolDispatch undefined; the
-      // converter must behave exactly as today — no functionCall parts on
-      // pre-finish chunks, all surfaced once on finish_reason.
+    it('flag-off: tool calls are emitted only on the finish_reason chunk', () => {
       const ctx = withStreamParser(new StreamingToolCallParser());
 
       const r1 = converter.convertOpenAIChunkToGemini(
@@ -340,15 +334,12 @@ describe('OpenAIContentConverter', () => {
         opener('call_X', 'read_file', '{"file_path":"/a'),
         ctx,
       );
-      // First chunk leaves JSON depth > 0 — no emission yet.
       expect(functionCallsOf(r1)).toEqual([]);
 
       const r2 = converter.convertOpenAIChunkToGemini(
         continuation('call_X', '/x.ts"}'),
         ctx,
       );
-      // Second chunk closes the JSON — functionCall surfaces here, NOT
-      // waiting for finish_reason.
       const mid = functionCallsOf(r2);
       expect(mid).toHaveLength(1);
       expect(mid[0]?.name).toBe('read_file');
@@ -372,9 +363,6 @@ describe('OpenAIContentConverter', () => {
       );
       const rFinish = converter.convertOpenAIChunkToGemini(finisher(), ctx);
 
-      // The finish_reason flush must be empty — `markEmitted()` /
-      // `emittedIndices` keep `getCompletedToolCalls()` from re-yielding the
-      // same call.
       expect(functionCallsOf(rFinish)).toEqual([]);
     });
 
@@ -384,7 +372,6 @@ describe('OpenAIContentConverter', () => {
         streamingToolDispatch: true,
       };
 
-      // Open both tool calls in the same chunk (incomplete JSON on each).
       const openBoth = {
         object: 'chat.completion.chunk',
         id: 'open-both',
@@ -399,13 +386,19 @@ describe('OpenAIContentConverter', () => {
                   index: 0,
                   id: 'call_A',
                   type: 'function' as const,
-                  function: { name: 'read_file', arguments: '{"file_path":"/a' },
+                  function: {
+                    name: 'read_file',
+                    arguments: '{"file_path":"/a',
+                  },
                 },
                 {
                   index: 1,
                   id: 'call_B',
                   type: 'function' as const,
-                  function: { name: 'read_file', arguments: '{"file_path":"/b' },
+                  function: {
+                    name: 'read_file',
+                    arguments: '{"file_path":"/b',
+                  },
                 },
               ],
             },
@@ -418,7 +411,6 @@ describe('OpenAIContentConverter', () => {
       const r1 = converter.convertOpenAIChunkToGemini(openBoth, ctx);
       expect(functionCallsOf(r1)).toEqual([]);
 
-      // Close A first.
       const r2 = converter.convertOpenAIChunkToGemini(
         continuation('call_A', '/x.ts"}', 0),
         ctx,
@@ -428,7 +420,6 @@ describe('OpenAIContentConverter', () => {
       expect(after2[0]?.id).toBe('call_A');
       expect(after2[0]?.args).toEqual({ file_path: '/a/x.ts' });
 
-      // Close B next.
       const r3 = converter.convertOpenAIChunkToGemini(
         continuation('call_B', '/y.ts"}', 1),
         ctx,
@@ -438,15 +429,72 @@ describe('OpenAIContentConverter', () => {
       expect(after3[0]?.id).toBe('call_B');
       expect(after3[0]?.args).toEqual({ file_path: '/b/y.ts' });
 
-      // finish_reason flush is empty — both already emitted.
       const rFinish = converter.convertOpenAIChunkToGemini(finisher(), ctx);
       expect(functionCallsOf(rFinish)).toEqual([]);
     });
 
+    it('flag-on: a single-chunk tool call with empty `{}` args emits immediately', () => {
+      const ctx: RequestContext = {
+        ...withStreamParser(new StreamingToolCallParser()),
+        streamingToolDispatch: true,
+      };
+
+      const r1 = converter.convertOpenAIChunkToGemini(
+        opener('call_E', 'noop', '{}'),
+        ctx,
+      );
+      const mid = functionCallsOf(r1);
+      expect(mid).toHaveLength(1);
+      expect(mid[0]?.name).toBe('noop');
+      expect(mid[0]?.id).toBe('call_E');
+      expect(mid[0]?.args).toEqual({});
+
+      const rFinish = converter.convertOpenAIChunkToGemini(finisher(), ctx);
+      expect(functionCallsOf(rFinish)).toEqual([]);
+    });
+
+    it('flag-on: tool call completing in the same chunk as finish_reason emits exactly once', () => {
+      const ctx: RequestContext = {
+        ...withStreamParser(new StreamingToolCallParser()),
+        streamingToolDispatch: true,
+      };
+
+      const combined = {
+        object: 'chat.completion.chunk',
+        id: 'combined',
+        created: 1,
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_C',
+                  type: 'function' as const,
+                  function: {
+                    name: 'read_file',
+                    arguments: '{"file_path":"/c.ts"}',
+                  },
+                },
+              ],
+            },
+            finish_reason: 'tool_calls',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      const r = converter.convertOpenAIChunkToGemini(combined, ctx);
+      const calls = functionCallsOf(r);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.id).toBe('call_C');
+      expect(calls[0]?.name).toBe('read_file');
+      expect(calls[0]?.args).toEqual({ file_path: '/c.ts' });
+    });
+
     it('flag-on: incomplete tool call at finish_reason still flushes through the fallback path', () => {
-      // Truncated JSON should NOT be surfaced mid-stream (depth never returns
-      // to 0), and must still appear on the finish_reason flush so that
-      // wasOutputTruncated handling downstream stays intact.
       const ctx: RequestContext = {
         ...withStreamParser(new StreamingToolCallParser()),
         streamingToolDispatch: true,

@@ -1037,6 +1037,15 @@ function convertOpenAITextToParts(
 }
 
 /**
+ * Synthetic ID used when a provider omits `id` on a tool call (some
+ * OpenAI-compatible servers do). Format matches the `call_*` shape so
+ * downstream code that pattern-matches on the prefix still works.
+ */
+function synthesizeToolCallId(): string {
+  return `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+}
+
+/**
  * Convert OpenAI response to Gemini format.
  */
 export function convertOpenAIResponseToGemini(
@@ -1227,48 +1236,29 @@ export function convertOpenAIChunkToGemini(
       parts.push(...convertOpenAITextToParts('', requestContext, true));
     }
 
-    // Handle tool calls using the stream-local parser.
-    //
-    // When `streamingToolDispatch` is on (Phase 1 of issue #4387), any chunk
-    // that completes a tool call's JSON arguments is surfaced as a
-    // `functionCall` part immediately, instead of waiting for the chunk that
-    // carries `finish_reason`. The parser's `markEmitted()` bookkeeping
-    // suppresses the corresponding entry from `getCompletedToolCalls()` so
-    // the finish_reason flush below does not produce a duplicate.
-    const streamingToolDispatch = requestContext.streamingToolDispatch === true;
     if (choice.delta?.tool_calls) {
+      const streamingToolDispatch =
+        requestContext.streamingToolDispatch === true;
       for (const toolCall of choice.delta.tool_calls) {
         const index = toolCall.index ?? 0;
-
-        // Process the tool call chunk through the streaming parser
-        const result = toolCall.function?.arguments
-          ? toolCallParser.addChunk(
-              index,
-              toolCall.function.arguments,
-              toolCall.id,
-              toolCall.function.name,
-            )
-          : toolCallParser.addChunk(
-              index,
-              '', // Empty chunk for metadata-only updates
-              toolCall.id,
-              toolCall.function?.name,
-            );
+        const result = toolCallParser.addChunk(
+          index,
+          toolCall.function?.arguments ?? '',
+          toolCall.id,
+          toolCall.function?.name,
+        );
 
         if (
           streamingToolDispatch &&
           result.complete &&
           result.name &&
-          result.index !== undefined &&
           !toolCallParser.isEmitted(result.index)
         ) {
           parts.push({
             functionCall: {
-              id:
-                result.id ||
-                `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+              id: result.id || synthesizeToolCallId(),
               name: result.name,
-              args: result.value ?? {},
+              args: result.value!,
             },
           });
           toolCallParser.markEmitted(result.index);
@@ -1279,9 +1269,9 @@ export function convertOpenAIChunkToGemini(
     // Only emit function calls when streaming is complete (finish_reason is present)
     let toolCallsTruncated = false;
     if (choice.finish_reason) {
-      // Detect truncation the provider may not report correctly.
-      // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
-      // even when output was cut off mid-JSON due to max_tokens.
+      // Some providers (DashScope/Qwen) report "stop" or "tool_calls" even
+      // when output was actually cut off mid-JSON due to max_tokens; detect
+      // that here so downstream sees the truncation.
       toolCallsTruncated = toolCallParser.hasIncompleteToolCalls();
 
       const completedToolCalls = toolCallParser.getCompletedToolCalls();
@@ -1290,9 +1280,7 @@ export function convertOpenAIChunkToGemini(
         if (toolCall.name) {
           parts.push({
             functionCall: {
-              id:
-                toolCall.id ||
-                `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+              id: toolCall.id || synthesizeToolCallId(),
               name: toolCall.name,
               args: toolCall.args,
             },
