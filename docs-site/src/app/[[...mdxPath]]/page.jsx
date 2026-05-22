@@ -1,13 +1,13 @@
 import { generateStaticParamsFor, importPage } from 'nextra/pages';
 import { notFound } from 'next/navigation';
 import { useMDXComponents as getMDXComponents } from '../../../mdx-components';
-import { isPublicDocsPath } from '../public-docs';
+import { filterPublicStaticParams, isPublicDocsPath } from '../public-docs';
 
 const generateAllStaticParams = generateStaticParamsFor('mdxPath');
 
 export async function generateStaticParams(...args) {
   const staticParams = await generateAllStaticParams(...args);
-  return staticParams.filter(({ mdxPath }) => isPublicDocsPath(mdxPath));
+  return filterPublicStaticParams(staticParams);
 }
 
 export async function generateMetadata(props) {

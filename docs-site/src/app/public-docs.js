@@ -1,7 +1,10 @@
 const LOCALE_SEGMENTS = new Set(['en', 'zh', 'de', 'fr', 'ja', 'ru', 'pt-BR']);
 
-// Keep this in sync with the public top-level entries in docs/_meta.ts.
-const PUBLIC_DOC_ROOTS = new Set(['users', 'developers']);
+// Keep this in sync with the public top-level page entries in docs/_meta.ts.
+// docs-site/scripts/link-public-docs.mjs consumes the same allowlist.
+export const PUBLIC_DOC_ROOTS = ['users', 'developers'];
+
+const PUBLIC_DOC_ROOT_SET = new Set(PUBLIC_DOC_ROOTS);
 
 function publicRootFromSegments(segments = []) {
   if (segments.length === 0) {
@@ -12,16 +15,19 @@ function publicRootFromSegments(segments = []) {
   return segments[rootIndex];
 }
 
-function pathSegmentsFromRoute(route = '') {
-  return route.split('/').filter(Boolean);
-}
-
 export function isPublicDocsPath(mdxPath = []) {
   const root = publicRootFromSegments(mdxPath);
-  return root === undefined || PUBLIC_DOC_ROOTS.has(root);
+  return root === undefined || PUBLIC_DOC_ROOT_SET.has(root);
 }
 
-export function isPublicDocsRoute(route = '') {
-  const root = publicRootFromSegments(pathSegmentsFromRoute(route));
-  return root === undefined || PUBLIC_DOC_ROOTS.has(root);
+export function filterPublicStaticParams(staticParams = []) {
+  return staticParams.filter((staticParam) => {
+    if (!Array.isArray(staticParam?.mdxPath)) {
+      throw new TypeError(
+        'Expected generateStaticParamsFor("mdxPath") to return objects with an mdxPath array.',
+      );
+    }
+
+    return isPublicDocsPath(staticParam.mdxPath);
+  });
 }

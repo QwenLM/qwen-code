@@ -7,10 +7,10 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "link": "rm -rf content && mkdir content && cp ../docs/index.md ../docs/_meta.ts content/ && cp -R ../docs/users ../docs/developers content/",
+    "link": "node scripts/link-public-docs.mjs",
     "clean": "rm -rf .next",
     "dev": "npm run clean && next --turbopack",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run --config vitest.config.js"
   },
   "dependencies": {
     "next": "^16.0.8",
