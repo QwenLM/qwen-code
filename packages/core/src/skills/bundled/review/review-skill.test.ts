@@ -86,10 +86,15 @@ describe('bundled review skill', () => {
 
     function runGuard(input: object): { stdout: string; exitCode: number } {
       try {
+        // Mirror hookRunner.ts:575 — the real hook receives
+        // `QWEN_PROJECT_DIR` in env. The guard uses that env var (not
+        // bash's cwd) to anchor its session-marker lookup, so tests must
+        // pass it too or the self-disable branch fires on every command.
         const stdout = execFileSync('bash', [guardScript], {
           input: JSON.stringify(input),
           encoding: 'utf8',
           cwd,
+          env: { ...process.env, QWEN_PROJECT_DIR: cwd },
         });
         return { stdout, exitCode: 0 };
       } catch (err) {
@@ -181,12 +186,35 @@ describe('bundled review skill', () => {
           }),
           encoding: 'utf8',
           cwd: otherCwd,
+          env: { ...process.env, QWEN_PROJECT_DIR: otherCwd },
         });
         const decision = JSON.parse(stdout);
         expect(decision.decision).toBe('allow');
       } finally {
         fs.rmSync(otherCwd, { recursive: true, force: true });
       }
+    });
+
+    it('still denies when bash cwd drifts into the worktree but QWEN_PROJECT_DIR points at the project root', () => {
+      // Regression: an earlier draft anchored the session-marker lookup at
+      // bash's cwd, which the LLM is supposed to set to the worktree during
+      // a compliant review flow. That made the self-disable branch fire
+      // exactly when the guard most needed to deny — `git checkout main`
+      // from inside the worktree would otherwise contaminate the user's
+      // main checkout. Use QWEN_PROJECT_DIR (set by hookRunner) to anchor.
+      const worktreeCwd = path.join(cwd, '.qwen', 'tmp', 'review-pr-1');
+      mkdirSync(worktreeCwd, { recursive: true });
+      const stdout = execFileSync('bash', [guardScript], {
+        input: JSON.stringify({
+          tool_name: 'run_shell_command',
+          tool_input: { command: 'git checkout main' },
+        }),
+        encoding: 'utf8',
+        cwd: worktreeCwd,
+        env: { ...process.env, QWEN_PROJECT_DIR: cwd },
+      });
+      const decision = JSON.parse(stdout);
+      expect(decision.decision).toBe('deny');
     });
   });
 });

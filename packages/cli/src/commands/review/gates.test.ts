@@ -114,9 +114,43 @@ describe('review subcommand gates (require fetch-pr report)', () => {
       '.qwen/tmp/rules.md',
       '--pr',
       '7',
+      '--owner-repo',
+      'octo/repo',
     ]);
     expect(err).not.toBeNull();
     expect(err?.message).toMatch(/Missing fetch-pr report for PR #7/);
+  });
+
+  it('load-rules --pr refuses when --owner-repo is not supplied', async () => {
+    // SKILL.md now passes both flags together; tightening the contract here
+    // catches a weakly instruction-following model that drops --owner-repo
+    // and would have inherited the previous "presence-only" gate.
+    const err = await runOrCapture([
+      'load-rules',
+      'origin/main',
+      '--out',
+      '.qwen/tmp/rules.md',
+      '--pr',
+      '7',
+    ]);
+    expect(err).not.toBeNull();
+    expect(err?.message).toMatch(/--owner-repo is required when --pr is set/);
+  });
+
+  it('load-rules --pr refuses when report.ownerRepo does not match', async () => {
+    writeReport('7', { ownerRepo: 'attacker/repo' });
+    const err = await runOrCapture([
+      'load-rules',
+      'origin/main',
+      '--out',
+      '.qwen/tmp/rules.md',
+      '--pr',
+      '7',
+      '--owner-repo',
+      'octo/repo',
+    ]);
+    expect(err).not.toBeNull();
+    expect(err?.message).toMatch(/bound to a different repo/);
   });
 
   it('load-rules without --pr does not require a fetch report', async () => {
@@ -149,9 +183,48 @@ describe('review subcommand gates (require fetch-pr report)', () => {
       '.qwen/tmp/det.json',
       '--pr',
       '7',
+      '--owner-repo',
+      'octo/repo',
     ]);
     expect(err).not.toBeNull();
     expect(err?.message).toMatch(/Missing fetch-pr report for PR #7/);
+  });
+
+  it('deterministic --pr refuses when --owner-repo is not supplied', async () => {
+    mkdirSync('.qwen/tmp/review-pr-7', { recursive: true });
+    writeFileSync('.qwen/tmp/changed.json', '[]', 'utf8');
+    const err = await runOrCapture([
+      'deterministic',
+      '.qwen/tmp/review-pr-7',
+      '--changed-files',
+      '.qwen/tmp/changed.json',
+      '--out',
+      '.qwen/tmp/det.json',
+      '--pr',
+      '7',
+    ]);
+    expect(err).not.toBeNull();
+    expect(err?.message).toMatch(/--owner-repo is required when --pr is set/);
+  });
+
+  it('deterministic --pr refuses when report.ownerRepo does not match', async () => {
+    writeReport('7', { ownerRepo: 'attacker/repo' });
+    mkdirSync('.qwen/tmp/review-pr-7', { recursive: true });
+    writeFileSync('.qwen/tmp/changed.json', '[]', 'utf8');
+    const err = await runOrCapture([
+      'deterministic',
+      '.qwen/tmp/review-pr-7',
+      '--changed-files',
+      '.qwen/tmp/changed.json',
+      '--out',
+      '.qwen/tmp/det.json',
+      '--pr',
+      '7',
+      '--owner-repo',
+      'octo/repo',
+    ]);
+    expect(err).not.toBeNull();
+    expect(err?.message).toMatch(/bound to a different repo/);
   });
 
   it('pr-context refuses when report.ownerRepo does not match the command arg', async () => {
@@ -193,6 +266,8 @@ describe('review subcommand gates (require fetch-pr report)', () => {
       '.qwen/tmp/det.json',
       '--pr',
       '7',
+      '--owner-repo',
+      'octo/repo',
     ]);
     expect(err).not.toBeNull();
     expect(err?.message).toMatch(/Worktree path mismatch/);

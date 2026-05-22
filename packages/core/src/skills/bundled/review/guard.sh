@@ -42,7 +42,15 @@ INPUT=$(cat)
 # denied with a recovery message pointing at a review session that no longer
 # exists. The presence of a fetch-pr report is the proxy for "review session
 # active".
-if ! ls .qwen/tmp/qwen-review-pr-*-fetch.json >/dev/null 2>&1; then
+#
+# Anchor the lookup at `$QWEN_PROJECT_DIR` (set by `hookRunner.ts:575` from
+# `config.getWorkingDir()`) rather than the bash cwd: in a compliant review
+# flow the LLM may `cd` into the worktree, and a cwd-relative `ls` would
+# then look at `<worktree>/.qwen/tmp/...` (empty) and self-disable the
+# guard right when it matters most. Fall back to `.` only for direct
+# script invocation in tests where the env var isn't set.
+PROJECT_DIR="${QWEN_PROJECT_DIR:-.}"
+if ! ls "$PROJECT_DIR"/.qwen/tmp/qwen-review-pr-*-fetch.json >/dev/null 2>&1; then
   printf '{"decision":"allow"}\n'
   exit 0
 fi

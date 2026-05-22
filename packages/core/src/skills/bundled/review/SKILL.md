@@ -106,10 +106,10 @@ Run `qwen review load-rules` to read project-specific rules. **For PR reviews, r
 ```bash
 qwen review load-rules <resolved_base_ref> \
   --out .qwen/tmp/qwen-review-<target>-rules.md \
-  [--pr <pr_number>]
+  [--pr <pr_number> --owner-repo <owner>/<repo>]
 ```
 
-Pass `--pr <pr_number>` for PR reviews; the subcommand will hard-fail if no fetch-pr report exists, catching the case where the worktree setup was skipped. Omit the flag for local-uncommitted or file-path reviews.
+Pass `--pr <pr_number> --owner-repo <owner>/<repo>` together for PR reviews; the subcommand will hard-fail if no fetch-pr report exists for that PR+repo combination, catching the case where the worktree setup was skipped or a stale report from another repo would otherwise satisfy the gate. Omit both flags for local-uncommitted or file-path reviews.
 
 `<resolved_base_ref>` is the base ref to load from: prefer `<base>` if it exists locally, otherwise `<remote>/<base>` (run `git fetch <remote> <base>` first if not yet fetched). For local-uncommitted or file-path reviews use `HEAD`.
 
@@ -135,10 +135,10 @@ Extract the list of changed files from the diff output. For local uncommitted re
    qwen review deterministic <worktree> \
      --changed-files .qwen/tmp/qwen-review-<target>-changed.json \
      --out .qwen/tmp/qwen-review-<target>-deterministic.json \
-     [--pr <pr_number>]
+     [--pr <pr_number> --owner-repo <owner>/<repo>]
    ```
 
-   Pass `--pr <pr_number>` for PR reviews — the subcommand will then refuse to run if `<worktree>` doesn't match the path recorded by `fetch-pr`, blocking accidental analysis of the user's main working tree. Omit for local / file reviews.
+   Pass `--pr <pr_number> --owner-repo <owner>/<repo>` together for PR reviews — the subcommand will then refuse to run if no fetch-pr report exists for that PR+repo combination or if `<worktree>` doesn't match the path recorded by `fetch-pr`, blocking accidental analysis of the user's main working tree or of a stale worktree from a same-PR-number review in another repo. Omit both flags for local / file reviews.
 
    Tools currently covered:
 

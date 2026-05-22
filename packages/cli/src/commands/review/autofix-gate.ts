@@ -107,7 +107,7 @@ export const autofixGateCommand: CommandModule = {
         type: 'number',
         default: 0,
         describe:
-          'Number of auto-fixable findings detected by Step 7. When 0, the decision is "noop" regardless of session state.',
+          'Number of auto-fixable findings detected by Step 7. The session-state checks (commentMode set, missing fetch-pr report) take precedence and produce "skip" before this value is consulted; otherwise 0 yields "noop" and non-zero yields "ask".',
       }),
   handler: (argv) => {
     runAutofixGate(argv as unknown as AutofixGateArgs);

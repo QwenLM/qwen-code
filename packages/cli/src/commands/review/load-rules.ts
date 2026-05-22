@@ -26,12 +26,13 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { gitOpt } from './lib/git.js';
-import { requireFetchReport } from './lib/session.js';
+import { requireFetchReportFor } from './lib/session.js';
 
 interface LoadRulesArgs {
   base_ref: string;
   out: string;
   pr?: string;
+  'owner-repo'?: string;
 }
 
 function showFile(baseRef: string, path: string): string | null {
@@ -119,11 +120,19 @@ function loadCombined(baseRef: string): {
 
 async function runLoadRules(args: LoadRulesArgs): Promise<void> {
   const { base_ref: baseRef, out, pr } = args;
-  // For PR reviews, refuse to load rules unless fetch-pr already ran. This
-  // catches the case where the LLM driver tried to skip straight to rules
-  // without setting up a worktree.
+  const ownerRepo = args['owner-repo'];
+  // For PR reviews, refuse to load rules unless fetch-pr already ran AND
+  // wrote a report bound to this owner/repo. Without the owner/repo binding
+  // a stale report from reviewing PR #N in another repo would satisfy the
+  // gate and the LLM driver would inherit rules under a stale session;
+  // matches the same precondition pr-context / presubmit enforce.
   if (pr) {
-    requireFetchReport(pr);
+    if (!ownerRepo) {
+      throw new Error(
+        '--owner-repo is required when --pr is set (must match the repo `fetch-pr` was run against).',
+      );
+    }
+    requireFetchReportFor({ prNumber: pr, ownerRepo });
   }
   const { combined, loaded } = loadCombined(baseRef);
 
@@ -162,7 +171,12 @@ export const loadRulesCommand: CommandModule = {
       .option('pr', {
         type: 'string',
         describe:
-          'PR number — when provided, validates that an active fetch-pr session exists. Omit for local-uncommitted or file-path reviews.',
+          'PR number — when provided, validates that an active fetch-pr session exists for the same owner/repo (requires --owner-repo). Omit for local-uncommitted or file-path reviews.',
+      })
+      .option('owner-repo', {
+        type: 'string',
+        describe:
+          'PR owner/repo (e.g. "octo/repo"). Required when --pr is set so the session report can be bound to this repo and stale reports for the same PR number in another repo are rejected.',
       }),
   handler: async (argv) => {
     await runLoadRules(argv as unknown as LoadRulesArgs);
