@@ -17,6 +17,9 @@ const MOCK_FORTUNE_QUOTE = 'The early bird catches the worm.';
 
 vi.mock('./fortune.js', () => ({
   getFortuneQuote: vi.fn(),
+}));
+
+vi.mock('../../config/constants.js', () => ({
   DEFAULT_FORTUNE_COMMAND: '/usr/games/fortune -s -n 45',
 }));
 

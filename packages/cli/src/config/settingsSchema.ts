@@ -12,7 +12,7 @@ import type {
   ChatCompressionSettings,
   ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
-import { DEFAULT_FORTUNE_COMMAND } from '../ui/hooks/fortune.js';
+import { DEFAULT_FORTUNE_COMMAND } from './constants.js';
 import {
   ApprovalMode,
   DEFAULT_STOP_HOOK_BLOCK_CAP,

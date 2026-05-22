@@ -6,7 +6,8 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { t, ta, getCurrentLanguage } from '../../i18n/index.js';
-import { getFortuneQuote, DEFAULT_FORTUNE_COMMAND } from './fortune.js';
+import { getFortuneQuote } from './fortune.js';
+import { DEFAULT_FORTUNE_COMMAND } from '../../config/constants.js';
 
 export const WITTY_LOADING_PHRASES: string[] = ["I'm Feeling Lucky"];
 

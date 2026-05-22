@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_FORTUNE_COMMAND } from './fortune.js';
+import { DEFAULT_FORTUNE_COMMAND } from '../../config/constants.js';
 
 describe('fortune', () => {
   it('should use DEFAULT_FORTUNE_COMMAND constant', () => {
