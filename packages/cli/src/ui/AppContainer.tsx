@@ -2766,6 +2766,8 @@ export const AppContainer = (props: AppContainerProps) => {
     closeDiffDialog,
     showWorktreeExitDialog,
     closeWorktreeExitDialog: () => setShowWorktreeExitDialog(false),
+    isAutoImproveSourceDialogOpen,
+    closeAutoImproveSourceDialog,
   });
 
   const handleExit = useCallback(

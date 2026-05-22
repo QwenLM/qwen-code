@@ -68,6 +68,10 @@ export interface DialogCloseOptions {
   // Worktree exit dialog (Phase C)
   showWorktreeExitDialog?: boolean;
   closeWorktreeExitDialog?: () => void;
+
+  // Auto-improve source dialog
+  isAutoImproveSourceDialogOpen?: boolean;
+  closeAutoImproveSourceDialog?: () => void;
 }
 
 /**
@@ -166,6 +170,14 @@ export function useDialogClose(options: DialogCloseOptions) {
       // the dialog was only escapable via the Escape key, inconsistent
       // with the rest of the dialog surface. (PR #4174 review.)
       options.closeWorktreeExitDialog();
+      return true;
+    }
+
+    if (
+      options.isAutoImproveSourceDialogOpen &&
+      options.closeAutoImproveSourceDialog
+    ) {
+      options.closeAutoImproveSourceDialog();
       return true;
     }
 
