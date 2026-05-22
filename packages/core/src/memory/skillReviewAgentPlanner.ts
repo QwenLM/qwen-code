@@ -21,6 +21,12 @@ import {
   getProjectSkillsRoot,
   isProjectSkillPath,
 } from '../skills/skill-paths.js';
+import {
+  DEFAULT_SKILL_COLLISION_STRATEGY,
+  listExistingProjectSkillNames,
+  type SkillCollisionStrategy,
+} from './skillCollisionGuard.js';
+import { installSkillCollisionGuard } from './skillCollisionAwareWriteFile.js';
 
 export const SKILL_REVIEW_AGENT_NAME = 'managed-skill-extractor' as const;
 export const DEFAULT_AUTO_SKILL_MAX_TURNS = 8;
@@ -153,9 +159,36 @@ function getScopedDenyRule(
   }
 }
 
+export interface CreateSkillScopedAgentConfigOptions {
+  /**
+   * Collision strategy applied when the agent attempts to `write_file` on
+   * an existing `<projectRoot>/.qwen/skills/<name>/SKILL.md`. Defaults to
+   * {@link DEFAULT_SKILL_COLLISION_STRATEGY} (`'rename'`).
+   *
+   * The strategy itself is enforced inside `runSkillReviewByAgent` via
+   * `installSkillCollisionGuard` on the YOLO override's tool registry —
+   * stored on the scoped config here so callers that test the scoped
+   * config in isolation can read it back.
+   */
+  collisionStrategy?: SkillCollisionStrategy;
+}
+
+const SKILL_COLLISION_STRATEGY_SYMBOL: unique symbol = Symbol.for(
+  'qwen-code:skill-collision-strategy',
+);
+
+export function readSkillCollisionStrategy(
+  config: Config,
+): SkillCollisionStrategy | undefined {
+  return (config as unknown as Record<symbol, SkillCollisionStrategy>)[
+    SKILL_COLLISION_STRATEGY_SYMBOL
+  ];
+}
+
 export function createSkillScopedAgentConfig(
   config: Config,
   projectRoot: string,
+  options: CreateSkillScopedAgentConfigOptions = {},
 ): Config {
   const basePm = config.getPermissionManager?.();
   const scopedPm: SkillScopedPermissionManager = {
@@ -188,6 +221,11 @@ export function createSkillScopedAgentConfig(
   const scopedConfig = Object.create(config) as Config;
   scopedConfig.getPermissionManager = () =>
     scopedPm as unknown as PermissionManager;
+  // Annotate with the chosen collision strategy so runSkillReviewByAgent
+  // (and tests) can read it without an extra parameter.
+  (scopedConfig as unknown as Record<symbol, SkillCollisionStrategy>)[
+    SKILL_COLLISION_STRATEGY_SYMBOL
+  ] = options.collisionStrategy ?? DEFAULT_SKILL_COLLISION_STRATEGY;
   return scopedConfig;
 }
 
@@ -230,9 +268,27 @@ function buildAgentHistory(history: Content[]): Content[] {
   ];
 }
 
-function buildTaskPrompt(skillsRoot: string): string {
+/**
+ * Exported for testing. Builds the agent's task prompt with an inline list
+ * of skill names already present on disk so the model can pick a fresh
+ * name on its first attempt and avoid the collision-guard rename path.
+ */
+export async function buildTaskPrompt(
+  skillsRoot: string,
+  projectRoot: string,
+): Promise<string> {
+  const existingNames = await listExistingProjectSkillNames(projectRoot);
+  const existingSection =
+    existingNames.length === 0
+      ? '(No skills exist yet — any new name is available.)'
+      : [
+          'Existing skills in this directory — DO NOT reuse these names for a new skill (use `edit` to update an existing auto-skill, `write_file` only for new ones):',
+          ...existingNames.map((n) => `  - ${n}`),
+        ].join('\n');
   return [
     `Project skills directory: \`${skillsRoot}\``,
+    '',
+    existingSection,
     '',
     'Use `ls` and `read_file` to inspect existing skills before writing.',
     'Use `write_file` to create a new skill, `edit` to update an existing auto-skill.',
@@ -255,16 +311,27 @@ export async function runSkillReviewByAgent(params: {
   history: Content[];
   maxTurns?: number;
   timeoutMs?: number;
+  /**
+   * Auto-skill collision strategy override. When omitted, the strategy is
+   * read from the Config (`getAutoSkillCollisionStrategy()`), then falls
+   * back to {@link DEFAULT_SKILL_COLLISION_STRATEGY}.
+   */
+  collisionStrategy?: SkillCollisionStrategy;
 }): Promise<SkillReviewExecutionResult> {
   const skillsRoot = getProjectSkillsRoot(params.projectRoot);
+  const strategy =
+    params.collisionStrategy ??
+    params.config.getAutoSkillCollisionStrategy?.() ??
+    DEFAULT_SKILL_COLLISION_STRATEGY;
   const scopedConfig = createSkillScopedAgentConfig(
     params.config,
     params.projectRoot,
+    { collisionStrategy: strategy },
   );
   const result = await runForkedAgent({
     name: SKILL_REVIEW_AGENT_NAME,
     config: scopedConfig,
-    taskPrompt: buildTaskPrompt(skillsRoot),
+    taskPrompt: await buildTaskPrompt(skillsRoot, params.projectRoot),
     systemPrompt: SKILL_REVIEW_SYSTEM_PROMPT,
     maxTurns: params.maxTurns ?? DEFAULT_AUTO_SKILL_MAX_TURNS,
     maxTimeMinutes:
@@ -276,6 +343,14 @@ export async function runSkillReviewByAgent(params: {
       ToolNames.EDIT,
     ],
     extraHistory: buildAgentHistory(params.history),
+    prepareToolRegistry: (yoloConfig) => {
+      installSkillCollisionGuard(
+        yoloConfig.getToolRegistry(),
+        yoloConfig,
+        params.projectRoot,
+        strategy,
+      );
+    },
   });
 
   if (result.status !== 'completed') {

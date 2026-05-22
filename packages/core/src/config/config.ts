@@ -676,6 +676,13 @@ export interface ConfigParameters {
   /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
   /**
+   * Strategy applied when the auto-skill review agent tries to write a
+   * SKILL.md to a path that already exists. Defaults to `'rename'` — append
+   * `-2`, `-3`, ... to the skill directory name so the existing skill is
+   * preserved. See issue #4437.
+   */
+  autoSkillCollisionStrategy?: 'rename' | 'skip' | 'overwrite';
+  /**
    * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
    * When set and valid for the current auth type, forked agents use this model instead of
    * the main session model, reducing latency and cost.
@@ -938,6 +945,7 @@ export class Config {
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
   private readonly enableAutoSkill: boolean;
+  private readonly autoSkillCollisionStrategy: 'rename' | 'skip' | 'overwrite';
   private fastModel?: string;
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
@@ -1152,6 +1160,8 @@ export class Config {
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? false;
+    this.autoSkillCollisionStrategy =
+      params.autoSkillCollisionStrategy ?? 'rename';
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -3038,6 +3048,10 @@ export class Config {
 
   getAutoSkillEnabled(): boolean {
     return this.enableAutoSkill && !this.getBareMode();
+  }
+
+  getAutoSkillCollisionStrategy(): 'rename' | 'skip' | 'overwrite' {
+    return this.autoSkillCollisionStrategy;
   }
 
   /**

@@ -332,6 +332,15 @@ export interface AgentPathParams {
    * Must end with a `model` role entry; call buildAgentHistory() to enforce this.
    */
   extraHistory?: Content[];
+  /**
+   * Optional hook invoked after the per-fork tool registry is built on the
+   * YOLO override but before AgentHeadless.create. Callers that need to
+   * swap in a wrapped tool (e.g. the auto-skill collision guard from
+   * issue #4437) install it here against the registry returned by
+   * `yoloConfig.getToolRegistry()`. The hook is awaited; throwing aborts
+   * the fork.
+   */
+  prepareToolRegistry?: (yoloConfig: Config) => Promise<void> | void;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
 }
@@ -482,6 +491,9 @@ export async function runForkedAgent(
   // API symmetry with the other createApprovalModeOverride callers; if
   // this function ever switches away from YOLO the lifecycle stays
   // correct without further refactor.
+  if (params.prepareToolRegistry) {
+    await params.prepareToolRegistry(yoloConfig);
+  }
   const filesTouched = new Set<string>();
 
   const emitter = new AgentEventEmitter();

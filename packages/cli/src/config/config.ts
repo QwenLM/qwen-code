@@ -1775,6 +1775,8 @@ export async function loadCliConfig(
     enableAutoSkill: bareMode
       ? false
       : (settings.memory?.enableAutoSkill ?? false),
+    autoSkillCollisionStrategy: (settings.memory?.autoSkillCollisionStrategy ??
+      'rename') as 'rename' | 'skip' | 'overwrite',
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode

@@ -1409,6 +1409,31 @@ const SETTINGS_SCHEMA = {
           'Enable background review for reusable project skills after tool-heavy sessions.',
         showInDialog: false,
       },
+      autoSkillCollisionStrategy: {
+        type: 'string',
+        label: 'Auto Skill Collision Strategy',
+        category: 'Memory',
+        requiresRestart: false,
+        default: 'rename',
+        options: [
+          {
+            value: 'rename',
+            label:
+              'Rename — append -2/-3/... (default, preserves existing skill)',
+          },
+          {
+            value: 'skip',
+            label: 'Skip — abort the write with a warning',
+          },
+          {
+            value: 'overwrite',
+            label: 'Overwrite — replace the existing file (legacy behaviour)',
+          },
+        ],
+        description:
+          "Behaviour when the auto-skill review agent writes to a SKILL.md that already exists. 'rename' (default) appends -2/-3/... so the existing skill is preserved; 'skip' aborts the write with a warning; 'overwrite' restores the pre-#4437 behaviour and silently replaces the existing file.",
+        showInDialog: false,
+      },
     },
   },
 
