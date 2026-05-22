@@ -1026,6 +1026,40 @@ describe('Telemetry SDK', () => {
       ).toBe(false);
     });
 
+    it('strips port from req.host fallback to avoid `host:port:port` URL reject', () => {
+      // Defensive: when `req.hostname` is absent and `req.host` already
+      // includes `:port` (e.g. `"collector:4318"`), naively appending
+      // `:${req.port}` produced `"http://collector:4318:4318"`, which
+      // `URL` rejects → silent guard bypass. Currently unreachable in
+      // practice (`@opentelemetry/otlp-exporter-base` always sets
+      // `hostname`) but the fallback path must be correct. PR #4390
+      // review feedback (wenshao).
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'http://collector.example.com:4318',
+      );
+      initializeTelemetry(mockConfig);
+      const httpInstrumentationConfig = vi.mocked(HttpInstrumentation).mock
+        .calls[0]![0]! as {
+        ignoreOutgoingRequestHook: (req: {
+          protocol: string;
+          host?: string;
+          hostname?: string;
+          port?: string | number;
+          path: string;
+        }) => boolean;
+      };
+      expect(
+        httpInstrumentationConfig.ignoreOutgoingRequestHook({
+          protocol: 'http:',
+          // hostname intentionally absent; host carries the port already
+          host: 'collector.example.com:4318',
+          port: 4318,
+          path: '/v1/traces',
+        }),
+      ).toBe(true);
+    });
+
     it('normalizeOtlpPrefix strips asymmetric quotes for parity with parseOtlpEndpoint', () => {
       // parseOtlpEndpoint (line 109) uses /^["']|["']$/g which strips
       // asymmetric leading/trailing quotes. Previously normalizeOtlpPrefix

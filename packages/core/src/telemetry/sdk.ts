@@ -431,7 +431,22 @@ export function initializeTelemetry(config: Config): void {
             ? String(req.protocol).replace(/:$/, '')
             : undefined;
           if (!proto) return false;
-          const host = req.hostname || req.host || '';
+          // `req.host` may already include `:port` (e.g. `"collector:4318"`).
+          // Naively concatenating `:${req.port}` below would yield
+          // `"http://collector:4318:4318"`, which `new URL()` rejects → catch
+          // returns false → silent guard bypass. Currently unreachable because
+          // `@opentelemetry/otlp-exporter-base` always sets `hostname`, but
+          // the fallback exists and must be correct. Strip the port — IPv6
+          // literals like `"[::1]:443"` keep their bracketed host. See PR
+          // #4390 review feedback (wenshao).
+          let host = req.hostname || '';
+          if (!host && req.host) {
+            const h = String(req.host);
+            const bracketEnd = h.indexOf(']');
+            const portIdx =
+              bracketEnd !== -1 ? h.indexOf(':', bracketEnd) : h.indexOf(':');
+            host = portIdx !== -1 ? h.slice(0, portIdx) : h;
+          }
           const portPart =
             req.port !== undefined && req.port !== null && String(req.port)
               ? `:${req.port}`

@@ -291,6 +291,25 @@ URLs matching the configured `telemetry.otlpEndpoint` /
 `telemetry.otlpMetricsEndpoint` prefixes. In file-outfile mode there are no
 outbound HTTP uploads, so the hook is a no-op.
 
+**Scope: all `fetch()` calls, not just LLM.** The undici instrumentation
+patches `globalThis.fetch` for the entire process, so a client span +
+`traceparent` injection happens on every outbound `fetch` — including the
+`WebFetch` tool, MCP StreamableHTTP clients, and any IDE-extension
+out-of-process calls — not only LLM SDK traffic. Two consequences worth
+knowing:
+
+- **Trace ID leakage.** The W3C `traceparent` header carries the trace ID
+  to every destination, including third-party URLs supplied at runtime
+  (e.g. a `WebFetch` to an arbitrary domain). The trace ID is not a
+  secret per the W3C spec, but operators with stricter requirements
+  should be aware that the qwen-code trace ID becomes observable to any
+  endpoint the user instructs the agent to call. If this is unacceptable
+  for a deployment, disable telemetry entirely (`telemetry.enabled: false`)
+  until a per-destination scoping toggle ships (tracked as a follow-up).
+- **Span volume.** Non-LLM `fetch` calls show up as client HTTP spans in
+  your OTLP backend. Filter on `http.url` or `peer.service` if you want
+  to isolate the LLM-only subset.
+
 ### Session correlation header
 
 Alongside `traceparent`, Qwen Code injects a custom HTTP header on every
