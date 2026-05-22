@@ -5,6 +5,7 @@
  */
 
 import * as crypto from 'node:crypto';
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { isNodeError } from './errors.js';
@@ -106,7 +107,15 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  *    can leave a partially-written file. EXDEV only occurs when the
  *    resolved target path is on a different filesystem than its parent
  *    directory, which is rare in practice.
- * 6. Always clean up the temp file on failure.
+ * 6. If the existing file is owned by a different uid/gid than the
+ *    current process (and we are not root), fall back to in-place
+ *    truncate+write instead of rename. POSIX rename creates a new inode
+ *    owned by the process's euid/egid, which would silently strip the
+ *    original ownership and break shared-write setups
+ *    (e.g. group-writable files in a shared workspace). The in-place
+ *    write preserves the inode — and therefore uid/gid — at the cost
+ *    of crash atomicity.
+ * 7. Always clean up the temp file on failure.
  *
  * The parent directory of `filePath` must already exist.
  */
@@ -122,19 +131,19 @@ export async function atomicWriteFile(
 
   const targetPath = await resolveSymlinkChain(filePath);
 
-  const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-
-  // Stat the target to preserve existing permissions (mask out file-type bits).
-  let existingMode: number | undefined;
+  // Stat the target to preserve existing permissions and detect
+  // ownership-changing renames (see step 6 in the function doc).
+  let existingStat: Stats | undefined;
   try {
-    const stat = await fs.stat(targetPath);
-    existingMode = stat.mode & 0o7777;
+    existingStat = await fs.stat(targetPath);
   } catch (err) {
     if (!isNodeError(err) || err.code !== 'ENOENT') {
       throw err;
     }
   }
 
+  const existingMode =
+    existingStat !== undefined ? existingStat.mode & 0o7777 : undefined;
   const desiredMode = existingMode ?? options?.mode;
 
   const writeOptions: {
@@ -156,6 +165,31 @@ export async function atomicWriteFile(
     }
   };
 
+  // Detect when atomic rename would silently change ownership. POSIX
+  // rename creates a new inode owned by the process's euid/egid; if the
+  // existing file is owned by someone else (or has a different group),
+  // shared-write users would lose access. Fall back to in-place write,
+  // which truncates the existing inode and so preserves uid/gid.
+  // Skipped on Windows (no POSIX ownership), for new files (no owner to
+  // preserve), and for root (rename + chown-back works; see below).
+  const ownershipWouldChange = (): boolean => {
+    if (existingStat === undefined) return false;
+    if (process.platform === 'win32') return false;
+    const euid = process.geteuid?.();
+    const egid = process.getegid?.();
+    if (euid === undefined || egid === undefined) return false;
+    if (euid === 0) return false;
+    return existingStat.uid !== euid || existingStat.gid !== egid;
+  };
+
+  if (ownershipWouldChange()) {
+    await fs.writeFile(targetPath, data, writeOptions);
+    await tryChmod(targetPath);
+    return;
+  }
+
+  const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+
   try {
     await fs.writeFile(tmpPath, data, writeOptions);
     await tryChmod(tmpPath);
@@ -176,6 +210,20 @@ export async function atomicWriteFile(
     }
 
     throw error;
+  }
+
+  // Root: rename produced a root-owned inode. Restore the original
+  // uid/gid so root invocations don't leak ownership to user files.
+  if (
+    existingStat !== undefined &&
+    process.platform !== 'win32' &&
+    process.geteuid?.() === 0
+  ) {
+    try {
+      await fs.chown(targetPath, existingStat.uid, existingStat.gid);
+    } catch {
+      // Best-effort. Not all filesystems support chown.
+    }
   }
 }
 

@@ -269,4 +269,82 @@ describe('atomicWriteFile', () => {
       path.normalize('../otherDir/target.txt'),
     );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'should use atomic rename when ownership matches (inode changes)',
+    async () => {
+      const filePath = path.join(tmpDir, 'mine.txt');
+      await fs.writeFile(filePath, 'original');
+      const inoBefore = (await fs.stat(filePath)).ino;
+
+      await atomicWriteFile(filePath, 'updated');
+
+      const statAfter = await fs.stat(filePath);
+      // Atomic rename produces a new inode.
+      expect(statAfter.ino).not.toBe(inoBefore);
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('updated');
+    },
+  );
+
+  it.skipIf(
+    process.platform === 'win32' || typeof process.geteuid !== 'function',
+  )(
+    'should fall back to in-place write when atomic rename would change ownership',
+    async () => {
+      // Simulate a file owned by a different user by replacing process.geteuid
+      // so it reports a uid that doesn't match the file's real uid. The code
+      // should detect rename would strip ownership and fall back to in-place
+      // writeFile, which preserves the inode — our signal that fallback ran.
+      const filePath = path.join(tmpDir, 'shared.txt');
+      await fs.writeFile(filePath, 'original');
+      await fs.chmod(filePath, 0o664);
+
+      const realStat = await fs.stat(filePath);
+      const inoBefore = realStat.ino;
+      const realGeteuid = process.geteuid!;
+      process.geteuid = () => realStat.uid + 1;
+
+      try {
+        await atomicWriteFile(filePath, 'updated');
+      } finally {
+        process.geteuid = realGeteuid;
+      }
+
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('updated');
+
+      const statAfter = await fs.stat(filePath);
+      // In-place write preserves the inode — proves rename was skipped.
+      expect(statAfter.ino).toBe(inoBefore);
+      // Permissions preserved.
+      expect(statAfter.mode & 0o777).toBe(0o664);
+      // No leftover temp file.
+      expect(await fs.readdir(tmpDir)).toEqual(['shared.txt']);
+    },
+  );
+
+  it.skipIf(
+    process.platform === 'win32' || typeof process.getegid !== 'function',
+  )(
+    'should fall back to in-place write when group differs from process gid',
+    async () => {
+      // Same scenario triggered via gid mismatch.
+      const filePath = path.join(tmpDir, 'shared-group.txt');
+      await fs.writeFile(filePath, 'original');
+
+      const realStat = await fs.stat(filePath);
+      const inoBefore = realStat.ino;
+      const realGetegid = process.getegid!;
+      process.getegid = () => realStat.gid + 1;
+
+      try {
+        await atomicWriteFile(filePath, 'updated');
+      } finally {
+        process.getegid = realGetegid;
+      }
+
+      const statAfter = await fs.stat(filePath);
+      expect(statAfter.ino).toBe(inoBefore);
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('updated');
+    },
+  );
 });
