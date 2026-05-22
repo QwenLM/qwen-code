@@ -29,10 +29,13 @@ vi.mock('fs/promises', async (importOriginal) => {
   };
 });
 
-vi.mock('os', () => {
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>();
   const homedir = vi.fn(() => '/home/user');
   return {
+    ...actual,
     default: {
+      ...actual,
       homedir,
     },
     homedir,
