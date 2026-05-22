@@ -6,6 +6,7 @@
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { parse } from 'shell-quote';
 
 const execFileAsync = promisify(execFile);
 
@@ -15,8 +16,24 @@ const execFileAsync = promisify(execFile);
  */
 export async function getFortuneQuote(command: string): Promise<string | null> {
   try {
-    const parts = command.split(/\s+/);
-    const [executable, ...args] = parts;
+    const parsed = parse(command);
+    const args: string[] = [];
+    let executable: string | null = null;
+
+    for (const part of parsed) {
+      if (typeof part === 'string') {
+        if (executable === null) {
+          executable = part;
+        } else {
+          args.push(part);
+        }
+      }
+    }
+
+    if (!executable) {
+      return null;
+    }
+
     const { stdout } = await execFileAsync(executable, args, {
       timeout: 5000,
       maxBuffer: 1024,
