@@ -9,6 +9,6 @@ import { DEFAULT_FORTUNE_COMMAND } from '../../config/constants.js';
 
 describe('fortune', () => {
   it('should use DEFAULT_FORTUNE_COMMAND constant', () => {
-    expect(DEFAULT_FORTUNE_COMMAND).toBe('/usr/games/fortune -s -n 45');
+    expect(DEFAULT_FORTUNE_COMMAND).toBe('fortune -s -n 45');
   });
 });

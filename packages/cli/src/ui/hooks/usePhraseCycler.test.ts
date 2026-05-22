@@ -20,7 +20,7 @@ vi.mock('./fortune.js', () => ({
 }));
 
 vi.mock('../../config/constants.js', () => ({
-  DEFAULT_FORTUNE_COMMAND: '/usr/games/fortune -s -n 45',
+  DEFAULT_FORTUNE_COMMAND: 'fortune -s -n 45',
 }));
 
 describe('usePhraseCycler', () => {

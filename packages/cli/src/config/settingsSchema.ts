@@ -767,7 +767,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: DEFAULT_FORTUNE_COMMAND,
         description:
-          'Command to execute for fortune quotes. Use -s for short fortunes, -n <chars> to limit length. Set `enableFortunes` to false to disable.',
+          'Command to execute for fortune quotes. Uses PATH lookup (no absolute path needed). Use -s for short fortunes, -n <chars> to limit length. Set `enableFortunes` to false to disable.',
         showInDialog: false,
         userOnly: true,
       },
