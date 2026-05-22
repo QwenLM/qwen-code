@@ -13,35 +13,26 @@ import type { ToolRegistry } from './tool-registry.js';
 
 const debugLogger = createDebugLogger('McpPool:View');
 
-function passesNameFilter(
-  name: string,
-  includeTools?: readonly string[],
-  excludeTools?: readonly string[],
-): boolean {
-  if (excludeTools?.includes(name)) return false;
-  if (!includeTools) return true;
-  return includeTools.some((entry) => {
-    const stripped = entry.includes('(')
-      ? entry.slice(0, entry.indexOf('('))
-      : entry;
-    return stripped === name;
-  });
-}
-
 /**
- * F2 (#4175 commit 6 review fix — wenshao W12 / PR A): precompute
- * lookup `Set`s once per `applyTools` / `applyPrompts` pass so the
- * per-tool predicate is O(1) instead of repeating the array scan
- * inside `passesNameFilter` for every snapshot entry. Same semantics:
- * `excludeTools` is direct-equality match (parens form not stripped —
- * intentional pre-F2 behavior preserved); `includeTools` strips the
- * first `(...)` suffix so `toolName(args)` matches `toolName`.
+ * F2 (#4175 commit 6 review fix — wenshao W12 / PR A; PR-A-R2 #2
+ * folded the exports to delegate here): precompute lookup `Set`s
+ * once per `applyTools` / `applyPrompts` pass so the per-tool
+ * predicate is O(1) instead of repeating an array scan for every
+ * snapshot entry. Same semantics: `excludeTools` is direct-equality
+ * match (parens form not stripped — intentional pre-F2 behavior
+ * preserved); `includeTools` strips the first `(...)` suffix so
+ * `toolName(args)` matches `toolName`.
  *
- * `passesSessionFilter` / `passesSessionPromptFilter` (the array-
- * based predicates exported above) stay unchanged for unit tests
- * and any caller that wants to test a single name without paying
- * the Set-construction cost. The Sets live on `applyTools` /
- * `applyPrompts`'s stack frame.
+ * PR-A-R2 #2: `passesSessionFilter` / `passesSessionPromptFilter`
+ * (exported below for unit-testability) now route THROUGH
+ * `compiledFilterAccepts(compileNameFilter(...))` so there is a
+ * single source of truth for the predicate. Pre-fix the exports
+ * called a separate `passesNameFilter` array-based implementation
+ * with the same semantics, creating a drift risk where a future
+ * change to one impl wouldn't be caught by tests of the other.
+ * The Set construction is per-call for these exports (cheap for
+ * tests / one-off probes); the bulk paths in
+ * `applyTools`/`applyPrompts` still construct ONE filter per pass.
  */
 interface CompiledNameFilter {
   excludeSet?: ReadonlySet<string>;
@@ -91,13 +82,21 @@ function compiledFilterAccepts(
  * support, intentionally matching the existing pre-F2 behavior so
  * operators don't see semantic divergence between the two filter
  * lists when migrating sessions through pool mode.
+ *
+ * PR-A-R2 #2: routes through `compiledFilterAccepts(compileNameFilter(...))`
+ * so the bulk-path predicate and the exported per-name predicate
+ * share one implementation. Set construction is paid per call here
+ * (negligible for unit tests / one-off audit-path probes).
  */
 export function passesSessionFilter(
   tool: DiscoveredMCPTool,
   includeTools?: readonly string[],
   excludeTools?: readonly string[],
 ): boolean {
-  return passesNameFilter(tool.serverToolName, includeTools, excludeTools);
+  return compiledFilterAccepts(
+    compileNameFilter(includeTools, excludeTools),
+    tool.serverToolName,
+  );
 }
 
 /**
@@ -113,13 +112,19 @@ export function passesSessionFilter(
  * parens form `excludeTools: ['toolName(args)']` which only matches
  * tools (the parens-stripping in `passesSessionFilter` matches
  * `toolName` in the include list, not the exclude list).
+ *
+ * PR-A-R2 #2: same delegation to the compiled path as
+ * `passesSessionFilter`.
  */
 export function passesSessionPromptFilter(
   promptName: string,
   includeTools?: readonly string[],
   excludeTools?: readonly string[],
 ): boolean {
-  return passesNameFilter(promptName, includeTools, excludeTools);
+  return compiledFilterAccepts(
+    compileNameFilter(includeTools, excludeTools),
+    promptName,
+  );
 }
 
 /**

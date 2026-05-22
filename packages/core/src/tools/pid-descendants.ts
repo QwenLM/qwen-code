@@ -305,9 +305,24 @@ async function listDescendantPidsWinPerPidFallback(
  * platforms' per-node subprocess forks once the snapshot has been
  * obtained. Same MAX_DESCENDANTS / MAX_DEPTH caps as the legacy
  * fallback path. Returns BFS order — children before grandchildren.
+ *
+ * F2 (#4175 commit 6 review fix — wenshao PR-A-R2 #1): `visited`
+ * set prevents BFS revisits when the snapshot captures a PID-reuse
+ * cycle (rare but possible on busy hosts with rapid pid churn
+ * between snapshot start and parse — Linux pid wraparound can make
+ * `ps -A` show a freed pid in a different parent's children list,
+ * producing an A→B / B→A cycle). Pre-fix the cycle would fill the
+ * MAX_DESCENDANTS=256 quota with duplicate entries and starve
+ * legitimate descendants. The per-pid `pgrep` BFS fallback had the
+ * same theoretical issue but was less exposed because each
+ * `pgrep -P pid` call only returns DIRECT children; the snapshot
+ * captures the whole tree at once. `root` is seeded into `visited`
+ * so a malformed snapshot listing root as a descendant of one of
+ * its own children doesn't re-enqueue root.
  */
 function walkDescendants(tree: Map<number, number[]>, root: number): number[] {
   const all: number[] = [];
+  const visited = new Set<number>([root]);
   const queue: Array<{ pid: number; depth: number }> = [
     { pid: root, depth: 0 },
   ];
@@ -317,6 +332,8 @@ function walkDescendants(tree: Map<number, number[]>, root: number): number[] {
     const children = tree.get(pid);
     if (!children) continue;
     for (const child of children) {
+      if (visited.has(child)) continue;
+      visited.add(child);
       if (all.length >= MAX_DESCENDANTS) break;
       all.push(child);
       queue.push({ pid: child, depth: depth + 1 });
