@@ -17,32 +17,16 @@ import {
 } from '@agentclientprotocol/sdk';
 import type {
   Agent,
-  AuthenticateRequest,
-  AuthenticateResponse,
-  CancelNotification,
-  InitializeRequest,
   InitializeResponse,
-  LoadSessionRequest,
   LoadSessionResponse,
-  NewSessionRequest,
-  NewSessionResponse,
-  PromptRequest,
   PromptResponse,
-  ResumeSessionRequest,
   ResumeSessionResponse,
-  SetSessionConfigOptionRequest,
-  SetSessionConfigOptionResponse,
-  SetSessionModeRequest,
-  SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
-import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import {
-  createHttpAcpBridge,
   InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
-  MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
   SessionNotFoundError,
   McpServerNotFoundError,
@@ -52,256 +36,22 @@ import {
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
   WorkspaceMismatchError,
-  type AcpChannel,
-  type BridgeOptions,
-  type ChannelFactory,
-  type HttpAcpBridge,
-} from './httpAcpBridge.js';
+} from './bridgeErrors.js';
+import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
+import { createHttpAcpBridge } from './bridge.js';
+import type { ChannelFactory } from './channel.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
 import type { BridgeEvent } from './eventBus.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
-
-// Workspace fixtures must round-trip through `path.resolve` so the
-// expected values match what the bridge canonicalizes internally on
-// every platform — a literal `/work/a` resolves to `D:\work\a` on
-// Windows and the assertion drifts. Same for the FakeAgent's
-// `sess:<cwd>` synthetic id, since the cwd it sees is the post-resolve
-// value the bridge passes through `connection.newSession`.
-const WS_A = path.resolve(path.sep, 'work', 'a');
-const WS_B = path.resolve(path.sep, 'work', 'b');
-const SESS_A = `sess:${WS_A}`;
-
-/**
- * Convenience wrapper: `createHttpAcpBridge` now requires `boundWorkspace`
- * (per #3803 §02 — 1 daemon = 1 workspace). Tests that only ever talk to
- * `WS_A` would otherwise repeat `boundWorkspace: WS_A` everywhere; this
- * helper defaults it. Tests that need a different bind path (e.g. the
- * mismatch test) pass `boundWorkspace` explicitly.
- *
- * #4175 PR 22b/2: also defaults `statusProvider` to the production daemon
- * impl so existing env / preflight tests (which exercise the bridge's
- * delegation path) keep seeing populated cells. Tests that want to
- * exercise the no-provider idle fallback can override with
- * `{ statusProvider: undefined }`.
- */
-function makeBridge(opts: Partial<BridgeOptions> = {}): HttpAcpBridge {
-  return createHttpAcpBridge({
-    boundWorkspace: WS_A,
-    statusProvider: createDaemonStatusProvider(),
-    ...opts,
-  });
-}
-
-interface FakeAgentOpts {
-  /** What the fake agent returns from `newSession`. */
-  sessionIdPrefix?: string;
-  /** Inject a per-call delay before responding to `initialize`. */
-  initializeDelayMs?: number;
-  /** Force `initialize` to throw. */
-  initializeThrows?: Error;
-  /**
-   * Custom prompt handler. Default returns `end_turn` synchronously. Useful
-   * for test cases that want to observe prompt ordering.
-   */
-  promptImpl?: (
-    p: PromptRequest,
-    self: FakeAgent,
-  ) => Promise<PromptResponse> | PromptResponse;
-  /**
-   * Custom `newSession` handler. Default returns a synthesized id (see
-   * `newSession` below). Used by tests that need to exercise the
-   * doSpawn newSession-failure path (e.g. throwing to cover the
-   * `isDying`-mark-then-kill cleanup).
-   */
-  newSessionImpl?: (
-    p: NewSessionRequest,
-    self: FakeAgent,
-  ) => Promise<NewSessionResponse> | NewSessionResponse;
-  loadSessionImpl?: (
-    p: LoadSessionRequest,
-    self: FakeAgent,
-  ) => Promise<LoadSessionResponse> | LoadSessionResponse;
-  resumeSessionImpl?: (
-    p: ResumeSessionRequest,
-    self: FakeAgent,
-  ) => Promise<ResumeSessionResponse> | ResumeSessionResponse;
-  extMethodImpl?: (
-    method: string,
-    params: Record<string, unknown>,
-    self: FakeAgent,
-  ) => Promise<Record<string, unknown>> | Record<string, unknown>;
-}
-
-class FakeAgent implements Agent {
-  newSessionCalls: NewSessionRequest[] = [];
-  loadSessionCalls: LoadSessionRequest[] = [];
-  resumeSessionCalls: ResumeSessionRequest[] = [];
-  promptCalls: PromptRequest[] = [];
-  cancelCalls: CancelNotification[] = [];
-  extMethodCalls: Array<{ method: string; params: Record<string, unknown> }> =
-    [];
-  constructor(private readonly opts: FakeAgentOpts = {}) {}
-
-  async initialize(_p: InitializeRequest): Promise<InitializeResponse> {
-    if (this.opts.initializeThrows) throw this.opts.initializeThrows;
-    if (this.opts.initializeDelayMs) {
-      await new Promise((r) => setTimeout(r, this.opts.initializeDelayMs));
-    }
-    return {
-      protocolVersion: PROTOCOL_VERSION,
-      agentInfo: { name: 'fake-agent', version: '0' },
-      authMethods: [],
-      agentCapabilities: {},
-    };
-  }
-
-  async newSession(p: NewSessionRequest): Promise<NewSessionResponse> {
-    this.newSessionCalls.push(p);
-    if (this.opts.newSessionImpl) {
-      return this.opts.newSessionImpl(p, this);
-    }
-    const prefix = this.opts.sessionIdPrefix ?? 'sess';
-    // Stage 1.5 multi-session: one FakeAgent can host multiple
-    // sessions (same as the real ACP agent), so each newSession call
-    // returns a fresh id. Suffix by call-count so tests that issue
-    // multiple newSession on the same channel get distinct ids.
-    const count = this.newSessionCalls.length;
-    const suffix = count === 1 ? '' : `#${count}`;
-    return { sessionId: `${prefix}:${p.cwd}${suffix}` };
-  }
-
-  async loadSession(p: LoadSessionRequest): Promise<LoadSessionResponse> {
-    this.loadSessionCalls.push(p);
-    if (this.opts.loadSessionImpl) {
-      return this.opts.loadSessionImpl(p, this);
-    }
-    return {};
-  }
-  async unstable_resumeSession(
-    p: ResumeSessionRequest,
-  ): Promise<ResumeSessionResponse> {
-    this.resumeSessionCalls.push(p);
-    if (this.opts.resumeSessionImpl) {
-      return this.opts.resumeSessionImpl(p, this);
-    }
-    return {};
-  }
-  async authenticate(_p: AuthenticateRequest): Promise<AuthenticateResponse> {
-    throw new Error('not implemented in test fake');
-  }
-  async prompt(p: PromptRequest): Promise<PromptResponse> {
-    this.promptCalls.push(p);
-    if (this.opts.promptImpl) {
-      return this.opts.promptImpl(p, this);
-    }
-    return { stopReason: 'end_turn' };
-  }
-  async cancel(p: CancelNotification): Promise<void> {
-    this.cancelCalls.push(p);
-  }
-  async setSessionMode(
-    _p: SetSessionModeRequest,
-  ): Promise<SetSessionModeResponse> {
-    throw new Error('not implemented in test fake');
-  }
-  async setSessionConfigOption(
-    _p: SetSessionConfigOptionRequest,
-  ): Promise<SetSessionConfigOptionResponse> {
-    throw new Error('not implemented in test fake');
-  }
-  async extMethod(
-    method: string,
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    this.extMethodCalls.push({ method, params });
-    if (this.opts.extMethodImpl) {
-      return this.opts.extMethodImpl(method, params, this);
-    }
-    return {};
-  }
-}
-
-interface ChannelHandle {
-  channel: AcpChannel;
-  agent: FakeAgent;
-  killed: boolean;
-  /**
-   * Resolve `channel.exited` without going through `kill()`. Optionally
-   * supply exit info so the bridge's `session_died` event carries the
-   * same `exitCode` / `signalCode` it would in a real crash (BX9_P).
-   */
-  crash: (info?: {
-    exitCode: number | null;
-    signalCode: NodeJS.Signals | null;
-  }) => void;
-}
-
-/**
- * Create a paired in-memory NDJSON channel: bridge sees `clientChannel`,
- * fake agent sees `agentStream`. Each `TransformStream` carries one
- * direction.
- *
- * Not migrated to `createInMemoryChannel()` (used by the other 10 sites
- * in this file): `kill()` below needs the underlying `ab` / `ba`
- * writables to simulate child-process termination, which the bare
- * helper deliberately does not expose. See `inMemoryChannel.ts` JSDoc
- * for the rationale.
- */
-function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
-  const ab = new TransformStream<Uint8Array, Uint8Array>();
-  const ba = new TransformStream<Uint8Array, Uint8Array>();
-  const clientStream = ndJsonStream(ab.writable, ba.readable);
-  const agentStream = ndJsonStream(ba.writable, ab.readable);
-  let resolveExited:
-    | ((info?: {
-        exitCode: number | null;
-        signalCode: NodeJS.Signals | null;
-      }) => void)
-    | undefined;
-  const exited = new Promise<
-    { exitCode: number | null; signalCode: NodeJS.Signals | null } | undefined
-  >((res) => {
-    resolveExited = res;
-  });
-  const handle: ChannelHandle = {
-    channel: undefined as unknown as AcpChannel,
-    agent: new FakeAgent(opts),
-    killed: false,
-    /** Test hook: simulate an unexpected child crash. */
-    crash: (info?: {
-      exitCode: number | null;
-      signalCode: NodeJS.Signals | null;
-    }) => resolveExited!(info),
-  };
-  // Spin up the fake agent on the agent side.
-  new AgentSideConnection(() => handle.agent, agentStream);
-  handle.channel = {
-    stream: clientStream,
-    exited,
-    kill: async () => {
-      handle.killed = true;
-      try {
-        await ab.writable.close();
-      } catch {
-        /* ignore */
-      }
-      try {
-        await ba.writable.close();
-      } catch {
-        /* ignore */
-      }
-      resolveExited!();
-    },
-    killSync: () => {
-      // Test fake: just mark killed; the async streams will close
-      // naturally on test cleanup. Mirrors the real spawn factory's
-      // SIGKILL semantics (fire-and-forget).
-      handle.killed = true;
-      resolveExited!();
-    },
-  };
-  return handle;
-}
+import {
+  FakeAgent,
+  type ChannelHandle,
+  makeBridge,
+  makeChannel,
+  WS_A,
+  WS_B,
+  SESS_A,
+} from './internal/testUtils.js';
 
 describe('createHttpAcpBridge', () => {
   it('accepts a valid BridgeOptions.eventRingSize at construction time', () => {
@@ -523,41 +273,11 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
-  it('answers /workspace/env from process state without consulting ACP, idle or live', async () => {
-    const handles: ChannelHandle[] = [];
-    const bridge = makeBridge({
-      channelFactory: async () => {
-        const h = makeChannel();
-        handles.push(h);
-        return h.channel;
-      },
-    });
-
-    // Idle path — daemon answers env from `process.*`; no ACP child spawn.
-    const idle = await bridge.getWorkspaceEnvStatus();
-    expect(idle).toMatchObject({
-      v: 1,
-      workspaceCwd: WS_A,
-      initialized: true,
-      acpChannelLive: false,
-    });
-    expect(idle.cells.length).toBeGreaterThan(0);
-    expect(handles).toHaveLength(0);
-
-    // Live path — bridge still answers locally; the ACP child sees no
-    // ext-method invocation for env.
-    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const live = await bridge.getWorkspaceEnvStatus();
-    expect(live.acpChannelLive).toBe(true);
-    expect(handles).toHaveLength(1);
-    expect(
-      handles[0]?.agent.extMethodCalls.some((c) =>
-        c.method.includes('/workspace/env'),
-      ),
-    ).toBe(false);
-
-    await bridge.shutdown();
-  });
+  // #4175 F1 test split: 1 of 4 daemon-host integration tests moved to
+  // cli/src/serve/daemonStatusProvider.test.ts (the ones that wire real
+  // `createDaemonStatusProvider()`). The two remaining "Mode A fallback"
+  // tests below cover no-provider / throwing-provider semantics, which
+  // are pure bridge resilience logic with no daemon-host coupling.
 
   it('returns idle env envelope when statusProvider is omitted (Mode A fallback)', async () => {
     // PR 22b/2 fold-in: covers the no-provider branch in
@@ -663,156 +383,10 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
-  it('returns daemon preflight cells with not_started ACP cells when idle', async () => {
-    const handles: ChannelHandle[] = [];
-    const bridge = makeBridge({
-      channelFactory: async () => {
-        const h = makeChannel();
-        handles.push(h);
-        return h.channel;
-      },
-    });
-
-    const status = await bridge.getWorkspacePreflightStatus();
-    expect(status).toMatchObject({
-      v: 1,
-      workspaceCwd: WS_A,
-      initialized: true,
-      acpChannelLive: false,
-    });
-
-    // Daemon-level cells are always populated.
-    const daemonKinds = status.cells
-      .filter((c) => c.locality === 'daemon')
-      .map((c) => c.kind);
-    expect(daemonKinds).toEqual(
-      expect.arrayContaining([
-        'node_version',
-        'cli_entry',
-        'workspace_dir',
-        'ripgrep',
-        'git',
-        'npm',
-      ]),
-    );
-
-    // ACP cells fall back to `not_started` placeholders without spawning.
-    const acpCells = status.cells.filter((c) => c.locality === 'acp');
-    expect(acpCells.map((c) => c.kind)).toEqual([
-      'auth',
-      'mcp_discovery',
-      'skills',
-      'providers',
-      'tool_registry',
-      'egress',
-    ]);
-    for (const cell of acpCells) {
-      expect(cell.status).toBe('not_started');
-    }
-
-    expect(handles).toHaveLength(0);
-  });
-
-  it('merges daemon cells with live ACP-side preflight cells when a channel is up', async () => {
-    const handles: ChannelHandle[] = [];
-    const acpCells = [
-      { kind: 'auth', status: 'ok', locality: 'acp' },
-      { kind: 'mcp_discovery', status: 'ok', locality: 'acp' },
-      { kind: 'skills', status: 'ok', locality: 'acp' },
-      { kind: 'providers', status: 'ok', locality: 'acp' },
-      { kind: 'tool_registry', status: 'ok', locality: 'acp' },
-      { kind: 'egress', status: 'not_started', locality: 'acp' },
-    ];
-    const bridge = makeBridge({
-      channelFactory: async () => {
-        const h = makeChannel({
-          extMethodImpl: (method) => {
-            if (method === 'qwen/status/workspace/preflight') {
-              return { cells: acpCells };
-            }
-            return { cells: [] };
-          },
-        });
-        handles.push(h);
-        return h.channel;
-      },
-    });
-
-    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const status = await bridge.getWorkspacePreflightStatus();
-    expect(status.acpChannelLive).toBe(true);
-    // Daemon cells precede ACP cells in the merged response.
-    const daemonKinds = status.cells
-      .filter((c) => c.locality === 'daemon')
-      .map((c) => c.kind);
-    expect(daemonKinds).toEqual(
-      expect.arrayContaining([
-        'node_version',
-        'cli_entry',
-        'workspace_dir',
-        'ripgrep',
-        'git',
-        'npm',
-      ]),
-    );
-    const liveAcpCells = status.cells.filter((c) => c.locality === 'acp');
-    expect(liveAcpCells.map((c) => [c.kind, c.status])).toEqual([
-      ['auth', 'ok'],
-      ['mcp_discovery', 'ok'],
-      ['skills', 'ok'],
-      ['providers', 'ok'],
-      ['tool_registry', 'ok'],
-      ['egress', 'not_started'],
-    ]);
-    expect(status.errors).toBeUndefined();
-
-    await bridge.shutdown();
-  });
-
-  it('falls back to idle ACP cells + envelope error when extMethod throws mid-preflight', async () => {
-    const handles: ChannelHandle[] = [];
-    const bridge = makeBridge({
-      channelFactory: async () => {
-        const h = makeChannel({
-          extMethodImpl: () => {
-            throw new Error('agent channel closed mid-request');
-          },
-        });
-        handles.push(h);
-        return h.channel;
-      },
-    });
-
-    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const status = await bridge.getWorkspacePreflightStatus();
-    // Daemon cells must still render — that's the route's resilience contract.
-    const daemonKinds = status.cells
-      .filter((c) => c.locality === 'daemon')
-      .map((c) => c.kind);
-    expect(daemonKinds.length).toBeGreaterThan(0);
-    // ACP cells fall back to `not_started` placeholders since the extMethod
-    // call rejected.
-    const acpCells = status.cells.filter((c) => c.locality === 'acp');
-    expect(acpCells.length).toBe(6);
-    for (const cell of acpCells) {
-      expect(cell.status).toBe('not_started');
-    }
-    // The envelope's `errors` array carries the bridge-side failure
-    // describing which surface failed without sinking the whole route.
-    // `errorKind` is best-effort via `mapDomainErrorToErrorKind`; here the
-    // ACP SDK wraps the inner throw as a generic JSON-RPC "Internal
-    // error" which doesn't match any of the helper's recognition rules
-    // (the typed `BridgeChannelClosedError` follow-up will close that
-    // gap), so we only assert the structural shape, not the tag.
-    expect(status.errors).toBeDefined();
-    expect(status.errors![0]).toMatchObject({
-      kind: 'preflight',
-      status: 'error',
-    });
-    expect(status.errors![0].error).toBeTruthy();
-
-    await bridge.shutdown();
-  });
+  // #4175 F1 test split: 3 more daemon-host integration tests moved to
+  // cli/src/serve/daemonStatusProvider.test.ts (preflight idle, preflight
+  // merged-live, preflight extMethod throws — all assert real daemon
+  // cells from `createDaemonStatusProvider()`).
 
   it('requests session status through the existing ACP channel', async () => {
     const handles: ChannelHandle[] = [];
