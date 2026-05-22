@@ -927,6 +927,29 @@ describe('loadCliConfig', () => {
     expect(config.getIncludePartialMessages()).toBe(true);
   });
 
+  it('should enable runtime sleep prevention by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(true);
+  });
+
+  it('should propagate runtime sleep prevention setting', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        general: {
+          preventSystemSleep: false,
+        },
+      },
+      argv,
+    );
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(false);
+  });
+
   it('should fork and load a new session when --resume is combined with --fork-session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {

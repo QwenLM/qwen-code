@@ -83,6 +83,14 @@ type ToolSpanRecord = {
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
 const shouldThrowToolSpanSetAttribute = vi.hoisted(() => ({ value: false }));
 const shouldThrowToolSpanSetStatus = vi.hoisted(() => ({ value: false }));
+const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
+  () => ({
+    mockAcquireSleepInhibitor: vi.fn(() => ({
+      release: mockSleepInhibitorRelease,
+    })),
+    mockSleepInhibitorRelease: vi.fn(),
+  }),
+);
 
 vi.mock('../telemetry/tracer.js', () => ({
   safeSetStatus: (
@@ -95,6 +103,10 @@ vi.mock('../telemetry/tracer.js', () => ({
       // Match production best-effort telemetry behavior.
     }
   },
+}));
+
+vi.mock('../services/sleepInhibitor.js', () => ({
+  acquireSleepInhibitor: mockAcquireSleepInhibitor,
 }));
 
 function createMockToolSpan(
@@ -3473,6 +3485,38 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(JSON.stringify(spanRecord.statusCalls)).not.toContain('sensitive');
     expect(spanRecord.ended).toBe(true);
   }
+
+  it('acquires the sleep inhibitor around actual tool execution', async () => {
+    mockAcquireSleepInhibitor.mockClear();
+    mockSleepInhibitorRelease.mockClear();
+
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      }),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'sleep-call',
+        name: 'mockTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-id',
+      },
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(mockAcquireSleepInhibitor).toHaveBeenCalledWith(
+      expect.any(Object),
+      'Qwen Code is executing tool mockTool',
+    );
+    expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+  });
 
   it('marks pre-hook denial with a sanitized failure kind', async () => {
     const execute = vi.fn().mockResolvedValue({

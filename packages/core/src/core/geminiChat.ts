@@ -46,6 +46,7 @@ import {
   ChatCompressionService,
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
+import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
@@ -1090,6 +1091,10 @@ export class GeminiChat {
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     return (async function* () {
+      const sleepInhibitorHandle = acquireSleepInhibitor(
+        self.config,
+        'Qwen Code is streaming a model response',
+      );
       try {
         // Surface a successful auto-compression to the caller as the first
         // event in the stream. Failed/skipped compaction attempts are silent.
@@ -1525,6 +1530,7 @@ export class GeminiChat {
           throw lastError;
         }
       } finally {
+        sleepInhibitorHandle.release();
         streamDoneResolver!();
       }
     })();

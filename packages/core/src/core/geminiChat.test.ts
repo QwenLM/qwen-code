@@ -83,6 +83,17 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
   },
 }));
 
+const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
+  () => ({
+    mockAcquireSleepInhibitor: vi.fn(),
+    mockSleepInhibitorRelease: vi.fn(),
+  }),
+);
+
+vi.mock('../services/sleepInhibitor.js', () => ({
+  acquireSleepInhibitor: mockAcquireSleepInhibitor,
+}));
+
 describe('GeminiChat', async () => {
   let mockContentGenerator: ContentGenerator;
   let chat: GeminiChat;
@@ -91,6 +102,9 @@ describe('GeminiChat', async () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAcquireSleepInhibitor.mockReturnValue({
+      release: mockSleepInhibitorRelease,
+    });
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
     mockContentGenerator = {
       generateContent: vi.fn(),
@@ -292,6 +306,36 @@ describe('GeminiChat', async () => {
   });
 
   describe('sendMessageStream', () => {
+    it('releases the sleep inhibitor after the stream is consumed', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'done' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test message' },
+        'prompt-id-sleep-inhibitor',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      expect(mockAcquireSleepInhibitor).toHaveBeenCalledWith(
+        mockConfig,
+        'Qwen Code is streaming a model response',
+      );
+      expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
     it('should succeed if a tool call is followed by an empty part', async () => {
       // 1. Mock a stream that contains a tool call, then an invalid (empty) part.
       const streamWithToolCall = (async function* () {
