@@ -7,8 +7,10 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { parse } from 'shell-quote';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const execFileAsync = promisify(execFile);
+const debugLogger = createDebugLogger('fortune');
 
 /**
  * Default fortune command: runs fortune with short (-s) output limited to 45 chars.
@@ -46,7 +48,8 @@ export async function getFortuneQuote(command: string): Promise<string | null> {
     });
     const quote = stdout.trim().replace(/\s+/g, ' ');
     return quote || null;
-  } catch {
+  } catch (err) {
+    debugLogger.error('Command failed:', (err as Error).message);
     return null;
   }
 }
