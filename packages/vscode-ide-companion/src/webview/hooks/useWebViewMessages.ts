@@ -747,19 +747,17 @@ export const useWebViewMessages = ({
             | { reason?: string; requestId?: string; source?: string }
             | undefined;
           const endRequestId = endData?.requestId ?? null;
-          const isBackgroundEnd = endData?.source === 'background_notification';
 
           // Drop stale or untagged streamEnd when a tagged stream is active.
           if (activeRequestIdRef.current) {
-            if (
-              endRequestId !== activeRequestIdRef.current &&
-              !isBackgroundEnd
-            ) {
+            if (endRequestId !== activeRequestIdRef.current) {
               console.log(
                 '[useWebViewMessages] Ignoring stale/untagged streamEnd:',
                 endRequestId,
                 'active:',
                 activeRequestIdRef.current,
+                'source:',
+                endData?.source,
               );
               break;
             }

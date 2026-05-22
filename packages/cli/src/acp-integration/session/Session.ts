@@ -138,6 +138,8 @@ interface BackgroundNotificationQueueItem {
   toolUseId?: string;
 }
 
+const MAX_NOTIFICATION_QUEUE = 20;
+
 export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
@@ -533,6 +535,7 @@ export class Session implements SessionContext {
       this.notificationAbortController = null;
     }
     this.notificationQueue = [];
+    this.notificationProcessing = false;
 
     // Stop scheduler and emit exit summary
     const scheduler = this.config.isCronEnabled()
@@ -579,9 +582,15 @@ export class Session implements SessionContext {
       }
     }
 
-    // A background notification turn mutates the same chat history as a
-    // user prompt. Wait for an already-running drain before accepting the
-    // new prompt so ACP never sends two turns against the same chat at once.
+    // A background notification turn mutates the same chat history as a user
+    // prompt. Abort it before awaiting the drain so user input is not blocked
+    // behind notification tool calls.
+    if (this.notificationAbortController) {
+      this.notificationAbortController.abort();
+      this.notificationAbortController = null;
+      this.notificationQueue = [];
+      this.notificationProcessing = false;
+    }
     if (this.notificationCompletion) {
       try {
         await this.notificationCompletion;
@@ -1628,6 +1637,9 @@ export class Session implements SessionContext {
   }
 
   #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
+    while (this.notificationQueue.length >= MAX_NOTIFICATION_QUEUE) {
+      this.notificationQueue.shift();
+    }
     this.notificationQueue.push(item);
     void this.#drainNotificationQueue();
   }
@@ -1782,11 +1794,12 @@ export class Session implements SessionContext {
               );
             }
 
+            if (this.messageRewriter) {
+              await this.messageRewriter.flushTurn(ac.signal);
+            }
+
             if (usageMetadata) {
               this.#recordPromptTokenCount(usageMetadata);
-              if (this.messageRewriter) {
-                this.messageRewriter.flushTurn(ac.signal);
-              }
               const durationMs = Date.now() - streamStartTime;
               await this.messageEmitter.emitUsageMetadata(
                 usageMetadata,
@@ -1817,10 +1830,18 @@ export class Session implements SessionContext {
           }
           debugLogger.error('Error processing background notification:', error);
           const msg = error instanceof Error ? error.message : String(error);
-          await this.messageEmitter.emitAgentMessage(
-            `[notification error] ${msg}`,
-          );
-          await this.#emitBackgroundNotificationEndTurn('end_turn');
+          try {
+            await this.messageEmitter.emitAgentMessage(
+              `[notification error] ${msg}`,
+            );
+          } catch (emitError) {
+            debugLogger.error(
+              'Failed to emit background notification error:',
+              emitError,
+            );
+          } finally {
+            await this.#emitBackgroundNotificationEndTurn('end_turn');
+          }
         } finally {
           if (this.notificationAbortController === ac) {
             this.notificationAbortController = null;

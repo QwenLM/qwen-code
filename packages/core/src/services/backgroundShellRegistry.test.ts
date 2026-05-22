@@ -80,6 +80,22 @@ describe('BackgroundShellRegistry', () => {
       );
     });
 
+    it('strips display control characters from notification XML summaries', () => {
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      reg.register(
+        makeEntry({ shellId: 'a', command: 'npm \x1b[31mtest\x00' }),
+      );
+
+      reg.complete('a', 0, 2000);
+
+      const modelText = callback.mock.calls[0][1] as string;
+      expect(modelText).toContain('<summary>Shell "npm [31mtest" completed.');
+      expect(modelText).not.toContain('\x1b');
+      expect(modelText).not.toContain('\x00');
+    });
+
     it('is a no-op when entry is not running', () => {
       const reg = new BackgroundShellRegistry();
       reg.register(makeEntry({ shellId: 'a' }));

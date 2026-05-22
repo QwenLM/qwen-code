@@ -28,6 +28,11 @@ const debugLogger = createDebugLogger('MESSAGE_REWRITE');
  *   4. Rewritten text is emitted as agent_message_chunk with _meta.rewritten=true
  */
 const DEFAULT_REWRITE_TIMEOUT_MS = 30_000;
+const REWRITE_META_EXCLUDED_KEYS = new Set([
+  'backgroundTask',
+  'qwenDiscreteMessage',
+  'source',
+]);
 
 export class MessageRewriteMiddleware {
   private readonly turnBuffer: TurnBuffer;
@@ -167,9 +172,17 @@ export class MessageRewriteMiddleware {
       return;
     }
 
+    const safeMeta = Object.fromEntries(
+      Object.entries(meta as Record<string, unknown>).filter(
+        ([key]) => !REWRITE_META_EXCLUDED_KEYS.has(key),
+      ),
+    );
+
+    if (Object.keys(safeMeta).length === 0) return;
+
     this.turnMeta = {
       ...this.turnMeta,
-      ...(meta as Record<string, unknown>),
+      ...safeMeta,
     };
   }
 

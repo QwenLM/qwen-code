@@ -203,7 +203,7 @@ describe('MessageRewriteMiddleware', () => {
       expect(meta['turnIndex']).toBe(1);
     });
 
-    it('preserves background discrete metadata on rewritten messages', async () => {
+    it('omits background discrete metadata on rewritten messages', async () => {
       const { middleware, mockSendUpdate } = createMiddleware('message');
 
       await middleware.interceptUpdate({
@@ -218,6 +218,7 @@ describe('MessageRewriteMiddleware', () => {
             kind: 'monitor',
             toolUseId: 'tool-1',
           },
+          customTraceId: 'trace-1',
         },
       } as unknown as SessionUpdate);
 
@@ -234,14 +235,7 @@ describe('MessageRewriteMiddleware', () => {
       );
       expect(rewriteCall).toBeDefined();
       expect((rewriteCall![0] as Record<string, unknown>)['_meta']).toEqual({
-        source: 'background_notification_response',
-        qwenDiscreteMessage: true,
-        backgroundTask: {
-          taskId: 'monitor-1',
-          status: 'completed',
-          kind: 'monitor',
-          toolUseId: 'tool-1',
-        },
+        customTraceId: 'trace-1',
         rewritten: true,
         turnIndex: 1,
       });

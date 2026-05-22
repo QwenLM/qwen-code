@@ -233,7 +233,7 @@ describe('useWebViewMessages', () => {
     expect(rendered.clearWaitingForResponse).toHaveBeenCalled();
   });
 
-  it('accepts background streamEnd while a tagged request is active', () => {
+  it('ignores background streamEnd while a tagged request is active', () => {
     const rendered = renderHookHarness();
     root = rendered.root;
     container = rendered.container;
@@ -263,8 +263,10 @@ describe('useWebViewMessages', () => {
       );
     });
 
-    expect(rendered.endStreaming).toHaveBeenCalled();
-    expect(rendered.handlers.messageHandling.clearThinking).toHaveBeenCalled();
+    expect(rendered.endStreaming).not.toHaveBeenCalled();
+    expect(
+      rendered.handlers.messageHandling.clearThinking,
+    ).not.toHaveBeenCalled();
   });
 
   it('drops transcript state from the edited user turn onward', () => {

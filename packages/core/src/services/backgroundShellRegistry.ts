@@ -304,7 +304,7 @@ export class BackgroundShellRegistry {
       `<task-id>${escapeXml(entry.shellId)}</task-id>`,
       '<kind>shell</kind>',
       `<status>${escapeXml(entry.status)}</status>`,
-      `<summary>Shell "${escapeXml(entry.command)}" ${statusText}.</summary>`,
+      `<summary>Shell "${escapeXml(this.stripDisplayControlChars(entry.command))}" ${statusText}.</summary>`,
       `<output-file>${escapeXml(entry.outputFile)}</output-file>`,
     ];
     if (entry.exitCode !== undefined) {

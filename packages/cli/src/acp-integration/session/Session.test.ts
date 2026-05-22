@@ -17,6 +17,7 @@ import { SettingScope } from '../../config/settings.js';
 import type {
   AgentSideConnection,
   PromptRequest,
+  SessionNotification,
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
@@ -980,6 +981,202 @@ describe('Session', () => {
             source: 'background_notification',
           },
         );
+      });
+    });
+
+    it('aborts an in-flight background notification before accepting a user prompt', async () => {
+      const noopCompression = {
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: core.CompressionStatus.NOOP,
+      };
+      let notificationSignal: AbortSignal | undefined;
+      mockGeminiClient.tryCompressChat = vi
+        .fn()
+        .mockResolvedValueOnce(noopCompression)
+        .mockImplementationOnce(
+          async (_promptId: string, _force: boolean, signal: AbortSignal) => {
+            notificationSignal = signal;
+            await new Promise<void>((resolve) => {
+              signal.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+            });
+            return noopCompression;
+          },
+        )
+        .mockResolvedValue(noopCompression);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() => {
+        expect(notificationSignal).toBeDefined();
+      });
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'interrupt notification' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(notificationSignal?.aborted).toBe(true);
+    });
+
+    it('drops oldest background notifications when the queue reaches its cap', () => {
+      (
+        session as unknown as {
+          pendingPrompt: AbortController | null;
+        }
+      ).pendingPrompt = new AbortController();
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      for (let index = 0; index < 25; index++) {
+        callback(
+          `done ${index}`,
+          `<task-notification>${index}</task-notification>`,
+          {
+            agentId: `agent-${index}`,
+            status: 'completed',
+          },
+        );
+      }
+
+      const queued = (
+        session as unknown as {
+          notificationQueue: Array<{ taskId: string }>;
+        }
+      ).notificationQueue;
+      expect(queued).toHaveLength(20);
+      expect(queued[0]?.taskId).toBe('agent-5');
+      expect(queued.at(-1)?.taskId).toBe('agent-24');
+    });
+
+    it('emits end_turn even when notification error display fails', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockRejectedValueOnce(new Error('notification blew up'));
+      mockClient.sessionUpdate = vi.fn().mockImplementation(async (params) => {
+        const text = (
+          (params as SessionNotification).update as {
+            content?: { text?: string };
+          }
+        )?.content?.text;
+        if (text?.includes('[notification error]')) {
+          throw new Error('display failed');
+        }
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            content: expect.objectContaining({
+              text: expect.stringContaining('[notification error]'),
+            }),
+          }),
+        });
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/end_turn',
+          {
+            sessionId: 'test-session-id',
+            reason: 'end_turn',
+            source: 'background_notification',
+          },
+        );
+      });
+    });
+
+    it('flushes notification rewrite metadata even without usage metadata', async () => {
+      const flushTurn = vi.fn().mockResolvedValue(undefined);
+      const waitForPendingRewrites = vi.fn().mockResolvedValue(undefined);
+      const interceptUpdate = vi.fn().mockResolvedValue(undefined);
+      session.messageRewriter = {
+        interceptUpdate,
+        flushTurn,
+        waitForPendingRewrites,
+      } as unknown as Session['messageRewriter'];
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'notification response' }],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() => {
+        expect(flushTurn).toHaveBeenCalled();
       });
     });
 

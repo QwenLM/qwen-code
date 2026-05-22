@@ -338,33 +338,7 @@ export class AcpConnection {
         extNotification: async (
           method: string,
           params: Record<string, unknown>,
-        ): Promise<void> => {
-          if (method === 'authenticate/update') {
-            console.log(
-              '[ACP] >>> Processing authenticate_update:',
-              JSON.stringify(params).substring(0, 300),
-            );
-            this.onAuthenticateUpdate(
-              params as unknown as AuthenticateUpdateNotification,
-            );
-          } else if (method === '_qwencode/slash_command') {
-            this.onSlashCommandNotification(
-              params as unknown as SlashCommandNotification,
-            );
-          } else if (method === '_qwencode/end_turn') {
-            const reason =
-              typeof params['reason'] === 'string'
-                ? params['reason']
-                : undefined;
-            const source =
-              typeof params['source'] === 'string'
-                ? params['source']
-                : undefined;
-            this.onEndTurn(reason, source);
-          } else {
-            console.warn(`[ACP] Unhandled extension notification: ${method}`);
-          }
-        },
+        ): Promise<void> => this.handleExtNotification(method, params),
       }),
       stream,
     );
@@ -391,6 +365,30 @@ export class AcpConnection {
       this.onInitialized(initResponse);
     } catch (err) {
       console.warn('[ACP] onInitialized callback error:', err);
+    }
+  }
+
+  handleExtNotification(method: string, params: Record<string, unknown>): void {
+    if (method === 'authenticate/update') {
+      console.log(
+        '[ACP] >>> Processing authenticate_update:',
+        JSON.stringify(params).substring(0, 300),
+      );
+      this.onAuthenticateUpdate(
+        params as unknown as AuthenticateUpdateNotification,
+      );
+    } else if (method === '_qwencode/slash_command') {
+      this.onSlashCommandNotification(
+        params as unknown as SlashCommandNotification,
+      );
+    } else if (method === '_qwencode/end_turn') {
+      const reason =
+        typeof params['reason'] === 'string' ? params['reason'] : undefined;
+      const source =
+        typeof params['source'] === 'string' ? params['source'] : undefined;
+      this.onEndTurn(reason, source);
+    } else {
+      console.warn(`[ACP] Unhandled extension notification: ${method}`);
     }
   }
 
