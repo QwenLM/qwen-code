@@ -17,6 +17,7 @@ import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
 import { AgentComposer } from '../components/agent-view/AgentComposer.js';
 import { LiveAgentPanel } from '../components/background-view/LiveAgentPanel.js';
+import { ThinkingPulse } from '../components/ThinkingPulse.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
@@ -66,10 +67,16 @@ export const DefaultAppLayout: React.FC = () => {
         </>
       ) : (
         <>
-          {/* Main view: conversation history + main composer / dialogs */}
+          {/* Main view: conversation history + main composer / dialogs.
+              While the Ctrl+O transcript overlay is up (`MainContent` has
+              already swapped its body to the overlay), the composer +
+              live indicators below are suppressed so:
+                - the user's keystrokes don't accumulate in the buffer
+                - LiveAgentPanel doesn't compete for the bottom rows
+                - ESC routing in AppContainer is the sole input target */}
           <MainContent />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
-            {uiState.dialogsVisible ? (
+            {uiState.transcriptSnapshot ? null : uiState.dialogsVisible ? (
               <Box
                 marginX={2}
                 flexDirection="column"
@@ -126,7 +133,10 @@ export const DefaultAppLayout: React.FC = () => {
               live progress lines have nothing to soft-wrap, so the
               panel wants the full terminal width.
             */}
-            {!uiState.dialogsVisible && (
+            {!uiState.dialogsVisible && !uiState.transcriptSnapshot && (
+              <ThinkingPulse />
+            )}
+            {!uiState.dialogsVisible && !uiState.transcriptSnapshot && (
               <LiveAgentPanel width={uiState.terminalWidth} />
             )}
           </Box>

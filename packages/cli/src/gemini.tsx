@@ -417,6 +417,19 @@ export async function main() {
   if (isBareMode(argv.bare)) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
+  // `--verbose` / `-v` bridge: AppContainer's initial verbose state reads
+  // this env var alongside settings so the CLI flag wins for the current
+  // session without persisting to settings.json. We DELETE the env var
+  // when the flag is absent so an inherited `QWEN_CODE_VERBOSE=1` from
+  // a parent shell does not silently force-on the preference for every
+  // child invocation that didn't ask for it.
+  if (argv.verbose === true) {
+    process.env['QWEN_CODE_VERBOSE'] = '1';
+  } else if (argv.verbose === false) {
+    process.env['QWEN_CODE_VERBOSE'] = '0';
+  } else {
+    delete process.env['QWEN_CODE_VERBOSE'];
+  }
 
   const settings = isBareMode(argv.bare)
     ? createMinimalSettings()

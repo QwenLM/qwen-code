@@ -113,11 +113,19 @@ export function isForceExpandGroup(
 }
 
 /**
- * Check if an item is hidden in compact mode (so it shouldn't break tool_group adjacency).
- * This mirrors HistoryItemDisplay.tsx which hides:
- *  - `gemini_thought` / `gemini_thought_content` (thinking — hidden when compactMode is true),
- *  - `tool_use_summary` (consumed upstream to decorate the adjacent tool_group's label;
- *    never rendered standalone so it must not break adjacency between two batches).
+ * Check if an item is hidden in the default (non-verbose) display so it
+ * should NOT break tool_group adjacency for merge purposes.
+ *
+ * Mirrors HistoryItemDisplay.tsx which hides, when `verbose=false`:
+ *  - `gemini_thought` / `gemini_thought_content` — thinking is gated on
+ *    `verbose`, so two tool groups separated only by thoughts read as
+ *    adjacent.
+ *  - `tool_use_summary` — consumed upstream to decorate the adjacent
+ *    tool_group's label; never rendered standalone, so it must not
+ *    break adjacency between two batches.
+ *
+ * (The function name preserves "CompactMode" terminology for git-blame
+ * continuity — verbose=false is the compact rendering path.)
  */
 function isHiddenInCompactMode(item: HistoryItem): boolean {
   return (

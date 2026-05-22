@@ -16,7 +16,8 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
-import { useCompactMode } from '../contexts/CompactModeContext.js';
+import { useEffectiveVerbose } from '../contexts/DisplayModeContext.js';
+import { TranscriptOverlay } from './TranscriptOverlay.js';
 import {
   countMarkdownSourceBlocks,
   type MarkdownSourceCopyIndexOffsets,
@@ -106,7 +107,17 @@ export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
   const uiActions = useUIActions();
-  const { compactMode } = useCompactMode();
+  // Display preference: `verbose=true` opts back into the legacy "show
+  // everything" layout (thoughts inline, no tool merging, etc.). The
+  // transcript overlay forces verbose=true automatically; we read
+  // `useEffectiveVerbose()` so the rest of this component does not need
+  // to know which source enabled it.
+  //
+  // Internal vocabulary keeps `compactMode = !verbose` for readability:
+  // most of the logic below was written around "compact mode" gating
+  // and the inverted variable would be confusing.
+  const verbose = useEffectiveVerbose();
+  const compactMode = !verbose;
   const {
     pendingHistoryItems,
     terminalWidth,
@@ -547,6 +558,21 @@ export const MainContent = () => {
       sourceCopyOffsetsByHistoryItem,
     ],
   );
+
+  // Top-priority branch: Ctrl+O transcript overlay. Replaces the live
+  // render path entirely while active so the user sees a frozen,
+  // fully-expanded view. Exit (Esc / Ctrl+O) drops the snapshot and
+  // the next render falls through to the live path below.
+  if (uiState.transcriptSnapshot) {
+    return (
+      <TranscriptOverlay
+        snapshot={uiState.transcriptSnapshot}
+        terminalWidth={terminalWidth}
+        mainAreaWidth={mainAreaWidth}
+        containerHeight={uiState.availableTerminalHeight}
+      />
+    );
+  }
 
   if (useVirtualScroll) {
     return (

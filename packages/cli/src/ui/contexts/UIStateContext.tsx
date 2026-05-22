@@ -168,6 +168,17 @@ export interface UIState {
   // Rewind selector
   isRewindSelectorOpen: boolean;
   rewindEscPending: boolean;
+  /**
+   * Display preferences.
+   * `verbose` mirrors `settings.ui.verbose` (true → show thoughts inline,
+   * unmerged tool groups, etc.). `transcriptSnapshot` is non-null while the
+   * Ctrl+O frozen transcript overlay is rendering — MainContent branches
+   * on it before falling through to the live render path.
+   */
+  verbose: boolean;
+  transcriptSnapshot:
+    | import('../hooks/useTranscriptOverlay.js').FrozenSnapshot
+    | null;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

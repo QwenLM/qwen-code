@@ -53,12 +53,21 @@ interface RenderInlineProps {
   text: string;
   textColor?: string;
   enableInlineMath?: boolean;
+  /**
+   * When true, inline code spans (` `code` `) render as plain monospaced
+   * secondary text instead of the syntax-highlighted `theme.text.code`
+   * variant. Used by the table renderer so colour bands inside cells do
+   * not break alignment. See
+   * `docs/design/tui-display-optimization/05-table-inline-code.md`.
+   */
+  inTable?: boolean;
 }
 
 const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   text,
   textColor = theme.text.primary,
   enableInlineMath = false,
+  inTable = false,
 }) => {
   // Early return for plain text without markdown or URLs
   if (
@@ -142,7 +151,10 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         const codeMatch = fullMatch.match(/^(`+)(.+?)\1$/s);
         if (codeMatch && codeMatch[2]) {
           renderedNode = (
-            <Text key={key} color={theme.text.code}>
+            <Text
+              key={key}
+              color={inTable ? theme.text.secondary : theme.text.code}
+            >
               {codeMatch[2]}
             </Text>
           );

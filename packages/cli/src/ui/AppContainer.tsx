@@ -117,7 +117,8 @@ import {
   isRealUserTurn,
 } from './utils/historyMapping.js';
 import { useVimMode } from './contexts/VimModeContext.js';
-import { CompactModeProvider } from './contexts/CompactModeContext.js';
+import { DisplayModeProvider } from './contexts/DisplayModeContext.js';
+import { useTranscriptOverlay } from './hooks/useTranscriptOverlay.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -196,7 +197,6 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
-import { compactToggleHasVisualEffect } from './utils/mergeCompactToolGroups.js';
 import {
   findLastUserItemIndex,
   isSyntheticHistoryItem,
@@ -1600,6 +1600,11 @@ export const AppContainer = (props: AppContainerProps) => {
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
+  // Mirror pendingHistoryItems into a ref so non-reactive callbacks
+  // (Ctrl+O transcript snapshot, etc.) can read the latest value at
+  // call time without participating in the dependency array.
+  const pendingHistoryItemsRef = useRef(pendingHistoryItems);
+  pendingHistoryItemsRef.current = pendingHistoryItems;
   const rawStickyTodos = useMemo(
     () => getStickyTodos(historyManager.history, pendingHistoryItems),
     [historyManager.history, pendingHistoryItems],
@@ -2019,9 +2024,43 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
-  const [compactMode, setCompactMode] = useState<boolean>(
-    settings.merged.ui?.compactMode ?? false,
-  );
+  // `verbose` is the new primary preference (replaces `compactMode`).
+  // Default false → compact display (thoughts hidden, tool batches merged,
+  // no borders). Resolution order (highest precedence first):
+  //   1. `QWEN_CODE_VERBOSE` env var (CLI flag bridge from gemini.tsx)
+  //   2. `ui.verbose` setting (explicit user preference)
+  //   3. Inverse of legacy `ui.compactMode` setting (backward compat)
+  //   4. `false`
+  const envVerbose = process.env['QWEN_CODE_VERBOSE'];
+  const initialVerbose =
+    envVerbose === '1'
+      ? true
+      : envVerbose === '0'
+        ? false
+        : (settings.merged.ui?.verbose ??
+          (typeof settings.merged.ui?.compactMode === 'boolean'
+            ? !settings.merged.ui!.compactMode
+            : false));
+  const [verbose, setVerbose] = useState<boolean>(initialVerbose);
+  const transcriptOverlay = useTranscriptOverlay();
+
+  // Live sync: `/verbose` (and any future writer of `ui.verbose` /
+  // `ui.compactMode`) updates `settings` directly without React knowing.
+  // Read the merged value each render and push it into the verbose state
+  // so the next paint reflects the new preference without restarting.
+  const settingsVerbose = settings.merged.ui?.verbose;
+  const settingsCompactMode = settings.merged.ui?.compactMode;
+  useEffect(() => {
+    let next: boolean | undefined;
+    if (typeof settingsVerbose === 'boolean') {
+      next = settingsVerbose;
+    } else if (typeof settingsCompactMode === 'boolean') {
+      next = !settingsCompactMode;
+    }
+    if (typeof next === 'boolean' && next !== verbose) {
+      setVerbose(next);
+    }
+  }, [settingsVerbose, settingsCompactMode, verbose]);
   const configuredRenderMode = settings.merged.ui?.renderMode;
   const [renderMode, setRenderMode] = useState<RenderMode>(
     configuredRenderMode === 'raw' ? 'raw' : 'render',
@@ -2692,7 +2731,29 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
+      } else if (
+        transcriptOverlay.isActive &&
+        keyMatchers[Command.EXIT_TRANSCRIPT](key)
+      ) {
+        // Dedicated EXIT_TRANSCRIPT handler — honours custom user
+        // bindings (e.g. remapping the overlay-exit key to `q`). Only
+        // fires while the overlay is active so the binding does not
+        // hijack the key during normal editing.
+        transcriptOverlay.exit();
+        refreshStatic();
+        return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
+        // Top priority: when the Ctrl+O transcript overlay is open, ESC
+        // closes the overlay and short-circuits the rest of the chain.
+        // The overlay owns input focus while active, so other ESC uses
+        // (cancel btw, clear buffer, abort streaming, double-esc rewind)
+        // are intentionally skipped here.
+        if (transcriptOverlay.isActive) {
+          transcriptOverlay.exit();
+          refreshStatic();
+          return;
+        }
+
         // Dismiss or cancel btw side-question on Escape,
         // but only when btw is actually visible (not hidden behind a dialog).
         if (btwItem && !dialogsVisibleRef.current) {
@@ -2809,18 +2870,22 @@ export const AppContainer = (props: AppContainerProps) => {
         if (activePtyId || embeddedShellFocused) {
           setEmbeddedShellFocused((prev) => !prev);
         }
-      } else if (keyMatchers[Command.TOGGLE_COMPACT_MODE](key)) {
-        const newValue = !compactMode;
-        setCompactMode(newValue);
-        void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
-        // Skip the expensive clearTerminal + Static remount when no past
-        // item would render differently (no tool_group / gemini_thought*).
-        // Future items pick up the new mode naturally because Static is
-        // append-only. Issue #3899: this unfreezes Ctrl+O for plain-chat
-        // long sessions; tool/thinking-bearing sessions still go through
-        // the (now chunked) full path in MainContent.
-        if (compactToggleHasVisualEffect(historyRef.current)) {
+      } else if (keyMatchers[Command.ENTER_TRANSCRIPT](key)) {
+        // Ctrl+O = enter / toggle the transcript overlay (frozen full-detail
+        // snapshot). Matches Claude Code's `app:toggleTranscript` semantics
+        // (`useGlobalKeybindings.tsx:118-132`): pressing Ctrl+O while the
+        // overlay is active exits it.
+        if (transcriptOverlay.isActive) {
+          transcriptOverlay.exit();
+          // VP path: nothing to repaint. Static path: the next render falls
+          // back to the original <Static> tree; force a refresh so a brand
+          // new historyRemountKey re-renders cleanly.
           refreshStatic();
+        } else {
+          transcriptOverlay.enter(
+            historyRef.current,
+            pendingHistoryItemsRef.current,
+          );
         }
       } else if (keyMatchers[Command.PROMOTE_SHELL_TO_BACKGROUND](key)) {
         // Ctrl+B: promote a running foreground shell command to a
@@ -2909,8 +2974,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // debugKeystrokeLogging is read at call time, so no stale closure risk.
       settings,
       isAuthenticating,
-      compactMode,
-      setCompactMode,
+      transcriptOverlay,
       setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
@@ -3114,6 +3178,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,
+      // Display preferences
+      verbose,
+      transcriptSnapshot: transcriptOverlay.snapshot,
     }),
     [
       isThemeDialogOpen,
@@ -3237,6 +3304,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,
+      // Display preferences
+      verbose,
+      transcriptOverlay.snapshot,
     ],
   );
 
@@ -3393,9 +3463,16 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
-  const compactModeValue = useMemo(
-    () => ({ compactMode, setCompactMode }),
-    [compactMode, setCompactMode],
+  const displayModeValue = useMemo(
+    () => ({
+      verbose,
+      setVerbose: (value: boolean) => {
+        setVerbose(value);
+        void settings.setValue(SettingScope.User, 'ui.verbose', value);
+      },
+      transcript: transcriptOverlay.isActive,
+    }),
+    [verbose, transcriptOverlay.isActive, settings],
   );
   const renderModeValue = useMemo(
     () => ({ renderMode, setRenderMode }),
@@ -3412,7 +3489,7 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <CompactModeProvider value={compactModeValue}>
+            <DisplayModeProvider value={displayModeValue}>
               <RenderModeProvider value={renderModeValue}>
                 <TerminalOutputProvider value={writeRaw}>
                   <ShellFocusContext.Provider value={isFocused}>
@@ -3420,7 +3497,7 @@ export const AppContainer = (props: AppContainerProps) => {
                   </ShellFocusContext.Provider>
                 </TerminalOutputProvider>
               </RenderModeProvider>
-            </CompactModeProvider>
+            </DisplayModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>

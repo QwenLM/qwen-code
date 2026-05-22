@@ -42,6 +42,11 @@ export interface ToolConfirmationMessageProps {
   isFocused?: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
+  /**
+   * @deprecated The TUI display optimization made the compact layout
+   * the only rendering path; the prop is preserved as a no-op so
+   * external test fixtures keep working but is otherwise ignored.
+   */
   compactMode?: boolean;
 }
 
@@ -53,8 +58,11 @@ export const ToolConfirmationMessage: React.FC<
   isFocused = true,
   availableTerminalHeight,
   contentWidth,
-  compactMode = false,
 }) => {
+  // Always-compact after the TUI display optimization: legacy spacing
+  // values are zero so the confirmation banner sits flush with the
+  // surrounding tool group rather than ballooning out with padding.
+  const compactMode = true;
   const { onConfirm } = confirmationDetails;
 
   const settings = useSettings();
@@ -137,13 +145,17 @@ export const ToolConfirmationMessage: React.FC<
 
     // Calculate the vertical space (in lines) consumed by UI elements
     // surrounding the main body content. Compact mode drops outer padding
-    // and inter-section margins, and renders a fixed 3-option list rather
-    // than the full options array.
+    // and inter-section margins. The option list reserves the actual
+    // option count (capped at `MAX_VISIBLE_OPTIONS`) — a fixed 3 here
+    // under-reserved when MCP / always-allow variants pushed the list to
+    // 4+ entries, letting the body content overflow the available
+    // terminal space.
+    const MAX_VISIBLE_OPTIONS = 6;
     const PADDING_OUTER_Y = compactMode ? 0 : 2;
     const MARGIN_BODY_BOTTOM = compactMode ? 0 : 1;
     const HEIGHT_QUESTION = 1;
     const MARGIN_QUESTION_BOTTOM = compactMode ? 0 : 1;
-    const HEIGHT_OPTIONS = compactMode ? 3 : options.length;
+    const HEIGHT_OPTIONS = Math.min(options.length, MAX_VISIBLE_OPTIONS);
 
     const surroundingElementsHeight =
       PADDING_OUTER_Y +

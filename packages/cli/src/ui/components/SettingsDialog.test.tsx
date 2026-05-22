@@ -132,8 +132,11 @@ vi.mock('../contexts/CompactModeContext.js', async () => {
   const actual = await vi.importActual('../contexts/CompactModeContext.js');
   return {
     ...actual,
+    // `compactMode: true` (= verbose=false) reflects the post-PR default
+    // so toggling `ui.verbose` ON from the dialog produces an observable
+    // setCompactMode(false) call for the sync test below.
     useCompactMode: () => ({
-      compactMode: false,
+      compactMode: true,
       setCompactMode: mockSetCompactMode,
     }),
   };
@@ -463,7 +466,14 @@ describe('SettingsDialog', () => {
       unmount();
     });
 
-    it('should sync compact mode with CompactModeContext when toggled', async () => {
+    it('should sync verbose display with DisplayModeContext when toggled', async () => {
+      // After the TUI display optimization, `ui.compactMode` is
+      // deprecated (showInDialog=false) and the dialog surfaces the new
+      // `ui.verbose` toggle instead. Flipping it should sync the
+      // DisplayModeContext (mocked here via the legacy `setCompactMode`
+      // shim — `verbose` and `compactMode` are inverses, so toggling
+      // verbose=true calls setCompactMode(false)) and trigger a static
+      // refresh.
       vi.mocked(saveModifiedSettings).mockClear();
       mockSetCompactMode.mockClear();
       mockRefreshStatic.mockClear();
@@ -483,10 +493,10 @@ describe('SettingsDialog', () => {
       });
 
       const dialogKeys = getDialogSettingKeys();
-      const targetIndex = dialogKeys.indexOf('ui.compactMode');
+      const targetIndex = dialogKeys.indexOf('ui.verbose');
       expect(targetIndex).toBeGreaterThan(0);
 
-      // Navigate to Compact Mode setting
+      // Navigate to Verbose Display setting
       for (let i = 0; i < targetIndex; i++) {
         act(() => {
           stdin.write(TerminalKeys.DOWN_ARROW as string);
@@ -494,7 +504,7 @@ describe('SettingsDialog', () => {
         await wait();
       }
       await waitFor(() => {
-        expect(lastFrame()).toContain('● Compact Mode');
+        expect(lastFrame()).toContain('● Verbose Display');
       });
 
       // Toggle the setting
@@ -507,8 +517,8 @@ describe('SettingsDialog', () => {
         ).toBeGreaterThan(0);
       });
 
-      // Verify compact mode context was synced
-      expect(mockSetCompactMode).toHaveBeenCalledWith(true);
+      // Verbose=true => compactMode shim is set to false.
+      expect(mockSetCompactMode).toHaveBeenCalledWith(false);
       // Verify refreshStatic was called to update rendered history
       expect(mockRefreshStatic).toHaveBeenCalled();
 

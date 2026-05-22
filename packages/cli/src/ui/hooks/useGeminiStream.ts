@@ -335,6 +335,13 @@ export const useGeminiStream = (
   const lastPromptErroredRef = useRef(false);
   const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
+  /**
+   * Timestamp of the user prompt that opened the current turn. Tool-result
+   * continuations preserve this value so the `turn_summary` history item
+   * emitted at finalisation reflects the full wall-clock duration of the
+   * turn, not just the trailing model call. Reset to null between turns.
+   */
+  const turnStartedAtRef = useRef<number | null>(null);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   // Hold the latest history in a ref so handleCompletedTools can read it
   // without depending on `history` (which would recreate the tool scheduler
@@ -604,6 +611,37 @@ export const useGeminiStream = (
     }
   }, [streamingState, config, history]);
 
+  // ── Per-turn `⏱` summary emit ─────────────────────────────────────────
+  // A "turn" spans the user prompt → final Idle, including any
+  // tool-result continuations and queued shells. We watch the streaming
+  // state machine: every transition into Idle while we hold a turn
+  // start timestamp produces one `turn_summary`. cancelOngoingRequest
+  // emits its own summary and clears the ref, so this effect doesn't
+  // double up on cancellation paths. Errors fall through to Idle the
+  // same way successful turns do.
+  const prevStreamingStateRef = useRef<StreamingState>(streamingState);
+  useEffect(() => {
+    const prev = prevStreamingStateRef.current;
+    prevStreamingStateRef.current = streamingState;
+    if (
+      streamingState === StreamingState.Idle &&
+      prev !== StreamingState.Idle &&
+      turnStartedAtRef.current !== null
+    ) {
+      const durationMs = Date.now() - turnStartedAtRef.current;
+      turnStartedAtRef.current = null;
+      const failed = lastPromptErroredRef.current;
+      addItem(
+        {
+          type: 'turn_summary' as const,
+          durationMs,
+          ...(failed ? { failed: true } : {}),
+        } as HistoryItemWithoutId,
+        Date.now(),
+      );
+    }
+  }, [streamingState, addItem]);
+
   const cancelOngoingRequest = useCallback(() => {
     if (streamingState !== StreamingState.Responding) {
       return;
@@ -663,6 +701,22 @@ export const useGeminiStream = (
       },
       Date.now(),
     );
+    // Emit the per-turn elapsed marker before the live submitQuery finally
+    // gets a chance. submitQuery's finally also guards on
+    // `turnStartedAtRef.current !== null`, so consuming the start time here
+    // (set to null) makes it a single-emit.
+    if (turnStartedAtRef.current !== null) {
+      const durationMs = Date.now() - turnStartedAtRef.current;
+      turnStartedAtRef.current = null;
+      addItem(
+        {
+          type: 'turn_summary' as const,
+          durationMs,
+          cancelled: true,
+        } as HistoryItemWithoutId,
+        Date.now(),
+      );
+    }
     setPendingHistoryItem(null);
     clearRetryCountdown();
     // Wrap the consumer callback so a throw in AppContainer's cancel
@@ -1776,9 +1830,14 @@ export const useGeminiStream = (
         setInitError(null);
         // Entering "requesting" phase — no content yet for this API call.
         setIsReceivingContent(false);
-        // Reset char counter only on new user queries; tool-result continuations
-        // keep accumulating so the token count only goes up within a turn.
+        // Per-turn wall-clock timing for the `⏱ X.Xs` history line emitted in
+        // the finally block. Start fresh on a brand new user prompt; preserve
+        // the existing start time when the turn is continuing with a tool
+        // result (the same logical turn just woke up after a tool call) so the
+        // displayed elapsed reflects the whole turn rather than the trailing
+        // continuation.
         if (submitType !== SendMessageType.ToolResult) {
+          turnStartedAtRef.current = Date.now();
           streamingResponseLengthRef.current = 0;
         }
 
@@ -1884,6 +1943,11 @@ export const useGeminiStream = (
         } finally {
           setIsResponding(false);
           isSubmittingQueryRef.current = false;
+          // The `⏱ turn_summary` history item is emitted from a
+          // streaming-state transition effect (Responding → Idle) below,
+          // not here. Emitting in this finally would fire once per
+          // model round-trip — tool-using turns would record only the
+          // pre-tool segment and never the full wall-clock the user sees.
         }
       });
     },

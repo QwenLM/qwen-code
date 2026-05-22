@@ -47,6 +47,7 @@ export function isSyntheticHistoryItem(
     case 'retry_countdown':
     case 'notification':
     case 'tool_use_summary':
+    case 'turn_summary':
     case 'gemini_thought':
     case 'gemini_thought_content':
     case 'away_recap':

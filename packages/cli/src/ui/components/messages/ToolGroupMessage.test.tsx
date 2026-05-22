@@ -111,11 +111,16 @@ describe('<ToolGroupMessage />', () => {
     isFocused: true,
   };
 
-  // Helper to wrap component with required providers
+  // Helper to wrap component with required providers. Defaults to
+  // `verbose=true` so groups render in their full expanded form — the
+  // SubAgent focus tests need access to individual tool rows that the
+  // (now-default) compact summary path collapses away.
   const renderWithProviders = (component: React.ReactElement) =>
     render(
       <ConfigContext.Provider value={mockConfig}>
-        {component}
+        <CompactModeProvider value={{ compactMode: false }}>
+          {component}
+        </CompactModeProvider>
       </ConfigContext.Provider>,
     );
 
@@ -474,17 +479,32 @@ describe('<ToolGroupMessage />', () => {
     });
   });
 
-  describe('Border Color Logic', () => {
-    it('uses yellow border when tools are pending', () => {
+  describe('No-border rendering (post TUI display optimization)', () => {
+    // The TUI display optimization removed the round border that used
+    // to wrap every tool group. The "yellow / gray border" distinctions
+    // therefore no longer exist; visual status is conveyed by the `⏺`
+    // prefix color and the `⎿` result glyph. The snapshots below pin
+    // the borderless render so a future regression that re-introduces
+    // box-drawing characters fails loudly.
+    const expectNoBorder = (frame: string | undefined) => {
+      const f = frame ?? '';
+      expect(f).not.toContain('╭');
+      expect(f).not.toContain('╮');
+      expect(f).not.toContain('╯');
+      expect(f).not.toContain('╰');
+      expect(f).not.toContain('│');
+    };
+
+    it('renders without border for pending tools', () => {
       const toolCalls = [createToolCall({ status: ToolCallStatus.Pending })];
       const { lastFrame } = renderWithProviders(
         <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
       );
-      // The snapshot will capture the visual appearance including border color
+      expectNoBorder(lastFrame());
       expect(lastFrame()).toMatchSnapshot();
     });
 
-    it('uses yellow border for shell commands even when successful', () => {
+    it('renders without border for shell commands even when successful', () => {
       const toolCalls = [
         createToolCall({
           name: 'run_shell_command',
@@ -494,10 +514,11 @@ describe('<ToolGroupMessage />', () => {
       const { lastFrame } = renderWithProviders(
         <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
       );
+      expectNoBorder(lastFrame());
       expect(lastFrame()).toMatchSnapshot();
     });
 
-    it('uses gray border when all tools are successful and no shell commands', () => {
+    it('renders without border when all tools are successful and no shell commands', () => {
       const toolCalls = [
         createToolCall({ status: ToolCallStatus.Success }),
         createToolCall({
@@ -509,6 +530,7 @@ describe('<ToolGroupMessage />', () => {
       const { lastFrame } = renderWithProviders(
         <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
       );
+      expectNoBorder(lastFrame());
       expect(lastFrame()).toMatchSnapshot();
     });
   });

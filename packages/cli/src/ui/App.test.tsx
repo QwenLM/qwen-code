@@ -59,6 +59,9 @@ describe('App', () => {
     dialogsVisible: false,
     stickyTodos: null,
     mainControlsRef: { current: null },
+    pendingHistoryItems: [],
+    verbose: false,
+    transcriptSnapshot: null,
     historyManager: {
       addItem: vi.fn(),
       history: [],

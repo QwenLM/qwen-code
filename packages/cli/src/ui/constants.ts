@@ -27,3 +27,30 @@ export const TOOL_STATUS = {
   CANCELED: '-',
   ERROR: 'x',
 } as const;
+
+/**
+ * Leading glyph for a tool call line, aligned to Claude Code's
+ * `BLACK_CIRCLE` (`figures.ts:4`). `⏺` on macOS terminals; `●` is
+ * the close fallback for non-macOS Unicode terminals. ASCII fallback
+ * `*` is used on Windows console.
+ */
+export const TOOL_PREFIX =
+  process.platform === 'win32'
+    ? '*'
+    : process.platform === 'darwin'
+      ? '⏺'
+      : '●';
+
+/**
+ * Leading glyph for a tool's result line; sits indented under the
+ * tool call. Aligned to CC's box-drawing "boxupright" used for
+ * result continuations. ASCII fallback `>` on Windows.
+ */
+export const RESULT_PREFIX = process.platform === 'win32' ? '>' : '⎿';
+
+/**
+ * Glyph for the ephemeral "thinking…" indicator above the composer.
+ * Inspired by CC's `AssistantRedactedThinkingMessage.tsx:16` (`✻`)
+ * which renders cleanly in mainstream monospace fonts.
+ */
+export const THINKING_PREFIX = process.platform === 'win32' ? '*' : '✻';

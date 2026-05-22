@@ -117,6 +117,8 @@ export interface CliArgs {
   sandbox: boolean | string | undefined;
   sandboxImage: string | undefined;
   debug: boolean | undefined;
+  /** When true, equivalent to setting ui.verbose=true at startup. */
+  verbose: boolean | undefined;
   prompt: string | undefined;
   promptInteractive: string | undefined;
   systemPrompt: string | undefined;
@@ -571,6 +573,12 @@ export async function parseArguments(): Promise<CliArgs> {
       type: 'boolean',
       description: 'Run in debug mode?',
       default: false,
+    })
+    .option('verbose', {
+      alias: 'v',
+      type: 'boolean',
+      description:
+        'Verbose display: show thinking output inline and full tool detail. Equivalent to setting ui.verbose=true.',
     })
     .option('bare', {
       type: 'boolean',

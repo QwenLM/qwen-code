@@ -192,8 +192,20 @@ export function SettingsDialog({
               });
             }
 
-            // Special handling for compact mode to sync with CompactModeContext
-            // and refresh static content so already-rendered history updates.
+            // Special handling for verbose display preference. Sync to the
+            // DisplayModeContext (so the active session reflects the change
+            // without a restart) and refresh static content so the
+            // already-rendered history re-paints under the new mode.
+            //
+            // Two settings can flip this preference:
+            //   - `ui.verbose`         — the new canonical key
+            //   - `ui.compactMode`     — deprecated; preserved so legacy
+            //                            scripts / settings.json files keep
+            //                            working until the next major.
+            if (key === 'ui.verbose' && newValue !== !compactMode) {
+              setCompactMode?.(!(newValue as boolean));
+              uiActions.refreshStatic();
+            }
             if (key === 'ui.compactMode' && newValue !== compactMode) {
               setCompactMode?.(newValue as boolean);
               uiActions.refreshStatic();

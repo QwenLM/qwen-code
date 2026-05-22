@@ -12,10 +12,9 @@ import { ToolCallStatus } from '../../types.js';
 import { ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
-import { theme } from '../../semantic-colors.js';
-import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { SubagentGroupSummary } from './SubagentGroupSummary.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
-import { useCompactMode } from '../../contexts/CompactModeContext.js';
+import { useEffectiveVerbose } from '../../contexts/DisplayModeContext.js';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
 
 function isAgentWithPendingConfirmation(
@@ -156,7 +155,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   compactLabel,
 }) => {
   const config = useConfig();
-  const { compactMode } = useCompactMode();
+  const verbose = useEffectiveVerbose();
+  const compactMode = !verbose;
 
   const hasConfirmingTool = toolCalls.some(
     (t) => t.status === ToolCallStatus.Confirming,
@@ -315,23 +315,37 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     );
   }
 
-  // Full expanded view
-  const hasPending = !inlineToolCalls.every(
-    (t) => t.status === ToolCallStatus.Success,
+  // ≥2 terminal sub-agents → render a single aggregated group summary
+  // (gemini-cli-inspired header + per-agent stat rows) instead of N
+  // individual SubagentSummary blocks. Skipped when any sub-agent is
+  // still running or awaiting confirmation, or when the group contains
+  // non-subagent siblings (mixed batches go through the per-tool path
+  // so the non-subagent tools still render).
+  const terminalSubagentTools = inlineToolCalls.filter(isTerminalSubagentTool);
+  const hasMixedNonSubagent = inlineToolCalls.some(
+    (t) => !isSubagentToolEntry(t),
   );
-  const isShellCommand = inlineToolCalls.some(
-    (t) => t.name === SHELL_COMMAND_NAME || t.name === SHELL_NAME,
-  );
-  const borderColor =
-    isShellCommand || isEmbeddedShellFocused
-      ? theme.ui.symbol
-      : hasPending
-        ? theme.status.warning
-        : theme.border.default;
+  if (
+    !verbose &&
+    terminalSubagentTools.length >= 2 &&
+    terminalSubagentTools.length === inlineToolCalls.length &&
+    !hasMixedNonSubagent &&
+    !hasConfirmingTool &&
+    !hasSubagentPendingConfirmation
+  ) {
+    return <SubagentGroupSummary subagentTools={terminalSubagentTools} />;
+  }
 
-  const staticHeight = /* border */ 2 + /* marginBottom */ 1;
-  // account for border (2 chars) and padding (2 chars)
-  const innerWidth = contentWidth - 4;
+  // Full expanded view — borderless after the TUI display optimization.
+  // We keep `contentWidth` as the width constraint so the Box still
+  // renders deterministically (Ink rendering bug noted in the old
+  // border block: removing the explicit width is what triggered
+  // tearing, not the border itself).
+
+  // No border, no inner padding → outer container reserves only the
+  // 1-row marginBottom for inter-batch separation.
+  const staticHeight = /* marginBottom */ 1;
+  const innerWidth = contentWidth;
 
   let countToolCallsWithResults = 0;
   for (const tool of inlineToolCalls) {
@@ -356,12 +370,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     const readCount = memoryReadCount ?? 0;
     const writeCount = memoryWriteCount ?? 0;
     return (
-      <Box
-        flexDirection="column"
-        borderStyle="round"
-        width={contentWidth}
-        borderColor={theme.border.default}
-      >
+      <Box flexDirection="column" width={contentWidth}>
         {readCount > 0 && (
           <Box paddingLeft={1}>
             <Text dimColor>
@@ -385,19 +394,13 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   return (
     <Box
       flexDirection="column"
-      borderStyle="round"
       /*
-        This width constraint is highly important and protects us from an Ink rendering bug.
-        Since the ToolGroup can typically change rendering states frequently, it can cause
-        Ink to render the border of the box incorrectly and span multiple lines and even
-        cause tearing.
+        The explicit width constraint stays even after the border was
+        removed. The original Ink rendering bug (tearing on rapid state
+        changes) was caused by ToolGroup rendering at an unconstrained
+        width while content changed, not by the border itself.
       */
       width={contentWidth}
-      borderDimColor={
-        hasPending && (!isShellCommand || !isEmbeddedShellFocused)
-      }
-      borderColor={borderColor}
-      gap={1}
     >
       {/* Memory badge for mixed groups (some memory ops + other ops) */}
       {!isMemoryOnlyGroup &&

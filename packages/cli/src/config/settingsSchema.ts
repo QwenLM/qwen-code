@@ -812,12 +812,22 @@ const SETTINGS_SCHEMA = {
       },
       compactMode: {
         type: 'boolean',
-        label: 'Compact Mode',
+        label: 'Compact Mode (deprecated)',
         category: 'UI',
         requiresRestart: false,
         default: false,
         description:
-          'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+          'Deprecated. The compact view is now the default. Set ui.verbose=true to restore the previous detailed view. This key is migrated to !verbose on next launch.',
+        showInDialog: false,
+      },
+      verbose: {
+        type: 'boolean',
+        label: 'Verbose Display',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Show thinking output and full tool details inline. When off (default), thoughts are hidden and tool batches are merged for a compact view. Ctrl+O always shows the full transcript regardless of this setting.',
         showInDialog: true,
       },
       useTerminalBuffer: {

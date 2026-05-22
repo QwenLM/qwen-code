@@ -61,7 +61,10 @@ describe('keyMatchers', () => {
     [Command.EXIT]: (key: Key) => key.ctrl && key.name === 'd',
     [Command.SHOW_MORE_LINES]: (key: Key) => key.ctrl && key.name === 's',
     [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
-    [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
+    // TOGGLE_COMPACT_MODE is retired (no default key); ENTER_TRANSCRIPT now owns Ctrl+O.
+    [Command.TOGGLE_COMPACT_MODE]: (_key: Key) => false,
+    [Command.ENTER_TRANSCRIPT]: (key: Key) => key.ctrl && key.name === 'o',
+    [Command.EXIT_TRANSCRIPT]: (key: Key) => key.name === 'escape',
     [Command.TOGGLE_RENDER_MODE]: (key: Key) => key.meta && key.name === 'm',
     [Command.PROMOTE_SHELL_TO_BACKGROUND]: (key: Key) =>
       key.ctrl && key.name === 'b',
@@ -283,9 +286,25 @@ describe('keyMatchers', () => {
       negative: [createKey('y'), createKey('r', { ctrl: true })],
     },
     {
+      // TOGGLE_COMPACT_MODE retains the Command enum entry for legacy
+      // user keybinding configs but has no default key after the
+      // Ctrl+O transcript rewrite.
       command: Command.TOGGLE_COMPACT_MODE,
+      positive: [],
+      negative: [
+        createKey('o', { ctrl: true }),
+        createKey('p', { ctrl: true }),
+      ],
+    },
+    {
+      command: Command.ENTER_TRANSCRIPT,
       positive: [createKey('o', { ctrl: true })],
       negative: [createKey('o'), createKey('p', { ctrl: true })],
+    },
+    {
+      command: Command.EXIT_TRANSCRIPT,
+      positive: [createKey('escape')],
+      negative: [createKey('o', { ctrl: true })],
     },
 
     // Selection list navigation
