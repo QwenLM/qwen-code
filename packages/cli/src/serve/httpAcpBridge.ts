@@ -89,6 +89,7 @@ export {
   WorkspaceInitRaceError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   // #4175 F3 — multi-client permission coordination errors.
   CancelSentinelCollisionError,
   PermissionForbiddenError,

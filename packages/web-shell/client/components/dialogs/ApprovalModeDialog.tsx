@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 
 interface ApprovalModeDialogProps {
@@ -7,12 +8,20 @@ interface ApprovalModeDialogProps {
   onClose: () => void;
 }
 
-const APPROVAL_MODES = [
-  { id: 'default', label: '默认模式', description: '每次工具调用都需要确认' },
-  { id: 'auto-edit', label: '自动编辑', description: '自动批准文件读写操作' },
-  { id: 'plan', label: 'Plan 模式', description: '仅分析和规划，不执行工具' },
-  { id: 'yolo', label: 'YOLO 模式', description: '自动批准所有操作' },
-];
+const APPROVAL_MODE_COPY: Record<
+  (typeof DAEMON_APPROVAL_MODES)[number],
+  { label: string; description: string }
+> = {
+  plan: { label: 'Plan 模式', description: '仅分析和规划，不执行工具' },
+  default: { label: '默认模式', description: '每次工具调用都需要确认' },
+  'auto-edit': { label: '自动编辑', description: '自动批准文件读写操作' },
+  yolo: { label: 'YOLO 模式', description: '自动批准所有操作' },
+};
+
+const APPROVAL_MODES = DAEMON_APPROVAL_MODES.map((id) => ({
+  id,
+  ...APPROVAL_MODE_COPY[id],
+}));
 
 export function ApprovalModeDialog({
   currentMode,

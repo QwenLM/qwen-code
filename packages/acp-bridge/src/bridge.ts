@@ -61,6 +61,7 @@ import {
   WorkspaceInitRaceError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  isNotCurrentlyGeneratingCancelError,
 } from './bridgeErrors.js';
 import { canonicalizeWorkspace } from './workspacePaths.js';
 import type {
@@ -1400,23 +1401,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     );
   };
 
-  const isNotCurrentlyGeneratingCancel = (err: unknown): boolean => {
-    if (err instanceof Error && err.message === 'Not currently generating') {
-      return true;
-    }
-    if (!err || typeof err !== 'object') return false;
-    const maybe = err as {
-      message?: unknown;
-      data?: unknown;
-    };
-    if (maybe.message === 'Not currently generating') return true;
-    if (!maybe.data || typeof maybe.data !== 'object') return false;
-    return (
-      (maybe.data as { details?: unknown }).details ===
-      'Not currently generating'
-    );
-  };
-
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
@@ -2035,7 +2019,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       try {
         await entry.connection.cancel(notif);
       } catch (err) {
-        if (isNotCurrentlyGeneratingCancel(err)) return;
+        if (isNotCurrentlyGeneratingCancelError(err)) return;
         throw err;
       }
     },

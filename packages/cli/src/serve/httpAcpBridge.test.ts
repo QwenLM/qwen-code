@@ -42,6 +42,7 @@ import {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
   SessionNotFoundError,
@@ -2641,6 +2642,39 @@ describe('createHttpAcpBridge', () => {
       expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
 
       await bridge.shutdown();
+    });
+
+    it('treats idle agent cancel wording variants as success', async () => {
+      const variants: unknown[] = [
+        new Error(`${NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE} (session idle)`),
+        {
+          code: -32603,
+          message: 'Internal error',
+          data: { details: 'not currently generating' },
+        },
+      ];
+
+      for (const err of variants) {
+        const handles: ChannelHandle[] = [];
+        const factory: ChannelFactory = async () => {
+          const h = makeChannel({
+            cancelImpl: () => {
+              throw err;
+            },
+          });
+          handles.push(h);
+          return h.channel;
+        };
+        const bridge = makeBridge({ channelFactory: factory });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        await expect(
+          bridge.cancelSession(session.sessionId),
+        ).resolves.toBeUndefined();
+        expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
+
+        await bridge.shutdown();
+      }
     });
   });
 

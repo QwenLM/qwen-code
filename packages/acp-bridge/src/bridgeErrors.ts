@@ -25,6 +25,42 @@
 
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 
+export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
+  'Not currently generating' as const;
+
+/**
+ * ACP idle-cancel compatibility contract.
+ *
+ * The current CLI agent throws `NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE`
+ * when a client sends `cancel` while no prompt is active. Older ACP
+ * surfaces may wrap that text in either `message` or `data.details`.
+ * Treat harmless wording extensions such as
+ * "Not currently generating (session idle)" as the same no-op cancel,
+ * but keep this matcher narrow so unrelated cancel failures still
+ * propagate to callers.
+ */
+export function isNotCurrentlyGeneratingCancelError(err: unknown): boolean {
+  if (err instanceof Error && isNotCurrentlyGeneratingText(err.message)) {
+    return true;
+  }
+  if (!err || typeof err !== 'object') return false;
+  const maybe = err as {
+    message?: unknown;
+    data?: unknown;
+  };
+  if (isNotCurrentlyGeneratingText(maybe.message)) return true;
+  if (!maybe.data || typeof maybe.data !== 'object') return false;
+  return isNotCurrentlyGeneratingText(
+    (maybe.data as { details?: unknown }).details,
+  );
+}
+
+function isNotCurrentlyGeneratingText(value: unknown): boolean {
+  return (
+    typeof value === 'string' && /\bnot currently generating\b/i.test(value)
+  );
+}
+
 export class SessionNotFoundError extends Error {
   readonly sessionId: string;
   constructor(sessionId: string, extra?: string) {

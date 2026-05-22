@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import type { ProxyOptions } from 'vite';
 import react from '@vitejs/plugin-react';
+import pkg from './package.json' with { type: 'json' };
 
 const daemonProxy: ProxyOptions = {
   target: 'http://127.0.0.1:4170',
@@ -29,6 +30,9 @@ const daemonProxy: ProxyOptions = {
 export default defineConfig({
   root: 'client',
   plugins: [react()],
+  define: {
+    __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
+  },
   server: {
     port: 5173,
     proxy: {

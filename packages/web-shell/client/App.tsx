@@ -27,20 +27,28 @@ import { LOCAL_COMMANDS } from './constants/localCommands';
 import { getDaemonBaseUrl, getDaemonToken } from './config/daemon';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
-import type { DaemonApprovalMode } from '@qwen-code/sdk/daemon';
+import {
+  DAEMON_APPROVAL_MODES,
+  type DaemonApprovalMode,
+} from '@qwen-code/sdk/daemon';
 import type { Message, StreamingState, TodoItem } from './adapters/types';
 import { extractTodosFromToolCall, hasActiveTodos } from './utils/todos';
 import styles from './App.module.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
 const DAEMON_TOKEN = getDaemonToken();
-const WEB_SHELL_VERSION = '0.0.1';
-const MODES_CYCLE = ['plan', 'default', 'auto-edit', 'yolo'];
+const WEB_SHELL_VERSION = __WEB_SHELL_VERSION__;
+const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 
 function getSessionIdFromUrl(): string | undefined {
   if (typeof window === 'undefined') return undefined;
   const match = window.location.pathname.match(/\/session\/([^/]+)/);
-  return match ? decodeURIComponent(match[1]) : undefined;
+  if (!match) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined;
+  }
 }
 
 function replaceSessionUrl(sessionId: string): void {
@@ -52,6 +60,10 @@ function replaceSessionUrl(sessionId: string): void {
 
 function formatError(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
+  return DAEMON_APPROVAL_MODES.includes(mode as DaemonApprovalMode);
 }
 
 function parseRenameArgument(
@@ -162,8 +174,15 @@ export function App() {
 
   const handleSetMode = useCallback(
     (modeId: string) => {
+      if (!isDaemonApprovalMode(modeId)) {
+        reportError(
+          new Error(`Unsupported approval mode: ${modeId}`),
+          '切换审批模式失败',
+        );
+        return;
+      }
       actions
-        .setApprovalMode(modeId as DaemonApprovalMode)
+        .setApprovalMode(modeId)
         .then((result) => {
           setCurrentMode(result.mode || modeId);
         })
@@ -197,7 +216,9 @@ export function App() {
   }, [connection.sessionId]);
 
   const handleCycleMode = useCallback(() => {
-    const idx = MODES_CYCLE.indexOf(currentMode);
+    const idx = isDaemonApprovalMode(currentMode)
+      ? MODES_CYCLE.indexOf(currentMode)
+      : -1;
     const next = MODES_CYCLE[(idx + 1) % MODES_CYCLE.length];
     handleSetMode(next);
   }, [currentMode, handleSetMode]);
