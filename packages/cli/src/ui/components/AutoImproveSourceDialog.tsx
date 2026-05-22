@@ -280,6 +280,11 @@ export function AutoImproveSourceDialog({
   return (
     <Box flexDirection="column" gap={1}>
       <Text bold>{t('Auto-improve sources')}</Text>
+      <Text color={theme.text.secondary}>
+        {t(
+          'Select which context auto-improve should collect before each improvement loop.',
+        )}
+      </Text>
       {error && <Text color={theme.status.error}>{error}</Text>}
 
       <Box flexDirection="column">

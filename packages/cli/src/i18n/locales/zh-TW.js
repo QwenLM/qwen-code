@@ -119,6 +119,8 @@ export default {
     '平順停止目前 auto-improve 循環',
   'Run one scheduled auto-improve tick': '執行一次排程中的 auto-improve tick',
   'Auto-improve sources': 'Auto-improve 來源',
+  'Select which context auto-improve should collect before each improvement loop.':
+    '選擇 auto-improve 每輪改進前要收集的上下文來源。',
   'Custom sources': '自訂來源',
   '  No custom sources': '  無自訂來源',
   'Add custom source': '新增自訂來源',

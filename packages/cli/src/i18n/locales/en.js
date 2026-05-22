@@ -135,6 +135,8 @@ export default {
     'Gracefully stop the active auto-improve loop',
   'Run one scheduled auto-improve tick': 'Run one scheduled auto-improve tick',
   'Auto-improve sources': 'Auto-improve sources',
+  'Select which context auto-improve should collect before each improvement loop.':
+    'Select which context auto-improve should collect before each improvement loop.',
   'Custom sources': 'Custom sources',
   '  No custom sources': '  No custom sources',
   'Add custom source': 'Add custom source',
