@@ -3269,3 +3269,234 @@ describe('daemon UI adapter conformance framework (PR-G)', () => {
     expect(result.failed).toEqual([]);
   });
 });
+
+describe('daemon UI subagent nesting (PR-K, post-rebase)', () => {
+  it('extracts parentToolCallId + subagentType from tool_call._meta', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'child-1',
+          title: 'grep src',
+          status: 'running',
+          rawInput: { query: 'TODO' },
+          _meta: {
+            parentToolCallId: 'parent-task-7',
+            subagentType: 'code-reviewer',
+          },
+        },
+      },
+    } as never);
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'tool.update',
+        toolCallId: 'child-1',
+        parentToolCallId: 'parent-task-7',
+        subagentType: 'code-reviewer',
+      }),
+    ]);
+  });
+
+  it('top-level (non-subagent) tool calls have undefined parent fields', () => {
+    const events = normalizeDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'top-1',
+          title: 'Bash ls',
+          status: 'running',
+          rawInput: { command: 'ls' },
+        },
+      },
+    } as never);
+    expect(events[0]).not.toHaveProperty('parentToolCallId');
+    expect(events[0]).not.toHaveProperty('subagentType');
+  });
+
+  it('reducer correlates parentBlockId at create time when parent already in state', async () => {
+    const { selectSubagentChildBlocks } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    // Parent Task tool call first.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'parent-task',
+            title: 'Delegate to reviewer',
+            status: 'running',
+            name: 'Task',
+            rawInput: { subagent_type: 'code-reviewer', prompt: 'review' },
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    // Child tool call inside subagent.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'child-grep',
+            title: 'grep auth',
+            status: 'completed',
+            rawInput: { query: 'auth' },
+            _meta: {
+              parentToolCallId: 'parent-task',
+              subagentType: 'code-reviewer',
+            },
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+
+    const parentBlock = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'parent-task',
+    )!;
+    const childBlock = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'child-grep',
+    )!;
+    expect(childBlock.parentToolCallId).toBe('parent-task');
+    expect(childBlock.subagentType).toBe('code-reviewer');
+    expect(childBlock.parentBlockId).toBe(parentBlock.id);
+
+    // Selector returns the child.
+    const children = selectSubagentChildBlocks(state, 'parent-task');
+    expect(children).toHaveLength(1);
+    expect(children[0]!.toolCallId).toBe('child-grep');
+  });
+
+  it('reducer adopts parent context on later update if not yet correlated', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    // Parent first.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'p1',
+            title: 'P',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    // Child arrives FIRST without parent stamp (early in flow).
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'c1',
+            title: 'C',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+    // Subsequent update stamps parent (SubAgentTracker activates).
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'c1',
+            status: 'completed',
+            _meta: { parentToolCallId: 'p1', subagentType: 'helper' },
+          },
+        },
+      } as never),
+      { now: 4 },
+    );
+    const child = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'c1',
+    )!;
+    expect(child.parentToolCallId).toBe('p1');
+    expect(child.subagentType).toBe('helper');
+    expect(child.parentBlockId).toBe(
+      state.blocks.find(
+        (b): b is Extract<typeof b, { kind: 'tool' }> =>
+          b.kind === 'tool' && b.toolCallId === 'p1',
+      )!.id,
+    );
+  });
+
+  it('isSubagentChildBlock discriminates tool blocks by parentToolCallId', async () => {
+    const { isSubagentChildBlock } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'standalone',
+            title: 'Top',
+            status: 'completed',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'nested',
+            title: 'Nested',
+            status: 'completed',
+            _meta: { parentToolCallId: 'standalone' },
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+    expect(isSubagentChildBlock(state.blocks[0]!)).toBe(false);
+    expect(isSubagentChildBlock(state.blocks[1]!)).toBe(true);
+  });
+});

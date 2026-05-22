@@ -114,6 +114,24 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
    * `mcp__<serverId>__<toolName>` naming convention as a fallback.
    */
   serverId?: string;
+  /**
+   * When the tool was invoked by a sub-agent delegation, the
+   * `toolCallId` of the parent agent's `Task` (or equivalent) tool call.
+   * Lets the reducer correlate sub-agent tool blocks under their
+   * parent block for nested rendering.
+   *
+   * Source: daemon stamps this in `tool_call._meta.parentToolCallId`
+   * (see `SubAgentTracker.getSubagentMeta()` in core).
+   */
+  parentToolCallId?: string;
+  /**
+   * Type name of the sub-agent that produced this tool call (e.g.
+   * `'code-reviewer'`). Pairs with `parentToolCallId` — when both are
+   * present the tool call originated inside a sub-agent run.
+   *
+   * Source: daemon stamps `tool_call._meta.subagentType`.
+   */
+  subagentType?: string;
   details?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
@@ -551,6 +569,27 @@ export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
   details?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
+  /**
+   * When this tool call was invoked by a sub-agent delegation, the
+   * `toolCallId` of the parent agent's `Task`-equivalent tool call.
+   * Renderers can group / nest sub-agent activity under their parent
+   * block.
+   *
+   * Mirrors `DaemonUiToolUpdateEvent.parentToolCallId`. Resolved from
+   * `tool_call._meta.parentToolCallId` (see `SubAgentTracker` in core).
+   */
+  parentToolCallId?: string;
+  /**
+   * Sub-agent type label (e.g. `'code-reviewer'`). Present iff this
+   * block came from a sub-agent delegation.
+   */
+  subagentType?: string;
+  /**
+   * `id` of the parent transcript block, populated by the reducer when
+   * `parentToolCallId` matches a block already in state. Renderers can
+   * walk this for visual nesting without re-correlating IDs.
+   */
+  parentBlockId?: string;
 }
 
 export interface DaemonShellTranscriptBlock extends DaemonTranscriptBlockBase {

@@ -431,6 +431,18 @@ function normalizeToolUpdate(
     };
   }
   const { provenance, serverId } = extractToolProvenance(update, toolName);
+  // PR-K (post-rebase): daemon stamps `parentToolCallId` + `subagentType` in
+  // `tool_call._meta` when the call was invoked inside a sub-agent
+  // delegation (see core's `SubAgentTracker.getSubagentMeta()`). Forward
+  // these into the typed UI event so the reducer can correlate sub-agent
+  // blocks under their parent for nested rendering. Both undefined for
+  // top-level (non-sub-agent) tool calls.
+  const parentToolCallId =
+    getString(update, 'parentToolCallId') ??
+    (metadata ? getString(metadata, 'parentToolCallId') : undefined);
+  const subagentType =
+    getString(update, 'subagentType') ??
+    (metadata ? getString(metadata, 'subagentType') : undefined);
   return {
     ...base,
     type: 'tool.update',
@@ -443,6 +455,8 @@ function normalizeToolUpdate(
     ...(locations !== undefined ? { locations } : {}),
     ...(provenance ? { provenance } : {}),
     ...(serverId ? { serverId } : {}),
+    ...(parentToolCallId ? { parentToolCallId } : {}),
+    ...(subagentType ? { subagentType } : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(rawInput !== undefined

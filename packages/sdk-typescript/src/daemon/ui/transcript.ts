@@ -359,10 +359,33 @@ function upsertToolBlock(
     if (event.rawOutput !== undefined) existing.rawOutput = event.rawOutput;
     if (event.toolName) existing.toolName = event.toolName;
     if (event.toolKind) existing.toolKind = event.toolKind;
+    // PR-K subagent nesting — daemon may stamp parent context on later
+    // updates (e.g., when SubAgentTracker first sees the call). Adopt
+    // if not yet correlated; never overwrite an established correlation.
+    if (event.parentToolCallId && !existing.parentToolCallId) {
+      existing.parentToolCallId = event.parentToolCallId;
+      const parentBlockId = state.toolBlockByCallId[event.parentToolCallId];
+      if (parentBlockId && parentBlockId !== TRIMMED_TOOL_BLOCK_ID) {
+        existing.parentBlockId = parentBlockId;
+      }
+    }
+    if (event.subagentType && !existing.subagentType) {
+      existing.subagentType = event.subagentType;
+    }
     updateCurrentToolPointer(state, event.toolCallId, event.status);
     return;
   }
 
+  // PR-K subagent nesting — resolve `parentBlockId` at create time when
+  // the parent's tool block already exists in state. Falls back to
+  // undefined when the parent hasn't been seen yet (out-of-order events);
+  // selectors fall back to `parentToolCallId` lookup in that case.
+  const parentBlockId =
+    event.parentToolCallId &&
+    state.toolBlockByCallId[event.parentToolCallId] !==
+      TRIMMED_TOOL_BLOCK_ID
+      ? state.toolBlockByCallId[event.parentToolCallId]
+      : undefined;
   const block: DaemonToolTranscriptBlock = {
     id: allocateBlockId(state, 'tool'),
     kind: 'tool',
@@ -388,6 +411,11 @@ function upsertToolBlock(
     ...(event.rawOutput !== undefined ? { rawOutput: event.rawOutput } : {}),
     ...(event.toolName ? { toolName: event.toolName } : {}),
     ...(event.toolKind ? { toolKind: event.toolKind } : {}),
+    ...(event.parentToolCallId
+      ? { parentToolCallId: event.parentToolCallId }
+      : {}),
+    ...(event.subagentType ? { subagentType: event.subagentType } : {}),
+    ...(parentBlockId ? { parentBlockId } : {}),
   };
   appendBlock(state, block);
   state.toolBlockByCallId[event.toolCallId] = block.id;
@@ -849,6 +877,41 @@ export function selectToolProgress(
   toolCallId: string,
 ): { ratio?: number; step?: string } | undefined {
   return state.toolProgress[toolCallId];
+}
+
+/**
+ * PR-K (post-rebase): return the tool blocks that were invoked inside a
+ * given sub-agent delegation, identified by the parent tool call id (the
+ * `toolCallId` of the `Task`-equivalent tool the main agent called).
+ *
+ * Renderers use this to draw a nested view: render the parent tool block
+ * as a folder header and the children as indented descendants.
+ *
+ * Returns an empty array when the parent has no recorded children, e.g.,
+ * the daemon hasn't seen any sub-agent activity yet or the children were
+ * already trimmed by `maxBlocks`.
+ */
+export function selectSubagentChildBlocks(
+  state: DaemonTranscriptState,
+  parentToolCallId: string,
+): ReadonlyArray<DaemonToolTranscriptBlock> {
+  return state.blocks.filter(
+    (block): block is DaemonToolTranscriptBlock =>
+      block.kind === 'tool' && block.parentToolCallId === parentToolCallId,
+  );
+}
+
+/**
+ * Return whether a given tool block was invoked inside a sub-agent
+ * delegation (has `parentToolCallId` set). Convenience for renderers
+ * dispatching on flat-vs-nested rendering.
+ */
+export function isSubagentChildBlock(
+  block: DaemonTranscriptBlock,
+): block is DaemonToolTranscriptBlock {
+  return (
+    block.kind === 'tool' && (block as DaemonToolTranscriptBlock).parentToolCallId !== undefined
+  );
 }
 
 function compareBlocksByEventOrder(
