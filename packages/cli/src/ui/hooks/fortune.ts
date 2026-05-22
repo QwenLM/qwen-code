@@ -55,7 +55,7 @@ export async function getFortuneQuote(command: string): Promise<string | null> {
     const { stdout } = await execFileAsync(executable, args, {
       timeout: 5000,
       maxBuffer: 1024,
-      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+      env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? '' },
     });
     const quote = stripAnsi(stdout).trim().replace(/\s+/g, ' ');
     return quote || null;
