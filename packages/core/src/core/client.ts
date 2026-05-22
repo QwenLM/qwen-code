@@ -45,6 +45,7 @@ import {
   type ChatCompressionInfo,
   type ServerGeminiStreamEvent,
 } from './turn.js';
+import { StreamingToolExecutor } from './streamingToolExecutor.js';
 
 // Services
 import { COMPRESSION_PRESERVE_THRESHOLD } from '../services/chatCompressionService.js';
@@ -1589,7 +1590,10 @@ export class GeminiClient {
         }
       }
 
-      const turn = new Turn(this.getChat(), prompt_id);
+      const streamingExecutor = this.config.getStreamingToolDispatch()
+        ? new StreamingToolExecutor()
+        : undefined;
+      const turn = new Turn(this.getChat(), prompt_id, streamingExecutor);
 
       // Determine the model to use for this turn
       const model = options?.modelOverride ?? this.config.getModel();

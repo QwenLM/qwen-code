@@ -14,6 +14,7 @@ import type { GenerateContentResponse, Part, Content } from '@google/genai';
 import { reportError } from '../utils/errorReporting.js';
 import type { GeminiChat } from './geminiChat.js';
 import { StreamEventType } from './geminiChat.js';
+import { StreamingToolExecutor } from './streamingToolExecutor.js';
 
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
@@ -1038,6 +1039,169 @@ describe('Turn', () => {
       expect(turn.pendingToolCalls).toHaveLength(2);
       expect(turn.pendingToolCalls[0].wasOutputTruncated).toBe(true);
       expect(turn.pendingToolCalls[1].wasOutputTruncated).toBe(true);
+    });
+  });
+
+  describe('streamingExecutor wiring (#4387 Phase 2)', () => {
+    it('forwards ToolCallRequest events to executor.accept()', async () => {
+      const executor = new StreamingToolExecutor();
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      mockSendMessageStream.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                { id: 'fc1', name: 'tool1', args: { a: 1 } },
+                { id: 'fc2', name: 'tool2', args: { b: 2 } },
+              ],
+            } as unknown as GenerateContentResponse,
+          };
+        })(),
+      );
+
+      for await (const _ of t.run(
+        'test-model',
+        [{ text: 'hi' }],
+        new AbortController().signal,
+      )) {
+        // consume
+      }
+
+      expect(t.getStreamingExecutor()).toBe(executor);
+      expect(executor.getAcceptedRequests().map((r) => r.callId)).toEqual([
+        'fc1',
+        'fc2',
+      ]);
+    });
+
+    it('discards the executor on retry events', async () => {
+      const executor = new StreamingToolExecutor();
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      mockSendMessageStream.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'fc1', name: 'tool1', args: {} }],
+            } as unknown as GenerateContentResponse,
+          };
+          yield { type: StreamEventType.RETRY, retryInfo: undefined };
+        })(),
+      );
+
+      for await (const _ of t.run(
+        'test-model',
+        [{ text: 'hi' }],
+        new AbortController().signal,
+      )) {
+        // consume
+      }
+      expect(executor.isDiscarded()).toBe(true);
+    });
+
+    it('discards the executor on signal abort', async () => {
+      const executor = new StreamingToolExecutor();
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      const ctrl = new AbortController();
+      mockSendMessageStream.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'fc1', name: 'tool1', args: {} }],
+            } as unknown as GenerateContentResponse,
+          };
+          ctrl.abort();
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [] } }],
+            } as unknown as GenerateContentResponse,
+          };
+        })(),
+      );
+
+      for await (const _ of t.run(
+        'test-model',
+        [{ text: 'hi' }],
+        ctrl.signal,
+      )) {
+        // consume
+      }
+      expect(executor.isDiscarded()).toBe(true);
+    });
+
+    it('discards the executor when the stream throws', async () => {
+      const executor = new StreamingToolExecutor();
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      mockSendMessageStream.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'fc1', name: 'tool1', args: {} }],
+            } as unknown as GenerateContentResponse,
+          };
+          throw new Error('boom');
+        })(),
+      );
+
+      for await (const _ of t.run(
+        'test-model',
+        [{ text: 'hi' }],
+        new AbortController().signal,
+      )) {
+        // consume
+      }
+      expect(executor.isDiscarded()).toBe(true);
+    });
+
+    it('default-off path: Turn without executor still works unchanged', async () => {
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+      );
+      mockSendMessageStream.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'fc1', name: 'tool1', args: { a: 1 } }],
+            } as unknown as GenerateContentResponse,
+          };
+        })(),
+      );
+
+      const events = [];
+      for await (const event of t.run(
+        'test-model',
+        [{ text: 'hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+      expect(t.getStreamingExecutor()).toBeUndefined();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: GeminiEventType.ToolCallRequest,
+      });
     });
   });
 });

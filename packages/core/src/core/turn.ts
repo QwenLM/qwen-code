@@ -35,6 +35,7 @@ import {
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
 import type { ActiveGoal } from '../goals/activeGoalStore.js';
+import type { StreamingToolExecutor } from './streamingToolExecutor.js';
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -285,7 +286,16 @@ export class Turn {
   constructor(
     private readonly chat: GeminiChat,
     private readonly prompt_id: string,
+    // When provided, `ToolCallRequest` events are forwarded to the executor
+    // and lifecycle transitions (retry / abort / error) call `discard()`. The
+    // Turn never reads results back — that ownership lives with the caller
+    // that drives early execution.
+    private readonly streamingExecutor?: StreamingToolExecutor,
   ) {}
+
+  getStreamingExecutor(): StreamingToolExecutor | undefined {
+    return this.streamingExecutor;
+  }
   // The run method yields simpler events suitable for server logic
   async *run(
     model: string,
@@ -308,6 +318,7 @@ export class Turn {
 
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {
+          this.streamingExecutor?.discard('aborted');
           yield { type: GeminiEventType.UserCancelled };
           return;
         }
@@ -319,6 +330,7 @@ export class Turn {
           this.pendingCitations.clear();
           this.debugResponses = [];
           this.finishReason = undefined;
+          this.streamingExecutor?.discard('retry');
           yield {
             type: GeminiEventType.Retry,
             retryInfo: streamEvent.retryInfo,
@@ -410,6 +422,7 @@ export class Turn {
       }
     } catch (e) {
       if (signal.aborted) {
+        this.streamingExecutor?.discard('aborted');
         yield { type: GeminiEventType.UserCancelled };
         // Regular cancellation error, fail gracefully.
         return;
@@ -417,8 +430,10 @@ export class Turn {
 
       const error = toFriendlyError(e);
       if (error instanceof UnauthorizedError) {
+        this.streamingExecutor?.discard('unauthorized');
         throw error;
       }
+      this.streamingExecutor?.discard('stream-error');
 
       const contextForReport = [...this.chat.getHistory(/*curated*/ true), req];
       await reportError(
@@ -463,6 +478,7 @@ export class Turn {
     };
 
     this.pendingToolCalls.push(toolCallRequest);
+    this.streamingExecutor?.accept(toolCallRequest);
 
     // Yield a request for the tool call, not the pending/confirming status
     return { type: GeminiEventType.ToolCallRequest, value: toolCallRequest };

@@ -441,6 +441,7 @@ describe('Gemini Client (client.ts)', () => {
       getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
       getFileService: vi.fn().mockReturnValue(fileService),
       getMaxSessionTurns: vi.fn().mockReturnValue(0),
+      getStreamingToolDispatch: vi.fn().mockReturnValue(false),
       getClearContextOnIdle: vi.fn().mockReturnValue({
         toolResultsThresholdMinutes: 60,
         toolResultsNumToKeep: 5,

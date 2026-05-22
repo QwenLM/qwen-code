@@ -50,6 +50,7 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
         enableOpenAILogging: false,
       }),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getStreamingToolDispatch: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     // Mock OpenAI client
