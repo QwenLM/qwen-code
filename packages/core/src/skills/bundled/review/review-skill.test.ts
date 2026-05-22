@@ -49,8 +49,13 @@ describe('bundled review skill', () => {
   it('ships an executable guard.sh alongside SKILL.md', () => {
     const stat = fs.statSync(guardScript);
     expect(stat.isFile()).toBe(true);
-    // 0o111 = any-execute bit; the bundled file ships as 0755 in source control.
-    expect(stat.mode & 0o111).toBeGreaterThan(0);
+    // NTFS doesn't track unix execute bits, so the mode check is meaningful
+    // only on POSIX. On Windows the file is invoked via `bash` which doesn't
+    // require the +x bit anyway.
+    if (process.platform !== 'win32') {
+      // 0o111 = any-execute bit; the bundled file ships as 0755 in source control.
+      expect(stat.mode & 0o111).toBeGreaterThan(0);
+    }
   });
 
   describe('guard.sh', () => {
@@ -76,11 +81,28 @@ describe('bundled review skill', () => {
     }
 
     it.each([
+      // Bare branch-mutating forms.
       'gh pr checkout 123',
       'git checkout main',
       'git switch feature',
       'git pull origin main',
       'git reset --hard HEAD~1',
+      // Flag-based HEAD mutations the previous `[^-]` rule let through.
+      'git checkout -b new',
+      'git checkout -B existing',
+      'git checkout -c new',
+      'git checkout --detach HEAD',
+      'git checkout --orphan greenfield',
+      'git switch -c new',
+      'git switch -C existing',
+      'git switch --detach HEAD',
+      // Shell-composition bypasses the previous prefix rule missed.
+      '(git checkout main)',
+      'echo $(git checkout main)',
+      'echo `git checkout main`',
+      'echo x|git checkout main',
+      'false||git pull',
+      'eval "git checkout main"',
     ])('denies %s', (cmd) => {
       const { stdout } = runGuard({
         tool_name: 'run_shell_command',
@@ -94,8 +116,11 @@ describe('bundled review skill', () => {
     it.each([
       'git diff main...HEAD',
       'git checkout -- src/foo.ts',
+      'git checkout -- .',
+      'git checkout', // bare info form, no HEAD movement
       'qwen review fetch-pr 123 octo/repo --out .qwen/tmp/x.json',
       'gh pr diff https://github.com/owner/repo/pull/1',
+      'cd /tmp && ls',
       'ls -la',
     ])('allows %s', (cmd) => {
       const { stdout } = runGuard({

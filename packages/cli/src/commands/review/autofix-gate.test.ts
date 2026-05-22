@@ -131,16 +131,17 @@ describe('qwen review autofix-gate', () => {
     expect(decision.decision).toBe('ask');
   });
 
-  it('falls through to findings-count check when fetch report is missing', async () => {
-    // No report written for pr-99 — the gate is conservative and treats it
-    // like a local target rather than crashing.
+  it('returns skip when fetch report is missing for a PR target', async () => {
+    // No report written for pr-99 — refuse rather than prompting the user
+    // for autofix on a worktree that may not exist.
     const { stdout } = await runGate([
       'autofix-gate',
       'pr-99',
       '--findings-count',
-      '0',
+      '5',
     ]);
     const decision = JSON.parse(stdout.trim());
-    expect(decision.decision).toBe('noop');
+    expect(decision.decision).toBe('skip');
+    expect(decision.reason).toMatch(/No fetch-pr report for PR #99/);
   });
 });

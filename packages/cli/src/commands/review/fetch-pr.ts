@@ -27,7 +27,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh } from './lib/gh.js';
 import { git, refExists } from './lib/git.js';
 import { REVIEW_TMP_DIR, reviewBranch, worktreePath } from './lib/paths.js';
-import { fetchReportPath } from './lib/session.js';
+import { fetchReportPath, type FetchReport } from './lib/session.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -45,26 +45,6 @@ interface FetchPrArgs {
   remote: string;
   out: string;
   comment: boolean;
-}
-
-interface FetchPrResult {
-  prNumber: string;
-  ownerRepo: string;
-  remote: string;
-  ref: string;
-  fetchedSha: string;
-  worktreePath: string;
-  baseRefName: string;
-  headRefName: string;
-  isCrossRepository: boolean;
-  diffStat: { files: number; additions: number; deletions: number };
-  /**
-   * Records whether `/review` was invoked with `--comment`. Downstream
-   * subcommands (notably `autofix-gate`) read this to decide deterministically
-   * whether Step 8 (autofix) should be skipped, instead of relying on the LLM
-   * driver to remember the flag.
-   */
-  commentMode: boolean;
 }
 
 function tryRemove(action: () => void): void {
@@ -160,7 +140,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   }
 
   // 5. Emit the report.
-  const result: FetchPrResult = {
+  const result: FetchReport = {
     prNumber,
     ownerRepo,
     remote,

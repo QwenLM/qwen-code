@@ -17,7 +17,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { tmpFile } from './paths.js';
+import { tmpFile, worktreePath } from './paths.js';
 
 /** Schema written by `qwen review fetch-pr` — read by every downstream step. */
 export interface FetchReport {
@@ -49,6 +49,9 @@ export function fetchReportPath(prNumber: string | number): string {
 export function readFetchReport(prNumber: string | number): FetchReport | null {
   const path = fetchReportPath(prNumber);
   if (!existsSync(path)) return null;
+  // readFileSync moved inside the try so EACCES / EISDIR / etc. on a present
+  // file degrade to "no report" rather than throwing past the recovery
+  // pointer in requireFetchReport.
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as FetchReport;
   } catch {
@@ -70,7 +73,7 @@ export function requireFetchReport(prNumber: string | number): FetchReport {
         `  qwen review fetch-pr ${prNumber} <owner>/<repo> --out ${path}\n\n` +
         `Do NOT use \`gh pr checkout\`, \`git checkout <branch>\`, \`git switch\`, ` +
         `\`git pull\`, or \`git reset --hard\` — they mutate the user's working tree. ` +
-        `\`fetch-pr\` creates an isolated worktree at ${tmpFile('pr-' + prNumber, '').replace(/-+$/, '')} ` +
+        `\`fetch-pr\` creates an isolated worktree at ${worktreePath(prNumber)} ` +
         `and writes the JSON report this command needs.`,
     );
   }

@@ -43,26 +43,31 @@ function decide(target: string, findingsCount: number): AutofixDecision {
   if (prMatch) {
     const prNumber = prMatch[1];
     const report = readFetchReport(prNumber);
-    // Missing report is not fatal here — pr-context / presubmit already
-    // hard-fail on a missing report, so by the time the LLM reaches Step 8
-    // either the report exists or it never got past Step 1. Falling through
-    // to the findings-count check keeps the gate conservative if invoked
-    // out-of-order.
-    if (report) {
-      if (report.commentMode) {
-        return {
-          decision: 'skip',
-          reason:
-            '/review was invoked with --comment; Step 8 (autofix) is suppressed in favour of inline PR comments.',
-        };
-      }
-      if (report.isCrossRepository) {
-        return {
-          decision: 'skip',
-          reason:
-            'Cross-repo PR running in lightweight mode — no local files to autofix.',
-        };
-      }
+    if (!report) {
+      // No fetch-pr report for a PR target means the LLM driver jumped
+      // straight to Step 8 without setting up the worktree. Earlier gates
+      // (pr-context / presubmit) already hard-fail on this, but if the model
+      // somehow reached us anyway, refuse to prompt the user — autofix would
+      // either edit the wrong tree or run against a directory that does not
+      // exist. `skip` is strictly safer than `ask` here.
+      return {
+        decision: 'skip',
+        reason: `No fetch-pr report for PR #${prNumber}; cannot determine autofix safety. Re-run \`qwen review fetch-pr\` first.`,
+      };
+    }
+    if (report.commentMode) {
+      return {
+        decision: 'skip',
+        reason:
+          '/review was invoked with --comment; Step 8 (autofix) is suppressed in favour of inline PR comments.',
+      };
+    }
+    if (report.isCrossRepository) {
+      return {
+        decision: 'skip',
+        reason:
+          'Cross-repo PR running in lightweight mode — no local files to autofix.',
+      };
     }
   }
 

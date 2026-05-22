@@ -16,7 +16,7 @@ hooks:
       hooks:
         - type: command
           command: 'bash "$QWEN_SKILL_ROOT/guard.sh"'
-          timeout: 5
+          timeout: 5000
 ---
 
 # Code Review
