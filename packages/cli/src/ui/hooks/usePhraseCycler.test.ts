@@ -21,9 +21,7 @@ vi.mock('./fortune.js', () => ({
 }));
 
 describe('usePhraseCycler', () => {
-  let mockGetFortuneQuote: ReturnType<
-    typeof vi.fn<[(command: string) => Promise<string | null>]>
-  >;
+  let mockGetFortuneQuote: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     vi.useFakeTimers();
@@ -31,7 +29,7 @@ describe('usePhraseCycler', () => {
     vi.spyOn(i18n, 't').mockImplementation((key) => key);
     const fortuneModule = await import('./fortune.js');
     mockGetFortuneQuote =
-      fortuneModule.getFortuneQuote as typeof mockGetFortuneQuote;
+      fortuneModule.getFortuneQuote as unknown as ReturnType<typeof vi.fn>;
     mockGetFortuneQuote.mockReset();
     mockGetFortuneQuote.mockResolvedValue(MOCK_FORTUNE_QUOTE);
   });

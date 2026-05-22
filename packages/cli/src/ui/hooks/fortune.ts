@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025
+ * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -35,6 +35,12 @@ export async function getFortuneQuote(command: string): Promise<string | null> {
         } else {
           args.push(part);
         }
+      } else {
+        debugLogger.warn(
+          'Shell operators (|, >, <, etc.) are not supported in fortuneCommand; ignoring command: %s',
+          command,
+        );
+        return null;
       }
     }
 
