@@ -962,6 +962,102 @@ describe('Telemetry SDK', () => {
         }),
       ).toBe(false);
     });
+
+    it('matches default-port requests against a portless prefix (URL.origin parity)', () => {
+      // Regression: `URL.origin` strips `:80` from `http://collector` to give
+      // `http://collector`. The hook's manual `${proto}://${host}${portPart}`
+      // reconstruction kept `:80`, so prefix and request origin diverged →
+      // guard bypassed → feedback loop. PR #4390 review feedback (wenshao).
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'http://collector.example.com',
+      );
+      initializeTelemetry(mockConfig);
+      const httpInstrumentationConfig = vi.mocked(HttpInstrumentation).mock
+        .calls[0]![0]! as {
+        ignoreOutgoingRequestHook: (req: {
+          protocol: string;
+          host?: string;
+          hostname?: string;
+          port?: string | number;
+          path: string;
+        }) => boolean;
+      };
+      // Default port HTTP request to portless prefix → must match.
+      expect(
+        httpInstrumentationConfig.ignoreOutgoingRequestHook({
+          protocol: 'http:',
+          hostname: 'collector.example.com',
+          port: 80,
+          path: '/v1/traces',
+        }),
+      ).toBe(true);
+    });
+
+    it('fails open when req.protocol is missing (no silent HTTPS guard bypass)', () => {
+      // Regression: previous `|| 'http'` fallback silently mis-bucketed HTTPS
+      // requests as HTTP when `req.protocol` was unset, so HTTPS OTLP
+      // endpoints never matched their prefix → guard bypassed. Now: missing
+      // proto → return false → request gets instrumented (worst case is a
+      // parasitic span, observable; the previous default produced an
+      // unbounded feedback loop). PR #4390 review feedback (wenshao).
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        'https://collector.example.com:4318',
+      );
+      initializeTelemetry(mockConfig);
+      const httpInstrumentationConfig = vi.mocked(HttpInstrumentation).mock
+        .calls[0]![0]! as {
+        ignoreOutgoingRequestHook: (req: {
+          protocol?: string;
+          host?: string;
+          hostname?: string;
+          port?: string | number;
+          path: string;
+        }) => boolean;
+      };
+      expect(
+        httpInstrumentationConfig.ignoreOutgoingRequestHook({
+          // protocol intentionally omitted
+          hostname: 'collector.example.com',
+          port: 4318,
+          path: '/v1/traces',
+        }),
+      ).toBe(false);
+    });
+
+    it('normalizeOtlpPrefix strips asymmetric quotes for parity with parseOtlpEndpoint', () => {
+      // parseOtlpEndpoint (line 109) uses /^["']|["']$/g which strips
+      // asymmetric leading/trailing quotes. Previously normalizeOtlpPrefix
+      // only stripped symmetric quotes, so settings.json typos like
+      // `"value'` would let the exporter connect (parseOtlpEndpoint accepts)
+      // while the guard returned undefined (normalizeOtlpPrefix rejected) →
+      // parasitic-span loop. PR #4390 review feedback (wenshao).
+      vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+      vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
+        '"http://collector.example.com:4318\'',
+      );
+      vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+        undefined,
+      );
+      vi.spyOn(mockConfig, 'getTelemetryOtlpLogsEndpoint').mockReturnValue(
+        undefined,
+      );
+      vi.spyOn(mockConfig, 'getTelemetryOtlpMetricsEndpoint').mockReturnValue(
+        undefined,
+      );
+      initializeTelemetry(mockConfig);
+      const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
+        ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
+      };
+      // Asymmetric-quoted endpoint normalized → guard matches OTLP traffic.
+      expect(
+        config.ignoreRequestHook({
+          origin: 'http://collector.example.com:4318',
+          path: '/v1/traces',
+        }),
+      ).toBe(true);
+    });
   });
 });
 

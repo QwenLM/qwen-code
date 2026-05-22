@@ -328,16 +328,15 @@ export function initializeTelemetry(config: Config): void {
     raw: string | undefined,
   ): { origin: string; pathname: string } | undefined {
     if (!raw) return undefined;
-    // Trim surrounding whitespace + symmetric ASCII quotes a user may have
-    // placed in settings.json (`"value"` → `value`).
-    let s = raw.trim();
-    if (
-      s.length >= 2 &&
-      ((s.startsWith('"') && s.endsWith('"')) ||
-        (s.startsWith("'") && s.endsWith("'")))
-    ) {
-      s = s.slice(1, -1);
-    }
+    // Trim surrounding whitespace + ASCII quotes a user may have placed in
+    // settings.json (`"value"` → `value`). Use the SAME lenient regex as
+    // `parseOtlpEndpoint` (line 109) so any endpoint the exporter accepts
+    // also gets a feedback-loop guard. Asymmetric quotes (e.g. `"value'`)
+    // are almost certainly typos but `parseOtlpEndpoint` strips them too —
+    // mismatching here would let the exporter connect while the guard
+    // returned `undefined`, reintroducing the parasitic-span loop. See PR
+    // #4390 review feedback (wenshao).
+    const s = raw.trim().replace(/^["']|["']$/g, '');
     try {
       const u = new URL(s);
       // Drop ?query and #fragment — they're never part of the request
@@ -419,14 +418,37 @@ export function initializeTelemetry(config: Config): void {
         // review feedback (wenshao).
         ignoreOutgoingRequestHook: (req) => {
           if (otlpUrlPrefixes.length === 0) return false;
-          const proto =
-            (req.protocol && String(req.protocol).replace(/:$/, '')) || 'http';
+          // Protocol must be known to compare reliably. The previous
+          // `|| 'http'` fallback silently mis-bucketed HTTPS requests as
+          // HTTP when `req.protocol` was unset, so HTTPS OTLP endpoints
+          // wouldn't match their prefix → guard bypassed → feedback loop.
+          // Now: when proto can't be determined, fail open (return false →
+          // request gets instrumented). Worst case is a parasitic client
+          // span for an OTLP request — observable and recoverable, vs. the
+          // unbounded feedback loop the previous default produced. See PR
+          // #4390 review feedback (wenshao).
+          const proto = req.protocol
+            ? String(req.protocol).replace(/:$/, '')
+            : undefined;
+          if (!proto) return false;
           const host = req.hostname || req.host || '';
           const portPart =
             req.port !== undefined && req.port !== null && String(req.port)
               ? `:${req.port}`
               : '';
-          const origin = `${proto}://${host}${portPart}`;
+          // Route through `URL` so the reconstructed origin gets the same
+          // default-port stripping (`:80` for http, `:443` for https) that
+          // `normalizeOtlpPrefix` applies via `URL.origin`. Without this,
+          // prefix `http://collector` (no explicit port) wouldn't match a
+          // request to `http://collector:80/v1/traces` because `prefix.origin`
+          // strips `:80` while the manually built string keeps it. See PR
+          // #4390 review feedback (wenshao).
+          let origin: string;
+          try {
+            origin = new URL(`${proto}://${host}${portPart}`).origin;
+          } catch {
+            return false;
+          }
           const path =
             typeof req.path === 'string' ? stripPathSuffix(req.path) : '';
           return matchesOtlpPrefix(origin, path);

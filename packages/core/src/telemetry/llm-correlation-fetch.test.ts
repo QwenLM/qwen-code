@@ -275,4 +275,23 @@ describe('staticCorrelationHeaders', () => {
     current = 'sess-B';
     expect(snapshot[SESSION_ID_HEADER]).toBe('sess-A');
   });
+
+  it('falls through to {} when config getters throw (telemetry must never break LLM path)', () => {
+    // Mirror the safety contract of `wrapFetchWithCorrelation`. This helper
+    // is called from the Gemini factory at construction time, so a throw
+    // here would propagate up and crash content-generator init for the
+    // whole session. PR #4390 review feedback (wenshao).
+    const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+    const exploding = {
+      getTelemetryEnabled: () => {
+        throw new Error('config exploded');
+      },
+      getSessionId: () => 'unreached',
+    } as unknown as Config;
+    expect(staticCorrelationHeaders(exploding)).toEqual({});
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('staticCorrelationHeaders'),
+    );
+    warnSpy.mockRestore();
+  });
 });

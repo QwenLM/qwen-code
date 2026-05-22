@@ -118,8 +118,20 @@ export function wrapFetchWithCorrelation<TFetch extends FetchLikeLoose>(
 export function staticCorrelationHeaders(
   config: Config,
 ): Record<string, string> {
-  if (!config.getTelemetryEnabled()) return {};
-  const sid = config.getSessionId();
-  if (!sid) return {};
-  return { [SESSION_ID_HEADER]: sid };
+  // Mirror the safety contract of `wrapFetchWithCorrelation`: telemetry must
+  // never break the LLM request path. This helper is called from the Gemini
+  // content-generator factory at construction time — a throw here would
+  // propagate up and crash content-generator init for the entire session.
+  // Fall through to `{}` instead. See PR #4390 review feedback (wenshao).
+  try {
+    if (!config.getTelemetryEnabled()) return {};
+    const sid = config.getSessionId();
+    if (!sid) return {};
+    return { [SESSION_ID_HEADER]: sid };
+  } catch (err) {
+    diag.warn(
+      `staticCorrelationHeaders: config read failed, omitting correlation header: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return {};
+  }
 }
