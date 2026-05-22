@@ -246,7 +246,7 @@
           }
         },
         "enableFortunes": {
-          "description": "Display random fortune quotes during loading instead of static phrases. Requires the `fortune` command to be installed.",
+          "description": "Display random fortune quotes during loading instead of static phrases. Requires the `fortune` command to be installed. **User-only setting**: This setting can only be configured in user settings, not in workspace settings.",
           "type": "boolean",
           "default": false
         },

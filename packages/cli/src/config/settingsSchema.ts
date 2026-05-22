@@ -757,6 +757,7 @@ const SETTINGS_SCHEMA = {
         description:
           'Display random fortune quotes during loading instead of static phrases. Requires the `fortune` command to be installed.',
         showInDialog: true,
+        userOnly: true,
       },
       fortuneCommand: {
         type: 'string',
