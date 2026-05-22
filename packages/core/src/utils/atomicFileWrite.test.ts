@@ -347,4 +347,42 @@ describe('atomicWriteFile', () => {
       expect(await fs.readFile(filePath, 'utf-8')).toBe('updated');
     },
   );
+
+  it.skipIf(
+    process.platform === 'win32' ||
+      typeof process.geteuid !== 'function' ||
+      // chmod 0o000 against the file's real owner still succeeds via
+      // POSIX rename in CI/sandbox setups where the user is effectively
+      // root; only assert real EACCES when we own and can be denied.
+      process.geteuid() === 0,
+  )(
+    'should surface EACCES when in-place fallback hits an unwritable file',
+    async () => {
+      // Atomic rename used to silently replace files the calling user
+      // has no write permission on (rename only needs parent-dir write).
+      // The in-place fallback respects the file's mode and surfaces
+      // EACCES — the correct behavior for "you don't own this, you
+      // shouldn't be replacing it" scenarios.
+      const filePath = path.join(tmpDir, 'readonly.txt');
+      await fs.writeFile(filePath, 'original');
+      await fs.chmod(filePath, 0o444);
+
+      const realStat = await fs.stat(filePath);
+      const realGeteuid = process.geteuid!;
+      process.geteuid = () => realStat.uid + 1;
+
+      try {
+        await expect(atomicWriteFile(filePath, 'updated')).rejects.toThrow(
+          /EACCES/,
+        );
+      } finally {
+        process.geteuid = realGeteuid;
+        // Restore mode so afterEach's rm can clean up.
+        await fs.chmod(filePath, 0o644);
+      }
+
+      // Original content untouched.
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('original');
+    },
+  );
 });

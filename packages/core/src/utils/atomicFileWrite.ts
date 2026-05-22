@@ -107,14 +107,27 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  *    can leave a partially-written file. EXDEV only occurs when the
  *    resolved target path is on a different filesystem than its parent
  *    directory, which is rare in practice.
- * 6. If the existing file is owned by a different uid/gid than the
- *    current process (and we are not root), fall back to in-place
- *    truncate+write instead of rename. POSIX rename creates a new inode
- *    owned by the process's euid/egid, which would silently strip the
- *    original ownership and break shared-write setups
- *    (e.g. group-writable files in a shared workspace). The in-place
- *    write preserves the inode — and therefore uid/gid — at the cost
- *    of crash atomicity.
+ * 6. **Ownership preservation.** If the existing file is owned by a
+ *    different uid/gid than the calling process's euid/egid, fall back
+ *    to in-place truncate+write instead of rename. POSIX rename creates
+ *    a new inode owned by the process's euid/egid, which would silently
+ *    strip the original ownership and break shared-write setups
+ *    (e.g. group-writable files in a shared workspace, or files inside
+ *    a bind-mounted Docker volume edited by root in-container). The
+ *    in-place write preserves the inode — and therefore uid/gid — at
+ *    the cost of three properties:
+ *      - **Crash atomicity** — a crash mid-write can leave a
+ *        partially-written file.
+ *      - **Concurrent reader isolation** — readers can observe a
+ *        zero-length or partial file during the write.
+ *      - **Watcher semantics** — emits an inotify `MODIFY` event rather
+ *        than `MOVED_TO` / `CREATE`. Most watchers (chokidar, VSCode)
+ *        handle both, but consumers that only watch for one will miss
+ *        these writes.
+ *    If the file is not writable by the current process (mode forbids
+ *    it), the in-place fallback surfaces `EACCES` — which is the
+ *    correct behavior (rename would have silently replaced a file the
+ *    user has no business overwriting).
  * 7. Always clean up the temp file on failure.
  *
  * The parent directory of `filePath` must already exist.
@@ -132,7 +145,8 @@ export async function atomicWriteFile(
   const targetPath = await resolveSymlinkChain(filePath);
 
   // Stat the target to preserve existing permissions and detect
-  // ownership-changing renames (see step 6 in the function doc).
+  // ownership-changing renames (see the ownership-preservation note in
+  // the function doc).
   let existingStat: Stats | undefined;
   try {
     existingStat = await fs.stat(targetPath);
@@ -170,15 +184,17 @@ export async function atomicWriteFile(
   // existing file is owned by someone else (or has a different group),
   // shared-write users would lose access. Fall back to in-place write,
   // which truncates the existing inode and so preserves uid/gid.
-  // Skipped on Windows (no POSIX ownership), for new files (no owner to
-  // preserve), and for root (rename + chown-back works; see below).
+  // Skipped on Windows (no POSIX ownership) and for new files (no owner
+  // to preserve). Root takes the same fallback as non-root — even
+  // though root *could* chown back after rename, chown silently fails
+  // inside user-namespaced or CAP_CHOWN-stripped containers, which is
+  // exactly the Docker-as-root scenario this fix targets.
   const ownershipWouldChange = (): boolean => {
     if (existingStat === undefined) return false;
     if (process.platform === 'win32') return false;
     const euid = process.geteuid?.();
     const egid = process.getegid?.();
     if (euid === undefined || egid === undefined) return false;
-    if (euid === 0) return false;
     return existingStat.uid !== euid || existingStat.gid !== egid;
   };
 
@@ -210,20 +226,6 @@ export async function atomicWriteFile(
     }
 
     throw error;
-  }
-
-  // Root: rename produced a root-owned inode. Restore the original
-  // uid/gid so root invocations don't leak ownership to user files.
-  if (
-    existingStat !== undefined &&
-    process.platform !== 'win32' &&
-    process.geteuid?.() === 0
-  ) {
-    try {
-      await fs.chown(targetPath, existingStat.uid, existingStat.gid);
-    } catch {
-      // Best-effort. Not all filesystems support chown.
-    }
   }
 }
 
