@@ -21,14 +21,17 @@ vi.mock('./fortune.js', () => ({
 }));
 
 describe('usePhraseCycler', () => {
-  let mockGetFortuneQuote: ReturnType<typeof vi.fn>;
+  let mockGetFortuneQuote: ReturnType<
+    typeof vi.fn<[(command: string) => Promise<string | null>]>
+  >;
 
   beforeEach(async () => {
     vi.useFakeTimers();
     vi.spyOn(i18n, 'ta').mockReturnValue(MOCK_WITTY_PHRASES);
     vi.spyOn(i18n, 't').mockImplementation((key) => key);
     const fortuneModule = await import('./fortune.js');
-    mockGetFortuneQuote = fortuneModule.getFortuneQuote;
+    mockGetFortuneQuote =
+      fortuneModule.getFortuneQuote as typeof mockGetFortuneQuote;
     mockGetFortuneQuote.mockReset();
     mockGetFortuneQuote.mockResolvedValue(MOCK_FORTUNE_QUOTE);
   });
