@@ -129,6 +129,18 @@ export default {
   'Gracefully stop the active auto-improve loop':
     '平滑停止当前 auto-improve 循环',
   'Run one scheduled auto-improve tick': '运行一次计划中的 auto-improve tick',
+  'Auto-improve sources': 'Auto-improve 来源',
+  'Custom sources': '自定义来源',
+  '  No custom sources': '  无自定义来源',
+  'Add custom source': '添加自定义来源',
+  'Edit custom source': '编辑自定义来源',
+  'Type a source and press Enter': '输入来源后按 Enter',
+  'Save changes': '保存更改',
+  'Space toggles built-ins · Enter adds/edits/saves · Delete removes · Esc cancels':
+    '空格切换内置来源 · Enter 添加/编辑/保存 · Delete 删除 · Esc 取消',
+  'Loading auto-improve sources...': '正在加载 auto-improve 来源...',
+  'Auto-improve source configuration saved.': 'Auto-improve 来源配置已保存。',
+  'Repository root is not ready yet.': '仓库根目录尚未准备好。',
   'Delete a previous session': '删除先前的会话',
   'Run installation and environment diagnostics': '运行安装和环境诊断',
   'Browse dynamic model catalogs and choose which models stay enabled locally':

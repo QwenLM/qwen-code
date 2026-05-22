@@ -118,6 +118,18 @@ export default {
   'Gracefully stop the active auto-improve loop':
     '平順停止目前 auto-improve 循環',
   'Run one scheduled auto-improve tick': '執行一次排程中的 auto-improve tick',
+  'Auto-improve sources': 'Auto-improve 來源',
+  'Custom sources': '自訂來源',
+  '  No custom sources': '  無自訂來源',
+  'Add custom source': '新增自訂來源',
+  'Edit custom source': '編輯自訂來源',
+  'Type a source and press Enter': '輸入來源後按 Enter',
+  'Save changes': '儲存變更',
+  'Space toggles built-ins · Enter adds/edits/saves · Delete removes · Esc cancels':
+    '空格切換內建來源 · Enter 新增/編輯/儲存 · Delete 刪除 · Esc 取消',
+  'Loading auto-improve sources...': '正在載入 auto-improve 來源...',
+  'Auto-improve source configuration saved.': 'Auto-improve 來源設定已儲存。',
+  'Repository root is not ready yet.': '儲存庫根目錄尚未準備好。',
   'Delete a previous session': '刪除先前的會話',
   'Run installation and environment diagnostics': '執行安裝與環境診斷',
   'Browse dynamic model catalogs and choose which models stay enabled locally':

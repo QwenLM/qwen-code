@@ -59,6 +59,7 @@ export interface AutoImproveActivePointer {
 }
 
 export const AUTO_IMPROVE_DIR = path.join('.qwen', 'auto-improve');
+export const AUTO_IMPROVE_LOOP_ID_LINE_PREFIX = '- Loop id: ';
 const LOOP_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const LOOP_STATUSES = new Set(['running', 'stopping', 'stopped', 'stale']);
 const ACTIVE_RUN_STATUSES = new Set(['implementing', 'testing', 'running']);
@@ -422,10 +423,12 @@ export async function markActiveAutoImproveRunCancelled(
 ): Promise<boolean> {
   const repoRoot = await resolveRepoRoot(cwd);
   const active = await readActiveAutoImproveLoop(repoRoot);
-  if (!active || active.activeLoopId !== loopId) return false;
+  if (active && active.activeLoopId !== loopId) return false;
 
   const state = await readAutoImproveLoopState(repoRoot, loopId);
-  if (!state || state.status !== 'running') return false;
+  if (!state || (state.status !== 'running' && state.status !== 'stopping')) {
+    return false;
+  }
 
   if (
     state.currentRun &&

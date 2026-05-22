@@ -90,11 +90,14 @@ import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
-import { markActiveAutoImproveRunCancelled } from '../commands/autoImproveState.js';
+import {
+  AUTO_IMPROVE_LOOP_ID_LINE_PREFIX,
+  markActiveAutoImproveRunCancelled,
+} from '../commands/autoImproveState.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
-function parseAutoImproveTickLoopId(
+export function parseAutoImproveTickLoopId(
   submitType: SendMessageType,
   query: PartListUnion,
 ): string | null {
@@ -116,8 +119,14 @@ function parseAutoImproveTickLoopId(
   const trimmed = text.trim();
   const slashMatch = trimmed.match(/^\/auto-improve\s+tick\s+(\S+)$/);
   if (slashMatch) return slashMatch[1]!;
-  const expandedPromptMatch = trimmed.match(/^- Loop id:\s*(\S+)$/m);
-  return expandedPromptMatch?.[1] ?? null;
+  const expandedPromptLine = trimmed
+    .split(/\r?\n/)
+    .find((line) => line.startsWith(AUTO_IMPROVE_LOOP_ID_LINE_PREFIX));
+  const expandedPromptLoopId = expandedPromptLine
+    ?.slice(AUTO_IMPROVE_LOOP_ID_LINE_PREFIX.length)
+    .trim()
+    .split(/\s+/)[0];
+  return expandedPromptLoopId || null;
 }
 
 /**
@@ -1746,6 +1755,7 @@ export const useGeminiStream = (
       ) {
         lastTurnUserItemRef.current = null;
         turnSawContentEventRef.current = false;
+        submitPromptOnCompleteRef.current = null;
         currentAutoImproveLoopIdRef.current = parseAutoImproveTickLoopId(
           submitType,
           query,
@@ -1956,6 +1966,7 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          submitPromptOnCompleteRef.current = null;
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {

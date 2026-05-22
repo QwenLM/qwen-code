@@ -134,6 +134,19 @@ export default {
   'Gracefully stop the active auto-improve loop':
     'Gracefully stop the active auto-improve loop',
   'Run one scheduled auto-improve tick': 'Run one scheduled auto-improve tick',
+  'Auto-improve sources': 'Auto-improve sources',
+  'Custom sources': 'Custom sources',
+  '  No custom sources': '  No custom sources',
+  'Add custom source': 'Add custom source',
+  'Edit custom source': 'Edit custom source',
+  'Type a source and press Enter': 'Type a source and press Enter',
+  'Save changes': 'Save changes',
+  'Space toggles built-ins · Enter adds/edits/saves · Delete removes · Esc cancels':
+    'Space toggles built-ins · Enter adds/edits/saves · Delete removes · Esc cancels',
+  'Loading auto-improve sources...': 'Loading auto-improve sources...',
+  'Auto-improve source configuration saved.':
+    'Auto-improve source configuration saved.',
+  'Repository root is not ready yet.': 'Repository root is not ready yet.',
   'Delete a previous session': 'Delete a previous session',
   'Run installation and environment diagnostics':
     'Run installation and environment diagnostics',

@@ -8,7 +8,11 @@
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { useGeminiStream, classifyApiError } from './useGeminiStream.js';
+import {
+  useGeminiStream,
+  classifyApiError,
+  parseAutoImproveTickLoopId,
+} from './useGeminiStream.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
 import type {
   TrackedToolCall,
@@ -38,6 +42,7 @@ import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
 import { MessageType, StreamingState } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import { AUTO_IMPROVE_LOOP_ID_LINE_PREFIX } from '../commands/autoImproveState.js';
 
 // --- MOCKS ---
 const mockSendMessageStream = vi
@@ -271,6 +276,31 @@ describe('useGeminiStream', () => {
       .mockClear()
       .mockReturnValue((async function* () {})());
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
+  });
+
+  it('extracts auto-improve loop ids from slash and expanded tick prompts', () => {
+    expect(
+      parseAutoImproveTickLoopId(
+        SendMessageType.UserQuery,
+        '/auto-improve tick loop-123',
+      ),
+    ).toBe('loop-123');
+    expect(
+      parseAutoImproveTickLoopId(SendMessageType.UserQuery, [
+        {
+          text: [
+            'You are running one tick.',
+            `${AUTO_IMPROVE_LOOP_ID_LINE_PREFIX}loop-456`,
+          ].join('\n'),
+        },
+      ]),
+    ).toBe('loop-456');
+    expect(
+      parseAutoImproveTickLoopId(
+        SendMessageType.ToolResult,
+        '/auto-improve tick loop-123',
+      ),
+    ).toBeNull();
   });
 
   afterEach(() => {
