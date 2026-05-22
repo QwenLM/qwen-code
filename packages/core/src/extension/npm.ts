@@ -211,7 +211,7 @@ function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
         if (res.statusCode !== 200) {
           return reject(
             new Error(
-              `npm registry request failed with status ${res.statusCode}: ${url}`,
+              `npm registry request failed with status ${res.statusCode}: ${redactUrlCredentials(url)}`,
             ),
           );
         }

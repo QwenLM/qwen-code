@@ -26,6 +26,24 @@ describe('redactUrlCredentials', () => {
     ).toBe(`https://${REDACTED_URL_CREDENTIAL}@example.com/org/repo.git`);
   });
 
+  it('redacts unencoded at signs inside echoed URL credentials', () => {
+    expect(
+      redactUrlCredentials('https://email@gmail.com:tok@example.com/repo'),
+    ).toBe(`https://${REDACTED_URL_CREDENTIAL}@example.com/repo`);
+  });
+
+  it('redacts unencoded question marks inside echoed URL credentials', () => {
+    expect(redactUrlCredentials('https://user:gh?token@example.com/repo')).toBe(
+      `https://${REDACTED_URL_CREDENTIAL}@example.com/repo`,
+    );
+  });
+
+  it('redacts percent-encoded URL credentials', () => {
+    expect(
+      redactUrlCredentials('https://user%40mail:tok%3Fen@example.com/repo'),
+    ).toBe(`https://${REDACTED_URL_CREDENTIAL}@example.com/repo`);
+  });
+
   it('does not redact at signs after the URL path starts', () => {
     const source = 'https://example.com/path/@scope/package';
     expect(redactUrlCredentials(source)).toBe(source);

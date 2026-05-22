@@ -6,7 +6,7 @@
 
 export const REDACTED_URL_CREDENTIAL = '***REDACTED***';
 
-const URL_CREDENTIALS_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)([^/?\s@]+)@/gi;
+const URL_CREDENTIALS_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)(?:[^/\s]+@)+/gi;
 
 /**
  * Redacts userinfo credentials from URL-like extension sources for logs,

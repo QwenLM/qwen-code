@@ -13,13 +13,16 @@ const mockExtensionManagerInstance = {
   refreshCache: mockRefreshCache,
 };
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  ExtensionManager: vi
-    .fn()
-    .mockImplementation(() => mockExtensionManagerInstance),
-  redactUrlCredentials: (source: string) =>
-    source.replace(/\/\/[^@]+@/, '//***REDACTED***@'),
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    ExtensionManager: vi
+      .fn()
+      .mockImplementation(() => mockExtensionManagerInstance),
+  };
+});
 
 vi.mock('../../config/settings.js', () => ({
   loadSettings: vi.fn().mockReturnValue({

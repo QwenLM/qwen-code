@@ -8,6 +8,7 @@ import {
   isScopedNpmPackage,
   resolveNpmRegistry,
   checkNpmUpdate,
+  downloadFromNpmRegistry,
 } from './npm.js';
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import { ExtensionUpdateState } from './extensionManager.js';
@@ -189,6 +190,45 @@ function mockNpmRegistryResponse(data: object) {
     },
   );
 }
+
+function mockNpmRegistryStatus(statusCode: number) {
+  vi.mocked(https.get).mockImplementation(
+    (_url: unknown, _options: unknown, callback: unknown) => {
+      const mockRes = {
+        statusCode,
+        headers: {},
+        on: vi.fn(),
+      };
+      if (typeof callback === 'function') {
+        callback(mockRes as never);
+      }
+      return { on: vi.fn() } as never;
+    },
+  );
+}
+
+describe('downloadFromNpmRegistry', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('redacts credentialed registry URLs in metadata request errors', async () => {
+    mockNpmRegistryStatus(404);
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://user:token@registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow(
+      'npm registry request failed with status 404: https://***REDACTED***@registry.example.com/@scope%2fpkg',
+    );
+  });
+});
 
 describe('checkNpmUpdate', () => {
   beforeEach(() => {

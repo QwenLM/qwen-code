@@ -43,6 +43,20 @@ export interface GitHubDownloadResult {
   type: 'git' | 'github-release';
 }
 
+function createRedactedErrorCause(error: unknown, message: string): Error {
+  if (!(error instanceof Error)) {
+    return new Error(message);
+  }
+  const cause = Object.create(Object.getPrototypeOf(error)) as Error;
+  Object.defineProperties(cause, Object.getOwnPropertyDescriptors(error));
+  Object.defineProperty(cause, 'message', {
+    value: message,
+    configurable: true,
+    writable: true,
+  });
+  return cause;
+}
+
 function getGitHubToken(): string | undefined {
   return process.env['GITHUB_TOKEN'];
 }
@@ -105,7 +119,7 @@ export async function cloneFromGit(
     throw new Error(
       `Failed to clone Git repository from ${redactedSource} ${redactedErrorMessage}`,
       {
-        cause: new Error(redactedErrorMessage),
+        cause: createRedactedErrorCause(error, redactedErrorMessage),
       },
     );
   }

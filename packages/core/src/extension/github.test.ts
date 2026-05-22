@@ -201,6 +201,42 @@ describe('git extension helpers', () => {
       expect(message).not.toContain('token');
     });
 
+    it('should preserve clone failure cause diagnostics while redacting its message', async () => {
+      const installMetadata = {
+        source: 'https://user:token@my-repo.com/org/repo.git',
+        type: 'git' as const,
+      };
+      const destination = '/dest';
+      const gitError = Object.assign(
+        new Error(
+          "fatal: Authentication failed for 'https://user:token@my-repo.com/org/repo.git'",
+        ),
+        {
+          code: 'ENOTFOUND',
+          task: { commands: ['clone'] },
+        },
+      );
+      mockGit.clone.mockRejectedValue(gitError);
+
+      let cause: unknown;
+      try {
+        await cloneFromGit(installMetadata, destination);
+      } catch (error: unknown) {
+        cause = error instanceof Error ? error.cause : undefined;
+      }
+
+      expect(cause).toBeInstanceOf(Error);
+      expect(cause).not.toBe(gitError);
+      expect((cause as Error).message).toContain(
+        'https://***REDACTED***@my-repo.com/org/repo.git',
+      );
+      expect((cause as Error).message).not.toContain('user');
+      expect((cause as { code?: string }).code).toBe('ENOTFOUND');
+      expect((cause as { task?: { commands: string[] } }).task).toEqual({
+        commands: ['clone'],
+      });
+    });
+
     it('should throw on clone error', async () => {
       const installMetadata = {
         source: 'http://my-repo.com',

@@ -1303,7 +1303,7 @@ export class ExtensionManager {
       } catch (e) {
         callback(extension.name, ExtensionUpdateState.ERROR);
         throw new Error(
-          `Updated extension not found after installation, got error:\n${e}`,
+          `Updated extension not found after installation, got error:\n${redactUrlCredentials(getErrorMessage(e))}`,
         );
       }
       const updatedVersion = updatedExtension.version;
