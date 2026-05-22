@@ -17,6 +17,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   ExtensionManager: vi
     .fn()
     .mockImplementation(() => mockExtensionManagerInstance),
+  redactUrlCredentials: (source: string) =>
+    source.replace(/\/\/[^@]+@/, '//***REDACTED***@'),
 }));
 
 vi.mock('../../config/settings.js', () => ({
@@ -131,5 +133,27 @@ describe('extensionToOutputString', () => {
     );
 
     expect(resultWithoutInline).toEqual(resultWithInlineFalse);
+  });
+
+  it('should redact URL credentials in install source output', () => {
+    const extension = createMockExtension({
+      installMetadata: {
+        type: 'git',
+        source: 'https://user:token@example.com/owner/repo.git',
+      },
+    });
+
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+      true,
+    );
+
+    expect(result).toContain(
+      'https://***REDACTED***@example.com/owner/repo.git',
+    );
+    expect(result).not.toContain('user');
+    expect(result).not.toContain('token');
   });
 });

@@ -22,6 +22,7 @@ import {
 } from './extensionManager.js';
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import { checkNpmUpdate } from './npm.js';
+import { redactUrlCredentials } from './redaction.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 
@@ -55,6 +56,7 @@ export async function cloneFromGit(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
 ): Promise<void> {
+  const redactedSource = redactUrlCredentials(installMetadata.source);
   try {
     const git = simpleGit(destination);
     let sourceUrl = installMetadata.source;
@@ -88,9 +90,7 @@ export async function cloneFromGit(
 
     const remotes = await git.getRemotes(true);
     if (remotes.length === 0) {
-      throw new Error(
-        `Unable to find any remotes for repo ${installMetadata.source}`,
-      );
+      throw new Error(`Unable to find any remotes for repo ${redactedSource}`);
     }
 
     const refToFetch = installMetadata.ref || 'HEAD';
@@ -102,7 +102,7 @@ export async function cloneFromGit(
     await git.checkout('FETCH_HEAD');
   } catch (error) {
     throw new Error(
-      `Failed to clone Git repository from ${installMetadata.source} ${getErrorMessage(error)}`,
+      `Failed to clone Git repository from ${redactedSource} ${redactUrlCredentials(getErrorMessage(error))}`,
       {
         cause: error,
       },
@@ -120,7 +120,7 @@ export function parseGitHubRepoForReleases(source: string): {
   const parts = parsedUrl?.pathname.substring(1).split('/');
   if (parts?.length !== 2 || parsedUrl?.host !== 'github.com') {
     throw new Error(
-      `Invalid GitHub repository source: ${source}. Expected "owner/repo" or a github repo uri.`,
+      `Invalid GitHub repository source: ${redactUrlCredentials(source)}. Expected "owner/repo" or a github repo uri.`,
     );
   }
   const owner = parts[0];
@@ -158,14 +158,14 @@ export async function checkForExtensionUpdate(
       });
     } catch (e) {
       debugLogger.error(
-        `Failed to check for update for local extension "${extension.name}". Could not load extension from source path: ${installMetadata.source}. Error: ${getErrorMessage(e)}`,
+        `Failed to check for update for local extension "${extension.name}". Could not load extension from source path: ${redactUrlCredentials(installMetadata.source)}. Error: ${redactUrlCredentials(getErrorMessage(e))}`,
       );
       return ExtensionUpdateState.NOT_UPDATABLE;
     }
 
     if (!latestConfig) {
       debugLogger.error(
-        `Failed to check for update for local extension "${extension.name}". Could not load extension from source path: ${installMetadata.source}`,
+        `Failed to check for update for local extension "${extension.name}". Could not load extension from source path: ${redactUrlCredentials(installMetadata.source)}`,
       );
       return ExtensionUpdateState.NOT_UPDATABLE;
     }
@@ -244,7 +244,7 @@ export async function checkForExtensionUpdate(
     }
   } catch (error) {
     debugLogger.error(
-      `Failed to check for updates for extension "${installMetadata.source}": ${getErrorMessage(error)}`,
+      `Failed to check for updates for extension "${redactUrlCredentials(installMetadata.source)}": ${redactUrlCredentials(getErrorMessage(error))}`,
     );
     return ExtensionUpdateState.ERROR;
   }
@@ -353,7 +353,7 @@ export async function downloadFromGitHubRelease(
     };
   } catch (error) {
     throw new Error(
-      `Failed to download release from ${installMetadata.source}: ${getErrorMessage(error)}`,
+      `Failed to download release from ${redactUrlCredentials(installMetadata.source)}: ${redactUrlCredentials(getErrorMessage(error))}`,
     );
   }
 }

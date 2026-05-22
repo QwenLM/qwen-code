@@ -62,6 +62,23 @@ describe('parseNpmPackageSource', () => {
       'Invalid scoped npm package source',
     );
   });
+
+  it('should redact URL credentials in invalid source errors', () => {
+    const source = 'https://user:token@example.com/some-package';
+
+    let message = '';
+    try {
+      parseNpmPackageSource(source);
+    } catch (error: unknown) {
+      message = String(error);
+    }
+
+    expect(message).toContain(
+      'https://***REDACTED***@example.com/some-package',
+    );
+    expect(message).not.toContain('user');
+    expect(message).not.toContain('token');
+  });
 });
 
 describe('isScopedNpmPackage', () => {

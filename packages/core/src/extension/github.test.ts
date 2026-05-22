@@ -152,6 +152,28 @@ describe('git extension helpers', () => {
       );
     });
 
+    it('should redact URL credentials in clone failures', async () => {
+      const installMetadata = {
+        source: 'https://user:token@my-repo.com/org/repo.git',
+        type: 'git' as const,
+      };
+      const destination = '/dest';
+      mockGit.getRemotes.mockResolvedValue([]);
+
+      let message = '';
+      try {
+        await cloneFromGit(installMetadata, destination);
+      } catch (error: unknown) {
+        message = String(error);
+      }
+
+      expect(message).toContain(
+        'https://***REDACTED***@my-repo.com/org/repo.git',
+      );
+      expect(message).not.toContain('user');
+      expect(message).not.toContain('token');
+    });
+
     it('should throw on clone error', async () => {
       const installMetadata = {
         source: 'http://my-repo.com',
@@ -418,6 +440,23 @@ describe('git extension helpers', () => {
       expect(() => parseGitHubRepoForReleases(source)).toThrow(
         'Invalid GitHub repository source: https://example.com/owner/repo.git. Expected "owner/repo" or a github repo uri.',
       );
+    });
+
+    it('should redact URL credentials in invalid source errors', () => {
+      const source = 'https://user:token@example.com/owner/repo.git';
+
+      let message = '';
+      try {
+        parseGitHubRepoForReleases(source);
+      } catch (error: unknown) {
+        message = String(error);
+      }
+
+      expect(message).toContain(
+        'https://***REDACTED***@example.com/owner/repo.git',
+      );
+      expect(message).not.toContain('user');
+      expect(message).not.toContain('token');
     });
 
     it('should parse owner and repo from a shorthand string', () => {
