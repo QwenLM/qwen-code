@@ -53,7 +53,10 @@ import { escapeSystemReminderTags, escapeXml } from '../utils/xml.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import {
+  detectCommandSubstitution,
+  stripShellWrapper,
+} from '../utils/shell-utils.js';
 import {
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
@@ -783,6 +786,35 @@ function partitionToolCalls(calls: ScheduledToolCall[]): ToolBatch[] {
     }
     return batches;
   }, []);
+}
+
+/**
+ * Tool names whose confirmation prompt may emit a command-substitution
+ * warning. When the L5 override (YOLO / auto-approve) skips
+ * `getConfirmationDetails()`, that warning never reaches the user. The
+ * substitution is still *executed* — by design, since #4093 made
+ * substitution-bearing commands overridable — but operators
+ * troubleshooting an exfiltration incident need an audit trail. Emit a
+ * DEBUG-level log here so the signal exists when `DEBUG=*` is set,
+ * without spamming every YOLO invocation.
+ */
+const SHELL_LIKE_TOOL_NAMES_FOR_SUBST_AUDIT: ReadonlySet<string> = new Set([
+  ToolNames.SHELL,
+  ToolNames.MONITOR,
+]);
+
+function maybeLogSubstitutionBypass(
+  canonicalName: string,
+  args: Record<string, unknown> | undefined,
+  approvalMode: ApprovalMode,
+  bypassReason: 'yolo' | 'auto-approve',
+): void {
+  if (!SHELL_LIKE_TOOL_NAMES_FOR_SUBST_AUDIT.has(canonicalName)) return;
+  const cmd = args?.['command'];
+  if (typeof cmd !== 'string' || !detectCommandSubstitution(cmd)) return;
+  debugLogger.warn(
+    `Auto-approving ${canonicalName} command with substitution (mode=${approvalMode}, bypass=${bypassReason}): ${cmd}`,
+  );
 }
 
 export class CoreToolScheduler {
@@ -1706,6 +1738,12 @@ export class CoreToolScheduler {
             );
             switch (outcome.kind) {
               case 'approved':
+                maybeLogSubstitutionBypass(
+                  canonicalName,
+                  reqInfo.args,
+                  approvalMode,
+                  'auto-approve',
+                );
                 this.setToolCallOutcome(
                   reqInfo.callId,
                   ToolConfirmationOutcome.ProceedAlways,
@@ -1753,6 +1791,12 @@ export class CoreToolScheduler {
           if (
             !needsConfirmation(finalPermission, approvalMode, canonicalName)
           ) {
+            maybeLogSubstitutionBypass(
+              canonicalName,
+              reqInfo.args,
+              approvalMode,
+              'yolo',
+            );
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
