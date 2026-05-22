@@ -96,20 +96,10 @@ function removeUserOnlySettings(settings: Settings): Settings {
           continue;
         }
 
-        // Handle deeply nested objects
-        if (
-          nestedValue &&
-          typeof nestedValue === 'object' &&
-          !Array.isArray(nestedValue) &&
-          nestedDef?.properties
-        ) {
-          // For deeper nesting, recursively process
-          filteredNested[nestedKey] = removeUserOnlySettings(
-            nestedValue as Settings,
-          );
-        } else {
-          filteredNested[nestedKey] = nestedValue;
-        }
+        // Note: userOnly is only supported at depth ≤ 2 (e.g., ui.fortuneCommand).
+        // The schema is exactly 2 levels deep, and recursive filtering beyond that
+        // would fail because getSettingsSchema() returns only top-level keys.
+        filteredNested[nestedKey] = nestedValue;
       }
 
       if (Object.keys(filteredNested).length > 0) {
