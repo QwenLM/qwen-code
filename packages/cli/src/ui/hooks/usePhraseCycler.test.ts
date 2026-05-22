@@ -230,7 +230,7 @@ describe('usePhraseCycler', () => {
     expect(mockGetFortuneQuote).not.toHaveBeenCalled();
   });
 
-  it('should clear interval on unmount when inactive', () => {
+  it('should not call clearInterval on unmount when no interval is active', () => {
     const { unmount } = renderHook(() => usePhraseCycler(false, false));
     const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
     unmount();
