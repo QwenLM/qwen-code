@@ -328,6 +328,12 @@ describe('AppContainer State Management', () => {
     // Mock Config
     mockConfig = makeFakeConfig();
 
+    // makeFakeConfig() returns a real Config whose initialize() throws
+    // "Config was already initialized" on the second call. React double-invokes
+    // the mount effect, so the real method rejects and leaks async renders into
+    // later tests — making footer-measurement assertions flaky. Stub it out.
+    vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
 
@@ -2358,7 +2364,11 @@ describe('AppContainer State Management', () => {
           initializationResult={mockInitResult}
         />,
       );
-      const callsAfterInitialRender = mockedMeasureElement.mock.calls.length;
+
+      // Reset call tracking after initial render to isolate rerender calls.
+      // This avoids flakiness from React 19's variable mount-time invocation
+      // count (e.g. StrictMode double-invoke, multiple reconciliation passes).
+      mockedMeasureElement.mockClear();
 
       historyManager.history = makeTodoHistory('in_progress');
       view.rerender(
@@ -2370,9 +2380,7 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      expect(mockedMeasureElement).toHaveBeenCalledTimes(
-        callsAfterInitialRender,
-      );
+      expect(mockedMeasureElement).not.toHaveBeenCalled();
     });
   });
 
