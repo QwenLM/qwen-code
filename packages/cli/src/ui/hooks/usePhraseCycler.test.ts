@@ -309,4 +309,50 @@ describe('usePhraseCycler', () => {
     });
     expect(result.current).toBe(differentQuotes[1]);
   });
+
+  it('should fall back to first witty phrase when fortune command throws an error', async () => {
+    mockGetFortuneQuote.mockRejectedValue(
+      new Error('Fortune command not found'),
+    );
+
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, '/usr/games/fortune'),
+    );
+
+    // Wait for the async fortune call to complete and catch error
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current).toBe(MOCK_WITTY_PHRASES[0]);
+  });
+
+  it('should fall back to first witty phrase when fortune command throws on interval update', async () => {
+    // First call succeeds, second call throws
+    mockGetFortuneQuote
+      .mockResolvedValueOnce(MOCK_FORTUNE_QUOTE)
+      .mockRejectedValueOnce(new Error('Timeout'));
+
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, true, '/usr/games/fortune'),
+    );
+
+    // Wait for initial fortune call
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current).toBe(MOCK_FORTUNE_QUOTE);
+
+    // Advance time to trigger interval update
+    act(() => {
+      vi.advanceTimersByTime(PHRASE_CHANGE_INTERVAL_MS);
+    });
+
+    // Wait for async call to fail and fallback
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current).toBe(MOCK_WITTY_PHRASES[0]);
+  });
 });
