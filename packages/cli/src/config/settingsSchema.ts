@@ -68,7 +68,7 @@ export interface SettingDefinition {
   type: SettingsType;
   label: string;
   category: string;
-  requiresRestart: boolean;
+  requiresRestart?: boolean;
   default: SettingsValue;
   description?: string;
   parentKey?: string;
