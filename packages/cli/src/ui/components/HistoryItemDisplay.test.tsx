@@ -113,6 +113,16 @@ describe('<HistoryItemDisplay />', () => {
       cronJobId: 'job-1',
       customSources: [],
       lastRun: '001-fix (success)',
+      recentRuns: [
+        {
+          status: 'success',
+          issueNumber: 4347,
+          task: 'Strip provider-leaked scratchpad',
+          branch: 'auto-improve/issue-4347-state-snapshot-extract',
+          commit: '91ecebc296dae1ef3db54b01fbb1abca7a963c59',
+          runDoc: '.qwen/auto-improve/loops/loop-1/runs/run-issue-4347.md',
+        },
+      ],
     };
     const { lastFrame } = renderWithProviders(
       <HistoryItemDisplay {...baseItem} item={item} />,
@@ -120,6 +130,12 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toContain('Auto-Improve');
     expect(lastFrame()).toContain('dragon/feat-self-improve');
     expect(lastFrame()).toContain('001-fix (success)');
+    expect(lastFrame()).toContain('issue #4347');
+    expect(lastFrame()).toContain('Branch');
+    expect(lastFrame()).toContain(
+      'auto-improve/issue-4347-state-snapshot-extract',
+    );
+    expect(lastFrame()).toContain('91ecebc296d');
   });
 
   it('renders ModelStatsDisplay for "model_stats" type', () => {

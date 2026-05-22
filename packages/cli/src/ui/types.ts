@@ -181,7 +181,18 @@ export type HistoryItemAutoImproveStatus = HistoryItemBase & {
   customSources: string[];
   currentRun?: string;
   lastRun?: string;
-  recentRuns?: string[];
+  recentRuns?: HistoryItemAutoImproveRun[];
+};
+
+export type HistoryItemAutoImproveRun = {
+  status: string;
+  source?: string;
+  task?: string;
+  branch?: string;
+  commit?: string;
+  runDoc?: string;
+  issueNumber?: number;
+  prNumber?: number;
 };
 
 export type HistoryItemHelp = HistoryItemBase & {

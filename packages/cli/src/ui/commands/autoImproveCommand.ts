@@ -34,7 +34,10 @@ import {
   type AutoImproveLoopState,
   type AutoImproveRunRecord,
 } from './autoImproveState.js';
-import type { HistoryItemAutoImproveStatus } from '../types.js';
+import type {
+  HistoryItemAutoImproveRun,
+  HistoryItemAutoImproveStatus,
+} from '../types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -264,7 +267,7 @@ function formatRunRef(value: unknown): string | null {
   return null;
 }
 
-function formatRunRecord(record: AutoImproveRunRecord): string {
+function formatRunRecord(record: HistoryItemAutoImproveRun): string {
   const parts: string[] = [record.status];
   if (record.issueNumber !== undefined) {
     parts.push(`issue #${record.issueNumber}`);
@@ -278,6 +281,23 @@ function formatRunRecord(record: AutoImproveRunRecord): string {
   if (record.commit) parts.push(record.commit);
   if (record.runDoc) parts.push(record.runDoc);
   return parts.join(' · ');
+}
+
+function toHistoryRunRecord(
+  record: AutoImproveRunRecord,
+): HistoryItemAutoImproveRun {
+  return {
+    status: record.status,
+    ...(record.source ? { source: record.source } : {}),
+    ...(record.task ? { task: record.task } : {}),
+    ...(record.branch ? { branch: record.branch } : {}),
+    ...(record.commit ? { commit: record.commit } : {}),
+    ...(record.runDoc ? { runDoc: record.runDoc } : {}),
+    ...(record.issueNumber !== undefined
+      ? { issueNumber: record.issueNumber }
+      : {}),
+    ...(record.prNumber !== undefined ? { prNumber: record.prNumber } : {}),
+  };
 }
 
 function buildStatusItem(
@@ -300,7 +320,7 @@ function buildStatusItem(
     customSources: state.sourceSnapshot.customSources,
     currentRun: formatRunRef(state.currentRun) ?? undefined,
     lastRun: formatRunRef(state.lastRun) ?? undefined,
-    recentRuns: recentRunRecords.map((record) => formatRunRecord(record)),
+    recentRuns: recentRunRecords.map((record) => toHistoryRunRecord(record)),
   };
 }
 
@@ -308,33 +328,37 @@ function formatStatusText(
   statusItem: Omit<HistoryItemAutoImproveStatus, 'type' | 'text'>,
 ): string {
   const lines = [
-    'Auto-Improve',
-    `Status: ${statusItem.status}`,
-    `Loop: ${statusItem.loopId}`,
-    `Cadence: ${statusItem.cadence} (${statusItem.cron})`,
-    `Target branch: ${statusItem.targetBranch}`,
-    `Sources: ${statusItem.sources}`,
-    `Cron job: ${statusItem.cronJobId ?? 'none'}`,
+    t('Auto-Improve'),
+    `${t('Status')}: ${t(statusItem.status)}`,
+    `${t('Loop')}: ${statusItem.loopId}`,
+    `${t('Cadence')}: ${statusItem.cadence} (${statusItem.cron})`,
+    `${t('Default branch')}: ${statusItem.targetBranch}`,
+    `${t('Sources')}: ${statusItem.sources}`,
+    `${t('Cron job')}: ${statusItem.cronJobId ?? t('none')}`,
   ];
   if (statusItem.statusNote) lines.push(statusItem.statusNote);
-  lines.push('Prompt:', `  ${statusItem.prompt || '(none)'}`);
+  lines.push(`${t('Prompt')}:`, `  ${statusItem.prompt || t('(none)')}`);
   if (statusItem.customSources.length > 0) {
     lines.push(
-      'Custom sources:',
+      `${t('Custom sources')}:`,
       ...statusItem.customSources.map((source) => `  - ${source}`),
     );
   }
   if (statusItem.currentRun) {
-    lines.push(`Current run: ${statusItem.currentRun}`);
+    lines.push(`${t('Current run')}: ${statusItem.currentRun}`);
   }
   if (statusItem.lastRun) {
-    lines.push(`Last run: ${statusItem.lastRun}`);
+    lines.push(`${t('Last run')}: ${statusItem.lastRun}`);
   }
   if (statusItem.recentRuns && statusItem.recentRuns.length > 0) {
-    lines.push(
-      'Recent runs:',
-      ...statusItem.recentRuns.map((run) => `  - ${run}`),
-    );
+    lines.push(`${t('Recent runs')}:`);
+    for (const run of statusItem.recentRuns) {
+      lines.push(`  - ${formatRunRecord({ ...run, status: t(run.status) })}`);
+      if (run.branch) lines.push(`    ${t('Branch')}: ${run.branch}`);
+      if (run.commit)
+        lines.push(`    ${t('Commit')}: ${run.commit.slice(0, 12)}`);
+      if (run.runDoc) lines.push(`    ${t('Run doc')}: ${run.runDoc}`);
+    }
   }
   return lines.join('\n');
 }

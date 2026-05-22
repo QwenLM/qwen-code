@@ -8,7 +8,10 @@ import type React from 'react';
 import { Box, Text } from 'ink';
 import { t } from '../../i18n/index.js';
 import { theme } from '../semantic-colors.js';
-import type { HistoryItemAutoImproveStatus } from '../types.js';
+import type {
+  HistoryItemAutoImproveRun,
+  HistoryItemAutoImproveStatus,
+} from '../types.js';
 
 type AutoImproveStatusBoxProps = Omit<
   HistoryItemAutoImproveStatus,
@@ -48,6 +51,67 @@ const Row: React.FC<{ label: string; value: string; color?: string }> = ({
   </Box>
 );
 
+function getRunStatusColor(status: string): string {
+  switch (status) {
+    case 'success':
+      return theme.status.success;
+    case 'failed':
+    case 'blocked':
+      return theme.status.error;
+    case 'cancelled':
+      return theme.status.warning;
+    default:
+      return theme.text.primary;
+  }
+}
+
+function getRunTitle(run: HistoryItemAutoImproveRun): string {
+  if (run.issueNumber !== undefined) return `issue #${run.issueNumber}`;
+  if (run.prNumber !== undefined) return `PR #${run.prNumber}`;
+  return run.source ?? t('run');
+}
+
+const RunField: React.FC<{ label: string; value: string; color?: string }> = ({
+  label,
+  value,
+  color,
+}) => (
+  <Box marginLeft={2} flexDirection="row">
+    <Box width={10}>
+      <Text color={theme.text.secondary}>{label}</Text>
+    </Box>
+    <Box flexGrow={1}>
+      <Text color={color ?? theme.text.primary}>{value}</Text>
+    </Box>
+  </Box>
+);
+
+const RecentRun: React.FC<{ run: HistoryItemAutoImproveRun }> = ({ run }) => (
+  <Box marginLeft={2} marginTop={1} flexDirection="column">
+    <Box flexDirection="row">
+      <Text color={getRunStatusColor(run.status)}>{t(run.status)}</Text>
+      <Text color={theme.text.secondary}> · </Text>
+      <Text color={theme.text.accent}>{getRunTitle(run)}</Text>
+    </Box>
+    {run.task && (
+      <Box marginLeft={2}>
+        <Text color={theme.text.primary}>{run.task}</Text>
+      </Box>
+    )}
+    {run.branch && (
+      <RunField
+        label={t('Branch')}
+        value={run.branch}
+        color={theme.text.accent}
+      />
+    )}
+    {run.commit && (
+      <RunField label={t('Commit')} value={run.commit.slice(0, 12)} />
+    )}
+    {run.runDoc && <RunField label={t('Run doc')} value={run.runDoc} />}
+  </Box>
+);
+
 export const AutoImproveStatusBox: React.FC<AutoImproveStatusBoxProps> = ({
   width,
   loopId,
@@ -79,12 +143,12 @@ export const AutoImproveStatusBox: React.FC<AutoImproveStatusBoxProps> = ({
           {t('Auto-Improve')}
         </Text>
         <Text color={theme.text.secondary}> </Text>
-        <Text color={statusColor}>{status}</Text>
+        <Text color={statusColor}>{t(status)}</Text>
       </Box>
 
       <Row label={t('Loop')} value={loopId} />
       <Row label={t('Cadence')} value={`${cadence} (${cron})`} />
-      <Row label={t('Target')} value={targetBranch} />
+      <Row label={t('Default branch')} value={targetBranch} />
       <Row label={t('Sources')} value={sources} />
       <Row label={t('Cron job')} value={cronJobId ?? t('none')} />
       {statusNote && (
@@ -127,10 +191,13 @@ export const AutoImproveStatusBox: React.FC<AutoImproveStatusBoxProps> = ({
           <Text bold color={theme.text.link}>
             {t('Recent runs')}
           </Text>
-          {recentRuns.map((run) => (
-            <Box key={run} marginLeft={2}>
-              <Text color={theme.text.primary}>{`- ${run}`}</Text>
-            </Box>
+          {recentRuns.map((run, index) => (
+            <RecentRun
+              key={`${run.issueNumber ?? run.prNumber ?? run.source ?? 'run'}-${
+                run.branch ?? run.commit ?? index
+              }`}
+              run={run}
+            />
           ))}
         </Box>
       )}
