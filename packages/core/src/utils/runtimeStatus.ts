@@ -29,9 +29,13 @@
  *   keeps running while no longer serving the recorded session
  *   (e.g. a hypothetical future mode-switch). Not currently invoked.
  *
- * The file is written atomically (tmp-file + rename) and contains a
- * small, stable schema. External consumers should treat unknown fields
- * as forward-compatible additions.
+ * The file is normally written atomically (tmp-file + rename); when
+ * the existing status file's owner differs from the daemon process
+ * (rare, e.g. bind-mounted state dir in a container-as-root setup),
+ * the write falls back to in-place truncate+write to preserve uid/gid.
+ * See {@link atomicWriteJSON} for the conditional-atomic contract.
+ * The schema is small and stable; external consumers should treat
+ * unknown fields as forward-compatible additions.
  */
 
 import * as fs from 'node:fs/promises';

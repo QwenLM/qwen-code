@@ -95,6 +95,63 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
 }
 
 /**
+ * In-place truncate+write that defends against three races the
+ * path-based `fs.writeFile` form does not:
+ *
+ * - `O_NOFOLLOW` rejects a final-component symlink (no follow to
+ *   attacker-chosen target).
+ * - **No `O_CREAT`** surfaces `ENOENT` instead of silently recreating a
+ *   file the attacker just unlinked — which would re-introduce the
+ *   exact ownership reset this whole codepath exists to prevent.
+ * - `fstat` after open verifies the bound inode's uid/gid still match
+ *   what we observed in the caller's stat; refuses the write otherwise
+ *   so an inode-swap between stat and open cannot trick us into writing
+ *   to the wrong file.
+ *
+ * Caller has already confirmed `existingStat.isFile()`; non-regular
+ * targets (FIFO, socket, device) must not reach this function, since
+ * `open(O_WRONLY|O_TRUNC)` against them is either blocking (FIFO) or
+ * destructive (device).
+ */
+async function writeInPlaceWithFdGuards(
+  targetPath: string,
+  data: string | Buffer,
+  expectedStat: Stats,
+  options: { encoding?: BufferEncoding; flush?: boolean; mode?: number },
+): Promise<void> {
+  const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+  const flags = fs.constants.O_WRONLY | fs.constants.O_TRUNC | O_NOFOLLOW;
+  const fh = await fs.open(targetPath, flags);
+  try {
+    const fdStat = await fh.stat();
+    if (fdStat.uid !== expectedStat.uid || fdStat.gid !== expectedStat.gid) {
+      const err: NodeJS.ErrnoException = new Error(
+        `ownership of ${targetPath} changed between stat and open ` +
+          `(was ${expectedStat.uid}:${expectedStat.gid}, ` +
+          `is ${fdStat.uid}:${fdStat.gid})`,
+      );
+      err.code = 'EOWNERSHIP_CHANGED';
+      throw err;
+    }
+    const fhWriteOptions: { encoding?: BufferEncoding; flush?: boolean } = {};
+    if (typeof data === 'string' && options.encoding) {
+      fhWriteOptions.encoding = options.encoding;
+    }
+    if (options.flush) fhWriteOptions.flush = true;
+    await fh.writeFile(data, fhWriteOptions);
+    if (options.mode !== undefined) {
+      try {
+        await fh.chmod(options.mode);
+      } catch {
+        // Ignore — not all filesystems support chmod.
+      }
+    }
+  } finally {
+    await fh.close();
+  }
+}
+
+/**
  * Atomically write arbitrary content (string or Buffer) to a file.
  *
  * 1. Resolve symlinks (including broken ones) so the temp file lives
@@ -107,15 +164,15 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  *    can leave a partially-written file. EXDEV only occurs when the
  *    resolved target path is on a different filesystem than its parent
  *    directory, which is rare in practice.
- * 6. **Ownership preservation.** If the existing file is owned by a
- *    different uid/gid than the calling process's euid/egid, fall back
- *    to in-place truncate+write instead of rename. POSIX rename creates
- *    a new inode owned by the process's euid/egid, which would silently
- *    strip the original ownership and break shared-write setups
- *    (e.g. group-writable files in a shared workspace, or files inside
- *    a bind-mounted Docker volume edited by root in-container). The
- *    in-place write preserves the inode — and therefore uid/gid — at
- *    the cost of three properties:
+ * 6. **Ownership preservation.** If the existing file is a regular
+ *    file owned by a different uid/gid than the calling process's
+ *    euid/egid, fall back to in-place truncate+write instead of
+ *    rename. POSIX rename creates a new inode owned by the process's
+ *    euid/egid, which would silently strip the original ownership and
+ *    break shared-write setups (e.g. group-writable files in a shared
+ *    workspace, or files inside a bind-mounted Docker volume edited
+ *    by root in-container). The in-place write preserves the inode —
+ *    and therefore uid/gid — at the cost of four observable shifts:
  *      - **Crash atomicity** — a crash mid-write can leave a
  *        partially-written file.
  *      - **Concurrent reader isolation** — readers can observe a
@@ -124,6 +181,18 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  *        than `MOVED_TO` / `CREATE`. Most watchers (chokidar, VSCode)
  *        handle both, but consumers that only watch for one will miss
  *        these writes.
+ *      - **Hardlink propagation** — rename creates a fresh inode, so
+ *        sibling hardlinks to the previous inode retain the old
+ *        content; in-place truncate+write keeps the inode, so every
+ *        hardlink to it sees the new content. Backup / snapshot /
+ *        dedup workflows that watch hardlink siblings will see a
+ *        behavior shift.
+ *    The in-place path is hardened against symlink-swap, unlink-race,
+ *    and inode-swap attacks via `O_NOFOLLOW` + missing `O_CREAT` +
+ *    post-open `fstat` verification. Non-regular targets (FIFO,
+ *    socket, device) bypass the in-place fallback and take the atomic
+ *    rename path, which has well-defined "replace with regular file"
+ *    semantics instead of FIFO-blocking or device-write footguns.
  *    If the file is not writable by the current process (mode forbids
  *    it), the in-place fallback surfaces `EACCES` — which is the
  *    correct behavior (rename would have silently replaced a file the
@@ -198,9 +267,22 @@ export async function atomicWriteFile(
     return existingStat.uid !== euid || existingStat.gid !== egid;
   };
 
-  if (ownershipWouldChange()) {
-    await fs.writeFile(targetPath, data, writeOptions);
-    await tryChmod(targetPath);
+  // Non-regular targets (FIFO, socket, device) skip the in-place
+  // fallback even when ownership mismatches: open(O_WRONLY|O_TRUNC) on
+  // a FIFO blocks until a reader appears, and on a device writes to the
+  // actual device. Both are far worse than the alternative "rename
+  // replaces the special file with a regular file" semantics that the
+  // atomic path provides for these cases.
+  if (
+    existingStat !== undefined &&
+    existingStat.isFile() &&
+    ownershipWouldChange()
+  ) {
+    await writeInPlaceWithFdGuards(targetPath, data, existingStat, {
+      encoding: typeof data === 'string' ? encoding : undefined,
+      flush,
+      mode: desiredMode,
+    });
     return;
   }
 
@@ -232,8 +314,13 @@ export async function atomicWriteFile(
 /**
  * Atomically write a JSON value to a file.
  *
- * Delegates to {@link atomicWriteFile} for the actual atomic
- * write-to-temp + rename flow.
+ * Delegates to {@link atomicWriteFile}. The write is **conditionally**
+ * atomic: when the existing file's uid/gid matches the calling
+ * process's euid/egid, this uses the write-to-temp + rename atomic
+ * path. When ownership differs (shared-write workspace, Docker
+ * bind-mount edited by a different user), it falls back to in-place
+ * truncate+write to preserve uid/gid — see the ownership-preservation
+ * note on {@link atomicWriteFile} for the full trade-off list.
  *
  * Note: if `filePath` is a symlink, the write resolves the chain
  * and updates the real target file — the symlink itself is preserved.
