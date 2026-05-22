@@ -413,8 +413,8 @@ Hard rules:
 
 Task selection guidance:
 - If GitHub issues are enabled, use gh to inspect open issues and prefer clear, unassigned issues with no assignees that are locally verifiable bugs or small enhancements.
-- If GitHub PRs are enabled, inspect relevant current-repo PRs and prefer open, non-draft PRs. Draft PRs are lower priority unless the user explicitly asked for them.
-- For GitHub PR work, focus on actionable unresolved review comments, requested changes, and failing checks. Do not treat already-resolved comments or mere comment history as work to fix.
+- If GitHub PRs are enabled, identify the authenticated GitHub user with gh, then inspect current-repo PRs authored by that user and prefer their open, non-draft PRs. Draft PRs are lower priority unless the user explicitly asked for them.
+- For GitHub PR work, focus on actionable unresolved review comments, requested changes, and failing checks on the user's own PRs. Unless the user explicitly requested a specific other user's PR, do not inspect or modify other users' PRs, CI failures, or review comments. Do not treat already-resolved comments or mere comment history as work to fix.
 - If local repository scanning is enabled, inspect the current repo for small, locally verifiable improvements: TODO/FIXME comments, skipped or failing tests, missing tests around changed code, stale docs, and open project notes under .qwen/design and .qwen/e2e-tests.
 - If custom sources are configured, treat each item as a user-provided source hint, then inspect or follow it where applicable.
 - If no sources and no start prompt are configured, do a minimal repository inspection and choose a useful small local task.
