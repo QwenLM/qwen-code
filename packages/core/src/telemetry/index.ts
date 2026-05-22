@@ -107,6 +107,7 @@ export {
   recordInvalidChunk,
   recordContentRetry,
   recordContentRetryFailure,
+  recordApiRetry,
   // Performance monitoring functions
   recordStartupPerformance,
   recordMemoryUsage,

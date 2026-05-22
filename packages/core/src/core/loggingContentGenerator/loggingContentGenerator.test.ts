@@ -40,6 +40,11 @@ const loggingSpanRecords = vi.hoisted(
       success?: boolean;
       inputTokens?: number;
       outputTokens?: number;
+      cachedInputTokens?: number;
+      ttftMs?: number;
+      requestSetupMs?: number;
+      attempt?: number;
+      retryTotalDelayMs?: number;
       durationMs?: number;
       error?: string;
     };
@@ -2039,4 +2044,183 @@ describe('LoggingContentGenerator', () => {
       expect(options).toBe(promptId);
     },
   );
+});
+
+// =========================================================================
+// Phase 4b — retryContext ALS propagation into LoggingContentGenerator.
+// Asserts the contract: when the LLM call runs inside a retryContext.run()
+// frame, endLLMRequestSpan receives the frame's values. When no frame is
+// present (warmup, side-query, direct call), `attempt` defaults to 1 and
+// requestSetupMs/retryTotalDelayMs stay undefined.
+// =========================================================================
+describe('LoggingContentGenerator — Phase 4b retry context propagation', () => {
+  beforeEach(() => {
+    loggingSpanRecords.length = 0;
+    vi.mocked(logApiRequest).mockClear();
+    vi.mocked(logApiResponse).mockClear();
+    vi.mocked(logApiError).mockClear();
+  });
+
+  it('non-stream: forwards retryContext.attempt/requestSetupMs/retryTotalDelayMs to endLLMRequestSpan', async () => {
+    const { retryContext } = await import('../../utils/retryContext.js');
+
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockResolvedValue(
+        createResponse('r-1', 'test-model', [{ text: 'ok' }], {
+          promptTokenCount: 10,
+          candidatesTokenCount: 5,
+          totalTokenCount: 15,
+        }),
+      ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // Simulate being invoked from within `retryWithBackoff`'s ALS frame —
+    // the LoggingContentGenerator must read these values and forward them.
+    await retryContext.run(
+      { attempt: 3, requestSetupMs: 1200, retryTotalDelayMs: 1000 },
+      async () => {
+        await generator.generateContent(request, 'prompt-retry');
+      },
+    );
+
+    const record = getGenerateContentSpanRecord();
+    expect(record.endMetadata).toMatchObject({
+      success: true,
+      attempt: 3,
+      requestSetupMs: 1200,
+      retryTotalDelayMs: 1000,
+    });
+  });
+
+  it('non-stream: defaults attempt=1 and leaves setup/delay undefined when no retry context (direct call / warmup)', async () => {
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockResolvedValue(
+        createResponse('r-2', 'test-model', [{ text: 'ok' }], {
+          promptTokenCount: 10,
+          candidatesTokenCount: 5,
+          totalTokenCount: 15,
+        }),
+      ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // No retryContext.run() — direct invocation.
+    await generator.generateContent(request, 'prompt-direct');
+
+    const record = getGenerateContentSpanRecord();
+    const meta = record.endMetadata as {
+      attempt?: number;
+      requestSetupMs?: number;
+      retryTotalDelayMs?: number;
+    };
+    expect(meta.attempt).toBe(1);
+    expect(meta.requestSetupMs).toBeUndefined();
+    expect(meta.retryTotalDelayMs).toBeUndefined();
+  });
+
+  it('stream: snapshots retry context in synchronous prelude and forwards through stream wrapper finally block', async () => {
+    const { retryContext } = await import('../../utils/retryContext.js');
+
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r-s1', 'test-model', [{ text: 'a' }]);
+        yield createResponse('r-s2', 'test-model', [{ text: 'b' }], {
+          promptTokenCount: 50,
+          candidatesTokenCount: 20,
+          totalTokenCount: 70,
+        });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // Critical: the stream wrapper is iterated AFTER retryContext.run resolves
+    // its synchronous body. The closure-captured snapshot must carry values
+    // through to the finally block's endLLMRequestSpan call.
+    await retryContext.run(
+      { attempt: 2, requestSetupMs: 500, retryTotalDelayMs: 400 },
+      async () => {
+        const stream = await generator.generateContentStream(
+          request,
+          'prompt-retry-stream',
+        );
+        for await (const _ of stream) {
+          // consume
+        }
+      },
+    );
+
+    const record = getStreamSpanRecord();
+    expect(record.endMetadata).toMatchObject({
+      success: true,
+      attempt: 2,
+      requestSetupMs: 500,
+      retryTotalDelayMs: 400,
+      inputTokens: 50,
+      outputTokens: 20,
+    });
+  });
+
+  it('stream: defaults attempt=1 when iterated outside any retry frame', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r-s3', 'test-model', [{ text: 'a' }]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-direct',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const record = getStreamSpanRecord();
+    const meta = record.endMetadata as {
+      attempt?: number;
+      requestSetupMs?: number;
+      retryTotalDelayMs?: number;
+    };
+    expect(meta.attempt).toBe(1);
+    expect(meta.requestSetupMs).toBeUndefined();
+    expect(meta.retryTotalDelayMs).toBeUndefined();
+  });
 });
