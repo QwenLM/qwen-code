@@ -251,7 +251,7 @@
           "default": false
         },
         "fortuneCommand": {
-          "description": "Command to execute for fortune quotes. Use -s for short fortunes, -n <chars> to limit length. Set `enableFortunes` to false to disable. Requires restart to apply. **User-only setting**: This setting can only be configured in user settings, not in workspace settings.",
+          "description": "Command to execute for fortune quotes. Use -s for short fortunes, -n <chars> to limit length. Set `enableFortunes` to false to disable. **User-only setting**: This setting can only be configured in user settings, not in workspace settings.",
           "type": "string",
           "default": "/usr/games/fortune -s -n 45"
         },
