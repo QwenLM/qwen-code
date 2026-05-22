@@ -22,12 +22,16 @@ to throttling.
 - `description` (string, optional): A brief description of what the monitor is
   watching. The display text is truncated to 80 characters.
 - `max_events` (number, optional): Stop after this many notification events.
-  Defaults to `1000`; maximum `10000`.
+  Must be a positive integer. Defaults to `1000`; maximum `10000` (values
+  outside this range are rejected, not silently clamped).
 - `idle_timeout_ms` (number, optional): Stop if the command produces no output
-  for this many milliseconds. Defaults to `300000` (5 minutes); maximum
-  `600000` (10 minutes).
-- `directory` (string, optional): Absolute workspace path to run the command in.
-  If omitted, Qwen Code uses the project root.
+  for this many milliseconds. Must be a positive integer. Defaults to `300000`
+  (5 minutes); maximum `600000` (10 minutes), and values outside this range are
+  rejected.
+- `directory` (string, optional): An absolute path to run the command in. Must
+  resolve (after symlink canonicalization) inside one of the registered
+  workspace directories, and must not be inside the user-skills directory. If
+  omitted, Qwen Code uses the project root.
 
 ## How to use `monitor` with Qwen Code
 
@@ -37,7 +41,7 @@ returns a monitor ID, the command, the event limit, and the idle timeout.
 
 Usage:
 
-```bash
+```
 monitor(command="tail -f logs/app.log", description="app log stream")
 ```
 
@@ -47,7 +51,7 @@ Background tasks dialog.
 
 To stop a running monitor, use the `task_stop` tool with the monitor ID:
 
-```bash
+```
 task_stop(task_id="mon_abc123def4567890")
 ```
 
@@ -55,7 +59,7 @@ task_stop(task_id="mon_abc123def4567890")
 
 Watch an application log:
 
-```bash
+```
 monitor(
   command="tail -f logs/app.log",
   description="application log stream",
@@ -65,7 +69,7 @@ monitor(
 
 Monitor a dev server or build watcher:
 
-```bash
+```
 monitor(
   command="npm run build -- --watch",
   description="watch build output",
@@ -75,7 +79,7 @@ monitor(
 
 Poll a local health endpoint:
 
-```bash
+```
 monitor(
   command="while true; do curl -s http://localhost:8080/health; sleep 5; done",
   description="local health check",
@@ -85,7 +89,7 @@ monitor(
 
 Run from a specific workspace directory:
 
-```bash
+```
 monitor(
   command="npm run dev",
   description="frontend dev server",
@@ -104,23 +108,42 @@ result or the complete command output.
 | Watch logs, build output, or periodic status updates   | `monitor`                                |
 | Run a one-time command and read the full output        | `run_shell_command(is_background=false)` |
 | Start a daemon that does not produce meaningful output | `run_shell_command(is_background=true)`  |
-| Keep a long-running process alive without event stream | `run_shell_command(is_background=true)`  |
 
-Do not add `&` to monitor commands. The monitor manages the background process
-lifecycle itself.
+Do not add `&` to monitor commands. A trailing `&`, such as
+`tail -f log &`, is stripped because the monitor manages backgrounding itself.
+A non-final `&`, such as `cmd1 & cmd2`, is rejected outright; restructure such
+commands without backgrounding instead.
 
 ## Important notes
 
 - **Auto-stop behavior:** Monitors stop automatically when they reach
-  `max_events` or when `idle_timeout_ms` elapses without output. The underlying
-  process is killed when the monitor stops.
-- **Concurrency limit:** Qwen Code allows up to 16 running monitors at once.
-  Stop an existing monitor before starting another if the limit is reached.
-- **Output handling:** Stdout and stderr are both converted into notification
-  events. Empty lines are ignored, ANSI color is stripped, and high-volume
-  output may be throttled.
+  `max_events` or when `idle_timeout_ms` elapses without output. Commands
+  cannot be interactive because stdin is closed. When a monitor stops, Qwen Code
+  sends `SIGTERM` to the command's process group and escalates to `SIGKILL`
+  after about 200 ms. On Windows, it uses `taskkill /f /t`. If the Qwen Code
+  process itself is hard-killed, crashes, or runs out of memory, the detached
+  process group is not cleaned up automatically; recover by stopping the monitor
+  with `task_stop` before exit or by terminating the process group manually.
+- **Concurrency limit:** Qwen Code allows up to 16 running monitors per CLI
+  session as a single shared pool. Monitors started by subagents count against
+  the same cap as monitors started by the main agent. Stop an existing monitor
+  before starting another if the limit is reached.
+- **Output handling:** Stdout and stderr are merged into a single notification
+  stream with no stream prefix. Empty lines are ignored, ANSI color and control
+  characters are stripped, and individual lines longer than 2000 characters are
+  truncated. High-volume output is rate-limited with a burst of 5 events and
+  about 1 event per second after that; lines beyond the rate limit are dropped,
+  not buffered. Monitor output flows into the agent context as
+  `<task-notification>` content. Structural notification tags are defanged, but
+  the model still reads each line's text, so avoid monitoring streams that
+  external parties can write to unless you trust the model to ignore embedded
+  instructions.
 - **Permissions:** `monitor` has its own permission boundary and permission
-  rules, such as `Monitor(git status)`. Read-only commands may run without
-  confirmation; other commands can require approval.
+  rules, such as `Monitor(git status)`. Read-only commands are automatically
+  allowed; commands that modify state require user approval; commands containing
+  command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`) are rejected
+  outright. The `tools.core` and `tools.exclude` settings for
+  `run_shell_command` do not apply to `monitor`.
 - **Workspace restriction:** The optional `directory` must be an absolute path
-  inside the current workspace.
+  that resolves inside a registered workspace directory and outside the
+  user-skills directory. Symlinks that point outside the workspace are rejected.
