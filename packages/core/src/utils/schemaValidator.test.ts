@@ -334,6 +334,28 @@ describe('SchemaValidator', () => {
       expect(SchemaValidator.validate(schema, params)).toBeNull();
       expect(params.urls).toEqual(['https://example.com']);
     });
+
+    it('should coerce stringified object when property type is a local $ref', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          config: { $ref: '#/definitions/Config' },
+        },
+        required: ['config'],
+        definitions: {
+          Config: {
+            type: 'object',
+            properties: {
+              key: { type: 'string' },
+            },
+            required: ['key'],
+          },
+        },
+      };
+      const params = { config: '{"key":"value"}' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.config).toEqual({ key: 'value' });
+    });
   });
 
   describe('JSON Schema version support', () => {

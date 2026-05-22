@@ -210,6 +210,33 @@ describe('LspTool', () => {
         } as LspToolParams);
         expect(result).toBeNull();
       });
+
+      it.each(['incomingCalls', 'outgoingCalls'] as LspOperation[])(
+        'accepts JSON-stringified callHierarchyItem values for %s',
+        (operation) => {
+          const item: LspCallHierarchyItem = {
+            name: 'testFunc',
+            uri: 'file:///test.ts',
+            range: {
+              start: { line: 0, character: 0 },
+              end: { line: 0, character: 10 },
+            },
+            selectionRange: {
+              start: { line: 0, character: 0 },
+              end: { line: 0, character: 10 },
+            },
+          };
+          const params = {
+            operation,
+            callHierarchyItem: JSON.stringify(item),
+          } as unknown as LspToolParams;
+
+          const result = tool.validateToolParams(params);
+
+          expect(result).toBeNull();
+          expect(params.callHierarchyItem).toEqual(item);
+        },
+      );
     });
 
     describe('numeric parameter validation', () => {

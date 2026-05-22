@@ -188,17 +188,39 @@ export class SchemaValidator {
  */
 /**
  * Returns the set of JSON Schema types that a property accepts,
- * considering `type`, `anyOf`, and `oneOf` keywords.
+ * considering `type`, local `$ref`, `anyOf`, and `oneOf` keywords.
  */
 function getAcceptedTypes(
   propSchema: Record<string, unknown>,
+  rootSchema: Record<string, unknown>,
 ): Set<string> | null {
   const types = new Set<string>();
+  collectAcceptedTypes(propSchema, rootSchema, types, new Set());
 
-  if (typeof propSchema['type'] === 'string') {
-    types.add(propSchema['type'] as string);
-  } else if (Array.isArray(propSchema['type'])) {
-    for (const t of propSchema['type'] as string[]) {
+  return types.size > 0 ? types : null;
+}
+
+function collectAcceptedTypes(
+  propSchema: Record<string, unknown>,
+  rootSchema: Record<string, unknown>,
+  types: Set<string>,
+  seenRefs: Set<string>,
+) {
+  const ref = propSchema['$ref'];
+  if (typeof ref === 'string' && !seenRefs.has(ref)) {
+    seenRefs.add(ref);
+    const refSchema = resolveLocalRef(ref, rootSchema);
+    if (refSchema) {
+      collectAcceptedTypes(refSchema, rootSchema, types, seenRefs);
+    }
+  }
+
+  const type = propSchema['type'];
+  if (typeof type === 'string') {
+    types.add(type);
+  } else if (Array.isArray(type)) {
+    for (const t of type) {
+      if (typeof t !== 'string') continue;
       types.add(t);
     }
   }
@@ -207,18 +229,39 @@ function getAcceptedTypes(
     const variants = propSchema[keyword];
     if (Array.isArray(variants)) {
       for (const variant of variants as Array<Record<string, unknown>>) {
-        if (typeof variant['type'] === 'string') {
-          types.add(variant['type'] as string);
-        } else if (Array.isArray(variant['type'])) {
-          for (const t of variant['type'] as string[]) {
-            types.add(t);
-          }
-        }
+        collectAcceptedTypes(variant, rootSchema, types, seenRefs);
       }
     }
   }
+}
 
-  return types.size > 0 ? types : null;
+function resolveLocalRef(
+  ref: string,
+  rootSchema: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (!ref.startsWith('#/')) return null;
+
+  let current: unknown = rootSchema;
+  for (const segment of ref.slice(2).split('/')) {
+    if (
+      typeof current !== 'object' ||
+      current === null ||
+      Array.isArray(current)
+    ) {
+      return null;
+    }
+    const key = segment.replace(/~1/g, '/').replace(/~0/g, '~');
+    current = (current as Record<string, unknown>)[key];
+  }
+
+  if (
+    typeof current !== 'object' ||
+    current === null ||
+    Array.isArray(current)
+  ) {
+    return null;
+  }
+  return current as Record<string, unknown>;
 }
 
 /**
@@ -252,7 +295,7 @@ function fixStringifiedJsonValues(
       (trimmed.startsWith('[') && trimmed.endsWith(']')) ||
       (trimmed.startsWith('{') && trimmed.endsWith('}'))
     ) {
-      const accepted = getAcceptedTypes(propSchema);
+      const accepted = getAcceptedTypes(propSchema, schema);
       if (!accepted) continue;
       // Only coerce if the schema does NOT accept string — otherwise the
       // string value may be intentional.
