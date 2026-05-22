@@ -11,6 +11,12 @@ import { parse } from 'shell-quote';
 const execFileAsync = promisify(execFile);
 
 /**
+ * Default fortune command: runs fortune with short (-s) output limited to 45 chars.
+ * Shared constant to avoid duplication across schema and hook.
+ */
+export const DEFAULT_FORTUNE_COMMAND = '/usr/games/fortune -s -n 45';
+
+/**
  * Get a random fortune quote by calling the fortune command.
  * Exported for testing purposes.
  */

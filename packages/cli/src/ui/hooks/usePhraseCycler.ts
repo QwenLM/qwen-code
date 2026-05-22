@@ -6,7 +6,7 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { t, ta, getCurrentLanguage } from '../../i18n/index.js';
-import { getFortuneQuote } from './fortune.js';
+import { getFortuneQuote, DEFAULT_FORTUNE_COMMAND } from './fortune.js';
 
 export const WITTY_LOADING_PHRASES: string[] = ["I'm Feeling Lucky"];
 
@@ -30,7 +30,7 @@ function selectRandomPhrase<T>(phrases: T[]): T {
  * @param isWaiting Whether to show a specific waiting phrase.
  * @param customPhrases Optional custom phrases to cycle through.
  * @param enableFortunes Whether to use fortune quotes (default: false).
- * @param fortuneCommand Optional custom fortune command (default: '/usr/games/fortune -s -n 45').
+ * @param fortuneCommand Optional custom fortune command (default: DEFAULT_FORTUNE_COMMAND).
  * @returns The current loading phrase.
  */
 export const usePhraseCycler = (
@@ -38,7 +38,7 @@ export const usePhraseCycler = (
   isWaiting: boolean,
   customPhrases?: string[],
   enableFortunes: boolean = false,
-  fortuneCommand: string = '/usr/games/fortune -s -n 45',
+  fortuneCommand: string = DEFAULT_FORTUNE_COMMAND,
 ) => {
   // Get phrases from translations if available
   const currentLanguage = getCurrentLanguage();

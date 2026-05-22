@@ -12,6 +12,7 @@ import type {
   ChatCompressionSettings,
   ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
+import { DEFAULT_FORTUNE_COMMAND } from '../ui/hooks/fortune.js';
 import {
   ApprovalMode,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
@@ -764,7 +765,7 @@ const SETTINGS_SCHEMA = {
         label: 'Fortune Command',
         category: 'UI',
         requiresRestart: true,
-        default: '/usr/games/fortune -s -n 45',
+        default: DEFAULT_FORTUNE_COMMAND,
         description:
           'Command to execute for fortune quotes. Use -s for short fortunes, -n <chars> to limit length. Set `enableFortunes` to false to disable. Requires restart to apply.',
         showInDialog: false,
