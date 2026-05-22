@@ -8,7 +8,11 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { atomicWriteFile, atomicWriteJSON } from './atomicFileWrite.js';
+import {
+  atomicWriteFile,
+  atomicWriteJSON,
+  writeInPlaceWithFdGuards,
+} from './atomicFileWrite.js';
 
 describe('atomicWriteJSON', () => {
   let tmpDir: string;
@@ -478,6 +482,79 @@ describe('atomicWriteFile', () => {
 
       // Original content untouched.
       expect(await fs.readFile(filePath, 'utf-8')).toBe('original');
+    },
+  );
+});
+
+describe('writeInPlaceWithFdGuards', () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fd-guards-test-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'should throw EOWNERSHIP_CHANGED when the inode at the path was swapped between caller stat and open',
+    async () => {
+      // Simulate the post-stat swap by capturing a stat, then unlinking
+      // and recreating a different file at the same path. fstat on the
+      // newly-opened fd reports a different inode than expectedStat → the
+      // guard throws EOWNERSHIP_CHANGED instead of writing to the
+      // attacker's substituted file.
+      const filePath = path.join(tmpDir, 'race.txt');
+      await fs.writeFile(filePath, 'original');
+      const staleStat = await fs.stat(filePath);
+
+      // Simulate attacker swap: unlink + create a new file at the same
+      // path. The new file has a different ino.
+      await fs.unlink(filePath);
+      await fs.writeFile(filePath, 'attacker-content');
+
+      await expect(
+        writeInPlaceWithFdGuards(filePath, 'should-not-land', staleStat, {
+          encoding: 'utf-8',
+          flush: true,
+        }),
+      ).rejects.toThrow(/swapped between stat and open/);
+
+      // Attacker's content survives — our write was refused.
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('attacker-content');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'should not hang and must refuse the write when path is a FIFO at open time',
+    async () => {
+      // Caller might pass an expectedStat captured for a regular file,
+      // but the path has been swapped to a FIFO post-stat. Defense in
+      // depth: O_NONBLOCK makes open() fail fast with ENXIO on a
+      // reader-less FIFO; if a reader were present and open succeeded,
+      // the fstat isFile() check would still catch it. Either way the
+      // helper must NOT hang and must NOT write to the special file.
+      const { execSync } = await import('node:child_process');
+      const regularPath = path.join(tmpDir, 'will-become-fifo');
+      const fifoPath = path.join(tmpDir, 'pipe.fifo');
+
+      await fs.writeFile(regularPath, 'placeholder');
+      const staleRegularStat = await fs.stat(regularPath);
+
+      execSync(`mkfifo "${fifoPath}"`);
+
+      // Accept either ENXIO (open failed fast — preferred) or
+      // EOWNERSHIP_CHANGED (open succeeded, fstat caught it). Both
+      // prove the FIFO race window is closed.
+      await expect(
+        writeInPlaceWithFdGuards(
+          fifoPath,
+          'should-not-land',
+          staleRegularStat,
+          { encoding: 'utf-8', flush: true },
+        ),
+      ).rejects.toThrow(/ENXIO|swapped between stat and open/);
     },
   );
 });

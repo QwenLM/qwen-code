@@ -106,9 +106,14 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  * - **No `O_TRUNC` at open time**: opening with `O_TRUNC` would
  *   truncate immediately, *before* the fd-bound `fstat` check could
  *   detect that the path was swapped to a different inode between the
- *   caller's stat and our open. We open read-write without truncating,
+ *   caller's stat and our open. We open write-only without truncating,
  *   verify the bound inode against `expectedStat`, and only then call
  *   `fh.truncate(0)` through the validated fd.
+ * - **`O_NONBLOCK`** so a post-stat swap from a regular file to a FIFO
+ *   doesn't hang `open()` indefinitely waiting for a reader. For
+ *   regular files `O_NONBLOCK` is a no-op; for FIFOs without a reader
+ *   it fails immediately with `ENXIO`; for special files that open
+ *   succeeds, the `fstat` check below catches them via `!isFile()`.
  * - **`fstat` verifies `dev` + `ino` + `uid` + `gid` + regular-file
  *   status** against the caller's `expectedStat`. uid/gid alone would
  *   miss a same-owner inode swap (attacker replaces the file with a
@@ -119,15 +124,17 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  * `open(O_WRONLY)` on a FIFO blocks until a reader appears and on a
  * device opens the device itself.
  */
-async function writeInPlaceWithFdGuards(
+export async function writeInPlaceWithFdGuards(
   targetPath: string,
   data: string | Buffer,
   expectedStat: Stats,
   options: { encoding?: BufferEncoding; flush?: boolean; mode?: number },
 ): Promise<void> {
   const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+  const O_NONBLOCK = fs.constants.O_NONBLOCK ?? 0;
   // No O_TRUNC: truncation must wait until after fd-bound verification.
-  const flags = fs.constants.O_WRONLY | O_NOFOLLOW;
+  // O_NONBLOCK: avoid hanging if the path was swapped to a FIFO.
+  const flags = fs.constants.O_WRONLY | O_NOFOLLOW | O_NONBLOCK;
   const fh = await fs.open(targetPath, flags);
   try {
     const fdStat = await fh.stat();
