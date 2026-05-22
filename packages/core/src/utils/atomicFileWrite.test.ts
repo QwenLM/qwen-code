@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -395,41 +396,20 @@ describe('atomicWriteFile', () => {
   it.skipIf(
     process.platform === 'win32' || typeof process.geteuid !== 'function',
   )(
-    'should reject in-place fallback if target becomes a symlink after stat (O_NOFOLLOW guard)',
+    'should write via in-place fallback through a resolved symlink when ownership differs',
     async () => {
-      // Even though resolveSymlinkChain runs first, an attacker with
-      // parent-dir write can swap targetPath for a symlink between
-      // our stat and our open. O_NOFOLLOW makes that open() fail with
-      // ELOOP rather than following the symlink to an attacker-chosen
-      // path. We simulate the post-stat swap by replacing the target
-      // with a symlink before atomicWriteFile via a setup helper, then
-      // verify the fallback path rejects it.
-      //
-      // We can't easily inject the swap mid-call without monkey-patching
-      // fs.stat, so instead we test the equivalent static case: call
-      // atomicWriteFile when targetPath is already a symlink AND a
-      // sentinel file exists at the symlink-resolved target. That sentinel
-      // file matches what existingStat would capture if the swap happened
-      // post-resolve. Then we verify O_NOFOLLOW kicks in.
-      //
-      // Practical surrogate: rather than test the race itself, verify
-      // that the implementation uses O_NOFOLLOW by inspecting that
-      // writing through a symlink would not silently follow it. Skip if
-      // the platform lacks O_NOFOLLOW support.
-      if (fs.constants.O_NOFOLLOW === undefined) return;
-
+      // atomicWriteFile resolves the symlink via resolveSymlinkChain
+      // before stat, so by the time writeInPlaceWithFdGuards runs the
+      // target is already the real file. This test exercises the
+      // resolve-then-stat-then-open flow and verifies the symlink itself
+      // is preserved (not replaced by a regular file). The direct
+      // O_NOFOLLOW-rejects-symlink case is tested separately below via
+      // writeInPlaceWithFdGuards directly.
       const realFile = path.join(tmpDir, 'real.txt');
       const symlinkAt = path.join(tmpDir, 'attacker-symlink.txt');
       await fs.writeFile(realFile, 'real-content');
-      // attacker-symlink.txt is a symlink to real.txt.
       await fs.symlink(realFile, symlinkAt);
 
-      // Drive atomicWriteFile through a path whose final component is
-      // a symlink. resolveSymlinkChain resolves it, so atomicWriteFile
-      // operates on realFile — no race in this static case. This
-      // exercises the resolve-then-stat-then-open flow and proves it
-      // doesn't crash; the actual O_NOFOLLOW behavior is in the source
-      // and reviewed there.
       const realGeteuid = process.geteuid!;
       const realStat = await fs.stat(realFile);
       process.geteuid = () => realStat.uid + 1;
@@ -440,8 +420,7 @@ describe('atomicWriteFile', () => {
         process.geteuid = realGeteuid;
       }
 
-      // The real file (which the symlink points to) is updated; the
-      // symlink itself is preserved.
+      // The real file is updated; the symlink itself is preserved.
       expect(await fs.readFile(realFile, 'utf-8')).toBe('updated');
       expect((await fs.lstat(symlinkAt)).isSymbolicLink()).toBe(true);
     },
@@ -498,21 +477,74 @@ describe('writeInPlaceWithFdGuards', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'should throw EOWNERSHIP_CHANGED when the inode at the path was swapped between caller stat and open',
+    'should write content and preserve inode on the happy path (stat matches)',
     async () => {
-      // Simulate the post-stat swap by capturing a stat, then unlinking
-      // and recreating a different file at the same path. fstat on the
-      // newly-opened fd reports a different inode than expectedStat → the
-      // guard throws EOWNERSHIP_CHANGED instead of writing to the
-      // attacker's substituted file.
-      const filePath = path.join(tmpDir, 'race.txt');
+      // Primary contract: when the stat matches at open time, the helper
+      // truncates + writes + chmods through the fd, preserving the
+      // existing inode.
+      const filePath = path.join(tmpDir, 'happy.txt');
+      await fs.writeFile(filePath, 'original-much-longer-than-replacement');
+      await fs.chmod(filePath, 0o644);
+      const beforeStat = await fs.stat(filePath);
+
+      await writeInPlaceWithFdGuards(filePath, 'updated', beforeStat, {
+        encoding: 'utf-8',
+        flush: true,
+        mode: 0o644,
+      });
+
+      const afterStat = await fs.stat(filePath);
+      expect(afterStat.ino).toBe(beforeStat.ino);
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('updated');
+      expect(afterStat.mode & 0o777).toBe(0o644);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'should throw ENOENT (not silently recreate) when target was unlinked after stat',
+    async () => {
+      // Regression test for the missing-O_CREAT security property:
+      // if the file disappears between caller stat and our open, we
+      // must surface ENOENT instead of recreating a file owned by the
+      // current process (which is exactly the ownership reset the
+      // fallback exists to prevent).
+      const filePath = path.join(tmpDir, 'will-be-unlinked.txt');
       await fs.writeFile(filePath, 'original');
       const staleStat = await fs.stat(filePath);
 
-      // Simulate attacker swap: unlink + create a new file at the same
-      // path. The new file has a different ino.
       await fs.unlink(filePath);
-      await fs.writeFile(filePath, 'attacker-content');
+
+      await expect(
+        writeInPlaceWithFdGuards(filePath, 'should-not-recreate', staleStat, {
+          encoding: 'utf-8',
+        }),
+      ).rejects.toThrow(/ENOENT/);
+
+      // Confirm the file was not recreated.
+      await expect(fs.stat(filePath)).rejects.toThrow(/ENOENT/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'should throw EOWNERSHIP_CHANGED when the inode at the path was swapped between caller stat and open',
+    async () => {
+      // Simulate the post-stat swap by capturing a stat, then renaming
+      // a different file over the original. rename guarantees a fresh
+      // inode at the path (unlike unlink+create, which on Linux tmpfs
+      // often reuses the freshly-freed inode number).
+      const filePath = path.join(tmpDir, 'race.txt');
+      const decoyPath = path.join(tmpDir, 'decoy.txt');
+      await fs.writeFile(filePath, 'original');
+      const staleStat = await fs.stat(filePath);
+
+      // Create a separate inode and rename it over the target. The
+      // target now holds the decoy's inode (guaranteed different from
+      // staleStat.ino — they were two distinct live files just now).
+      await fs.writeFile(decoyPath, 'attacker-content');
+      await fs.rename(decoyPath, filePath);
+
+      const sanity = await fs.stat(filePath);
+      expect(sanity.ino).not.toBe(staleStat.ino);
 
       await expect(
         writeInPlaceWithFdGuards(filePath, 'should-not-land', staleStat, {
@@ -535,26 +567,55 @@ describe('writeInPlaceWithFdGuards', () => {
       // reader-less FIFO; if a reader were present and open succeeded,
       // the fstat isFile() check would still catch it. Either way the
       // helper must NOT hang and must NOT write to the special file.
+      //
+      // Pass a stat captured from the FIFO itself so the inode/dev
+      // match and only the FIFO-specific defense (ENXIO from O_NONBLOCK,
+      // or !isFile() from fstat) can fire — not the dev/ino mismatch
+      // from passing a stale regular-file stat.
       const { execSync } = await import('node:child_process');
-      const regularPath = path.join(tmpDir, 'will-become-fifo');
       const fifoPath = path.join(tmpDir, 'pipe.fifo');
-
-      await fs.writeFile(regularPath, 'placeholder');
-      const staleRegularStat = await fs.stat(regularPath);
-
       execSync(`mkfifo "${fifoPath}"`);
+      const fifoStat = await fs.stat(fifoPath);
 
       // Accept either ENXIO (open failed fast — preferred) or
-      // EOWNERSHIP_CHANGED (open succeeded, fstat caught it). Both
-      // prove the FIFO race window is closed.
+      // EOWNERSHIP_CHANGED (open succeeded with a reader, fstat caught
+      // it via !isFile()). Both prove the FIFO race window is closed.
+      await expect(
+        writeInPlaceWithFdGuards(fifoPath, 'should-not-land', fifoStat, {
+          encoding: 'utf-8',
+          flush: true,
+        }),
+      ).rejects.toThrow(/ENXIO|swapped between stat and open/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'should reject a symlink at the target with ELOOP via O_NOFOLLOW',
+    async () => {
+      // Direct test of the O_NOFOLLOW guard: if the path resolves to a
+      // symlink at open time (without resolveSymlinkChain pre-resolving
+      // it), the open must fail rather than follow to an
+      // attacker-chosen target.
+      if (fs.constants.O_NOFOLLOW === undefined) return;
+
+      const realFile = path.join(tmpDir, 'real.txt');
+      const symlinkPath = path.join(tmpDir, 'a-symlink.txt');
+      await fs.writeFile(realFile, 'real-content');
+      await fs.symlink(realFile, symlinkPath);
+
+      const symlinkLstat = await fs.lstat(symlinkPath);
+
       await expect(
         writeInPlaceWithFdGuards(
-          fifoPath,
-          'should-not-land',
-          staleRegularStat,
-          { encoding: 'utf-8', flush: true },
+          symlinkPath,
+          'should-not-follow',
+          symlinkLstat as Stats,
+          { encoding: 'utf-8' },
         ),
-      ).rejects.toThrow(/ENXIO|swapped between stat and open/);
+      ).rejects.toThrow(/ELOOP|EMLINK|symlink/i);
+
+      // The real file (symlink's target) must not have been touched.
+      expect(await fs.readFile(realFile, 'utf-8')).toBe('real-content');
     },
   );
 });

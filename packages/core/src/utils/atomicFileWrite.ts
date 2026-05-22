@@ -95,8 +95,7 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
 }
 
 /**
- * In-place truncate+write that defends against four races the
- * path-based `fs.writeFile` form does not:
+ * In-place truncate+write hardened against post-stat races:
  *
  * - `O_NOFOLLOW` rejects a final-component symlink (no follow to
  *   attacker-chosen target).
@@ -112,17 +111,26 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  * - **`O_NONBLOCK`** so a post-stat swap from a regular file to a FIFO
  *   doesn't hang `open()` indefinitely waiting for a reader. For
  *   regular files `O_NONBLOCK` is a no-op; for FIFOs without a reader
- *   it fails immediately with `ENXIO`; for special files that open
- *   succeeds, the `fstat` check below catches them via `!isFile()`.
+ *   it fails immediately with `ENXIO`.
  * - **`fstat` verifies `dev` + `ino` + `uid` + `gid` + regular-file
  *   status** against the caller's `expectedStat`. uid/gid alone would
  *   miss a same-owner inode swap (attacker replaces the file with a
- *   different inode of their own).
+ *   different inode of their own); `!isFile()` catches a special-file
+ *   swap that survives `O_NONBLOCK` (e.g. FIFO with a live reader).
  *
- * Caller has already confirmed `existingStat.isFile()`; non-regular
- * targets (FIFO, socket, device) must not reach this function, since
- * `open(O_WRONLY)` on a FIFO blocks until a reader appears and on a
- * device opens the device itself.
+ * Caller should confirm `existingStat.isFile()` before invoking so the
+ * in-place path is skipped for known non-regular targets. Defense in
+ * depth: if the file is swapped to a non-regular target post-stat,
+ * `O_NONBLOCK` prevents hanging on FIFO open and the fstat guard
+ * rejects all non-regular files via `!fdStat.isFile()`.
+ *
+ * **chmod via `fh.chmod` is best-effort**:
+ * - Root (Docker-as-root, the PR's target): chmod succeeds and is
+ *   load-bearing — POSIX clears setuid/setgid on write to a file
+ *   with those bits, so chmod restores them.
+ * - Non-root with `uid !== expectedStat.uid`: chmod is guaranteed to
+ *   fail with EPERM (POSIX requires file owner or root for chmod).
+ *   We skip the syscall in that case to avoid the guaranteed failure.
  */
 export async function writeInPlaceWithFdGuards(
   targetPath: string,
@@ -156,18 +164,40 @@ export async function writeInPlaceWithFdGuards(
       throw err;
     }
     // Verified — now safe to truncate and write through the bound fd.
+    // Wrap writeFile so a mid-write failure surfaces the post-truncate
+    // state explicitly — without this, callers see the raw OS error
+    // (ENOSPC, EIO, …) and may wrongly assume the original file is
+    // intact because this function lives in atomicFileWrite.ts.
     await fh.truncate(0);
     const fhWriteOptions: { encoding?: BufferEncoding; flush?: boolean } = {};
     if (typeof data === 'string' && options.encoding) {
       fhWriteOptions.encoding = options.encoding;
     }
     if (options.flush) fhWriteOptions.flush = true;
-    await fh.writeFile(data, fhWriteOptions);
+    try {
+      await fh.writeFile(data, fhWriteOptions);
+    } catch (writeErr) {
+      const err: NodeJS.ErrnoException = new Error(
+        `In-place write to ${targetPath} failed after truncate(0); ` +
+          `file is now empty or partially written. Cause: ` +
+          (writeErr instanceof Error ? writeErr.message : String(writeErr)),
+      );
+      err.code = 'EINPLACE_WRITE_FAILED';
+      (err as Error & { cause?: unknown }).cause = writeErr;
+      throw err;
+    }
     if (options.mode !== undefined) {
-      try {
-        await fh.chmod(options.mode);
-      } catch {
-        // Ignore — not all filesystems support chmod.
+      // Skip chmod when we know it will EPERM — non-root callers cannot
+      // chmod files they don't own. Root and same-owner callers proceed.
+      const euid = process.geteuid?.();
+      const canChmod =
+        euid === undefined || euid === 0 || euid === expectedStat.uid;
+      if (canChmod) {
+        try {
+          await fh.chmod(options.mode);
+        } catch {
+          // Ignore — not all filesystems support chmod.
+        }
       }
     }
   } finally {
@@ -302,12 +332,21 @@ export async function atomicWriteFile(
     existingStat.isFile() &&
     ownershipWouldChange()
   ) {
-    await writeInPlaceWithFdGuards(targetPath, data, existingStat, {
-      encoding: typeof data === 'string' ? encoding : undefined,
-      flush,
-      mode: desiredMode,
-    });
-    return;
+    try {
+      await writeInPlaceWithFdGuards(targetPath, data, existingStat, {
+        encoding: typeof data === 'string' ? encoding : undefined,
+        flush,
+        mode: desiredMode,
+      });
+      return;
+    } catch (err) {
+      // File deleted between caller's stat and in-place open — nothing
+      // to preserve. Fall through to the atomic rename path, which will
+      // correctly create a new file at targetPath.
+      if (!isNodeError(err) || err.code !== 'ENOENT') {
+        throw err;
+      }
+    }
   }
 
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
