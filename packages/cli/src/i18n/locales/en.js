@@ -135,6 +135,9 @@ export default {
     'Gracefully stop the active auto-improve loop',
   'Run one scheduled auto-improve tick': 'Run one scheduled auto-improve tick',
   'Auto-improve sources': 'Auto-improve sources',
+  'GitHub issues': 'GitHub issues',
+  'GitHub PRs / CI / review comments': 'GitHub PRs / CI / review comments',
+  'Scan local repository': 'Scan local repository',
   'Select which context auto-improve should collect before each improvement loop.':
     'Select which context auto-improve should collect before each improvement loop.',
   'Custom sources': 'Custom sources',
@@ -149,6 +152,10 @@ export default {
   'Auto-improve source configuration saved.':
     'Auto-improve source configuration saved.',
   'Repository root is not ready yet.': 'Repository root is not ready yet.',
+  'No auto-improve loops found.': 'No auto-improve loops found.',
+  'Showing the most recent auto-improve loop.':
+    'Showing the most recent auto-improve loop.',
+  'Recent runs': 'Recent runs',
   'Delete a previous session': 'Delete a previous session',
   'Run installation and environment diagnostics':
     'Run installation and environment diagnostics',

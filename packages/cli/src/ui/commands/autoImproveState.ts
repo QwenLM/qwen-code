@@ -29,10 +29,29 @@ export interface AutoImproveRunRef {
 }
 
 export interface AutoImproveDeliveryTarget {
-  kind: 'loop-branch' | 'pr-branch' | 'local-only';
+  kind: 'loop-branch' | 'issue-branch' | 'pr-branch' | 'local-only';
   branch: string;
+  issueNumber?: number;
   prNumber?: number;
   pushRequested: boolean;
+}
+
+export interface AutoImproveRunRecord {
+  runId: string;
+  status: string;
+  source?: string;
+  task?: string;
+  branch?: string;
+  commit?: string;
+  runDoc?: string;
+  issueNumber?: number;
+  prNumber?: number;
+  updatedAt?: string;
+}
+
+export interface AutoImproveRunIndex {
+  version: 1;
+  runs: AutoImproveRunRecord[];
 }
 
 export interface AutoImproveLoopState {
@@ -105,6 +124,17 @@ export function getAutoImproveStatePath(
   loopId: string,
 ): string {
   return path.join(getAutoImproveLoopDir(repoRoot, loopId), 'state.json');
+}
+
+export function getAutoImproveRunIndexPath(
+  repoRoot: string,
+  loopId: string,
+): string {
+  return path.join(
+    getAutoImproveLoopDir(repoRoot, loopId),
+    'runs',
+    'index.json',
+  );
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -266,9 +296,11 @@ function normalizeRunRef(value: unknown): AutoImproveRunRef | undefined {
     const kind = deliveryTarget['kind'];
     const branch = deliveryTarget['branch'];
     const pushRequested = deliveryTarget['pushRequested'];
+    const issueNumber = deliveryTarget['issueNumber'];
     const prNumber = deliveryTarget['prNumber'];
     if (
       (kind === 'loop-branch' ||
+        kind === 'issue-branch' ||
         kind === 'pr-branch' ||
         kind === 'local-only') &&
       typeof branch === 'string' &&
@@ -279,6 +311,9 @@ function normalizeRunRef(value: unknown): AutoImproveRunRef | undefined {
         kind,
         branch,
         pushRequested,
+        ...(typeof issueNumber === 'number' && Number.isFinite(issueNumber)
+          ? { issueNumber }
+          : {}),
         ...(typeof prNumber === 'number' && Number.isFinite(prNumber)
           ? { prNumber }
           : {}),
@@ -287,6 +322,59 @@ function normalizeRunRef(value: unknown): AutoImproveRunRef | undefined {
   }
 
   return runRef;
+}
+
+function readOptionalString(
+  value: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const raw = value[key];
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
+}
+
+function readOptionalNumber(
+  value: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const raw = value[key];
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
+}
+
+function normalizeRunRecord(value: unknown): AutoImproveRunRecord | null {
+  if (!isRecord(value)) return null;
+  const runId = readOptionalString(value, 'runId');
+  const status = readOptionalString(value, 'status');
+  if (!runId || !status) return null;
+  const source = readOptionalString(value, 'source');
+  const task = readOptionalString(value, 'task');
+  const branch = readOptionalString(value, 'branch');
+  const commit = readOptionalString(value, 'commit');
+  const runDoc = readOptionalString(value, 'runDoc');
+  const issueNumber = readOptionalNumber(value, 'issueNumber');
+  const prNumber = readOptionalNumber(value, 'prNumber');
+  const updatedAt = readOptionalString(value, 'updatedAt');
+  return {
+    runId,
+    status,
+    ...(source ? { source } : {}),
+    ...(task ? { task } : {}),
+    ...(branch ? { branch } : {}),
+    ...(commit ? { commit } : {}),
+    ...(runDoc ? { runDoc } : {}),
+    ...(issueNumber !== undefined ? { issueNumber } : {}),
+    ...(prNumber !== undefined ? { prNumber } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+  };
+}
+
+function normalizeRunIndex(value: unknown): AutoImproveRunIndex {
+  const runsValue = isRecord(value) ? value['runs'] : undefined;
+  const runs = Array.isArray(runsValue)
+    ? runsValue
+        .map((record) => normalizeRunRecord(record))
+        .filter((record): record is AutoImproveRunRecord => record !== null)
+    : [];
+  return { version: 1, runs };
 }
 
 function normalizeLoopState(value: unknown): AutoImproveLoopState | null {
@@ -360,6 +448,74 @@ export async function readAutoImproveLoopState(
   }
 }
 
+export async function readAutoImproveRunIndex(
+  repoRoot: string,
+  loopId: string,
+): Promise<AutoImproveRunIndex> {
+  try {
+    const raw = await fs.readFile(
+      getAutoImproveRunIndexPath(repoRoot, loopId),
+      'utf8',
+    );
+    return normalizeRunIndex(JSON.parse(raw));
+  } catch (error) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      return { version: 1, runs: [] };
+    }
+    if (error instanceof SyntaxError) return { version: 1, runs: [] };
+    throw error;
+  }
+}
+
+function getLoopStateTimestamp(state: AutoImproveLoopState): number {
+  const parsed = Date.parse(state.createdAt);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export async function listAutoImproveLoopStates(
+  repoRoot: string,
+): Promise<AutoImproveLoopState[]> {
+  let entries: Array<{ name: string; isDirectory(): boolean }>;
+  try {
+    entries = await fs.readdir(
+      path.join(getAutoImproveRoot(repoRoot), 'loops'),
+      {
+        withFileTypes: true,
+      },
+    );
+  } catch (error) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      return [];
+    }
+    throw error;
+  }
+
+  const states = await Promise.all(
+    entries
+      .filter(
+        (entry) => entry.isDirectory() && isValidAutoImproveLoopId(entry.name),
+      )
+      .map((entry) => readAutoImproveLoopState(repoRoot, entry.name)),
+  );
+  return states
+    .filter((state): state is AutoImproveLoopState => state !== null)
+    .sort((left, right) => {
+      const timeDiff =
+        getLoopStateTimestamp(right) - getLoopStateTimestamp(left);
+      return timeDiff || right.loopId.localeCompare(left.loopId);
+    });
+}
+
 export async function writeAutoImproveLoopState(
   repoRoot: string,
   state: AutoImproveLoopState,
@@ -393,6 +549,11 @@ export async function initializeAutoImproveLoopFiles(
       '| --- | --- | --- | --- | --- |',
       '',
     ].join('\n'),
+    'utf8',
+  );
+  await fs.writeFile(
+    getAutoImproveRunIndexPath(repoRoot, state.loopId),
+    `${JSON.stringify({ version: 1, runs: [] }, null, 2)}\n`,
     'utf8',
   );
 }

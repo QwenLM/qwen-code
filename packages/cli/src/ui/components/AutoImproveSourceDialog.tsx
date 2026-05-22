@@ -31,7 +31,7 @@ type SourceKey = 'githubIssues' | 'githubPrs' | 'localSignals';
 const SOURCE_ROWS: Array<{ key: SourceKey; label: string }> = [
   { key: 'githubIssues', label: 'GitHub issues' },
   { key: 'githubPrs', label: 'GitHub PRs / CI / review comments' },
-  { key: 'localSignals', label: 'Local repo signals' },
+  { key: 'localSignals', label: 'Scan local repository' },
 ];
 
 function getConfiguredRoot(config: Config): string {
@@ -309,7 +309,7 @@ export function AutoImproveSourceDialog({
                       : theme.text.primary
                 }
               >
-                {isChecked ? '[✓]' : '[ ]'} {row.label}
+                {isChecked ? '[✓]' : '[ ]'} {t(row.label)}
               </Text>
             </Box>
           );

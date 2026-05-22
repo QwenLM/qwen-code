@@ -171,6 +171,7 @@ export type HistoryItemAutoImproveStatus = HistoryItemBase & {
   type: 'auto_improve_status';
   loopId: string;
   status: string;
+  statusNote?: string;
   cadence: string;
   cron: string;
   targetBranch: string;
@@ -180,6 +181,7 @@ export type HistoryItemAutoImproveStatus = HistoryItemBase & {
   customSources: string[];
   currentRun?: string;
   lastRun?: string;
+  recentRuns?: string[];
 };
 
 export type HistoryItemHelp = HistoryItemBase & {

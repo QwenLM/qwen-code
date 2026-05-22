@@ -119,6 +119,9 @@ export default {
     '平順停止目前 auto-improve 循環',
   'Run one scheduled auto-improve tick': '執行一次排程中的 auto-improve tick',
   'Auto-improve sources': 'Auto-improve 來源',
+  'GitHub issues': 'GitHub issues',
+  'GitHub PRs / CI / review comments': 'GitHub PRs / CI / review comments',
+  'Scan local repository': '掃描本機儲存庫',
   'Select which context auto-improve should collect before each improvement loop.':
     '選擇 auto-improve 每輪改進前要收集的上下文來源。',
   'Custom sources': '自訂來源',
@@ -132,6 +135,10 @@ export default {
   'Loading auto-improve sources...': '正在載入 auto-improve 來源...',
   'Auto-improve source configuration saved.': 'Auto-improve 來源設定已儲存。',
   'Repository root is not ready yet.': '儲存庫根目錄尚未準備好。',
+  'No auto-improve loops found.': '沒有找到 auto-improve 循環。',
+  'Showing the most recent auto-improve loop.':
+    '正在顯示最近一次 auto-improve 循環。',
+  'Recent runs': '最近執行',
   'Delete a previous session': '刪除先前的會話',
   'Run installation and environment diagnostics': '執行安裝與環境診斷',
   'Browse dynamic model catalogs and choose which models stay enabled locally':

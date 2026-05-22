@@ -130,6 +130,9 @@ export default {
     '平滑停止当前 auto-improve 循环',
   'Run one scheduled auto-improve tick': '运行一次计划中的 auto-improve tick',
   'Auto-improve sources': 'Auto-improve 来源',
+  'GitHub issues': 'GitHub issues',
+  'GitHub PRs / CI / review comments': 'GitHub PRs / CI / review comments',
+  'Scan local repository': '扫描本地仓库',
   'Select which context auto-improve should collect before each improvement loop.':
     '选择 auto-improve 每轮改进前要收集的上下文来源。',
   'Custom sources': '自定义来源',
@@ -143,6 +146,10 @@ export default {
   'Loading auto-improve sources...': '正在加载 auto-improve 来源...',
   'Auto-improve source configuration saved.': 'Auto-improve 来源配置已保存。',
   'Repository root is not ready yet.': '仓库根目录尚未准备好。',
+  'No auto-improve loops found.': '没有找到 auto-improve 循环。',
+  'Showing the most recent auto-improve loop.':
+    '正在显示最近一次 auto-improve 循环。',
+  'Recent runs': '最近运行',
   'Delete a previous session': '删除先前的会话',
   'Run installation and environment diagnostics': '运行安装和环境诊断',
   'Browse dynamic model catalogs and choose which models stay enabled locally':

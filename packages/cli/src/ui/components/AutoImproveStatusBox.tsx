@@ -52,6 +52,7 @@ export const AutoImproveStatusBox: React.FC<AutoImproveStatusBoxProps> = ({
   width,
   loopId,
   status,
+  statusNote,
   cadence,
   cron,
   targetBranch,
@@ -61,6 +62,7 @@ export const AutoImproveStatusBox: React.FC<AutoImproveStatusBoxProps> = ({
   customSources,
   currentRun,
   lastRun,
+  recentRuns,
 }) => {
   const statusColor = getStatusColor(status);
 
@@ -85,6 +87,11 @@ export const AutoImproveStatusBox: React.FC<AutoImproveStatusBoxProps> = ({
       <Row label={t('Target')} value={targetBranch} />
       <Row label={t('Sources')} value={sources} />
       <Row label={t('Cron job')} value={cronJobId ?? t('none')} />
+      {statusNote && (
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>{statusNote}</Text>
+        </Box>
+      )}
 
       <Box marginTop={1} flexDirection="column">
         <Text bold color={theme.text.link}>
@@ -112,6 +119,19 @@ export const AutoImproveStatusBox: React.FC<AutoImproveStatusBoxProps> = ({
         <Box marginTop={1} flexDirection="column">
           {currentRun && <Row label={t('Current run')} value={currentRun} />}
           {lastRun && <Row label={t('Last run')} value={lastRun} />}
+        </Box>
+      )}
+
+      {recentRuns && recentRuns.length > 0 && (
+        <Box marginTop={1} flexDirection="column">
+          <Text bold color={theme.text.link}>
+            {t('Recent runs')}
+          </Text>
+          {recentRuns.map((run) => (
+            <Box key={run} marginLeft={2}>
+              <Text color={theme.text.primary}>{`- ${run}`}</Text>
+            </Box>
+          ))}
         </Box>
       )}
     </Box>

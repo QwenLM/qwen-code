@@ -24,12 +24,15 @@ import {
   initializeAutoImproveLoopFiles,
   isActiveAutoImproveRunRef,
   isRecord,
+  listAutoImproveLoopStates,
   readActiveAutoImproveLoop,
   readAutoImproveConfig,
   readAutoImproveLoopState,
+  readAutoImproveRunIndex,
   writeActiveAutoImproveLoop,
   writeAutoImproveLoopState,
   type AutoImproveLoopState,
+  type AutoImproveRunRecord,
 } from './autoImproveState.js';
 import type { HistoryItemAutoImproveStatus } from '../types.js';
 
@@ -218,7 +221,7 @@ function describeSources(state: AutoImproveLoopState): string {
     enabled.push('GitHub PRs / CI / review comments');
   }
   if (state.sourceSnapshot.sources.localSignals) {
-    enabled.push('Local repo signals');
+    enabled.push('Scan local repository');
   }
   if (state.sourceSnapshot.customSources.length > 0) {
     enabled.push(
@@ -261,14 +264,33 @@ function formatRunRef(value: unknown): string | null {
   return null;
 }
 
+function formatRunRecord(record: AutoImproveRunRecord): string {
+  const parts: string[] = [record.status];
+  if (record.issueNumber !== undefined) {
+    parts.push(`issue #${record.issueNumber}`);
+  } else if (record.prNumber !== undefined) {
+    parts.push(`PR #${record.prNumber}`);
+  } else if (record.source) {
+    parts.push(record.source);
+  }
+  if (record.task) parts.push(record.task);
+  if (record.branch) parts.push(record.branch);
+  if (record.commit) parts.push(record.commit);
+  if (record.runDoc) parts.push(record.runDoc);
+  return parts.join(' · ');
+}
+
 function buildStatusItem(
   state: AutoImproveLoopState,
   status: string,
-  cronJobId?: string,
+  cronJobId: string | undefined,
+  recentRunRecords: AutoImproveRunRecord[],
+  statusNote?: string,
 ): Omit<HistoryItemAutoImproveStatus, 'type' | 'text'> {
   return {
     loopId: state.loopId,
     status,
+    statusNote,
     cadence: state.cadence,
     cron: state.cron,
     targetBranch: state.targetBranch,
@@ -278,6 +300,7 @@ function buildStatusItem(
     customSources: state.sourceSnapshot.customSources,
     currentRun: formatRunRef(state.currentRun) ?? undefined,
     lastRun: formatRunRef(state.lastRun) ?? undefined,
+    recentRuns: recentRunRecords.map((record) => formatRunRecord(record)),
   };
 }
 
@@ -292,9 +315,9 @@ function formatStatusText(
     `Target branch: ${statusItem.targetBranch}`,
     `Sources: ${statusItem.sources}`,
     `Cron job: ${statusItem.cronJobId ?? 'none'}`,
-    'Prompt:',
-    `  ${statusItem.prompt || '(none)'}`,
   ];
+  if (statusItem.statusNote) lines.push(statusItem.statusNote);
+  lines.push('Prompt:', `  ${statusItem.prompt || '(none)'}`);
   if (statusItem.customSources.length > 0) {
     lines.push(
       'Custom sources:',
@@ -306,6 +329,12 @@ function formatStatusText(
   }
   if (statusItem.lastRun) {
     lines.push(`Last run: ${statusItem.lastRun}`);
+  }
+  if (statusItem.recentRuns && statusItem.recentRuns.length > 0) {
+    lines.push(
+      'Recent runs:',
+      ...statusItem.recentRuns.map((run) => `  - ${run}`),
+    );
   }
   return lines.join('\n');
 }
@@ -333,6 +362,7 @@ ${AUTO_IMPROVE_LOOP_ID_LINE_PREFIX}${state.loopId}
 - State file: ${path.join(loopDir, 'state.json')}
 - Summary file: ${path.join(loopDir, 'summary.md')}
 - Runs dir: ${path.join(loopDir, 'runs')}
+- Run index file: ${path.join(loopDir, 'runs', 'index.json')}
 - Loop default branch: ${state.targetBranch}
 - Delivery policy: source-aware local commit. Do not push unless the user explicitly requested push in the start prompt or selected source.
 - Repair budget: 5 test/repair attempts.
@@ -341,6 +371,7 @@ ${AUTO_IMPROVE_LOOP_ID_LINE_PREFIX}${state.loopId}
 Hard rules:
 1. Run exactly one small, coherent, locally verifiable improvement.
 2. Determine the delivery target before editing:
+   - For issue-derived tasks, create a new branch from the repository default branch (prefer origin/HEAD, then origin/main or main) named like auto-improve/issue-<number>-<short-slug>, adding a short run id suffix if needed, then use that branch as the delivery branch. Do not commit issue-derived tasks to the loop default branch unless the user explicitly requested that branch.
    - For PR-derived tasks, use that PR's head branch as the delivery branch.
    - For local/default tasks, use the loop default branch.
    - If the correct branch is unclear, use a new local branch and mark the delivery target as "local-only".
@@ -352,15 +383,15 @@ Hard rules:
 8. Do not push unless the user explicitly requested push in the start prompt or selected source. If push was not requested, report the local commit and branch.
 9. Do not open PRs.
 10. After 5 failed repair attempts, delete the worktree and keep only documentation.
-11. Update ${path.join(loopDir, 'summary.md')} and one markdown file under ${path.join(loopDir, 'runs')} for every attempted run.
+11. Update ${path.join(loopDir, 'summary.md')}, ${path.join(loopDir, 'runs', 'index.json')}, and one markdown file under ${path.join(loopDir, 'runs')} for every attempted run. In the run index, append or update one record with runId, status, source, task, issueNumber or prNumber when applicable, branch, commit, runDoc, and updatedAt.
 12. Do not edit ${path.join(loopDir, 'state.json')} directly. The loop infrastructure owns state transitions.
 13. If stopRequested is true when you inspect the state, do not start a new run; report Outcome: cancelled.
 
 Task selection guidance:
-- If GitHub issues are enabled, use gh to inspect open issues and prefer clear, unclaimed, locally verifiable bugs or small enhancements.
+- If GitHub issues are enabled, use gh to inspect open issues and prefer clear, unassigned issues with no assignees that are locally verifiable bugs or small enhancements.
 - If GitHub PRs are enabled, inspect relevant current-repo PRs and prefer open, non-draft PRs. Draft PRs are lower priority unless the user explicitly asked for them.
 - For GitHub PR work, focus on actionable unresolved review comments, requested changes, and failing checks. Do not treat already-resolved comments or mere comment history as work to fix.
-- If local repo signals are enabled, inspect TODOs, failing or missing tests, recent churn, .qwen/design, and .qwen/e2e-tests.
+- If local repository scanning is enabled, inspect the current repo for small, locally verifiable improvements: TODO/FIXME comments, skipped or failing tests, missing tests around changed code, stale docs, and open project notes under .qwen/design and .qwen/e2e-tests.
 - If custom sources are configured, treat each item as a user-provided source hint, then inspect or follow it where applicable.
 - If no sources and no start prompt are configured, do a minimal repository inspection and choose a useful small local task.
 
@@ -527,18 +558,19 @@ async function statusAutoImprove(
     );
   }
   const active = await readActiveAutoImproveLoop(repoRoot);
-  if (!active) {
-    return message('info', t('No active auto-improve loop.'));
-  }
-
-  const state = await readAutoImproveLoopState(repoRoot, active.activeLoopId);
+  const state = active
+    ? await readAutoImproveLoopState(repoRoot, active.activeLoopId)
+    : (await listAutoImproveLoopStates(repoRoot))[0];
   if (!state) {
-    return message(
-      'error',
-      t('Active auto-improve loop state is missing: {{loopId}}', {
-        loopId: active.activeLoopId,
-      }),
-    );
+    if (active) {
+      return message(
+        'error',
+        t('Active auto-improve loop state is missing: {{loopId}}', {
+          loopId: active.activeLoopId,
+        }),
+      );
+    }
+    return message('info', t('No auto-improve loops found.'));
   }
 
   const scheduler = config.isCronEnabled() ? config.getCronScheduler() : null;
@@ -546,8 +578,19 @@ async function statusAutoImprove(
     ?.list()
     .find((candidate) => candidate.id === state.cronJobId);
   const effectiveStatus =
-    state.status === 'running' && !job ? 'stale' : state.status;
-  const statusItem = buildStatusItem(state, effectiveStatus, job?.id);
+    active && state.status === 'running' && !job ? 'stale' : state.status;
+  const runIndex = await readAutoImproveRunIndex(repoRoot, state.loopId);
+  const recentRunRecords = runIndex.runs.slice(-5).reverse();
+  const statusNote = active
+    ? undefined
+    : t('Showing the most recent auto-improve loop.');
+  const statusItem = buildStatusItem(
+    state,
+    effectiveStatus,
+    job?.id,
+    recentRunRecords,
+    statusNote,
+  );
 
   if (context.executionMode === 'interactive') {
     context.ui.addItem(

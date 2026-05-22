@@ -19,7 +19,7 @@ Expose four user-facing subcommands:
 - `/auto-improve stop`
 
 `source` is interactive-only. It opens a dialog with checkboxes for GitHub
-issues, GitHub PRs / CI / review comments, and local repository signals, plus a
+issues, GitHub PRs / CI / review comments, and local repository scanning, plus a
 custom source list. Users can add multiple custom source hints, edit existing
 items, and delete items. Custom sources can be used alone or together with
 checked built-in sources. Defaults are all off and an empty custom source list.
@@ -43,6 +43,7 @@ Store state under `.qwen/auto-improve/`:
       state.json
       summary.md
       runs/
+        index.json
         001-xxx.md
 ```
 
@@ -75,6 +76,8 @@ Each tick is prompt-driven. The prompt instructs the agent to:
 - read the loop state;
 - select exactly one small, coherent, locally verifiable improvement from the
   source snapshot and optional start prompt;
+- create a dedicated issue branch from the repository default branch for
+  GitHub issue-derived tasks;
 - create an isolated worktree and branch;
 - implement the change;
 - run appropriate tests;
@@ -94,7 +97,8 @@ Each tick is prompt-driven. The prompt instructs the agent to:
   selected source;
 - never overwrite or discard user uncommitted work;
 - delete the worktree after success or after five failed repair attempts;
-- update `summary.md` and one run document for every attempted run.
+- update `summary.md`, `runs/index.json`, and one run document for every
+  attempted run.
 
 Successful runs are local commits by default. For PR-derived tasks, the local
 commit belongs to the PR head branch rather than the branch that started the
@@ -109,9 +113,11 @@ loop stopped, and clears `active.json`. If a run is active, it cancels future
 scheduling and writes `stopRequested: true`; the current run may naturally
 finish, fail, or cancel, but no later tick should start.
 
-`status` displays only the active loop: loop id, status, cadence, target branch,
-source snapshot, start prompt, current run, last run, and next/future schedule
-information when available.
+`status` displays the active loop when present. If there is no active loop, it
+falls back to the most recent historical loop so stopped loops remain
+discoverable. Status includes loop id, status, cadence, target branch, source
+snapshot, start prompt, current run, last run, recent run records, and
+next/future schedule information when available.
 
 ## Implementation Shape
 

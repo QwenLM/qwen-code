@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { autoImproveCommand } from './autoImproveCommand.js';
 import {
   getAutoImproveConfigPath,
+  getAutoImproveRunIndexPath,
   markActiveAutoImproveRunCancelled,
   readAutoImproveLoopState,
   readAutoImproveConfig,
@@ -125,6 +126,14 @@ describe('autoImproveCommand', () => {
       "For PR-derived tasks, use that PR's head branch as the delivery branch.",
     );
     expect(prompt).toContain(
+      'For issue-derived tasks, create a new branch from the repository default branch',
+    );
+    expect(prompt).toContain(
+      'prefer clear, unassigned issues with no assignees',
+    );
+    expect(prompt).toContain('Run index file:');
+    expect(prompt).toContain('runs/index.json');
+    expect(prompt).toContain(
       'For PR-derived tasks, never merge the fix into the loop default branch unless it is the same branch.',
     );
     expect(prompt).toContain(
@@ -133,6 +142,9 @@ describe('autoImproveCommand', () => {
     expect(prompt).toContain('actionable unresolved review comments');
     expect(prompt).toContain(
       'Do not treat already-resolved comments or mere comment history as work to fix.',
+    );
+    expect(prompt).toContain(
+      'If local repository scanning is enabled, inspect the current repo for small, locally verifiable improvements',
     );
     expect(scheduler.create).toHaveBeenCalledWith(
       '7 */2 * * *',
@@ -177,6 +189,11 @@ describe('autoImproveCommand', () => {
       'utf8',
     );
     expect(summaryContent).toContain('# Auto-Improve Summary');
+    const runIndexRaw = await fs.readFile(
+      getAutoImproveRunIndexPath(tempDir, active.activeLoopId),
+      'utf8',
+    );
+    expect(JSON.parse(runIndexRaw)).toEqual({ version: 1, runs: [] });
   });
 
   it('accepts spaced intervals and rejects unsupported cadences', async () => {
@@ -385,6 +402,65 @@ describe('autoImproveCommand', () => {
         'utf8',
       ),
     ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('reports the most recent stopped loop when no loop is active', async () => {
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+    await autoImproveCommand.action?.(context, 'stop');
+    context.executionMode = 'non_interactive';
+
+    const result = await autoImproveCommand.action?.(context, 'status');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+    });
+    const content = (result as { content: string }).content;
+    expect(content).toContain('Status: stopping');
+    expect(content).toContain('Showing the most recent auto-improve loop.');
+  });
+
+  it('shows recent run records in stopped loop status', async () => {
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+    const activeRaw = await fs.readFile(
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
+      'utf8',
+    );
+    const active = JSON.parse(activeRaw) as { activeLoopId: string };
+    await fs.writeFile(
+      getAutoImproveRunIndexPath(tempDir, active.activeLoopId),
+      `${JSON.stringify(
+        {
+          version: 1,
+          runs: [
+            {
+              runId: '001',
+              status: 'success',
+              source: 'github-issue',
+              task: 'Fix login timeout',
+              issueNumber: 123,
+              branch: 'auto-improve/issue-123-fix-login-timeout',
+              commit: 'abc1234',
+              runDoc: 'runs/001-issue-123.md',
+              updatedAt: '2026-05-22T06:00:00.000Z',
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+    await autoImproveCommand.action?.(context, 'stop');
+    context.executionMode = 'non_interactive';
+
+    const result = await autoImproveCommand.action?.(context, 'status');
+
+    const content = (result as { content: string }).content;
+    expect(content).toContain('Recent runs:');
+    expect(content).toContain('issue #123');
+    expect(content).toContain('auto-improve/issue-123-fix-login-timeout');
+    expect(content).toContain('abc1234');
   });
 
   it('completes submit-prompt runs without recreating cron jobs', async () => {
