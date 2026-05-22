@@ -494,6 +494,76 @@ describe('NotebookEditTool', () => {
     expect(result.llmContent).not.toContain('without offset or limit');
   });
 
+  it('rejects notebook directory targets with TARGET_IS_DIRECTORY', async () => {
+    const dirPath = path.join(tempDir, 'directory.ipynb');
+    fs.mkdirSync(dirPath);
+
+    const result = await buildInvocation({
+      notebook_path: dirPath,
+      cell_id: 'a',
+      new_source: 'x = 2',
+    }).execute(abortSignal);
+
+    expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+    expect(result.llmContent).toContain('is a directory');
+  });
+
+  it('returns FILE_CHANGED_SINCE_READ when a notebook disappears after content read', async () => {
+    const filePath = writeNotebook('disappears-after-read.ipynb', {
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+    const realFileSystemService = new StandardFileSystemService();
+    const fileSystemService = new StandardFileSystemService();
+    vi.spyOn(fileSystemService, 'readTextFile').mockImplementation(
+      async (args) => {
+        const result = await realFileSystemService.readTextFile(args);
+        fs.unlinkSync(filePath);
+        return result;
+      },
+    );
+    vi.spyOn(config, 'getFileSystemService').mockReturnValue(fileSystemService);
+
+    const result = await buildInvocation({
+      notebook_path: filePath,
+      cell_id: 'a',
+      new_source: 'x = 2',
+    }).execute(abortSignal);
+
+    expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+    expect(result.llmContent).toContain('disappeared after it was read');
+  });
+
+  it('returns PRIOR_READ_VERIFICATION_FAILED when notebook stat verification fails', async () => {
+    const filePath = writeNotebook('stat-fails.ipynb', {
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+    const statSpy = vi
+      .spyOn(fs.promises, 'stat')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+    let result: ToolResult | undefined;
+
+    try {
+      result = await buildInvocation({
+        notebook_path: filePath,
+        cell_id: 'a',
+        new_source: 'x = 2',
+      }).execute(abortSignal);
+    } finally {
+      statSpy.mockRestore();
+    }
+
+    expect(result?.error?.type).toBe(
+      ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+    );
+    expect(result?.llmContent).toContain('Could not stat');
+  });
+
   it.skipIf(process.platform === 'win32')(
     'rejects non-regular notebook paths with a dedicated error type',
     async () => {
