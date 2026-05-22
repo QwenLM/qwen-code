@@ -425,6 +425,22 @@ describe('session-tracing', () => {
       expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
     });
 
+    it('endLLMRequestSpan emits cached_input_tokens === 0 (cache miss is meaningful info, not undefined)', () => {
+      // Providers that report 0 cached tokens are signaling an explicit cache
+      // miss. Distinct from undefined ("we don't know"). Both attribute names
+      // must propagate the literal 0.
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 100,
+        cachedInputTokens: 0,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['cached_input_tokens']).toBe(0);
+      expect(attrs['gen_ai.usage.cached_tokens']).toBe(0);
+    });
+
     it('endLLMRequestSpan writes ttft_ms and dual-emits gen_ai.server.time_to_first_token (in seconds)', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {

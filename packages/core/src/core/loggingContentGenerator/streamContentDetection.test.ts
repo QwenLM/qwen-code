@@ -55,10 +55,33 @@ describe('hasUserVisibleContent', () => {
     ).toBe(true);
   });
 
-  it('returns true for thought / reasoning part', () => {
+  it('returns true for thought / reasoning part with thought: true', () => {
     expect(hasUserVisibleContent(chunkWithParts([{ thought: true }]))).toBe(
       true,
     );
+  });
+
+  it('returns false for thought: false (explicit non-thought part)', () => {
+    // Codebase convention: `thought` is a boolean flag where false means
+    // "explicitly not a thought." A part with only `thought: false` and no
+    // other content must not trigger TTFT.
+    expect(hasUserVisibleContent(chunkWithParts([{ thought: false }]))).toBe(
+      false,
+    );
+  });
+
+  it('returns false for thought: undefined / missing (default non-thought)', () => {
+    // A bare object without the `thought` key is the common case for non-thinking
+    // chunks; must not match the thought branch.
+    expect(hasUserVisibleContent(chunkWithParts([{}]))).toBe(false);
+  });
+
+  it('returns true when thought: true coexists with empty text', () => {
+    // First Anthropic <thinking> chunk often arrives as { text: '', thought: true }.
+    // Per design doc D1, "thought / reasoning content" is user-visible — TTFT fires.
+    expect(
+      hasUserVisibleContent(chunkWithParts([{ text: '', thought: true }])),
+    ).toBe(true);
   });
 
   it('returns true when any part is user-visible (mixed)', () => {

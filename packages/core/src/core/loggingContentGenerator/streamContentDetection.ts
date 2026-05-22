@@ -48,7 +48,10 @@ function isUserVisiblePart(part: unknown): boolean {
   if (p.functionCall !== undefined) return true;
   if (p.inlineData !== undefined) return true;
   if (p.executableCode !== undefined) return true;
-  // `thought` is provider-dependent and not always present on Part — guard with `in` to be safe.
-  if (p.thought !== undefined) return true;
+  // `thought` is a boolean flag in this codebase — `true` means the part
+  // carries reasoning content, false / absent means none (see loggingContentGenerator.ts
+  // where `part.thought ? {...} : {}` is the canonical pattern). Match strict `=== true`
+  // rather than checking presence — `thought: false` parts are explicitly NOT user-visible.
+  if (p.thought === true) return true;
   return false;
 }
