@@ -65,7 +65,11 @@ export * from './core/insightProtocol.js';
 export * from './core/logger.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
-export * from './core/streamingToolExecutor.js';
+export {
+  StreamingToolExecutor,
+  StreamingToolExecutorDiscardedError,
+  type StreamingToolExecutorDiscardReason,
+} from './core/streamingToolExecutor.js';
 export * from './core/tokenLimits.js';
 export * from './core/turn.js';
 

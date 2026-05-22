@@ -286,10 +286,6 @@ export class Turn {
   constructor(
     private readonly chat: GeminiChat,
     private readonly prompt_id: string,
-    // When provided, `ToolCallRequest` events are forwarded to the executor
-    // and lifecycle transitions (retry / abort / error) call `discard()`. The
-    // Turn never reads results back — that ownership lives with the caller
-    // that drives early execution.
     private readonly streamingExecutor?: StreamingToolExecutor,
   ) {}
 
@@ -330,7 +326,7 @@ export class Turn {
           this.pendingCitations.clear();
           this.debugResponses = [];
           this.finishReason = undefined;
-          this.streamingExecutor?.discard('retry');
+          this.streamingExecutor?.reset('retry');
           yield {
             type: GeminiEventType.Retry,
             retryInfo: streamEvent.retryInfo,
@@ -395,10 +391,12 @@ export class Turn {
         // This is the key change: Only yield 'Finished' if there is a finishReason.
         if (finishReason) {
           // Mark pending tool calls so downstream can distinguish
-          // truncation from real parameter errors.
+          // truncation from real parameter errors. The streaming executor
+          // holds its own deep-cloned copies, so mirror the flag explicitly.
           if (finishReason === FinishReason.MAX_TOKENS) {
             for (const tc of this.pendingToolCalls) {
               tc.wasOutputTruncated = true;
+              this.streamingExecutor?.markTruncated(tc.callId);
             }
           }
 
@@ -456,6 +454,11 @@ export class Turn {
       await this.chat.maybeIncludeSchemaDepthContext(structuredError);
       yield { type: GeminiEventType.Error, value: { error: structuredError } };
       return;
+    } finally {
+      // Catches consumer break-out (e.g. LoopDetected, MaxSessionTurns
+      // mid-stream) so the executor learns the stream ended without wiping
+      // buffered state. No-op when an explicit discard already fired.
+      this.streamingExecutor?.close();
     }
   }
 

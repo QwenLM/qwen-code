@@ -177,7 +177,7 @@ describe('StreamingToolExecutor', () => {
       ex.accept(req('a'));
       ex.recordResult(resp('a'));
       ex.discard();
-      ex.discard('again');
+      ex.discard('retry');
       expect(ex.isDiscarded()).toBe(true);
       expect(ex.size()).toBe(0);
       expect(ex.getCompletedResults()).toEqual([]);
@@ -205,6 +205,231 @@ describe('StreamingToolExecutor', () => {
       await expect(p2).rejects.toBeInstanceOf(
         StreamingToolExecutorDiscardedError,
       );
+    });
+
+    it('first reason wins on repeated discard()', () => {
+      const ex = new StreamingToolExecutor();
+      ex.discard('aborted');
+      ex.discard('retry');
+      expect(ex.getDiscardReason()).toBe('aborted');
+    });
+
+    it('rejection carries the discard reason on the Error instance', async () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      const pending = ex.getRemainingResults();
+      ex.discard('retry');
+      await expect(pending).rejects.toMatchObject({
+        name: 'StreamingToolExecutorDiscardedError',
+        reason: 'retry',
+      });
+    });
+  });
+
+  describe('reference safety', () => {
+    it('accept() deep-clones the request so post-accept top-level mutation does not leak', () => {
+      const ex = new StreamingToolExecutor();
+      const r = req('a');
+      r.wasOutputTruncated = false;
+      ex.accept(r);
+      r.wasOutputTruncated = true;
+      const [stored] = ex.getAcceptedRequests();
+      expect(stored.wasOutputTruncated).toBe(false);
+    });
+
+    it('accept() deep-clones args so caller mutation does not leak (nested)', () => {
+      const ex = new StreamingToolExecutor();
+      const r: ToolCallRequestInfo = {
+        ...req('a'),
+        args: { config: { timeout: 100 } },
+      };
+      ex.accept(r);
+      (r.args as { config: { timeout: number } }).config.timeout = 999;
+      const [stored] = ex.getAcceptedRequests();
+      expect(stored.args).toEqual({ config: { timeout: 100 } });
+    });
+  });
+
+  describe('markTruncated()', () => {
+    it('flips wasOutputTruncated on the matching stored request', () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      ex.accept(req('b'));
+      ex.markTruncated('b');
+      const [a, b] = ex.getAcceptedRequests();
+      expect(a.wasOutputTruncated).toBeUndefined();
+      expect(b.wasOutputTruncated).toBe(true);
+    });
+
+    it('is a no-op for unknown callIds', () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      ex.markTruncated('ghost');
+      const [a] = ex.getAcceptedRequests();
+      expect(a.wasOutputTruncated).toBeUndefined();
+    });
+
+    it('is a no-op after discard()', () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      ex.discard('aborted');
+      ex.markTruncated('a');
+      // Discard wipes everything — nothing to flip; should not throw either.
+      expect(ex.getAcceptedRequests()).toEqual([]);
+    });
+  });
+
+  describe('close()', () => {
+    it('marks isClosed without discarding or wiping state', () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      ex.recordResult(resp('a'));
+      ex.close();
+      expect(ex.isClosed()).toBe(true);
+      expect(ex.isDiscarded()).toBe(false);
+      expect(ex.size()).toBe(1);
+      expect(ex.getCompletedResults().map((r) => r.callId)).toEqual(['a']);
+    });
+
+    it('blocks subsequent accept() but still admits matching recordResult()', () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      ex.close();
+      ex.accept(req('b')); // post-close accept is dropped
+      expect(ex.size()).toBe(1);
+      ex.recordResult(resp('a'));
+      expect(ex.isComplete()).toBe(true);
+      expect(ex.getCompletedResults().map((r) => r.callId)).toEqual(['a']);
+    });
+
+    it('keeps pending consumers unrejected when not complete at close time', async () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      const pending = ex.getRemainingResults();
+      ex.close();
+      let settled = false;
+      pending.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      ex.recordResult(resp('a'));
+      await expect(pending).resolves.toHaveLength(1);
+    });
+
+    it('is idempotent and no-op after discard()', () => {
+      const ex = new StreamingToolExecutor();
+      ex.discard('aborted');
+      ex.close();
+      ex.close();
+      expect(ex.isClosed()).toBe(false);
+      expect(ex.isDiscarded()).toBe(true);
+      expect(ex.getDiscardReason()).toBe('aborted');
+    });
+
+    it('discard() after close() supersedes — isClosed flips back to false', async () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      const pending = ex.getRemainingResults();
+      ex.close();
+      expect(ex.isClosed()).toBe(true);
+      ex.discard('aborted');
+      expect(ex.isDiscarded()).toBe(true);
+      expect(ex.isClosed()).toBe(false);
+      await expect(pending).rejects.toBeInstanceOf(
+        StreamingToolExecutorDiscardedError,
+      );
+      expect(ex.getDiscardReason()).toBe('aborted');
+    });
+  });
+
+  describe('reset()', () => {
+    it('wipes buffered state but keeps the executor Open for fresh accepts', () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      ex.recordResult(resp('a'));
+      ex.reset('retry');
+      expect(ex.isDiscarded()).toBe(false);
+      expect(ex.isClosed()).toBe(false);
+      expect(ex.size()).toBe(0);
+      expect(ex.getCompletedResults()).toEqual([]);
+      ex.accept(req('b'));
+      ex.recordResult(resp('b'));
+      expect(ex.getCompletedResults().map((r) => r.callId)).toEqual(['b']);
+    });
+
+    it('clears closed flag', () => {
+      const ex = new StreamingToolExecutor();
+      ex.close();
+      ex.reset('retry');
+      expect(ex.isClosed()).toBe(false);
+      // After reset the executor accepts again.
+      ex.accept(req('a'));
+      expect(ex.size()).toBe(1);
+    });
+
+    it('rejects pending getRemainingResults() consumers with the reason', async () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      const pending = ex.getRemainingResults();
+      ex.reset('retry');
+      await expect(pending).rejects.toMatchObject({
+        name: 'StreamingToolExecutorDiscardedError',
+        reason: 'retry',
+      });
+    });
+
+    it('is a no-op on already-discarded executors', async () => {
+      const ex = new StreamingToolExecutor();
+      ex.discard('aborted');
+      ex.reset('retry');
+      expect(ex.isDiscarded()).toBe(true);
+      expect(ex.isClosed()).toBe(false);
+      expect(ex.getDiscardReason()).toBe('aborted');
+      // The terminal-discard contract still holds — getRemainingResults
+      // rejects with the original reason rather than waiting for a fresh
+      // accept after the reset no-op.
+      await expect(ex.getRemainingResults()).rejects.toMatchObject({
+        reason: 'aborted',
+      });
+    });
+
+    it('re-accepts the same callId after a reset (acceptedIds cleared)', () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a', 'first'));
+      ex.reset('retry');
+      ex.accept(req('a', 'second'));
+      expect(ex.size()).toBe(1);
+      const [stored] = ex.getAcceptedRequests();
+      expect(stored.callId).toBe('a');
+      expect(stored.name).toBe('second');
+    });
+
+    it('does not set a discard reason — getDiscardReason stays undefined', () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      ex.reset('retry');
+      expect(ex.getDiscardReason()).toBeUndefined();
+    });
+  });
+
+  describe('multi-consumer settlement', () => {
+    it('two concurrent getRemainingResults() both resolve when complete', async () => {
+      const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
+      ex.accept(req('b'));
+      const p1 = ex.getRemainingResults();
+      const p2 = ex.getRemainingResults();
+      ex.recordResult(resp('a'));
+      ex.recordResult(resp('b'));
+      const [r1, r2] = await Promise.all([p1, p2]);
+      expect(r1.map((r) => r.callId)).toEqual(['a', 'b']);
+      expect(r2.map((r) => r.callId)).toEqual(['a', 'b']);
     });
   });
 });
