@@ -26,7 +26,7 @@ function selectRandomPhrase<T>(phrases: T[]): T {
 
 /**
  * Custom hook to manage cycling through loading phrases.
- * Uses fortune command for dynamic quotes instead of static phrases.
+ * Optionally uses fortune command for dynamic quotes when enabled; otherwise cycles through static phrases.
  * @param isActive Whether the phrase cycling should be active.
  * @param isWaiting Whether to show a specific waiting phrase.
  * @param customPhrases Optional custom phrases to cycle through.
