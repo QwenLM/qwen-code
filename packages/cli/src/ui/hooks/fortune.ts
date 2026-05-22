@@ -53,7 +53,7 @@ export async function getFortuneQuote(command: string): Promise<string | null> {
     }
 
     const { stdout } = await execFileAsync(executable, args, {
-      timeout: 5000,
+      timeout: 2000,
       maxBuffer: 1024,
       env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? '' },
     });
