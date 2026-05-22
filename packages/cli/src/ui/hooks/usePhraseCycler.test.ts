@@ -210,6 +210,7 @@ describe('usePhraseCycler', () => {
       usePhraseCycler(true, false, undefined, false),
     );
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
+    expect(mockGetFortuneQuote).not.toHaveBeenCalled();
   });
 
   it('should not use fortune when fortuneCommand is empty string', () => {
@@ -217,6 +218,7 @@ describe('usePhraseCycler', () => {
       usePhraseCycler(true, false, undefined, true, ''),
     );
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
+    expect(mockGetFortuneQuote).not.toHaveBeenCalled();
   });
 
   it('should not use fortune when fortuneCommand is whitespace only', () => {
@@ -224,6 +226,7 @@ describe('usePhraseCycler', () => {
       usePhraseCycler(true, false, undefined, true, '   '),
     );
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
+    expect(mockGetFortuneQuote).not.toHaveBeenCalled();
   });
 
   it('should clear interval on unmount when inactive', () => {
