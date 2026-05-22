@@ -208,10 +208,20 @@ async function snapshotProcessTreeWin(): Promise<Map<number, number[]>> {
   // F2 (#4175 commit 5 review fix — wenshao R5): no integer
   // interpolation into the script; this query takes no parameters
   // (we filter in-memory after the snapshot returns).
+  //
+  // F2 (#4175 commit 6 review fix — wenshao PR-A-R3 T3): explicit
+  // `-Delimiter ","` on `ConvertTo-Csv`. Pre-fix PowerShell 5.1
+  // honored the system locale's list separator (semicolon on
+  // German / French / Dutch / etc.), so the regex
+  // `^"(\d+)","(\d+)"$` below never matched on those locales →
+  // snapshot threw → fell back to the slower per-pid CIM path
+  // (~0.5-1s extra PowerShell startup latency per descendant on
+  // every shutdown). Forcing comma normalizes the output across
+  // locales / PS versions.
   const script =
     'Get-CimInstance -ClassName Win32_Process ' +
     '| Select-Object ProcessId,ParentProcessId ' +
-    '| ConvertTo-Csv -NoTypeInformation';
+    '| ConvertTo-Csv -NoTypeInformation -Delimiter ","';
   const { stdout } = await execFileAsync(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', script],
