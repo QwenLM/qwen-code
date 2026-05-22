@@ -589,7 +589,13 @@ jobs:
           else
             # Strip code fences if the model added them despite instructions.
             json_text="$(printf '%s' "$raw_out" | sed -E 's/^```(json)?$//; s/^```$//' | sed '/^[[:space:]]*$/d')"
-            if ! parsed="$(printf '%s' "$json_text" | jq -e '. | select(.tier and .blast_radius)' 2>/dev/null)"; then
+            # `.blast_radius` must be an object — a string/number/null would
+            # make every `.blast_radius.<flag>` lookup below return null and
+            # silently flatten the high-risk dimensions to `false`, routing
+            # a security-sensitive PR through LIGHT without protest. The
+            # type check forces the fall-through to DEEP whenever the model
+            # hallucinates the wrong shape.
+            if ! parsed="$(printf '%s' "$json_text" | jq -e '. | select(.tier and (.blast_radius | type == "object"))' 2>/dev/null)"; then
               echo "::warning::Preflight returned invalid JSON or missing required fields; falling back to DEEP."
               rationale="invalid preflight JSON"
             else
