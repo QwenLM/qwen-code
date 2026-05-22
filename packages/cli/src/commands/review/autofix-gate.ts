@@ -62,13 +62,14 @@ function decide(target: string, findingsCount: number): AutofixDecision {
           '/review was invoked with --comment; Step 8 (autofix) is suppressed in favour of inline PR comments.',
       };
     }
-    if (report.isCrossRepository) {
-      return {
-        decision: 'skip',
-        reason:
-          'Cross-repo PR running in lightweight mode — no local files to autofix.',
-      };
-    }
+    // Real lightweight mode (no matching remote, no worktree) is already
+    // caught by the missing-report branch above — `fetch-pr` only writes a
+    // report when it created a worktree. For fork PRs reviewed via a
+    // configured `upstream` remote, `gh pr view --json isCrossRepository`
+    // still returns `true` even though a real worktree with editable files
+    // exists. Skipping autofix on `isCrossRepository` alone would block the
+    // common fork-PR-via-upstream workflow that SKILL.md Step 1 explicitly
+    // supports. Push failure for forks is handled in SKILL.md Step 8.
   }
 
   if (findingsCount <= 0) {

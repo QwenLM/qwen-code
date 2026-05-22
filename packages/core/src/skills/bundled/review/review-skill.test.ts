@@ -14,7 +14,7 @@ import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { describe, expect, it, beforeAll } from 'vitest';
 import { SkillManager } from '../../skill-manager.js';
 import type { CommandHookConfig } from '../../../hooks/types.js';
@@ -44,6 +44,15 @@ describe('bundled review skill', () => {
     const hook = preToolUse?.[0]?.hooks?.[0] as CommandHookConfig;
     expect(hook.type).toBe('command');
     expect(hook.command).toContain('guard.sh');
+    // Regression guard for the round-1 `timeout: 5` bug — `hookRunner.ts`
+    // treats command-hook timeouts as milliseconds, so 5 (≈ 0.005s) made the
+    // guard always time out and silently fail open. Anything ≥ 1000ms gives
+    // bash + jq + grep enough room to finish; pinning a floor here means a
+    // future SKILL.md edit can't accidentally reintroduce the regression.
+    expect(hook.timeout).toBeGreaterThanOrEqual(1000);
+    // Pinning the outer shell to bash is what makes `$QWEN_SKILL_ROOT`
+    // expand on Windows (cmd.exe / PowerShell don't expand `$VAR`).
+    expect(hook.shell).toBe('bash');
   });
 
   it('ships an executable guard.sh alongside SKILL.md', () => {
@@ -64,6 +73,15 @@ describe('bundled review skill', () => {
     beforeAll(() => {
       cwd = mkdtempSync(path.join(tmpdir(), 'qwen-review-guard-'));
       mkdirSync(path.join(cwd, '.qwen', 'tmp'), { recursive: true });
+      // Simulate an active /review session — the guard self-disables when no
+      // fetch-pr report is present (lifecycle backstop for the no-op
+      // `unregisterSkillHooks`). Without this stub, every command below
+      // would fall straight through to `allow` and the deny matrix would be
+      // exercising the wrong code path.
+      writeFileSync(
+        path.join(cwd, '.qwen', 'tmp', 'qwen-review-pr-1-fetch.json'),
+        '{}',
+      );
     });
 
     function runGuard(input: object): { stdout: string; exitCode: number } {
@@ -138,6 +156,28 @@ describe('bundled review skill', () => {
       });
       const decision = JSON.parse(stdout);
       expect(decision.decision).toBe('allow');
+    });
+
+    it('self-disables when no /review session is active', () => {
+      // The hook outlives any single /review invocation because
+      // `unregisterSkillHooks` is a no-op. If no fetch-pr report exists, the
+      // guard must NOT deny the user's other work even on otherwise-blocked
+      // commands.
+      const otherCwd = mkdtempSync(path.join(tmpdir(), 'qwen-review-noop-'));
+      try {
+        const stdout = execFileSync('bash', [guardScript], {
+          input: JSON.stringify({
+            tool_name: 'run_shell_command',
+            tool_input: { command: 'git checkout main' },
+          }),
+          encoding: 'utf8',
+          cwd: otherCwd,
+        });
+        const decision = JSON.parse(stdout);
+        expect(decision.decision).toBe('allow');
+      } finally {
+        fs.rmSync(otherCwd, { recursive: true, force: true });
+      }
     });
   });
 });

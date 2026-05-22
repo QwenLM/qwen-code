@@ -82,7 +82,12 @@ describe('qwen review autofix-gate', () => {
     expect(decision.reason).toMatch(/--comment/);
   });
 
-  it('returns skip when isCrossRepository is true', async () => {
+  it('returns ask for a fork PR with a worktree (isCrossRepository true)', async () => {
+    // `gh pr view --json isCrossRepository` returns true for any fork PR,
+    // including the common "fork PR reviewed via configured upstream remote"
+    // flow where fetch-pr succeeds and a real worktree exists. Real
+    // lightweight mode (no matching remote, no worktree) writes no fetch
+    // report, so it is already handled by the missing-report branch.
     writeReport('99', { commentMode: false, isCrossRepository: true });
     const { stdout } = await runGate([
       'autofix-gate',
@@ -91,8 +96,7 @@ describe('qwen review autofix-gate', () => {
       '5',
     ]);
     const decision = JSON.parse(stdout.trim());
-    expect(decision.decision).toBe('skip');
-    expect(decision.reason).toMatch(/lightweight mode/);
+    expect(decision.decision).toBe('ask');
   });
 
   it('returns ask for a normal PR with findings', async () => {
@@ -143,5 +147,40 @@ describe('qwen review autofix-gate', () => {
     const decision = JSON.parse(stdout.trim());
     expect(decision.decision).toBe('skip');
     expect(decision.reason).toMatch(/No fetch-pr report for PR #99/);
+  });
+
+  it('falls through to findings-count when legacy report omits commentMode', async () => {
+    // Pre-existing fetch-pr reports on disk (written before this PR) lack
+    // the `commentMode` field. The gate must read the absent field as
+    // falsy and proceed to the findings-count check rather than crashing,
+    // so users with stale `.qwen/tmp/qwen-review-pr-<n>-fetch.json` from a
+    // previous run don't see a regression. Hand-write the JSON to bypass
+    // `writeReport`, which always supplies `commentMode`.
+    mkdirSync('.qwen/tmp', { recursive: true });
+    writeFileSync(
+      fetchReportPath('77'),
+      JSON.stringify({
+        prNumber: '77',
+        ownerRepo: 'octo/repo',
+        remote: 'origin',
+        ref: 'qwen-review/pr-77',
+        fetchedSha: 'b'.repeat(40),
+        worktreePath: '.qwen/tmp/review-pr-77',
+        baseRefName: 'main',
+        headRefName: 'legacy',
+        isCrossRepository: false,
+        diffStat: { files: 1, additions: 0, deletions: 0 },
+        // no `commentMode` key on purpose — simulates a stale report.
+      }),
+      'utf8',
+    );
+    const { stdout } = await runGate([
+      'autofix-gate',
+      'pr-77',
+      '--findings-count',
+      '3',
+    ]);
+    const decision = JSON.parse(stdout.trim());
+    expect(decision.decision).toBe('ask');
   });
 });

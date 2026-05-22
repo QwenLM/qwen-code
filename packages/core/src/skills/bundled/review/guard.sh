@@ -1,16 +1,30 @@
 #!/usr/bin/env bash
-# /review session guard.
+# /review session guard — best-effort speed bump.
 #
-# Registered as a PreToolUse hook in SKILL.md frontmatter. Refuses
-# `run_shell_command` calls that would mutate the user's working tree —
+# Registered as a PreToolUse hook in SKILL.md frontmatter. Refuses obvious
+# `run_shell_command` invocations that would mutate the user's working tree —
 # `gh pr checkout`, `git checkout <branch>`, `git switch`, `git pull`,
 # `git reset --hard`. The /review skill MUST use the worktree created by
 # `qwen review fetch-pr`; bypassing it contaminates the user's local state.
 #
-# This is a backstop. The primary enforcement is `qwen review fetch-pr` +
-# downstream subcommands hard-failing on a missing fetch-report. The hook
-# catches the case where the LLM ran a forbidden command before any
-# `qwen review` subcommand had a chance to refuse.
+# Primary enforcement is on the CLI side: `qwen review fetch-pr` +
+# `requireFetchReport` in pr-context / presubmit / deterministic --pr /
+# load-rules --pr. Those gates are pure-Node string compares and cannot be
+# bypassed by shell tricks. This script is only a second-line backstop that
+# trips the common careless cases (LLM types `git checkout main`).
+#
+# Known bypass classes the regex deliberately does NOT plug — anyone trying
+# to defeat the guard can drive the runtime command to `git checkout main`
+# while the literal string seen here contains no `git checkout`:
+#   - parameter expansion:  git${IFS}checkout main, ${cmd:-git} checkout main
+#   - command substitution producing the verb:  $(echo git) checkout main
+#   - backslash-newline line continuation that bash collapses pre-tokenise
+#   - xargs argument-supply:  echo main | xargs git checkout
+#   - PATH-prefixed binaries: /usr/bin/git checkout main
+#   - global git options:    git -C /repo checkout main
+# Plugging these would require parsing bash ourselves, which is the wrong
+# tool. Trust the CLI gates as the deterministic control; treat this script
+# as documentation-with-teeth for the everyday case.
 #
 # Hook input is a single JSON line on stdin shaped like:
 #   {"tool_name": "run_shell_command", "tool_input": {"command": "..."}}
@@ -19,6 +33,19 @@
 set -eu
 
 INPUT=$(cat)
+
+# Self-disable when no /review session is active. `unregisterSkillHooks` is a
+# documented no-op (`packages/core/src/hooks/registerSkillHooks.ts`), so this
+# hook outlives any single `/review` invocation for the rest of the
+# interactive CLI session. Without this gate, a follow-up `git checkout main`
+# in the same conversation — long after `/review N` finished — would still be
+# denied with a recovery message pointing at a review session that no longer
+# exists. The presence of a fetch-pr report is the proxy for "review session
+# active".
+if ! ls .qwen/tmp/qwen-review-pr-*-fetch.json >/dev/null 2>&1; then
+  printf '{"decision":"allow"}\n'
+  exit 0
+fi
 
 # Bail out cleanly if jq is missing; we don't want the guard itself to be a
 # reason for /review to fail. Surface a stderr warning so the silent
@@ -31,8 +58,12 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi
 
+# The SKILL.md matcher is `^run_shell_command$`; `sessionHooksManager`
+# compiles it into a RegExp anchored on both ends, so `Bash` / `Shell`
+# tool_names never reach this script. Keep the check tight rather than
+# carrying dead aliases.
 TOOL=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null || true)
-if [ "$TOOL" != "run_shell_command" ] && [ "$TOOL" != "Bash" ] && [ "$TOOL" != "Shell" ]; then
+if [ "$TOOL" != "run_shell_command" ]; then
   printf '{"decision":"allow"}\n'
   exit 0
 fi
