@@ -101,10 +101,11 @@ export async function cloneFromGit(
     // This results in a detached HEAD state, which is fine for this purpose.
     await git.checkout('FETCH_HEAD');
   } catch (error) {
+    const redactedErrorMessage = redactUrlCredentials(getErrorMessage(error));
     throw new Error(
-      `Failed to clone Git repository from ${redactedSource} ${redactUrlCredentials(getErrorMessage(error))}`,
+      `Failed to clone Git repository from ${redactedSource} ${redactedErrorMessage}`,
       {
-        cause: error,
+        cause: new Error(redactedErrorMessage),
       },
     );
   }

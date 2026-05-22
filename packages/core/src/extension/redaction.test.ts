@@ -20,6 +20,17 @@ describe('redactUrlCredentials', () => {
     ).toBe(`https://${REDACTED_URL_CREDENTIAL}@github.com/owner/repo`);
   });
 
+  it('redacts raw hash characters echoed in URL credentials', () => {
+    expect(
+      redactUrlCredentials('https://user:pass#word@example.com/org/repo.git'),
+    ).toBe(`https://${REDACTED_URL_CREDENTIAL}@example.com/org/repo.git`);
+  });
+
+  it('does not redact at signs after the URL path starts', () => {
+    const source = 'https://example.com/path/@scope/package';
+    expect(redactUrlCredentials(source)).toBe(source);
+  });
+
   it('redacts custom URL schemes used by extension sources', () => {
     expect(redactUrlCredentials('sso://user:token@example.com/org/repo')).toBe(
       `sso://${REDACTED_URL_CREDENTIAL}@example.com/org/repo`,

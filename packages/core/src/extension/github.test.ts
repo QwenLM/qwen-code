@@ -24,6 +24,7 @@ import {
   type Extension,
   type ExtensionManager,
 } from './extensionManager.js';
+import { getErrorMessage } from '../utils/errors.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockArch = vi.hoisted(() => vi.fn());
@@ -165,6 +166,32 @@ describe('git extension helpers', () => {
         await cloneFromGit(installMetadata, destination);
       } catch (error: unknown) {
         message = String(error);
+      }
+
+      expect(message).toContain(
+        'https://***REDACTED***@my-repo.com/org/repo.git',
+      );
+      expect(message).not.toContain('user');
+      expect(message).not.toContain('token');
+    });
+
+    it('should redact URL credentials in clone failure causes', async () => {
+      const installMetadata = {
+        source: 'https://user:token@my-repo.com/org/repo.git',
+        type: 'git' as const,
+      };
+      const destination = '/dest';
+      mockGit.clone.mockRejectedValue(
+        new Error(
+          "fatal: Authentication failed for 'https://user:token@my-repo.com/org/repo.git'",
+        ),
+      );
+
+      let message = '';
+      try {
+        await cloneFromGit(installMetadata, destination);
+      } catch (error: unknown) {
+        message = getErrorMessage(error);
       }
 
       expect(message).toContain(
