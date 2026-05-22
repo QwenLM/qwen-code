@@ -5,7 +5,7 @@
 > **状态**：本设计已在本 PR（codex/preflight-triage 分支）落地。具体文件：
 >
 > - `.github/workflows/pr-gate.yml` — 两个独立 job (PR Template / PR Size)。PR Title (Conventional Commits) check 不做 —— 仓库已有本地 commit-msg hook 把住格式。
-> - `.github/PULL_REQUEST_TEMPLATE.md` — 仓库**已有**，结构与本 plan 兼容（`## Linked Issues / Bugs` 包含 `## Linked Issues` 子串），无需重写
+> - `.github/pull_request_template.md` — 仓库**已有**，结构与本 plan 兼容（`## Linked Issues / Bugs` 包含 `## Linked Issues` 子串），无需重写
 > - `.github/workflows/qwen-code-pr-review.yml` — Phase B 已应用：size 超限不再发"请拆分"评论，阻断职责完全交给 `pr-gate.yml`
 > - Branch Protection / CODEOWNERS — 在 Settings 配，不在代码里，详见下面 §Phase D
 >

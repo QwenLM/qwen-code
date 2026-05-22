@@ -63,4 +63,15 @@ describe('Qwen PR review workflow safety rails', () => {
     // Still gated so an intentionally size-skipped PR posts nothing.
     expect(workflow).toContain("steps.size.outputs.should_review == 'true'");
   });
+
+  it('fences untrusted model output before writing it to Actions logs', () => {
+    expect(workflow).toContain('preflight-raw-');
+    expect(workflow).toContain('qwen-light-stream-');
+    expect(workflow).toContain('qwen-standard-stream-');
+    expect(workflow).toContain('qwen-deep-stream-');
+    expect(workflow).toContain('qwen-deep-summary-');
+
+    const stopCommandMarkers = workflow.match(/::stop-commands::/g);
+    expect(stopCommandMarkers?.length).toBeGreaterThanOrEqual(5);
+  });
 });

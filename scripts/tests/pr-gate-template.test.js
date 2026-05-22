@@ -106,5 +106,6 @@ npm run typecheck
     expect(failures).toHaveLength(1);
     expect(failures[0]).toContain('Missing "Validation" section');
     expect(failures[0]).toContain('Missing "Linked Issues" section');
+    expect(failures[0]).toContain('.github/pull_request_template.md');
   });
 });

@@ -148,7 +148,7 @@ jobs:
               core.setFailed(
                 `PR description is incomplete:\n\n${formatted}\n\n` +
                 'Edit your PR description to match the template at ' +
-                '`.github/PULL_REQUEST_TEMPLATE.md` and the check will re-run automatically.'
+                '`.github/pull_request_template.md` and the check will re-run automatically.'
               );
             }
 
@@ -168,8 +168,8 @@ jobs:
         uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
         with:
           script: |
-            // Pull the full file list (up to 3 pages * 100 = 300 files;
-            // anything beyond that is itself a sign of too-large PR).
+            // Pull the full file list. Extremely high file counts are still
+            // covered by the meaningful-line threshold below.
             const files = await github.paginate(
               github.rest.pulls.listFiles,
               {

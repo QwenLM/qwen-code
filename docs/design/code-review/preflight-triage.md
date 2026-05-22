@@ -140,14 +140,14 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
   Reply `@qwen /review --tier=light|standard|deep` to force a review.
   ```
 
-- **耗时硬上限**：60s（preflight 自身 ≤ 30s + shell ≤ 5s + `gh pr comment` ≤ 25s）
-- **超时兜底**：若 60s 内未能 comment（极罕见，仅网络问题）→ 走 fallback comment 路径
+- **耗时硬上限**：preflight `timeout 3m` + step `timeout-minutes: 5`；若命中 ULTRA_LIGHT，后续只做 shell 组装和 comment
+- **超时兜底**：preflight 失败或超时会保守降级到 DEEP；若最终 comment 发布失败则走 fallback comment 路径
 
 ### LIGHT
 
 - **执行路径**：workflow → 单次 qwen 调用（不走 bundled skill）
 - **Prompt 文件**：`.qwen/preflight-light-review-prompt.md`（独立可审阅文件）
-- **输入注入**：PR 标题/正文、changed file list、首 500 行 unified diff、`focus_areas`（来自 preflight）
+- **输入注入**：PR 标题/正文、changed file list、首 50KB unified diff、`focus_areas`（来自 preflight）
 - **要求模型输出**：简洁 markdown review，**最多 3 项 findings**，不要求 P0-P3 结构
 - **耗时硬上限**：3 min（`timeout 3m qwen ...`） + 5 min step `timeout-minutes`
 - **超时兜底**：3 min timeout 触发 → 走流式累加器，把已生成的部分作为 partial review 发出；不做自动升档重试。
@@ -156,7 +156,7 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 
 - **执行路径**：workflow → 单次 qwen 调用（不走 bundled skill）
 - **Prompt 文件**：`.qwen/preflight-standard-review-prompt.md`
-- **输入注入**：与 LIGHT 同，但 unified diff 截断点 2000 行，附 `.qwen/review-rules.md`、`focus_areas`、`agents_to_run` 列表
+- **输入注入**：与 LIGHT 同，但 unified diff 截断点 200KB，附 `.qwen/review-rules.md`、`focus_areas`、`agents_to_run` 列表
 - **要求模型输出**：结构化 P0–P3 markdown，含 cross-file 提示（"if XX changed, also check YY"），含 Validation Evidence verdict（沿用 review-rules.md 既有要求）
 - **耗时硬上限**：8 min（`timeout 8m qwen ...`） + 10 min step `timeout-minutes`
 - **超时兜底**：8 min timeout 触发 → 走流式累加器（同 DEEP），把已生成的部分作为 partial review 发出；不再升级到 DEEP（STANDARD 失败大概率说明 LLM 服务故障）
@@ -312,7 +312,7 @@ shell-only   单发 qwen   单发 qwen   单发 qwen
 
 > **tier-specific 输出**：LIGHT/STANDARD/DEEP 都是单发 qwen 调用，所有 assistant segment 都是 review 内容，`buildOutput` 直接按 stream 顺序 `join`。DEEP 不 checkout PR head，也不会切换 worktree；workflow 只把可信 shell 收集到的 PR metadata / diff / rules 渲染进 prompt。
 
-> 这个改动同时让"调试期看进度"（stream 落盘）与"timeout 时有结果"（本设计目标）都得到满足。
+> 这个改动同时让"调试期看进度"（stream 落盘）与"timeout 时有结果"（本设计目标）都得到满足。写入 Actions 日志的模型流和解析后的 DEEP summary 都用随机 `::stop-commands::` fence 包住，避免 PR 内容诱导模型输出 GitHub Actions workflow command。
 
 ## Maintainer override
 
@@ -412,6 +412,8 @@ Deep review verdict: APPROVE
     prompt="$(cat .qwen/preflight-light-review-prompt.md)"
     # 注入 PR diff + focus_areas
     set +e
+    stop_token="qwen-light-stream-$(date +%s%N)"
+    echo "::stop-commands::${stop_token}"
     timeout --kill-after=15s 3m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
       --approval-mode default \
       --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
@@ -420,6 +422,7 @@ Deep review verdict: APPROVE
       --output-format stream-json --include-partial-messages \
       --prompt "$prompt" 2>&1 | tee qwen-review-stream.jsonl
     status=${PIPESTATUS[0]}
+    echo "::${stop_token}::"
     set -e
     # 累加式解析（见 §Failure modes 流式累加器实现要点）
     # timeout / 非零 exit 都走 partial flush，不再升 STANDARD
@@ -436,6 +439,8 @@ Deep review verdict: APPROVE
     # 注入 PR diff + focus_areas + agents_to_run + review-rules.md
     out=qwen-review-stream.jsonl
     set +e
+    stop_token="qwen-standard-stream-$(date +%s%N)"
+    echo "::stop-commands::${stop_token}"
     timeout --kill-after=30s 8m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
       --approval-mode default \
       --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
@@ -444,6 +449,7 @@ Deep review verdict: APPROVE
       --output-format stream-json --include-partial-messages \
       --prompt "$prompt" 2>&1 | tee "$out"
     status=${PIPESTATUS[0]}
+    echo "::${stop_token}::"
     set -e
     # 累加式解析（即使 timeout，已落盘的 stream 也能解出 partial）
     node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md
@@ -465,6 +471,8 @@ Deep review verdict: APPROVE
     prompt="$(cat .qwen/preflight-deep-review-prompt.md)"
     # 注入 PR diff + focus_areas + agents_to_run + review-rules.md
     set +e
+    stop_token="qwen-deep-stream-$(date +%s%N)"
+    echo "::stop-commands::${stop_token}"
     timeout --kill-after=30s 15m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
       --approval-mode default \
       --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
@@ -473,6 +481,7 @@ Deep review verdict: APPROVE
       --output-format stream-json --include-partial-messages \
       --prompt "$prompt" 2>&1 | tee qwen-review-stream.jsonl
     status=${PIPESTATUS[0]}
+    echo "::${stop_token}::"
     set -e
     node scripts/parse-review-stream.cjs qwen-review-stream.jsonl qwen-review-summary.md
     if [ "$status" -ne 0 ]; then
@@ -581,14 +590,17 @@ Deep review verdict: APPROVE
 
 ## 需要新增的仓库内文件清单
 
-| 文件                                               | 用途                                                                                                | 来源决策                  |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------- |
-| `.qwen/preflight-prompt.md`                        | preflight 模型的提示词                                                                              | D2                        |
-| `.qwen/preflight-light-review-prompt.md`           | LIGHT tier 的单发 review prompt                                                                     | D3                        |
-| `.qwen/preflight-standard-review-prompt.md`        | STANDARD tier 的单发 review prompt                                                                  | D3                        |
-| `scripts/parse-review-stream.cjs`                  | 累加式 stream-json 解析器（替换 workflow inline node 脚本）                                         | §Failure modes 流式累加器 |
-| (修改) `.github/workflows/qwen-code-pr-review.yml` | 加 preflight + 4 tier 执行 + 累加式解析                                                             | §Workflow step 结构       |
-| (修改) `.gitignore`                                | 已对 `.qwen/*` 例外 `review-rules.md`、`commands/`、`skills/`、`agents/`；需追加例外上述 3 个新文件 | 配套                      |
+| 文件                                               | 用途                                                                                                 | 来源决策                  |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------- |
+| `.qwen/preflight-prompt.md`                        | preflight 模型的提示词                                                                               | D2                        |
+| `.qwen/preflight-light-review-prompt.md`           | LIGHT tier 的单发 review prompt                                                                      | D3                        |
+| `.qwen/preflight-standard-review-prompt.md`        | STANDARD tier 的单发 review prompt                                                                   | D3                        |
+| `.qwen/preflight-deep-review-prompt.md`            | DEEP tier 的单发 review prompt                                                                       | D3                        |
+| `scripts/compute-pr-size.cjs`                      | 与 PR Size gate 对齐的 meaningful changed-line 计算                                                  | §Workflow step 结构       |
+| `scripts/parse-review-stream.cjs`                  | 累加式 stream-json 解析器（替换 workflow inline node 脚本）                                          | §Failure modes 流式累加器 |
+| `scripts/render-review-prompt.cjs`                 | 将 PR context / review rules 渲染进 prompt 模板，避免 YAML inline 脚本重复                           | §Workflow step 结构       |
+| (修改) `.github/workflows/qwen-code-pr-review.yml` | 加 preflight + 4 tier 执行 + 累加式解析                                                              | §Workflow step 结构       |
+| (修改) `.gitignore`                                | 已对 `.qwen/*` 例外 `review-rules.md`、`commands/`、`skills/`、`agents/`；需追加例外上述 prompt 文件 | 配套                      |
 
 ## 需要新增的仓库 vars / secrets
 
@@ -608,6 +620,9 @@ Deep review verdict: APPROVE
 - **AC5**：existing fallback comment 路径在 STANDARD/DEEP 失败时仍能发出
 
 ## 实测验证记录
+
+详细验证证据（GitHub Actions run、PR 评论链接、当前 #4359 gate 状态、size 计算结果）见
+[`preflight-validation.md`](./preflight-validation.md)。
 
 下表是 `codex/preflight-triage` 分支经 `workflow_dispatch` 在真实 CI 上跑出的端到端结果。pre-merge 阶段新版链路只能靠 `workflow_dispatch` 验证 —— `pull_request_target` / `@qwen /review` 自动触发按 GHA 安全机制用 **base 分支(main)** 的 workflow,合并后才生效。
 

@@ -782,6 +782,11 @@ jobs:
           out=qwen-review-stream.jsonl
           echo "::group::Qwen LIGHT review (live stream)"
           set +e
+          # qwen output is model text derived from untrusted PR content.
+          # Fence it so GitHub Actions does not interpret accidental or
+          # prompt-injected `::workflow-command::` lines from the stream.
+          stop_token="qwen-light-stream-$(date +%s%N)"
+          echo "::stop-commands::${stop_token}"
           timeout --kill-after=15s 3m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
             --approval-mode default \
             --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
@@ -790,6 +795,7 @@ jobs:
             --output-format stream-json --include-partial-messages \
             --prompt "$(cat /tmp/light-prompt-rendered.md)" 2>&1 | tee "$out"
           status=${PIPESTATUS[0]}
+          echo "::${stop_token}::"
           set -e
           echo "::endgroup::"
 
@@ -895,6 +901,11 @@ jobs:
           out=qwen-review-stream.jsonl
           echo "::group::Qwen STANDARD review (live stream)"
           set +e
+          # qwen output is model text derived from untrusted PR content.
+          # Fence it so GitHub Actions does not interpret accidental or
+          # prompt-injected `::workflow-command::` lines from the stream.
+          stop_token="qwen-standard-stream-$(date +%s%N)"
+          echo "::stop-commands::${stop_token}"
           timeout --kill-after=30s 8m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
             --approval-mode default \
             --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
@@ -903,6 +914,7 @@ jobs:
             --output-format stream-json --include-partial-messages \
             --prompt "$(cat /tmp/standard-prompt-rendered.md)" 2>&1 | tee "$out"
           status=${PIPESTATUS[0]}
+          echo "::${stop_token}::"
           set -e
           echo "::endgroup::"
 
@@ -999,6 +1011,11 @@ jobs:
           out=qwen-review-stream.jsonl
           echo "::group::Qwen DEEP review (live stream-json events)"
           set +e
+          # qwen output is model text derived from untrusted PR content.
+          # Fence it so GitHub Actions does not interpret accidental or
+          # prompt-injected `::workflow-command::` lines from the stream.
+          stop_token="qwen-deep-stream-$(date +%s%N)"
+          echo "::stop-commands::${stop_token}"
           timeout --kill-after=30s 15m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
             --approval-mode default \
             --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
@@ -1007,6 +1024,7 @@ jobs:
             --output-format stream-json --include-partial-messages \
             --prompt "$(cat /tmp/deep-prompt-rendered.md)" 2>&1 | tee "$out"
           status=${PIPESTATUS[0]}
+          echo "::${stop_token}::"
           set -e
           echo "::endgroup::"
 
@@ -1045,7 +1063,11 @@ jobs:
           fi
 
           echo "::group::Parsed review summary"
+          # This is also model-derived markdown; keep the log display inert.
+          stop_token="qwen-deep-summary-$(date +%s%N)"
+          echo "::stop-commands::${stop_token}"
           cat qwen-review-summary.md 2>/dev/null || echo "(summary file removed by near-empty guard; fallback comment will fire)"
+          echo "::${stop_token}::"
           echo "::endgroup::"
 
       - name: 'Post dry-run summary'
