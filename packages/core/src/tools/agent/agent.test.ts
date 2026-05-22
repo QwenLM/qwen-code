@@ -63,6 +63,31 @@ function escapeRegExp(value: string): string {
 vi.mock('../../subagents/subagent-manager.js');
 vi.mock('../../agents/runtime/agent-headless.js');
 
+// Spies for the subagent-span layer so tests can assert what status taxonomy
+// was published. The real runInSubagentSpanContext sets up OTel context-with,
+// which is irrelevant here — we just need the body to run. Review wenshao
+// @ #4410.
+const mockStartSubagentSpan = vi.fn();
+const mockEndSubagentSpan = vi.fn();
+
+vi.mock('../../telemetry/index.js', async (importOriginal) => {
+  const orig =
+    await importOriginal<typeof import('../../telemetry/index.js')>();
+  return {
+    ...orig,
+    startSubagentSpan: (opts: unknown) => {
+      mockStartSubagentSpan(opts);
+      // Minimal stand-in — endSubagentSpan is mocked too, so no method
+      // on this object is ever invoked.
+      return {} as ReturnType<typeof orig.startSubagentSpan>;
+    },
+    endSubagentSpan: (span: unknown, metadata: unknown) => {
+      mockEndSubagentSpan(span, metadata);
+    },
+    runInSubagentSpanContext: <T>(_span: unknown, fn: () => Promise<T>) => fn(),
+  };
+});
+
 const MockedSubagentManager = vi.mocked(SubagentManager);
 const MockedContextState = vi.mocked(ContextState);
 
@@ -731,6 +756,143 @@ describe('AgentTool', () => {
       const description = invocation.getDescription();
 
       expect(description).toBe('Search files');
+    });
+
+    describe('qwen-code.subagent span outcome (#4410 wenshao)', () => {
+      beforeEach(() => {
+        mockStartSubagentSpan.mockClear();
+        mockEndSubagentSpan.mockClear();
+      });
+
+      async function runForegroundOnce(): Promise<void> {
+        const params: AgentParams = {
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+        };
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        await invocation.execute();
+      }
+
+      function lastEndMeta(): {
+        status?: string;
+        terminateReason?: string;
+        resultSummaryPresent?: boolean;
+        error?: string;
+        errorType?: string;
+      } {
+        const calls = mockEndSubagentSpan.mock.calls;
+        return calls[calls.length - 1][1] as {
+          status?: string;
+          terminateReason?: string;
+          resultSummaryPresent?: boolean;
+          error?: string;
+          errorType?: string;
+        };
+      }
+
+      function lastStartSpec(): {
+        depth?: number;
+        parentAgentId?: string;
+      } {
+        const calls = mockStartSubagentSpan.mock.calls;
+        return calls[calls.length - 1][0] as {
+          depth?: number;
+          parentAgentId?: string;
+        };
+      }
+
+      it('GOAL terminateMode → status="completed" + resultSummaryPresent', async () => {
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.GOAL,
+        );
+        await runForegroundOnce();
+        expect(mockEndSubagentSpan).toHaveBeenCalledTimes(1);
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('completed');
+        expect(meta.resultSummaryPresent).toBe(true);
+      });
+
+      it('ERROR terminateMode → status="failed" + terminateReason="error"', async () => {
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.ERROR,
+        );
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.terminateReason).toBe('error');
+      });
+
+      it('MAX_TURNS terminateMode → status="failed" + terminateReason="max_turns"', async () => {
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.MAX_TURNS,
+        );
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.terminateReason).toBe('max_turns');
+      });
+
+      it('CANCELLED terminateMode → status="cancelled"', async () => {
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.CANCELLED,
+        );
+        await runForegroundOnce();
+        // No external signal abort → "subagent_cancelled" branch (terminate
+        // mode came from inside the subagent itself).
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('cancelled');
+        expect(meta.terminateReason).toBe('subagent_cancelled');
+      });
+
+      it('subagent.execute throws → status="failed" + errorType=Error', async () => {
+        vi.mocked(mockAgent.execute).mockRejectedValue(
+          new Error('catastrophic boom'),
+        );
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.error).toBe('catastrophic boom');
+        expect(meta.errorType).toBe('Error');
+        expect(meta.terminateReason).toBe('exception');
+      });
+
+      it('non-Error throw → errorType="NonErrorThrown"', async () => {
+        vi.mocked(mockAgent.execute).mockRejectedValue('plain string');
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.error).toBe('plain string');
+        expect(meta.errorType).toBe('NonErrorThrown');
+      });
+
+      it('endSubagentSpan still fires when body never opts in (default = completed)', async () => {
+        // Default mockAgent setup is GOAL termination — runSubagentWithHooks
+        // DOES call recordSpanOutcome. Verify the finalize is always reached.
+        await runForegroundOnce();
+        expect(mockEndSubagentSpan).toHaveBeenCalledTimes(1);
+      });
+
+      it('startSubagentSpan receives depth=0 for top-level foreground (no parent ALS frame)', async () => {
+        await runForegroundOnce();
+        expect(mockStartSubagentSpan).toHaveBeenCalledTimes(1);
+        const spec = lastStartSpec();
+        expect(spec.depth).toBe(0);
+        expect(spec.parentAgentId).toBeUndefined();
+      });
+
+      it('startSubagentSpan receives depth=parentDepth+1 when invoked inside an outer agent frame', async () => {
+        await runWithAgentContext('outer-parent', async () => {
+          await runForegroundOnce();
+        });
+        // Outer ALS frame at depth=0 → subagent itself records depth=1.
+        // This regression-guards wenshao's depth-off-by-one fix at #4410.
+        const spec = lastStartSpec();
+        expect(spec.depth).toBe(1);
+        expect(spec.parentAgentId).toBe('outer-parent');
+      });
     });
   });
 

@@ -688,6 +688,56 @@ assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-
   }
 }
 
+/**
+ * Callback the body of `runWithSubagentSpan` invokes to publish its terminal
+ * state. Without this, both `runSubagentWithHooks` and `bgBody` swallow their
+ * own errors before returning, leaving the wrapper's catch block dead and
+ * every span ending as `status='completed'` regardless of actual outcome.
+ * Review wenshao @ #4410.
+ */
+type SubagentOutcomeSink = (metadata: SubagentSpanMetadata) => void;
+
+/**
+ * Map `AgentTerminateMode` + signal/error state to the span's status taxonomy.
+ * Mirrors the foreground/background display logic: GOAL → success, CANCELLED
+ * (or signal abort) → user-initiated stop, everything else → failure.
+ */
+function deriveSubagentOutcomeMetadata(opts: {
+  terminateMode: AgentTerminateMode;
+  signalAborted: boolean;
+  resultSummaryPresent: boolean;
+}): SubagentSpanMetadata {
+  const { terminateMode, signalAborted, resultSummaryPresent } = opts;
+  if (signalAborted || terminateMode === AgentTerminateMode.CANCELLED) {
+    return {
+      status: 'cancelled',
+      terminateReason: signalAborted ? 'signal_aborted' : 'subagent_cancelled',
+      resultSummaryPresent,
+    };
+  }
+  if (terminateMode === AgentTerminateMode.GOAL) {
+    return { status: 'completed', resultSummaryPresent };
+  }
+  return {
+    status: 'failed',
+    terminateReason: String(terminateMode).toLowerCase(),
+    resultSummaryPresent,
+  };
+}
+
+function deriveSubagentExceptionMetadata(
+  error: unknown,
+  signalAborted: boolean,
+): SubagentSpanMetadata {
+  return {
+    status: signalAborted ? 'aborted' : 'failed',
+    error: error instanceof Error ? error.message : String(error),
+    errorType:
+      error instanceof Error ? error.constructor.name : 'NonErrorThrown',
+    terminateReason: signalAborted ? 'signal_aborted' : 'exception',
+  };
+}
+
 class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   readonly eventEmitter: AgentEventEmitter = new AgentEventEmitter();
   private currentDisplay: AgentResultDisplay | null = null;
@@ -1178,34 +1228,47 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       modelOverride?: string;
     },
     signal: AbortSignal | undefined,
-    body: () => Promise<T>,
+    body: (recordOutcome: SubagentOutcomeSink) => Promise<T>,
   ): Promise<T> {
     const invokerSpanContext =
       spec.invocationKind === 'foreground'
         ? undefined
         : trace.getSpan(otelContext.active())?.spanContext();
+    // Capture parent identity BEFORE we enter the child's runWithAgentContext
+    // frame inside `body`. The parent's depth is `getCurrentAgentDepth()` (0
+    // outside any frame, N inside frame at depth N); the subagent itself
+    // lives one level deeper, hence the +1 — but only when a parent frame
+    // exists. Without a parent the subagent is top-level (depth 0). The
+    // `getCurrentAgentId() !== null` test discriminates "no frame" from
+    // "frame at depth 0", which `getCurrentAgentDepth()` alone cannot.
+    // Review wenshao @ #4410.
+    const parentAgentId = getCurrentAgentId();
     const span = startSubagentSpan({
       ...spec,
-      // parentAgentId / depth captured at caller's ALS frame BEFORE we
-      // enter the child's runWithAgentContext frame inside `body`.
-      parentAgentId: getCurrentAgentId() ?? undefined,
-      depth: getCurrentAgentDepth(),
+      parentAgentId: parentAgentId ?? undefined,
+      depth: parentAgentId !== null ? getCurrentAgentDepth() + 1 : 0,
       invokingRequestId: this.callId,
       sessionId: this.config.getSessionId(),
       invokerSpanContext,
     });
 
-    let metadata: SubagentSpanMetadata = {
-      status: 'aborted',
-      terminateReason: 'subagent body did not reach a terminal state',
+    // The body catches its own errors (runSubagentWithHooks / bgBody both
+    // swallow exceptions internally, mapping them to display state /
+    // registry calls), so this wrapper's `catch` is unreachable for the
+    // happy-flow lifecycle. To still surface real terminal state on the
+    // span, body opts in by calling `recordOutcome(metadata)` before it
+    // resolves. If the body forgets, the wrapper defaults to `completed`.
+    // The throw-derived fallbacks below only fire if the body somehow
+    // rejects (synchronous setup throw or a bug). Review wenshao @ #4410.
+    let recordedMetadata: SubagentSpanMetadata | undefined;
+    const recordOutcome: SubagentOutcomeSink = (m) => {
+      recordedMetadata = m;
     };
     try {
-      const result = await runInSubagentSpanContext(span, body);
-      metadata = { status: 'completed' };
-      return result;
+      return await runInSubagentSpanContext(span, () => body(recordOutcome));
     } catch (error) {
       const aborted = signal?.aborted ?? false;
-      metadata = {
+      recordedMetadata = {
         status: aborted ? 'aborted' : 'failed',
         error: error instanceof Error ? error.message : String(error),
         errorType:
@@ -1214,7 +1277,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
       throw error;
     } finally {
-      endSubagentSpan(span, metadata);
+      // No `recordOutcome` call AND no throw → body resolved normally
+      // without opting in. Treat as completed (matches caller intent for
+      // historical paths that don't yet record outcomes).
+      endSubagentSpan(span, recordedMetadata ?? { status: 'completed' });
     }
   }
 
@@ -1231,6 +1297,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       resolvedMode: PermissionMode;
       signal?: AbortSignal;
       updateOutput?: (output: ToolResultDisplay) => void;
+      /**
+       * Optional sink the qwen-code.subagent span wrapper passes in so this
+       * method can report its actual terminal state (the outer try/catch
+       * swallows errors, so the wrapper cannot derive it from a throw).
+       * Review wenshao @ #4410.
+       */
+      recordSpanOutcome?: SubagentOutcomeSink;
     },
   ): Promise<string | undefined> {
     const { agentId, agentType, resolvedMode, signal, updateOutput } = opts;
@@ -1300,6 +1373,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           updateOutput,
         );
       }
+      opts.recordSpanOutcome?.(
+        deriveSubagentOutcomeMetadata({
+          terminateMode,
+          signalAborted: signal?.aborted ?? false,
+          resultSummaryPresent: Boolean(finalText && finalText.length > 0),
+        }),
+      );
       return stopHookWarning;
     } catch (error) {
       const errorMessage =
@@ -1313,6 +1393,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           terminateReason: `Failed to run subagent: ${errorMessage}`,
         },
         updateOutput,
+      );
+      opts.recordSpanOutcome?.(
+        deriveSubagentExceptionMetadata(error, signal?.aborted ?? false),
       );
       return undefined;
     }
@@ -2066,7 +2149,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // guard in execute() fires if the fork child's model calls `agent`
         // again — otherwise background forks bypass the ALS marker and can
         // spawn nested implicit forks.
-        const bgBody = async () => {
+        const bgBody = async (recordSpanOutcome?: SubagentOutcomeSink) => {
           try {
             await bgSubagent.execute(contextState, bgAbortController.signal);
 
@@ -2128,6 +2211,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   finalText || `Agent terminated with mode: ${terminateMode}`,
               });
             }
+            recordSpanOutcome?.(
+              deriveSubagentOutcomeMetadata({
+                terminateMode,
+                signalAborted: bgAbortController.signal.aborted,
+                resultSummaryPresent: Boolean(
+                  finalText && finalText.length > 0,
+                ),
+              }),
+            );
           } catch (error) {
             const baseErrorMsg =
               error instanceof Error ? error.message : String(error);
@@ -2172,6 +2264,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 lastError: errorMsg,
               });
             }
+            recordSpanOutcome?.(
+              deriveSubagentExceptionMetadata(
+                error,
+                bgAbortController.signal.aborted,
+              ),
+            );
           } finally {
             bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
             bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
@@ -2211,8 +2309,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               isBuiltIn: subagentConfig.level === 'builtin',
               modelOverride: subagentConfig.model,
             },
-            hookOpts.signal,
-            () => runWithAgentContext(hookOpts.agentId, bgBody),
+            // bg uses the per-agent abort controller, not the parent turn
+            // signal — `task_stop` aborts the bg controller alone (silent
+            // failure: a task_stop'd bg agent was being reported as 'failed'
+            // because the wrapper saw an unaborted parent signal).
+            bgAbortController.signal,
+            (recordOutcome) =>
+              runWithAgentContext(hookOpts.agentId, () =>
+                bgBody(recordOutcome),
+              ),
           );
         void (isFork ? runInForkContext(framedBgBody) : framedBgBody());
 
@@ -2275,14 +2380,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               modelOverride: subagentConfig.model,
             },
             hookOpts.signal,
-            () =>
+            (recordSpanOutcome) =>
               runWithAgentContext(hookOpts.agentId, async () => {
                 try {
-                  await this.runSubagentWithHooks(
-                    subagent,
-                    contextState,
-                    hookOpts,
-                  );
+                  await this.runSubagentWithHooks(subagent, contextState, {
+                    ...hookOpts,
+                    recordSpanOutcome,
+                  });
                 } finally {
                   cleanupOwnedMonitorNotifications();
                   void agentConfig
@@ -2331,9 +2435,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             modelOverride: subagentConfig.model,
           },
           fgAbortController.signal,
-          () =>
+          (recordSpanOutcome) =>
             runWithAgentContext(hookOpts.agentId, () =>
-              this.runSubagentWithHooks(subagent, contextState, fgHookOpts),
+              this.runSubagentWithHooks(subagent, contextState, {
+                ...fgHookOpts,
+                recordSpanOutcome,
+              }),
             ),
         );
 
