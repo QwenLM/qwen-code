@@ -8,6 +8,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import stripAnsi from 'strip-ansi';
 
 const execFileAsync = promisify(execFile);
 const debugLogger = createDebugLogger('fortune');
@@ -56,7 +57,7 @@ export async function getFortuneQuote(command: string): Promise<string | null> {
       maxBuffer: 1024,
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
     });
-    const quote = stdout.trim().replace(/\s+/g, ' ');
+    const quote = stripAnsi(stdout).trim().replace(/\s+/g, ' ');
     return quote || null;
   } catch (err) {
     debugLogger.error('Command failed:', (err as Error).message);
