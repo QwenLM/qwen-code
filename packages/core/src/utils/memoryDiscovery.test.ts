@@ -829,5 +829,35 @@ describe('loadServerHierarchicalMemory', () => {
         'do not promote this to project-local',
       );
     });
+
+    it('dedupes when an extension registers the local slot path explicitly', async () => {
+      // The hierarchical scan iterates `getAllGeminiMdFilenames()`
+      // (QWEN.md / AGENTS.md) and never produces a `QWEN.local.md` path,
+      // so the dedup guard in the slot loader looks unreachable in
+      // production paths. It IS reachable, though, via
+      // `extensionContextFilePaths`: an extension may register the slot
+      // path explicitly, in which case the hierarchical scan picks it up
+      // via the extension-paths append. The dedup guard prevents the
+      // slot loader from then appending the same file a second time
+      // (double content + inflated fileCount). Pin that behavior.
+      const localFile = await createTestFile(
+        path.join(projectRoot, QWEN_DIR, 'QWEN.local.md'),
+        'slot content only once',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [localFile], // extension explicitly registers the slot path
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(1);
+      const occurrences = (
+        result.memoryContent.match(/slot content only once/g) ?? []
+      ).length;
+      expect(occurrences).toBe(1);
+    });
   });
 });

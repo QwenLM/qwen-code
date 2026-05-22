@@ -17,6 +17,7 @@ import { processImports } from './memoryImportProcessor.js';
 import { QWEN_DIR } from './paths.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from './debugLogger.js';
+import { findProjectRoot } from './projectRoot.js';
 import { loadRules, type RuleFile } from './rulesDiscovery.js';
 
 const logger = createDebugLogger('MEMORY_DISCOVERY');
@@ -24,53 +25,6 @@ const logger = createDebugLogger('MEMORY_DISCOVERY');
 interface GeminiFileContent {
   filePath: string;
   content: string | null;
-}
-
-async function findProjectRoot(startDir: string): Promise<string | null> {
-  let currentDir = path.resolve(startDir);
-  while (true) {
-    const gitPath = path.join(currentDir, '.git');
-    try {
-      const stats = await fs.lstat(gitPath);
-      // `.git` is a directory in a normal clone, but a regular file in
-      // git worktrees and submodules (it contains `gitdir: <path>`).
-      // Both shapes mark a repo root — accept either.
-      if (stats.isDirectory() || stats.isFile()) {
-        return currentDir;
-      }
-    } catch (error: unknown) {
-      // Don't log ENOENT errors as they're expected when .git doesn't exist
-      // Also don't log errors in test environments, which often have mocked fs
-      const isENOENT =
-        typeof error === 'object' &&
-        error !== null &&
-        'code' in error &&
-        (error as { code: string }).code === 'ENOENT';
-
-      // Only log unexpected errors in non-test environments
-      // process.env['NODE_ENV'] === 'test' or VITEST are common test indicators
-      const isTestEnv =
-        process.env['NODE_ENV'] === 'test' || process.env['VITEST'];
-
-      if (!isENOENT && !isTestEnv) {
-        if (typeof error === 'object' && error !== null && 'code' in error) {
-          const fsError = error as { code: string; message: string };
-          logger.warn(
-            `Error checking for .git directory at ${gitPath}: ${fsError.message}`,
-          );
-        } else {
-          logger.warn(
-            `Non-standard error checking for .git directory at ${gitPath}: ${String(error)}`,
-          );
-        }
-      }
-    }
-    const parentDir = path.dirname(currentDir);
-    if (parentDir === currentDir) {
-      return null;
-    }
-    currentDir = parentDir;
-  }
 }
 
 async function getGeminiMdFilePathsInternal(
