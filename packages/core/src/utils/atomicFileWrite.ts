@@ -95,7 +95,7 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
 }
 
 /**
- * In-place truncate+write that defends against three races the
+ * In-place truncate+write that defends against four races the
  * path-based `fs.writeFile` form does not:
  *
  * - `O_NOFOLLOW` rejects a final-component symlink (no follow to
@@ -103,15 +103,21 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  * - **No `O_CREAT`** surfaces `ENOENT` instead of silently recreating a
  *   file the attacker just unlinked — which would re-introduce the
  *   exact ownership reset this whole codepath exists to prevent.
- * - `fstat` after open verifies the bound inode's uid/gid still match
- *   what we observed in the caller's stat; refuses the write otherwise
- *   so an inode-swap between stat and open cannot trick us into writing
- *   to the wrong file.
+ * - **No `O_TRUNC` at open time**: opening with `O_TRUNC` would
+ *   truncate immediately, *before* the fd-bound `fstat` check could
+ *   detect that the path was swapped to a different inode between the
+ *   caller's stat and our open. We open read-write without truncating,
+ *   verify the bound inode against `expectedStat`, and only then call
+ *   `fh.truncate(0)` through the validated fd.
+ * - **`fstat` verifies `dev` + `ino` + `uid` + `gid` + regular-file
+ *   status** against the caller's `expectedStat`. uid/gid alone would
+ *   miss a same-owner inode swap (attacker replaces the file with a
+ *   different inode of their own).
  *
  * Caller has already confirmed `existingStat.isFile()`; non-regular
  * targets (FIFO, socket, device) must not reach this function, since
- * `open(O_WRONLY|O_TRUNC)` against them is either blocking (FIFO) or
- * destructive (device).
+ * `open(O_WRONLY)` on a FIFO blocks until a reader appears and on a
+ * device opens the device itself.
  */
 async function writeInPlaceWithFdGuards(
   targetPath: string,
@@ -120,19 +126,30 @@ async function writeInPlaceWithFdGuards(
   options: { encoding?: BufferEncoding; flush?: boolean; mode?: number },
 ): Promise<void> {
   const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
-  const flags = fs.constants.O_WRONLY | fs.constants.O_TRUNC | O_NOFOLLOW;
+  // No O_TRUNC: truncation must wait until after fd-bound verification.
+  const flags = fs.constants.O_WRONLY | O_NOFOLLOW;
   const fh = await fs.open(targetPath, flags);
   try {
     const fdStat = await fh.stat();
-    if (fdStat.uid !== expectedStat.uid || fdStat.gid !== expectedStat.gid) {
+    if (
+      !fdStat.isFile() ||
+      fdStat.dev !== expectedStat.dev ||
+      fdStat.ino !== expectedStat.ino ||
+      fdStat.uid !== expectedStat.uid ||
+      fdStat.gid !== expectedStat.gid
+    ) {
       const err: NodeJS.ErrnoException = new Error(
-        `ownership of ${targetPath} changed between stat and open ` +
-          `(was ${expectedStat.uid}:${expectedStat.gid}, ` +
-          `is ${fdStat.uid}:${fdStat.gid})`,
+        `${targetPath} was swapped between stat and open ` +
+          `(expected dev=${expectedStat.dev} ino=${expectedStat.ino} ` +
+          `uid=${expectedStat.uid} gid=${expectedStat.gid} regular=true; ` +
+          `got dev=${fdStat.dev} ino=${fdStat.ino} ` +
+          `uid=${fdStat.uid} gid=${fdStat.gid} regular=${fdStat.isFile()})`,
       );
       err.code = 'EOWNERSHIP_CHANGED';
       throw err;
     }
+    // Verified — now safe to truncate and write through the bound fd.
+    await fh.truncate(0);
     const fhWriteOptions: { encoding?: BufferEncoding; flush?: boolean } = {};
     if (typeof data === 'string' && options.encoding) {
       fhWriteOptions.encoding = options.encoding;
