@@ -125,8 +125,9 @@ function normalizeInsightEnum<T extends string>(
   allowed: readonly T[],
   fallback: T,
 ): T {
-  if (typeof value === 'string' && allowed.some((item) => item === value)) {
-    return value as T;
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (trimmed && allowed.some((item) => item === trimmed)) {
+    return trimmed as T;
   }
 
   logger.debug(
