@@ -1,7 +1,6 @@
 ---
 name: simplify
 description: Review recent code changes for reuse, code quality, and efficiency, then directly apply straightforward cleanup improvements. Use when the user wants a post-implementation cleanup pass, pre-PR polish, or asks to simplify/refine recent changes. Invoke with `/simplify` or `/simplify <focus>`.
-argument-hint: '[focus]'
 allowedTools:
   - agent
   - run_shell_command
@@ -23,8 +22,8 @@ Determine which files and changes to review.
 1. First inspect the current git state.
 2. If there are staged changes, review against `HEAD` so both staged and unstaged tracked changes are included.
 3. Otherwise review the current uncommitted diff.
-4. If there is no git diff, fall back to recently modified files in the working tree.
-5. If recently modified files are not obvious, fall back to files edited in this conversation.
+4. If there is no git diff, fall back to `git ls-files --modified --others --exclude-standard` so the scope respects `.gitignore` (this keeps build output, `node_modules`, and other ignored paths out of the cleanup).
+5. If that is still empty, fall back to files edited in this conversation.
 6. If you still cannot identify a meaningful scope, stop and tell the user there are no recent changes to simplify.
 
 Preferred commands:
@@ -40,7 +39,7 @@ Use `git diff HEAD` whenever staged changes exist. Otherwise use `git diff`.
 
 ## Step 2: Launch three review passes in parallel
 
-Use the `agent` tool and launch all review passes in a single response so they run concurrently. Each pass must receive the same review scope and diff command.
+Use the `agent` tool and launch all review passes in a single response so they run concurrently. Each pass must receive the same review scope and diff command. These passes are read-only: each one inspects and reports findings only and must not modify files — all edits happen later in Step 4.
 
 Keep each review prompt short and focused. Do not paste the full diff into the prompt. Tell each pass to read the diff itself and inspect only files relevant to its findings.
 
@@ -98,7 +97,7 @@ Directly implement safe cleanup improvements.
 Examples of good automatic fixes:
 
 - replace duplicated logic with an existing helper
-- remove dead or redundant code
+- remove redundant code, but only after a repository-wide search confirms it has no remaining callers
 - simplify conditionals or control flow
 - tighten loops or repeated work
 - reduce unnecessary state or wrapper code

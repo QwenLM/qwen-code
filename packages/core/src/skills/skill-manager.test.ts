@@ -763,6 +763,8 @@ Review content`;
       const reviewSkills = skills.filter((s) => s.name === 'review');
       expect(reviewSkills).toHaveLength(1);
       expect(reviewSkills[0].level).toBe('project');
+      // simplify has no name conflict, so it must still survive alongside the deduped review skill
+      expect(skills.some((s) => s.name === 'simplify')).toBe(true);
     });
 
     it('should prioritize user-level over bundled skills with same name', async () => {
@@ -774,6 +776,8 @@ Review content`;
       const reviewSkills = skills.filter((s) => s.name === 'review');
       expect(reviewSkills).toHaveLength(1);
       expect(reviewSkills[0].level).toBe('user');
+      // simplify has no name conflict, so it must still survive alongside the deduped review skill
+      expect(skills.some((s) => s.name === 'simplify')).toBe(true);
     });
 
     it('should skip all skills in bare mode', async () => {
