@@ -761,6 +761,17 @@ export async function main() {
       ]),
     ];
 
+    // Surface critical startup warnings (corrupted settings, recovery, etc.)
+    // to stderr so they are visible regardless of UI mode. In interactive
+    // mode the TUI's Notifications component also renders them, but the
+    // onboarding flow can obscure the notification area, leaving users
+    // unaware that their settings were reset. Writing to stderr before
+    // the TUI takes over ensures the message is visible in the terminal
+    // scrollback. In non-interactive mode this is the *only* channel.
+    for (const warning of startupWarnings) {
+      writeStderrLine(warning);
+    }
+
     // Render UI, passing necessary config values. Check that there is no command line question.
     profileCheckpoint('before_render');
 
