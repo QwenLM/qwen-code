@@ -108,6 +108,36 @@ export interface PooledConnection {
 }
 
 /**
+ * F2 (#4175 follow-up — W134): structured outcome of
+ * `PoolEntry.sweepAndDisconnect`. The silent-drop fire-and-forget
+ * caller (`mcp-pool-entry.ts:383`) reads this off the chained promise
+ * to surface orphan-process pressure to operators via a structured
+ * `warn` log. `forceShutdown` and `doRestart` callers ignore the
+ * return — their own catch paths carry richer error signals already.
+ *
+ * Both `descendantsFound` and `descendantsSignaled` are tracked
+ * because partial-signal failure (`signaled < found`) is itself
+ * orphan-process-pressure evidence even when the sweep itself does
+ * NOT throw — e.g. a child exited between `listDescendantPids` and
+ * `sigtermPids`, OR EPERM on a child the daemon doesn't own.
+ *
+ * Internal — NOT exported. The sweep result never crosses the wire
+ * (pool events stay shape-compatible per `PoolEvent` union); this
+ * type only exists to give the in-process caller something to chain
+ * a log decision on.
+ */
+interface SweepResult {
+  /** Set when `listDescendantPids` itself threw (sandbox blocking pgrep, ESRCH on root, etc.). */
+  pidSweepError?: Error;
+  /** Set when `client.disconnect()` threw. Rare — usually transport bug. */
+  disconnectError?: Error;
+  /** Number of descendant pids `listDescendantPids` returned. Undefined if root pid unavailable or sweep threw. */
+  descendantsFound?: number;
+  /** Number of descendant pids `sigtermPids` successfully signaled. May be < `descendantsFound`. */
+  descendantsSignaled?: number;
+}
+
+/**
  * Internal pool-entry record. Created once per `ConnectionId`,
  * holds the shared `McpClient` + its tool/prompt snapshots + ref
  * accounting + reconnect state.
@@ -343,11 +373,25 @@ export class PoolEntry {
         // 'failed' event and can route any pending callTool promises
         // to MCPCallInterruptedError. Mirrors forceShutdown's
         // emit→detach ordering at line 583-593.
+        //
+        // F2 (#4175 follow-up — W133-a): thread the upstream
+        // McpClient.onerror cause (EPIPE, OAuth 401, server crash)
+        // into `lastError` instead of emitting only the synthetic
+        // marker. Pre-fix the only diagnostic carrier was the synthetic
+        // string; operators triaging a 'failed' event had to grep
+        // daemon `--debug` logs for the matching `MCP ERROR (...)` line
+        // out of band. Now the actual error message is on the wire.
+        // Preserves the literal `"silent transport drop"` substring so
+        // any operator log-grep tooling that targets the pre-fix marker
+        // keeps matching post-fix.
+        const upstreamError = this.client.getLastTransportError();
         this.emit({
           kind: 'failed',
           serverName: this.serverName,
           generation: this._generation,
-          lastError: 'transport disconnected (silent transport drop)',
+          lastError: upstreamError
+            ? `transport disconnected (silent transport drop): ${upstreamError.message}`
+            : 'transport disconnected (silent transport drop)',
         });
         // Detach all subscriber views (W122 cleanup). Snapshot keys
         // because detach mutates `subscribers`.
@@ -381,7 +425,38 @@ export class PoolEntry {
         // Errors inside the chain log at warn/error via
         // `sweepAndDisconnect`'s own catches.
         void this.sweepAndDisconnect('silent_drop').then(
-          () => {
+          (result) => {
+            // F2 (#4175 follow-up — W134): surface orphan-process
+            // pressure to operators. Two failure shapes worth a
+            // structured `warn` here:
+            //   (a) `pidSweepError`: pid-discovery itself threw
+            //       (pgrep blocked by sandbox, ESRCH at root pid,
+            //       etc.). We may have leaked descendants we never
+            //       enumerated.
+            //   (b) Partial signal: discovery succeeded but
+            //       `sigtermPids` killed fewer than discovered
+            //       (some children already exited between listing
+            //       and signaling, OR EPERM on a child the daemon
+            //       doesn't own). Less alarming than (a) but still
+            //       worth surfacing during silent drops.
+            // Pre-fix `void` discarded both signals; the only
+            // observability path was tailing `--debug warn+` for
+            // the inner `sweepAndDisconnect` log line out of band.
+            const partialSignal =
+              result.descendantsFound !== undefined &&
+              result.descendantsSignaled !== undefined &&
+              result.descendantsSignaled < result.descendantsFound;
+            if (result.pidSweepError !== undefined || partialSignal) {
+              debugLogger.warn(
+                `PoolEntry ${this.id} silent-drop sweep observability: ` +
+                  `descendantsFound=${result.descendantsFound ?? 0}, ` +
+                  `descendantsSignaled=${result.descendantsSignaled ?? 0}, ` +
+                  `pidSweepError=${result.pidSweepError?.message ?? 'none'}. ` +
+                  `Possible orphan-process pressure — operator should ` +
+                  `check for lingering subprocess descendants of the dead ` +
+                  `transport.`,
+              );
+            }
             this.updateGlobalStatus();
           },
           () => {
@@ -716,21 +791,36 @@ export class PoolEntry {
    * usually indicates a transport bug worth surfacing). Pre-W35
    * `doRestart` had logged both at `debug` — production
    * observability gap that masked PID exhaustion.
+   *
+   * F2 (#4175 follow-up — W134): now returns a `SweepResult` so the
+   * silent-drop fire-and-forget caller (which `void`-discards the
+   * promise and would otherwise lose the orphan-process-pressure
+   * signal entirely) can chain a structured warn log when either pid
+   * sweep threw or `sigtermPids` partially signaled. The `forceShutdown`
+   * and `doRestart` callers continue to ignore the return value (their
+   * caller-side `await` discards it) — those paths already carry rich
+   * error signals via their own catches and don't need the extra
+   * surface. The internal log lines stay unchanged for backward
+   * compat with existing log-tail tooling.
    */
-  private async sweepAndDisconnect(reason: string): Promise<void> {
+  private async sweepAndDisconnect(reason: string): Promise<SweepResult> {
+    const result: SweepResult = {};
     try {
       const rootPid = this.client.getTransportPid?.();
       if (rootPid !== undefined) {
         const descendants = await listDescendantPids(rootPid);
         if (descendants.length > 0) {
-          const signaled = sigtermPids(descendants);
+          result.descendantsFound = descendants.length;
+          result.descendantsSignaled = sigtermPids(descendants);
           debugLogger.debug(
-            `Sent SIGTERM to ${signaled}/${descendants.length} descendants ` +
+            `Sent SIGTERM to ${result.descendantsSignaled}/${descendants.length} descendants ` +
               `of pid ${rootPid} for ${this.id} (${reason})`,
           );
         }
       }
     } catch (err) {
+      result.pidSweepError =
+        err instanceof Error ? err : new Error(String(err));
       debugLogger.warn(
         `Descendant pid sweep failed for ${this.id} (${reason}): ${String(
           err,
@@ -740,10 +830,13 @@ export class PoolEntry {
     try {
       await this.client.disconnect();
     } catch (err) {
+      result.disconnectError =
+        err instanceof Error ? err : new Error(String(err));
       debugLogger.error(
         `client.disconnect failed for ${this.id} (${reason}): ${String(err)}`,
       );
     }
+    return result;
   }
 
   /**
