@@ -765,10 +765,14 @@ function normalizeMemoryChanged(
   const scope = getString(event.data, 'scope');
   const filePath = getString(event.data, 'filePath');
   const mode = getString(event.data, 'mode');
-  const bytesWritten =
-    isRecord(event.data) && typeof event.data['bytesWritten'] === 'number'
-      ? (event.data['bytesWritten'] as number)
-      : undefined;
+  // wenshao R3 (claude-opus-4-7): use the `numberField` helper so NaN /
+  // Infinity are rejected — every other numeric field in the normalizer
+  // already routes through it. A daemon emitting `bytesWritten: NaN`
+  // would otherwise propagate to renderers as `+NaNb`.
+  const bytesWritten = numberField(
+    isRecord(event.data) ? event.data : undefined,
+    'bytesWritten',
+  );
   if (
     (scope !== 'workspace' && scope !== 'global') ||
     !filePath ||

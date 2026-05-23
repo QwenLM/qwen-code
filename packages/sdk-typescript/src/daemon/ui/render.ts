@@ -72,7 +72,9 @@ export function daemonBlockToMarkdown(
     case 'assistant':
       return text(block.text);
     case 'thought':
-      return `> *thought:* ${text(block.text)}`;
+      // wenshao R3 (claude-opus-4-7): blockquote each line so multi-line
+      // reasoning traces don't escape the `>` indent on newline.
+      return blockquote(`*thought:* ${text(block.text)}`);
     case 'tool': {
       const header = renderToolHeader(block, opts);
       const previewMd = daemonToolPreviewToMarkdown(block.preview, opts);
@@ -107,9 +109,9 @@ export function daemonBlockToMarkdown(
     case 'status':
       return `*${text(block.text)}*`;
     case 'debug':
-      return `> debug: ${text(block.text)}`;
+      return blockquote(`debug: ${text(block.text)}`);
     case 'error':
-      return `> [!CAUTION]\n> ${text(block.text)}`;
+      return `> [!CAUTION]\n${blockquote(text(block.text))}`;
     default:
       return '';
   }
@@ -262,7 +264,18 @@ export function daemonToolPreviewToMarkdown(
           ? `_model: ${escapeMarkdownText(preview.model, opts)}_`
           : null,
         preview.thumbnailUrl
-          ? `![image](${opts.sanitizeUrls ? sanitizeUrl(preview.thumbnailUrl) : preview.thumbnailUrl})`
+          ? // wenshao R2 (qwen3.7-max): always protocol-validate image
+            // URLs regardless of `sanitizeUrls` opt-in. `javascript:` /
+            // `vbscript:` in `<img src>` is never legitimate; the markdown
+            // pipeline will convert `![image](javascript:...)` into an
+            // attacker-controlled `<img src>` in most renderers.
+            // `sanitizeUrls: true` additionally strips query-param
+            // tokens + Basic Auth.
+            `![image](${
+              opts.sanitizeUrls
+                ? sanitizeUrl(preview.thumbnailUrl)
+                : ensureSafeImageUrl(preview.thumbnailUrl)
+            })`
           : null,
       ]
         .filter(Boolean)
@@ -298,6 +311,18 @@ export function daemonToolPreviewToMarkdown(
     default:
       return '';
   }
+}
+
+/**
+ * Prefix every line of `raw` with `> ` so a markdown blockquote stays
+ * intact across newlines. The naive `> ${text}` form only quotes the
+ * first line; subsequent lines render as bare markdown.
+ */
+function blockquote(raw: string): string {
+  return raw
+    .split('\n')
+    .map((line) => `> ${line}`)
+    .join('\n');
 }
 
 function markdownFence(language: string, raw: string): string {
@@ -350,10 +375,12 @@ export function daemonBlockToPlainText(
     case 'thought':
       return `(thought: ${cap(block.text)})`;
     case 'tool': {
+      // wenshao R3 (qwen3.7-max): cap header fields. Markdown + HTML
+      // paths cap; plainText path previously rendered uncapped titles.
       const header = [
-        block.title,
-        block.toolName ? `[${block.toolName}]` : null,
-        block.toolKind ? `(${block.toolKind})` : null,
+        cap(block.title),
+        block.toolName ? `[${cap(block.toolName)}]` : null,
+        block.toolKind ? `(${cap(block.toolKind)})` : null,
       ]
         .filter(Boolean)
         .join(' ');
@@ -369,16 +396,17 @@ export function daemonBlockToPlainText(
     case 'shell':
       return `[shell ${block.stream ?? 'stdout'}]\n${cap(block.text)}`;
     case 'permission': {
+      // wenshao R3 (qwen3.7-max): cap permission fields for parity.
       const optionList = block.options
         .map(
           (opt) =>
-            `  - ${opt.label}${opt.description ? `: ${opt.description}` : ''}`,
+            `  - ${cap(opt.label)}${opt.description ? `: ${cap(opt.description)}` : ''}`,
         )
         .join('\n');
       const resolved = block.resolved
-        ? `(resolved: ${block.resolved})`
+        ? `(resolved: ${cap(block.resolved)})`
         : '(awaiting decision)';
-      return `Permission: ${block.title}\n${optionList}\n${resolved}`;
+      return `Permission: ${cap(block.title)}\n${optionList}\n${resolved}`;
     }
     case 'status':
       return `[status] ${cap(block.text)}`;
@@ -400,49 +428,57 @@ function daemonToolPreviewToPlainText(
   // block, but previously the helper took no opts — so even when the
   // caller set `sanitizeUrls: true` to strip auth tokens from URLs, the
   // HTML path leaked tokens into the DOM (markdown path was already safe).
+  //
+  // wenshao R3 + doudouOUC R3 (qwen3.7-max): apply `maxFieldLength` for
+  // parity with markdown's `text()` wrapper. Previously plaintext /
+  // HTML preview content was uncapped while every other field hit the
+  // 8192 default.
   const url = (u: string) => (opts.sanitizeUrls ? sanitizeUrl(u) : u);
+  const cap = capLength(opts);
   switch (preview.kind) {
     case 'ask_user_question':
       return preview.questions
-        .map((q) => `${q.header ? `${q.header}: ` : ''}${q.question}`)
+        .map((q) => `${q.header ? `${cap(q.header)}: ` : ''}${cap(q.question)}`)
         .join('\n');
     case 'command':
       return preview.cwd
-        ? `$ ${preview.command} (cwd: ${preview.cwd})`
-        : `$ ${preview.command}`;
+        ? `$ ${cap(preview.command)} (cwd: ${cap(preview.cwd)})`
+        : `$ ${cap(preview.command)}`;
     case 'file_diff':
-      if (preview.patch) return preview.patch;
+      if (preview.patch) return cap(preview.patch);
       if (preview.newText !== undefined)
-        return `${preview.path}: ${preview.newText}`;
-      return preview.path;
+        return `${cap(preview.path)}: ${cap(preview.newText)}`;
+      return cap(preview.path);
     case 'file_read':
       return preview.range
-        ? `${preview.path} (lines ${preview.range[0]}-${preview.range[1]})`
-        : preview.path;
+        ? `${cap(preview.path)} (lines ${preview.range[0]}-${preview.range[1]})`
+        : cap(preview.path);
     case 'web_fetch':
-      return `${preview.method ?? 'GET'} ${url(preview.url)}`;
+      return `${preview.method ?? 'GET'} ${cap(url(preview.url))}`;
     case 'mcp_invocation':
-      return `${preview.serverId}::${preview.toolName}${preview.argsSummary ? ` (${preview.argsSummary})` : ''}`;
+      return `${cap(preview.serverId)}::${cap(preview.toolName)}${preview.argsSummary ? ` (${cap(preview.argsSummary)})` : ''}`;
     case 'code_block':
       return preview.origin
-        ? `[${preview.origin}]\n${preview.code}`
-        : preview.code;
+        ? `[${cap(preview.origin)}]\n${cap(preview.code)}`
+        : cap(preview.code);
     case 'search':
       return [
-        `search: ${preview.query}`,
+        `search: ${cap(preview.query)}`,
         preview.resultCount !== undefined
           ? `(${preview.resultCount} results)`
           : null,
-        ...(preview.top ?? []).map((r) => `  ${r}`),
+        ...(preview.top ?? []).map((r) => `  ${cap(r)}`),
       ]
         .filter(Boolean)
         .join('\n');
     case 'tabular': {
       if (preview.columns.length === 0) return '(empty table)';
-      const lines = [preview.columns.join('\t')];
+      const lines = [preview.columns.map((c) => cap(c)).join('\t')];
       for (const row of preview.rows) {
         lines.push(
-          preview.columns.map((_, idx) => String(row[idx] ?? '')).join('\t'),
+          preview.columns
+            .map((_, idx) => cap(String(row[idx] ?? '')))
+            .join('\t'),
         );
       }
       if (
@@ -457,16 +493,22 @@ function daemonToolPreviewToPlainText(
     }
     case 'image_generation': {
       const thumb = preview.thumbnailUrl
-        ? ` [${url(preview.thumbnailUrl)}]`
+        ? // Image URLs also get protocol validation even when sanitizeUrls
+          // is false (XSS defense for img-src contexts).
+          ` [${
+            opts.sanitizeUrls
+              ? sanitizeUrl(preview.thumbnailUrl)
+              : ensureSafeImageUrl(preview.thumbnailUrl)
+          }]`
         : '';
-      return `image: "${preview.prompt}"${preview.model ? ` (${preview.model})` : ''}${thumb}`;
+      return `image: "${cap(preview.prompt)}"${preview.model ? ` (${cap(preview.model)})` : ''}${thumb}`;
     }
     case 'subagent_delegation':
-      return `delegate to ${preview.agentName}: ${preview.task}`;
+      return `delegate to ${cap(preview.agentName)}: ${cap(preview.task)}`;
     case 'key_value':
-      return preview.rows.map((r) => `${r.label}: ${r.value}`).join('\n');
+      return preview.rows.map((r) => `${cap(r.label)}: ${cap(r.value)}`).join('\n');
     case 'generic':
-      return preview.summary ?? '';
+      return preview.summary ? cap(preview.summary) : '';
     default:
       return '';
   }
@@ -520,16 +562,19 @@ export function daemonBlockToHtml(
     case 'shell':
       return `<pre class="daemon-block daemon-shell" data-stream="${sanitizer(block.stream ?? 'stdout')}">${sanitizer(cap(block.text))}</pre>`;
     case 'permission': {
+      // wenshao R3 (qwen3.7-max): apply `cap()` for parity with every
+      // other block kind in this function. The tool block's `cap(title)`
+      // was added in the prior round; permission was overlooked.
       const optionList = block.options
         .map(
           (opt) =>
-            `<li><strong>${sanitizer(opt.label)}</strong>${opt.description ? ` — ${sanitizer(opt.description)}` : ''}</li>`,
+            `<li><strong>${sanitizer(cap(opt.label))}</strong>${opt.description ? ` — ${sanitizer(cap(opt.description))}` : ''}</li>`,
         )
         .join('');
       const resolved = block.resolved
-        ? `<p class="resolved">resolved: ${sanitizer(block.resolved)}</p>`
+        ? `<p class="resolved">resolved: ${sanitizer(cap(block.resolved))}</p>`
         : '<p class="pending">awaiting decision</p>';
-      return `<div class="daemon-block daemon-permission"><h4>${sanitizer(block.title)}</h4><ul>${optionList}</ul>${resolved}</div>`;
+      return `<div class="daemon-block daemon-permission"><h4>${sanitizer(cap(block.title))}</h4><ul>${optionList}</ul>${resolved}</div>`;
     }
     case 'status':
       return `<div class="daemon-block daemon-status">${sanitizer(cap(block.text))}</div>`;
@@ -612,6 +657,13 @@ function sanitizeUrl(url: string): string {
     ) {
       return '#';
     }
+    // wenshao R2 (qwen3.7-max): clear HTTP Basic Auth credentials.
+    // URLs like `https://admin:sk-abc123@api.example.com/v1/models`
+    // previously passed through with `userinfo` intact, leaking secrets
+    // into rendered markdown / HTML / plaintext output. Sanitization
+    // must cover both query-param tokens AND the userinfo component.
+    u.username = '';
+    u.password = '';
     for (const key of Array.from(u.searchParams.keys())) {
       if (
         /^(token|key|auth|signature|sig|access|secret|bearer|credential|session|api[_-]?key|x-amz-|x-goog-)/i.test(
@@ -622,6 +674,28 @@ function sanitizeUrl(url: string): string {
       }
     }
     return u.toString();
+  } catch {
+    return '#';
+  }
+}
+
+/**
+ * Protocol-only validation for URLs that need XSS defense even when the
+ * caller hasn't opted into full sanitization. `javascript:` / `data:` /
+ * `vbscript:` URLs are never legitimate in `<img src>` / `![image]()`
+ * contexts; reject them up front regardless of `sanitizeUrls`.
+ *
+ * wenshao R2 (qwen3.7-max): added because `sanitizeUrls` is opt-in and
+ * defaults to false, but image-URL XSS exposure has no legitimate
+ * use-case that would justify opt-in. Always run for image renderings.
+ */
+function ensureSafeImageUrl(url: string): string {
+  try {
+    const protocol = new URL(url).protocol.toLowerCase();
+    if (protocol !== 'http:' && protocol !== 'https:' && protocol !== 'data:') {
+      return '#';
+    }
+    return url;
   } catch {
     return '#';
   }

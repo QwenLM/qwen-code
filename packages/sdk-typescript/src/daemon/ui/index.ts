@@ -89,6 +89,7 @@ export type {
   DaemonUiSessionMetadataChangedEvent,
   DaemonUiSessionApprovalModeChangedEvent,
   DaemonUiSessionAvailableCommandsEvent,
+  DaemonUiStateResyncRequiredEvent,
   // Workspace events
   DaemonUiWorkspaceMemoryChangedEvent,
   DaemonUiWorkspaceAgentChangedEvent,

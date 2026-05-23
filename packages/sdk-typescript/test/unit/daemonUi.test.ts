@@ -2168,7 +2168,13 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     expect(selectCurrentTool(state)).toMatchObject({ toolCallId: 'call-a' });
   });
 
-  it('marks in-flight tools cancelled when a stream ends unexpectedly', () => {
+  it('marks in-flight tools cancelled on application-layer cancellation (reason: cancelled)', () => {
+    // wenshao R3 (qwen3.7-max) PR #4353: cancellation propagation now
+    // scopes to application-layer reasons only — `cancelled` (explicit
+    // abort) and `error`. Transport-layer reasons `stream_ended` and
+    // `reconnected` no longer flip in-flight tools to cancelled,
+    // because the daemon-side tool is still running and SSE replay
+    // will deliver the real terminal status.
     let state = createDaemonTranscriptState({ now: 1 });
     state = reduceDaemonTranscriptEvents(
       state,
@@ -2190,7 +2196,7 @@ describe('daemon UI reducer state machine (PR-E)', () => {
 
     state = reduceDaemonTranscriptEvents(
       state,
-      [{ type: 'assistant.done', reason: 'stream_ended' }],
+      [{ type: 'assistant.done', reason: 'cancelled' }],
       { now: 3 },
     );
 
@@ -4200,7 +4206,7 @@ describe('daemon UI WeakMap memo hits (wenshao glm-5.1 review)', () => {
     expect(a).toHaveLength(1);
   });
 
-  it('selectSubagentChildBlocks returns a shallow copy (caller mutation does not leak)', async () => {
+  it('selectSubagentChildBlocks returns a frozen list (caller mutation throws, cache safe)', async () => {
     const { selectSubagentChildBlocks } = await import(
       '../../src/daemon/ui/index.js'
     );
@@ -4240,11 +4246,21 @@ describe('daemon UI WeakMap memo hits (wenshao glm-5.1 review)', () => {
       } as never),
       { now: 3 },
     );
-    const result = selectSubagentChildBlocks(state, 'p') as Array<unknown>;
-    // Mutate the result; a second call must still return the original
-    // children list (no corruption).
-    result.length = 0;
+    const result = selectSubagentChildBlocks(state, 'p');
+    // wenshao R3 (qwen3.7-max): the prior round used `[...cached]`
+    // shallow-copy. That defeated React.memo / useMemo identity stability
+    // — every call produced a fresh array reference even when state was
+    // unchanged. Now the cached arrays are frozen at build time, so:
+    // (a) callers can hold the reference across renders (stable identity)
+    // (b) accidental in-place mutation (sort/length=0/etc.) throws in
+    //     strict mode instead of silently corrupting the cache.
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(() => {
+      (result as Array<unknown>).length = 0;
+    }).toThrow();
     const second = selectSubagentChildBlocks(state, 'p');
+    // Same reference across calls — identity stable.
+    expect(second).toBe(result);
     expect(second).toHaveLength(1);
   });
 });
@@ -4296,3 +4312,241 @@ describe('daemonBlockToPlainText forwards opts (wenshao review 4350741340)', () 
     expect(sanitized).toContain('keep');
   });
 });
+
+describe('daemonBlockToHtml — additional coverage (wenshao R3 qwen3.7-max)', () => {
+  const baseFields = {
+    id: 'b',
+    clientReceivedAt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  } as const;
+
+  it('strips token query param + Basic Auth from web_fetch URL when sanitizeUrls:true', async () => {
+    const {
+      daemonBlockToHtml,
+      createDaemonToolPreview,
+    } = await import('../../src/daemon/ui/index.js');
+    const block = {
+      ...baseFields,
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'fetch',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        {
+          url: 'https://admin:basicpw-do-not-leak@api.example.com/v1?token=qparam-do-not-leak&q=keep',
+          method: 'GET',
+        },
+        { toolName: 'WebFetch', toolKind: 'tool' },
+      ),
+    };
+    const html = daemonBlockToHtml(block, { sanitizeUrls: true });
+    expect(html).not.toContain('qparam-do-not-leak');
+    expect(html).not.toContain('basicpw-do-not-leak');
+    expect(html).toContain('keep');
+  });
+
+  it('protocol-validates thumbnailUrl even when sanitizeUrls:false', async () => {
+    const {
+      daemonBlockToMarkdown,
+      createDaemonToolPreview,
+    } = await import('../../src/daemon/ui/index.js');
+    const block = {
+      ...baseFields,
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'gen',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        { prompt: 'hi', thumbnailUrl: 'javascript:alert(1)' },
+        { toolName: 'image_generator', toolKind: 'tool' },
+      ),
+    };
+    const md = daemonBlockToMarkdown(block);
+    expect(md).not.toContain('javascript:alert(1)');
+    expect(md).toContain('![image](#)');
+  });
+
+  it('renders shell block', async () => {
+    const { daemonBlockToHtml } = await import('../../src/daemon/ui/index.js');
+    const out = daemonBlockToHtml({
+      ...baseFields,
+      kind: 'shell',
+      text: 'shell out',
+      stream: 'stdout',
+    });
+    expect(out).toContain('class="daemon-block daemon-shell"');
+    expect(out).toContain('data-stream="stdout"');
+    expect(out).toContain('shell out');
+  });
+
+  it('renders permission block with cap applied', async () => {
+    const { daemonBlockToHtml } = await import('../../src/daemon/ui/index.js');
+    const out = daemonBlockToHtml({
+      ...baseFields,
+      kind: 'permission',
+      requestId: 'r',
+      title: 'Allow?',
+      options: [{ optionId: 'a', label: 'Allow', raw: null }],
+      preview: { kind: 'generic', summary: '' },
+    });
+    expect(out).toContain('class="daemon-block daemon-permission"');
+    expect(out).toContain('Allow?');
+  });
+
+  it('renders thought / debug / status blocks', async () => {
+    const { daemonBlockToHtml } = await import('../../src/daemon/ui/index.js');
+    expect(
+      daemonBlockToHtml({ ...baseFields, kind: 'thought', text: 't' }),
+    ).toContain('class="daemon-block daemon-thought"');
+    expect(
+      daemonBlockToHtml({ ...baseFields, kind: 'debug', text: 'd' }),
+    ).toContain('class="daemon-block daemon-debug"');
+    expect(
+      daemonBlockToHtml({ ...baseFields, kind: 'status', text: 's' }),
+    ).toContain('class="daemon-block daemon-status"');
+  });
+});
+
+describe('Trimmed tool cancellation propagation (wenshao R3 qwen3.7-max)', () => {
+  it('skips trimmed sentinel entries without throwing', () => {
+    let state = createDaemonTranscriptState({ now: 1, maxBlocks: 1 });
+    // Start a running tool.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'long',
+            title: 'long task',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    // Push another tool to trim the first.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'other',
+            title: 'other',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+    // Now dispatch a cancelled assistant.done — must not throw despite
+    // the trimmed sentinel entry for 'long' in toolBlockByCallId.
+    expect(() => {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [{ type: 'assistant.done', reason: 'cancelled' } as never],
+        { now: 4 },
+      );
+    }).not.toThrow();
+  });
+
+  it('does NOT cancel in-flight tools on stream_ended / reconnected reasons', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'flight',
+            title: 'still running',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    // stream_ended is a TRANSPORT-layer signal — tool is still running
+    // on the daemon side. Cancelling would cause a visible flash when
+    // SSE replay later corrects status.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.done', reason: 'stream_ended' } as never],
+      { now: 3 },
+    );
+    const block = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'flight',
+    )!;
+    expect(block.status).toBe('running');
+  });
+});
+
+describe('Late permission.resolved after sentinel pruned (wenshao R3 qwen3.7-max)', () => {
+  it('drops resolution silently when permissionBlockByRequestId entry was pruned', () => {
+    let state = createDaemonTranscriptState({ maxBlocks: 1, now: 1 });
+    // Issue + trim 5 permission requests so prune kicks in.
+    for (let i = 0; i < 5; i += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        normalizeDaemonEvent({
+          id: 100 + i,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'request_permission',
+              permissionRequestId: `req-${i}`,
+              options: [{ optionId: 'allow', label: 'Allow' }],
+              toolCall: { name: 'Bash', command: `echo ${i}` },
+            },
+          },
+        } as never),
+        { now: 2 + i },
+      );
+    }
+    // Push a tool block to trigger trim → sentinels written → some pruned.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'status', text: 'flush' } as never],
+      { now: 100 },
+    );
+    const blocksBefore = state.blocks.length;
+    // Resolution arrives for req-0 (likely pruned entirely now).
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 999,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'permission_outcome',
+            permissionRequestId: 'req-0',
+            outcome: 'allowed',
+          },
+        },
+      } as never),
+      { now: 200 },
+    );
+    // No orphan resolution block created.
+    expect(state.blocks.length).toBe(blocksBefore);
+  });
+});
+
+// Note: webui transcriptAdapter previewMarkdown/rawOutput preservation
+// test lives in packages/webui/src/daemon/transcriptAdapter.test.ts —
+// keeping it co-located with the adapter ensures path resolution goes
+// through webui's tsconfig path-mapping into source rather than the
+// SDK dist (which doesn't exist in CI before this PR builds).

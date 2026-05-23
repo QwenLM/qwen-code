@@ -329,3 +329,35 @@ function createPermissionBlock(
     ...(resolved !== undefined ? { resolved } : {}),
   };
 }
+
+describe('previewMarkdown preserves rawOutput (wenshao R3 qwen3.7-max)', () => {
+  it('keeps rawOutput as original object and exposes previewMarkdown when enrich enabled', () => {
+    const block: DaemonTranscriptBlock = {
+      id: 'tool-1',
+      kind: 'tool',
+      toolCallId: 't',
+      title: 'edit file',
+      status: 'completed',
+      rawInput: { path: '/x.ts', oldText: 'a', newText: 'b' },
+      rawOutput: { ok: true, lines: 42, message: 'wrote' },
+      preview: {
+        kind: 'file_diff',
+        path: '/x.ts',
+        oldText: 'a',
+        newText: 'b',
+      },
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    } as DaemonTranscriptBlock;
+    const [msg] = daemonTranscriptToUnifiedMessages([block], {
+      enrichToolDetailsWithPreview: true,
+    });
+    const tc = (msg as unknown as { toolCall: Record<string, unknown> })
+      .toolCall;
+    expect(typeof tc['rawOutput']).toBe('object');
+    expect(tc['rawOutput']).toMatchObject({ ok: true, lines: 42 });
+    expect(typeof tc['previewMarkdown']).toBe('string');
+    expect((tc['previewMarkdown'] as string).includes('/x.ts')).toBe(true);
+  });
+});

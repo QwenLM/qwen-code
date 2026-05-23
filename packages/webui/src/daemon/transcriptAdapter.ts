@@ -308,6 +308,20 @@ function normalizePermissionStatus(
 }
 
 function classifySelectedPermissionOption(detail: string): ToolCallStatus {
+  // Design intent (see caller comment at the `selected` branch): a
+  // selected option resolves the prompt even when the option id contains
+  // labels like `cancel` / `abort` / `dismiss`. The user actively
+  // chose the option, so the prompt is resolved — not cancelled. Only
+  // the FAILED set is honored here, because daemons distinguish
+  // explicit-fail (`failed:reason`) from option-selection (`selected:x`)
+  // at the caller layer.
+  //
+  // wenshao R3 (qwen3.7-max) proposed adding a CANCELLED check here, but
+  // that conflicts with the explicit design intent and the existing
+  // `cancelled-substring-permission` test (input `selected:abort`,
+  // expected status `completed`). When the daemon means "user cancelled
+  // the prompt", it emits `cancelled` as the primary token, NOT
+  // `selected:cancel` — and that path is handled separately.
   const normalized = detail.trim().toLowerCase();
   if (FAILED_PERMISSION_TERMS.has(normalized)) {
     return 'failed';

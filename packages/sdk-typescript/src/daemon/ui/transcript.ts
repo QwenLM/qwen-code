@@ -129,6 +129,26 @@ function applyDaemonTranscriptEvent(
     next.lastEventId = Math.max(next.lastEventId ?? 0, event.eventId);
   }
   if (next.awaitingResync && !RESYNC_PASSTHROUGH_TYPES.has(event.type)) {
+    // wenshao R2 (qwen3.7-max): diagnostic for the "permanently frozen
+    // transcript" case. Without this log, consumers debugging a stuck UI
+    // had no signal that events were being dropped. The latch is
+    // intentional — daemon's `state_resync_required` means the SSE ring
+    // evicted past our cursor, and we cannot safely continue without an
+    // explicit re-sync (typically via session reconnect with new id).
+    // But silent drop made diagnosis difficult. Use console.warn (not
+    // console.error) so it surfaces in DevTools but doesn't escalate as
+    // an uncaught issue. Throttled at the call site is the consumer's
+    // job — this fires once per dropped event.
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn(
+        `[daemon-ui] dropping event \`${event.type}\` while awaitingResync; ` +
+          `state may be stale until session reconnect (lastResyncRequired: ${
+            next.lastResyncRequired
+              ? JSON.stringify(next.lastResyncRequired)
+              : 'unknown'
+          })`,
+      );
+    }
     return;
   }
 
@@ -147,16 +167,20 @@ function applyDaemonTranscriptEvent(
       break;
     case 'assistant.done':
       finishAssistant(next);
-      // PR-E cancellation propagation: when the assistant turn was
-      // cancelled, any in-flight tool block whose status the daemon
+      // PR-E cancellation propagation: when the assistant turn ENDS
+      // abnormally, any in-flight tool block whose status the daemon
       // never updated to a terminal state would otherwise spin forever.
       // Force them to 'cancelled' so renderers can clear spinners.
-      if (
-        event.reason === 'cancelled' ||
-        event.reason === 'stream_ended' ||
-        event.reason === 'reconnected' ||
-        event.reason === 'error'
-      ) {
+      //
+      // wenshao R2 (qwen3.7-max): scope this to application-layer
+      // terminations only. Transport-layer events (`stream_ended`,
+      // `reconnected`) are NOT cancellations — the tool is still
+      // running on the daemon side. Marking it cancelled here causes a
+      // visible spinner-to-red flash when SSE replay later corrects
+      // status back to `running`. Leave in-flight tools untouched for
+      // those reasons; the post-reconnect `tool_call_update` stream
+      // will deliver the real terminal status.
+      if (event.reason === 'cancelled' || event.reason === 'error') {
         propagateCancellationToInFlightTools(next);
       }
       break;
@@ -598,8 +622,18 @@ function resolvePermissionBlock(
   // (b) fall through to create a brand-new orphan resolution block, which
   // wastes a slot, accelerates further trimming, and violates the
   // trimmed-block contract.
+  // wenshao R3 (qwen3.7-max): the prior fix guarded only the sentinel.
+  // After `pruneTrimmedPermissionIndexes` deletes a sentinel (long
+  // sessions), a late `permission.resolved` for that requestId hits
+  // `existingId === undefined`, bypasses the sentinel check, falls
+  // through to the create branch, and produces an orphan resolution
+  // block. Reject both sentinel AND undefined: an unknown requestId at
+  // resolution time means either it was trimmed long ago OR the
+  // daemon is buggy — in either case, do NOT manifest a new block.
   const existingId = state.permissionBlockByRequestId[event.requestId];
-  if (existingId === TRIMMED_PERMISSION_BLOCK_ID) return;
+  if (existingId === undefined || existingId === TRIMMED_PERMISSION_BLOCK_ID) {
+    return;
+  }
   const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'permission') {
     existing.resolved = event.outcome;
@@ -1057,7 +1091,7 @@ export function selectToolProgress(
  */
 const childrenIndexCache = new WeakMap<
   readonly DaemonTranscriptBlock[],
-  Map<string, DaemonToolTranscriptBlock[]>
+  Map<string, readonly DaemonToolTranscriptBlock[]>
 >();
 
 const EMPTY_CHILD_LIST: readonly DaemonToolTranscriptBlock[] = Object.freeze(
@@ -1066,30 +1100,37 @@ const EMPTY_CHILD_LIST: readonly DaemonToolTranscriptBlock[] = Object.freeze(
 
 function getOrBuildChildrenIndex(
   blocks: readonly DaemonTranscriptBlock[],
-): Map<string, DaemonToolTranscriptBlock[]> {
+): Map<string, readonly DaemonToolTranscriptBlock[]> {
   const cached = childrenIndexCache.get(blocks);
   if (cached) return cached;
-  const index = new Map<string, DaemonToolTranscriptBlock[]>();
+  const mutable = new Map<string, DaemonToolTranscriptBlock[]>();
   for (const block of blocks) {
     if (block.kind !== 'tool' || !block.parentToolCallId) continue;
-    const list = index.get(block.parentToolCallId);
+    const list = mutable.get(block.parentToolCallId);
     if (list) list.push(block);
-    else index.set(block.parentToolCallId, [block]);
+    else mutable.set(block.parentToolCallId, [block]);
   }
-  childrenIndexCache.set(blocks, index);
-  return index;
+  // wenshao R3 (qwen3.7-max): freeze each child list at build time so
+  // consumers can hold the cached reference across renders (React.memo /
+  // useMemo identity remains stable) without risk of in-place mutation
+  // corrupting other consumers sharing the same `state.blocks`
+  // snapshot. Supersedes the earlier "[...cached]" shallow copy from
+  // glm-5.1 — that defended against mutation but defeated identity
+  // stability; freezing achieves both.
+  const frozen = new Map<string, readonly DaemonToolTranscriptBlock[]>();
+  for (const [parentId, list] of mutable) {
+    frozen.set(parentId, Object.freeze(list));
+  }
+  childrenIndexCache.set(blocks, frozen);
+  return frozen;
 }
 
 export function selectSubagentChildBlocks(
   state: DaemonTranscriptState,
   parentToolCallId: string,
 ): readonly DaemonToolTranscriptBlock[] {
-  // wenshao review (glm-5.1): return a shallow copy so downstream
-  // accidental mutation (e.g., callers calling `.sort()` in-place on the
-  // result) cannot corrupt the WeakMap-cached children index for other
-  // consumers sharing the same `state.blocks` snapshot.
-  const cached = getOrBuildChildrenIndex(state.blocks).get(parentToolCallId);
-  return cached ? [...cached] : EMPTY_CHILD_LIST;
+  return getOrBuildChildrenIndex(state.blocks).get(parentToolCallId) ??
+    EMPTY_CHILD_LIST;
 }
 
 /**

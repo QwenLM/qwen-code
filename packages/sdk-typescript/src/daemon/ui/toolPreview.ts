@@ -329,8 +329,16 @@ function detectSubagentDelegation(
   opts: { title?: string; toolName?: string; toolKind?: string },
 ): DaemonToolPreview | undefined {
   const toolName = opts.toolName ?? '';
+  // wenshao R3 (claude-opus-4-7): `task` was previously matched in either
+  // `^|_` position, which falsely caught `edit_task`, `list_task`,
+  // `create_task`, etc. — common tool names that have nothing to do with
+  // sub-agent delegation. The Anthropic-style delegation tool is
+  // literally named `Task` (no prefix), so restrict the bare-`task`
+  // match to whole-name only. `delegate` / `subagent` / `spawn_task`
+  // are specific enough to keep the `^|_` prefix.
   const looksLikeDelegate =
-    /(?:^|_)(?:delegate|subagent|spawn[_-]?task|task)$/i.test(toolName) ||
+    /^task$/i.test(toolName) ||
+    /(?:^|_)(?:delegate|subagent|spawn[_-]?task)$/i.test(toolName) ||
     /agent/i.test(opts.toolKind ?? '');
   if (!looksLikeDelegate) return undefined;
   if (!isRecord(input)) return undefined;

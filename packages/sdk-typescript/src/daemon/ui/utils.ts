@@ -61,24 +61,20 @@ export function redactSensitiveFields(value: unknown, depth = 0): unknown {
 export function isSensitiveKey(key: string): boolean {
   const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
   return (
-    // Exact matches (doudouOUC review: deduplicated — `privatekey` is
-    // covered by `endsWith('privatekey')` below; `secretkey` / `accesskey`
-    // similarly).
+    // Exact matches — only keep names NOT already covered by the suffix
+    // / substring rules below. wenshao R3 (qwen3.7-max): the following
+    // were redundant and removed — `password` / `apikey` / `idtoken` /
+    // `sessiontoken` / `clientsecret` / `xapikey` / `xauthtoken` —
+    // already caught by `endsWith('password' | 'token' | 'secret' |
+    // 'apikey')` respectively.
     normalized === 'authorization' ||
     normalized === 'auth' ||
     normalized === 'cookie' ||
     normalized === 'setcookie' ||
     normalized === 'credential' ||
     normalized === 'credentials' ||
-    normalized === 'password' ||
     normalized === 'passphrase' ||
-    normalized === 'apikey' ||
-    normalized === 'clientsecret' ||
-    normalized === 'idtoken' ||
-    normalized === 'sessiontoken' ||
-    normalized === 'xapikey' ||
     normalized === 'xauthkey' ||
-    normalized === 'xauthtoken' ||
     // Suffix matches — each pattern listed once.
     normalized.endsWith('password') ||
     normalized.endsWith('token') ||

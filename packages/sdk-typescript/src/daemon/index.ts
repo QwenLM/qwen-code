@@ -127,6 +127,7 @@ export type {
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiSessionMetadataChangedEvent,
   DaemonUiShellOutputEvent,
+  DaemonUiStateResyncRequiredEvent,
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
   DaemonUiToolProvenance,
