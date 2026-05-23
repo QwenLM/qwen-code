@@ -60,7 +60,8 @@ export async function getFortuneQuote(command: string): Promise<string | null> {
     const quote = stripAnsi(stdout).trim().replace(/\s+/g, ' ');
     return quote || null;
   } catch (err) {
-    debugLogger.error('Command failed:', (err as Error).message);
+    const msg = err instanceof Error ? err.message : String(err);
+    debugLogger.error('Command failed:', msg);
     return null;
   }
 }

@@ -68,7 +68,7 @@ describe('usePhraseCycler', () => {
     const { result } = renderHook(() => usePhraseCycler(true, false));
     // Initial phrase should be one of the witty phrases
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
-    const _initialPhrase = result.current;
+    const initialPhrase = result.current;
 
     act(() => {
       vi.advanceTimersByTime(PHRASE_CHANGE_INTERVAL_MS);
@@ -76,11 +76,14 @@ describe('usePhraseCycler', () => {
     // Phrase should change and be one of the witty phrases
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
 
-    const _secondPhrase = result.current;
+    const secondPhrase = result.current;
     act(() => {
       vi.advanceTimersByTime(PHRASE_CHANGE_INTERVAL_MS);
     });
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
+
+    // Verify phrases changed
+    expect(secondPhrase).not.toBe(initialPhrase);
   });
 
   it('should reset to a witty phrase when isActive becomes true after being false (and not waiting)', () => {
@@ -161,7 +164,7 @@ describe('usePhraseCycler', () => {
 
     expect(result.current).toBe(customPhrases[1]);
 
-    rerender({ isActive: true, isWaiting: false, customPhrases: undefined });
+    rerender({ isActive: true, isWaiting: false, customPhrases: [] });
 
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
   });
