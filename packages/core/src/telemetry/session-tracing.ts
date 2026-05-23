@@ -816,7 +816,11 @@ export function endToolBlockedOnUserSpan(
 
 // --- Hook Spans ---
 
-export type HookEvent = 'PreToolUse' | 'PostToolUse' | 'PostToolUseFailure';
+export type HookEvent =
+  | 'PreToolUse'
+  | 'PostToolUse'
+  | 'PostToolUseFailure'
+  | 'PostToolBatch';
 
 export interface StartHookSpanOptions {
   hookEvent: HookEvent;

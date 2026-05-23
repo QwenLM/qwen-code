@@ -112,6 +112,7 @@ import {
   type PermissionSuggestion,
   type HookEventName,
   type HookDefinition,
+  type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 
@@ -1282,6 +1283,12 @@ export class Config {
                   (input['error'] as string) || '',
                   input['is_interrupt'] as boolean | undefined,
                   (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
+                );
+                break;
+              case 'PostToolBatch':
+                result = await hookSystem.firePostToolBatchEvent(
+                  (input['tool_calls'] as PostToolBatchToolCall[]) || [],
                   signal,
                 );
                 break;

@@ -746,6 +746,139 @@ describe('CoreToolScheduler', () => {
     },
   );
 
+  it('fires PostToolBatch once after a resolved tool batch before completion callback', async () => {
+    const executeA = vi.fn().mockResolvedValue({
+      llmContent: 'alpha output',
+      returnDisplay: 'alpha output',
+    });
+    const executeB = vi.fn().mockResolvedValue({
+      llmContent: 'beta output',
+      returnDisplay: 'beta output',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'alpha',
+        new MockTool({
+          name: 'alpha',
+          kind: Kind.Read,
+          execute: executeA,
+        }),
+      ],
+      [
+        'beta',
+        new MockTool({
+          name: 'beta',
+          kind: Kind.Read,
+          execute: executeB,
+        }),
+      ],
+    ]);
+    const callOrder: string[] = [];
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(
+          async (request: {
+            eventName: string;
+          }): Promise<HookExecutionResponse> => {
+            callOrder.push(request.eventName);
+            return {
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: `${request.eventName}-hook`,
+              success: true,
+              output:
+                request.eventName === 'PostToolBatch'
+                  ? {
+                      hookSpecificOutput: {
+                        hookEventName: 'PostToolBatch',
+                        additionalContext: 'batch context',
+                      },
+                    }
+                  : { decision: 'allow' },
+            };
+          },
+        ),
+    };
+    const onAllToolCallsComplete = vi.fn(() => {
+      callOrder.push('complete');
+    });
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      messageBus,
+      disableHooks: false,
+      onAllToolCallsComplete,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-alpha',
+          name: 'alpha',
+          args: { value: 'a' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-batch',
+        },
+        {
+          callId: 'call-beta',
+          name: 'beta',
+          args: { value: 'b' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-batch',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const batchRequests = messageBus.request.mock.calls.filter(
+      ([request]) => request.eventName === 'PostToolBatch',
+    );
+    expect(batchRequests).toHaveLength(1);
+    expect(batchRequests[0][0]).toEqual(
+      expect.objectContaining({
+        eventName: 'PostToolBatch',
+        input: {
+          tool_calls: [
+            expect.objectContaining({
+              tool_name: 'alpha',
+              tool_input: { value: 'a' },
+              tool_use_id: 'call-alpha',
+              tool_response: expect.objectContaining({
+                error: undefined,
+              }),
+            }),
+            expect.objectContaining({
+              tool_name: 'beta',
+              tool_input: { value: 'b' },
+              tool_use_id: 'call-beta',
+              tool_response: expect.objectContaining({
+                error: undefined,
+              }),
+            }),
+          ],
+        },
+      }),
+    );
+    expect(callOrder.indexOf('PostToolBatch')).toBeLessThan(
+      callOrder.indexOf('complete'),
+    );
+
+    const completionCalls = onAllToolCallsComplete.mock
+      .calls as unknown as Array<[ToolCall[]]>;
+    const completedCalls = completionCalls[0]?.[0];
+    const lastCompletedCall = completedCalls?.at(-1);
+    const lastResponse =
+      lastCompletedCall && 'response' in lastCompletedCall
+        ? lastCompletedCall.response.responseParts.at(-1)
+        : undefined;
+    expect(lastResponse?.functionResponse?.response?.['output']).toContain(
+      'batch context',
+    );
+  });
+
   it('should cancel a tool call if the signal is aborted before confirmation', async () => {
     const mockTool = new MockTool({
       name: 'mockTool',
@@ -4106,13 +4239,13 @@ describe('CoreToolScheduler telemetry spans', () => {
     };
     await runSingleTool({ messageBus, disableHooks: false });
 
-    // The PreToolUse hook span is the only one fired in this path.
-    const hookSpans = getHookSpans();
-    expect(hookSpans).toHaveLength(1);
-    expect(hookSpans[0].attributes['hook_event']).toBe('PreToolUse');
-    expect(hookSpans[0].hookMetadata?.success).toBe(true);
-    expect(hookSpans[0].hookMetadata?.shouldProceed).toBe(false);
-    expect(hookSpans[0].hookMetadata?.blockType).toBe('denied');
+    const preToolUseSpan = getHookSpans().find(
+      (span) => span.attributes['hook_event'] === 'PreToolUse',
+    );
+    expect(preToolUseSpan).toBeDefined();
+    expect(preToolUseSpan?.hookMetadata?.success).toBe(true);
+    expect(preToolUseSpan?.hookMetadata?.shouldProceed).toBe(false);
+    expect(preToolUseSpan?.hookMetadata?.blockType).toBe('denied');
   });
 
   it('hook span records error when underlying hook helper surfaces hookError (#4321)', async () => {

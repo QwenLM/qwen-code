@@ -24,11 +24,13 @@ import {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  firePostToolBatchHook,
   fireNotificationHook,
   firePermissionRequestHook,
   appendAdditionalContext,
 } from './toolHookTriggers.js';
 import { NotificationType } from '../hooks/types.js';
+import type { PostToolBatchToolCall } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
@@ -706,6 +708,126 @@ const createErrorResponse = (
   errorType,
   contentLength: error.message.length,
 });
+
+function serializeToolResponse(
+  response: ToolCallResponseInfo,
+): Record<string, unknown> {
+  return {
+    response_parts: response.responseParts,
+    result_display: response.resultDisplay,
+    error: response.error?.message,
+    error_type: response.errorType,
+    content_length: response.contentLength,
+  };
+}
+
+function toPostToolBatchToolCall(
+  call: CompletedToolCall,
+): PostToolBatchToolCall {
+  return {
+    tool_name: call.request.name,
+    tool_input: call.request.args,
+    tool_use_id: call.request.callId,
+    tool_response: serializeToolResponse(call.response),
+  };
+}
+
+function appendContextToResponsePart(
+  part: Part,
+  additionalContext: string,
+): Part {
+  if (!part.functionResponse) {
+    return part;
+  }
+
+  const response = part.functionResponse.response ?? {};
+  const output = response['output'];
+  const error = response['error'];
+  const key = typeof output === 'string' ? 'output' : 'error';
+  const currentText =
+    typeof output === 'string'
+      ? output
+      : typeof error === 'string'
+        ? error
+        : JSON.stringify(response);
+
+  return {
+    ...part,
+    functionResponse: {
+      ...part.functionResponse,
+      response: {
+        ...response,
+        [key]: `${currentText}\n\n${additionalContext}`,
+      },
+    },
+  };
+}
+
+function appendContextToToolResponse(
+  response: ToolCallResponseInfo,
+  additionalContext: string | undefined,
+): ToolCallResponseInfo {
+  if (!additionalContext || response.responseParts.length === 0) {
+    return response;
+  }
+
+  const responseParts = [...response.responseParts];
+  const lastIndex = responseParts.length - 1;
+  responseParts[lastIndex] = appendContextToResponsePart(
+    responseParts[lastIndex],
+    additionalContext,
+  );
+
+  return {
+    ...response,
+    responseParts,
+  };
+}
+
+function withPostToolBatchAdditionalContext(
+  completedCalls: CompletedToolCall[],
+  additionalContext: string | undefined,
+): CompletedToolCall[] {
+  if (!additionalContext || completedCalls.length === 0) {
+    return completedCalls;
+  }
+
+  const calls = [...completedCalls];
+  const lastIndex = calls.length - 1;
+  calls[lastIndex] = {
+    ...calls[lastIndex],
+    response: appendContextToToolResponse(
+      calls[lastIndex].response,
+      additionalContext,
+    ),
+  } as CompletedToolCall;
+  return calls;
+}
+
+function withPostToolBatchStop(
+  completedCalls: CompletedToolCall[],
+  stopReason: string,
+): CompletedToolCall[] {
+  if (completedCalls.length === 0) {
+    return completedCalls;
+  }
+
+  const calls = [...completedCalls];
+  const lastCall = calls[calls.length - 1];
+  calls[calls.length - 1] = {
+    status: 'error',
+    request: lastCall.request,
+    tool: 'tool' in lastCall ? lastCall.tool : undefined,
+    response: createErrorResponse(
+      lastCall.request,
+      new Error(stopReason),
+      ToolErrorType.EXECUTION_DENIED,
+    ),
+    durationMs: lastCall.durationMs,
+    outcome: lastCall.outcome,
+  } as ErroredToolCall;
+  return calls;
+}
 
 interface CoreToolSchedulerOptions {
   config: Config;
@@ -3156,8 +3278,60 @@ export class CoreToolScheduler {
     );
 
     if (this.toolCalls.length > 0 && allCallsAreTerminal) {
-      const completedCalls = [...this.toolCalls] as CompletedToolCall[];
+      let completedCalls = [...this.toolCalls] as CompletedToolCall[];
       this.toolCalls = [];
+
+      let messageBus: MessageBus | undefined;
+      try {
+        const shouldFirePostToolBatch =
+          !this.config.getDisableAllHooks() &&
+          (this.config.hasHooksForEvent?.('PostToolBatch') ?? true);
+        messageBus = shouldFirePostToolBatch
+          ? this.config.getMessageBus()
+          : undefined;
+      } catch (error) {
+        debugLogger.warn(
+          `PostToolBatch hook setup failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      if (messageBus) {
+        const batchHookResult = await this.withHookSpan(
+          { hookEvent: 'PostToolBatch', toolName: 'batch' },
+          () =>
+            firePostToolBatchHook(
+              messageBus,
+              completedCalls.map(toPostToolBatchToolCall),
+            ),
+          (r) =>
+            r.hookError
+              ? {
+                  success: false,
+                  error: r.hookError,
+                  shouldStop: false,
+                }
+              : {
+                  success: true,
+                  shouldStop: r.shouldStop,
+                  hasAdditionalContext: !!r.additionalContext,
+                  blockType: r.shouldStop ? 'stop' : undefined,
+                },
+        );
+
+        completedCalls = withPostToolBatchAdditionalContext(
+          completedCalls,
+          batchHookResult.additionalContext,
+        );
+
+        if (batchHookResult.shouldStop) {
+          completedCalls = withPostToolBatchStop(
+            completedCalls,
+            batchHookResult.stopReason ||
+              'Execution stopped by PostToolBatch hook',
+          );
+        }
+      }
 
       for (const call of completedCalls) {
         logToolCall(this.config, new ToolCallEvent(call));

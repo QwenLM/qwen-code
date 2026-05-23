@@ -167,6 +167,7 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PreToolUse);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostToolUse);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostToolUseFailure);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostToolBatch);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.Notification);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.UserPromptSubmit);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionStart);
@@ -180,8 +181,8 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.TodoCompleted);
     });
 
-    it('should have 16 events', () => {
-      expect(DISPLAY_HOOK_EVENTS).toHaveLength(16);
+    it('should have 17 events', () => {
+      expect(DISPLAY_HOOK_EVENTS).toHaveLength(17);
     });
   });
 

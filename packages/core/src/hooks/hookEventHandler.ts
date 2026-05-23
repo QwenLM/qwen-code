@@ -25,6 +25,8 @@ import type {
   PreToolUseInput,
   PostToolUseInput,
   PostToolUseFailureInput,
+  PostToolBatchInput,
+  PostToolBatchToolCall,
   PreCompactInput,
   PreCompactTrigger,
   PostCompactInput,
@@ -304,6 +306,27 @@ export class HookEventHandler {
       {
         trigger,
       },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a PostToolBatch event
+   * Called once after every tool call in a batch has resolved
+   */
+  async firePostToolBatchEvent(
+    toolCalls: PostToolBatchToolCall[],
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: PostToolBatchInput = {
+      ...this.createBaseInput(HookEventName.PostToolBatch),
+      tool_calls: toolCalls,
+    };
+
+    return this.executeHooks(
+      HookEventName.PostToolBatch,
+      input,
+      undefined,
       signal,
     );
   }

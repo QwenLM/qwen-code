@@ -18,6 +18,7 @@ import {
   type NotificationType,
   type PermissionRequestHookOutput,
   type PermissionSuggestion,
+  type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { Part, PartListUnion } from '@google/genai';
@@ -72,6 +73,20 @@ export interface PostToolUseHookResult {
  */
 export interface PostToolUseFailureHookResult {
   /** Additional context about the failure */
+  additionalContext?: string;
+  /** See PreToolUseHookResult.hookError. */
+  hookError?: string;
+}
+
+/**
+ * Result of PostToolBatch hook execution
+ */
+export interface PostToolBatchHookResult {
+  /** Whether execution should stop before the next model request */
+  shouldStop: boolean;
+  /** Stop reason if applicable */
+  stopReason?: string;
+  /** Additional context to append once for the whole batch */
   additionalContext?: string;
   /** See PreToolUseHookResult.hookError. */
   hookError?: string;
@@ -358,6 +373,61 @@ export async function firePostToolUseFailureHook(
       `PostToolUseFailure hook error for ${toolName}: ${message}`,
     );
     return { hookError: message };
+  }
+}
+
+/**
+ * Fire PostToolBatch hook via MessageBus and process the result
+ *
+ * @param messageBus - The message bus instance
+ * @param toolCalls - Resolved tool calls in the batch
+ * @returns PostToolBatchHookResult with stop/additional-context decisions
+ */
+export async function firePostToolBatchHook(
+  messageBus: MessageBus | undefined,
+  toolCalls: PostToolBatchToolCall[],
+  signal?: AbortSignal,
+): Promise<PostToolBatchHookResult> {
+  if (!messageBus) {
+    return { shouldStop: false };
+  }
+
+  try {
+    const response = await messageBus.request<
+      HookExecutionRequest,
+      HookExecutionResponse
+    >(
+      {
+        type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        eventName: 'PostToolBatch',
+        input: {
+          tool_calls: toolCalls,
+        },
+        signal,
+      },
+      MessageBusType.HOOK_EXECUTION_RESPONSE,
+    );
+
+    if (!response.success || !response.output) {
+      const message =
+        response.error?.message ||
+        `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
+      return { shouldStop: false, hookError: message };
+    }
+
+    const batchOutput = createHookOutput('PostToolBatch', response.output);
+
+    return {
+      shouldStop: batchOutput.shouldStopExecution(),
+      stopReason: batchOutput.shouldStopExecution()
+        ? batchOutput.getEffectiveReason()
+        : undefined,
+      additionalContext: batchOutput.getAdditionalContext(),
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    debugLogger.warn(`PostToolBatch hook error: ${message}`);
+    return { shouldStop: false, hookError: message };
   }
 }
 

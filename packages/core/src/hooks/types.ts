@@ -26,6 +26,8 @@ export enum HookEventName {
   PostToolUse = 'PostToolUse',
   // PostToolUseFailure - After tool execution fails
   PostToolUseFailure = 'PostToolUseFailure',
+  // PostToolBatch - After a batch of tool calls resolves
+  PostToolBatch = 'PostToolBatch',
   // Notification - When notifications are sent
   Notification = 'Notification',
   // UserPromptSubmit - When the user submits a prompt
@@ -661,6 +663,34 @@ export interface PostToolUseFailureInput extends HookInput {
 export interface PostToolUseFailureOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'PostToolUseFailure';
+    additionalContext?: string;
+  };
+}
+
+/**
+ * Tool call summary for PostToolBatch hook input
+ */
+export interface PostToolBatchToolCall {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  tool_use_id: string;
+  tool_response?: Record<string, unknown>;
+}
+
+/**
+ * PostToolBatch hook input
+ * Fired once after every tool call in a batch has resolved.
+ */
+export interface PostToolBatchInput extends HookInput {
+  tool_calls: PostToolBatchToolCall[];
+}
+
+/**
+ * PostToolBatch hook output
+ */
+export interface PostToolBatchOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'PostToolBatch';
     additionalContext?: string;
   };
 }

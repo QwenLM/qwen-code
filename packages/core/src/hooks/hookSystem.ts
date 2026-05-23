@@ -19,6 +19,7 @@ import type {
   SessionEndReason,
   AgentType,
   PermissionMode,
+  PostToolBatchToolCall,
   PreCompactTrigger,
   PostCompactTrigger,
   NotificationType,
@@ -264,6 +265,22 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('PostToolUseFailure', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PostToolBatch event - called once after a tool-call batch resolves
+   */
+  async firePostToolBatchEvent(
+    toolCalls: PostToolBatchToolCall[],
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePostToolBatchEvent(
+      toolCalls,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PostToolBatch', result.finalOutput)
       : undefined;
   }
 
