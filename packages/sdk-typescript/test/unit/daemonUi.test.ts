@@ -2500,7 +2500,11 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     });
   });
 
-  it('detects file_read from offset/limit pair', () => {
+  it('detects file_read from offset/limit pair with 1-based range conversion', () => {
+    // wenshao R4 (qwen3.7-max): `range` is 1-based inclusive per the
+    // `DaemonToolPreview.file_read` type doc. The detector converts
+    // daemon-emitted 0-based offset+limit to that contract. For
+    // offset=100, limit=50 the displayed range is "lines 101-150".
     const preview = createDaemonToolPreview(
       { path: '/work/y.md', offset: 100, limit: 50 },
       { toolName: 'View' },
@@ -2508,7 +2512,7 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     expect(preview).toMatchObject({
       kind: 'file_read',
       path: '/work/y.md',
-      range: [100, 149],
+      range: [101, 150],
     });
   });
 

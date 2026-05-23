@@ -68,6 +68,26 @@ export function createDaemonTranscriptStore(
       });
       scheduleNotify();
     },
+    // wenshao R4 (qwen3.7-max): explicit recovery from the
+    // `awaitingResync` one-way latch. After the client receives a
+    // `session.state_resync_required` event, it should:
+    //   1. Drop local state if a full replay isn't feasible, OR
+    //   2. Re-subscribe with `Last-Event-ID: 0` to receive a full
+    //      replay, then call `clearAwaitingResync()` once the replay
+    //      stream has drained.
+    // Without this API the latch could only be cleared by `reset()`,
+    // which forces session-id reset semantics — wrong shape for the
+    // same-session-with-replay recovery flow.
+    clearAwaitingResync() {
+      if (!state.awaitingResync) return;
+      state = {
+        ...state,
+        awaitingResync: false,
+        // Keep lastResyncRequired for diagnostic visibility — consumers
+        // who want a clean slate can also call reset().
+      };
+      scheduleNotify();
+    },
   };
 }
 

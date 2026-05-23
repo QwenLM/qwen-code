@@ -69,7 +69,7 @@ export function createDaemonToolPreview(
   const imageGeneration = detectImageGeneration(input, opts);
   if (imageGeneration) return imageGeneration;
 
-  const fileDiff = detectFileDiff(input);
+  const fileDiff = detectFileDiff(input, opts);
   if (fileDiff) return fileDiff;
 
   const fileRead = detectFileRead(input, opts);
@@ -112,7 +112,10 @@ export function createDaemonToolPreview(
  * - Aider-style: `patch` text
  * - All variants require a `path` / `filePath` field.
  */
-function detectFileDiff(input: unknown): DaemonToolPreview | undefined {
+function detectFileDiff(
+  input: unknown,
+  opts: { title?: string; toolName?: string; toolKind?: string } = {},
+): DaemonToolPreview | undefined {
   if (!isRecord(input)) return undefined;
   const path = getFirstString(input, [
     'path',
@@ -127,13 +130,30 @@ function detectFileDiff(input: unknown): DaemonToolPreview | undefined {
     'old_str',
     'oldString',
   ]);
-  const newText = getFirstString(input, [
+  // wenshao R4 (qwen3.7-max): `content` is too ambiguous as a newText
+  // alias — `{ path, content }` is a common shape for both file writes
+  // AND read assertions / search queries / file_read results echoed in
+  // rawInput. Since `detectFileDiff` runs BEFORE `detectFileRead` in the
+  // detector chain, accepting `content` would mis-classify reads as
+  // writes. Restrict bare `content` to tools whose name signals a write
+  // (`write` / `create` / `edit` / `replace` / `save`); otherwise
+  // require an explicit `newText` / `new_str` / `newString` alias OR
+  // co-occurrence with `oldText` (edit shape).
+  const explicitNewText = getFirstString(input, [
     'newText',
     'new_text',
     'new_str',
     'newString',
-    'content',
   ]);
+  const toolNameLower = (opts.toolName ?? '').toLowerCase();
+  const writeIntent =
+    /write|create|edit|replace|save|update/.test(toolNameLower) ||
+    !!oldText;
+  const contentField =
+    explicitNewText === undefined && writeIntent
+      ? getFirstString(input, ['content'])
+      : undefined;
+  const newText = explicitNewText ?? contentField;
   const patch = getFirstString(input, ['patch', 'diff', 'unified_diff']);
   // Require at least one of: oldText+newText pair (edit), patch (apply),
   // newText (write). Pure path with no diff content → not a diff preview.
@@ -182,7 +202,12 @@ function detectFileRead(
     const offset = input['offset'];
     const limit = input['limit'];
     if (typeof offset === 'number' && typeof limit === 'number' && limit > 0) {
-      range = [offset, offset + limit - 1] as const;
+      // wenshao R4 (qwen3.7-max): convert 0-based offset+limit pair to
+      // 1-based inclusive range, matching the documented `range` type
+      // (`Optional [startLine, endLine] 1-based inclusive`).
+      // For offset=0, limit=10 the old formula produced [0, 9] which
+      // displayed as "lines 0-9" — line 0 doesn't exist in 1-based.
+      range = [offset + 1, offset + limit] as const;
     }
   }
   if (!looksLikeRead && !range) return undefined;

@@ -108,7 +108,18 @@ export function reduceDaemonTranscriptEvents(
   if (events.length === 0) return state;
   const next = cloneTranscriptState(state, opts);
   for (const event of events) applyDaemonTranscriptEvent(next, event);
-  return trimTranscriptState(next);
+  const result = trimTranscriptState(next);
+  // doudouOUC R4: with lazy COW, `state.blocks` is shared across
+  // sidechannel-only snapshots. A misbehaving consumer doing
+  // `(state.blocks as DaemonTranscriptBlock[]).sort()` would corrupt
+  // EVERY snapshot that shares the reference (previously only the
+  // current one). Freeze the array at the dispatch boundary so external
+  // in-place mutation throws in strict mode instead of silently
+  // poisoning future snapshots. Internal reducer mutation goes through
+  // `takeBlocksOwnership` which copies BEFORE mutating, so the frozen
+  // shared reference is never touched in-place by the next dispatch.
+  Object.freeze(result.blocks);
+  return result;
 }
 
 export function rebuildDaemonTranscriptBlockIndex(
@@ -276,9 +287,27 @@ function handleStateResyncRequired(
   appendStatusBlock(
     state,
     'error',
-    `State resync required: missed daemon events ${event.lastDeliveredId + 1}-${event.earliestAvailableId - 1}. Reload the session to recover.`,
+    `State resync required: ${formatMissedRange(event.lastDeliveredId, event.earliestAvailableId)}. Reload the session to recover.`,
     event,
   );
+}
+
+/**
+ * Format `missed daemon events X-Y` defensively. The naive formula
+ * `lastDeliveredId+1 .. earliestAvailableId-1` produces inverted output
+ * for `gap == 0` (next-id-is-next, no actual gap) and confusing
+ * single-event range for `gap == 1`. Round all edge cases to natural
+ * phrasing so the diagnostic stays readable. wenshao R4 (qwen3.7-max).
+ */
+function formatMissedRange(
+  lastDeliveredId: number,
+  earliestAvailableId: number,
+): string {
+  const first = lastDeliveredId + 1;
+  const last = earliestAvailableId - 1;
+  if (last < first) return 'no events lost (resync requested without gap)';
+  if (last === first) return `missed 1 daemon event (id ${first})`;
+  return `missed daemon events ${first}-${last}`;
 }
 
 export function selectTranscriptBlocks(

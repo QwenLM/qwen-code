@@ -685,6 +685,15 @@ export interface DaemonTranscriptStore {
   dispatch(event: DaemonUiEvent | DaemonUiEvent[]): void;
   appendLocalUserMessage(text: string): void;
   reset(seed?: Partial<DaemonTranscriptState>): void;
+  /**
+   * Clear the `awaitingResync` latch that gets set when the daemon emits
+   * `session.state_resync_required`. Call this after re-subscribing to
+   * SSE with `Last-Event-ID: 0` and the replay stream has fully drained
+   * (or after dropping state via your own flow). Without this API, the
+   * latch could only be cleared by `reset()`, which forces session-id
+   * change semantics that don't fit same-session reconnect.
+   */
+  clearAwaitingResync(): void;
 }
 
 export interface DaemonUiSessionActions {

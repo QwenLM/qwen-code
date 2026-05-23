@@ -664,11 +664,26 @@ function sanitizeUrl(url: string): string {
     // must cover both query-param tokens AND the userinfo component.
     u.username = '';
     u.password = '';
+    // wenshao R4 (qwen3.7-max): widen regex to catch additional cloud
+    // provider credential / signed-URL params:
+    //   - AWS S3 presigned: `AWSAccessKeyId` (case-insensitive starts
+    //     with `aws`), `X-Amz-*` (already covered)
+    //   - GCP signed: `GoogleAccessId`, `Signature` (already), `Expires`
+    //   - Azure SAS: short codes `sv`/`se`/`sr`/`sp`/`st`/`spr`/`sip`/`ss`/`srt`/`sig`
+    // `Expires` is included because in signed-URL contexts it pairs with
+    // the credential; non-signed URLs typically don't include it as a
+    // top-level query param so the false-positive risk is bounded.
+    const AZURE_SAS_KEYS = new Set([
+      'sv', 'se', 'sr', 'sp', 'st', 'spr', 'sip', 'ss', 'srt', 'sig', 'skoid',
+      'sktid', 'skt', 'ske', 'sks', 'skv',
+    ]);
     for (const key of Array.from(u.searchParams.keys())) {
+      const k = key.toLowerCase();
       if (
-        /^(token|key|auth|signature|sig|access|secret|bearer|credential|session|api[_-]?key|x-amz-|x-goog-)/i.test(
+        /^(token|key|auth|signature|sig|access|secret|bearer|credential|session|api[_-]?key|x-amz-|x-goog-|aws|google|expires)/i.test(
           key,
-        )
+        ) ||
+        AZURE_SAS_KEYS.has(k)
       ) {
         u.searchParams.delete(key);
       }

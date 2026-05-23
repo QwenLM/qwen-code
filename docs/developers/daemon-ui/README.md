@@ -106,7 +106,7 @@ store.subscribe(() => {
 `auth.device_flow.{started,throttled,authorized,failed,cancelled}`
 
 Each carries the daemon's `deviceFlowId`. Failed events carry a closed-enum
-`errorKind` (`expired` / `access_denied` / `transport` / etc.).
+`errorKind` (closed enum — see `KNOWN_DEVICE_FLOW_ERROR_KINDS` exported from `@qwen-code/sdk/daemon` for the canonical list, currently: `expired_token` / `access_denied` / `invalid_grant` / `upstream_error` / `persist_failed` / `not_found_or_evicted`).
 
 ## Render contract (PR-D)
 
@@ -313,9 +313,11 @@ it('my adapter conforms to daemon UI corpus', () => {
 });
 ```
 
-The fixture corpus (`DAEMON_UI_CONFORMANCE_FIXTURES`) covers 10 scenarios:
-chat, tool lifecycle, file edits, MCP, permissions, MCP budget warning,
-cancellation, malformed payload redaction, OAuth, command updates.
+The fixture corpus (`DAEMON_UI_CONFORMANCE_FIXTURES`) covers chat, tool
+lifecycle, file edits, MCP, permissions, MCP budget warning, cancellation,
+malformed payload redaction, OAuth, command updates, and sub-agent
+nesting. (Count is derivable at runtime — read
+`DAEMON_UI_CONFORMANCE_FIXTURES.length`.)
 
 **Format-agnostic** — your adapter can render to ANSI / HTML / markdown /
 JSX; the framework only checks semantic content via `expectedContains` and
