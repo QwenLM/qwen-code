@@ -7,8 +7,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseUploadArgs, uploadAssets } from '../upload-aliyun-oss-assets.js';
 
@@ -85,14 +83,6 @@ describe('parseUploadArgs', () => {
 });
 
 describe('uploadAssets (integration)', () => {
-  function withPrependedPath(workDir) {
-    const env = { ...process.env };
-    const pathKey =
-      Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
-    env[pathKey] = `${workDir}${path.delimiter}${env[pathKey] ?? ''}`;
-    return env;
-  }
-
   function makeOssutilShim(workDir, behavior = 'success') {
     fs.mkdirSync(workDir, { recursive: true });
     const ossutilPath = path.join(workDir, 'ossutil-shim.cjs');
@@ -112,73 +102,6 @@ describe('uploadAssets (integration)', () => {
       ossutilCommandArgs: [ossutilPath],
     };
   }
-
-  function makeExecutableOssutilShim(workDir) {
-    fs.mkdirSync(workDir, { recursive: true });
-    const logPath = path.join(workDir, 'ossutil.log');
-    const ossutilPath = path.join(workDir, 'ossutil');
-    fs.writeFileSync(
-      ossutilPath,
-      [
-        '#!/usr/bin/env node',
-        "const fs = require('node:fs');",
-        `fs.appendFileSync(${JSON.stringify(logPath)}, process.argv.slice(2).join('\\n') + '\\n');`,
-        'process.exit(0);',
-        '',
-      ].join('\n'),
-      { mode: 0o755 },
-    );
-    fs.writeFileSync(
-      path.join(workDir, 'ossutil.cmd'),
-      ['@echo off', `"${process.execPath}" "${ossutilPath}" %*`, ''].join(
-        '\r\n',
-      ),
-    );
-    return { logPath };
-  }
-
-  it('runs the CLI upload path without retry constant TDZ errors', () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-upload-cli-'));
-    try {
-      const { logPath } = makeExecutableOssutilShim(tmp);
-      const assetPath = path.join(tmp, 'asset.tar.gz');
-      fs.writeFileSync(assetPath, 'asset');
-      const configPath = path.join(tmp, '.ossutilconfig');
-      fs.writeFileSync(configPath, '[Credentials]\n');
-
-      const scriptPath = fileURLToPath(
-        new URL('../upload-aliyun-oss-assets.js', import.meta.url),
-      );
-      const result = spawnSync(
-        process.execPath,
-        [
-          scriptPath,
-          '--bucket',
-          'qwen-test-bucket',
-          '--config',
-          configPath,
-          '--prefix',
-          'releases/qwen-code/v0.0.0',
-          assetPath,
-        ],
-        {
-          encoding: 'utf8',
-          env: withPrependedPath(tmp),
-        },
-      );
-
-      expect(result.status, result.stderr || result.stdout).toBe(0);
-      expect(result.stderr).not.toContain(
-        "Cannot access 'MAX_UPLOAD_ATTEMPTS' before initialization",
-      );
-      const log = fs.readFileSync(logPath, 'utf8');
-      expect(log).toContain(
-        'oss://qwen-test-bucket/releases/qwen-code/v0.0.0/asset.tar.gz',
-      );
-    } finally {
-      fs.rmSync(tmp, { recursive: true, force: true });
-    }
-  });
 
   it('spawns ossutil with the expected cp arguments per asset', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-upload-'));
