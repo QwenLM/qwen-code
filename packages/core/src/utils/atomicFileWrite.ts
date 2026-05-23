@@ -207,11 +207,14 @@ export async function writeInPlaceWithFdGuards(
       (err as Error & { cause?: unknown }).cause = truncErr;
       throw err;
     }
-    const fhWriteOptions: { encoding?: BufferEncoding; flush?: boolean } = {};
+    const fhWriteOptions: { encoding?: BufferEncoding } = {};
     if (typeof data === 'string' && options.encoding) {
       fhWriteOptions.encoding = options.encoding;
     }
-    if (options.flush) fhWriteOptions.flush = true;
+    // Note: do NOT pass `flush: true` here — Node.js silently ignores
+    // the flush option on `FileHandle.writeFile` (it's only honored on
+    // the path-based `fs.writeFile` form). We issue an explicit
+    // `fh.sync()` after the write succeeds.
     try {
       await fh.writeFile(data, fhWriteOptions);
     } catch (writeErr) {
@@ -224,6 +227,19 @@ export async function writeInPlaceWithFdGuards(
       (err as Error & { cause?: unknown }).cause = writeErr;
       throw err;
     }
+    // Explicit data fsync — fh.writeFile does not honor flush on a
+    // FileHandle, so without this the just-written bytes sit in the
+    // kernel page cache and a power loss can leave the file empty
+    // (truncate succeeded) or partially written. Must run *before*
+    // the chmod block so it fsyncs even when canChmod=false — that
+    // branch is the exact shared-write scenario this PR targets.
+    if (options.flush) {
+      try {
+        await fh.sync();
+      } catch {
+        // Best-effort: not all filesystems support fsync.
+      }
+    }
     if (options.mode !== undefined) {
       // Skip chmod when we know it will EPERM — non-root callers cannot
       // chmod files they don't own. Use fdStat.uid (fd-bound, verified
@@ -234,17 +250,15 @@ export async function writeInPlaceWithFdGuards(
       if (canChmod) {
         try {
           await fh.chmod(options.mode);
-          // chmod is a metadata-only operation not covered by the data
-          // fsync inside writeFile({ flush: true }). Force a metadata
-          // commit so a crash before lazy metadata flush doesn't lose
-          // the mode restoration (matters for setuid/setgid bits).
+          // chmod is metadata-only; the data fsync above covered the
+          // bytes but not the mode change. A second sync ensures the
+          // mode restoration survives a crash before lazy metadata
+          // flush (matters for setuid/setgid bits).
           if (options.flush) {
             try {
               await fh.sync();
             } catch {
-              // Best-effort: if data sync succeeded, metadata sync
-              // failing usually means a filesystem that doesn't
-              // distinguish them. Acceptable.
+              // Best-effort.
             }
           }
         } catch {

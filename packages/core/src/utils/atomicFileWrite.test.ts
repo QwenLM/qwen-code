@@ -695,4 +695,67 @@ describe('writeInPlaceWithFdGuards', () => {
       expect(afterStat.mode & 0o777).toBe(0o644);
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'should wrap fh.truncate failure as EINPLACE_TRUNCATE_FAILED with original content intact',
+    async () => {
+      // Sibling test to EINPLACE_WRITE_FAILED. truncate failing means
+      // the original content is still intact — verify the error code
+      // and that the file's bytes are unchanged.
+      const filePath = path.join(tmpDir, 'truncate-fail.txt');
+      const original = 'original content that must survive';
+      await fs.writeFile(filePath, original);
+      const beforeStat = await fs.stat(filePath);
+
+      const probeFh = await fs.open(filePath, 'r');
+      const FileHandleProto = Object.getPrototypeOf(probeFh);
+      const origTruncate = FileHandleProto.truncate;
+      await probeFh.close();
+
+      FileHandleProto.truncate = async function mockTruncate(): Promise<void> {
+        const err: NodeJS.ErrnoException = new Error('mock EIO');
+        err.code = 'EIO';
+        throw err;
+      };
+
+      try {
+        await expect(
+          writeInPlaceWithFdGuards(filePath, 'should-not-land', beforeStat, {
+            encoding: 'utf-8',
+          }),
+        ).rejects.toMatchObject({
+          code: 'EINPLACE_TRUNCATE_FAILED',
+          message: expect.stringMatching(/original content is intact/),
+          cause: expect.objectContaining({ code: 'EIO' }),
+        });
+      } finally {
+        FileHandleProto.truncate = origTruncate;
+      }
+
+      // Original content must be intact since truncate failed.
+      expect(await fs.readFile(filePath, 'utf-8')).toBe(original);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'should write Buffer data correctly through in-place fallback',
+    async () => {
+      // String tests above don't exercise the Buffer code path. If a
+      // future refactor passes encoding through for Buffer data, binary
+      // content would be corrupted; this test locks in binary fidelity.
+      const filePath = path.join(tmpDir, 'binary.bin');
+      const original = Buffer.from([0xff, 0xfe, 0xfd]);
+      await fs.writeFile(filePath, original);
+      const beforeStat = await fs.stat(filePath);
+
+      const buf = Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0xff]);
+      await writeInPlaceWithFdGuards(filePath, buf, beforeStat, {
+        flush: true,
+      });
+
+      // Byte-exact comparison.
+      const written = await fs.readFile(filePath);
+      expect(Buffer.compare(written, buf)).toBe(0);
+    },
+  );
 });
