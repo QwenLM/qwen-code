@@ -648,6 +648,41 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
+    it('should append UserPromptExpansion additional context to submit_prompt actions', async () => {
+      mockFireUserPromptExpansionEvent.mockResolvedValue({
+        getBlockingError: () => ({ blocked: false }),
+        shouldStopExecution: () => false,
+        getAdditionalContext: () => 'Hook context',
+      });
+      const fileCommand = createTestCommand(
+        {
+          name: 'filecmd',
+          description: 'A command from a file',
+          action: async () => ({
+            type: 'submit_prompt',
+            content: [{ text: 'The actual prompt from the TOML file.' }],
+          }),
+        },
+        CommandKind.FILE,
+      );
+
+      const result = setupProcessorHook([], [fileCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand('/filecmd');
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: [
+          { text: 'The actual prompt from the TOML file.' },
+          { text: '\n\nHook context' },
+        ],
+      });
+    });
+
     it('should block submit_prompt actions when UserPromptExpansion blocks', async () => {
       mockFireUserPromptExpansionEvent.mockResolvedValue({
         getBlockingError: () => ({
@@ -715,6 +750,42 @@ describe('useSlashCommandProcessor', () => {
       expect(mockAddItem).toHaveBeenCalledWith(
         { type: MessageType.USER, text: '/mcpcmd' },
         expect.any(Number),
+      );
+    });
+
+    it('should fire UserPromptExpansion hooks for model-invocable command execution', async () => {
+      mockFireUserPromptExpansionEvent.mockResolvedValue({
+        getBlockingError: () => ({ blocked: false }),
+        shouldStopExecution: () => false,
+        getAdditionalContext: () => 'Hook context',
+      });
+      const fileCommand = createTestCommand(
+        {
+          name: 'filecmd',
+          description: 'A command from a file',
+          modelInvocable: true,
+          action: async () => ({
+            type: 'submit_prompt',
+            content: [{ text: 'The actual prompt from the TOML file.' }],
+          }),
+        },
+        CommandKind.FILE,
+      );
+
+      const result = setupProcessorHook([], [fileCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const executor = mockConfig.getModelInvocableCommandsExecutor?.();
+      expect(executor).toBeDefined();
+      const content = await executor?.('filecmd', 'with args');
+
+      expect(mockFireUserPromptExpansionEvent).toHaveBeenCalledWith(
+        'filecmd',
+        'with args',
+        'The actual prompt from the TOML file.',
+      );
+      expect(content).toBe(
+        'The actual prompt from the TOML file.\n\nHook context',
       );
     });
   });

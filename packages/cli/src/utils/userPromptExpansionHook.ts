@@ -7,6 +7,24 @@
 import type { PartListUnion } from '@google/genai';
 import { partToString } from '@qwen-code/qwen-code-core';
 
+export function appendUserPromptExpansionAdditionalContext(
+  content: PartListUnion,
+  additionalContext: string | undefined,
+): PartListUnion {
+  if (!additionalContext) {
+    return content;
+  }
+
+  const suffix = `\n\n${additionalContext}`;
+  if (typeof content === 'string') {
+    return `${content}${suffix}`;
+  }
+  if (Array.isArray(content)) {
+    return [...content, { text: suffix }];
+  }
+  return [content, { text: suffix }];
+}
+
 export function serializeUserPromptExpansionPrompt(
   content: PartListUnion,
 ): string {
@@ -16,6 +34,8 @@ export function serializeUserPromptExpansionPrompt(
   return partToString(content, { verbose: true });
 }
 
-export function formatUserPromptExpansionBlockedMessage(reason: string): string {
+export function formatUserPromptExpansionBlockedMessage(
+  reason: string,
+): string {
   return `UserPromptExpansion blocked: ${reason}`;
 }

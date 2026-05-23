@@ -382,6 +382,39 @@ describe('handleSlashCommand', () => {
     );
   });
 
+  it('should append UserPromptExpansion additional context for submit_prompt commands', async () => {
+    mockFireUserPromptExpansionEvent.mockResolvedValue({
+      getBlockingError: () => ({ blocked: false }),
+      shouldStopExecution: () => false,
+      getAdditionalContext: () => 'Hook context',
+    });
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Expanded prompt' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom with args',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.content).toEqual([
+        { text: 'Expanded prompt' },
+        { text: '\n\nHook context' },
+      ]);
+    }
+  });
+
   it('should block submit_prompt commands when UserPromptExpansion blocks', async () => {
     mockFireUserPromptExpansionEvent.mockResolvedValue({
       getBlockingError: () => ({

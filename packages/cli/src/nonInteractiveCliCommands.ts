@@ -29,6 +29,7 @@ import type { LoadedSettings } from './config/settings.js';
 import type { SessionStatsState } from './ui/contexts/SessionContext.js';
 import { t } from './i18n/index.js';
 import {
+  appendUserPromptExpansionAdditionalContext,
   formatUserPromptExpansionBlockedMessage,
   serializeUserPromptExpansionPrompt,
 } from './utils/userPromptExpansionHook.js';
@@ -178,10 +179,13 @@ async function fireUserPromptExpansionHook(
   commandArgs: string,
   content: PartListUnion,
   signal: AbortSignal,
-): Promise<NonInteractiveSlashCommandResult | null> {
+): Promise<{
+  blockedResult?: NonInteractiveSlashCommandResult;
+  content: PartListUnion;
+}> {
   const hookSystem = config.getHookSystem();
   if (!hookSystem) {
-    return null;
+    return { content };
   }
 
   const output = await hookSystem.fireUserPromptExpansionEvent(
@@ -191,21 +195,29 @@ async function fireUserPromptExpansionHook(
     signal,
   );
   if (!output) {
-    return null;
+    return { content };
   }
 
   const blockingError = output.getBlockingError();
   if (blockingError.blocked || output.shouldStopExecution()) {
     return {
-      type: 'message',
-      messageType: 'error',
-      content: formatUserPromptExpansionBlockedMessage(
-        blockingError.reason || output.getEffectiveReason(),
-      ),
+      blockedResult: {
+        type: 'message',
+        messageType: 'error',
+        content: formatUserPromptExpansionBlockedMessage(
+          blockingError.reason || output.getEffectiveReason(),
+        ),
+      },
+      content,
     };
   }
 
-  return null;
+  return {
+    content: appendUserPromptExpansionAdditionalContext(
+      content,
+      output.getAdditionalContext(),
+    ),
+  };
 }
 
 /**
@@ -292,7 +304,15 @@ export const handleSlashCommand = async (
       } as unknown as CommandContext;
       const result = await cmd.action(minimalContext, args);
       if (!result || result.type !== 'submit_prompt') return null;
-      const content = result.content;
+      const hookResult = await fireUserPromptExpansionHook(
+        config,
+        name,
+        args,
+        result.content,
+        new AbortController().signal,
+      );
+      if (hookResult.blockedResult) return null;
+      const content = hookResult.content;
       if (typeof content === 'string') return content;
       if (Array.isArray(content)) {
         return content
@@ -405,9 +425,10 @@ export const handleSlashCommand = async (
       result.content,
       abortController.signal,
     );
-    if (hookResult) {
-      return hookResult;
+    if (hookResult.blockedResult) {
+      return hookResult.blockedResult;
     }
+    return handleCommandResult({ ...result, content: hookResult.content });
   }
 
   // Handle different result types

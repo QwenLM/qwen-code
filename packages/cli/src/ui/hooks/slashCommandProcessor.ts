@@ -58,6 +58,7 @@ import {
   type ExtensionUpdateStatus,
 } from '../state/extensions.js';
 import {
+  appendUserPromptExpansionAdditionalContext,
   formatUserPromptExpansionBlockedMessage,
   serializeUserPromptExpansionPrompt,
 } from '../../utils/userPromptExpansionHook.js';
@@ -471,7 +472,23 @@ export const useSlashCommandProcessor = (
               } as unknown as Parameters<typeof cmd.action>[0];
               const result = await cmd.action(minimalContext, args);
               if (!result || result.type !== 'submit_prompt') return null;
-              const content = result.content;
+              const output = await config
+                .getHookSystem()
+                ?.fireUserPromptExpansionEvent(
+                  name,
+                  args,
+                  serializeUserPromptExpansionPrompt(result.content),
+                );
+              if (output) {
+                const blockingError = output.getBlockingError();
+                if (blockingError.blocked || output.shouldStopExecution()) {
+                  return null;
+                }
+              }
+              const content = appendUserPromptExpansionAdditionalContext(
+                result.content,
+                output?.getAdditionalContext(),
+              );
               if (typeof content === 'string') return content;
               if (Array.isArray(content)) {
                 return content
@@ -768,40 +785,40 @@ export const useSlashCommandProcessor = (
                   actions.quit(result.messages);
                   return { type: 'handled' };
 
-                case 'submit_prompt':
-                  {
-                    const invocation = fullCommandContext.invocation;
-                    const output = await config
-                      ?.getHookSystem()
-                      ?.fireUserPromptExpansionEvent(
-                        invocation?.name ?? '',
-                        invocation?.args ?? '',
-                        serializeUserPromptExpansionPrompt(result.content),
-                        abortController.signal,
-                      );
-                    if (output) {
-                      const blockingError = output.getBlockingError();
-                      if (
-                        blockingError.blocked ||
-                        output.shouldStopExecution()
-                      ) {
-                        addMessage({
-                          type: MessageType.ERROR,
-                          content: formatUserPromptExpansionBlockedMessage(
-                            blockingError.reason ||
-                              output.getEffectiveReason(),
-                          ),
-                          timestamp: new Date(),
-                        });
-                        return { type: 'handled' };
-                      }
+                case 'submit_prompt': {
+                  const invocation = fullCommandContext.invocation;
+                  let content = result.content;
+                  const output = await config
+                    ?.getHookSystem()
+                    ?.fireUserPromptExpansionEvent(
+                      invocation?.name ?? '',
+                      invocation?.args ?? '',
+                      serializeUserPromptExpansionPrompt(content),
+                      abortController.signal,
+                    );
+                  if (output) {
+                    const blockingError = output.getBlockingError();
+                    if (blockingError.blocked || output.shouldStopExecution()) {
+                      addMessage({
+                        type: MessageType.ERROR,
+                        content: formatUserPromptExpansionBlockedMessage(
+                          blockingError.reason || output.getEffectiveReason(),
+                        ),
+                        timestamp: new Date(),
+                      });
+                      return { type: 'handled' };
                     }
+                    content = appendUserPromptExpansionAdditionalContext(
+                      content,
+                      output.getAdditionalContext(),
+                    );
                   }
                   return {
                     type: 'submit_prompt',
-                    content: result.content,
+                    content,
                     onComplete: result.onComplete,
                   };
+                }
                 case 'confirm_shell_commands': {
                   const { outcome, approvedCommands } = await new Promise<{
                     outcome: ToolConfirmationOutcome;
