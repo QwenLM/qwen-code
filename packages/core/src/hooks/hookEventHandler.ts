@@ -316,10 +316,12 @@ export class HookEventHandler {
    */
   async firePostToolBatchEvent(
     toolCalls: PostToolBatchToolCall[],
+    permissionMode: PermissionMode = PermissionMode.Default,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: PostToolBatchInput = {
       ...this.createBaseInput(HookEventName.PostToolBatch),
+      permission_mode: permissionMode,
       tool_calls: toolCalls,
     };
 

@@ -419,20 +419,25 @@ describe('toolHookTriggers', () => {
         },
       });
 
-      const result = await firePostToolBatchHook(mockMessageBus, [
-        {
-          tool_name: 'read_file',
-          tool_input: { path: 'README.md' },
-          tool_use_id: 'call-1',
-          tool_response: { output: 'contents' },
-        },
-      ]);
+      const result = await firePostToolBatchHook(
+        mockMessageBus,
+        [
+          {
+            tool_name: 'read_file',
+            tool_input: { path: 'README.md' },
+            tool_use_id: 'call-1',
+            tool_response: { output: 'contents' },
+          },
+        ],
+        'auto',
+      );
 
       expect(mockMessageBus.request).toHaveBeenCalledWith(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
           eventName: 'PostToolBatch',
           input: {
+            permission_mode: 'auto',
             tool_calls: [
               {
                 tool_name: 'read_file',

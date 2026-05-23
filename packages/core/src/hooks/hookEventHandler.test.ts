@@ -827,6 +827,7 @@ describe('HookEventHandler', () => {
         .calls;
       const input = mockCalls[0][2] as {
         hook_event_name: string;
+        permission_mode: string;
         tool_calls: Array<{
           tool_name: string;
           tool_input: Record<string, unknown>;
@@ -836,6 +837,7 @@ describe('HookEventHandler', () => {
       };
 
       expect(input.hook_event_name).toBe(HookEventName.PostToolBatch);
+      expect(input.permission_mode).toBe(PermissionMode.Default);
       expect(input.tool_calls).toEqual([
         {
           tool_name: 'shell',

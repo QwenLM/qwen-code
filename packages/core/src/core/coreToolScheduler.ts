@@ -1308,6 +1308,7 @@ export class CoreToolScheduler {
             setToolSpanCancelled(span);
             this.finalizeToolSpan(callId);
           }
+          this.callIdToPostToolBatchSignal.delete(callId);
         } catch (e) {
           debugLogger.warn(
             `drainSpansForBatch: failed to drain ${callId}: ${e instanceof Error ? e.message : String(e)}`,
@@ -3317,9 +3318,16 @@ export class CoreToolScheduler {
       }
       if (messageBus) {
         const batchToolCalls = completedCalls.map(toPostToolBatchToolCall);
+        const permissionMode = this.config.getApprovalMode();
         const batchHookResult = await this.withHookSpan(
           { hookEvent: 'PostToolBatch', toolName: 'batch' },
-          () => firePostToolBatchHook(messageBus, batchToolCalls, batchSignal),
+          () =>
+            firePostToolBatchHook(
+              messageBus,
+              batchToolCalls,
+              permissionMode,
+              batchSignal,
+            ),
           (r) =>
             r.hookError
               ? {

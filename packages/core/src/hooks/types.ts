@@ -696,6 +696,7 @@ export interface PostToolBatchToolCall {
  * Fired once after every tool call in a batch has resolved.
  */
 export interface PostToolBatchInput extends HookInput {
+  permission_mode: PermissionMode;
   tool_calls: PostToolBatchToolCall[];
 }
 

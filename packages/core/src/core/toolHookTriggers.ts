@@ -386,6 +386,7 @@ export async function firePostToolUseFailureHook(
 export async function firePostToolBatchHook(
   messageBus: MessageBus | undefined,
   toolCalls: PostToolBatchToolCall[],
+  permissionMode = 'default',
   signal?: AbortSignal,
 ): Promise<PostToolBatchHookResult> {
   if (!messageBus) {
@@ -401,6 +402,7 @@ export async function firePostToolBatchHook(
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
         eventName: 'PostToolBatch',
         input: {
+          permission_mode: permissionMode,
           tool_calls: toolCalls,
         },
         signal,

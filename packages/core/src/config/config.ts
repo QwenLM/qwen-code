@@ -1289,6 +1289,7 @@ export class Config {
               case 'PostToolBatch':
                 result = await hookSystem.firePostToolBatchEvent(
                   (input['tool_calls'] as PostToolBatchToolCall[]) || [],
+                  (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
                 );
                 break;

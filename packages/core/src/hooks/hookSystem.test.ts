@@ -874,6 +874,7 @@ describe('HookSystem', () => {
 
       expect(mockHookEventHandler.firePostToolBatchEvent).toHaveBeenCalledWith(
         toolCalls,
+        PermissionMode.Default,
         undefined,
       );
       expect(result).toBeDefined();
