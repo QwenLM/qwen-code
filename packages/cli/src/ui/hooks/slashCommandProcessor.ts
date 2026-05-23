@@ -493,7 +493,9 @@ export const useSlashCommandProcessor = (
               if (output) {
                 const blockingError = output.getBlockingError();
                 if (blockingError.blocked || output.shouldStopExecution()) {
-                  return null;
+                  return formatUserPromptExpansionBlockedMessage(
+                    blockingError.reason || output.getEffectiveReason(),
+                  );
                 }
               }
               const content = appendUserPromptExpansionAdditionalContext(
@@ -812,6 +814,7 @@ export const useSlashCommandProcessor = (
                   if (output) {
                     const blockingError = output.getBlockingError();
                     if (blockingError.blocked || output.shouldStopExecution()) {
+                      hasError = true;
                       addMessage({
                         type: MessageType.ERROR,
                         content: formatUserPromptExpansionBlockedMessage(

@@ -792,6 +792,38 @@ describe('useSlashCommandProcessor', () => {
         'The actual prompt from the TOML file.\n\nHook context',
       );
     });
+
+    it('should return block reason for blocked model-invocable command execution', async () => {
+      mockFireUserPromptExpansionEvent.mockResolvedValue({
+        getBlockingError: () => ({
+          blocked: true,
+          reason: 'Blocked by policy',
+        }),
+        shouldStopExecution: () => false,
+        getEffectiveReason: () => 'fallback reason',
+      });
+      const fileCommand = createTestCommand(
+        {
+          name: 'filecmd',
+          description: 'A command from a file',
+          modelInvocable: true,
+          action: async () => ({
+            type: 'submit_prompt',
+            content: 'The actual prompt from the TOML file.',
+          }),
+        },
+        CommandKind.FILE,
+      );
+
+      const result = setupProcessorHook([], [fileCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const executor = mockConfig.getModelInvocableCommandsExecutor?.();
+      expect(executor).toBeDefined();
+      const content = await executor?.('filecmd', 'with args');
+
+      expect(content).toBe('UserPromptExpansion blocked: Blocked by policy');
+    });
   });
 
   describe('Shell Command Confirmation Flow', () => {

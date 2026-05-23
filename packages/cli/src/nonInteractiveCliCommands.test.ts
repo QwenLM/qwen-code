@@ -449,6 +449,43 @@ describe('handleSlashCommand', () => {
     });
   });
 
+  it('should return block reason for blocked model-invocable command execution', async () => {
+    mockFireUserPromptExpansionEvent.mockResolvedValue({
+      getBlockingError: () => ({
+        blocked: true,
+        reason: 'Blocked by policy',
+      }),
+      shouldStopExecution: () => false,
+      getEffectiveReason: () => 'fallback reason',
+    });
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      modelInvocable: true,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    const executor = vi.mocked(mockConfig.setModelInvocableCommandsExecutor)
+      .mock.calls[0]?.[0];
+    expect(executor).toBeDefined();
+
+    const content = await executor?.('custom', 'with args');
+
+    expect(content).toBe('UserPromptExpansion blocked: Blocked by policy');
+  });
+
   it('should return unsupported for other built-in commands like /quit', async () => {
     const mockQuitCommand = {
       name: 'quit',

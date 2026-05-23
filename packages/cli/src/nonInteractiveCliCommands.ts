@@ -318,7 +318,11 @@ export const handleSlashCommand = async (
         result.content,
         abortController.signal,
       );
-      if (hookResult.blockedResult) return null;
+      if (hookResult.blockedResult) {
+        return hookResult.blockedResult.type === 'message'
+          ? hookResult.blockedResult.content
+          : null;
+      }
       const content = hookResult.content;
       if (typeof content === 'string') return content;
       if (Array.isArray(content)) {
