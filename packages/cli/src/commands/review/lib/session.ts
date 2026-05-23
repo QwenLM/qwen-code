@@ -18,7 +18,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Argv } from 'yargs';
-import { tmpFile, worktreePath } from './paths.js';
+import { projectRoot, tmpFile, worktreePath } from './paths.js';
 
 /** Schema written by `qwen review fetch-pr` — read by every downstream step. */
 export interface FetchReport {
@@ -203,8 +203,15 @@ export function ensureWorktreeMatches(
   report: FetchReport,
   providedWorktree: string,
 ): void {
-  const expected = resolve(report.worktreePath);
-  const got = resolve(providedWorktree);
+  // Anchor both sides at the main project root rather than `process.cwd()`
+  // so the comparison holds even when the subcommand is invoked from
+  // inside the PR worktree itself (cwd != project root). `resolve(root, p)`
+  // treats `p` as-is if absolute, or as project-relative if not — covers
+  // both legacy reports (which stored relative `.qwen/tmp/review-pr-N`)
+  // and reports written after the paths.ts change to absolute.
+  const root = projectRoot();
+  const expected = resolve(root, report.worktreePath);
+  const got = resolve(root, providedWorktree);
   if (expected !== got) {
     throw new Error(
       `Worktree path mismatch for PR #${report.prNumber}.\n` +

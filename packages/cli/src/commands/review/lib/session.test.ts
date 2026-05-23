@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -37,7 +43,9 @@ describe('review/lib/session', () => {
 
   beforeEach(() => {
     originalCwd = process.cwd();
-    cwd = mkdtempSync(join(tmpdir(), 'qwen-review-session-'));
+    // Use the realpath'd form so macOS `/var → /private/var` symlink
+    // doesn't make string equality on absolute paths fail spuriously.
+    cwd = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-review-session-')));
     process.chdir(cwd);
     mkdirSync('.qwen/tmp', { recursive: true });
   });
@@ -47,12 +55,16 @@ describe('review/lib/session', () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  it('fetchReportPath returns the canonical .qwen/tmp path', () => {
+  it('fetchReportPath returns an absolute path anchored at the project root', () => {
+    // Anchored at `projectRoot()` (cwd or QWEN_PROJECT_DIR fallback chain)
+    // so the canonical path is invariant under `process.chdir(...)` —
+    // gated subcommands invoked from inside the PR worktree must still
+    // resolve the same canonical fetch-pr report.
     expect(fetchReportPath('42')).toBe(
-      join('.qwen', 'tmp', 'qwen-review-pr-42-fetch.json'),
+      join(cwd, '.qwen', 'tmp', 'qwen-review-pr-42-fetch.json'),
     );
     expect(fetchReportPath(7)).toBe(
-      join('.qwen', 'tmp', 'qwen-review-pr-7-fetch.json'),
+      join(cwd, '.qwen', 'tmp', 'qwen-review-pr-7-fetch.json'),
     );
   });
 
@@ -173,5 +185,40 @@ describe('review/lib/session', () => {
     expect(() => requireFetchReport('42')).toThrow(
       /Preserve any `--remote.*--comment.*flags from the original/s,
     );
+  });
+
+  it('fetchReportPath resolves to the project-root canonical path regardless of cwd', () => {
+    // The bug this guards against: a gated subcommand invoked from inside
+    // the PR worktree (`cd .qwen/tmp/review-pr-N`) used to look for the
+    // fetch report under `<worktree>/.qwen/tmp/...` instead of the main
+    // project root, making the report invisible and the hard gate fail.
+    // With paths.ts anchored at `projectRoot()` (via QWEN_PROJECT_DIR
+    // env), the canonical path must resolve identically from both cwds.
+    writeFileSync(
+      fetchReportPath('42'),
+      JSON.stringify(REPORT_FIXTURE),
+      'utf8',
+    );
+    const fromProjectRoot = fetchReportPath('42');
+
+    const worktreeCwd = join(cwd, '.qwen', 'tmp', 'review-pr-42');
+    mkdirSync(worktreeCwd, { recursive: true });
+    const prevEnv = process.env.QWEN_PROJECT_DIR;
+    process.env.QWEN_PROJECT_DIR = cwd;
+    process.chdir(worktreeCwd);
+    try {
+      const fromWorktree = fetchReportPath('42');
+      expect(fromWorktree).toBe(fromProjectRoot);
+      // And the file must be findable from the worktree cwd too.
+      const report = requireFetchReport('42');
+      expect(report.prNumber).toBe('42');
+    } finally {
+      process.chdir(cwd);
+      if (prevEnv === undefined) {
+        delete process.env.QWEN_PROJECT_DIR;
+      } else {
+        process.env.QWEN_PROJECT_DIR = prevEnv;
+      }
+    }
   });
 });

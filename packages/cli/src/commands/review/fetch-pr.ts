@@ -26,7 +26,12 @@ import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh } from './lib/gh.js';
 import { git, refExists } from './lib/git.js';
-import { REVIEW_TMP_DIR, reviewBranch, worktreePath } from './lib/paths.js';
+import {
+  REVIEW_TMP_DIR,
+  projectRoot,
+  reviewBranch,
+  worktreePath,
+} from './lib/paths.js';
 import { fetchReportPath, type FetchReport } from './lib/session.js';
 
 interface PrMetadata {
@@ -158,7 +163,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     commentMode: !!comment,
   };
 
-  mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+  // Anchor mkdirSync at projectRoot so the directory exists even when
+  // fetch-pr is invoked from a non-root cwd (`tmpFile` / `fetchReportPath`
+  // resolve absolute against projectRoot, so the relative-from-cwd
+  // mkdirSync would have created the wrong directory).
+  mkdirSync(resolve(projectRoot(), REVIEW_TMP_DIR), { recursive: true });
   const json = JSON.stringify(result, null, 2) + '\n';
   writeFileSync(out, json, 'utf8');
   // Also mirror to the canonical path so downstream subcommands can locate the

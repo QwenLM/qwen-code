@@ -47,6 +47,7 @@ import {
   ensureWorktreeMatches,
   requirePrSessionFromArgs,
 } from './lib/session.js';
+import { projectRoot } from './lib/paths.js';
 
 const TIMEOUT_TYPECHECK_MS = 120_000;
 const TIMEOUT_LINTER_MS = 60_000;
@@ -656,7 +657,13 @@ interface DeterministicArgs {
 }
 
 async function runDeterministic(args: DeterministicArgs): Promise<void> {
-  const worktree = resolve(args.worktree);
+  // Anchor at projectRoot so a relative `<worktree>` arg resolves against
+  // the main project root rather than `process.cwd()`. The LLM driver
+  // sometimes invokes the subcommand from inside the worktree itself; a
+  // bare `resolve(args.worktree)` would then double-nest the path
+  // (`<worktree>/.qwen/tmp/review-pr-N`) and the existsSync check would
+  // fail spuriously.
+  const worktree = resolve(projectRoot(), args.worktree);
   if (!existsSync(worktree)) {
     throw new Error(`Worktree not found: ${worktree}`);
   }

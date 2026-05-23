@@ -5,19 +5,62 @@
  */
 
 // Centralised path constants and helpers for the `qwen review` subcommands.
-// All paths are relative to the project root (the current working directory
-// when the command is invoked). Use `path.join` rather than string
-// concatenation so Windows backslashes are produced when needed.
+// All paths are anchored at the main project root — not `process.cwd()` —
+// because the gated subcommands (`pr-context`, `presubmit`,
+// `deterministic --pr`, `load-rules --pr`, `autofix-gate`) are expected to
+// honour the canonical fetch-pr report at `<project>/.qwen/tmp/...` even
+// when they're invoked from inside the PR worktree (cwd != project root).
+// Resolution order:
+//   1. `QWEN_PROJECT_DIR` env var (set by hookRunner.ts for skill hooks).
+//   2. `git rev-parse --git-common-dir` — yields `<main>/.git` even from
+//      inside a `git worktree`, so the parent dir is the main project root
+//      regardless of which worktree the subcommand was launched from.
+//   3. `process.cwd()` — fallback for non-git invocations.
+// Use `path.join` rather than string concatenation so Windows backslashes
+// are produced when needed.
 
-import { join } from 'node:path';
+import { execSync } from 'node:child_process';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+
+function findProjectRoot(): string {
+  const envRoot = process.env.QWEN_PROJECT_DIR;
+  if (envRoot && isAbsolute(envRoot)) {
+    return envRoot;
+  }
+  try {
+    const commonDir = execSync('git rev-parse --git-common-dir', {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (commonDir) {
+      const abs = isAbsolute(commonDir) ? commonDir : resolve(commonDir);
+      // `--git-common-dir` returns the path of the shared `.git` directory
+      // (the main repo's `.git` for any linked worktree). The main project
+      // root is its parent, which "owns" the `.qwen/tmp/` markers the
+      // gated subcommands read.
+      return dirname(abs);
+    }
+  } catch {
+    // Not a git repo, or `git` not available. Fall through to cwd.
+  }
+  return process.cwd();
+}
+
+/**
+ * Absolute path of the main project root. Computed every call so tests that
+ * `process.chdir(...)` between assertions get fresh resolution.
+ */
+export function projectRoot(): string {
+  return findProjectRoot();
+}
 
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
 export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
 
-/** Worktree path for a given PR review session. */
+/** Worktree path for a given PR review session — absolute, project-anchored. */
 export function worktreePath(prNumber: string | number): string {
-  return join(REVIEW_TMP_DIR, `review-pr-${prNumber}`);
+  return join(projectRoot(), REVIEW_TMP_DIR, `review-pr-${prNumber}`);
 }
 
 /** Local branch ref name for a fetched PR head. */
@@ -26,15 +69,17 @@ export function reviewBranch(prNumber: string | number): string {
 }
 
 /**
- * Per-target side-file path (review JSON, PR context, presubmit report).
+ * Per-target side-file path (review JSON, PR context, presubmit report) —
+ * absolute, project-anchored.
  *
- * Files live under `.qwen/tmp/` rather than the OS temp dir so the path is
- * stable across platforms (macOS's `os.tmpdir()` returns `/var/folders/...`,
- * not `/tmp` — using the project-local dir avoids that mismatch entirely)
- * and so they're scoped to the project rather than the user's whole machine.
+ * Files live under `<project>/.qwen/tmp/` rather than the OS temp dir so
+ * the path is stable across platforms (macOS's `os.tmpdir()` returns
+ * `/var/folders/...`, not `/tmp` — using the project-local dir avoids that
+ * mismatch entirely) and so they're scoped to the project rather than the
+ * user's whole machine.
  */
 export function tmpFile(target: string, suffix: string): string {
-  return join(REVIEW_TMP_DIR, `qwen-review-${target}-${suffix}`);
+  return join(projectRoot(), REVIEW_TMP_DIR, `qwen-review-${target}-${suffix}`);
 }
 
 /** Filename prefix used by `tmpFile`; useful for cleanup globbing. */
