@@ -67,6 +67,10 @@
       "types": "./dist/bridgeFileSystem.d.ts",
       "import": "./dist/bridgeFileSystem.js"
     },
+    "./internal/testUtils": {
+      "types": "./dist/internal/testUtils.d.ts",
+      "import": "./dist/internal/testUtils.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -78,7 +82,9 @@
     "typecheck": "tsc --noEmit"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/internal/testUtils.*",
+    "!dist/**/*.test.*"
   ],
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
