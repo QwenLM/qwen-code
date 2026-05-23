@@ -825,7 +825,7 @@ describe('AgentTool', () => {
         expect(meta.terminateReason).toBe('error');
       });
 
-      it('MAX_TURNS terminateMode → status="failed" + terminateReason="max_turns"', async () => {
+      it('MAX_TURNS terminateMode → status="failed" + error/errorType populated', async () => {
         vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
           AgentTerminateMode.MAX_TURNS,
         );
@@ -833,6 +833,11 @@ describe('AgentTool', () => {
         const meta = lastEndMeta();
         expect(meta.status).toBe('failed');
         expect(meta.terminateReason).toBe('max_turns');
+        // Same shape as the ERROR test above so a regression in the
+        // error-stamping for non-throwing failure paths is caught here
+        // too. wenshao @ #4410 DeepSeek 3292521241.
+        expect(meta.error).toBe('subagent terminated with mode: MAX_TURNS');
+        expect(meta.errorType).toBe('MAX_TURNS');
       });
 
       it('CANCELLED terminateMode → status="cancelled"', async () => {
@@ -896,11 +901,41 @@ describe('AgentTool', () => {
         expect(meta.errorType).toBe('NonErrorThrown');
       });
 
-      it('endSubagentSpan still fires when body never opts in (default = completed)', async () => {
-        // Default mockAgent setup is GOAL termination — runSubagentWithHooks
-        // DOES call recordSpanOutcome. Verify the finalize is always reached.
+      it('endSubagentSpan is always called exactly once per invocation', async () => {
+        // Lifecycle invariant: the wrapper's finally block fires once
+        // for every runWithSubagentSpan call regardless of the body's
+        // path. Default mockAgent here uses GOAL termination →
+        // runSubagentWithHooks calls recordSpanOutcome internally.
         await runForegroundOnce();
         expect(mockEndSubagentSpan).toHaveBeenCalledTimes(1);
+      });
+
+      it('fallback: body that skips recordOutcome → status="failed" + wiring-bug terminateReason', async () => {
+        // Defensive fallback in runWithSubagentSpan's finally — fires
+        // when the body returns without calling recordOutcome. Today
+        // no production path hits this (runSubagentWithHooks always
+        // records), so we have to STUB out runSubagentWithHooks to
+        // exercise the branch. wenshao @ #4410 DeepSeek 3292521244.
+        const params: AgentParams = {
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+        };
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        // Replace runSubagentWithHooks on this instance so it returns
+        // without calling recordSpanOutcome.
+        (
+          invocation as unknown as { runSubagentWithHooks: () => Promise<void> }
+        ).runSubagentWithHooks = vi.fn().mockResolvedValue(undefined);
+        await invocation.execute();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.terminateReason).toBe(
+          'wiring_bug_record_outcome_not_called',
+        );
+        expect(meta.error).toBe('recordOutcome was never called (wiring bug)');
       });
 
       it('startSubagentSpan receives depth=0 for top-level foreground (no parent ALS frame)', async () => {

@@ -255,6 +255,12 @@ function sweepStaleSpans(now: number): void {
             ? {
                 'qwen-code.subagent.status': 'aborted',
                 'qwen-code.subagent.terminate_reason': 'ttl_swept',
+                // Mirror the subagent-specific duration_ms key that
+                // endSubagentSpan stamps so dashboards querying that
+                // namespace see TTL-swept spans too (they currently
+                // only get the generic qwen-code.span.duration_ms
+                // above). wenshao @ #4410 DeepSeek 3292521245.
+                'qwen-code.subagent.duration_ms': ageMs,
               }
             : {}),
         });

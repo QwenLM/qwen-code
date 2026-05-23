@@ -1254,6 +1254,32 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    *
    * #3731 Phase 3.
    */
+  /**
+   * Build the spec object passed to `runWithSubagentSpan`. The 3 call
+   * sites differ only in `invocationKind`; this helper de-duplicates the
+   * other fields so renaming `subagentName` (or adding a new spec field)
+   * is a one-place change. wenshao @ #4410 DeepSeek 3292521238.
+   */
+  private buildSubagentSpanSpec(
+    hookOpts: { agentId: string; agentType: string },
+    subagentConfig: SubagentConfig,
+    invocationKind: SubagentInvocationKind,
+  ): {
+    agentId: string;
+    subagentName: string;
+    invocationKind: SubagentInvocationKind;
+    isBuiltIn: boolean;
+    modelOverride?: string;
+  } {
+    return {
+      agentId: hookOpts.agentId,
+      subagentName: hookOpts.agentType,
+      invocationKind,
+      isBuiltIn: subagentConfig.level === 'builtin',
+      modelOverride: subagentConfig.model,
+    };
+  }
+
   private async runWithSubagentSpan<T>(
     spec: {
       agentId: string;
@@ -1336,7 +1362,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         recordedMetadata ?? {
           status: 'failed',
           error: 'recordOutcome was never called (wiring bug)',
-          terminateReason: 'unknown',
+          // Distinct sentinel so dashboards can separate genuine
+          // failures from wiring defects. wenshao @ #4410 DeepSeek
+          // 3292521240.
+          terminateReason: 'wiring_bug_record_outcome_not_called',
         },
       );
     }
@@ -2222,7 +2251,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // guard in execute() fires if the fork child's model calls `agent`
         // again — otherwise background forks bypass the ALS marker and can
         // spawn nested implicit forks.
-        const bgBody = async (recordSpanOutcome?: SubagentOutcomeSink) => {
+        const bgBody = async (recordSpanOutcome: SubagentOutcomeSink) => {
           try {
             await bgSubagent.execute(contextState, bgAbortController.signal);
 
@@ -2250,7 +2279,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // outcome (review wenshao @ #4410).
             const terminateMode = bgSubagent.getTerminateMode();
             const subagentRawText = bgSubagent.getFinalText();
-            recordSpanOutcome?.(
+            recordSpanOutcome(
               deriveSubagentOutcomeMetadata({
                 terminateMode,
                 signalAborted: bgAbortController.signal.aborted,
@@ -2310,7 +2339,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             }
           } catch (error) {
             // Publish first — same reason as the success path.
-            recordSpanOutcome?.(
+            recordSpanOutcome(
               deriveSubagentExceptionMetadata(
                 error,
                 bgAbortController.signal.aborted,
@@ -2391,13 +2420,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // both are long-lived enough to qualify for the 4h TTL safety net.
         const framedBgBody = () =>
           this.runWithSubagentSpan(
-            {
-              agentId: hookOpts.agentId,
-              subagentName: hookOpts.agentType,
-              invocationKind: isFork ? 'fork' : 'background',
-              isBuiltIn: subagentConfig.level === 'builtin',
-              modelOverride: subagentConfig.model,
-            },
+            this.buildSubagentSpanSpec(
+              hookOpts,
+              subagentConfig,
+              isFork ? 'fork' : 'background',
+            ),
             // bg uses the per-agent abort controller, not the parent turn
             // signal — `task_stop` aborts the bg controller alone (silent
             // failure: a task_stop'd bg agent was being reported as 'failed'
@@ -2474,13 +2501,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // TTL safety net catches genuinely abandoned forks.
         const runFramedFork = () =>
           this.runWithSubagentSpan(
-            {
-              agentId: hookOpts.agentId,
-              subagentName: hookOpts.agentType,
-              invocationKind: 'fork',
-              isBuiltIn: subagentConfig.level === 'builtin',
-              modelOverride: subagentConfig.model,
-            },
+            this.buildSubagentSpanSpec(hookOpts, subagentConfig, 'fork'),
             // Forks are fire-and-forget. The parent turn's signal is the
             // wrong abort source for span classification here — if the
             // parent turn happens to be cancelled at the same instant the
@@ -2543,13 +2564,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // span, inheriting its traceId so the trace tree stays unified.
       const runFramed = () =>
         this.runWithSubagentSpan(
-          {
-            agentId: hookOpts.agentId,
-            subagentName: hookOpts.agentType,
-            invocationKind: 'foreground',
-            isBuiltIn: subagentConfig.level === 'builtin',
-            modelOverride: subagentConfig.model,
-          },
+          this.buildSubagentSpanSpec(hookOpts, subagentConfig, 'foreground'),
           fgAbortController.signal,
           (recordSpanOutcome) =>
             runWithAgentContext(hookOpts.agentId, () =>
