@@ -582,10 +582,18 @@ function resolvePermissionBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'permission.resolved' }>,
 ): void {
-  const existing = getWritableBlockById(
-    state,
-    state.permissionBlockByRequestId[event.requestId],
-  );
+  // wenshao review (Critical): mirror the `upsertPermissionBlock` guard at
+  // line ~544. When `maxBlocks` trimming has already evicted the original
+  // permission request block, the index still carries the
+  // `TRIMMED_PERMISSION_BLOCK_ID` sentinel for that requestId. Without
+  // this guard, the `permission.resolved` event would (a) fail the
+  // `getWritableBlockById` lookup (sentinel is not a real block id) and
+  // (b) fall through to create a brand-new orphan resolution block, which
+  // wastes a slot, accelerates further trimming, and violates the
+  // trimmed-block contract.
+  const existingId = state.permissionBlockByRequestId[event.requestId];
+  if (existingId === TRIMMED_PERMISSION_BLOCK_ID) return;
+  const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'permission') {
     existing.resolved = event.outcome;
     existing.updatedAt = state.now;
@@ -706,6 +714,7 @@ function trimTranscriptState(
       state.permissionBlockByRequestId[requestId] = TRIMMED_PERMISSION_BLOCK_ID;
     }
   }
+  pruneTrimmedPermissionIndexes(state);
   // PR-K: tool blocks that survived trimming may still reference a
   // `parentBlockId` whose parent was just trimmed. The dangling id no
   // longer resolves via `blockIndexById`. Null it to give renderers a
@@ -825,6 +834,28 @@ function pruneTrimmedToolIndexes(state: DaemonTranscriptState): void {
   for (const toolCallId of trimmedToolCallIds.slice(0, overflow)) {
     delete state.toolBlockByCallId[toolCallId];
     delete state.trimmedToolNotificationByCallId[toolCallId];
+  }
+}
+
+/**
+ * wenshao review (Suggestion): mirror `pruneTrimmedToolIndexes` for the
+ * permission index. In long sessions where many permission requests are
+ * trimmed out, `permissionBlockByRequestId` would grow unboundedly
+ * because the trimmed sentinel `TRIMMED_PERMISSION_BLOCK_ID` is written
+ * by `trimTranscriptState` but never deleted. Cap to `maxBlocks` worth
+ * of trimmed entries — beyond that, the historical record of
+ * "this requestId was once seen" stops being useful (any later resolved
+ * event will fall through and we'd still rather drop it than orphan).
+ */
+function pruneTrimmedPermissionIndexes(state: DaemonTranscriptState): void {
+  const maxTrimmedEntries = Math.max(0, state.maxBlocks);
+  const trimmedRequestIds = Object.entries(state.permissionBlockByRequestId)
+    .filter(([, blockId]) => blockId === TRIMMED_PERMISSION_BLOCK_ID)
+    .map(([requestId]) => requestId);
+  const overflow = trimmedRequestIds.length - maxTrimmedEntries;
+  if (overflow <= 0) return;
+  for (const requestId of trimmedRequestIds.slice(0, overflow)) {
+    delete state.permissionBlockByRequestId[requestId];
   }
 }
 

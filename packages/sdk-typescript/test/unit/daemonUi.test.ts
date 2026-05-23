@@ -1015,7 +1015,14 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(getOutputText(nested)).toBe('[output truncated]');
   });
 
-  it('keeps orphan permission resolutions visible after request trimming', () => {
+  it('drops resolution for trimmed permission requests (wenshao Critical)', () => {
+    // Previously this test asserted that an orphan permission resolution
+    // block was created when the original request had been trimmed.
+    // wenshao's review (PR #4353) flagged that as a contract violation:
+    // the resolution should be silently dropped, matching the existing
+    // `upsertPermissionBlock` guard at the request side. Otherwise the
+    // orphan wastes a block slot, accelerates further trimming, and
+    // breaks the trimmed-block contract.
     let state = createDaemonTranscriptState({ maxBlocks: 1, now: 1 });
     state = reduceDaemonTranscriptEvents(
       state,
@@ -1036,6 +1043,8 @@ describe('daemon UI normalizer and transcript reducer', () => {
       [{ type: 'status', text: 'trim permission' }],
       { now: 3 },
     );
+    // Second `permission_request` with same id is silently dropped because
+    // the request side already guards against `TRIMMED_PERMISSION_BLOCK_ID`.
     state = reduceDaemonTranscriptEvents(
       state,
       normalizeDaemonEvent({
@@ -1069,13 +1078,11 @@ describe('daemon UI normalizer and transcript reducer', () => {
       { now: 5 },
     );
 
+    // Resolution drops silently — no new permission block created.
     expect(state.blocks).toMatchObject([
-      {
-        kind: 'permission',
-        requestId: 'perm-trimmed',
-        resolved: 'selected:allow',
-      },
+      { kind: 'status', text: 'trim permission' },
     ]);
+    expect(state.blocks.find((b) => b.kind === 'permission')).toBeUndefined();
   });
 
   it('preserves shell output streams while normalizing events', () => {
@@ -3760,5 +3767,120 @@ describe('daemon UI subagent nesting — review hardening (R1-R4)', () => {
     );
     expect(result.failed).toEqual([]);
     expect(result.passed).toBe(1);
+  });
+});
+
+describe('daemon UI permission trim contract — wenshao review hardening', () => {
+  it('Critical: resolvePermissionBlock drops resolution for trimmed permission requests', () => {
+    let state = createDaemonTranscriptState({ now: 1, maxBlocks: 3 });
+    // Permission request issued.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'request_permission',
+            permissionRequestId: 'req-evict',
+            options: [{ optionId: 'allow', label: 'Allow' }],
+            toolCall: { name: 'Bash', command: 'rm -rf /tmp/x' },
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    // Push 3 unrelated tool blocks to trim the permission request.
+    for (let i = 0; i < 3; i += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        normalizeDaemonEvent({
+          id: 10 + i,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: `filler-${i}`,
+              title: `filler ${i}`,
+              status: 'completed',
+            },
+          },
+        } as never),
+        { now: 3 + i },
+      );
+    }
+    // The permission request block is now trimmed; index carries the sentinel.
+    const blocksBefore = state.blocks.length;
+    // Resolution arrives AFTER the request was trimmed.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 20,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'permission_outcome',
+            permissionRequestId: 'req-evict',
+            outcome: 'allowed',
+          },
+        },
+      } as never),
+      { now: 10 },
+    );
+    // Critical contract: no orphan resolution block created.
+    const blocksAfter = state.blocks.length;
+    expect(blocksAfter).toBe(blocksBefore);
+    // No permission block of any kind in current state.
+    expect(state.blocks.find((b) => b.kind === 'permission')).toBeUndefined();
+  });
+
+  it('Suggestion: pruneTrimmedPermissionIndexes caps the trimmed sentinel set', () => {
+    let state = createDaemonTranscriptState({ now: 1, maxBlocks: 2 });
+    // Issue many permission requests then trim them all by adding tool blocks.
+    for (let i = 0; i < 10; i += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        normalizeDaemonEvent({
+          id: 100 + i,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'request_permission',
+              permissionRequestId: `req-${i}`,
+              options: [{ optionId: 'allow', label: 'Allow' }],
+              toolCall: { name: 'Bash', command: `echo ${i}` },
+            },
+          },
+        } as never),
+        { now: 2 + i },
+      );
+    }
+    // Push 2 tool blocks to trim everything.
+    for (let i = 0; i < 2; i += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        normalizeDaemonEvent({
+          id: 200 + i,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: `final-${i}`,
+              title: `final ${i}`,
+              status: 'completed',
+            },
+          },
+        } as never),
+        { now: 50 + i },
+      );
+    }
+    // Index size capped at maxBlocks (= 2), not unbounded (would be 10).
+    const indexSize = Object.keys(state.permissionBlockByRequestId).length;
+    expect(indexSize).toBeLessThanOrEqual(2);
   });
 });
