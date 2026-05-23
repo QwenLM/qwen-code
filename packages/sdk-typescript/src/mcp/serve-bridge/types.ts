@@ -23,8 +23,46 @@ export interface ServeBridgeMcpServerOptions {
  */
 export interface BridgeState {
   client: DaemonClient;
+  /** Daemon base URL for raw fetch calls to endpoints not in DaemonClient. */
+  daemonUrl: string;
+  /** Bearer token for auth headers in raw fetch calls. */
+  token: string | undefined;
   defaultSessionId: string | undefined;
   workspaceCwd: string | undefined;
+}
+
+/**
+ * Build authorization headers for raw fetch calls.
+ */
+export function authHeaders(state: BridgeState): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (state.token) {
+    headers['Authorization'] = `Bearer ${state.token}`;
+  }
+  return headers;
+}
+
+/**
+ * Raw fetch helper for daemon endpoints not exposed by DaemonClient.
+ * Throws on non-OK responses with the response body as message.
+ */
+export async function daemonFetch(
+  state: BridgeState,
+  path: string,
+  query?: Record<string, string>,
+): Promise<unknown> {
+  const url = new URL(`${state.daemonUrl}${path}`);
+  if (query) {
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined) url.searchParams.set(k, v);
+    }
+  }
+  const res = await fetch(url.toString(), { headers: authHeaders(state) });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`${res.status} ${path}: ${text || res.statusText}`);
+  }
+  return await res.json();
 }
 
 /**

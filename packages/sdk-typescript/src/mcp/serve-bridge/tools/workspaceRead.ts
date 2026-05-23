@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { tool } from '../../tool.js';
 import { formatJsonResult } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
-import { handler } from '../types.js';
+import { handler, daemonFetch } from '../types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function workspaceReadTools(state: BridgeState): any[] {
@@ -56,7 +56,7 @@ export function workspaceReadTools(state: BridgeState): any[] {
         path: z.string().describe('File path to stat.'),
       },
       handler(async (args) => {
-        const result = await state.client.readWorkspaceFile(args.path, { maxBytes: 0 });
+        const result = await daemonFetch(state, '/stat', { path: args.path });
         return formatJsonResult(result);
       }),
     ),
@@ -68,7 +68,7 @@ export function workspaceReadTools(state: BridgeState): any[] {
         path: z.string().describe('Directory path to list.'),
       },
       handler(async (args) => {
-        const result = await state.client.readWorkspaceFile(args.path, { maxBytes: 0 });
+        const result = await daemonFetch(state, '/list', { path: args.path });
         return formatJsonResult(result);
       }),
     ),
@@ -80,7 +80,7 @@ export function workspaceReadTools(state: BridgeState): any[] {
         pattern: z.string().describe('Glob pattern (e.g. "**/*.ts", "src/**/*.js").'),
       },
       handler(async (args) => {
-        const result = await state.client.readWorkspaceFile(args.pattern, { maxBytes: 0 });
+        const result = await daemonFetch(state, '/glob', { pattern: args.pattern });
         return formatJsonResult(result);
       }),
     ),

@@ -39,6 +39,8 @@ export function createServeBridgeMcpServer(
       baseUrl: opts.daemonUrl,
       token: opts.token,
     }),
+    daemonUrl: opts.daemonUrl.replace(/\/+$/, ''),
+    token: opts.token,
     defaultSessionId: undefined,
     workspaceCwd: opts.workspaceCwd,
   };
