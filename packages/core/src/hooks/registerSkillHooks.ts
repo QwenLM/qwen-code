@@ -12,6 +12,8 @@
  * of the session.
  */
 
+import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { SessionHooksManager } from './sessionHooksManager.js';
 import type { SkillHooksSettings, SkillConfig } from '../skills/types.js';
@@ -23,6 +25,52 @@ import {
 } from './types.js';
 
 const debugLogger = createDebugLogger('SKILL_HOOKS');
+
+/**
+ * Session-active marker path for the `/review` skill. Written when the skill
+ * is registered so `guard.sh` knows a review session is in progress even
+ * before `qwen review fetch-pr` has had a chance to write its
+ * `qwen-review-pr-<n>-fetch.json`. Closes the pre-fetch-pr gap where a
+ * weakly-instruction-following model could call `git checkout FETCH_HEAD`
+ * straight away — at that moment the fetch-pr marker doesn't exist yet,
+ * so guard.sh's self-disable branch would otherwise fire and the bad
+ * `git checkout` would slide through.
+ *
+ * The path is computed against `process.cwd()` because skill registration
+ * happens at the project root in normal interactive flow. The marker is
+ * project-scoped (lives under `.qwen/tmp/`) so concurrent /review sessions
+ * in different projects don't trample each other.
+ */
+const REVIEW_ACTIVE_MARKER = join('.qwen', 'tmp', 'qwen-review-active');
+
+function writeReviewActiveMarker(): void {
+  try {
+    mkdirSync(join('.qwen', 'tmp'), { recursive: true });
+    writeFileSync(REVIEW_ACTIVE_MARKER, '');
+    debugLogger.debug(
+      `Wrote /review session marker at ${REVIEW_ACTIVE_MARKER}`,
+    );
+  } catch (err) {
+    // Defensive: marker is a hint for guard.sh, not a hard prerequisite —
+    // failure to write must not block skill activation. CLI gates
+    // (`requireFetchReport` in pr-context / presubmit / load-rules --pr /
+    // deterministic --pr) stay deterministic even if the marker is absent.
+    debugLogger.warn(
+      `Failed to write /review session marker: ${(err as Error).message}`,
+    );
+  }
+}
+
+/** @internal Removes the /review session marker — called by `qwen review cleanup`. */
+export function removeReviewActiveMarker(): boolean {
+  try {
+    unlinkSync(REVIEW_ACTIVE_MARKER);
+    return true;
+  } catch {
+    // ENOENT / EACCES → already gone or we don't care; cleanup is best-effort.
+    return false;
+  }
+}
 
 /**
  * Registers hooks from a skill's configuration as session hooks.
@@ -91,6 +139,15 @@ export function registerSkillHooks(
     debugLogger.info(
       `Registered ${registeredCount} hooks from skill '${skill.name}'`,
     );
+  }
+
+  // /review-specific: write the session-active marker so `guard.sh`'s
+  // self-disable check (which keys off `.qwen/tmp/` markers) fires from
+  // the very first `run_shell_command`, not just after `fetch-pr` has
+  // already written its own marker. See `REVIEW_ACTIVE_MARKER` JSDoc
+  // above for the threat model this closes.
+  if (skill.name === 'review') {
+    writeReviewActiveMarker();
   }
 
   return registeredCount;

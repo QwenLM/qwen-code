@@ -42,8 +42,16 @@ INPUT=$(cat)
 # interactive CLI session. Without this gate, a follow-up `git checkout main`
 # in the same conversation — long after `/review N` finished — would still be
 # denied with a recovery message pointing at a review session that no longer
-# exists. The presence of a fetch-pr report is the proxy for "review session
-# active".
+# exists.
+#
+# TWO markers count as "/review session active":
+#   1. `.qwen/tmp/qwen-review-active`         — written at skill activation
+#      by `registerSkillHooks.ts`. Covers the pre-fetch-pr window where the
+#      LLM might `git checkout FETCH_HEAD` before ever calling fetch-pr.
+#   2. `.qwen/tmp/qwen-review-pr-*-fetch.json` — written by `fetch-pr` once
+#      the worktree exists. Persists across the rest of the session until
+#      `qwen review cleanup` removes both.
+# Either marker keeps the guard active; both are removed by `cleanup`.
 #
 # Anchor the lookup at `$QWEN_PROJECT_DIR` (set by `hookRunner.ts:575` from
 # `config.getWorkingDir()`) rather than the bash cwd: in a compliant review
@@ -52,7 +60,8 @@ INPUT=$(cat)
 # guard right when it matters most. Fall back to `.` only for direct
 # script invocation in tests where the env var isn't set.
 PROJECT_DIR="${QWEN_PROJECT_DIR:-.}"
-if ! ls "$PROJECT_DIR"/.qwen/tmp/qwen-review-pr-*-fetch.json >/dev/null 2>&1; then
+if [ ! -f "$PROJECT_DIR/.qwen/tmp/qwen-review-active" ] \
+   && ! ls "$PROJECT_DIR"/.qwen/tmp/qwen-review-pr-*-fetch.json >/dev/null 2>&1; then
   printf '{"decision":"allow"}\n'
   exit 0
 fi

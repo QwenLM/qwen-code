@@ -222,6 +222,40 @@ describe('bundled review skill', () => {
       }
     });
 
+    it('denies when only the /review session marker is present (pre-fetch-pr window)', () => {
+      // Threat model: a weak model invokes `/review N` then immediately
+      // runs `git checkout FETCH_HEAD` BEFORE `fetch-pr` has had a chance
+      // to write its `qwen-review-pr-<n>-fetch.json` marker. The session
+      // marker `.qwen/tmp/qwen-review-active` (written by
+      // registerSkillHooks at skill activation) MUST keep the guard
+      // active during this window so the bad checkout still denies —
+      // closes the previous self-disable chicken-and-egg gap.
+      const markerOnlyCwd = mkdtempSync(
+        path.join(tmpdir(), 'qwen-review-marker-only-'),
+      );
+      mkdirSync(path.join(markerOnlyCwd, '.qwen', 'tmp'), { recursive: true });
+      writeFileSync(
+        path.join(markerOnlyCwd, '.qwen', 'tmp', 'qwen-review-active'),
+        '',
+      );
+      // NB: no qwen-review-pr-*-fetch.json present — only the marker.
+      try {
+        const stdout = execFileSync('bash', [guardScript], {
+          input: JSON.stringify({
+            tool_name: 'run_shell_command',
+            tool_input: { command: 'git checkout FETCH_HEAD' },
+          }),
+          encoding: 'utf8',
+          cwd: markerOnlyCwd,
+          env: { ...process.env, QWEN_PROJECT_DIR: markerOnlyCwd },
+        });
+        const decision = JSON.parse(stdout);
+        expect(decision.decision).toBe('deny');
+      } finally {
+        fs.rmSync(markerOnlyCwd, { recursive: true, force: true });
+      }
+    });
+
     it('denies via the cwd fallback when QWEN_PROJECT_DIR is unset and the report is in cwd', () => {
       // Defensive regression: if hookRunner.ts ever stops passing
       // QWEN_PROJECT_DIR, the `${QWEN_PROJECT_DIR:-.}` fallback uses

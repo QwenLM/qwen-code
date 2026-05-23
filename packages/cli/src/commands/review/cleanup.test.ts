@@ -107,6 +107,23 @@ describe('cleanup', () => {
     expect(existsSync(sideFile)).toBe(false);
   });
 
+  it('removes the /review session marker', async () => {
+    // The marker (written by registerSkillHooks at skill activation)
+    // must be removed by cleanup so subsequent unrelated shell commands
+    // in the same CLI session aren't denied by guard.sh's self-active
+    // branch. Closes the lifecycle hole behind the sticky-guard report.
+    const marker = join(
+      projectRoot,
+      '.qwen',
+      'tmp',
+      'qwen-review-active',
+    );
+    writeFileSync(marker, '', 'utf8');
+    expect(existsSync(marker)).toBe(true);
+    await runCleanup('pr-7');
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it('does not touch other PRs’ side files', async () => {
     const ours = join(
       projectRoot,

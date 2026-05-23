@@ -92,6 +92,29 @@ function runCleanup(target: string): void {
     }
   }
 
+  // --- /review session marker -------------------------------------------
+  // `registerSkillHooks.ts` writes `.qwen/tmp/qwen-review-active` when the
+  // /review skill is registered, so `guard.sh` knows the session is in
+  // progress even before `fetch-pr` writes its own marker. Remove the
+  // marker here as the last cleanup step so subsequent unrelated shell
+  // commands in the same CLI session aren't denied by the guard.
+  // Skill-name-scoped to the singleton /review session (not per-PR), so
+  // it's only safe to remove this on a top-level cleanup invocation —
+  // matches the SKILL.md Step 11 contract where cleanup is the terminal
+  // /review step.
+  const activeMarker = join(tmpDir, 'qwen-review-active');
+  if (existsSync(activeMarker)) {
+    try {
+      unlinkSync(activeMarker);
+      writeStdoutLine(`Removed /review session marker: ${activeMarker}`);
+      removedAny = true;
+    } catch (err) {
+      writeStderrLine(
+        `Failed to remove ${activeMarker}: ${(err as Error).message}`,
+      );
+    }
+  }
+
   if (!removedAny) {
     writeStdoutLine(`Nothing to clean for target "${target}".`);
   }
