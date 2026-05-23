@@ -526,6 +526,13 @@ describe('osc8 helpers', () => {
       expect(supportsHyperlinks()).toBe(false);
       delete process.env['TERM_PROGRAM_VERSION'];
       expect(supportsHyperlinks()).toBe(false);
+      // Users on mintty 3.1–3.2 who know their build's OSC 8 implementation
+      // works can opt back in via FORCE_HYPERLINK=1 — same escape hatch the
+      // Warp and Hyper tests above assert. Pin the contract so a future
+      // refactor that reorders early-exit checks can't silently break it.
+      process.env['TERM_PROGRAM_VERSION'] = '3.2.9';
+      process.env['FORCE_HYPERLINK'] = '1';
+      expect(supportsHyperlinks()).toBe(true);
     });
 
     it('Hyper is intentionally not auto-detected (requires FORCE_HYPERLINK)', () => {
