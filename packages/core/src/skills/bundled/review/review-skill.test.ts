@@ -200,6 +200,29 @@ describe('bundled review skill', () => {
       }
     });
 
+    it('denies via the cwd fallback when QWEN_PROJECT_DIR is unset and the report is in cwd', () => {
+      // Defensive regression: if hookRunner.ts ever stops passing
+      // QWEN_PROJECT_DIR, the `${QWEN_PROJECT_DIR:-.}` fallback uses
+      // bash's cwd. Without an explicit test of the fallback path, a
+      // regression that drops the env var would silently degrade the
+      // guard to "self-disable in worktree, allow everything" with no
+      // test failing — exactly the failure shape the env-var anchor
+      // was added to prevent.
+      const env = { ...process.env };
+      delete env.QWEN_PROJECT_DIR;
+      const stdout = execFileSync('bash', [guardScript], {
+        input: JSON.stringify({
+          tool_name: 'run_shell_command',
+          tool_input: { command: 'git checkout main' },
+        }),
+        encoding: 'utf8',
+        cwd,
+        env,
+      });
+      const decision = JSON.parse(stdout);
+      expect(decision.decision).toBe('deny');
+    });
+
     it('still denies when bash cwd drifts into the worktree but QWEN_PROJECT_DIR points at the project root', () => {
       // Regression: an earlier draft anchored the session-marker lookup at
       // bash's cwd, which the LLM is supposed to set to the worktree during

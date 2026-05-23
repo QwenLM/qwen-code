@@ -52,7 +52,7 @@ const TIMEOUT_TYPECHECK_MS = 120_000;
 const TIMEOUT_LINTER_MS = 60_000;
 const EXEC_MAX_BUFFER = 10 * 1024 * 1024; // 10 MB output cap per tool
 
-interface Finding {
+export interface Finding {
   source: 'linter' | 'typecheck';
   tool: string;
   file: string;
@@ -199,7 +199,11 @@ const tscTool: ToolDef = {
   },
 };
 
-function parseTscOutput(
+// Exported for unit testing. The `parse*` helpers below are the data
+// extraction layer for each tool's stdout/stderr; a regex regression or
+// JSON shape shift would silently drop findings, so they're covered
+// directly rather than only end-to-end through `runDeterministic`.
+export function parseTscOutput(
   output: string,
   worktree: string,
   set: Set<string>,
@@ -296,7 +300,7 @@ const eslintTool: ToolDef = {
   },
 };
 
-function parseEslintJson(
+export function parseEslintJson(
   stdout: string,
   worktree: string,
   set: Set<string>,
@@ -390,7 +394,7 @@ const ruffTool: ToolDef = {
   },
 };
 
-function parseRuffJson(
+export function parseRuffJson(
   stdout: string,
   worktree: string,
   set: Set<string>,
@@ -465,7 +469,7 @@ const cargoClippyTool: ToolDef = {
   },
 };
 
-function parseCargoClippyNdjson(
+export function parseCargoClippyNdjson(
   stdout: string,
   worktree: string,
   set: Set<string>,
@@ -530,7 +534,7 @@ const goVetTool: ToolDef = {
   },
 };
 
-function parseGoVetOutput(
+export function parseGoVetOutput(
   output: string,
   worktree: string,
   set: Set<string>,
@@ -598,7 +602,7 @@ const golangciLintTool: ToolDef = {
   },
 };
 
-function parseGolangciJson(
+export function parseGolangciJson(
   stdout: string,
   worktree: string,
   set: Set<string>,
