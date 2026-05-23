@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Text, useStdin } from 'ink';
+// no hooks needed beyond keypress handled inside
+import { Box, Text } from 'ink';
 import chalk from 'chalk';
 import stringWidth from 'string-width';
 import { useTextBuffer } from './text-buffer.js';
-import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { cpSlice, cpLen } from '../../utils/textUtils.js';
@@ -76,18 +76,12 @@ export function TextInput({
     onChangeRef.current?.(text);
   }, []);
 
-  const preferredEditor = usePreferredEditor();
-  const { stdin, setRawMode } = useStdin();
-
   const buffer = useTextBuffer({
     initialText: value || '',
     initialCursorOffset,
     viewport: { height, width: inputWidth },
-    stdin,
-    setRawMode,
     isValidPath: () => false,
     onChange: stableOnChange,
-    preferredEditor,
   });
 
   const handleSubmit = () => {

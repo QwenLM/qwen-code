@@ -40,8 +40,6 @@ describe('resolveToolName', () => {
     expect(resolveToolName('ReadFile')).toBe('read_file');
     expect(resolveToolName('ReadFileTool')).toBe('read_file');
     expect(resolveToolName('EditTool')).toBe('edit');
-    expect(resolveToolName('NotebookEdit')).toBe('notebook_edit');
-    expect(resolveToolName('NotebookEditTool')).toBe('notebook_edit');
     expect(resolveToolName('WriteFileTool')).toBe('write_file');
   });
 
@@ -79,7 +77,6 @@ describe('getSpecifierKind', () => {
   it('returns "path" for file read/edit tools', async () => {
     expect(getSpecifierKind('read_file')).toBe('path');
     expect(getSpecifierKind('edit')).toBe('path');
-    expect(getSpecifierKind('notebook_edit')).toBe('path');
     expect(getSpecifierKind('write_file')).toBe('path');
     expect(getSpecifierKind('grep_search')).toBe('path');
     expect(getSpecifierKind('glob')).toBe('path');
@@ -111,9 +108,8 @@ describe('toolMatchesRuleToolName', () => {
     expect(toolMatchesRuleToolName('read_file', 'list_directory')).toBe(true);
   });
 
-  it('"Edit" (edit) covers write_file and notebook_edit', async () => {
+  it('"Edit" (edit) covers write_file', async () => {
     expect(toolMatchesRuleToolName('edit', 'write_file')).toBe(true);
-    expect(toolMatchesRuleToolName('edit', 'notebook_edit')).toBe(true);
   });
 
   it('"Bash" (run_shell_command) covers monitor', async () => {
@@ -708,11 +704,10 @@ describe('matchesRule', () => {
   });
 
   // Meta-category matching: Edit
-  it('Edit rule matches edit, write_file, and notebook_edit', async () => {
+  it('Edit rule matches edit and write_file', async () => {
     const rule = parseRule('Edit');
     expect(matchesRule(rule, 'edit')).toBe(true);
     expect(matchesRule(rule, 'write_file')).toBe(true);
-    expect(matchesRule(rule, 'notebook_edit')).toBe(true);
     expect(matchesRule(rule, 'read_file')).toBe(false); // not an edit tool
   });
 
@@ -764,31 +759,6 @@ describe('matchesRule', () => {
         'write_file',
         undefined,
         '/project/docs/readme.md',
-        undefined,
-        pathCtx,
-      ),
-    ).toBe(false);
-  });
-
-  it('Edit path specifier matches notebook_edit too', async () => {
-    const rule = parseRule('Edit(/src/**/*.ipynb)');
-    const pathCtx = { projectRoot: '/project', cwd: '/project' };
-    expect(
-      matchesRule(
-        rule,
-        'notebook_edit',
-        undefined,
-        '/project/src/analysis.ipynb',
-        undefined,
-        pathCtx,
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'notebook_edit',
-        undefined,
-        '/project/docs/analysis.ipynb',
         undefined,
         pathCtx,
       ),
@@ -879,7 +849,6 @@ function makeConfig(
     coreTools: string[];
     projectRoot: string;
     cwd: string;
-    approvalMode: string;
   }> = {},
 ): PermissionManagerConfig {
   return {
@@ -889,7 +858,6 @@ function makeConfig(
     getCoreTools: () => opts.coreTools,
     getProjectRoot: () => opts.projectRoot ?? '/project',
     getCwd: () => opts.cwd ?? '/project',
-    getApprovalMode: () => opts.approvalMode ?? 'default',
   };
 }
 
@@ -1534,12 +1502,6 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
     });
 
-    it('Edit deny rule disables notebook_edit', async () => {
-      pm = new PermissionManager(makeConfig({ permissionsDeny: ['Edit'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('notebook_edit')).toBe(false);
-    });
-
     it('coreTools allowlist: listed tool is enabled', async () => {
       pm = new PermissionManager(
         makeConfig({ coreTools: ['read_file', 'Bash'] }),
@@ -1554,14 +1516,6 @@ describe('PermissionManager', () => {
       pm.initialize();
       expect(await pm.isToolEnabled('read_file')).toBe(true);
       expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
-      expect(await pm.isToolEnabled('edit')).toBe(false);
-      expect(await pm.isToolEnabled('notebook_edit')).toBe(false);
-    });
-
-    it('coreTools allowlist: NotebookEdit alias enables notebook_edit', async () => {
-      pm = new PermissionManager(makeConfig({ coreTools: ['NotebookEdit'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('notebook_edit')).toBe(true);
       expect(await pm.isToolEnabled('edit')).toBe(false);
     });
 
@@ -1817,7 +1771,6 @@ describe('getRuleDisplayName', () => {
   it('maps edit tools to "Edit" meta-category', async () => {
     expect(getRuleDisplayName('edit')).toBe('Edit');
     expect(getRuleDisplayName('write_file')).toBe('Edit');
-    expect(getRuleDisplayName('notebook_edit')).toBe('Edit');
   });
 
   it('maps shell to "Bash"', async () => {
@@ -1889,14 +1842,6 @@ describe('buildPermissionRules', () => {
       const rules = buildPermissionRules({
         toolName: 'write_file',
         filePath: '/tmp/output.txt',
-      });
-      expect(rules).toEqual(['Edit(//tmp/**)']);
-    });
-
-    it('generates Edit rule scoped to parent directory for notebook_edit', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'notebook_edit',
-        filePath: '/tmp/analysis.ipynb',
       });
       expect(rules).toEqual(['Edit(//tmp/**)']);
     });
@@ -2240,140 +2185,5 @@ describe('PermissionManager.findMatchingDenyRule', () => {
     });
     // rule.raw preserves the original rule string as written in config
     expect(result).toBe('ShellTool');
-  });
-});
-
-// ─── AUTO mode dangerous-rule stash ────────────────────────────────────
-
-describe('PermissionManager — strip/restore for AUTO mode', () => {
-  it('strips Bash interpreter wildcards and stashes them', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAllow: ['Bash(python:*)', 'Bash(git status)'],
-      }),
-    );
-    pm.initialize();
-
-    const stash = pm.stripDangerousRulesForAutoMode();
-    expect(stash.persistent).toHaveLength(1);
-    expect(stash.persistent[0].raw).toBe('Bash(python:*)');
-
-    // The safe rule remains: git status still auto-allowed.
-    return expect(
-      pm.evaluate({ toolName: 'run_shell_command', command: 'git status' }),
-    ).resolves.toBe('allow');
-  });
-
-  it('strips bare tool-level Bash allow', async () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['Bash'] }),
-    );
-    pm.initialize();
-
-    // Before strip: any Bash command is auto-allowed.
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: 'rm -rf /',
-      }),
-    ).toBe('allow');
-
-    pm.stripDangerousRulesForAutoMode();
-
-    // After strip: Bash falls through to default (which AST analysis turns
-    // into ask for non-readonly commands).
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: 'rm -rf /',
-      }),
-    ).not.toBe('allow');
-  });
-
-  it('strips Agent / Skill any-allow rules', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAllow: ['Agent(coder)', 'Skill(pdf)', 'ReadFileTool'],
-      }),
-    );
-    pm.initialize();
-
-    const stash = pm.stripDangerousRulesForAutoMode();
-    expect(stash.persistent).toHaveLength(2);
-    expect(stash.persistent.map((r) => r.toolName).sort()).toEqual(
-      ['agent', 'skill'].sort(),
-    );
-    // Safe Read rule untouched.
-    expect(pm.getAllowRawStrings()).toEqual(['ReadFileTool']);
-  });
-
-  it('is idempotent — second strip returns the same stash without re-removal', () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
-    );
-    pm.initialize();
-
-    const first = pm.stripDangerousRulesForAutoMode();
-    const second = pm.stripDangerousRulesForAutoMode();
-    expect(first).toBe(second);
-    expect(pm.getAllowRawStrings()).toEqual([]);
-  });
-
-  it('restoreDangerousRules reattaches stripped rules to their original scope', async () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
-    );
-    pm.initialize();
-
-    pm.stripDangerousRulesForAutoMode();
-    expect(pm.getAllowRawStrings()).toEqual([]);
-
-    pm.restoreDangerousRules();
-    expect(pm.getAllowRawStrings()).toEqual(['Bash(python:*)']);
-
-    // And the rule works again: python anything is auto-allowed.
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: 'python foo.py',
-      }),
-    ).toBe('allow');
-  });
-
-  it('never strips deny rules — user intent for deny is honored', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsDeny: ['Bash', 'Agent'],
-        permissionsAllow: ['Bash(git log)'],
-      }),
-    );
-    pm.initialize();
-
-    pm.stripDangerousRulesForAutoMode();
-    // Bash deny still applies — no allow rule can override it after strip.
-    return expect(
-      pm.evaluate({ toolName: 'run_shell_command', command: 'git log' }),
-    ).resolves.toBe('deny');
-  });
-
-  it('auto-strips on initialize when approvalMode is "auto"', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAllow: ['Bash(python:*)'],
-        approvalMode: 'auto',
-      }),
-    );
-    pm.initialize();
-    expect(pm.getAllowRawStrings()).toEqual([]);
-    expect(pm.getStrippedDangerousRules()?.persistent).toHaveLength(1);
-  });
-
-  it('does NOT auto-strip when approvalMode is the default', () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
-    );
-    pm.initialize();
-    expect(pm.getAllowRawStrings()).toEqual(['Bash(python:*)']);
-    expect(pm.getStrippedDangerousRules()).toBeUndefined();
   });
 });

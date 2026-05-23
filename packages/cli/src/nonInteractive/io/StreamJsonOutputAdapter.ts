@@ -7,11 +7,9 @@
 import { randomUUID } from 'node:crypto';
 import type {
   Config,
-  ServerGeminiStreamEvent,
   ToolCallRequestInfo,
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
-import { GeminiEventType } from '@qwen-code/qwen-code-core';
 import type {
   CLIAssistantMessage,
   CLIMessage,
@@ -122,24 +120,6 @@ export class StreamJsonOutputAdapter
 
   send(message: CLIMessage | ControlMessage): void {
     this.emitMessage(message);
-  }
-
-  override processEvent(event: ServerGeminiStreamEvent): void {
-    // Active goal updates are session-level metadata, not message content.
-    // They intentionally bypass the base finalized guard so late goal state
-    // changes can still reach stream consumers.
-    if (event.type === GeminiEventType.ActiveGoal) {
-      this.emitStreamEventIfEnabled(
-        {
-          type: 'active_goal',
-          active_goal: event.value,
-        },
-        null,
-      );
-      return;
-    }
-
-    super.processEvent(event);
   }
 
   /**

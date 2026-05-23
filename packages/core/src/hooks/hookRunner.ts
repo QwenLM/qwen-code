@@ -614,7 +614,7 @@ export class HookRunner {
       };
 
       if (signal) {
-        signal.addEventListener('abort', abortHandler, { once: true });
+        signal.addEventListener('abort', abortHandler);
       }
 
       // Send input to stdin

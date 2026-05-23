@@ -7,6 +7,7 @@ import {
   UserFeedbackEvent,
   type UserFeedbackRating,
   isNodeError,
+  AuthType,
   Storage,
 } from '@qwen-code/qwen-code-core';
 import { StreamingState, MessageType, type HistoryItem } from '../types.js';
@@ -144,14 +145,16 @@ export const useFeedbackDialog = ({
     const checkAndShowFeedback = () => {
       if (streamingState === StreamingState.Idle && history.length > 0) {
         // Show feedback dialog if:
-        // 1. Qwen logger is enabled (required for feedback submission)
-        // 2. User feedback is enabled in settings
-        // 3. The last message is an AI response
-        // 4. Random chance (25% probability)
-        // 5. Meets minimum requirements (tool calls > 10 OR user messages > 5)
-        // 6. Fatigue mechanism allows showing (not shown recently across sessions)
-        // 7. Not temporarily dismissed
+        // 1. User is authenticated via QWEN_OAUTH
+        // 2. Qwen logger is enabled (required for feedback submission)
+        // 3. User feedback is enabled in settings
+        // 4. The last message is an AI response
+        // 5. Random chance (25% probability)
+        // 6. Meets minimum requirements (tool calls > 10 OR user messages > 5)
+        // 7. Fatigue mechanism allows showing (not shown recently across sessions)
+        // 8. Not temporarily dismissed
         if (
+          config.getAuthType() !== AuthType.QWEN_OAUTH ||
           !config.getUsageStatisticsEnabled() ||
           settings.merged.ui?.enableUserFeedback === false ||
           !lastMessageIsAIResponse(history) ||

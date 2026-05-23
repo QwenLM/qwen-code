@@ -19,6 +19,7 @@ import {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   brandSecret,
+  sanitizeForStderr,
   unsafeRevealSecret,
   UpstreamDeviceFlowError,
   type BrandedSecret,
@@ -50,25 +51,6 @@ function truncateForStderr(detail: string): string {
   if (detail.length <= STDERR_DETAIL_MAX) return detail;
   const dropped = detail.length - STDERR_DETAIL_MAX;
   return `${detail.slice(0, STDERR_DETAIL_MAX)}…[+${dropped} bytes truncated]`;
-}
-
-/**
- * Strip / replace bytes that could forge log lines or inject terminal
- * control sequences when interpolated into a stderr breadcrumb. PR #4291
- * follow-up review (gpt-5.5, #2): `QwenOAuthPollError.oauthError` comes
- * directly from the upstream JSON `error` field — attacker-controlled
- * if the IdP, a reverse proxy, or a WAF is hostile / compromised. A
- * value like `slow_down\n[serve] FAKE LOG LINE 2026-...` would otherwise
- * forge an extra log line; a value containing `\x1b[…m` could inject
- * ANSI color or cursor-movement sequences into operator terminals.
- *
- * Strips C0 controls (0x00–0x1f), DEL (0x7f), and C1 controls (0x80–0x9f).
- * Replaces each with `?` so the operator can still see SOMETHING was
- * present at that index (length-preserving) instead of silently dropping.
- */
-function sanitizeForStderr(value: string): string {
-  // eslint-disable-next-line no-control-regex
-  return value.replace(/[\x00-\x1f\x7f-\x9f]/g, '?');
 }
 
 /**
@@ -270,7 +252,14 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
           // unexpected AbortError). The constructor name + length is
           // enough for triage; the raw message MAY contain WAF-echoed
           // request body fields.
-          safeDetail = `${err.name} (message ${err.message.length} bytes; raw suppressed to avoid echoing device_code/PKCE)`;
+          // PR #4291 follow-up review (qwen-latest, round-4 #4):
+          // `Error.name` is a freely assignable string property —
+          // a hostile provider or fetch wrapper could set it to
+          // `'X\n[serve] FAKE LINE\x1b[31m'` to forge log lines
+          // or inject ANSI sequences. The same `sanitizeForStderr`
+          // we apply to `oauthError` must apply here too. Length
+          // is a number and safe to interpolate raw.
+          safeDetail = `${sanitizeForStderr(err.name)} (message ${err.message.length} bytes; raw suppressed to avoid echoing device_code/PKCE)`;
         } else {
           safeDetail = `<non-Error throw: ${typeof err}>`;
         }

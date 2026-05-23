@@ -112,11 +112,6 @@ esbuild
     },
     define: {
       'process.env.CLI_VERSION': JSON.stringify(pkg.version),
-      // react-reconciler ≥0.33 (ink 7) gates its dev build behind NODE_ENV
-      // and calls performance.measure() on every render, leaking
-      // PerformanceMeasure objects into the global measureEntryBuffer.
-      // Setting production here tree-shakes the entire dev build (~15k lines).
-      'process.env.NODE_ENV': JSON.stringify('production'),
       // Make global available for compatibility
       global: 'globalThis',
       // Redirect free __dirname/__filename references to the shim so that

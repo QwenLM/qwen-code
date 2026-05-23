@@ -29,13 +29,8 @@ import type {
   GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import {
-  runWithRuntimeContentGenerator,
-  type RuntimeContentGeneratorView,
-} from '../agents/runtime/agent-context.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
-import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import {
   AgentHeadless,
@@ -48,11 +43,6 @@ import {
   type RunConfig,
   type ToolConfig,
 } from '../agents/index.js';
-import {
-  buildModelIdContext,
-  resolveModelId,
-  type ResolvedModelId,
-} from './modelId.js';
 
 // ---------------------------------------------------------------------------
 // CacheSafeParams — shared prompt-cache slot
@@ -66,7 +56,7 @@ import {
 export interface CacheSafeParams {
   /** Full generation config including systemInstruction and tools */
   generationConfig: GenerateContentConfig;
-  /** Curated conversation history (shallow copy; consumers must not mutate) */
+  /** Curated conversation history (deep clone) */
   history: Content[];
   /** Model identifier */
   model: string;
@@ -165,85 +155,6 @@ export function createForkedChat(
   );
 }
 
-interface ForkedModelRuntime {
-  model: string;
-  runtimeView?: RuntimeContentGeneratorView;
-}
-
-async function buildForkedModelRuntime(
-  base: Config,
-  contentGeneratorOwner: Config,
-  modelSelector: string,
-): Promise<ForkedModelRuntime> {
-  const resolvedModel = resolveModelId(
-    modelSelector,
-    buildModelIdContext(base),
-  );
-  // When the selector cannot resolve (e.g. `fast` with no fast model
-  // configured, or `inherit` on a config without a current model), fall back
-  // to the parent session model instead of passing the raw selector string
-  // to the provider. Matches the subagent path, where an unresolvable
-  // selector means "inherit parent".
-  const model = resolvedModel?.modelId ?? base.getModel();
-  const runtimeView = await buildForkedRuntimeContentGeneratorView(
-    base,
-    contentGeneratorOwner,
-    resolvedModel,
-  );
-
-  return { model, runtimeView };
-}
-
-async function buildForkedRuntimeContentGeneratorView(
-  base: Config,
-  contentGeneratorOwner: Config,
-  resolvedModel: ResolvedModelId | undefined,
-): Promise<RuntimeContentGeneratorView | undefined> {
-  if (!resolvedModel?.authType) return undefined;
-
-  const currentContentGeneratorConfig = base.getContentGeneratorConfig?.();
-  const currentAuthType = currentContentGeneratorConfig?.authType;
-  const currentModel =
-    currentContentGeneratorConfig?.model ?? base.getModel?.();
-  if (
-    resolvedModel.authType === currentAuthType &&
-    resolvedModel.modelId === currentModel
-  ) {
-    return undefined;
-  }
-
-  return createRuntimeContentGeneratorView(
-    base,
-    contentGeneratorOwner,
-    resolvedModel.modelId,
-    { authType: resolvedModel.authType },
-  );
-}
-
-function runWithForkedModelRuntime<T>(
-  runtime: ForkedModelRuntime,
-  fn: (model: string) => Promise<T>,
-): Promise<T> {
-  const run = () => fn(runtime.model);
-  return runtime.runtimeView
-    ? runWithRuntimeContentGenerator(runtime.runtimeView, run)
-    : run();
-}
-
-/**
- * Run a direct forked-chat loop under the runtime view required by the
- * selected model. This is used by speculation, which owns its own multi-turn
- * loop instead of going through runForkedAgent().
- */
-export async function runWithForkedChatModel<T>(
-  config: Config,
-  modelSelector: string,
-  fn: (model: string) => Promise<T>,
-): Promise<T> {
-  const runtime = await buildForkedModelRuntime(config, config, modelSelector);
-  return runWithForkedModelRuntime(runtime, fn);
-}
-
 // ---------------------------------------------------------------------------
 // ForkedQueryResult — returned by cache-path runForkedAgent
 // ---------------------------------------------------------------------------
@@ -314,7 +225,7 @@ export interface AgentPathParams {
   taskPrompt: string;
   /** System prompt defining the agent's persona and constraints. */
   systemPrompt: string;
-  /** Model override (defaults to fast model selector, then current model). */
+  /** Model override (defaults to config.getFastModel() ?? config.getModel()). */
   model?: string;
   /** Maximum number of agent turns (default: unlimited). */
   maxTurns?: number;
@@ -406,60 +317,52 @@ export async function runForkedAgent(
   if ('cacheSafeParams' in params) {
     const { config, userMessage, cacheSafeParams, jsonSchema, abortSignal } =
       params;
-    const modelSelector = params.model ?? cacheSafeParams.model;
-    const modelRuntime = await buildForkedModelRuntime(
-      config,
-      config,
-      modelSelector,
+    const model = params.model ?? cacheSafeParams.model;
+    const chat = createForkedChat(config, cacheSafeParams);
+
+    const requestConfig: GenerateContentConfig = { ...NO_TOOLS };
+    if (abortSignal) requestConfig.abortSignal = abortSignal;
+    if (jsonSchema) {
+      requestConfig.responseMimeType = 'application/json';
+      requestConfig.responseJsonSchema = jsonSchema;
+    }
+
+    const stream = await chat.sendMessageStream(
+      model,
+      { message: [{ text: userMessage }], config: requestConfig },
+      'forked_query',
     );
 
-    return runWithForkedModelRuntime(modelRuntime, async (model) => {
-      const chat = createForkedChat(config, cacheSafeParams);
+    let fullText = '';
+    let usage: ForkedQueryResult['usage'] = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheHitTokens: 0,
+    };
 
-      const requestConfig: GenerateContentConfig = { ...NO_TOOLS };
-      if (abortSignal) requestConfig.abortSignal = abortSignal;
-      if (jsonSchema) {
-        requestConfig.responseMimeType = 'application/json';
-        requestConfig.responseJsonSchema = jsonSchema;
+    for await (const event of stream) {
+      if (event.type !== StreamEventType.CHUNK) continue;
+      const response = event.value;
+      const text = response.candidates?.[0]?.content?.parts
+        ?.filter((p) => !(p as Record<string, unknown>)['thought'])
+        .map((p) => p.text ?? '')
+        .join('');
+      if (text) fullText += text;
+      if (response.usageMetadata)
+        usage = extractQueryUsage(response.usageMetadata);
+    }
+
+    const trimmed = fullText.trim() || null;
+    let jsonResult: Record<string, unknown> | undefined;
+    if (jsonSchema && trimmed) {
+      try {
+        jsonResult = JSON.parse(trimmed) as Record<string, unknown>;
+      } catch {
+        // non-JSON response despite schema constraint — treat as text
       }
+    }
 
-      const stream = await chat.sendMessageStream(
-        model,
-        { message: [{ text: userMessage }], config: requestConfig },
-        'forked_query',
-      );
-
-      let fullText = '';
-      let usage: ForkedQueryResult['usage'] = {
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheHitTokens: 0,
-      };
-
-      for await (const event of stream) {
-        if (event.type !== StreamEventType.CHUNK) continue;
-        const response = event.value;
-        const text = response.candidates?.[0]?.content?.parts
-          ?.filter((p) => !(p as Record<string, unknown>)['thought'])
-          .map((p) => p.text ?? '')
-          .join('');
-        if (text) fullText += text;
-        if (response.usageMetadata)
-          usage = extractQueryUsage(response.usageMetadata);
-      }
-
-      const trimmed = fullText.trim() || null;
-      let jsonResult: Record<string, unknown> | undefined;
-      if (jsonSchema && trimmed) {
-        try {
-          jsonResult = JSON.parse(trimmed) as Record<string, unknown>;
-        } catch {
-          // non-JSON response despite schema constraint — treat as text
-        }
-      }
-
-      return { text: trimmed, jsonResult, usage };
-    });
+    return { text: trimmed, jsonResult, usage };
   }
 
   // ── AgentHeadless path ────────────────────────────────────────────────────
@@ -476,12 +379,10 @@ export async function runForkedAgent(
   // wrapper's bound tools resolve `this.config.getPermissionManager()`
   // through the prototype chain to the scoped wrapper's own override,
   // while `this.config.getApprovalMode()` lands on YOLO.
-  const { config: yoloConfig, cleanup: restoreParentPM } =
-    await createApprovalModeOverride(params.config, ApprovalMode.YOLO);
-  // YOLO never triggers strip → restoreParentPM is a no-op. Kept for
-  // API symmetry with the other createApprovalModeOverride callers; if
-  // this function ever switches away from YOLO the lifecycle stays
-  // correct without further refactor.
+  const yoloConfig = await createApprovalModeOverride(
+    params.config,
+    ApprovalMode.YOLO,
+  );
   const filesTouched = new Set<string>();
 
   const emitter = new AgentEventEmitter();
@@ -495,15 +396,9 @@ export async function runForkedAgent(
     systemPrompt: params.systemPrompt,
     initialMessages: params.extraHistory,
   };
-  const modelSelector =
-    params.model ?? params.config.getFastModel?.() ?? params.config.getModel();
-  const modelRuntime = await buildForkedModelRuntime(
-    params.config,
-    yoloConfig,
-    modelSelector,
-  );
   const modelConfig: ModelConfig = {
-    model: modelRuntime.model,
+    model:
+      params.model ?? params.config.getFastModel() ?? params.config.getModel(),
   };
   const runConfig: RunConfig = {
     max_turns: params.maxTurns,
@@ -521,15 +416,11 @@ export async function runForkedAgent(
       runConfig,
       toolConfig,
       emitter,
-      undefined,
-      modelRuntime.runtimeView,
     );
 
     const context = new ContextState();
     context.set('task_prompt', params.taskPrompt);
-    await runWithForkedModelRuntime(modelRuntime, async () => {
-      await headless.execute(context, params.abortSignal);
-    });
+    await headless.execute(context, params.abortSignal);
 
     const terminateReason = headless.getTerminateMode();
     const finalText = headless.getFinalText() || undefined;
@@ -569,6 +460,5 @@ export async function runForkedAgent(
       .getToolRegistry()
       .stop()
       .catch(() => {});
-    restoreParentPM();
   }
 }

@@ -18,21 +18,13 @@
 // limitations under the License.
 
 import { execSync } from 'node:child_process';
-import { rmSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 if (!process.cwd().includes('packages')) {
   console.error('must be invoked from a package directory');
   process.exit(1);
 }
-
-// Clean this package's stale outputs first to avoid TS5055 when tsbuildinfo
-// is out of sync with sources (e.g. after a version bump or branch switch)
-// under composite project references. We delete files directly rather than
-// using `tsc --build --clean`, because the latter walks project references
-// and would wipe upstream packages already built by scripts/build.js.
-rmSync('dist', { recursive: true, force: true });
-rmSync('tsconfig.tsbuildinfo', { force: true });
 
 // build typescript files
 execSync('tsc --build', { stdio: 'inherit' });

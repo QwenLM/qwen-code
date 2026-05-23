@@ -744,7 +744,6 @@ export enum PermissionMode {
   Default = 'default',
   Plan = 'plan',
   AutoEdit = 'auto_edit',
-  Auto = 'auto',
   Yolo = 'yolo',
 }
 

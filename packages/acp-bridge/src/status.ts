@@ -105,6 +105,7 @@ export const SERVE_STATUS_EXT_METHODS = {
  * which then mutates Config / ToolRegistry / McpClientManager state.
  */
 export const SERVE_CONTROL_EXT_METHODS = {
+  sessionClose: 'qwen/control/session/close',
   sessionApprovalMode: 'qwen/control/session/approval_mode',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
 } as const;
@@ -160,6 +161,37 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
    * arrays to render a per-server row correctly.
    */
   disabledReason?: 'config' | 'budget';
+  /**
+   * F2 (#4175 commit 5): pool-mode workspaces can hold multiple
+   * `PoolEntry` instances under the same `name` when sessions inject
+   * different fingerprints (e.g. per-session OAuth headers). Absent on
+   * pre-F2 daemons and on F2 daemons with `QWEN_SERVE_NO_MCP_POOL=1`;
+   * present (≥1) when the pool advertises `mcp_workspace_pool`.
+   * Operators use this to render an "N entries" badge or drill into
+   * `entrySummary` for the per-entry breakdown.
+   */
+  entryCount?: number;
+  /**
+   * F2 (#4175 commit 5): per-entry breakdown for multi-entry server
+   * names. `entryIndex` is a stable opaque integer assigned at entry
+   * creation (V21-7) — NOT the raw fingerprint, which would leak
+   * OAuth/env rotation timing through snapshot diffs. `refs` is the
+   * count of sessions currently attached. `status` is the per-entry
+   * runtime status (`connected` / `connecting` / `disconnected`) so
+   * dashboards can show per-entry health when the aggregated
+   * `mcpStatus` rolls up to `connected` while one entry is still
+   * reconnecting.
+   *
+   * Old SDK clients ignore the field per the additive-only protocol
+   * contract; new clients gate UI on `entryCount > 1`. The pair
+   * (`entryCount`, `entrySummary`) is always present together when
+   * advertised — `mcp_workspace_pool` capability tag implies both.
+   */
+  entrySummary?: ReadonlyArray<{
+    entryIndex: number;
+    refs: number;
+    status: ServeMcpServerRuntimeStatus;
+  }>;
 }
 
 /** Budget mode for the MCP client guardrails (issue #4175 PR 14). */

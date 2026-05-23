@@ -36,6 +36,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
+import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import {
@@ -75,11 +76,6 @@ export function isValidSessionId(value: string): boolean {
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import {
-  parseDurationSeconds,
-  validateMaxToolCalls,
-  validateMaxWallTimeSetting,
-} from '../utils/runBudget.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -87,7 +83,6 @@ const VALID_APPROVAL_MODE_VALUES = [
   'plan',
   'default',
   'auto-edit',
-  'auto',
   'yolo',
 ] as const;
 
@@ -112,8 +107,6 @@ function parseApprovalModeValue(value: string): ApprovalMode {
     case 'autoedit':
     case 'auto-edit':
       return ApprovalMode.AUTO_EDIT;
-    case 'auto':
-      return ApprovalMode.AUTO;
     default:
       throw formatApprovalModeError(value);
   }
@@ -176,8 +169,6 @@ export interface CliArgs {
   /** Internal: preserve the outer session ID when relaunching in a sandbox */
   sandboxSessionId?: string | undefined;
   maxSessionTurns: number | undefined;
-  maxWallTime: string | undefined;
-  maxToolCalls: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   disabledSlashCommands: string[] | undefined;
@@ -651,9 +642,9 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('approval-mode', {
           type: 'string',
-          choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
+          choices: ['plan', 'default', 'auto-edit', 'yolo'],
           description:
-            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
+            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), yolo (auto-approve all tools)',
         })
         .option('checkpointing', {
           type: 'boolean',
@@ -834,16 +825,6 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('max-session-turns', {
           type: 'number',
           description: 'Maximum number of session turns',
-        })
-        .option('max-wall-time', {
-          type: 'string',
-          description:
-            'Run-level wall-clock budget for headless / unattended runs. Accepts seconds (e.g. `90`), or a duration string with unit (e.g. `30s`, `5m`, `1h`, `1.5h`). Minimum 1s — sub-second values (`500ms`, `0.5`) are rejected as typos; max ~24 days. Aborts the run with exit code 55 when exceeded.',
-        })
-        .option('max-tool-calls', {
-          type: 'number',
-          description:
-            'Maximum cumulative tool calls executed during the run (success or failure; `structured_output` under --json-schema is exempt). Aborts with exit code 55 when exceeded. -1 / unset means no limit; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos.',
         })
         .option('core-tools', {
           type: 'array',
@@ -1131,65 +1112,6 @@ export async function loadHierarchicalGeminiMemory(
     memoryImportFormat,
     contextRuleExcludes,
   );
-}
-
-/**
- * Resolves the wall-clock budget for a run. Returns seconds (`-1` =
- * unlimited). Order of precedence: `--max-wall-time` flag, then
- * `model.maxWallTimeSeconds` from settings, else unlimited.
- *
- * The CLI flag is a duration string (`30s` / `5m` / `1h` / `90`); the
- * settings entry is a plain number of seconds (parity with
- * `model.maxSessionTurns`). Both layers reject `0` and out-of-range
- * values up front — a typo in a CI guardrail should fail loud at startup,
- * not silently disable the budget.
- */
-function resolveMaxWallTimeSeconds(argv: CliArgs, settings: Settings): number {
-  if (argv.maxWallTime !== undefined && argv.maxWallTime !== null) {
-    try {
-      return parseDurationSeconds(String(argv.maxWallTime));
-    } catch (err) {
-      throw new Error(`--max-wall-time: ${(err as Error).message}`);
-    }
-  }
-  const fromSettings = settings.model?.maxWallTimeSeconds;
-  if (typeof fromSettings === 'number') {
-    try {
-      return validateMaxWallTimeSetting(fromSettings);
-    } catch (err) {
-      throw new Error(`settings.json: ${(err as Error).message}`);
-    }
-  }
-  return -1;
-}
-
-/**
- * Resolves the tool-call budget for a run. Returns the validated count
- * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
- * `model.maxToolCalls` from settings, else unlimited.
- *
- * Symmetric with `resolveMaxWallTimeSeconds`: yargs accepts `NaN` from
- * non-numeric flag values, and the enforcer's `>= 0` gate would silently
- * disable the budget for `NaN` / negatives. Validate up front so a typo
- * in a CI guardrail fails loudly.
- */
-function resolveMaxToolCalls(argv: CliArgs, settings: Settings): number {
-  if (argv.maxToolCalls !== undefined && argv.maxToolCalls !== null) {
-    try {
-      return validateMaxToolCalls(argv.maxToolCalls);
-    } catch (err) {
-      throw new Error(`--max-tool-calls: ${(err as Error).message}`);
-    }
-  }
-  const fromSettings = settings.model?.maxToolCalls;
-  if (typeof fromSettings === 'number') {
-    try {
-      return validateMaxToolCalls(fromSettings);
-    } catch (err) {
-      throw new Error(`settings.json: ${(err as Error).message}`);
-    }
-  }
-  return -1;
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
@@ -1501,16 +1423,10 @@ export async function loadCliConfig(
   // Resolve the per-workspace tool denylist (#4175 Wave 4 PR 17). De-duplicate
   // while preserving original casing; downstream lookups go through
   // `Config.getDisabledTools()` which materializes a Set, so the order here
-  // is only meaningful for diagnostic output.
-  const disabledTools: string[] = [];
-  const seenDisabledTools = new Set<string>();
-  for (const raw of settings.tools?.disabled ?? []) {
-    if (typeof raw !== 'string') continue;
-    const trimmed = raw.trim();
-    if (!trimmed || seenDisabledTools.has(trimmed)) continue;
-    seenDisabledTools.add(trimmed);
-    disabledTools.push(trimmed);
-  }
+  // is only meaningful for diagnostic output. Shared helper since the MCP
+  // restart refresh path (`cli/src/acp-integration/acpAgent.ts`) MUST agree
+  // byte-for-byte with this — #4175 F1 (#4319) fold-in for #4329.
+  const disabledTools = normalizeDisabledToolList(settings.tools?.disabled);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -1551,17 +1467,6 @@ export async function loadCliConfig(
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:
         // Deny all write/execute tools unless explicitly allowed.
-        denyUnlessAllowed(ToolNames.SHELL as ToolName);
-        denyUnlessAllowed(ToolNames.MONITOR as ToolName);
-        denyUnlessAllowed(ToolNames.EDIT as ToolName);
-        denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
-        break;
-      case ApprovalMode.AUTO:
-        // AUTO uses an LLM classifier to gate Shell/Monitor/Edit/WriteFile at
-        // call time; but non-interactive mode has no UI for the classifier's
-        // fallback path, so apply the same denylist as DEFAULT to keep parity
-        // with the interactive AUTO safety guarantees (no zero-denial drift
-        // toward YOLO behavior).
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
         denyUnlessAllowed(ToolNames.MONITOR as ToolName);
         denyUnlessAllowed(ToolNames.EDIT as ToolName);
@@ -1746,7 +1651,6 @@ export async function loadCliConfig(
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
-      autoMode: settings.permissions?.autoMode,
     },
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
@@ -1786,7 +1690,6 @@ export async function loadCliConfig(
       screenReader,
     },
     telemetry: telemetrySettings,
-    outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
@@ -1808,8 +1711,6 @@ export async function loadCliConfig(
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
-    maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
-    maxToolCalls: resolveMaxToolCalls(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? false,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,

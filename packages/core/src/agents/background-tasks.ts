@@ -31,32 +31,6 @@ const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
 const MAX_DESCRIPTION_LENGTH = 40;
 const MAX_RECENT_ACTIVITIES = 5;
-export const DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS = 10;
-export const BACKGROUND_AGENT_CONCURRENCY_ENV =
-  'QWEN_CODE_MAX_BACKGROUND_AGENTS';
-
-export function resolveMaxConcurrentBackgroundAgents(
-  env: Record<string, string | undefined> = process.env,
-): number {
-  const raw = env[BACKGROUND_AGENT_CONCURRENCY_ENV];
-  if (raw === undefined || raw.trim() === '') {
-    return DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS;
-  }
-
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 1) {
-    debugLogger.warn(
-      `Invalid ${BACKGROUND_AGENT_CONCURRENCY_ENV}=${JSON.stringify(raw)}, ` +
-        `using default (${DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS})`,
-    );
-    return DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS;
-  }
-
-  return parsed;
-}
-
-export const MAX_CONCURRENT_BACKGROUND_AGENTS =
-  resolveMaxConcurrentBackgroundAgents();
 
 /**
  * Cap on how many fully-finalized terminal entries (those that have
@@ -280,54 +254,15 @@ export type BackgroundActivityChangeCallback = (entry: AgentTask) => void;
 
 type MessageWaiter = () => void;
 
-export interface BackgroundTaskRegistryOptions {
-  maxConcurrentBackgroundAgents?: number;
-}
-
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, AgentTask>();
   private readonly messageWaiters = new Map<string, Set<MessageWaiter>>();
-  private readonly maxConcurrentBackgroundAgents: number;
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
   private statusChangeCallback?: BackgroundStatusChangeCallback;
   private activityChangeCallback?: BackgroundActivityChangeCallback;
 
-  constructor(options: BackgroundTaskRegistryOptions = {}) {
-    const configured =
-      options.maxConcurrentBackgroundAgents ?? MAX_CONCURRENT_BACKGROUND_AGENTS;
-    this.maxConcurrentBackgroundAgents =
-      Number.isInteger(configured) && configured >= 1
-        ? configured
-        : MAX_CONCURRENT_BACKGROUND_AGENTS;
-  }
-
-  assertCanStartBackgroundAgent(): void {
-    const running = this.getRunningBackgroundCount();
-    if (running >= this.maxConcurrentBackgroundAgents) {
-      debugLogger.warn(
-        `Background agent concurrency cap reached: ` +
-          `${running}/${this.maxConcurrentBackgroundAgents}. ` +
-          `Refusing new background agent.`,
-      );
-      throw new Error(
-        `Cannot start background agent: maximum concurrent background agents ` +
-          `(${this.maxConcurrentBackgroundAgents}) reached. Stop an existing ` +
-          `agent first.`,
-      );
-    }
-  }
-
   register(registration: AgentTaskRegistration): AgentTask {
-    if (registration.isBackgrounded && registration.status === 'running') {
-      const existing = this.agents.get(registration.agentId);
-      const isReplacingRunning =
-        existing?.isBackgrounded === true && existing.status === 'running';
-      if (!isReplacingRunning) {
-        this.assertCanStartBackgroundAgent();
-      }
-    }
-
     // Mutate the registration in place to graduate it to an `AgentTask`.
     // Returning the same reference lets callers (e.g. the resume service)
     // continue using their local variable post-register and lets external
@@ -570,12 +505,6 @@ export class BackgroundTaskRegistry {
    */
   getAll(): AgentTask[] {
     return Array.from(this.agents.values());
-  }
-
-  private getRunningBackgroundCount(): number {
-    return Array.from(this.agents.values()).filter(
-      (entry) => entry.isBackgrounded && entry.status === 'running',
-    ).length;
   }
 
   /**

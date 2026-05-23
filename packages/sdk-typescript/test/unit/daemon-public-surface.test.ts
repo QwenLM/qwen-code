@@ -47,6 +47,13 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(typeof Public.reduceDaemonSessionEvent).toBe('function');
     expect(typeof Public.reduceDaemonSessionEvents).toBe('function');
     expect(typeof Public.createDaemonSessionViewState).toBe('function');
+    // F2 (#4175 commit 6 review fix — claude-opus-4-7 W121): pin
+    // `isWorkspaceScopedBudgetEvent` to the SDK public surface. PR
+    // description + event JSDoc tell consumers to use this helper to
+    // branch on `scope === 'workspace'`; without this pinning the
+    // export could silently drop on a future barrel reshuffle (same
+    // failure mode caught for PR-21 auth surface).
+    expect(typeof Public.isWorkspaceScopedBudgetEvent).toBe('function');
   });
 
   it('round-trips a raw DaemonEvent through the public narrow helper', () => {

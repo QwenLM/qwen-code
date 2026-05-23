@@ -190,7 +190,8 @@ export default {
   'open full Qwen Code documentation in your browser':
     'obrir la documentació completa de Qwen Code al navegador',
   'Configuration not available.': 'Configuració no disponible.',
-  'Connect an LLM provider': 'Connectar un proveïdor LLM',
+  'Configure authentication information for login':
+    "Configurar la informació d'autenticació per a iniciar sessió",
   'Copy the last result or code snippet to clipboard':
     "Copiar l'últim resultat o fragment de codi al porta-retalls",
 
@@ -1113,9 +1114,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Benvingut de nou! (Darrera actualització: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Objectiu general:',
-  'Connect a Provider': 'Connectar un proveïdor',
-  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
-    'Cal connectar un proveïdor per continuar. Premeu Ctrl+C de nou per sortir.',
+  'Select Authentication Method': "Seleccioneu el mètode d'autenticació",
+  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
+    "Cal seleccionar un mètode d'autenticació per continuar. Premeu Ctrl+C de nou per sortir.",
   'Terms of Services and Privacy Notice':
     'Termes de servei i avís de privacitat',
   'Qwen OAuth': 'Qwen OAuth',

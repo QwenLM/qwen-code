@@ -20,10 +20,6 @@ import {
   readWorktreeSessionMarker,
   worktreeBranchForSlug,
 } from '../services/gitWorktreeService.js';
-import {
-  readWorktreeSession,
-  clearWorktreeSession,
-} from '../services/worktreeSessionService.js';
 import * as fs from 'node:fs/promises';
 import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -182,14 +178,6 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     }
 
     if (this.params.action === 'keep') {
-      // Phase C update: preserve the sidecar on `keep`. `keep` means
-      // "the worktree directory and branch remain on disk so it can be
-      // revisited later" — clearing the persisted binding would force
-      // a subsequent `--resume` (or interactive Footer / WorktreeExitDialog)
-      // to forget the worktree the user just chose to retain. The model
-      // can still reference the absolute path from the tool result;
-      // dropping the sidecar served no purpose beyond invalidating the
-      // restore mechanism. (PR #4174 review #3259975245.)
       const output: ExitWorktreeOutput = {
         action: 'keep',
         worktreePath,
@@ -295,7 +283,6 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       // Status check passed and unmerged check passed, but the safe
       // delete still refused — most likely a race where new commits
       // landed between the checks. Be loud rather than force-deleting.
-      await this.maybeClearWorktreeSession();
       const output: ExitWorktreeOutput = {
         action: 'remove',
         worktreePath,
@@ -315,7 +302,6 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       `Removed user worktree: ${worktreePath} (branch=${branch})`,
     );
 
-    await this.maybeClearWorktreeSession();
     const output: ExitWorktreeOutput = {
       action: 'remove',
       worktreePath,
@@ -326,31 +312,6 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       llmContent: JSON.stringify(output),
       returnDisplay: `Removed worktree **${this.params.name}** (branch \`${branch}\`)`,
     };
-  }
-
-  /**
-   * Clears the WorktreeSession sidecar file iff its `slug` matches the
-   * worktree being exited. We skip the clear when the sidecar names a
-   * different slug because the user might have multiple worktrees on
-   * disk while the sidecar tracks only one — wiping it on every exit
-   * would orphan the currently-tracked worktree from the CLI's view.
-   *
-   * Best-effort: failures are logged, never raised.
-   */
-  private async maybeClearWorktreeSession(): Promise<void> {
-    try {
-      const sessionPath = this.config
-        .getSessionService()
-        .getWorktreeSessionPath(this.config.getSessionId());
-      const existing = await readWorktreeSession(sessionPath);
-      if (existing && existing.slug === this.params.name) {
-        await clearWorktreeSession(sessionPath);
-      }
-    } catch (error) {
-      debugLogger.warn(
-        `exit_worktree: failed to clear WorktreeSession sidecar: ${error}`,
-      );
-    }
   }
 }
 

@@ -49,18 +49,11 @@ export function buildPermissionCheckContext(
         : path.resolve(targetDir, toolParams['directory'])
       : undefined;
 
-  // Extract file path — tools use 'file_path', 'notebook_path', or
-  // 'path' (LS / grep / glob).
+  // Extract file path — tools use 'file_path' or 'path' (LS / grep / glob).
   let filePath =
     typeof toolParams['file_path'] === 'string'
       ? toolParams['file_path']
       : undefined;
-  if (
-    filePath === undefined &&
-    typeof toolParams['notebook_path'] === 'string'
-  ) {
-    filePath = toolParams['notebook_path'];
-  }
   if (filePath === undefined && typeof toolParams['path'] === 'string') {
     // LS uses absolute paths; grep/glob may be relative to targetDir.
     filePath = path.isAbsolute(toolParams['path'])

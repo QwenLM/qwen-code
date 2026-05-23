@@ -192,7 +192,8 @@ export default {
   'open full Qwen Code documentation in your browser':
     'Открытие полной документации Qwen Code в браузере',
   'Configuration not available.': 'Конфигурация недоступна.',
-  'Connect an LLM provider': 'Подключить провайдера LLM',
+  'Configure authentication information for login':
+    'Настройка аутентификационной информации для входа',
   'Copy the last result or code snippet to clipboard':
     'Копирование последнего результата или фрагмента кода в буфер обмена',
 
@@ -1028,9 +1029,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 С возвращением! (Последнее обновление: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Общая цель:',
-  'Connect a Provider': 'Подключить провайдера',
-  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
-    'Необходимо подключить провайдера для продолжения. Нажмите Ctrl+C снова для выхода.',
+  'Select Authentication Method': 'Выберите метод авторизации',
+  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
+    'Вы должны выбрать метод авторизации для продолжения. Нажмите Ctrl+C снова для выхода.',
   'Terms of Services and Privacy Notice':
     'Условия обслуживания и уведомление о конфиденциальности',
   'Qwen OAuth': 'Qwen OAuth',

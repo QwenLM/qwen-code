@@ -19,7 +19,6 @@ import { useStatusLine } from '../hooks/useStatusLine.js';
 import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
-import { useSettings } from '../contexts/SettingsContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
@@ -29,7 +28,6 @@ import { t } from '../../i18n/index.js';
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
-  const settings = useSettings();
   const { vimEnabled, vimMode } = useVimMode();
   const { lines: statusLineLines, useThemeColors } = useStatusLine();
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
@@ -160,25 +158,6 @@ export const Footer: React.FC = () => {
               {line}
             </Text>
           ))}
-        {/* Built-in worktree indicator. Shown by default whenever a
-            worktree is active so the user always has a UI affordance,
-            even when a custom statusline is configured — their script
-            may not render `payload.worktree` (written before Phase C,
-            ignored by choice, or only rendering some fields), and
-            silently hiding the indicator could let the user operate
-            in the wrong cwd. Users who want the suppression behaviour
-            (e.g. their statusline already renders worktree) can opt
-            in via the `ui.hideBuiltinWorktreeIndicator` setting.
-            Hidden during ctrl-quit warnings so they take precedence.
-            (PR #4174 review #3256241831.) */}
-        {uiState.activeWorktree &&
-          !settings.merged.ui?.hideBuiltinWorktreeIndicator &&
-          !uiState.ctrlCPressedOnce &&
-          !uiState.ctrlDPressedOnce && (
-            <Text dimColor wrap="truncate">
-              {`⎇ ${uiState.activeWorktree.branch} (${uiState.activeWorktree.slug})`}
-            </Text>
-          )}
         <Box flexDirection="row" flexShrink={1}>
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />

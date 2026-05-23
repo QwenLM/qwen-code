@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 
 export interface ResolvedModelId {
@@ -16,14 +15,6 @@ export interface ModelIdResolutionContext {
   currentModel?: string;
   currentAuthType?: AuthType;
   fastModel?: string;
-  getAvailableModels?: (
-    authTypes?: AuthType[],
-  ) => readonly ModelIdAvailableModel[];
-}
-
-export interface ModelIdAvailableModel {
-  id: string;
-  authType: AuthType;
 }
 
 type ModelIdSelector =
@@ -47,8 +38,7 @@ const AUTH_TYPES = new Set<AuthType>(Object.values(AuthType));
  * Supported forms:
  * - omitted / inherit -> use parent conversation model
  * - fast -> use the configured fastModel
- * - modelId -> use current authType when available, otherwise the first
- *   configured authType that contains the model
+ * - modelId -> use parent authType with the provided modelId
  * - authType:modelId -> use explicit authType and modelId
  */
 export function resolveModelId(
@@ -56,21 +46,6 @@ export function resolveModelId(
   context: ModelIdResolutionContext = {},
 ): ResolvedModelId | undefined {
   return resolveModelIdSelector(parseModelIdSelector(model), context);
-}
-
-/**
- * Build a {@link ModelIdResolutionContext} from a {@link Config}, wiring the
- * standard adapter calls (current model, current auth type, configured fast
- * model, configured models per auth type) used by every runtime caller.
- */
-export function buildModelIdContext(config: Config): ModelIdResolutionContext {
-  return {
-    currentModel: config.getModel?.(),
-    currentAuthType: config.getContentGeneratorConfig?.()?.authType,
-    fastModel: config.getFastModel?.(),
-    getAvailableModels: (authTypes) =>
-      config.getAllConfiguredModels?.(authTypes) ?? [],
-  };
 }
 
 function parseModelIdSelector(model: string | undefined): ModelIdSelector {
@@ -109,33 +84,13 @@ function parseModelIdSelector(model: string | undefined): ModelIdSelector {
   };
 }
 
-function resolveAuthTypeForBareModel(
-  modelId: string,
-  context: ModelIdResolutionContext,
-): AuthType | undefined {
-  if (context.currentAuthType && context.getAvailableModels) {
-    const currentModels = context.getAvailableModels([context.currentAuthType]);
-    if (currentModels.some((model) => model.id === modelId)) {
-      return context.currentAuthType;
-    }
-  }
-
-  const configuredModel = context.getAvailableModels
-    ? context.getAvailableModels().find((model) => model.id === modelId)
-    : undefined;
-  return configuredModel?.authType ?? context.currentAuthType;
-}
-
 function resolveModelIdSelector(
   selector: ModelIdSelector,
   context: ModelIdResolutionContext,
 ): ResolvedModelId | undefined {
   if (selector.kind === 'model') {
-    const authType =
-      selector.authType ??
-      resolveAuthTypeForBareModel(selector.modelId, context);
     return {
-      ...(authType ? { authType } : {}),
+      ...(selector.authType ? { authType: selector.authType } : {}),
       modelId: selector.modelId,
     };
   }

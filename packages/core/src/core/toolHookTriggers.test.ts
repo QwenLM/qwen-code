@@ -58,7 +58,7 @@ describe('toolHookTriggers', () => {
       expect(result).toEqual({ shouldProceed: true });
     });
 
-    it('should return shouldProceed: true with sentinel hookError when hook execution fails without an error message', async () => {
+    it('should return shouldProceed: true when hook execution fails', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
         success: false,
@@ -72,38 +72,7 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
-      // #4321 review-7 SF-H1: runner contract violation (success:false
-      // with no error.message) used to silently return allow with no
-      // telemetry. Now synthesizes a sentinel hookError so the span
-      // records `success: false` + the description of what went wrong.
-      expect(result.shouldProceed).toBe(true);
-      expect(result.hookError).toMatch(/success: false/);
-    });
-
-    it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
-      // #4321 review-9: pin the `||` (not `??`) semantics. A future
-      // regression back to `??` would preserve `hookError: ""` here
-      // which downstream `r.hookError ? ...` truthiness then silently
-      // drops — same allow-without-telemetry pathology SF-H1 closed.
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-        error: { message: '' },
-      });
-
-      const result = await firePreToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'test-id',
-        'auto',
-      );
-
-      expect(result.shouldProceed).toBe(true);
-      expect(result.hookError).toMatch(/success: false/);
-      // Specifically NOT empty: an empty string would round-trip through
-      // a downstream truthiness check as missing.
-      expect(result.hookError).not.toBe('');
+      expect(result).toEqual({ shouldProceed: true });
     });
 
     it('should return shouldProceed: true when hook output is empty', async () => {
@@ -246,13 +215,7 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
-      // #4321 review: hookError surfaces the swallowed transport error so
-      // observers (telemetry spans, debug logs) can distinguish a failed
-      // hook from a successful "allow" decision.
-      expect(result).toEqual({
-        shouldProceed: true,
-        hookError: 'Network error',
-      });
+      expect(result).toEqual({ shouldProceed: true });
     });
   });
 
@@ -270,7 +233,7 @@ describe('toolHookTriggers', () => {
       expect(result).toEqual({ shouldStop: false });
     });
 
-    it('should return shouldStop: false with sentinel hookError when hook execution fails without an error message', async () => {
+    it('should return shouldStop: false when hook execution fails', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
         success: false,
@@ -285,31 +248,7 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
-      // #4321 review-7 SF-H1 — see firePreToolUseHook counterpart.
-      expect(result.shouldStop).toBe(false);
-      expect(result.hookError).toMatch(/success: false/);
-    });
-
-    it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
-      // #4321 review-9 — see firePreToolUseHook counterpart.
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-        error: { message: '' },
-      });
-
-      const result = await firePostToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        {},
-        'test-id',
-        'auto',
-      );
-
-      expect(result.shouldStop).toBe(false);
-      expect(result.hookError).toMatch(/success: false/);
-      expect(result.hookError).not.toBe('');
+      expect(result).toEqual({ shouldStop: false });
     });
 
     it('should return shouldStop: false when hook output is empty', async () => {
@@ -399,9 +338,7 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
-      // #4321 review: hookError now surfaced to caller (see PreToolUse parallel test).
-      expect(result.shouldStop).toBe(false);
-      expect(result.hookError).toBeDefined();
+      expect(result).toEqual({ shouldStop: false });
     });
   });
 
@@ -418,7 +355,7 @@ describe('toolHookTriggers', () => {
       expect(result).toEqual({});
     });
 
-    it('should return sentinel hookError when hook execution fails without an error message', async () => {
+    it('should return empty object when hook execution fails', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
         success: false,
@@ -432,28 +369,7 @@ describe('toolHookTriggers', () => {
         'error message',
       );
 
-      // #4321 review-7 SF-H1 — see firePreToolUseHook counterpart.
-      expect(result.hookError).toMatch(/success: false/);
-    });
-
-    it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
-      // #4321 review-9 — see firePreToolUseHook counterpart.
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-        error: { message: '' },
-      });
-
-      const result = await firePostToolUseFailureHook(
-        mockMessageBus,
-        'test-id',
-        'test-tool',
-        {},
-        'error message',
-      );
-
-      expect(result.hookError).toMatch(/success: false/);
-      expect(result.hookError).not.toBe('');
+      expect(result).toEqual({});
     });
 
     it('should return empty object when hook output is empty', async () => {
@@ -513,9 +429,7 @@ describe('toolHookTriggers', () => {
         'error message',
       );
 
-      // #4321 review: hookError now surfaced to caller.
-      expect(result.hookError).toBeDefined();
-      expect(result.additionalContext).toBeUndefined();
+      expect(result).toEqual({});
     });
   });
 

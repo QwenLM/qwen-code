@@ -144,7 +144,7 @@ The SDK supports different permission modes for controlling tool execution:
 
 - **`default`**: Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`. Read-only tools execute without confirmation.
 - **`plan`**: Blocks all write tools, instructing AI to present a plan first.
-- **`auto-edit`**: Auto-approve edit tools (`edit`, `write_file`, `notebook_edit`) while other tools require confirmation.
+- **`auto-edit`**: Auto-approve edit tools (edit, write_file) while other tools require confirmation.
 - **`yolo`**: All tools execute automatically without confirmation.
 
 ### Session Event Consumers and Assistant Content Consumers

@@ -194,30 +194,6 @@ describe('extensionsCommand', () => {
       expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
     });
 
-    it('should redact URL credentials in install progress messages', async () => {
-      mockParseInstallSource.mockResolvedValue({
-        type: 'git',
-        source: 'https://user:token@example.com/test/extension',
-      });
-      mockInstallExtension.mockResolvedValue({
-        name: 'test-extension',
-        version: '1.0.0',
-      });
-
-      await installAction(
-        mockContext,
-        'https://user:token@example.com/test/extension',
-      );
-
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        {
-          type: MessageType.INFO,
-          text: 'Installing extension from "https://***REDACTED***@example.com/test/extension"...',
-        },
-        expect.any(Number),
-      );
-    });
-
     it('should handle install errors', async () => {
       mockParseInstallSource.mockRejectedValue(
         new Error('Install source not found.'),
@@ -229,27 +205,6 @@ describe('extensionsCommand', () => {
         {
           type: MessageType.ERROR,
           text: 'Failed to install extension from "/invalid/path": Install source not found.',
-        },
-        expect.any(Number),
-      );
-    });
-
-    it('should redact URL credentials in install error messages and causes', async () => {
-      mockParseInstallSource.mockRejectedValue(
-        new Error(
-          'Install source not found: https://user:token@example.com/test/extension',
-        ),
-      );
-
-      await installAction(
-        mockContext,
-        'https://user:token@example.com/test/extension',
-      );
-
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        {
-          type: MessageType.ERROR,
-          text: 'Failed to install extension from "https://***REDACTED***@example.com/test/extension": Install source not found: https://***REDACTED***@example.com/test/extension',
         },
         expect.any(Number),
       );

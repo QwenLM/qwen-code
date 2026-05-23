@@ -14,9 +14,9 @@ import { t } from '../../i18n/index.js';
 
 export const authCommand: SlashCommand = {
   name: 'auth',
-  altNames: ['connect', 'login'],
+  altNames: ['login'],
   get description() {
-    return t('Connect an LLM provider');
+    return t('Configure authentication information for login');
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'],

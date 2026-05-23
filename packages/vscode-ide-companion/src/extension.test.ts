@@ -7,14 +7,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
 import { activate } from './extension.js';
-import { IDE_DEFINITIONS, detectIdeFromEnv } from '@qwen-code/qwen-code-core';
+import {
+  IDE_DEFINITIONS,
+  detectIdeFromEnv,
+} from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
 
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+vi.mock('@qwen-code/qwen-code-core/src/ide/detect-ide.js', async () => {
+  const actual = await vi.importActual(
+    '@qwen-code/qwen-code-core/src/ide/detect-ide.js',
+  );
   return {
     ...actual,
-    detectIdeFromEnv: vi.fn(() => actual.IDE_DEFINITIONS.vscode),
+    detectIdeFromEnv: vi.fn(() => IDE_DEFINITIONS.vscode),
   };
 });
 

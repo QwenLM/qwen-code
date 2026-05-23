@@ -22,8 +22,6 @@ describe('createContentGenerator', () => {
       getUsageStatisticsEnabled: () => true,
       getContentGeneratorConfig: () => ({}),
       getCliVersion: () => '1.0.0',
-      getTelemetryEnabled: () => false,
-      getSessionId: () => 'test-session',
     } as unknown as Config;
 
     const mockGenerator = {
@@ -59,8 +57,6 @@ describe('createContentGenerator', () => {
       getUsageStatisticsEnabled: () => false,
       getContentGeneratorConfig: () => ({}),
       getCliVersion: () => '1.0.0',
-      getTelemetryEnabled: () => false,
-      getSessionId: () => 'test-session',
     } as unknown as Config;
     const mockGenerator = {
       models: {},

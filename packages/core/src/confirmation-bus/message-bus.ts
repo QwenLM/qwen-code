@@ -120,7 +120,7 @@ export class MessageBus extends EventEmitter {
       };
 
       if (signal) {
-        signal.addEventListener('abort', abortHandler, { once: true });
+        signal.addEventListener('abort', abortHandler);
       }
 
       const responseHandler = (response: TResponse) => {

@@ -22,7 +22,7 @@ import { isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 import { extractPDFText, parsePDFPageRange } from './pdf.js';
-import { readNotebookWithMetadata } from './notebook.js';
+import { readNotebook } from './notebook.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 
@@ -818,7 +818,7 @@ export interface ProcessedFileReadResult {
   error?: string; // Optional error message for the LLM if file processing failed
   errorType?: ToolErrorType; // Structured error type
   originalLineCount?: number; // For text files, the total number of lines in the original file
-  isTruncated?: boolean; // Indicates if displayed content was truncated
+  isTruncated?: boolean; // For text files, indicates if content was truncated
   linesShown?: [number, number]; // For text files [startLine, endLine] (1-based for display)
   /**
    * The Stats taken at the start of the read pipeline, before the
@@ -1172,13 +1172,10 @@ export async function processSingleFileContent(
       }
       case 'notebook': {
         try {
-          const { content, isTruncated } =
-            await readNotebookWithMetadata(filePath);
+          const content = await readNotebook(filePath);
           return {
             llmContent: content,
             returnDisplay: `Read notebook: ${relativePathForDisplay}`,
-            isTruncated,
-            stats,
           };
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);

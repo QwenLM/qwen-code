@@ -8,13 +8,8 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import pathMod from 'node:path';
-import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import {
-  createDebugLogger,
-  unescapePath,
-  getExternalEditorCommand,
-  type EditorType,
-} from '@qwen-code/qwen-code-core';
+import { useState, useCallback, useEffect, useMemo, useReducer } from 'react';
+import { createDebugLogger, unescapePath } from '@qwen-code/qwen-code-core';
 import {
   toCodePoints,
   cpLen,
@@ -809,7 +804,6 @@ interface UseTextBufferProps {
   onChange?: (text: string) => void; // Callback for when text changes
   isValidPath: (path: string) => boolean;
   shellModeActive?: boolean; // Whether the text buffer is in shell mode
-  preferredEditor?: EditorType;
 }
 
 interface UndoHistoryEntry {
@@ -1908,7 +1902,6 @@ export function useTextBuffer({
   onChange,
   isValidPath,
   shellModeActive = false,
-  preferredEditor,
 }: UseTextBufferProps): TextBuffer {
   const initialState = useMemo((): TextBufferState => {
     const lines = initialText.split('\n');
@@ -1935,14 +1928,7 @@ export function useTextBuffer({
     };
   }, [initialText, initialCursorOffset, viewport.width, viewport.height]);
 
-  const stateRef = useRef(initialState);
-  const [state, setState] = useState(initialState);
-
-  const dispatch = useCallback((action: TextBufferAction) => {
-    stateRef.current = textBufferReducer(stateRef.current, action);
-    setState(stateRef.current);
-  }, []);
-
+  const [state, dispatch] = useReducer(textBufferReducer, initialState);
   const {
     lines,
     cursorRow,
@@ -1974,7 +1960,7 @@ export function useTextBuffer({
       type: 'set_viewport',
       payload: { width: viewport.width, height: viewport.height },
     });
-  }, [dispatch, viewport.width, viewport.height]);
+  }, [viewport.width, viewport.height]);
 
   // Update visual scroll (vertical)
   useEffect(() => {
@@ -2039,20 +2025,20 @@ export function useTextBuffer({
         dispatch({ type: 'insert', payload: currentText });
       }
     },
-    [dispatch, isValidPath, shellModeActive],
+    [isValidPath, shellModeActive],
   );
 
   const newline = useCallback((): void => {
     dispatch({ type: 'insert', payload: '\n' });
-  }, [dispatch]);
+  }, []);
 
   const backspace = useCallback((): void => {
     dispatch({ type: 'backspace' });
-  }, [dispatch]);
+  }, []);
 
   const del = useCallback((): void => {
     dispatch({ type: 'delete' });
-  }, [dispatch]);
+  }, []);
 
   const move = useCallback(
     (dir: Direction): void => {
@@ -2063,359 +2049,208 @@ export function useTextBuffer({
 
   const undo = useCallback((): void => {
     dispatch({ type: 'undo' });
-  }, [dispatch]);
+  }, []);
 
   const redo = useCallback((): void => {
     dispatch({ type: 'redo' });
-  }, [dispatch]);
+  }, []);
 
-  const setText = useCallback(
-    (newText: string): void => {
-      dispatch({ type: 'set_text', payload: newText });
-    },
-    [dispatch],
-  );
+  const setText = useCallback((newText: string): void => {
+    dispatch({ type: 'set_text', payload: newText });
+  }, []);
 
   const deleteWordLeft = useCallback((): void => {
     dispatch({ type: 'delete_word_left' });
-  }, [dispatch]);
+  }, []);
 
   const deleteWordRight = useCallback((): void => {
     dispatch({ type: 'delete_word_right' });
-  }, [dispatch]);
+  }, []);
 
   const killLineRight = useCallback((): void => {
     dispatch({ type: 'kill_line_right' });
-  }, [dispatch]);
+  }, []);
 
   const killLineLeft = useCallback((): void => {
     dispatch({ type: 'kill_line_left' });
-  }, [dispatch]);
+  }, []);
 
   // Vim-specific operations
-  const vimDeleteWordForward = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_delete_word_forward', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimDeleteWordForward = useCallback((count: number): void => {
+    dispatch({ type: 'vim_delete_word_forward', payload: { count } });
+  }, []);
 
-  const vimDeleteWordBackward = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_delete_word_backward', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimDeleteWordBackward = useCallback((count: number): void => {
+    dispatch({ type: 'vim_delete_word_backward', payload: { count } });
+  }, []);
 
-  const vimDeleteWordEnd = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_delete_word_end', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimDeleteWordEnd = useCallback((count: number): void => {
+    dispatch({ type: 'vim_delete_word_end', payload: { count } });
+  }, []);
 
-  const vimChangeWordForward = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_change_word_forward', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimChangeWordForward = useCallback((count: number): void => {
+    dispatch({ type: 'vim_change_word_forward', payload: { count } });
+  }, []);
 
-  const vimChangeWordBackward = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_change_word_backward', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimChangeWordBackward = useCallback((count: number): void => {
+    dispatch({ type: 'vim_change_word_backward', payload: { count } });
+  }, []);
 
-  const vimChangeWordEnd = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_change_word_end', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimChangeWordEnd = useCallback((count: number): void => {
+    dispatch({ type: 'vim_change_word_end', payload: { count } });
+  }, []);
 
-  const vimDeleteLine = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_delete_line', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimDeleteLine = useCallback((count: number): void => {
+    dispatch({ type: 'vim_delete_line', payload: { count } });
+  }, []);
 
-  const vimChangeLine = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_change_line', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimChangeLine = useCallback((count: number): void => {
+    dispatch({ type: 'vim_change_line', payload: { count } });
+  }, []);
 
   const vimDeleteToEndOfLine = useCallback((): void => {
     dispatch({ type: 'vim_delete_to_end_of_line' });
-  }, [dispatch]);
+  }, []);
 
   const vimChangeToEndOfLine = useCallback((): void => {
     dispatch({ type: 'vim_change_to_end_of_line' });
-  }, [dispatch]);
+  }, []);
 
   const vimChangeMovement = useCallback(
     (movement: 'h' | 'j' | 'k' | 'l', count: number): void => {
       dispatch({ type: 'vim_change_movement', payload: { movement, count } });
     },
-    [dispatch],
+    [],
   );
 
   // New vim navigation and operation methods
-  const vimMoveLeft = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_move_left', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimMoveLeft = useCallback((count: number): void => {
+    dispatch({ type: 'vim_move_left', payload: { count } });
+  }, []);
 
-  const vimMoveRight = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_move_right', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimMoveRight = useCallback((count: number): void => {
+    dispatch({ type: 'vim_move_right', payload: { count } });
+  }, []);
 
-  const vimMoveUp = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_move_up', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimMoveUp = useCallback((count: number): void => {
+    dispatch({ type: 'vim_move_up', payload: { count } });
+  }, []);
 
-  const vimMoveDown = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_move_down', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimMoveDown = useCallback((count: number): void => {
+    dispatch({ type: 'vim_move_down', payload: { count } });
+  }, []);
 
-  const vimMoveWordForward = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_move_word_forward', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimMoveWordForward = useCallback((count: number): void => {
+    dispatch({ type: 'vim_move_word_forward', payload: { count } });
+  }, []);
 
-  const vimMoveWordBackward = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_move_word_backward', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimMoveWordBackward = useCallback((count: number): void => {
+    dispatch({ type: 'vim_move_word_backward', payload: { count } });
+  }, []);
 
-  const vimMoveWordEnd = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_move_word_end', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimMoveWordEnd = useCallback((count: number): void => {
+    dispatch({ type: 'vim_move_word_end', payload: { count } });
+  }, []);
 
-  const vimDeleteChar = useCallback(
-    (count: number): void => {
-      dispatch({ type: 'vim_delete_char', payload: { count } });
-    },
-    [dispatch],
-  );
+  const vimDeleteChar = useCallback((count: number): void => {
+    dispatch({ type: 'vim_delete_char', payload: { count } });
+  }, []);
 
   const vimInsertAtCursor = useCallback((): void => {
     dispatch({ type: 'vim_insert_at_cursor' });
-  }, [dispatch]);
+  }, []);
 
   const vimAppendAtCursor = useCallback((): void => {
     dispatch({ type: 'vim_append_at_cursor' });
-  }, [dispatch]);
+  }, []);
 
   const vimOpenLineBelow = useCallback((): void => {
     dispatch({ type: 'vim_open_line_below' });
-  }, [dispatch]);
+  }, []);
 
   const vimOpenLineAbove = useCallback((): void => {
     dispatch({ type: 'vim_open_line_above' });
-  }, [dispatch]);
+  }, []);
 
   const vimAppendAtLineEnd = useCallback((): void => {
     dispatch({ type: 'vim_append_at_line_end' });
-  }, [dispatch]);
+  }, []);
 
   const vimInsertAtLineStart = useCallback((): void => {
     dispatch({ type: 'vim_insert_at_line_start' });
-  }, [dispatch]);
+  }, []);
 
   const vimMoveToLineStart = useCallback((): void => {
     dispatch({ type: 'vim_move_to_line_start' });
-  }, [dispatch]);
+  }, []);
 
   const vimMoveToLineEnd = useCallback((): void => {
     dispatch({ type: 'vim_move_to_line_end' });
-  }, [dispatch]);
+  }, []);
 
   const vimMoveToFirstNonWhitespace = useCallback((): void => {
     dispatch({ type: 'vim_move_to_first_nonwhitespace' });
-  }, [dispatch]);
+  }, []);
 
   const vimMoveToFirstLine = useCallback((): void => {
     dispatch({ type: 'vim_move_to_first_line' });
-  }, [dispatch]);
+  }, []);
 
   const vimMoveToLastLine = useCallback((): void => {
     dispatch({ type: 'vim_move_to_last_line' });
-  }, [dispatch]);
+  }, []);
 
-  const vimMoveToLine = useCallback(
-    (lineNumber: number): void => {
-      dispatch({ type: 'vim_move_to_line', payload: { lineNumber } });
-    },
-    [dispatch],
-  );
+  const vimMoveToLine = useCallback((lineNumber: number): void => {
+    dispatch({ type: 'vim_move_to_line', payload: { lineNumber } });
+  }, []);
 
   const vimEscapeInsertMode = useCallback((): void => {
     dispatch({ type: 'vim_escape_insert_mode' });
-  }, [dispatch]);
+  }, []);
 
   const openInExternalEditor = useCallback(
     async (opts: { editor?: string } = {}): Promise<void> => {
-      let tmpDir: string;
-      let filePath: string;
-      try {
-        tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
-        filePath = pathMod.join(tmpDir, 'buffer.txt');
-      } catch (err) {
-        debugLogger.error(
-          '[useTextBuffer] failed to create temp directory',
-          err,
-        );
-        return;
-      }
+      const editor =
+        opts.editor ??
+        process.env['VISUAL'] ??
+        process.env['EDITOR'] ??
+        (process.platform === 'win32' ? 'notepad' : 'vi');
+      const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
+      const filePath = pathMod.join(tmpDir, 'buffer.txt');
+      fs.writeFileSync(filePath, text, 'utf8');
 
-      let editorCmd: string;
-      let editorArgs: string[];
-      let useShell = false;
-      let editorSource: 'opts' | 'preferred' | 'env/default' = 'env/default';
-
-      if (opts.editor) {
-        // Explicit programmatic override takes highest priority
-        editorCmd = opts.editor;
-        editorArgs = [filePath];
-        editorSource = 'opts';
-        if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
-          if (/["|%!]/.test(editorCmd)) {
-            debugLogger.error(
-              `[useTextBuffer] opts.editor command contains unsafe characters: ${editorCmd}`,
-            );
-            try {
-              fs.rmSync(tmpDir, { recursive: true, force: true });
-            } catch {
-              /* ignore */
-            }
-            return;
-          }
-          useShell = true;
-        }
-      } else {
-        const resolved = preferredEditor
-          ? getExternalEditorCommand(preferredEditor, filePath)
-          : null;
-
-        if (resolved) {
-          editorCmd = resolved.command;
-          editorArgs = resolved.args;
-          useShell = resolved.needsShell;
-          editorSource = 'preferred';
-        } else {
-          if (preferredEditor) {
-            debugLogger.warn(
-              `[useTextBuffer] preferred editor "${preferredEditor}" not found, falling back to env/default`,
-            );
-          }
-          editorCmd =
-            process.env['VISUAL'] ??
-            process.env['EDITOR'] ??
-            (process.platform === 'win32' ? 'notepad' : 'vi');
-          editorArgs = [filePath];
-          if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
-            if (/["|%!]/.test(editorCmd)) {
-              debugLogger.error(
-                `[useTextBuffer] Editor command from environment contains unsafe characters: ${editorCmd}`,
-              );
-              try {
-                fs.rmSync(tmpDir, { recursive: true, force: true });
-              } catch {
-                /* ignore */
-              }
-              return;
-            }
-            useShell = true;
-          }
-        }
-      }
-
-      if (useShell) {
-        // .cmd/.bat launch through cmd.exe on Windows. Quote both the
-        // command and args so paths with spaces survive cmd.exe parsing.
-        // These are process-generated paths; do not reuse for
-        // user-controlled arguments.
-        editorCmd = `"${editorCmd}"`;
-        editorArgs = editorArgs.map((a) => `"${a}"`);
-      }
+      dispatch({ type: 'create_undo_snapshot' });
 
       const wasRaw = stdin?.isRaw ?? false;
       try {
-        const currentText = stateRef.current.lines.join('\n');
-        fs.writeFileSync(filePath, currentText, {
-          encoding: 'utf8',
-          mode: 0o600,
-        });
         setRawMode?.(false);
-
-        debugLogger.warn(
-          `[useTextBuffer] launching external editor (cmd=${editorCmd}, shell=${useShell}, source=${editorSource}, file=${filePath})`,
-        );
-        const { status, error, signal } = spawnSync(editorCmd, editorArgs, {
+        const { status, error } = spawnSync(editor, [filePath], {
           stdio: 'inherit',
-          shell: useShell,
-          timeout: 30 * 60 * 1000,
         });
         if (error) throw error;
-        if (signal)
-          throw new Error(`External editor was killed by signal ${signal}`);
         if (typeof status === 'number' && status !== 0)
           throw new Error(`External editor exited with status ${status}`);
 
         let newText = fs.readFileSync(filePath, 'utf8');
         newText = newText.replace(/\r\n?/g, '\n');
-        if (newText !== currentText) {
-          dispatch({ type: 'create_undo_snapshot' });
-          dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
-        }
+        dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
       } catch (err) {
-        debugLogger.error(
-          `[useTextBuffer] external editor error (cmd=${editorCmd}, shell=${useShell}, source=${editorSource}, file=${filePath})`,
-          err,
-        );
+        debugLogger.error('[useTextBuffer] external editor error', err);
       } finally {
+        if (wasRaw) setRawMode?.(true);
         try {
-          if (wasRaw) setRawMode?.(true);
-        } catch (rawErr) {
-          debugLogger.error(
-            '[useTextBuffer] failed to restore raw mode after external editor',
-            rawErr,
-          );
+          fs.unlinkSync(filePath);
+        } catch {
+          /* ignore */
         }
         try {
-          // recursive+force handles leftover swap files (.swp) from vim/neovim.
-          // On Windows, EPERM/EBUSY from locked files may still cause a partial
-          // delete — the catch below keeps it non-fatal.
-          fs.rmSync(tmpDir, { recursive: true, force: true });
+          fs.rmdirSync(tmpDir);
         } catch {
-          /* best-effort cleanup */
+          /* ignore */
         }
       }
     },
-    [dispatch, stdin, setRawMode, preferredEditor],
+    [text, stdin, setRawMode],
   );
 
   const handleInput = useCallback(
@@ -2517,39 +2352,27 @@ export function useTextBuffer({
         payload: { startRow, startCol, endRow, endCol, text },
       });
     },
-    [dispatch],
+    [],
   );
 
   const replaceRangeByOffset = useCallback(
     (startOffset: number, endOffset: number, replacementText: string): void => {
-      const currentText = stateRef.current.lines.join('\n');
-      const [startRow, startCol] = offsetToLogicalPos(currentText, startOffset);
-      const [endRow, endCol] = offsetToLogicalPos(currentText, endOffset);
+      const [startRow, startCol] = offsetToLogicalPos(text, startOffset);
+      const [endRow, endCol] = offsetToLogicalPos(text, endOffset);
       replaceRange(startRow, startCol, endRow, endCol, replacementText);
     },
-    [replaceRange],
+    [text, replaceRange],
   );
 
-  const moveToOffset = useCallback(
-    (offset: number): void => {
-      dispatch({ type: 'move_to_offset', payload: { offset } });
-    },
-    [dispatch],
-  );
+  const moveToOffset = useCallback((offset: number): void => {
+    dispatch({ type: 'move_to_offset', payload: { offset } });
+  }, []);
 
-  // Getters read from stateRef.current so event handlers (which may hold a stale
-  // closure reference to this object) always see the latest state.
   const returnValue: TextBuffer = useMemo(
     () => ({
-      get lines() {
-        return stateRef.current.lines;
-      },
-      get text() {
-        return stateRef.current.lines.join('\n');
-      },
-      get cursor(): [number, number] {
-        return [stateRef.current.cursorRow, stateRef.current.cursorCol];
-      },
+      lines,
+      text,
+      cursor: [cursorRow, cursorCol],
       preferredCol,
       selectionAnchor,
 
@@ -2612,6 +2435,10 @@ export function useTextBuffer({
       vimEscapeInsertMode,
     }),
     [
+      lines,
+      text,
+      cursorRow,
+      cursorCol,
       preferredCol,
       selectionAnchor,
       visualLines,
@@ -2768,14 +2595,19 @@ export interface TextBuffer {
     sequence: string;
   }) => void;
   /**
-   * Opens the current buffer contents in an external editor.  Resolution
-   * order: `/editor` preference → `$VISUAL` → `$EDITOR` → platform default (`vi` on Unix, `notepad` on Windows).
+   * Opens the current buffer contents in the user's preferred terminal text
+   * editor ($VISUAL or $EDITOR, falling back to "vi").  The method blocks
+   * until the editor exits, then reloads the file and replaces the in‑memory
+   * buffer with whatever the user saved.
    *
-   * The undo snapshot is created *after* the editor exits and only when
-   * the content actually changed, so one `undo()` reverts the entire edit.
+   * The operation is treated as a single undoable edit – we snapshot the
+   * previous state *once* before launching the editor so one `undo()` will
+   * revert the entire change set.
    *
-   * Uses the synchronous spawn API so the calling process blocks until the
-   * editor closes, mirroring Git's behaviour.
+   * Note: We purposefully rely on the *synchronous* spawn API so that the
+   * calling process genuinely waits for the editor to close before
+   * continuing.  This mirrors Git's behaviour and simplifies downstream
+   * control‑flow (callers can simply `await` the Promise).
    */
   openInExternalEditor: (opts?: { editor?: string }) => Promise<void>;
 

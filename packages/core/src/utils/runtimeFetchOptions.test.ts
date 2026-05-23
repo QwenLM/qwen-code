@@ -22,10 +22,6 @@ vi.mock('./debugLogger.js', () => ({
   mockWarn,
 }));
 
-const { mockUndiciFetch } = vi.hoisted(() => ({
-  mockUndiciFetch: vi.fn(),
-}));
-
 vi.mock('undici', () => {
   class MockAgent {
     options: UndiciOptions;
@@ -51,7 +47,6 @@ vi.mock('undici', () => {
   return {
     Agent: MockAgent,
     ProxyAgent: MockProxyAgent,
-    fetch: mockUndiciFetch,
   };
 });
 
@@ -117,38 +112,6 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       headersTimeout: 0,
       bodyTimeout: 0,
     });
-  });
-
-  it('pins fetch to undici when proxy is set so dispatcher and fetch share a version', () => {
-    // Regression for `invalid onError method`: Node's built-in fetch (newer
-    // undici) cannot accept a ProxyAgent built from a different undici major.
-    // The function must hand back the bundled undici's fetch alongside the
-    // dispatcher.
-    const openaiResult = buildRuntimeFetchOptions(
-      'openai',
-      'http://proxy.local',
-    );
-    expect((openaiResult as { fetch?: unknown }).fetch).toBe(mockUndiciFetch);
-
-    const anthropicResult = buildRuntimeFetchOptions(
-      'anthropic',
-      'http://proxy.local',
-    );
-    expect((anthropicResult as { fetch?: unknown }).fetch).toBe(
-      mockUndiciFetch,
-    );
-  });
-
-  it('does not inject a fetch override when no proxy is set', () => {
-    // No-proxy path must stay on the runtime's built-in fetch — see the
-    // comment in buildFetchOptionsWithDispatcher() in runtimeFetchOptions.ts
-    // about avoiding version-mismatch issues on code paths
-    // that don't need a custom dispatcher.
-    const openaiResult = buildRuntimeFetchOptions('openai');
-    expect(openaiResult).toBeUndefined();
-
-    const anthropicResult = buildRuntimeFetchOptions('anthropic');
-    expect((anthropicResult as { fetch?: unknown }).fetch).toBeUndefined();
   });
 
   it('returns undefined for OpenAI when dispatcher creation fails', () => {

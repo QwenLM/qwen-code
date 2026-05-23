@@ -34,8 +34,6 @@ import {
   isDefaultValue,
   isValueInherited,
   getEffectiveDisplayValue,
-  setNestedPropertySafe,
-  setNestedPropertyForce,
 } from './settingsUtils.js';
 import {
   getSettingsSchema,
@@ -1151,54 +1149,6 @@ describe('SettingsUtils', () => {
         );
         expect(result).toBe(false); // Default value
       });
-    });
-  });
-});
-
-describe('setNestedProperty prototype-pollution guards', () => {
-  // After each test, assert global Object.prototype was not polluted.
-  const assertNoPollution = () => {
-    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
-    expect(
-      (Object.prototype as Record<string, unknown>)['polluted'],
-    ).toBeUndefined();
-  };
-
-  describe('setNestedPropertySafe', () => {
-    it('writes a normal dotted path', () => {
-      const obj: Record<string, unknown> = {};
-      setNestedPropertySafe(obj, 'a.b.c', 1);
-      const a = obj['a'] as Record<string, Record<string, unknown>>;
-      expect(a['b']['c']).toBe(1);
-    });
-
-    it('refuses a __proto__ segment (no pollution, no write)', () => {
-      const obj: Record<string, unknown> = {};
-      setNestedPropertySafe(obj, '__proto__.polluted', 'yes');
-      assertNoPollution();
-      expect(Object.keys(obj)).toEqual([]);
-    });
-
-    it('refuses constructor / prototype segments', () => {
-      const obj: Record<string, unknown> = {};
-      setNestedPropertySafe(obj, 'constructor.prototype.polluted', 'yes');
-      setNestedPropertySafe(obj, 'foo.prototype.polluted', 'yes');
-      assertNoPollution();
-    });
-  });
-
-  describe('setNestedPropertyForce', () => {
-    it('writes a normal dotted path', () => {
-      const obj: Record<string, unknown> = {};
-      setNestedPropertyForce(obj, 'x.y', 2);
-      expect((obj['x'] as Record<string, unknown>)['y']).toBe(2);
-    });
-
-    it('refuses a __proto__ segment (no pollution, no write)', () => {
-      const obj: Record<string, unknown> = {};
-      setNestedPropertyForce(obj, '__proto__.polluted', 'yes');
-      assertNoPollution();
-      expect(Object.keys(obj)).toEqual([]);
     });
   });
 });

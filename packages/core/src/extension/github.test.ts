@@ -24,7 +24,6 @@ import {
   type Extension,
   type ExtensionManager,
 } from './extensionManager.js';
-import { getErrorMessage } from '../utils/errors.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockArch = vi.hoisted(() => vi.fn());
@@ -151,90 +150,6 @@ describe('git extension helpers', () => {
       await expect(cloneFromGit(installMetadata, destination)).rejects.toThrow(
         'Failed to clone Git repository from http://my-repo.com',
       );
-    });
-
-    it('should redact URL credentials in clone failures', async () => {
-      const installMetadata = {
-        source: 'https://user:token@my-repo.com/org/repo.git',
-        type: 'git' as const,
-      };
-      const destination = '/dest';
-      mockGit.getRemotes.mockResolvedValue([]);
-
-      let message = '';
-      try {
-        await cloneFromGit(installMetadata, destination);
-      } catch (error: unknown) {
-        message = String(error);
-      }
-
-      expect(message).toContain(
-        'https://***REDACTED***@my-repo.com/org/repo.git',
-      );
-      expect(message).not.toContain('user');
-      expect(message).not.toContain('token');
-    });
-
-    it('should redact URL credentials in clone failure causes', async () => {
-      const installMetadata = {
-        source: 'https://user:token@my-repo.com/org/repo.git',
-        type: 'git' as const,
-      };
-      const destination = '/dest';
-      mockGit.clone.mockRejectedValue(
-        new Error(
-          "fatal: Authentication failed for 'https://user:token@my-repo.com/org/repo.git'",
-        ),
-      );
-
-      let message = '';
-      try {
-        await cloneFromGit(installMetadata, destination);
-      } catch (error: unknown) {
-        message = getErrorMessage(error);
-      }
-
-      expect(message).toContain(
-        'https://***REDACTED***@my-repo.com/org/repo.git',
-      );
-      expect(message).not.toContain('user');
-      expect(message).not.toContain('token');
-    });
-
-    it('should preserve clone failure cause diagnostics while redacting its message', async () => {
-      const installMetadata = {
-        source: 'https://user:token@my-repo.com/org/repo.git',
-        type: 'git' as const,
-      };
-      const destination = '/dest';
-      const gitError = Object.assign(
-        new Error(
-          "fatal: Authentication failed for 'https://user:token@my-repo.com/org/repo.git'",
-        ),
-        {
-          code: 'ENOTFOUND',
-          task: { commands: ['clone'] },
-        },
-      );
-      mockGit.clone.mockRejectedValue(gitError);
-
-      let cause: unknown;
-      try {
-        await cloneFromGit(installMetadata, destination);
-      } catch (error: unknown) {
-        cause = error instanceof Error ? error.cause : undefined;
-      }
-
-      expect(cause).toBeInstanceOf(Error);
-      expect(cause).not.toBe(gitError);
-      expect((cause as Error).message).toContain(
-        'https://***REDACTED***@my-repo.com/org/repo.git',
-      );
-      expect((cause as Error).message).not.toContain('user');
-      expect((cause as { code?: string }).code).toBe('ENOTFOUND');
-      expect((cause as { task?: { commands: string[] } }).task).toEqual({
-        commands: ['clone'],
-      });
     });
 
     it('should throw on clone error', async () => {
@@ -503,23 +418,6 @@ describe('git extension helpers', () => {
       expect(() => parseGitHubRepoForReleases(source)).toThrow(
         'Invalid GitHub repository source: https://example.com/owner/repo.git. Expected "owner/repo" or a github repo uri.',
       );
-    });
-
-    it('should redact URL credentials in invalid source errors', () => {
-      const source = 'https://user:token@example.com/owner/repo.git';
-
-      let message = '';
-      try {
-        parseGitHubRepoForReleases(source);
-      } catch (error: unknown) {
-        message = String(error);
-      }
-
-      expect(message).toContain(
-        'https://***REDACTED***@example.com/owner/repo.git',
-      );
-      expect(message).not.toContain('user');
-      expect(message).not.toContain('token');
     });
 
     it('should parse owner and repo from a shorthand string', () => {

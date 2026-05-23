@@ -190,7 +190,8 @@ export default {
   'open full Qwen Code documentation in your browser':
     'ouvrir la documentation complète de Qwen Code dans votre navigateur',
   'Configuration not available.': 'Configuration non disponible.',
-  'Connect an LLM provider': 'Se connecter à un fournisseur LLM',
+  'Configure authentication information for login':
+    "Configurer les informations d'authentification pour la connexion",
   'Copy the last result or code snippet to clipboard':
     'Copier le dernier résultat ou extrait de code dans le presse-papiers',
 
@@ -1121,9 +1122,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Bon retour ! (Dernière mise à jour : {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Objectif global :',
-  'Connect a Provider': 'Connecter un fournisseur',
-  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
-    'Vous devez connecter un fournisseur pour continuer. Appuyez à nouveau sur Ctrl+C pour quitter.',
+  'Select Authentication Method': "Sélectionner la méthode d'authentification",
+  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
+    "Vous devez sélectionner une méthode d'authentification pour continuer. Appuyez à nouveau sur Ctrl+C pour quitter.",
   'Terms of Services and Privacy Notice':
     "Conditions d'utilisation et avis de confidentialité",
   'Qwen OAuth': 'Qwen OAuth',

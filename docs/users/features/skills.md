@@ -74,7 +74,6 @@ Create a `SKILL.md` file with YAML frontmatter and Markdown content:
 ---
 name: your-skill-name
 description: Brief description of what this Skill does and when to use it
-priority: 10
 ---
 
 # Your Skill Name
@@ -92,13 +91,11 @@ Qwen Code currently validates that:
 
 - `name` is a non-empty string matching `/^[\p{L}\p{N}_:.-]+$/u` — Unicode letters and digits (CJK / Cyrillic / accented Latin all OK), plus `_`, `:`, `.`, `-`. Whitespace, slashes, brackets and other structurally unsafe characters are rejected at parse time.
 - `description` is a non-empty string
-- `priority` is optional. When present, it must be a finite number. Higher values sort earlier in the `/skills` listing only — slash-command completion (typing `/`) and the `/help` custom commands view stay alphabetical, so a high-priority Skill never reorders built-in commands. Omitted or invalid values are treated as unset, which behaves like `0`.
 
 Recommended conventions:
 
 - Prefer lowercase ASCII with hyphens for shareable names (e.g. `tsx-helper`)
 - Make `description` specific: include both **what** the Skill does and **when** to use it (key words users will naturally mention)
-- Use `priority` sparingly for Skills that should reliably appear before the default alphabetical order in `/skills`. Negative priorities are allowed and sort below unset Skills.
 
 ### Optional: gate a Skill on file paths (`paths:`)
 

@@ -69,11 +69,6 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
-import {
-  type AutoModeDenialState,
-  createDenialState,
-  resetDenialState,
-} from '../permissions/denialTracking.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -176,7 +171,6 @@ export enum ApprovalMode {
   PLAN = 'plan',
   DEFAULT = 'default',
   AUTO_EDIT = 'auto-edit',
-  AUTO = 'auto',
   YOLO = 'yolo',
 }
 
@@ -228,35 +222,12 @@ export const APPROVAL_MODE_INFO: Record<ApprovalMode, ApprovalModeInfo> = {
     name: 'Auto Edit',
     description: 'Automatically approve file edits',
   },
-  [ApprovalMode.AUTO]: {
-    id: ApprovalMode.AUTO,
-    name: 'Auto',
-    description: 'LLM classifier auto-approves safe actions, blocks risky ones',
-  },
   [ApprovalMode.YOLO]: {
     id: ApprovalMode.YOLO,
     name: 'YOLO',
     description: 'Automatically approve all tools',
   },
 };
-
-/**
- * Settings for the AUTO approval mode classifier.
- *
- * `hints` and `environment` are natural-language strings injected additively
- * into the classifier's system prompt; they do NOT use rule-matching syntax.
- * Use `permissions.allow / ask / deny` for hard rules.
- */
-export interface AutoModeSettings {
-  hints?: {
-    /** Natural-language descriptions of actions the user wants AUTO mode to allow. */
-    allow?: string[];
-    /** Natural-language descriptions of actions the user wants AUTO mode to block. */
-    deny?: string[];
-  };
-  /** Environment / context lines injected into the classifier's system prompt. */
-  environment?: string[];
-}
 
 export interface AccessibilitySettings {
   enableLoadingPhrases?: boolean;
@@ -268,6 +239,7 @@ export interface BugCommandSettings {
 }
 
 export interface ChatCompressionSettings {
+  contextPercentageThreshold?: number;
   /**
    * Estimated tokens for a single inline image / document part when
    * apportioning chars across history in `findCompressSplitPoint`.
@@ -303,73 +275,6 @@ export interface TelemetrySettings {
   logPrompts?: boolean;
   includeSensitiveSpanAttributes?: boolean;
   outfile?: string;
-  /**
-   * Static resource attributes attached to every span/log/metric the SDK
-   * exports (OTLP or file outfile — they share the same Resource).
-   * Merged with `OTEL_RESOURCE_ATTRIBUTES`; settings win on key conflict.
-   * Reserved keys (`service.version`, `session.id`) are dropped with a
-   * `diag.warn`.
-   */
-  resourceAttributes?: Record<string, string>;
-  /** Per-signal cardinality controls. */
-  metrics?: TelemetryMetricsSettings;
-  /**
-   * Human-readable diagnostics produced while resolving
-   * `resourceAttributes` (drops, coercions, reserved-key strips).
-   * Populated by `resolveTelemetrySettings()`; the SDK emits a one-time
-   * console summary at startup when this is non-empty so users notice
-   * silent drops without scanning the OTel debug log.
-   *
-   * Not a user-settable field — operators should leave it unset.
-   */
-  resourceAttributeWarnings?: string[];
-}
-
-export interface TelemetryMetricsSettings {
-  /**
-   * Include `session.id` on every metric data point. Default: false.
-   *
-   * WARNING: each CLI session creates a new value, causing unbounded
-   * metric time-series fan-out at the backend. Only enable for
-   * short-term debugging — spans and logs still carry session.id.
-   */
-  includeSessionId?: boolean;
-}
-
-/**
- * Security-relevant settings controlling what client-side correlation
- * data qwen-code writes into outbound LLM API requests.
- *
- * **Why this is a separate namespace from `telemetry.*`:** telemetry
- * controls data flow into the user's OWN observability backend (OTLP
- * collector / file outfile). The settings here control data flow OUT of
- * the qwen-code process and INTO third-party LLM provider request
- * streams (DashScope, OpenAI, Anthropic, etc.). Different recipients =
- * different consent decision, so a different settings tree. See PR
- * #4390 review (LaZzyMan) for the framing rationale.
- *
- * All values default to off / no propagation. Operators who want to
- * propagate trace context for server-side trace stitching (e.g. ARMS
- * Tracing + DashScope) opt in explicitly.
- */
-export interface OutboundCorrelationSettings {
-  /**
-   * Inject W3C `traceparent` header on outbound HTTP requests
-   * originated by undici / global `fetch` (LLM SDK calls, MCP
-   * StreamableHTTP clients, WebFetch tool, etc.). Default: `false`.
-   *
-   * When `false`, the SDK is configured with a no-op
-   * `TextMapPropagator` so trace context stays internal to the user's
-   * OTLP collector (operator still gets client HTTP spans, but the
-   * trace id is not written onto third-party request streams).
-   *
-   * When `true`, the OTel default W3C composite propagator
-   * (`tracecontext` + `baggage`) is installed and `traceparent` is
-   * written on every outbound `fetch`. Useful when the LLM provider
-   * also reports into the operator's OTel collector — e.g. ARMS
-   * Tracing + DashScope — for cross-process trace stitching.
-   */
-  propagateTraceContext?: boolean;
 }
 
 export interface OutputSettings {
@@ -583,8 +488,6 @@ export interface ConfigParameters {
     allow?: string[];
     ask?: string[];
     deny?: string[];
-    /** Settings consumed by the AUTO approval mode classifier. */
-    autoMode?: AutoModeSettings;
   };
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
@@ -600,7 +503,6 @@ export interface ConfigParameters {
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
-  outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
   /**
@@ -629,19 +531,6 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
-  /**
-   * Wall-clock budget for an unattended run, in seconds. `-1` (default)
-   * means no limit. Enforced by the CLI's non-interactive run loop —
-   * see `RunBudgetEnforcer` in `packages/cli/src/utils/runBudget.ts`.
-   * Issue: QwenLM/qwen-code#4103.
-   */
-  maxWallTimeSeconds?: number;
-  /**
-   * Cumulative tool-call budget across the entire run. `-1` means no
-   * limit. Counts every `executeToolCall` invocation (incl. failed
-   * tools, since the model is still consuming tokens reading the error).
-   */
-  maxToolCalls?: number;
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
@@ -811,12 +700,27 @@ export interface ConfigInitializeOptions {
    * need config services (hooks, tools, MCP) before a real session exists.
    */
   skipGeminiInitialization?: boolean;
+  /**
+   * F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): skip MCP
+   * discovery entirely (both inline tool-registry-time discovery AND
+   * the post-`createToolRegistry` background `startMcpDiscoveryInBackground`).
+   * The bootstrap config in ACP daemon mode uses this to AVOID spawning
+   * MCP servers under the bootstrap's pool-less McpClientManager.
+   * Pre-fix every stdio MCP server was spawned twice — once by the
+   * bootstrap (legacy per-server path, invisible to pool / budget /
+   * drainAll / pid-sweep) and once by each session's pool-routed
+   * discovery — silently violating the workspace budget contract.
+   * The bootstrap's MCP clients were never actually used to serve a
+   * session (each session builds its own per-session Config and runs
+   * its own discovery), so skipping at the bootstrap layer is safe
+   * AND closes the 2N subprocess leak.
+   */
+  skipMcpDiscovery?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
   ToolNames.READ_FILE,
   ToolNames.EDIT,
-  ToolNames.NOTEBOOK_EDIT,
   ToolNames.SHELL,
 ];
 
@@ -878,11 +782,18 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
-  private readonly disabledTools: ReadonlySet<string>;
+  // #4282 fold-in 5 (Codex P2-2). `disabledTools` is set at construction
+  // time but can be re-synced by the daemon mutation surface
+  // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
+  // `discoverMcpToolsForServer` sees the latest disabled set instead
+  // of the bootstrap snapshot. Stays `ReadonlySet` for callers; the
+  // setter swaps the reference rather than mutating in place so any
+  // captured reference (e.g. by ToolRegistry mid-iteration) remains
+  // self-consistent.
+  private disabledTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
-  private readonly permissionsAutoMode: AutoModeSettings;
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
@@ -900,10 +811,8 @@ export class Config {
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
-  private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
-  private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
@@ -934,8 +843,6 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
-  private readonly maxWallTimeSeconds: number;
-  private readonly maxToolCalls: number;
   private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
@@ -1042,7 +949,6 @@ export class Config {
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
-    this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -1070,13 +976,6 @@ export class Config {
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
       outfile: params.telemetry?.outfile,
-      resourceAttributes: params.telemetry?.resourceAttributes,
-      metrics: params.telemetry?.metrics,
-      resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
-    };
-    this.outboundCorrelationSettings = {
-      propagateTraceContext:
-        params.outboundCorrelation?.propagateTraceContext ?? false,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
@@ -1103,8 +1002,6 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
-    this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
-    this.maxToolCalls = params.maxToolCalls ?? -1;
     this.clearContextOnIdle = {
       toolResultsThresholdMinutes:
         params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
@@ -1130,24 +1027,6 @@ export class Config {
     this.loadMemoryFromIncludeDirectories =
       params.loadMemoryFromIncludeDirectories ?? false;
     this.importFormat = params.importFormat ?? 'tree';
-    // Auto-compaction threshold moved to built-in constants (computeThresholds
-    // in chatCompressionService.ts). The old `contextPercentageThreshold`
-    // field is deprecated; if present in user settings, emit a one-time
-    // warning and ignore the value.
-    if (
-      params.chatCompression &&
-      typeof (params.chatCompression as Record<string, unknown>)[
-        'contextPercentageThreshold'
-      ] !== 'undefined'
-    ) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        '[qwen-code] chatCompression.contextPercentageThreshold has been removed ' +
-          'and is now controlled by built-in thresholds. Setting will be ignored. ' +
-          'Remove this key from your settings.json to silence this warning; ' +
-          'see docs/users/configuration/settings.md for current compaction behavior.',
-      );
-    }
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
@@ -1470,7 +1349,14 @@ export class Config {
     // an escape hatch.
     const legacyBlockingMcp =
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
-    const skipInlineMcpDiscovery = this.getBareMode() || !legacyBlockingMcp;
+    // W119: also force the inline-discovery skip when the caller opts
+    // out of MCP entirely (ACP bootstrap path) — otherwise the legacy
+    // blocking mode would still spawn MCP servers via the tool-registry
+    // construction path.
+    const skipInlineMcpDiscovery =
+      this.getBareMode() ||
+      !legacyBlockingMcp ||
+      options?.skipMcpDiscovery === true;
 
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
@@ -1503,7 +1389,15 @@ export class Config {
     // `setTools()` (~16ms / one frame) so the model sees the new tools
     // shortly after each server settles. See `AppContainer.tsx`'s
     // `mcp-client-update` subscriber.
-    if (skipInlineMcpDiscovery && !this.getBareMode()) {
+    //
+    // W119: also gated on `!options?.skipMcpDiscovery` — the ACP
+    // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
+    // config doesn't run discovery under its pool-less manager.
+    if (
+      skipInlineMcpDiscovery &&
+      !this.getBareMode() &&
+      !options?.skipMcpDiscovery
+    ) {
       this.startMcpDiscoveryInBackground();
     }
 
@@ -2056,35 +1950,52 @@ export class Config {
   }
 
   /**
-   * Returns the configured fast model selector when it resolves to an available
-   * model. Bare selectors stay bare and authType-qualified selectors keep their
-   * authType prefix so selector-aware runtime paths can route cross-auth calls.
+   * Returns the fast model if one is configured and valid for the current auth
+   * type, otherwise returns undefined. Direct runtime paths use this as a
+   * cheaper alternative to the main session model, so it intentionally stays
+   * current-auth-only.
    */
   getFastModel(): string | undefined {
+    const authType =
+      this.contentGeneratorConfig?.authType ??
+      this.modelsConfig.getCurrentAuthType();
+    if (!authType) return undefined;
+    const selector = this.resolveFastModelSelector();
+    if (!selector) return undefined;
+    if (selector.authType && selector.authType !== authType) return undefined;
+
+    const available = this.getAllConfiguredModels([authType]);
+    return available.some((m) => m.id === selector.modelId)
+      ? selector.modelId
+      : undefined;
+  }
+
+  /**
+   * Returns the fast model for side-query paths. Unlike {@link getFastModel},
+   * this can return an authType-qualified selector because BaseLlmClient can
+   * route a single request through a provider different from the main session.
+   */
+  getFastModelForSideQuery(): string | undefined {
     const selector = this.resolveFastModelSelector();
     if (!selector) return undefined;
 
-    const available = selector.authType
-      ? this.getAllConfiguredModels([selector.authType])
-      : this.getAllConfiguredModels();
-    if (!available.some((m) => m.id === selector.modelId)) {
-      return undefined;
+    if (selector.authType) {
+      const available = this.getAllConfiguredModels([selector.authType]);
+      return available.some((m) => m.id === selector.modelId)
+        ? `${selector.authType}:${selector.modelId}`
+        : undefined;
     }
 
-    const rawSelector = resolveModelId(this.fastModel);
-    return rawSelector?.authType
-      ? `${rawSelector.authType}:${selector.modelId}`
-      : selector.modelId;
+    const available = this.getAllConfiguredModels();
+    return available.some((m) => m.id === selector.modelId)
+      ? selector.modelId
+      : undefined;
   }
 
   private resolveFastModelSelector() {
     if (!this.fastModel) return undefined;
     try {
-      return resolveModelId(this.fastModel, {
-        currentAuthType: this.getContentGeneratorConfig()?.authType,
-        getAvailableModels: (authTypes) =>
-          this.getAllConfiguredModels(authTypes),
-      });
+      return resolveModelId(this.fastModel);
     } catch {
       return undefined;
     }
@@ -2238,14 +2149,6 @@ export class Config {
 
   getMaxSessionTurns(): number {
     return this.maxSessionTurns;
-  }
-
-  getMaxWallTimeSeconds(): number {
-    return this.maxWallTimeSeconds;
-  }
-
-  getMaxToolCalls(): number {
-    return this.maxToolCalls;
   }
 
   getClearContextOnIdle(): ClearContextOnIdleSettings {
@@ -2432,12 +2335,45 @@ export class Config {
   /**
    * Returns the read-only set of tool names hidden from this Config's
    * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
-   * `ToolRegistry.registerFactory` to skip registration. Toggling at
-   * runtime requires re-spawning the ACP child (the set is frozen at
-   * construction time). See `disabledTools` in ConfigParameters.
+   * `ToolRegistry.registerFactory` to skip registration.
+   *
+   * Mutability semantics (#4282 fold-in 5 P2-2): the snapshot is
+   * mutable via `setDisabledTools()` so the daemon's
+   * `setWorkspaceToolEnabled` route can re-sync the set after a
+   * `tools.disabled` settings write — without that sync, the
+   * documented "toggle + restart" workflow would re-register the
+   * just-disabled MCP tool against the bootstrap snapshot.
+   *
+   * Already-registered tools are NOT retroactively unregistered:
+   * `ToolRegistry` consults the set at registration time only, so a
+   * mid-session disable only takes effect on the next `registerTool`
+   * call (next ACP child spawn, MCP rediscover, etc.). This matches
+   * the documented "toggling does not unregister live tools"
+   * contract.
+   *
+   * See `disabledTools` in ConfigParameters and `setDisabledTools`
+   * for the runtime sync entry point.
    */
   getDisabledTools(): ReadonlySet<string> {
     return this.disabledTools;
+  }
+
+  /**
+   * #4282 fold-in 5 (Codex P2-2). Replace the in-process `disabledTools`
+   * snapshot with a fresh set sourced from the workspace settings.
+   * Intended for the `qwen serve` mutation surface
+   * (`setWorkspaceToolEnabled` → ACP `qwen/control/...` → here): the
+   * settings file is the source of truth, and this setter keeps the
+   * in-memory Config in sync so a subsequent MCP rediscovery / next
+   * tool registration honors the just-toggled value.
+   *
+   * Already-registered tools are NOT retroactively unregistered —
+   * `ToolRegistry` consults the set at registration time only, which
+   * matches the documented "toggling does not unregister live tools"
+   * contract.
+   */
+  setDisabledTools(disabled: ReadonlySet<string>): void {
+    this.disabledTools = new Set(disabled);
   }
 
   getToolCallCommand(): string | undefined {
@@ -2446,6 +2382,32 @@ export class Config {
 
   getMcpServerCommand(): string | undefined {
     return this.mcpServerCommand;
+  }
+
+  /**
+   * F2 (#4175 commit 4): optional workspace-shared MCP transport pool
+   * injected by the daemon-mode `QwenAgent`. When set, the wrapping
+   * `ToolRegistry` threads it into `McpClientManager`, which delegates
+   * non-SDK MCP server discovery to the pool instead of spawning its
+   * own per-session `McpClient`. Standalone `qwen` (non-daemon) leaves
+   * this `undefined` and the manager keeps its pre-F2 behavior.
+   *
+   * Eagerly instantiated by `QwenAgent` (per V21-13 Q6 resolved); the
+   * pool itself is lazy w.r.t. actual MCP work — it spawns nothing
+   * until the first `acquire()` from a session.
+   */
+  private mcpTransportPool?: import('../tools/mcp-transport-pool.js').McpTransportPool;
+
+  setMcpTransportPool(
+    pool: import('../tools/mcp-transport-pool.js').McpTransportPool | undefined,
+  ): void {
+    this.mcpTransportPool = pool;
+  }
+
+  getMcpTransportPool():
+    | import('../tools/mcp-transport-pool.js').McpTransportPool
+    | undefined {
+    return this.mcpTransportPool;
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
@@ -2651,32 +2613,6 @@ export class Config {
   }
 
   /**
-   * Returns the AUTO approval mode classifier settings (hints + environment).
-   * Returns an empty object when no settings are configured.
-   */
-  getAutoModeSettings(): AutoModeSettings {
-    return this.permissionsAutoMode;
-  }
-
-  /**
-   * Returns the AUTO mode denialTracking state for the current session.
-   * Used by the scheduler to decide whether to fall back from classifier
-   * evaluation to manual approval. Session-scoped, never persisted.
-   */
-  getAutoModeDenialState(): AutoModeDenialState {
-    return this.autoModeDenialState;
-  }
-
-  /**
-   * Replace the AUTO mode denialTracking state. Caller produces the new
-   * state via one of the pure transitions in `permissions/denialTracking.ts`
-   * (recordAllow / recordBlock / recordUnavailable / recordFallback*).
-   */
-  setAutoModeDenialState(state: AutoModeDenialState): void {
-    this.autoModeDenialState = state;
-  }
-
-  /**
    * Returns the approval mode that was active before entering plan mode.
    * Falls back to DEFAULT if no pre-plan mode was recorded.
    */
@@ -2702,25 +2638,6 @@ export class Config {
       this.approvalMode === ApprovalMode.PLAN
     ) {
       this.prePlanMode = undefined;
-    }
-    // Strip over-broad allow rules (Bash interpreter wildcards, any Agent /
-    // Skill allow) on AUTO entry; restore them on AUTO exit. Settings on
-    // disk are NEVER touched — this is a runtime-only adjustment of the
-    // active PermissionManager rule set. The PermissionManager is `null`
-    // until initialize() is called, so skip the hook on early-startup
-    // mode changes (the strip will happen via initialize for AUTO-default
-    // sessions).
-    const fromMode = this.approvalMode;
-    if (this.permissionManager) {
-      if (mode === ApprovalMode.AUTO && fromMode !== ApprovalMode.AUTO) {
-        this.permissionManager.stripDangerousRulesForAutoMode();
-      } else if (fromMode === ApprovalMode.AUTO && mode !== ApprovalMode.AUTO) {
-        this.permissionManager.restoreDangerousRules();
-      }
-    }
-    // Any deliberate mode change invalidates the AUTO denialTracking signal.
-    if (fromMode !== mode) {
-      this.autoModeDenialState = resetDenialState();
     }
     this.approvalMode = mode;
   }
@@ -2923,27 +2840,6 @@ export class Config {
 
   getTelemetryTarget(): TelemetryTarget {
     return this.telemetrySettings.target ?? DEFAULT_TELEMETRY_TARGET;
-  }
-
-  getTelemetryResourceAttributes(): Record<string, string> {
-    return this.telemetrySettings.resourceAttributes ?? {};
-  }
-
-  getTelemetryMetricsIncludeSessionId(): boolean {
-    return this.telemetrySettings.metrics?.includeSessionId ?? false;
-  }
-
-  getTelemetryResourceAttributeWarnings(): readonly string[] {
-    return this.telemetrySettings.resourceAttributeWarnings ?? [];
-  }
-
-  /**
-   * Whether to inject W3C `traceparent` on outbound `fetch` requests
-   * (LLM SDKs, MCP, WebFetch, etc.). Default false — see
-   * `OutboundCorrelationSettings` for rationale.
-   */
-  getOutboundCorrelationPropagateTraceContext(): boolean {
-    return this.outboundCorrelationSettings.propagateTraceContext ?? false;
   }
 
   getTelemetryOutfile(): string | undefined {
@@ -3733,10 +3629,6 @@ export class Config {
         const { EditTool } = await import('../tools/edit.js');
         return new EditTool(this);
       });
-      await registerLazy(ToolNames.NOTEBOOK_EDIT, async () => {
-        const { NotebookEditTool } = await import('../tools/notebook-edit.js');
-        return new NotebookEditTool(this);
-      });
       await registerLazy(ToolNames.SHELL, async () => {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
@@ -3820,10 +3712,6 @@ export class Config {
     await registerLazy(ToolNames.EDIT, async () => {
       const { EditTool } = await import('../tools/edit.js');
       return new EditTool(this);
-    });
-    await registerLazy(ToolNames.NOTEBOOK_EDIT, async () => {
-      const { NotebookEditTool } = await import('../tools/notebook-edit.js');
-      return new NotebookEditTool(this);
     });
     await registerLazy(ToolNames.WRITE_FILE, async () => {
       const { WriteFileTool } = await import('../tools/write-file.js');

@@ -234,34 +234,6 @@ export abstract class DeclarativeTool<
   }
 
   /**
-   * Projects tool params for the AUTO approval mode classifier.
-   *
-   * Tools with security-relevant parameters (file paths, shell commands,
-   * URLs) should override this to redact voluminous or sensitive fields
-   * (full content, secrets) while exposing enough for the classifier to
-   * judge safety.
-   *
-   * Returns:
-   *   - object: projected params to send to the classifier
-   *   - empty string: signals "no security relevance" — the classifier
-   *     transcript will record only the tool name
-   *   - undefined: fall back to raw params (only safe when the tool is
-   *     known to have no sensitive params)
-   *
-   * Default is the empty-string sentinel — fail-closed: a third-party
-   * MCP tool (or any tool that has not opted in) does not leak its raw
-   * parameters (potentially containing API keys, tokens, file contents)
-   * into the classifier LLM prompt. Tools that want their args inspected
-   * by the classifier for safety judgement should override this and
-   * return an object with only the security-relevant fields.
-   */
-  toAutoClassifierInput(
-    _params: TParams,
-  ): Record<string, unknown> | string | undefined {
-    return '';
-  }
-
-  /**
    * Validates the raw tool parameters.
    * Subclasses should override this to add custom validation logic
    * beyond the JSON schema check.

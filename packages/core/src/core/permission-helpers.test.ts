@@ -74,19 +74,4 @@ describe('buildPermissionCheckContext', () => {
       command: `/bin/bash -c 'tail -f ./app.log' && rm -rf /tmp/owned`,
     });
   });
-
-  it('uses notebook_path as the file path for notebook_edit', () => {
-    expect(
-      buildPermissionCheckContext(
-        'notebook_edit',
-        {
-          notebook_path: '/project/analysis.ipynb',
-        },
-        '/project',
-      ),
-    ).toMatchObject({
-      toolName: 'notebook_edit',
-      filePath: '/project/analysis.ipynb',
-    });
-  });
 });

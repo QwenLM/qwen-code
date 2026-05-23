@@ -5,7 +5,14 @@
  */
 
 import { execSync } from 'node:child_process';
-import { rmSync, mkdirSync, existsSync, cpSync } from 'node:fs';
+import {
+  rmSync,
+  mkdirSync,
+  existsSync,
+  cpSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
@@ -13,6 +20,7 @@ import esbuild from 'esbuild';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const rootDir = join(__dirname, '..');
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 100 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
@@ -81,6 +89,42 @@ await esbuild.build({
   treeShaking: true,
 });
 
+await esbuild.build({
+  entryPoints: [join(rootDir, 'src', 'daemon', 'index.ts')],
+  bundle: true,
+  format: 'esm',
+  platform: 'browser',
+  target: 'es2022',
+  outfile: join(rootDir, 'dist', 'daemon', 'index.js'),
+  sourcemap: false,
+  minify: true,
+  minifyWhitespace: true,
+  minifyIdentifiers: true,
+  minifySyntax: true,
+  legalComments: 'none',
+  keepNames: false,
+  treeShaking: true,
+});
+
+assertBrowserSafeBundle(join(rootDir, 'dist', 'daemon', 'index.js'));
+
+await esbuild.build({
+  entryPoints: [join(rootDir, 'src', 'daemon', 'index.ts')],
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node22',
+  outfile: join(rootDir, 'dist', 'daemon', 'index.cjs'),
+  sourcemap: false,
+  minify: true,
+  minifyWhitespace: true,
+  minifyIdentifiers: true,
+  minifySyntax: true,
+  legalComments: 'none',
+  keepNames: false,
+  treeShaking: true,
+});
+
 // Copy LICENSE from root directory to dist
 const licenseSource = join(rootDir, '..', '..', 'LICENSE');
 const licenseTarget = join(rootDir, 'dist', 'LICENSE');
@@ -89,5 +133,52 @@ if (existsSync(licenseSource)) {
     cpSync(licenseSource, licenseTarget);
   } catch (error) {
     console.warn('Could not copy LICENSE:', error.message);
+  }
+}
+
+function assertBrowserSafeBundle(filePath) {
+  const size = statSync(filePath).size;
+  if (size > MAX_DAEMON_BROWSER_BUNDLE_BYTES) {
+    throw new Error(
+      `Browser daemon SDK bundle is ${size} bytes; expected <= ${MAX_DAEMON_BROWSER_BUNDLE_BYTES}`,
+    );
+  }
+
+  const contents = readFileSync(filePath, 'utf8');
+  if (contents.includes('node:')) {
+    throw new Error('Browser daemon SDK bundle contains Node-only token node:');
+  }
+  const forbiddenBuiltins = [
+    'assert',
+    'buffer',
+    'child_process',
+    'cluster',
+    'crypto',
+    'fs',
+    'http',
+    'https',
+    'module',
+    'net',
+    'os',
+    'path',
+    'perf_hooks',
+    'process',
+    'readline',
+    'stream',
+    'tls',
+    'tty',
+    'url',
+    'util',
+    'worker_threads',
+    'zlib',
+  ];
+  const requirePattern = new RegExp(
+    `require\\((["'])(${forbiddenBuiltins.join('|')})(?:/[^"']*)?\\1\\)`,
+  );
+  const found = contents.match(requirePattern);
+  if (found) {
+    throw new Error(
+      `Browser daemon SDK bundle contains Node-only token ${found[0]}`,
+    );
   }
 }

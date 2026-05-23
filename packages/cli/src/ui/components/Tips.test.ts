@@ -40,14 +40,6 @@ function createContext(overrides: Partial<TipContext> = {}): TipContext {
     sessionPromptCount: 0,
     sessionCount: 1,
     platform: 'linux',
-    // Matches computeThresholds(1_000_000) — kept inline so this test stays
-    // hermetic to the registry's tier logic rather than re-deriving constants.
-    thresholds: {
-      warn: 947_000,
-      auto: 967_000,
-      hard: 977_000,
-      effectiveWindow: 980_000,
-    },
     ...overrides,
   };
 }
@@ -67,8 +59,7 @@ describe('selectTip', () => {
 
   it('returns context-high tip when context usage is high', () => {
     const ctx = createContext({
-      // Between auto (967K) and hard (977K) — context-high band.
-      lastPromptTokenCount: 970_000,
+      lastPromptTokenCount: 850_000,
       contextWindowSize: 1_000_000,
       sessionPromptCount: 10,
     });
@@ -80,8 +71,7 @@ describe('selectTip', () => {
 
   it('returns context-critical tip when context usage is critical', () => {
     const ctx = createContext({
-      // At/above hard (977K) — context-critical band.
-      lastPromptTokenCount: 980_000,
+      lastPromptTokenCount: 960_000,
       contextWindowSize: 1_000_000,
       sessionPromptCount: 10,
     });
@@ -93,8 +83,7 @@ describe('selectTip', () => {
 
   it('returns compress-intro tip when context is moderate and session is long', () => {
     const ctx = createContext({
-      // Between warn (947K) and auto (967K) — compress-intro band.
-      lastPromptTokenCount: 955_000,
+      lastPromptTokenCount: 550_000,
       contextWindowSize: 1_000_000,
       sessionPromptCount: 10,
     });
@@ -117,7 +106,7 @@ describe('selectTip', () => {
 
   it('respects cooldown — does not re-show same tip within cooldown period', () => {
     const ctx = createContext({
-      lastPromptTokenCount: 970_000,
+      lastPromptTokenCount: 850_000,
       contextWindowSize: 1_000_000,
       sessionPromptCount: 10,
     });

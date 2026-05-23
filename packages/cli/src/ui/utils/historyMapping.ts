@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { HistoryItem, HistoryItemUser } from '../types.js';
+import type { HistoryItem } from '../types.js';
 import type { Content } from '@google/genai';
 import { STARTUP_CONTEXT_MODEL_ACK } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
@@ -14,14 +14,8 @@ import { isSlashCommand } from './commandUtils.js';
  * sent to the model, as opposed to a slash-command invocation (`/help`,
  * `/stats`, …) which is stored with `type: 'user'` in the UI but never
  * reaches the API history or `turnParentUuids`.
- *
- * Typed as a type predicate so callers can drop their `as HistoryItemUser`
- * casts — a regression that loosened either side of the narrowing would now
- * be caught by tsc instead of silently bypassing it.
  */
-export function isRealUserTurn(
-  item: HistoryItem,
-): item is HistoryItem & HistoryItemUser {
+export function isRealUserTurn(item: HistoryItem): boolean {
   if (item.type !== 'user' || !item.text) return false;
   return !isSlashCommand(item.text) && !item.text.startsWith('?');
 }

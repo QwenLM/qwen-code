@@ -19,7 +19,22 @@ import { resolve } from 'path';
  * - TypeScript declarations: dist/index.d.ts
  * - CSS: dist/styles.css (optional styles)
  */
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  resolve:
+    command === 'serve'
+      ? {
+          alias: {
+            '@qwen-code/sdk/daemon': resolve(
+              __dirname,
+              '../sdk-typescript/src/daemon/index.ts',
+            ),
+            '@qwen-code/sdk': resolve(
+              __dirname,
+              '../sdk-typescript/src/index.ts',
+            ),
+          },
+        }
+      : undefined,
   plugins: [
     react(),
     dts({
@@ -42,9 +57,17 @@ export default defineConfig({
       },
     },
     rollupOptions: {
-      external: ['react', 'react-dom', 'react/jsx-runtime'],
+      external: [
+        '@qwen-code/sdk',
+        '@qwen-code/sdk/daemon',
+        'react',
+        'react-dom',
+        'react/jsx-runtime',
+      ],
       output: {
         globals: {
+          '@qwen-code/sdk': 'QwenCodeSdk',
+          '@qwen-code/sdk/daemon': 'QwenCodeSdkDaemon',
           react: 'React',
           'react-dom': 'ReactDOM',
           'react/jsx-runtime': 'ReactJSXRuntime',
@@ -56,4 +79,4 @@ export default defineConfig({
     minify: false,
     cssCodeSplit: false,
   },
-});
+}));

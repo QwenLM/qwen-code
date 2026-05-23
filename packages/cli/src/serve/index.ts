@@ -88,8 +88,19 @@ export {
 export {
   createHttpAcpBridge,
   defaultSpawnChannelFactory,
+  // #4297 fold-in 1 (16:32:44-round S2): export every typed error
+  // class that `sendBridgeError` matches via `instanceof`. External
+  // embeds that want to recognize these errors (parallel to how
+  // they already match `WorkspaceInitConflictError` /
+  // `SessionNotFoundError`) need them on the public barrel; without
+  // this they have to deep-import `./httpAcpBridge.js`.
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
   SessionNotFoundError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
+  WorkspaceInitRaceError,
   type AcpChannel,
   type BridgeOptions,
   type BridgeSession,

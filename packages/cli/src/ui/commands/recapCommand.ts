@@ -63,12 +63,12 @@ export const recapCommand: SlashCommand = {
     if (context.executionMode === 'interactive') {
       const item: HistoryItemAwayRecap = {
         type: 'away_recap',
-        text: recap,
+        text: recap.text,
       };
       context.ui.addItem(item, Date.now());
       return;
     }
 
-    return { type: 'message', messageType: 'info', content: recap };
+    return { type: 'message', messageType: 'info', content: recap.text };
   },
 };

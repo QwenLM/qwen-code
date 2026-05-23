@@ -143,15 +143,6 @@ describe('useAtCompletion', () => {
         'dir/',
         'file.txt',
       ]);
-      // Verify isDirectory flag
-      const dirSuggestion = result.current.suggestions.find(
-        (s) => s.value === 'dir/',
-      );
-      const fileSuggestion = result.current.suggestions.find(
-        (s) => s.value === 'file.txt',
-      );
-      expect(dirSuggestion?.isDirectory).toBe(true);
-      expect(fileSuggestion?.isDirectory).toBe(false);
     });
   });
 

@@ -7,10 +7,12 @@
 /**
  * `PermissionMediator` — type-only interface contract for daemon
  * permission flow. **No implementation lives here.** Permission voting
- * still runs inside `BridgeClient.requestPermission` /
- * `respondToPermission` in `packages/cli/src/serve/httpAcpBridge.ts`,
- * hard-coded to `first-responder`. PR 24 (#4175 Wave 5) will move that
- * code behind this interface and add the other three policies.
+ * still runs inside `BridgeClient.requestPermission`
+ * (`@qwen-code/acp-bridge/bridgeClient` after #4175 F1 step 2) and
+ * `respondToPermission` (inside `createHttpAcpBridge` factory closure
+ * at `@qwen-code/acp-bridge/bridge` after F1 step 3), hard-coded to
+ * `first-responder`. F3 PR 24 will move that code behind this
+ * interface and add the other three policies.
  *
  * The four policies are ordered from cheapest to strongest:
  *
@@ -30,8 +32,9 @@
  *   Use case: workstations where remote control should never grant
  *   privilege escalation.
  *
- * See `httpAcpBridge.ts:1096-1106` for the original FIXME that
- * scoped this contract.
+ * See `bridgeClient.ts BridgeClient.requestPermission` for the
+ * current first-responder implementation; the `FIXME(stage-1.5,
+ * chiga0 finding 3)` block above that method scoped this contract.
  */
 export type PermissionPolicy =
   | 'first-responder'
@@ -42,8 +45,8 @@ export type PermissionPolicy =
 /**
  * One pending permission tracked by a `PermissionMediator`. The
  * shape mirrors the current `PendingPermission` record in
- * `httpAcpBridge.ts:1003` so PR 24's lift is a structural rename
- * rather than a redesign.
+ * `@qwen-code/acp-bridge/bridgeClient` (lifted in #4175 F1 step 2)
+ * so F3 PR 24's lift is a structural rename rather than a redesign.
  */
 export interface PermissionRequestRecord {
   /** ACP `RequestPermission` request id, unique per session. */
@@ -105,6 +108,19 @@ export type PermissionVoteOutcome =
   | { readonly kind: 'already_resolved'; readonly resolvedOptionId: string }
   | {
       readonly kind: 'forbidden';
+      /**
+       * `designated_mismatch` fires for both:
+       *   - `designated` policy: voter `clientId` is not the prompt
+       *     `originatorClientId`.
+       *   - `consensus` policy: voter `clientId` is undefined OR not
+       *     in the issue-time `votersAtIssue` snapshot. Overloaded
+       *     here to keep the contract closed; future versions may
+       *     widen this union with a more specific reason if SDK
+       *     consumers need to distinguish.
+       *
+       * `remote_not_allowed` fires under `local-only` policy when
+       * `vote.fromLoopback === false`.
+       */
       readonly reason: 'designated_mismatch' | 'remote_not_allowed';
     }
   | { readonly kind: 'unknown_request' };

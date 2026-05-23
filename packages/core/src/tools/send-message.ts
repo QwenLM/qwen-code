@@ -12,7 +12,6 @@
  */
 
 import type { Config } from '../config/config.js';
-import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import {
@@ -43,19 +42,6 @@ class SendMessageInvocation extends BaseToolInvocation<
 
   getDescription(): string {
     return `Send message to task ${this.params.task_id}`;
-  }
-
-  /**
-   * Send-message routes free-form text into a running background task,
-   * which will then execute it as a new instruction with full tool
-   * access. Treat it as a privileged sink — the L4 default must not be
-   * 'allow', because that would let the scheduler auto-approve in
-   * AUTO mode (where 'allow' short-circuits the classifier). 'ask' lets
-   * AUTO route through the classifier so the destination task and
-   * message text can be inspected.
-   */
-  override async getDefaultPermission(): Promise<PermissionDecision> {
-    return 'ask';
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
@@ -155,17 +141,5 @@ export class SendMessageTool extends BaseDeclarativeTool<
     params: SendMessageParams,
   ): ToolInvocation<SendMessageParams, ToolResult> {
     return new SendMessageInvocation(this.config, params);
-  }
-
-  /**
-   * Forward both fields verbatim to the classifier — `task_id` identifies
-   * the privileged sink and the `message` itself is the new instruction
-   * the background task will execute, so the classifier needs the full
-   * text to evaluate the action's safety.
-   */
-  override toAutoClassifierInput(
-    params: SendMessageParams,
-  ): Record<string, unknown> {
-    return { task_id: params.task_id, message: params.message };
   }
 }

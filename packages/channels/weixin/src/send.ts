@@ -12,7 +12,7 @@ import {
   closeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { resolve, extname, win32, posix } from 'node:path';
+import { resolve, extname } from 'node:path';
 import { sendMessage, getUploadUrl, uploadToCdn } from './api.js';
 import { MessageType, MessageState, MessageItemType } from './types.js';
 import { encryptAesEcb, computeMd5 } from './media.js';
@@ -44,28 +44,6 @@ export function markdownToPlainText(text: string): string {
 
 const ALLOWED_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024; // 20 MB
-
-function looksLikeWindowsPath(pathValue: string): boolean {
-  return /^[a-zA-Z]:[\\/]/.test(pathValue) || pathValue.startsWith('\\\\');
-}
-
-function normalizeWindowsPath(pathValue: string): string {
-  return pathValue.replace(/\//g, '\\');
-}
-
-function isInsideAllowedDir(realPath: string, allowedDir: string): boolean {
-  const windowsStyle =
-    looksLikeWindowsPath(realPath) || looksLikeWindowsPath(allowedDir);
-  const pathImpl = windowsStyle ? win32 : posix;
-  const from = windowsStyle ? normalizeWindowsPath(allowedDir) : allowedDir;
-  const to = windowsStyle ? normalizeWindowsPath(realPath) : realPath;
-  const relative = pathImpl.relative(from, to);
-
-  return (
-    relative === '' ||
-    (!relative.startsWith('..') && !pathImpl.isAbsolute(relative))
-  );
-}
 
 /** Image magic bytes → MIME type mapping. */
 export function detectImageMime(data: Buffer): string {
@@ -147,7 +125,7 @@ export function validateImagePath(
     ...workspaceDirs.map((d) => realpathSync(resolve(d)) + '/'),
   ];
 
-  if (!ALLOWED_DIRS.some((dir) => isInsideAllowedDir(real, dir))) {
+  if (!ALLOWED_DIRS.some((dir) => real.startsWith(dir))) {
     throw new Error(`Image path outside allowed directories: ${real}`);
   }
 
@@ -253,10 +231,9 @@ export async function sendImage(params: {
   const encrypted = encryptAesEcb(fileBuffer, aesKeyBytes);
   const cdnEncryptParam = await uploadToCdn(uploadParam, filekey, encrypted);
 
-  // Step 4: send message with image_item using CDN's x-encrypted-param.
-  // WeChat image messages expect the AES key as a hex string, with media.aes_key
-  // carrying base64(hex string), not base64(raw bytes).
-  const aesKeyBase64 = Buffer.from(aesKeyHex, 'ascii').toString('base64');
+  // Step 4: send message with image_item using CDN's x-encrypted-param
+  // aes_key: base64(raw 16 bytes) for images per protocol
+  const aesKeyBase64 = aesKeyBytes.toString('base64');
 
   await sendMessage(baseUrl, token, {
     to_user_id: to,
@@ -269,8 +246,6 @@ export async function sendImage(params: {
       {
         type: MessageItemType.IMAGE,
         image_item: {
-          aeskey: aesKeyHex,
-          mid_size: encryptedSize,
           media: {
             encrypt_query_param: cdnEncryptParam,
             aes_key: aesKeyBase64,

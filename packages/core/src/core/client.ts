@@ -30,7 +30,6 @@ const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
 import { GeminiChat } from './geminiChat.js';
-import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   getArenaSystemReminder,
   getCoreSystemPrompt,
@@ -47,7 +46,10 @@ import {
 } from './turn.js';
 
 // Services
-import { COMPRESSION_PRESERVE_THRESHOLD } from '../services/chatCompressionService.js';
+import {
+  COMPRESSION_PRESERVE_THRESHOLD,
+  COMPRESSION_TOKEN_THRESHOLD,
+} from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -151,25 +153,41 @@ function wrapIdeContext(contextText: string): string {
 }
 
 /**
- * Handle for a non-blocking auto-memory recall prefetch.
+ * Resolve the auto-memory recall promise with a hard deadline.
+ * If the recall (model-driven selection + heuristic fallback) does not complete
+ * within the deadline, return an empty result so the main request is not delayed.
  *
- * Lifecycle:
- *  1. Created on UserQuery/Cron — the recall promise fires immediately,
- *     `pendingMemoryPrefetch` is set to this handle.
- *  2. Consumed at either of two opportunistic points: a zero-wait
- *     `settledAt !== null` poll just before the UserQuery main request,
- *     or — if recall hadn't settled yet — on the first ToolResult turn.
- *  3. Aborted-and-discarded by every cleanup path (resetChat,
- *     MaxSessionTurns, etc.) or replaced when a new UserQuery arrives.
+ * The deadline is set slightly above the model-driven selector's own
+ * AbortSignal.timeout (2s) to give the heuristic fallback time to complete,
+ * but low enough that the user does not perceive a delay on every turn.
  */
-type MemoryPrefetchHandle = {
-  promise: Promise<RelevantAutoMemoryPromptResult>;
-  /** Set by promise.finally(). null until the promise settles. */
-  settledAt: number | null;
-  /** True after memory has been injected — prevents double-inject. */
-  consumed: boolean;
-  controller: AbortController;
-};
+async function resolveAutoMemoryWithDeadline(
+  promise: Promise<RelevantAutoMemoryPromptResult> | undefined,
+  onDeadline: () => void,
+): Promise<RelevantAutoMemoryPromptResult> {
+  if (!promise) {
+    return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<RelevantAutoMemoryPromptResult>((resolve) => {
+    timer = setTimeout(() => {
+      try {
+        onDeadline();
+      } finally {
+        resolve(EMPTY_RELEVANT_AUTO_MEMORY_RESULT);
+      }
+    }, 2_500);
+  });
+
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
 
 /** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
 const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -183,14 +201,13 @@ export class GeminiClient {
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
-  private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
-  private pendingMemoryPrefetch: MemoryPrefetchHandle | undefined;
+  private pendingRecallAbortController: AbortController | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
 
@@ -300,71 +317,8 @@ export class GeminiClient {
     return this.getChat().getHistory(curated);
   }
 
-  getHistoryShallow(curated: boolean = false): Content[] {
-    const chat = this.getChat();
-    return chat.getHistoryShallow?.(curated) ?? chat.getHistory(curated);
-  }
-
   getHistoryTail(count: number, curated: boolean = false): Content[] {
     return this.getChat().getHistoryTail(count, curated);
-  }
-
-  private getHistoryTailShallow(
-    count: number,
-    curated: boolean = false,
-  ): Content[] {
-    const chat = this.getChat();
-    return (
-      chat.getHistoryTailShallow?.(count, curated) ??
-      chat.getHistoryTail?.(count, curated) ??
-      chat.getHistory(curated).slice(-count)
-    );
-  }
-
-  private peekLastHistoryEntry(): Content | undefined {
-    const chat = this.getChat();
-    return chat.peekLastHistoryEntry?.() ?? chat.getHistory().at(-1);
-  }
-
-  private getHistoryLength(): number {
-    const chat = this.getChat();
-    return chat.getHistoryLength?.() ?? chat.getHistory().length;
-  }
-
-  private getLastModelMessageText(): string | undefined {
-    const chat = this.getChat();
-    if (chat.getLastModelMessageText) {
-      return chat.getLastModelMessageText();
-    }
-    const history = chat.getHistoryShallow?.() ?? chat.getHistory();
-    for (let i = history.length - 1; i >= 0; i--) {
-      const message = history[i];
-      if (message?.role !== 'model') continue;
-      const text =
-        message.parts
-          ?.filter(
-            (part): part is { text: string } => typeof part.text === 'string',
-          )
-          .map((part) => part.text)
-          .join('') ?? '';
-      return text || undefined;
-    }
-    return undefined;
-  }
-
-  /**
-   * Walk-only accessor for the set of `functionResponse.id` strings in
-   * raw history. Callers that only need the dedup id set (notably
-   * `useGeminiStream.handleCompletedTools`) MUST prefer this over
-   * {@link getHistory}, which deep-clones the entire conversation via
-   * `structuredClone` on every call. On long sessions with sizable
-   * tool outputs the clone is a multi-millisecond hit on the React UI
-   * thread; running it on every tool-completion batch caused visible
-   * frame drops during streaming. See
-   * `GeminiChat.getHistoryFunctionResponseIds` for the implementation.
-   */
-  getHistoryFunctionResponseIds(): Set<string> {
-    return this.getChat().getHistoryFunctionResponseIds();
   }
 
   /**
@@ -404,62 +358,6 @@ export class GeminiClient {
     // entirely or send only a diff against a now-removed baseline. Match
     // the invalidation `setHistory()` / `truncateHistory()` already do.
     this.forceFullIdeContext = true;
-  }
-
-  /**
-   * Synthesize a `functionResponse` for every dangling `model[functionCall]`
-   * in chat history whose corresponding tool_result never landed. Inverse of
-   * {@link stripOrphanedUserEntriesFromHistory}, which only handles trailing
-   * `user` entries.
-   *
-   * This `GeminiClient` method is the resume-path entry point — called once
-   * from {@link startChat} after the transcript loads, covering `--resume`
-   * of a session that crashed between a partial-tool_use push and the
-   * tool's eventual completion.
-   *
-   * The other two coverage points (Retry submit path after
-   * `stripOrphanedUserEntriesFromHistory`, and the defensive pass at the
-   * start of every UserQuery / Cron send) live one layer down inside
-   * `GeminiChat.sendMessageStream` and call the standalone
-   * `repairOrphanedToolUseTurns(history)` function directly — they don't
-   * route through this wrapper. Anyone tracing the repair-pass coupling
-   * between the client and chat layers should follow that path
-   * separately rather than expect everything to funnel through here.
-   *
-   * Synthesizes an `error` `functionResponse`. The React tool scheduler
-   * (`useGeminiStream.handleCompletedTools`) MUST dedupe by `callId` against
-   * the live history before submitting its own `tool_result` — otherwise a
-   * late real result lands as a second `user[tool_result]` block (orphan
-   * because the synthetic already consumed the matching `tool_use`).
-   */
-  repairOrphanedToolUseTurnsInHistory(reason?: string): {
-    injected: Array<{ callId: string; name: string }>;
-    droppedDuplicates: Array<{ callId: string; name: string }>;
-  } {
-    const result = this.getChat().repairOrphanedToolUseTurns(reason);
-    if (result.injected.length > 0) {
-      debugLogger.warn(
-        `[REPAIR] Synthesized ${result.injected.length} functionResponse(s) ` +
-          `for dangling tool_use(s): ${result.injected
-            .map((e) => `${e.name}(${e.callId})`)
-            .join(', ')}`,
-      );
-    }
-    if (result.droppedDuplicates.length > 0) {
-      // Surface the duplicate-cleanup pass so investigators tracing
-      // a dedup-drop log have a breadcrumb pointing back to the
-      // repair function. Without this a duplicate-only repair (no
-      // synthesis, no hoist) leaves zero diagnostic trail and a
-      // future callId-collision bug would silently delete the
-      // wrong fr.
-      debugLogger.warn(
-        `[REPAIR] Dropped ${result.droppedDuplicates.length} duplicate ` +
-          `functionResponse(s) for callId(s): ${result.droppedDuplicates
-            .map((e) => `${e.name}(${e.callId})`)
-            .join(', ')}`,
-      );
-    }
-    return result;
   }
 
   setHistory(history: Content[]) {
@@ -534,54 +432,9 @@ export class GeminiClient {
     });
   }
 
-  /**
-   * Abort and release the pending auto-memory prefetch in one step.
-   * Safe to call when no prefetch is pending — does nothing. Centralises
-   * the abort-then-clear idiom so every cleanup path (resetChat, early
-   * returns, finally) cannot half-fix one without the other.
-   *
-   * If the handle has already settled (recall completed but consume point
-   * hadn't run yet), the settled result is discarded — logged at debug so
-   * operators can diagnose missing-memory scenarios.
-   */
-  private cancelPendingMemoryPrefetch(): void {
-    const handle = this.pendingMemoryPrefetch;
-    if (!handle) return;
-    if (handle.settledAt !== null && !handle.consumed) {
-      debugLogger.debug('Discarding settled but unconsumed memory prefetch.');
-    }
-    handle.controller.abort();
-    this.pendingMemoryPrefetch = undefined;
-  }
-
-  /**
-   * Atomically consume the pending prefetch if it has already settled.
-   * Returns the recall result (caller decides where to inject it in
-   * `requestToSend`), or `null` if there's nothing to consume yet.
-   *
-   * Centralises the consume-and-mark dance so the UserQuery and ToolResult
-   * inject sites can't drift on the guard logic.
-   */
-  private async tryConsumeMemoryPrefetch(): Promise<RelevantAutoMemoryPromptResult | null> {
-    const handle = this.pendingMemoryPrefetch;
-    if (!handle || handle.settledAt === null || handle.consumed) {
-      return null;
-    }
-    handle.consumed = true;
-    this.pendingMemoryPrefetch = undefined;
-    const result = await handle.promise; // already settled, returns immediately
-    if (result.prompt) {
-      for (const doc of result.selectedDocs) {
-        this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
-      }
-    }
-    return result;
-  }
-
   async resetChat(): Promise<void> {
     this.initializedSessionId = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
-    this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
     // startChat() rewrites the chat to its initial state. Any prior
     // read_file tool results the FileReadCache still tracks are no
@@ -592,7 +445,10 @@ export class GeminiClient {
     this.config.getBaseLlmClient().clearPerModelGeneratorCache();
     // Abort any in-flight auto-memory recall so the stale controller
     // does not leak into the next session.
-    this.cancelPendingMemoryPrefetch();
+    if (this.pendingRecallAbortController) {
+      this.pendingRecallAbortController.abort();
+      this.pendingRecallAbortController = undefined;
+    }
     // Drop any deferred tools revealed this session so /clear really gives
     // a clean slate. We don't clear inside startChat itself because that path
     // is also taken by compression (which preserves the session), and
@@ -618,41 +474,28 @@ export class GeminiClient {
     });
   }
 
-  private getCachedGitStatus(): string | null {
-    if (this.cachedGitStatus === undefined) {
-      // Mirror claude-code: append git status (branch + recent commits) to the
-      // system prompt so the main agent treats version history as authoritative
-      // context, not background noise. Only injected when cwd is a git repo.
-      this.cachedGitStatus = getRecentGitStatus(this.config.getCwd());
-    }
-    return this.cachedGitStatus;
-  }
-
   private getMainSessionSystemInstruction(
     deferredTools?: Array<{ name: string; description: string }>,
   ): string {
     const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
-    const gitStatus = this.getCachedGitStatus();
 
     if (overrideSystemPrompt) {
-      const base = getCustomSystemPrompt(
+      return getCustomSystemPrompt(
         overrideSystemPrompt,
         userMemory,
         appendSystemPrompt,
         deferredTools,
       );
-      return gitStatus ? base + '\n\n' + gitStatus : base;
     }
 
-    const base = getCoreSystemPrompt(
+    return getCoreSystemPrompt(
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
       deferredTools,
     );
-    return gitStatus ? base + '\n\n' + gitStatus : base;
   }
 
   /**
@@ -729,8 +572,6 @@ export class GeminiClient {
         return PermissionMode.Plan;
       case ApprovalMode.AUTO_EDIT:
         return PermissionMode.AutoEdit;
-      case ApprovalMode.AUTO:
-        return PermissionMode.Auto;
       case ApprovalMode.YOLO:
         return PermissionMode.Yolo;
       default:
@@ -821,21 +662,6 @@ export class GeminiClient {
         this.config.getChatRecordingService(),
         uiTelemetryService,
       );
-
-      // Repair any dangling `model[functionCall]` whose `functionResponse`
-      // never made it back into the transcript before we wrote the JSONL.
-      // The common cause is a process crash / OOM / SIGKILL between the
-      // partial-tool_use push (see `processStreamResponse`) and the React
-      // scheduler's tool_result submission. Without this pass, the first
-      // API call on a resumed session would 400 with the same
-      // `tool_use_id ... corresponding tool_use` error this whole
-      // subsystem is trying to escape. (Belt-and-suspenders: the same
-      // helper runs again inside `chat.sendMessageStream` after the user
-      // content is pushed, so a dangling left here by setHistory /
-      // compaction reordering is also caught — but doing it here keeps
-      // any pre-send code reading `chat.history` from seeing a malformed
-      // shape.)
-      this.repairOrphanedToolUseTurnsInHistory();
 
       const sessionStartAdditionalContext =
         await this.fireSessionStartHook(sessionStartSource);
@@ -1068,7 +894,7 @@ export class GeminiClient {
     ) {
       const projectRoot = this.config.getProjectRoot();
       const sessionId = this.config.getSessionId();
-      const history = this.getHistoryShallow();
+      const history = this.getHistory();
       const mgr = this.config.getMemoryManager();
       const autoSkillEnabled = this.config.getAutoSkillEnabled();
 
@@ -1132,7 +958,7 @@ export class GeminiClient {
 
     const projectRoot = this.config.getProjectRoot();
     const sessionId = this.config.getSessionId();
-    const history = this.getHistoryShallow();
+    const history = this.getHistory();
     const mgr = this.config.getMemoryManager();
 
     if (!this.config.getManagedAutoMemoryEnabled()) {
@@ -1218,16 +1044,12 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    let relevantAutoMemoryPromise:
+      | Promise<RelevantAutoMemoryPromptResult>
+      | undefined;
 
     if (messageType === SendMessageType.Retry) {
       this.stripOrphanedUserEntriesFromHistory();
-      // The matching dangling-`functionCall` repair runs inside
-      // `chat.sendMessageStream` AFTER the user content is pushed, so any
-      // tool_result the user is supplying (Retry of a ToolResult
-      // submission, lastPrompt === fr parts) closes the pair via the real
-      // `functionResponse` before we synthesize an error one. Doing the
-      // repair here would happen pre-push and race against the user
-      // content's own pairing — see PR #4176 review for the corner.
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
@@ -1317,54 +1139,28 @@ export class GeminiClient {
       }
     }
 
-    // Tracks whether the generator reached its natural end (the bottom-of-try
-    // `return turn`). Only on that path do we want to preserve the pending
-    // memory prefetch so the next ToolResult turn can consume it. Any other
-    // exit (LoopDetected, Error, signal abort, uncaught exception, abnormal
-    // early-return) leaves this `false`, and the `finally` block aborts the
-    // prefetch as a safety net.
-    let normalCompletion = false;
     try {
       if (
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
         if (this.config.getManagedAutoMemoryEnabled()) {
-          // A previous recall may still be pending (slow side-query, new user
-          // turn arrived before it settled). Abort it before installing the
-          // new handle so the orphan doesn't keep running indefinitely.
-          this.cancelPendingMemoryPrefetch();
-          const controller = new AbortController();
-          // Bridge the caller's signal into the prefetch controller so a user
-          // abort (Ctrl-C / Esc) on the parent turn also terminates the
-          // recall side-query. `{ once: true }` lets the listener clean itself
-          // up after firing; we still call removeEventListener on the promise's
-          // finally to cover the normal-completion case so a long-lived parent
-          // signal doesn't accumulate listeners across many turns.
-          const onParentAbort = () => controller.abort();
-          if (signal.aborted) {
-            controller.abort();
-          } else {
-            signal.addEventListener('abort', onParentAbort, { once: true });
-          }
-          const promise = this.config
+          const recallAbortController = new AbortController();
+          const rawRecallPromise = this.config
             .getMemoryManager()
             .recall(this.config.getProjectRoot(), partToString(request), {
               config: this.config,
               excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-              abortSignal: controller.signal,
+              abortSignal: recallAbortController.signal,
             })
             .catch((error: unknown) => {
-              // Abort sources are now numerous (caller signal, new UserQuery,
-              // cleanup paths, safety-net timeout). Keep a debug trace so
-              // operators can diagnose missing-memory scenarios without
-              // raising noise on the common abort path.
               if (
                 error instanceof DOMException &&
                 error.name === 'AbortError'
               ) {
                 debugLogger.debug(
-                  'Managed auto-memory recall prefetch aborted.',
+                  'Auto-memory recall aborted by deadline.',
+                  error,
                 );
               } else {
                 debugLogger.warn(
@@ -1374,17 +1170,14 @@ export class GeminiClient {
               }
               return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
             });
-          const handle: MemoryPrefetchHandle = {
-            promise,
-            settledAt: null,
-            consumed: false,
-            controller,
-          };
-          void promise.finally(() => {
-            handle.settledAt = Date.now();
-            signal.removeEventListener('abort', onParentAbort);
-          });
-          this.pendingMemoryPrefetch = handle;
+          this.pendingRecallAbortController = recallAbortController;
+          // Race the recall against the deadline at initiation time so the 2.5s
+          // budget is not consumed by intermediate work (microcompact, compression,
+          // token checks, IDE context) between initiation and consumption.
+          relevantAutoMemoryPromise = resolveAutoMemoryWithDeadline(
+            rawRecallPromise,
+            () => recallAbortController.abort(),
+          );
         }
 
         // Track prompt count for commit attribution. Only the user typing a
@@ -1413,7 +1206,7 @@ export class GeminiClient {
         // retries/hooks) so that model latency during a tool-call loop
         // doesn't count as user idle time.
         const mcResult = microcompactHistory(
-          this.getHistoryShallow(),
+          this.getChat().getHistory(),
           this.lastApiCompletionTimestamp,
           this.config.getClearContextOnIdle(),
         );
@@ -1496,7 +1289,8 @@ export class GeminiClient {
           this.config.getMaxSessionTurns() > 0 &&
           this.sessionTurnCount > this.config.getMaxSessionTurns()
         ) {
-          this.cancelPendingMemoryPrefetch();
+          this.pendingRecallAbortController?.abort();
+          this.pendingRecallAbortController = undefined;
           yield { type: GeminiEventType.MaxSessionTurns };
           if (isTopLevelInteraction)
             endInteractionSpan('error', {
@@ -1509,7 +1303,8 @@ export class GeminiClient {
       // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
       const boundedTurns = Math.min(turns, MAX_TURNS);
       if (!boundedTurns) {
-        this.cancelPendingMemoryPrefetch();
+        this.pendingRecallAbortController?.abort();
+        this.pendingRecallAbortController = undefined;
         if (isTopLevelInteraction)
           endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
         return new Turn(this.getChat(), prompt_id);
@@ -1524,7 +1319,8 @@ export class GeminiClient {
         const lastPromptTokenCount =
           uiTelemetryService.getLastPromptTokenCount();
         if (lastPromptTokenCount > sessionTokenLimit) {
-          this.cancelPendingMemoryPrefetch();
+          this.pendingRecallAbortController?.abort();
+          this.pendingRecallAbortController = undefined;
           yield {
             type: GeminiEventType.SessionTokenLimitExceeded,
             value: {
@@ -1548,8 +1344,9 @@ export class GeminiClient {
       // part from the user immediately follows a functionCall part from the model
       // in the conversation history . The IDE context is not discarded; it will
       // be included in the next regular message sent to the model.
-      const historyLength = this.getHistoryLength();
-      const lastMessage = this.peekLastHistoryEntry();
+      const history = this.getHistory();
+      const lastMessage =
+        history.length > 0 ? history[history.length - 1] : undefined;
       const hasPendingToolCall =
         !!lastMessage &&
         lastMessage.role === 'model' &&
@@ -1560,7 +1357,7 @@ export class GeminiClient {
 
       if (this.config.getIdeMode() && !hasPendingToolCall) {
         const { contextParts, newIdeContext } = this.getIdeContextParts(
-          this.forceFullIdeContext || historyLength === 0,
+          this.forceFullIdeContext || history.length === 0,
         );
         if (contextParts.length > 0) {
           ideContextText = wrapIdeContext(contextParts.join('\n'));
@@ -1583,7 +1380,8 @@ export class GeminiClient {
             `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
           );
           await arenaAgentClient.reportCancelled();
-          this.cancelPendingMemoryPrefetch();
+          this.pendingRecallAbortController?.abort();
+          this.pendingRecallAbortController = undefined;
           if (isTopLevelInteraction) endInteractionSpan('cancelled');
           return new Turn(this.getChat(), prompt_id);
         }
@@ -1609,6 +1407,20 @@ export class GeminiClient {
         messageType === SendMessageType.Cron
       ) {
         const systemReminders = [];
+        // The recall promise was already raced against the 2.5s deadline at
+        // initiation time; this await just collects the result.
+        this.pendingRecallAbortController = undefined;
+        const relevantAutoMemory = relevantAutoMemoryPromise
+          ? await relevantAutoMemoryPromise
+          : EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+        const relevantAutoMemoryPrompt = relevantAutoMemory.prompt;
+
+        if (relevantAutoMemoryPrompt) {
+          systemReminders.push(relevantAutoMemoryPrompt);
+          for (const doc of relevantAutoMemory.selectedDocs) {
+            this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+          }
+        }
 
         // add subagent system reminder if there are subagents
         const hasAgentTool = await this.config
@@ -1643,39 +1455,7 @@ export class GeminiClient {
           }
         }
 
-        // Zero-wait poll: consume only if the prefetch has already settled.
-        // Done AFTER the async reminder setup above so recall settling during
-        // those awaits still gets caught here. (settledAt is set in
-        // promise.finally(); microtask ordering guarantees it's visible
-        // after any await prior to this point — flatMapTextParts above is
-        // the natural drain.) If still not settled, skip — the ToolResult
-        // inject point will retry on the next turn.
-        const userQueryMemory = await this.tryConsumeMemoryPrefetch();
-        if (userQueryMemory?.prompt) {
-          // Unshift to the front of systemReminders: on a UserQuery turn
-          // requestToSend leads with user text, so positioning memory at
-          // the very start of the system-reminder block keeps it close to
-          // the user prompt. Contrast the ToolResult path below, which
-          // must append to avoid splitting functionCall / functionResponse.
-          systemReminders.unshift(userQueryMemory.prompt);
-        }
-
         requestToSend = [...systemReminders, ...requestToSend];
-      }
-
-      if (messageType === SendMessageType.ToolResult) {
-        const toolResultMemory = await this.tryConsumeMemoryPrefetch();
-        if (toolResultMemory?.prompt) {
-          // Append (not prepend): on a ToolResult turn, requestToSend leads
-          // with functionResponse parts that must immediately follow the
-          // model's functionCall (Qwen API constraint — same reason the
-          // IDE-context block above is skipped while a tool call is pending,
-          // see the `hasPendingToolCall` guard). Putting the memory text
-          // after the functionResponse parts keeps the call/response pairing
-          // intact under native Gemini; the OpenAI converter then emits the
-          // text as a separate user message after the tool messages.
-          requestToSend = [...requestToSend, toolResultMemory.prompt];
-        }
       }
 
       const activeGoalAtTurnStart = getActiveGoal(this.config.getSessionId());
@@ -1723,9 +1503,6 @@ export class GeminiClient {
             this.lastApiCompletionTimestamp = Date.now();
             if (isTopLevelInteraction)
               endInteractionSpan('error', { errorMessage: 'loop detected' });
-            // finally cleanup catches this, but cancel explicitly to match
-            // the cleanup pattern at other early-return sites.
-            this.cancelPendingMemoryPrefetch();
             return turn;
           }
         }
@@ -1776,9 +1553,6 @@ export class GeminiClient {
               event.value instanceof Error ? '[API error]' : 'unknown error';
             endInteractionSpan('error', { errorMessage: errMsg });
           }
-          // finally cleanup catches this, but cancel explicitly to match
-          // the cleanup pattern at other early-return sites.
-          this.cancelPendingMemoryPrefetch();
           return turn;
         }
       }
@@ -1796,8 +1570,16 @@ export class GeminiClient {
         !signal.aborted &&
         this.config.hasHooksForEvent('Stop')
       ) {
+        // Get response text from the chat history
+        const history = this.getHistory();
+        const lastModelMessage = history
+          .filter((msg) => msg.role === 'model')
+          .pop();
         const responseText =
-          this.getLastModelMessageText() || '[no response text]';
+          lastModelMessage?.parts
+            ?.filter((p): p is { text: string } => 'text' in p)
+            .map((p) => p.text)
+            .join('') || '[no response text]';
 
         const response = await messageBus.request<
           HookExecutionRequest,
@@ -1941,10 +1723,6 @@ export class GeminiClient {
           );
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
-          // Preserve the pending prefetch: the inner Hook turn we just
-          // yielded may have produced tool calls, and the caller's next
-          // ToolResult turn still needs to consume the recall result.
-          normalCompletion = true;
           return hookTurn;
         }
 
@@ -1962,11 +1740,12 @@ export class GeminiClient {
         // see the current turn's history regardless of which path exits below.
         try {
           const chat = this.getChat();
+          const fullHistory = chat.getHistory(true);
           const maxHistoryForCache = 40;
-          const cachedHistory = this.getHistoryTailShallow(
-            maxHistoryForCache,
-            true,
-          );
+          const cachedHistory =
+            fullHistory.length > maxHistoryForCache
+              ? fullHistory.slice(-maxHistoryForCache)
+              : fullHistory;
           saveCacheSafeParams(
             chat.getGenerationConfig(),
             cachedHistory,
@@ -2010,11 +1789,6 @@ export class GeminiClient {
           );
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
-          // Preserve the pending prefetch: same reasoning as the
-          // `return hookTurn` site above — the recursive Hook turn may
-          // have produced tool calls whose ToolResult turn still needs
-          // the recall result.
-          normalCompletion = true;
           return continueTurn;
         }
 
@@ -2034,18 +1808,8 @@ export class GeminiClient {
       if (isTopLevelInteraction) {
         endInteractionSpan(signal?.aborted ? 'cancelled' : 'ok');
       }
-      // Reached the bottom of the try — this turn ended cleanly. Preserve
-      // any still-pending memory prefetch so the next ToolResult turn can
-      // consume it (the whole point of the fire-and-forget design).
-      normalCompletion = true;
       return turn;
     } finally {
-      // Belt-and-suspenders: abort the prefetch on any exit other than the
-      // bottom-of-try `return turn`. Catches uncaught exceptions and guards
-      // against future early-return sites that forget to call cancel.
-      if (!normalCompletion) {
-        this.cancelPendingMemoryPrefetch();
-      }
       if (isTopLevelInteraction) {
         endInteractionSpan(signal?.aborted ? 'cancelled' : 'error', {
           errorMessage: 'unexpected exit',
@@ -2152,8 +1916,7 @@ export class GeminiClient {
       signal,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
-      const chat = this.getChat();
-      const compressedHistory = chat.getHistoryShallow?.() ?? chat.getHistory();
+      const compressedHistory = this.getChat().getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
       if (
         !this.lastSessionStartContext &&
@@ -2185,4 +1948,5 @@ export class GeminiClient {
 
 export const TEST_ONLY = {
   COMPRESSION_PRESERVE_THRESHOLD,
+  COMPRESSION_TOKEN_THRESHOLD,
 };

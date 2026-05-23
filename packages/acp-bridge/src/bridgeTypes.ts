@@ -16,6 +16,7 @@ import type {
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
+import type { PermissionPolicy } from './permission.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionSupportedCommandsStatus,
@@ -93,6 +94,18 @@ export interface SessionMetadataUpdate {
 export interface BridgeClientRequestContext {
   /** Daemon-issued client id echoed through the HTTP transport header. */
   clientId?: string;
+  /**
+   * `true` when the request arrived from a loopback peer (kernel-stamped
+   * `req.socket.remoteAddress` ∈ {`127.0.0.1`, `::1`, `::ffff:127.0.0.1`}).
+   * Populated by permission-vote routes for the `local-only` mediation
+   * policy; other routes leave this undefined.
+   *
+   * **Security**: this is NOT computed from `X-Forwarded-For` or any
+   * other forwardable HTTP header — those are forgeable. Callers that
+   * reverse-proxy `qwen serve` should not rely on `local-only` (use a
+   * dedicated daemon or `designated` policy instead).
+   */
+  fromLoopback?: boolean;
 }
 
 /**
@@ -340,12 +353,25 @@ export interface HttpAcpBridge {
 
   /**
    * Restart a configured MCP server through the ACP child's
-   * `McpClientManager`. Pre-checks the live budget snapshot and
-   * returns a structured "skipped" response (200 OK) for soft refusals.
+   * `McpClientManager` (pre-F2) or transport pool (F2 #4175 commit 5).
+   * Pre-checks the live budget snapshot and returns a structured
+   * "skipped" response (200 OK) for soft refusals.
+   *
+   * F2 commit 5: under pool mode, a single `serverName` may map to
+   * multiple `PoolEntry` instances (different fingerprints from
+   * per-session OAuth/env divergence). When `opts.entryIndex` is
+   * undefined, the pool restarts ALL matching entries in parallel via
+   * `Promise.allSettled` and returns the new `{entries: RestartResult[]}`
+   * shape. When `opts.entryIndex` is set, only that entry restarts
+   * (404 / not-found surfaces as `entries: []`). Pre-F2 daemons and
+   * single-entry pool-mode responses keep the legacy
+   * `{restarted, durationMs}` shape so SDK clients that pre-date the
+   * `mcp_pool_restart` capability tag observe no diff.
    */
   restartMcpServer(
     serverName: string,
     originatorClientId: string | undefined,
+    opts?: { entryIndex?: number },
   ): Promise<
     | { serverName: string; restarted: true; durationMs: number }
     | {
@@ -353,6 +379,15 @@ export interface HttpAcpBridge {
         restarted: false;
         skipped: true;
         reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      }
+    | {
+        serverName: string;
+        entries: Array<{
+          entryIndex: number;
+          restarted: boolean;
+          durationMs?: number;
+          reason?: string;
+        }>;
       }
   >;
 
@@ -380,6 +415,18 @@ export interface HttpAcpBridge {
 
   /** Test/inspection hook: number of permission requests awaiting a vote. */
   readonly pendingPermissionCount: number;
+
+  /**
+   * #4175 F3 Commit 6 — active permission mediation policy. Reflects
+   * the value `runQwenServe` resolved from
+   * `settings.policy.permissionStrategy` (or the
+   * `'first-responder'` default). Surfaced through the
+   * `/capabilities` envelope's `policy.permission` field so SDK
+   * clients can feature-detect at runtime which strategy is in
+   * effect, distinct from the build-supported set advertised on
+   * the `permission_mediation` capability tag.
+   */
+  readonly permissionPolicy: PermissionPolicy;
 
   /**
    * Synchronous force-kill of every live channel. Called by signal

@@ -8,7 +8,6 @@ import type {
   MCPServerConfig,
   BugCommandSettings,
   TelemetrySettings,
-  OutboundCorrelationSettings,
   AuthType,
   ChatCompressionSettings,
   ModelProvidersConfig,
@@ -621,16 +620,6 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
-      autoModeAcknowledged: {
-        type: 'boolean',
-        label: 'Auto Mode Acknowledged',
-        category: 'UI',
-        requiresRestart: false,
-        default: false,
-        description:
-          'True once the user has seen the first-time information message about the AUTO approval mode. Set automatically; not intended for manual configuration.',
-        showInDialog: false,
-      },
       statusLine: {
         type: 'object',
         label: 'Status Line',
@@ -661,16 +650,6 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: {} as Record<string, CustomTheme>,
         description: 'Custom theme definitions.',
-        showInDialog: false,
-      },
-      hideBuiltinWorktreeIndicator: {
-        type: 'boolean',
-        label: 'Hide Built-in Worktree Indicator',
-        category: 'UI',
-        requiresRestart: false,
-        default: false,
-        description:
-          'When true, the built-in `⎇ worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself — otherwise an active worktree silently has no UI affordance.',
         showInDialog: false,
       },
       hideWindowTitle: {
@@ -1013,51 +992,8 @@ const SETTINGS_SCHEMA = {
           type: 'boolean',
           default: false,
         },
-        resourceAttributes: {
-          description:
-            'Static resource attributes attached to every span/log/metric the SDK exports (OTLP or file outfile — they share the same Resource). Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version, session.id) are dropped with a warning.',
-          type: 'object',
-          additionalProperties: { type: 'string' },
-          default: {},
-        },
-        metrics: {
-          description: 'Per-signal cardinality controls for exported metrics.',
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            includeSessionId: {
-              description:
-                'Include session.id on every metric data point. WARNING: each CLI session creates a new value, causing unbounded metric time-series fan-out at the backend. Only enable for short-term debugging — spans and logs still carry session.id.',
-              type: 'boolean',
-              default: false,
-            },
-          },
-        },
       },
       additionalProperties: true,
-    },
-  },
-
-  outboundCorrelation: {
-    type: 'object',
-    label: 'Outbound Correlation',
-    category: 'Advanced',
-    requiresRestart: true,
-    default: undefined as OutboundCorrelationSettings | undefined,
-    description:
-      "SECURITY-RELEVANT. Controls what client-side correlation data qwen-code writes into outbound LLM API requests (DashScope, OpenAI, Anthropic, etc.) — separate from `telemetry.*` which governs data flow into the operator's OWN OTLP collector. All values default to off. Opt in only when the LLM provider also reports into your OTel collector for cross-process trace stitching (e.g. ARMS Tracing + DashScope).",
-    showInDialog: false,
-    jsonSchemaOverride: {
-      type: 'object',
-      properties: {
-        propagateTraceContext: {
-          description:
-            "Requires `telemetry.enabled: true`. Inject W3C `traceparent` header on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...). Default: false — trace context stays internal to the operator's OTLP collector and is NOT written onto third-party request streams. Set true only when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope). Client HTTP spans are still emitted in either case; this flag only governs the wire `traceparent` header.",
-          type: 'boolean',
-          default: false,
-        },
-      },
-      additionalProperties: false,
     },
   },
 
@@ -1100,26 +1036,6 @@ const SETTINGS_SCHEMA = {
           'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
         showInDialog: false,
       },
-      maxWallTimeSeconds: {
-        type: 'number',
-        label: 'Max Wall-Clock Time (seconds)',
-        category: 'Model',
-        requiresRestart: false,
-        default: -1,
-        description:
-          'Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).',
-        showInDialog: false,
-      },
-      maxToolCalls: {
-        type: 'number',
-        label: 'Max Tool Calls',
-        category: 'Model',
-        requiresRestart: false,
-        default: -1,
-        description:
-          'Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.',
-        showInDialog: false,
-      },
       chatCompression: {
         type: 'object',
         label: 'Chat Compression',
@@ -1153,8 +1069,7 @@ const SETTINGS_SCHEMA = {
         category: 'Model',
         requiresRestart: false,
         default: true,
-        description:
-          'Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.',
+        description: 'Disable all loop detection checks (streaming and LLM).',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -1533,62 +1448,6 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
-      autoMode: {
-        type: 'object',
-        label: 'Auto Mode',
-        category: 'Tools',
-        requiresRestart: true,
-        default: {},
-        description: 'Settings consumed by the AUTO approval mode classifier.',
-        showInDialog: false,
-        properties: {
-          hints: {
-            type: 'object',
-            label: 'Classifier Hints',
-            category: 'Tools',
-            requiresRestart: true,
-            default: {},
-            description:
-              'Natural-language hints injected into the classifier system prompt.',
-            showInDialog: false,
-            properties: {
-              allow: {
-                type: 'array',
-                label: 'Auto Mode Allow Hints',
-                category: 'Tools',
-                requiresRestart: true,
-                default: undefined as string[] | undefined,
-                description:
-                  'Natural-language descriptions of actions AUTO mode should allow.',
-                showInDialog: false,
-                mergeStrategy: MergeStrategy.UNION,
-              },
-              deny: {
-                type: 'array',
-                label: 'Auto Mode Deny Hints',
-                category: 'Tools',
-                requiresRestart: true,
-                default: undefined as string[] | undefined,
-                description:
-                  'Natural-language descriptions of actions AUTO mode should block.',
-                showInDialog: false,
-                mergeStrategy: MergeStrategy.UNION,
-              },
-            },
-          },
-          environment: {
-            type: 'array',
-            label: 'Auto Mode Environment',
-            category: 'Tools',
-            requiresRestart: true,
-            default: undefined as string[] | undefined,
-            description:
-              'Environment / context lines injected into the classifier system prompt.',
-            showInDialog: false,
-            mergeStrategy: MergeStrategy.UNION,
-          },
-        },
-      },
     },
   },
 
@@ -1736,7 +1595,6 @@ const SETTINGS_SCHEMA = {
           { value: ApprovalMode.PLAN, label: 'Plan' },
           { value: ApprovalMode.DEFAULT, label: 'Default' },
           { value: ApprovalMode.AUTO_EDIT, label: 'Auto Edit' },
-          { value: ApprovalMode.AUTO, label: 'Auto' },
           { value: ApprovalMode.YOLO, label: 'YOLO' },
         ],
       },
@@ -1806,6 +1664,82 @@ const SETTINGS_SCHEMA = {
         default: DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         description: 'The number of lines to keep when truncating tool output.',
         showInDialog: false,
+      },
+    },
+  },
+
+  policy: {
+    type: 'object',
+    label: 'Daemon Policy',
+    category: 'Daemon',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Daemon multi-client coordination policies. Tool-level allow/deny rules ' +
+      'live under `permissions`; this section is for runtime mediation behavior ' +
+      'between concurrent HTTP clients sharing one `qwen serve` daemon.',
+    showInDialog: false,
+    properties: {
+      permissionStrategy: {
+        type: 'enum',
+        label: 'Permission Mediation Policy',
+        category: 'Daemon',
+        requiresRestart: true,
+        default: 'first-responder',
+        description:
+          'How permission requests resolve when multiple clients are attached. ' +
+          '`first-responder` (default) = any client decides, first wins. ' +
+          '`designated` = only the prompt originator decides; falls back to ' +
+          'first-responder if originator is anonymous. ' +
+          'NOTE: client identity comes from self-declared X-Qwen-Client-Id ' +
+          'with no proof-of-possession (pair-token mechanism is a future PR), ' +
+          'so any client observing originatorClientId on SSE frames can ' +
+          'register with the same id and impersonate the originator. ' +
+          '`consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, ' +
+          'which means UNANIMITY for M=2 (quorum=2, both must agree) and ' +
+          'supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). ' +
+          'For M=2 specifically, split votes resolve only via permissionTimeoutMs. ' +
+          '`local-only` = only loopback clients can RESOLVE; remote clients ' +
+          'can still ABORT a pending permission via the cancel sentinel ' +
+          '({outcome:"cancelled"}) — F3 v1 keeps cancel cross-policy for ' +
+          'consistency. Strict-cancel-too deployments need a dedicated ' +
+          'loopback-bound daemon. ' +
+          'Requires daemon restart — F3 v1 reads this once at boot.',
+        showInDialog: true,
+        options: [
+          { value: 'first-responder', label: 'First Responder' },
+          { value: 'designated', label: 'Designated Originator' },
+          { value: 'consensus', label: 'Consensus Quorum' },
+          { value: 'local-only', label: 'Local Only' },
+        ],
+      },
+      consensusQuorum: {
+        type: 'number',
+        label: 'Consensus Quorum Override',
+        category: 'Daemon',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        description:
+          'Optional fixed quorum size for consensus policy. Capped at M ' +
+          '(count of registered voters at request issue time) to prevent ' +
+          'unreachable quorum. Unset = floor(M/2)+1. ' +
+          'Requires daemon restart — F3 v1 reads this once at boot.',
+        showInDialog: false,
+        // Wenshao review #4335 / 3271185604 — runQwenServe.ts validates
+        // `Number.isInteger(n) && n >= 1` and refuses to boot otherwise.
+        // Override the generated schema so IDE inline validation
+        // (VSCode, JetBrains via JSON Schema) flags `0`, `-1`, `1.5`
+        // BEFORE the user restarts the daemon. The bare `type:'number'`
+        // mapping accepts all of these.
+        jsonSchemaOverride: {
+          type: 'integer',
+          minimum: 1,
+          description:
+            'Optional fixed quorum size for consensus policy. Capped at M ' +
+            '(count of registered voters at request issue time) to prevent ' +
+            'unreachable quorum. Unset = floor(M/2)+1. ' +
+            'Requires daemon restart — F3 v1 reads this once at boot.',
+        },
       },
     },
   },

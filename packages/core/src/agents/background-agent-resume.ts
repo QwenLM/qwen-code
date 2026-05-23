@@ -67,7 +67,7 @@ const LEGACY_FORK_RESUME_BLOCKED_REASON =
 const LEGACY_FORK_CAPABILITIES_BLOCKED_REASON =
   'Fork background task cannot be safely resumed because its launch-time runtime constraints are missing.';
 
-type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
+type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'yolo';
 
 interface TranscriptRecovery {
   history: Content[];
@@ -105,8 +105,6 @@ function approvalModeToPermissionMode(mode?: string): PermissionMode {
       return PermissionMode.Yolo;
     case 'auto-edit':
       return PermissionMode.AutoEdit;
-    case 'auto':
-      return PermissionMode.Auto;
     case 'plan':
       return PermissionMode.Plan;
     case 'default':
@@ -123,7 +121,6 @@ function normalizeApprovalMode(
     case 'plan':
     case 'default':
     case 'auto-edit':
-    case 'auto':
     case 'yolo':
       return value;
     default:
@@ -138,9 +135,7 @@ function reconcileResumedApprovalMode(
 ): ApprovalModeValue {
   if (
     isTrustedFolder ||
-    (persistedMode !== 'auto-edit' &&
-      persistedMode !== 'auto' &&
-      persistedMode !== 'yolo')
+    (persistedMode !== 'auto-edit' && persistedMode !== 'yolo')
   ) {
     return persistedMode;
   }
@@ -492,32 +487,18 @@ export class BackgroundAgentResumeService {
 
     const bgAbortController = new AbortController();
 
-    try {
-      registry.register({
-        ...existing,
-        status: 'running',
-        abortController: bgAbortController,
-        endTime: undefined,
-        result: undefined,
-        error: undefined,
-        resumeBlockedReason: undefined,
-        stats: undefined,
-        recentActivities: [],
-        pendingMessages: [...(existing.pendingMessages ?? [])],
-      });
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      debugLogger.warn(
-        `[BackgroundAgentResume] Cannot resume background agent ${agentId}: ${errorMessage}`,
-      );
-      patchAgentMeta(metaPath, {
-        lastError: errorMessage,
-        lastUpdatedAt: new Date().toISOString(),
-      });
-      this.restorePausedEntry(agentId, { error: errorMessage });
-      return undefined;
-    }
+    registry.register({
+      ...existing,
+      status: 'running',
+      abortController: bgAbortController,
+      endTime: undefined,
+      result: undefined,
+      error: undefined,
+      resumeBlockedReason: undefined,
+      stats: undefined,
+      recentActivities: [],
+      pendingMessages: [...(existing.pendingMessages ?? [])],
+    });
 
     let cleanupOwnedMonitorNotifications: (() => void) | undefined;
     let cleanupJsonl: (() => void) | undefined;
@@ -554,11 +535,10 @@ export class BackgroundAgentResumeService {
       // continuing to read the parent's. Reusing `this.config`
       // directly here would short-circuit that isolation. See the
       // matching wrapper in `agent.ts:createApprovalModeOverride`.
-      const { config: agentConfig, cleanup: restoreParentPM } =
-        await createApprovalModeOverride(
-          this.config,
-          resolvedApprovalMode as ApprovalMode,
-        );
+      const agentConfig = await createApprovalModeOverride(
+        this.config,
+        resolvedApprovalMode as ApprovalMode,
+      );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const bgConfig = Object.create(agentConfig) as any;
       bgConfig.getShouldAvoidPermissionPrompts = () => true;
@@ -838,10 +818,6 @@ export class BackgroundAgentResumeService {
             .getToolRegistry()
             .stop()
             .catch(() => {});
-          // Restore parent PermissionManager's dangerous allow rules if
-          // this override stripped them. See createApprovalModeOverride
-          // strip-lifecycle comment in agent.ts.
-          restoreParentPM();
         }
       };
 

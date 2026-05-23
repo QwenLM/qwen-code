@@ -9,10 +9,6 @@ import { CommandKind } from './types.js';
 import { MessageType, type HistoryItemAbout } from '../types.js';
 import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
 import { t } from '../../i18n/index.js';
-import {
-  collectSessionPathInfo,
-  formatSessionPathInfo,
-} from '../../utils/sessionPaths.js';
 
 export const aboutCommand: SlashCommand = {
   name: 'status',
@@ -55,23 +51,4 @@ export const aboutCommand: SlashCommand = {
     context.ui.addItem(aboutItem, Date.now());
     return;
   },
-  subCommands: [
-    {
-      name: 'paths',
-      get description() {
-        return t('show paths for current session files and logs');
-      },
-      kind: CommandKind.BUILT_IN,
-      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-      action: async (context) => {
-        const info = await collectSessionPathInfo(context);
-        const content = formatSessionPathInfo(info);
-        return {
-          type: 'message' as const,
-          messageType: 'info' as const,
-          content,
-        };
-      },
-    },
-  ],
 };

@@ -156,9 +156,10 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const cacheEnabled = !this.config.getFileReadCacheDisabled();
     const useFastPath = cacheEnabled && !isAutoMem;
     const cache = this.config.getFileReadCache();
-    // A request-level "full" Read asks for the whole file: no offset,
-    // no limit, no PDF page range. The cache entry is only marked as
-    // full later if the produced content was not truncated.
+    // A "full" Read consumes the whole file: no offset, no limit, no PDF
+    // page range. Only full Reads are eligible for the file_unchanged
+    // fast-path; range-scoped Reads always go through, since the model
+    // may legitimately ask for a different slice next time.
     const isFullRead =
       this.params.offset === undefined &&
       this.params.limit === undefined &&
@@ -244,9 +245,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     //    level if the produced content was not truncated, otherwise
     //    the model only saw the head and a follow-up `file_unchanged`
     //    placeholder would falsely imply "you've already seen
-    //    everything". NotebookEdit also requires this flag so a
-    //    truncated notebook render does not authorize structured writes
-    //    against unseen cells.
+    //    everything".
     //
     // The stat we record is the one taken inside `processSingleFileContent`
     // and surfaced via `result.stats`. The internal stat happens
@@ -275,11 +274,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     }
 
     let llmContent: PartUnion;
-    if (
-      result.isTruncated &&
-      result.linesShown &&
-      result.originalLineCount !== undefined
-    ) {
+    if (result.isTruncated) {
       const [start, end] = result.linesShown!;
       const total = result.originalLineCount!;
       llmContent = `Showing lines ${start}-${end} of ${total} total lines.\n\n---\n\n${result.llmContent}`;
@@ -435,23 +430,6 @@ export class ReadFileTool extends BaseDeclarativeTool<
     }
     if (params.limit !== undefined && params.limit <= 0) {
       return 'Limit must be a positive number';
-    }
-
-    if (params.pages !== undefined) {
-      const pages = params.pages.trim();
-      params.pages = pages.length > 0 ? pages : undefined;
-    }
-
-    const ext = path.extname(filePath).toLowerCase();
-    if (
-      (params.offset !== undefined || params.limit !== undefined) &&
-      ext === '.ipynb'
-    ) {
-      return 'offset and limit are not supported for Jupyter notebook (.ipynb) files. Notebooks are always read in full with structured cell output.';
-    }
-
-    if (params.pages !== undefined && ext === '.ipynb') {
-      return 'pages is not supported for Jupyter notebook (.ipynb) files. Notebooks are always read in full with structured cell output.';
     }
 
     if (params.pages) {

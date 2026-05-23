@@ -14,6 +14,7 @@ import {
   getMCPServerStatus,
   populateMcpServerCommand,
   removeMCPServerStatus,
+  setMCPDiscoveryState,
 } from './mcp-client.js';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -21,6 +22,17 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import type { EventEmitter } from 'node:events';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+// F2 (#4175 commit 5 review fix — wenshao R2): `connectionIdOf` for
+// the discoverAllMcpToolsViaPool diff. Static import from a leaf module
+// is safe even though mcp-pool-key.ts imports `mcpTransportOf` from
+// here — that import is a value-level back-edge that ES module hoisting
+// resolves before either side's top-level code runs. The other pool
+// modules (mcp-transport-pool.ts, mcp-pool-entry.ts) intentionally use
+// `import('...')` types to avoid pulling in their RUNTIME code, but
+// mcp-pool-key.ts is pure utility (hash + string concat) with no
+// runtime side effects, so a static value import is fine.
+import { connectionIdOf } from './mcp-pool-key.js';
+import type { ConnectionId } from './mcp-pool-events.js';
 
 const debugLogger = createDebugLogger('MCP');
 
@@ -332,6 +344,26 @@ function readBudgetFromEnv(): McpBudgetConfig {
 }
 
 /**
+ * F2 (#4175 commit 6 review fix — wenshao R9 / PR A): options bag for
+ * `McpClientManager` construction, replacing the prior 5 trailing
+ * positional parameters (`eventEmitter`, `sendSdkMcpMessage`,
+ * `healthConfig`, `budgetConfig`, `pool`). Pre-fix every test site
+ * threaded 4 explicit `undefined`s to reach the trailing `pool` arg —
+ * the fixed positions also blocked future option additions without
+ * re-ordering. The options-object form lets each caller name only the
+ * fields it cares about and keeps the constructor signature stable
+ * across future additions (e.g. when the W8 health-monitor wire-up
+ * lands a new `reconnectStrategy` knob).
+ */
+export interface McpClientManagerOptions {
+  eventEmitter?: EventEmitter;
+  sendSdkMcpMessage?: SendSdkMcpMessage;
+  healthConfig?: Partial<MCPHealthMonitorConfig>;
+  budgetConfig?: McpBudgetConfig;
+  pool?: import('./mcp-transport-pool.js').McpTransportPool;
+}
+
+/**
  * Manages the lifecycle of multiple MCP clients, including local child processes.
  * This class is responsible for starting, stopping, and discovering tools from
  * a collection of MCP servers defined in the configuration.
@@ -458,20 +490,59 @@ export class McpClientManager {
    */
   private onBudgetEvent?: (event: McpBudgetEvent) => void;
 
+  /**
+   * F2 (#4175 commit 4): when present, non-SDK MCP server discovery
+   * delegates to the workspace-shared pool instead of spawning a
+   * per-session `McpClient`. Tracked here so `disconnectServer` /
+   * `stop` can `release` the pool reference cleanly without leaking
+   * refs (the pool's drain timer kicks in when refs hit zero).
+   *
+   * SDK MCP servers (`isSdkMcpServerConfig`) always bypass the pool
+   * — the `sendSdkMcpMessage` callback is per-session by design and
+   * the pool's transport is workspace-level. Per-server gating in
+   * `discoverMcpToolsForServer` keeps the legacy path for SDK MCP.
+   */
+  private readonly pool?: import('./mcp-transport-pool.js').McpTransportPool;
+  private readonly pooledConnections = new Map<
+    string,
+    import('./mcp-pool-entry.js').PooledConnection
+  >();
+  /**
+   * F2 (#4175 commit 6 review fix — wenshao W6): re-entrancy guard
+   * for `discoverAllMcpToolsViaPool`. Two passes interleaving (full
+   * + incremental, or two incrementals) could see
+   * `pooledConnections.has(name) === false` simultaneously and both
+   * call `pool.acquire`, with the second `set(name, conn2)` silently
+   * overwriting the first → conn1 leaks (refcount never reaches 0,
+   * drain timer never fires). The mutex serializes passes; a second
+   * caller awaits the same promise and sees the resolved state.
+   */
+  private discoveryInFlight?: Promise<void>;
+
+  /**
+   * F2 (#4175 commit 6 review fix — qwen-latest W115): set true by
+   * `stop()` when its 5s shutdown-grace timer wins the race against
+   * `discoveryInFlight`. The in-flight discovery pass checks this
+   * flag before calling `pooledConnections.set(...)` so a late-
+   * resolving `pool.acquire` (whose 30s default timeout exceeds the
+   * shutdown cap) doesn't orphan an entry by re-populating the Map
+   * after `releaseAllPooledConnections` cleared it.
+   */
+  private stopTimedOut = false;
+
   constructor(
     config: Config,
     toolRegistry: ToolRegistry,
-    eventEmitter?: EventEmitter,
-    sendSdkMcpMessage?: SendSdkMcpMessage,
-    healthConfig?: Partial<MCPHealthMonitorConfig>,
-    budgetConfig?: McpBudgetConfig,
+    options: McpClientManagerOptions = {},
   ) {
     this.cliConfig = config;
     this.toolRegistry = toolRegistry;
+    this.pool = options.pool;
 
-    this.eventEmitter = eventEmitter;
-    this.sendSdkMcpMessage = sendSdkMcpMessage;
-    this.healthConfig = { ...DEFAULT_HEALTH_CONFIG, ...healthConfig };
+    this.eventEmitter = options.eventEmitter;
+    this.sendSdkMcpMessage = options.sendSdkMcpMessage;
+    this.healthConfig = { ...DEFAULT_HEALTH_CONFIG, ...options.healthConfig };
+    const budgetConfig = options.budgetConfig;
 
     // Tests inject `budgetConfig` directly; production reads env vars
     // set by `qwen serve --mcp-client-budget=N --mcp-budget-mode=X`
@@ -930,10 +1001,21 @@ export class McpClientManager {
    * Initiates the tool discovery process for all configured MCP servers.
    * It connects to each server, discovers its available tools, and registers
    * them with the `ToolRegistry`.
+   *
+   * F2 (#4175 commit 4): in pool mode (`this.pool !== undefined`),
+   * non-SDK MCP servers go through the workspace-shared transport
+   * pool. SDK MCP and HTTP/SSE (when not opt-in) fall back through
+   * the pool's own `createUnpooledConnection` path so this manager
+   * doesn't need to maintain a parallel SDK code path. Pool entries
+   * are tracked in `this.pooledConnections` for `disconnectServer` /
+   * `stop` to release cleanly.
    */
   async discoverAllMcpTools(cliConfig: Config): Promise<void> {
     if (!cliConfig.isTrustedFolder()) {
       return;
+    }
+    if (this.pool) {
+      return this.discoverAllMcpToolsViaPool(cliConfig);
     }
     await this.stop();
 
@@ -1084,6 +1166,19 @@ export class McpClientManager {
     serverName: string,
     cliConfig: Config,
   ): Promise<void> {
+    const servers = populateMcpServerCommand(
+      this.cliConfig.getMcpServers() || {},
+      this.cliConfig.getMcpServerCommand(),
+    );
+    const serverConfig = servers[serverName];
+    if (!serverConfig) {
+      return;
+    }
+    if (this.pool && !isSdkMcpServerConfig(serverConfig)) {
+      await this.discoverAllMcpToolsViaPool(cliConfig);
+      return;
+    }
+
     const inProgressDiscovery = this.serverDiscoveryPromises.get(serverName);
     if (inProgressDiscovery) {
       await inProgressDiscovery;
@@ -1301,12 +1396,346 @@ export class McpClientManager {
   }
 
   /**
+   * F2 (#4175 commit 4): pool-mode discovery. Iterates configured
+   * servers and calls `pool.acquire(name, cfg, sessionId, toolReg,
+   * promptReg)` for each non-disabled server. Pool internally:
+   *   - Returns the existing PoolEntry if same fingerprint already
+   *     spawned for this workspace (other sessions sharing it)
+   *   - Spawns a new entry otherwise (deduped via spawnInFlight)
+   *   - For SDK MCP / non-pooled HTTP: routes to
+   *     `createUnpooledConnection` (per-session McpClient with the
+   *     supplied session registries)
+   *   - On attach: synchronously applies tool/prompt snapshots into
+   *     the supplied session registries via `SessionMcpView`
+   *
+   * Per-session reconnect / health monitoring / budget enforcement
+   * lives inside the pool, NOT in this manager — `this.reservedSlots`
+   * / `this.healthCheckTimers` etc. stay empty in pool mode (they're
+   * still allocated for legacy mode coexistence).
+   *
+   * Pre-pool path's `await this.stop()` releases EVERYTHING; here we
+   * only need to drop the manager's own pool refs because cross-
+   * session pool entries still belong to the pool.
+   */
+  private discoverAllMcpToolsViaPool(cliConfig: Config): Promise<void> {
+    // Re-entrancy guard (W6): if a pass is in flight, return the
+    // same promise so the caller awaits the in-flight resolution
+    // instead of triggering a parallel pass that races on
+    // `pooledConnections`. Cleanup runs in `.finally` so the next
+    // call (after this pass completes) starts fresh.
+    if (this.discoveryInFlight) return this.discoveryInFlight;
+    this.discoveryInFlight = this.runDiscoverAllMcpToolsViaPool(
+      cliConfig,
+    ).finally(() => {
+      this.discoveryInFlight = undefined;
+    });
+    return this.discoveryInFlight;
+  }
+
+  private async runDiscoverAllMcpToolsViaPool(
+    cliConfig: Config,
+  ): Promise<void> {
+    if (!this.pool) return; // unreachable; caller already gates
+    // F2 (#4175 commit 6 review fix — gpt-5.5 W118): reset the W115
+    // shutdown-timeout flag at the START of every discovery pass. The
+    // flag is sticky — it persists across `stop()` calls until
+    // explicitly reset. Without this reset, a manager that survived
+    // one timed-out shutdown (e.g., a slow MCP server during SIGTERM
+    // exceeding the 5s grace cap) would then enter every subsequent
+    // discovery pass with the guard already true, silently calling
+    // `conn.release()` and skipping `pooledConnections.set(...)` for
+    // every server — the manager would appear to discover servers but
+    // none would be reachable for subsequent tool calls. A fresh
+    // discovery pass means we're past any prior shutdown phase.
+    this.stopTimedOut = false;
+    this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
+    // F2 (#4175 commit 6 review fix — gpt-5.5 W72): also write the
+    // module-global `mcpDiscoveryState`. Pre-fix the pool path only
+    // updated `this.discoveryState` (manager-local) — `GET /workspace/mcp`
+    // and the MCP preflight cell read the GLOBAL via
+    // `getMCPDiscoveryState()` and reported `not_started` for a
+    // workspace whose pool discovery was running or already
+    // complete. Snapshot now reflects reality regardless of which
+    // discovery path (legacy per-session or pool) is active.
+    setMCPDiscoveryState(MCPDiscoveryState.IN_PROGRESS);
+    // F2 (#4175 commit 6): bracket the pass with the pool's budget
+    // bulk-pass scope so per-server BudgetExhaustedError refusals
+    // accumulate into ONE coalesced `refused_batch` event at end of
+    // pass — matches PR 14b's per-pass contract for the snapshot
+    // route AND the typed push event consumers depend on.
+    const poolBudget = this.pool.getBudget();
+    poolBudget?.beginBulkPass();
+    try {
+      const sessionId = this.cliConfig.getSessionId();
+      const promptRegistry = this.cliConfig.getPromptRegistry();
+      const servers = populateMcpServerCommand(
+        this.cliConfig.getMcpServers() || {},
+        this.cliConfig.getMcpServerCommand(),
+      );
+      // F2 (#4175 commit 5 review fix — wenshao R2): diff against the
+      // current `pooledConnections` instead of releasing all then
+      // re-acquiring everything. Pre-fix every incremental discovery
+      // pass (the default progressive-mode boot path also routes
+      // through here) was: `release-all` → `view.teardown` →
+      // `removeMcpToolsByServer` for every server, then
+      // `pool.acquire` → `view.applyTools` re-registers everything.
+      // That left a brief window with zero MCP tools registered AND
+      // bounced every pool entry's drain timer for no reason. Now:
+      //   1. Build the desired (name, fingerprint) set from current
+      //      config + filters (skip disabled, skip SDK MCP).
+      //   2. Release stale pooled connections (server removed,
+      //      disabled, or fingerprint changed) — survivors stay
+      //      attached, no tool registry churn.
+      //   3. Acquire only the desired connections we don't already
+      //      hold by id.
+      // SDK MCP servers always re-run via legacy
+      // `discoverMcpToolsForServer` (idempotent on re-call; the
+      // legacy path's `discoverMcpToolsForServer` purges existing
+      // entries before rediscovery).
+      const desiredIds = new Map<string, ConnectionId>();
+      for (const [name, config] of Object.entries(servers)) {
+        if (cliConfig.isMcpServerDisabled(name)) continue;
+        if (isSdkMcpServerConfig(config)) continue;
+        desiredIds.set(name, connectionIdOf(name, config));
+      }
+      // Release connections that are stale (no longer wanted, or
+      // wanted but with a different fingerprint).
+      for (const [name, conn] of [...this.pooledConnections]) {
+        const desired = desiredIds.get(name);
+        if (desired === undefined || desired !== conn.id) {
+          try {
+            conn.release();
+          } catch (err) {
+            debugLogger.debug(
+              `Pool release error (ignored): ${getErrorMessage(err)}`,
+            );
+          }
+          this.pooledConnections.delete(name);
+        }
+      }
+      const acquirePromises = Object.entries(servers).map(
+        async ([name, config]) => {
+          if (cliConfig.isMcpServerDisabled(name)) {
+            debugLogger.debug(
+              `Skipping disabled MCP server (pool mode): ${name}`,
+            );
+            return;
+          }
+          // F2 (#4175 commit 4 self-review fix): SDK MCP servers MUST
+          // stay on the legacy McpClientManager path because their
+          // `sendSdkMcpMessage` callback is bound per-session in this
+          // manager's ctor, but the workspace-shared pool was
+          // constructed in `QwenAgent` ctor without it. Routing SDK
+          // MCP through `pool.acquire` would yield an McpClient with
+          // `sendSdkMcpMessage: undefined`, breaking SDK MCP server
+          // tool calls. The legacy path below preserves the
+          // per-session callback wiring and SDK servers continue to
+          // work bit-for-bit identically to pre-F2 daemon mode.
+          if (isSdkMcpServerConfig(config)) {
+            await this.discoverMcpToolsForServer(name, cliConfig);
+            return;
+          }
+          // R2 follow-on: skip if we already hold the exact desired
+          // connection (survived the diff above). Avoids the redundant
+          // `pool.acquire` call which would otherwise just bump the
+          // entry's refcount + trigger a snapshot replay.
+          if (this.pooledConnections.has(name)) return;
+          try {
+            const conn = await this.pool!.acquire(
+              name,
+              config,
+              sessionId,
+              this.toolRegistry,
+              promptRegistry,
+            );
+            // F2 (#4175 commit 6 review fix — wenshao W5 + W75):
+            // subscribe to entry-level events so a `'failed'` event
+            // (entry's restart hit reconnect-budget exhaustion →
+            // terminal failure → entry removed from `pool.entries`)
+            // evicts our stale handle.
+            //
+            // W75: keep a NAMED listener and unregister it on
+            // 'failed' BEFORE deleting from `pooledConnections`. Pre-
+            // fix the anonymous arrow stayed attached to the entry's
+            // EventEmitter even after we deleted from
+            // `pooledConnections` — the listener's closure pinned
+            // `this` (manager) and `conn` (PooledConnection wrapper),
+            // making cleanup depend on whole-object GC. With named +
+            // self-unregister, the listener detaches as soon as the
+            // 'failed' event fires.
+            //
+            // Idempotent — a second 'failed' event on the same id
+            // is a no-op via `get(name) === conn` guard;
+            // `releaseAllPooledConnections` / `stop` also call
+            // `conn.release()` independently.
+            const onFailed = (e: import('./mcp-pool-events.js').PoolEvent) => {
+              if (e.kind !== 'failed') return;
+              if (this.pooledConnections.get(name) === conn) {
+                this.pooledConnections.delete(name);
+              }
+              conn.off('event', onFailed);
+            };
+            conn.on('event', onFailed);
+            // F2 (#4175 commit 6 review fix — qwen-latest W115): skip
+            // the set if shutdown already passed its 5s grace cap and
+            // released pool connections. A late-resolving pool.acquire
+            // (whose own 30s stdio timeout exceeds the shutdown cap)
+            // would otherwise repopulate `pooledConnections` AFTER
+            // `releaseAllPooledConnections` cleared it — orphan entry
+            // (refcount never reaches 0, drain timer never fires).
+            // Release the just-acquired connection so the pool's
+            // refcount drops back to where it would have been if the
+            // acquire had been refused.
+            if (this.stopTimedOut) {
+              try {
+                conn.release();
+              } catch {
+                /* best effort — shutdown in progress */
+              }
+              return;
+            }
+            this.pooledConnections.set(name, conn);
+          } catch (err) {
+            // Pool acquire failure for one server is non-fatal for
+            // siblings (matches the pre-F2 `discoverMcpToolsForServer`
+            // catch behavior). Operator visibility through standard
+            // error logger; status snapshot reflects reality via the
+            // global `serverStatuses` Map (pool's
+            // `aggregateStatusByName` keeps it consistent).
+            //
+            // F2 (#4175 commit 6): `BudgetExhaustedError` from the
+            // pool's pre-spawn budget gate is not a "failure" — the
+            // refusal was deliberate, already recorded by the pool's
+            // `recordRefusal`, and will surface as a `refused_batch`
+            // event at end of pass. Log at debug to avoid flooding
+            // operators with one error per refused server.
+            if (err instanceof BudgetExhaustedError) {
+              debugLogger.debug(
+                `Pool refused acquire for ${name} (budget exhausted, ` +
+                  `budget=${err.budget}, reservedCount=${err.reservedCount})`,
+              );
+            } else {
+              debugLogger.error(
+                `Pool acquire failed for ${name}: ${getErrorMessage(err)}`,
+              );
+            }
+          }
+        },
+      );
+      await Promise.all(acquirePromises);
+    } finally {
+      poolBudget?.endBulkPass();
+      this.discoveryState = MCPDiscoveryState.COMPLETED;
+      // W72 fold-in: same global update as the IN_PROGRESS write
+      // above; preflight cell + snapshot route both read the global.
+      setMCPDiscoveryState(MCPDiscoveryState.COMPLETED);
+      this.eventEmitter?.emit('mcp-client-update', this.clients);
+    }
+  }
+
+  private releaseAllPooledConnections(): void {
+    for (const conn of this.pooledConnections.values()) {
+      try {
+        conn.release();
+      } catch (err) {
+        debugLogger.debug(
+          `Pool release error (ignored): ${getErrorMessage(err)}`,
+        );
+      }
+    }
+    this.pooledConnections.clear();
+  }
+
+  /**
    * Stops all running local MCP servers and closes all client connections.
    * This is the cleanup method to be called on application exit.
    */
   async stop(): Promise<void> {
     // Stop all health checks first
     this.stopAllHealthChecks();
+
+    // F2 (#4175 commit 6 review fix — qwen-latest W94 + W108): drain
+    // the in-flight pool discovery pass BEFORE releasing pool refs.
+    // Pre-fix `stop()` called `releaseAllPooledConnections()` while a
+    // pool-mode `discoverAllMcpToolsViaPool` was still mid-flight (e.g.
+    // progressive discovery running during shutdown). The in-flight
+    // pass would subsequently call `pool.acquire(...)` and attach a
+    // fresh entry to `pooledConnections` AFTER the release loop had
+    // already cleared the Map — leaking pool refs that no caller now
+    // tracks.
+    //
+    // W108 hardening over plain `await`:
+    //   1. Outer 5s deadline via `Promise.race` — a single hung MCP
+    //      server should not block daemon SIGTERM indefinitely;
+    //      individual acquires are bounded by `runWithTimeout`
+    //      (stdio default 30s, remote 5s), but the aggregate
+    //      `discoveryInFlight` promise has no inherent cap. Matches
+    //      the pool's own `drainAll` shutdown-bounded contract (W73).
+    //   2. Debug log on entry + on rejection — pre-fix the empty catch
+    //      silently swallowed rejections; an MCP-discovery hang during
+    //      shutdown left zero log trail. Now operators tailing
+    //      `--debug` see what `stop()` waited on AND whether the wait
+    //      ended via resolution / rejection / timeout.
+    //   3. Timer `unref()` so the grace timer doesn't hold the event
+    //      loop open if discovery actually resolves first.
+    if (this.discoveryInFlight) {
+      debugLogger.debug(
+        'stop(): awaiting in-flight pool discovery to drain (5s cap)',
+      );
+      const SHUTDOWN_DISCOVERY_GRACE_MS = 5_000;
+      // F2 (#4175 commit 6 review fix — qwen-latest W114): clear the
+      // grace timer in `finally` so its callback doesn't fire after
+      // discovery settles cleanly. Without this, every clean shutdown
+      // logs the false-positive "did not settle within 5s grace"
+      // debug line 5s later (whenever the event loop happens to still
+      // be alive). `t.unref()` only prevents the timer from holding
+      // the loop open — it does NOT prevent the callback from
+      // executing if other refs keep the loop alive.
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      // F2 (#4175 commit 6 review fix — qwen-latest W115; R23 T16
+      // doc fix): the `stopTimedOut` flag is set synchronously inside
+      // the grace-timer callback below — i.e. the instant the timer
+      // fires (when `Promise.race` resolves via the timeout branch)
+      // and BEFORE `stop()` proceeds to `releaseAllPooledConnections`.
+      // Any in-flight `pool.acquire` callback that resolves between
+      // the grace timeout firing and the release loop running sees
+      // the gate at line ~1572 and skips the `pooledConnections.set`,
+      // preventing the orphan-entry bug W115 describes. Pre-R23 the
+      // comment said "set BEFORE the race" which misled readers into
+      // expecting a synchronous pre-set; the line citation `~1539`
+      // was also stale (the consumer guard is at ~1572).
+      // Pre-fix: a slow `pool.acquire` (stdio default 30s timeout)
+      // that resolved at 8s did `pooledConnections.set` AFTER the
+      // release loop had cleared the Map — orphan entry in the pool.
+      try {
+        await Promise.race([
+          this.discoveryInFlight,
+          new Promise<void>((resolve) => {
+            graceTimer = setTimeout(() => {
+              this.stopTimedOut = true;
+              debugLogger.debug(
+                'stop(): in-flight discovery did not settle within 5s grace; proceeding',
+              );
+              resolve();
+            }, SHUTDOWN_DISCOVERY_GRACE_MS);
+            graceTimer.unref?.();
+          }),
+        ]);
+      } catch (err) {
+        debugLogger.debug(
+          `stop(): in-flight discovery rejected (proceeding): ${getErrorMessage(
+            err,
+          )}`,
+        );
+      } finally {
+        if (graceTimer) clearTimeout(graceTimer);
+      }
+    }
+
+    // F2 (#4175 commit 4): release all pool refs this manager holds.
+    // Pool's drain timer kicks in for entries that hit refs=0; other
+    // sessions still referencing the same entry keep it alive.
+    this.releaseAllPooledConnections();
 
     const disconnectionPromises = Array.from(this.clients.entries()).map(
       async ([name, client]) => {
@@ -1348,6 +1777,15 @@ export class McpClientManager {
   async disconnectServer(serverName: string): Promise<void> {
     // Stop health check for this server
     this.stopHealthCheck(serverName);
+
+    // F2 (#4175 commit 4): release this server's pool reference if
+    // we acquired one. Pool starts drain timer at refs=0; entry will
+    // be force-closed unless another session re-acquires.
+    const pooled = this.pooledConnections.get(serverName);
+    if (pooled) {
+      pooled.release();
+      this.pooledConnections.delete(serverName);
+    }
 
     const client = this.clients.get(serverName);
     if (client) {
@@ -1539,6 +1977,17 @@ export class McpClientManager {
   async discoverAllMcpToolsIncremental(cliConfig: Config): Promise<void> {
     if (!cliConfig.isTrustedFolder()) {
       return;
+    }
+    // F2 (#4175 commit 4 review fix — wenshao C7): incremental
+    // discovery is the path `Config.startMcpDiscoveryInBackground` takes
+    // during `config.initialize()` under the default progressive mode.
+    // Without this gate, daemon-mode sessions would bypass the
+    // workspace-shared pool and silently revert to per-session
+    // McpClient spawning during boot — the exact regression `discoverAllMcpTools`
+    // was hardened against. Route through the same pool branch so every
+    // discovery entry point honors the pool injection.
+    if (this.pool) {
+      return this.discoverAllMcpToolsViaPool(cliConfig);
     }
 
     const servers = populateMcpServerCommand(
@@ -1931,6 +2380,39 @@ export class McpClientManager {
     uri: string,
     options?: { signal?: AbortSignal },
   ): Promise<ReadResourceResult> {
+    const servers = populateMcpServerCommand(
+      this.cliConfig.getMcpServers() || {},
+      this.cliConfig.getMcpServerCommand(),
+    );
+    const serverConfig = servers[serverName];
+    if (this.cliConfig.isMcpServerDisabled(serverName)) {
+      throw new Error(`MCP server '${serverName}' is disabled.`);
+    }
+    const pooled = this.pooledConnections.get(serverName);
+    if (pooled) {
+      // F2 (#4175 commit 6 review fix — wenshao R24 T19): self-heal
+      // pre-call health check. There is a narrow window between a
+      // silent transport drop (W120/W131 flips entry to 'failed' +
+      // emits the 'failed' event) and the manager-side `onFailed`
+      // listener evicting the handle from `pooledConnections`. A
+      // `readResource` landing in that window pre-fix delegated to
+      // `pooled.client.readResource` on a dead transport and
+      // surfaced an opaque MCP `"Transport is closed"` error.
+      // Detect the dead handle, evict it inline (so the next call
+      // re-acquires through the legacy spawn path below), and throw
+      // a clear server-unavailable error the caller can surface.
+      // Mirrors the W122 self-heal philosophy: the pool already
+      // owns the eviction, we just close the observability gap on
+      // the read path.
+      if (pooled.client.getStatus() !== MCPServerStatus.CONNECTED) {
+        this.pooledConnections.delete(serverName);
+        throw new Error(
+          `MCP server '${serverName}' pool entry disconnected; retry after discovery.`,
+        );
+      }
+      return pooled.client.readResource(uri, options);
+    }
+
     let client = this.clients.get(serverName);
     // PR 14 fix (review #4247 wenshao C3): track whether THIS call
     // reserved the slot + created the client, so the zombie-leak
@@ -1944,11 +2426,6 @@ export class McpClientManager {
     // whether we're on the lazy-spawn or already-existing-client
     // path. Existing clients get the same per-server discovery
     // timeout as fresh ones — uniform behavior across spawn paths.
-    const servers = populateMcpServerCommand(
-      this.cliConfig.getMcpServers() || {},
-      this.cliConfig.getMcpServerCommand(),
-    );
-    const serverConfig = servers[serverName];
     if (!client) {
       // PR 14 invariant (wenshao R2 P3 line 501): the lookup→
       // disabled-check→budget-reserve→client-create sequence below
@@ -2053,10 +2530,6 @@ export class McpClientManager {
     // until the next incremental discovery pass calls `removeServer`.
     // Re-check disabled state on every readResource, regardless of
     // whether the client was just lazy-spawned or pre-existing.
-    if (this.cliConfig.isMcpServerDisabled(serverName)) {
-      throw new Error(`MCP server '${serverName}' is disabled.`);
-    }
-
     if (client.getStatus() !== MCPServerStatus.CONNECTED) {
       try {
         // PR 14 fix (review #4247 wenshao R9 #6 line 1521): wrap the

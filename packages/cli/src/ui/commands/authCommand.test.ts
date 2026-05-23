@@ -72,7 +72,8 @@ describe('authCommand', () => {
 
   it('should have the correct name and description', () => {
     expect(authCommand.name).toBe('auth');
-    expect(authCommand.altNames).toEqual(['connect', 'login']);
-    expect(authCommand.description).toBe('Connect an LLM provider');
+    expect(authCommand.description).toBe(
+      'Configure authentication information for login',
+    );
   });
 });

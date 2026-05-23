@@ -250,7 +250,7 @@ describe('System Control (E2E)', () => {
 
       try {
         const systemMessages: Array<{ model?: string }> = [];
-        let turnCount = 0;
+        let responseCount = 0;
         const resolvers: Array<() => void> = [];
         const responsePromises = [
           new Promise<void>((resolve) => resolvers.push(resolve)),
@@ -265,11 +265,11 @@ describe('System Control (E2E)', () => {
             }
             if (isSDKResultMessage(message)) {
               resultWaiter.notifyResult();
-              // Resolve on result (one per turn), not assistant message
-              // (which may fire multiple times per turn: thinking + text)
-              if (turnCount < resolvers.length) {
-                resolvers[turnCount]?.();
-                turnCount++;
+            }
+            if (isSDKAssistantMessage(message)) {
+              if (responseCount < resolvers.length) {
+                resolvers[responseCount]?.();
+                responseCount++;
               }
             }
           }

@@ -24,6 +24,7 @@ import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { TrustDialog } from './TrustDialog.js';
 import { PermissionsDialog } from './PermissionsDialog.js';
 import { ModelDialog } from './ModelDialog.js';
+import { ManageModelsDialog } from './ManageModelsDialog.js';
 import { ArenaStartDialog } from './arena/ArenaStartDialog.js';
 import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
 import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
@@ -40,7 +41,6 @@ import process from 'node:process';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { IdeTrustChangeDialog } from './IdeTrustChangeDialog.js';
 import { WelcomeBackDialog } from './WelcomeBackDialog.js';
-import { WorktreeExitDialog } from './WorktreeExitDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
 import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js';
@@ -48,7 +48,6 @@ import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
-import { DiffDialog } from './DiffDialog.js';
 import { MemoryDialog } from './MemoryDialog.js';
 import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
@@ -80,19 +79,6 @@ export const DialogManager = ({
         welcomeBackInfo={uiState.welcomeBackInfo}
         onSelect={uiActions.handleWelcomeBackSelection}
         onClose={uiActions.handleWelcomeBackClose}
-      />
-    );
-  }
-  if (uiState.showWorktreeExitDialog && uiState.activeWorktree) {
-    return (
-      <WorktreeExitDialog
-        slug={uiState.activeWorktree.slug}
-        branch={uiState.activeWorktree.branch}
-        worktreePath={uiState.activeWorktree.path}
-        originalHeadCommit={uiState.activeWorktree.originalHeadCommit}
-        onKeep={() => void uiActions.handleWorktreeExit('keep')}
-        onRemove={() => void uiActions.handleWorktreeExit('remove')}
-        onCancel={() => void uiActions.handleWorktreeExit('cancel')}
       />
     );
   }
@@ -231,6 +217,14 @@ export const DialogManager = ({
       <ModelDialog
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
+      />
+    );
+  }
+  if (uiState.isManageModelsDialogOpen) {
+    return (
+      <ManageModelsDialog
+        config={config}
+        onClose={uiActions.closeManageModelsDialog}
       />
     );
   }
@@ -474,18 +468,6 @@ export const DialogManager = ({
         onCancel={uiActions.closeRewindSelector}
         fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
         fileHistoryService={config.getFileHistoryService()}
-      />
-    );
-  }
-
-  if (uiState.isDiffDialogOpen) {
-    return (
-      <DiffDialog
-        history={uiState.history}
-        cwd={config.getWorkingDir() || config.getProjectRoot()}
-        fileHistoryService={config.getFileHistoryService()}
-        fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
-        onClose={uiActions.closeDiffDialog}
       />
     );
   }

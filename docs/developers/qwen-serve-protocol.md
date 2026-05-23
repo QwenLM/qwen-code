@@ -104,8 +104,16 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'mcp_guardrail_events',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
  'session_approval_mode_control', 'workspace_tool_toggle',
- 'workspace_init', 'workspace_mcp_restart']
+ 'workspace_init', 'workspace_mcp_restart',
+ 'auth_device_flow', 'permission_mediation']
 ```
+
+> The conditional `require_auth` tag (PR 15) appears only when the daemon
+> is started with `--require-auth`. F3's `permission_mediation` tag is
+> always-on and carries `modes: ['first-responder', 'designated',
+'consensus', 'local-only']` so SDK clients can introspect the
+> build-supported set; the runtime-active strategy is at
+> `body.policy.permission`.
 
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
 
@@ -1121,7 +1129,7 @@ Request:
 { "mode": "auto-edit", "persist": false }
 ```
 
-`mode` must be one of `'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo'` (mirror of core's `ApprovalMode` enum; the SDK exports `DAEMON_APPROVAL_MODES` for runtime validation). `persist` defaults to `false`.
+`mode` must be one of `'plan' | 'default' | 'auto-edit' | 'yolo'` (mirror of core's `ApprovalMode` enum; the SDK exports `DAEMON_APPROVAL_MODES` for runtime validation). `persist` defaults to `false`.
 
 Response (200):
 
@@ -1278,17 +1286,19 @@ data: {"v":1,"type":"client_evicted","data":{"reason":"queue_overflow","droppedA
 
 The SSE-level `id:` / `event:` lines duplicate `envelope.id` / `envelope.type` for EventSource compatibility. Raw-`fetch` consumers (the SDK's `parseSseStream`) read everything off the JSON envelope and ignore the SSE preamble lines.
 
-| Event type            | Trigger                                                                                                                                                                                                                                                                                                                  |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `session_update`      | Any ACP `sessionUpdate` notification (LLM chunks, tool calls, usage)                                                                                                                                                                                                                                                     |
-| `permission_request`  | Agent asked for tool approval                                                                                                                                                                                                                                                                                            |
-| `permission_resolved` | Some client voted on a permission via `POST /permission/:requestId`                                                                                                                                                                                                                                                      |
-| `model_switched`      | `POST /session/:id/model` succeeded                                                                                                                                                                                                                                                                                      |
-| `model_switch_failed` | `POST /session/:id/model` rejected                                                                                                                                                                                                                                                                                       |
-| `session_died`        | Agent child crashed unexpectedly. **Terminal: SSE stream closes after this frame; the session is gone from `byId`.** Subscribers should reconnect via `POST /session` to spawn a fresh one.                                                                                                                              |
-| `slow_client_warning` | Subscriber-local: queue ≥ 75% full. **Non-terminal** — the stream continues; the warning is a heads-up before eviction. Carries `{queueSize, maxQueued, lastEventId}`. Fires ONCE per overflow episode; re-arms after the queue drains below 37.5%. No `id` (synthetic). Pre-flight `caps.features.slow_client_warning`. |
-| `client_evicted`      | Subscriber-local: queue overflow. **Terminal: SSE stream closes after this frame** (no `id` — synthetic). Other subscribers on the same session continue.                                                                                                                                                                |
-| `stream_error`        | Daemon-side error during fan-out. **Terminal: SSE stream closes after this frame** (no `id` — synthetic).                                                                                                                                                                                                                |
+| Event type                | Trigger                                                                                                                                                                                                                                                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `session_update`          | Any ACP `sessionUpdate` notification (LLM chunks, tool calls, usage)                                                                                                                                                                                                                                                     |
+| `permission_request`      | Agent asked for tool approval                                                                                                                                                                                                                                                                                            |
+| `permission_resolved`     | Some client voted on a permission via `POST /permission/:requestId`                                                                                                                                                                                                                                                      |
+| `permission_partial_vote` | (consensus only) A vote was recorded but quorum not yet reached. Carries `{requestId, sessionId, votesReceived, votesNeeded, quorum, optionTallies}`. Pre-flight `caps.features.permission_mediation`.                                                                                                                   |
+| `permission_forbidden`    | A vote was rejected by the active policy (`designated` mismatch, `local-only` non-loopback, or `consensus` voter not in snapshot). Carries `{requestId, sessionId, clientId?, reason}`. Pre-flight `caps.features.permission_mediation`.                                                                                 |
+| `model_switched`          | `POST /session/:id/model` succeeded                                                                                                                                                                                                                                                                                      |
+| `model_switch_failed`     | `POST /session/:id/model` rejected                                                                                                                                                                                                                                                                                       |
+| `session_died`            | Agent child crashed unexpectedly. **Terminal: SSE stream closes after this frame; the session is gone from `byId`.** Subscribers should reconnect via `POST /session` to spawn a fresh one.                                                                                                                              |
+| `slow_client_warning`     | Subscriber-local: queue ≥ 75% full. **Non-terminal** — the stream continues; the warning is a heads-up before eviction. Carries `{queueSize, maxQueued, lastEventId}`. Fires ONCE per overflow episode; re-arms after the queue drains below 37.5%. No `id` (synthetic). Pre-flight `caps.features.slow_client_warning`. |
+| `client_evicted`          | Subscriber-local: queue overflow. **Terminal: SSE stream closes after this frame** (no `id` — synthetic). Other subscribers on the same session continue.                                                                                                                                                                |
+| `stream_error`            | Daemon-side error during fan-out. **Terminal: SSE stream closes after this frame** (no `id` — synthetic).                                                                                                                                                                                                                |
 
 Reconnect semantics:
 
@@ -1305,20 +1315,32 @@ Backpressure:
 
 ### `POST /permission/:requestId`
 
-Cast a vote on a pending `permission_request`. **First responder wins** — once one client answers, every other client trying to answer the same id gets `404`.
+Cast a vote on a pending `permission_request`. The active **mediation policy** decides who wins:
 
-> **Stage 1 limitation — no permission timeout.** A `permission_request`
+| Policy                      | Behavior                                                                                                                                                                                              |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `first-responder` (default) | Any validated voter wins; later voters get `404`. Pre-F3 baseline.                                                                                                                                    |
+| `designated`                | Only the prompt originator (`originatorClientId`) decides; non-originators get `403 permission_forbidden / designated_mismatch`. Falls back to first-responder for anonymous prompts.                 |
+| `consensus`                 | N-of-M voters must agree (default `N = floor(M/2) + 1`, override via `policy.consensusQuorum`). First option to reach `N` wins. Non-resolving votes get `200` + `permission_partial_vote` SSE frames. |
+| `local-only`                | Only loopback voters decide; remote callers get `403 permission_forbidden / remote_not_allowed`.                                                                                                      |
+
+The active policy is configured in `settings.json` under `policy.permissionStrategy` and surfaced on `/capabilities` at `body.policy.permission`. Pre-flight `caps.features.permission_mediation` (with `modes: [...]`) for the build-supported set.
+
+> **F3 (#4175): multi-client permission coordination.** F3 added the four policies above. Pre-F3 daemons hardcoded first-responder; the wire shape stays bit-for-bit unchanged when the configured policy is `first-responder`. New events (`permission_partial_vote`, `permission_forbidden`) are additive — old SDKs see them as `unrecognized_known_event` and gracefully ignore.
+
+> **Permission timeout (default 5 minutes).** A `permission_request`
 > stays pending until: (a) some client votes here, (b) `POST /session/:id/cancel`
-> fires, (c) the HTTP client driving the prompt
-> disconnects (mid-prompt cancel resolves outstanding permissions as
-> `cancelled`), (d) the session is killed, or (e) the daemon shuts
-> down. **In a fully-headless deployment with no SSE subscriber,
-> `requestPermission` blocks the agent indefinitely** — there's nothing
-> to time out the wait. Stage 2 will add a configurable
-> `permissionTimeoutMs`. Until then, headless callers should keep an
-> SSE subscription open or wrap their prompt loop in their own timeout
->
-> - `POST /session/:id/cancel` on expiry.
+> fires, (c) the HTTP client driving the prompt disconnects
+> (mid-prompt cancel resolves outstanding permissions as `cancelled`),
+> (d) the session is killed, (e) the daemon shuts down, **or
+> (f) the per-session permission timeout fires** (`DEFAULT_PERMISSION_TIMEOUT_MS`,
+> 5 minutes). On timeout fire the agent's `requestPermission` resolves
+> as `{outcome: 'cancelled'}`, the audit ring records a
+> `permission.timeout` entry, daemon stderr emits a one-line
+> breadcrumb, and the SSE bus fans out the standard
+> `permission_resolved` cancelled frame so subscribers clean up. The
+> timeout is configurable via `BridgeOptions.permissionResponseTimeoutMs`;
+> headless callers running long-form prompts may want to extend it.
 
 Request:
 
@@ -1338,10 +1360,13 @@ Outcomes:
 
 Response:
 
-- `200 {}` — your vote was accepted
+- `200 {}` — your vote was accepted (resolved OR recorded under consensus quorum)
+- `403 { "code": "permission_forbidden", "reason": "designated_mismatch" | "remote_not_allowed", "requestId", "sessionId" }` — F3: the active policy rejected your vote
 - `404 { "error": "..." }` — the requestId is unknown (already resolved, never existed, or session torn down)
+- `500 { "code": "cancel_sentinel_collision", ... }` — F3: the agent's `allowedOptionIds` contains the reserved sentinel `'__cancelled__'`; agent / daemon contract violation
+- `501 { "code": "permission_policy_not_implemented", "policy": "<name>" }` — F3 forward-compat: a policy literal landed in the schema but its mediator branch isn't built yet (currently unreachable; reserved for future policies)
 
-After a successful vote, every connected client sees `permission_resolved` with the same `requestId` and the chosen `outcome`.
+After a successful vote, every connected client sees `permission_resolved` with the same `requestId` and the chosen `outcome`. Under `consensus`, intermediate votes additionally fan out `permission_partial_vote` until quorum.
 
 ### Auth device-flow routes (issue #4175 PR 21)
 

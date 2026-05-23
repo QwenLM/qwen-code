@@ -332,17 +332,6 @@ describe('FileReadCache', () => {
         expect(afterWrite.entry.lastReadCacheable).toBe(true);
       }
     });
-
-    it('can record structured writes as non-cacheable', () => {
-      const cache = new FileReadCache();
-      const entry = cache.recordWrite('/x/notebook.ipynb', makeStats(), {
-        cacheable: false,
-      });
-
-      expect(entry.lastReadWasFull).toBe(true);
-      expect(entry.lastReadCacheable).toBe(false);
-      expect(entry.lastReadAt).toBe(entry.lastWriteAt);
-    });
   });
 
   describe('read-then-write-then-read ordering', () => {

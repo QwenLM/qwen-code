@@ -390,34 +390,12 @@ export function settingExistsInScope(
   return value !== undefined;
 }
 
-/**
- * True if any dotted-path segment would let a write climb into the prototype
- * chain. Defense in depth at the utility level: callers like
- * migrateProviderMetadata feed `field` names straight from Object.entries on
- * user-editable settings.json, and JSON.parse preserves `__proto__` as an own
- * property — a crafted file could otherwise pollute Object.prototype here.
- * Inline literal === comparisons (not Set.has) so CodeQL recognises this as a
- * prototype-pollution sanitiser.
- */
-function pathHasUnsafeSegment(keys: string[]): boolean {
-  for (const key of keys) {
-    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
-      return true;
-    }
-  }
-  return false;
-}
-
 export function setNestedPropertyForce(
   obj: Record<string, unknown>,
   path: string,
   value: unknown,
 ): void {
   const keys = path.split('.');
-  // Refuse prototype-chain segments (see pathHasUnsafeSegment). Silent skip
-  // rather than throw: callers iterate user data and a poisoned key should
-  // be ignored, not crash the operation.
-  if (pathHasUnsafeSegment(keys)) return;
   const lastKey = keys.pop();
   if (!lastKey) return;
 
@@ -438,8 +416,6 @@ export function setNestedPropertySafe(
   value: unknown,
 ): void {
   const keys = path.split('.');
-  // Refuse prototype-chain segments (see pathHasUnsafeSegment).
-  if (pathHasUnsafeSegment(keys)) return;
   const lastKey = keys.pop();
   if (!lastKey) return;
 
@@ -680,15 +656,8 @@ export function restoreSettingsFromBackup(filePath: string): boolean {
       fs.unlinkSync(backupPath);
       return true;
     }
-  } catch (err) {
-    // Caller handles the boolean failure, but log the underlying cause so
-    // EACCES / disk full / file-locked don't all look identical from
-    // upstream — the adapter's own warning then has something to point at.
-    // eslint-disable-next-line no-console -- best-effort rollback path
-    console.error(
-      `[settingsUtils] restoreSettingsFromBackup(${filePath}) failed:`,
-      err,
-    );
+  } catch (_e) {
+    // Ignore restore errors — caller should handle the failure
   }
   return false;
 }

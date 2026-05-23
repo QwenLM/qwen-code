@@ -8,7 +8,6 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { ToolResult, ToolResultDisplay } from './tools.js';
 import type { Config } from '../config/config.js';
-import type { PermissionDecision } from '../permissions/types.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
 import { logSkillLaunch, SkillLaunchEvent } from '../telemetry/index.js';
@@ -299,10 +298,6 @@ ${skillDescriptions}
     );
   }
 
-  override toAutoClassifierInput(params: SkillParams): Record<string, unknown> {
-    return { skill: params.skill };
-  }
-
   getAvailableSkillNames(): string[] {
     return this.availableSkills.map((skill) => skill.name);
   }
@@ -354,18 +349,6 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
   getDescription(): string {
     return `Use skill: "${this.params.skill}"`;
-  }
-
-  /**
-   * Skills load user-defined code that runs with the agent's tool
-   * access — they're a privileged sink. In AUTO mode the classifier
-   * needs to inspect the skill name and any inline args before the
-   * skill loads, but the scheduler short-circuits at L4 when
-   * `finalPermission === 'allow'`. The L3 default must be `'ask'` so
-   * the classifier projection added in this PR can be reached.
-   */
-  override async getDefaultPermission(): Promise<PermissionDecision> {
-    return 'ask';
   }
 
   async execute(

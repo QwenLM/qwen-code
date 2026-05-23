@@ -172,6 +172,97 @@ export class InvalidSessionMetadataError extends Error {
 }
 
 /**
+ * #4175 F3. Thrown by `MultiClientPermissionMediator.vote` when the
+ * active policy is wired into the schema/registry but the mediator
+ * implementation has not been built yet.
+ *
+ * **Currently unreachable in production** — F3 Commit 4 implemented
+ * all 4 policies in the frozen `PermissionPolicy` union. The class +
+ * route-level 501 mapping in `server.ts:sendPermissionVoteError` are
+ * RETAINED as forward-compat infrastructure: when a future PR adds a
+ * 5th policy literal to `PermissionPolicy` and lands its mediator
+ * implementation across multiple commits, the intermediate-build
+ * stub can throw this typed error and the operator gets a clean 501
+ * instead of a generic 500.
+ *
+ * Routes map this to HTTP 501 with a structured body so SDK clients
+ * can render "your daemon is older than your settings expect;
+ * upgrade".
+ */
+export class PermissionPolicyNotImplementedError extends Error {
+  readonly policy: string;
+  constructor(policy: string) {
+    super(
+      `Permission policy "${policy}" is declared in the contract but ` +
+        'not yet implemented in this daemon build.',
+    );
+    this.name = 'PermissionPolicyNotImplementedError';
+    this.policy = policy;
+  }
+}
+
+/**
+ * #4175 F3 Commit 1. Thrown by `MultiClientPermissionMediator.request`
+ * when an agent-declared `allowedOptionIds` set contains the
+ * cancel-vote sentinel string. The bridge maps voter cancel intent
+ * to that exact `optionId`; if the agent legitimately uses it as
+ * an option label, the mediator can no longer disambiguate. We
+ * fail loudly at request issue time so the operator sees a clear
+ * misconfiguration rather than the silent "voter approval was
+ * treated as cancel" semantic flip.
+ *
+ * Routes map this to HTTP 500 — it represents a contract violation
+ * between agent and daemon, not a client mistake.
+ */
+export class CancelSentinelCollisionError extends Error {
+  readonly requestId: string;
+  readonly sentinel: string;
+  constructor(requestId: string, sentinel: string) {
+    super(
+      `Permission ${requestId}: agent-declared optionId set contains ` +
+        `the cancel-vote sentinel "${sentinel}", which would prevent ` +
+        'the daemon from disambiguating cancel intent from a real vote.',
+    );
+    this.name = 'CancelSentinelCollisionError';
+    this.requestId = requestId;
+    this.sentinel = sentinel;
+  }
+}
+
+/**
+ * #4175 F3 Commit 2. Thrown by `bridge.respondToSessionPermission` /
+ * `bridge.respondToPermission` when the active permission policy
+ * rejects the vote (designated voter mismatch, or remote vote under
+ * `local-only`). The bridge converts the mediator's
+ * `PermissionVoteOutcome { kind: 'forbidden', reason: ... }` into
+ * this typed error so the route layer can map to HTTP 403 without
+ * pattern-matching on the error message.
+ *
+ * `reason` is forwarded verbatim from the mediator's outcome so SDK
+ * clients can render a precise UI ("you weren't designated to
+ * approve" vs "this daemon only accepts loopback approvals").
+ */
+export class PermissionForbiddenError extends Error {
+  readonly requestId: string;
+  readonly sessionId: string;
+  readonly reason: 'designated_mismatch' | 'remote_not_allowed';
+  constructor(
+    requestId: string,
+    sessionId: string,
+    reason: 'designated_mismatch' | 'remote_not_allowed',
+  ) {
+    super(
+      `Permission ${requestId} on session ${sessionId}: ` +
+        `vote rejected by policy (${reason}).`,
+    );
+    this.name = 'PermissionForbiddenError';
+    this.requestId = requestId;
+    this.sessionId = sessionId;
+    this.reason = reason;
+  }
+}
+
+/**
  * #4175 Wave 4 PR 17. Thrown by `initWorkspace` when the target file
  * already exists with non-whitespace content and the caller did not
  * pass `force: true`. Translated to HTTP 409 by the route. The
@@ -190,6 +281,78 @@ export class WorkspaceInitConflictError extends Error {
     this.name = 'WorkspaceInitConflictError';
     this.path = path;
     this.existingSize = existingSize;
+  }
+}
+
+/**
+ * #4297 fold-in 1 (16:32:44-round S1). Thrown by `initWorkspace` when
+ * the configured `context.fileName` resolves outside the bound
+ * workspace via path arithmetic (e.g. `../outside.md`). Translated
+ * to HTTP 400 by the route — distinguishable from a generic 500 so
+ * an operator sees "your workspace config is wrong" rather than
+ * "the daemon is broken." The `filename` and `boundWorkspace`
+ * fields let clients display a precise diagnostic.
+ */
+export class WorkspaceInitPathEscapeError extends Error {
+  readonly filename: string;
+  readonly boundWorkspace: string;
+  constructor(filename: string, boundWorkspace: string) {
+    super(
+      `Configured workspace context filename ${JSON.stringify(filename)} ` +
+        `resolves outside the bound workspace ${JSON.stringify(boundWorkspace)}. ` +
+        `Refusing to write.`,
+    );
+    this.name = 'WorkspaceInitPathEscapeError';
+    this.filename = filename;
+    this.boundWorkspace = boundWorkspace;
+  }
+}
+
+/**
+ * #4297 fold-in 1 (16:32:44-round S1). Thrown by `initWorkspace` when
+ * the target file is itself a symlink, OR when the parent path
+ * canonicalizes (via `realpath`) outside the bound workspace.
+ * Translated to HTTP 400 by the route — same operator-clarity
+ * rationale as `WorkspaceInitPathEscapeError`. `target` is the
+ * resolved path the bridge attempted, `kind` distinguishes the two
+ * symlink scenarios for diagnostics.
+ */
+export class WorkspaceInitSymlinkError extends Error {
+  readonly target: string;
+  readonly kind: 'target' | 'parent';
+  constructor(target: string, kind: 'target' | 'parent', detail: string) {
+    super(detail);
+    this.name = 'WorkspaceInitSymlinkError';
+    this.target = target;
+    this.kind = kind;
+  }
+}
+
+/**
+ * #4297 fold-in 10 (qwen-latest, addresses #3263954690). Thrown by
+ * `initWorkspace` when the target file's inode misbehaved at write
+ * time IN A NON-SYMLINK WAY — typically a TOCTOU race against a
+ * concurrent writer:
+ *   - `'eexist'`: a regular file (or symlink) appeared at the target
+ *     path between the absence check and our atomic `'wx'` create.
+ *   - `'enoent'`: the target was deleted between the content check
+ *     and the `O_NOFOLLOW` overwrite (concurrent git checkout, editor
+ *     save, etc.).
+ *
+ * Split out from `WorkspaceInitSymlinkError` so the HTTP error code
+ * isn't misleading: an operator chasing a `workspace_init_race`
+ * code knows it's a benign concurrent-modification window, not a
+ * symlink attack vector. Same 400 mapping as the sibling class —
+ * the route layer still recognizes both.
+ */
+export class WorkspaceInitRaceError extends Error {
+  readonly target: string;
+  readonly kind: 'eexist' | 'enoent';
+  constructor(target: string, kind: 'eexist' | 'enoent', detail: string) {
+    super(detail);
+    this.name = 'WorkspaceInitRaceError';
+    this.target = target;
+    this.kind = kind;
   }
 }
 

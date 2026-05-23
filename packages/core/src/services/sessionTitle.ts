@@ -70,7 +70,7 @@ const TRAILING_PAIRED_BRACKETS_RE =
  * command) can surface actionable messages instead of a generic "could not
  * generate".
  *
- * - `no_fast_model`: config.getFastModel() returned undefined.
+ * - `no_fast_model`: config.getFastModelForSideQuery() returned undefined.
  *   User needs to configure one via `/model --fast <name>`.
  * - `no_client`: BaseLlmClient or GeminiClient not yet initialized. Rare,
  *   usually means the session hasn't authenticated yet.
@@ -107,7 +107,7 @@ export async function tryGenerateSessionTitle(
   abortSignal: AbortSignal,
 ): Promise<SessionTitleOutcome> {
   try {
-    const model = config.getFastModel();
+    const model = config.getFastModelForSideQuery?.() ?? config.getFastModel();
     if (!model) return { ok: false, reason: 'no_fast_model' };
 
     const geminiClient = config.getGeminiClient();

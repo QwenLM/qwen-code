@@ -53,19 +53,9 @@ const MEMORY_RECALL_COUNT = `${SERVICE_NAME}.memory.recall.count`;
 const MEMORY_RECALL_DURATION = `${SERVICE_NAME}.memory.recall.duration`;
 
 const baseMetricDefinition = {
-  // session.id on metrics is opt-in: each session is a new value, so
-  // attaching it by default would create unbounded time-series fan-out on
-  // every metric backend. Operators who need session-level metric slicing
-  // can enable QWEN_TELEMETRY_METRICS_INCLUDE_SESSION_ID or
-  // telemetry.metrics.includeSessionId. Spans and logs always carry
-  // session.id for trace/log correlation.
-  getCommonAttributes: (config: Config): Attributes => {
-    const out: Attributes = {};
-    if (config.getTelemetryMetricsIncludeSessionId()) {
-      out['session.id'] = config.getSessionId();
-    }
-    return out;
-  },
+  getCommonAttributes: (config: Config): Attributes => ({
+    'session.id': config.getSessionId(),
+  }),
 };
 
 const COUNTER_DEFINITIONS = {

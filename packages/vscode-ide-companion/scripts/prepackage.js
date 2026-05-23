@@ -178,11 +178,11 @@ function removeSelfReferenceFromNodeModules() {
 function main() {
   const npm = npmBin();
 
-  // The CLI bundle is produced by esbuild directly from TypeScript source
-  // (entryPoint: packages/cli/index.ts), so a full tsc build is not needed.
-  // Calling `npm run build` here would trigger tsc --build a second time
-  // (after the initial `prepare` in npm ci) and fail with TS5055 when the
-  // version bump made source files diverge from the stale tsbuildinfo.
+  // Root bundling depends on built workspace outputs. Use the root build to
+  // ensure all required workspace dist/ artifacts exist.
+  console.log('[prepackage] Building repo...');
+  run(npm, ['--prefix', repoRoot, 'run', 'build'], { cwd: repoRoot });
+
   console.log('[prepackage] Bundling root CLI...');
   run(npm, ['--prefix', repoRoot, 'run', 'bundle'], { cwd: repoRoot });
 

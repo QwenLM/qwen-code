@@ -75,18 +75,13 @@ export const Composer = () => {
     setShowShortcuts((prev) => !prev);
   }, []);
 
-  // State for autocomplete-dropdown visibility (narrow signal). Drives the
-  // Footer / KeyboardShortcuts hide-when-dropdown-visible logic below; kept
-  // local to Composer because nothing outside this component needs the
-  // narrow signal.
+  // State for suggestions visibility
   const [showSuggestions, setShowSuggestions] = useState(false);
-
-  // Broad signal — any input-area Tab consumer. Forwarded to AppContainer
-  // via UIActionsContext so useAutoAcceptIndicator's `shouldBlockTab` can
-  // suppress the Windows-only bare-Tab approval-mode fallback. See #4171.
-  const handleTabConsumerChange = useCallback(
-    (active: boolean) => {
-      uiActions.onTabConsumerChange(active);
+  const handleSuggestionsVisibilityChange = useCallback(
+    (visible: boolean) => {
+      setShowSuggestions(visible);
+      // Also notify AppContainer for Tab key handling
+      uiActions.onSuggestionsVisibilityChange(visible);
     },
     [uiActions],
   );
@@ -150,8 +145,7 @@ export const Composer = () => {
           onEscapePromptChange={uiActions.onEscapePromptChange}
           onToggleShortcuts={handleToggleShortcuts}
           showShortcuts={showShortcuts}
-          onSuggestionsVisibilityChange={setShowSuggestions}
-          onTabConsumerChange={handleTabConsumerChange}
+          onSuggestionsVisibilityChange={handleSuggestionsVisibilityChange}
           focus={true}
           vimHandleInput={uiActions.vimHandleInput}
           isEmbeddedShellFocused={uiState.embeddedShellFocused}

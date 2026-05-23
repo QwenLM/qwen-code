@@ -30,12 +30,70 @@ export {
   createDaemonSessionViewState,
   isDaemonEventType,
   isKnownDaemonEvent,
+  // F2 (#4175 commit 6 review fix — claude-opus-4-7 W121): re-export
+  // the workspace-scoped budget event helper. Pre-fix the PR
+  // description and event JSDoc told consumers to use this helper to
+  // branch on `scope === 'workspace'`, but the function lived in
+  // `events.ts` and was never added to this barrel — SDK consumers
+  // had no public import path. Same omission pattern caught for PR-21
+  // auth surface; locked down by `daemon-public-surface.test.ts`.
+  isWorkspaceScopedBudgetEvent,
   reduceDaemonAuthEvent,
   reduceDaemonAuthEvents,
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from './events.js';
 export { parseSseStream, SseFramingError } from './sse.js';
+export {
+  appendLocalUserTranscriptMessage,
+  createDaemonToolPreview,
+  createDaemonTranscriptState,
+  createDaemonTranscriptStore,
+  DAEMON_PLAN_TOOL_CALL_ID,
+  daemonUiEventToTerminalText,
+  getOutputText as getDaemonUiOutputText,
+  getSessionUpdatePayload,
+  isDaemonUiSensitiveKey,
+  normalizeDaemonEvent,
+  redactDaemonUiSensitiveFields,
+  rebuildDaemonTranscriptBlockIndex,
+  reduceDaemonTranscriptEvents,
+  sanitizeTerminalText as sanitizeDaemonTerminalText,
+  selectPendingPermissionBlocks,
+  selectTranscriptBlocks,
+  stringifyJson as stringifyDaemonUiJson,
+  stripOscSequences as stripDaemonOscSequences,
+  transcriptBlockToTerminalText,
+} from './ui/index.js';
+export type {
+  DaemonShellTranscriptBlock,
+  DaemonStatusTranscriptBlock,
+  DaemonTextTranscriptBlock,
+  DaemonToolPreview,
+  DaemonToolTranscriptBlock,
+  DaemonTranscriptBlock,
+  DaemonTranscriptBlockKind,
+  DaemonTranscriptQuestion,
+  DaemonTranscriptQuestionOption,
+  DaemonTranscriptReducerOptions,
+  DaemonTranscriptState,
+  DaemonTranscriptStore,
+  DaemonUiAssistantDoneEvent,
+  DaemonUiErrorEvent,
+  DaemonUiEvent,
+  DaemonUiEventBase,
+  DaemonUiEventType,
+  DaemonUiModelChangedEvent,
+  DaemonUiPermissionOption,
+  DaemonUiPermissionRequestEvent,
+  DaemonUiPermissionResolvedEvent,
+  DaemonUiSessionActions,
+  DaemonUiShellOutputEvent,
+  DaemonUiStatusEvent,
+  DaemonUiTextEvent,
+  DaemonUiToolUpdateEvent,
+  NormalizeDaemonEventOptions,
+} from './ui/index.js';
 export {
   DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
@@ -51,6 +109,10 @@ export type {
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonControlEvent,
+  // #4175 F4 prereq (Ilya0527 issue #15) — daemon-emitted resync
+  // signal for SSE reconnects past the ring eviction boundary.
+  DaemonStateResyncRequiredData,
+  DaemonStateResyncRequiredEvent,
   DaemonMcpServerRestartedData,
   DaemonMcpServerRestartedEvent,
   DaemonMcpServerRestartRefusedData,
@@ -78,6 +140,11 @@ export type {
   DaemonPermissionOption,
   DaemonPermissionAlreadyResolvedData,
   DaemonPermissionAlreadyResolvedEvent,
+  // #4175 F3 Commit 7 — multi-client permission coordination push events.
+  DaemonPermissionForbiddenData,
+  DaemonPermissionForbiddenEvent,
+  DaemonPermissionPartialVoteData,
+  DaemonPermissionPartialVoteEvent,
   DaemonPermissionRequestData,
   DaemonPermissionRequestEvent,
   DaemonPermissionResolvedData,

@@ -28,8 +28,6 @@ export interface Suggestion {
   matchedAlias?: string;
   supportedModes?: ExecutionMode[];
   modelInvocable?: boolean;
-  /** Whether the suggestion represents a directory path. When true, handleAutocomplete should NOT append a trailing space so the user can continue tab-completing deeper into the directory tree. */
-  isDirectory?: boolean;
 }
 interface SuggestionsDisplayProps {
   suggestions: Suggestion[];

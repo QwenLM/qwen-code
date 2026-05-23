@@ -17,7 +17,6 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { RuntimeContentGeneratorView } from './agent-context.js';
-import { createChildAbortController } from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type {
   AgentEventEmitter,
@@ -226,117 +225,116 @@ export class AgentHeadless {
       return;
     }
 
-    // Child controller propagates from optional externalSignal and auto-cleans
-    // its parent listener when aborted (see utils/abortController.ts).
-    const abortController = createChildAbortController(externalSignal);
+    // Set up abort signal propagation
+    const abortController = new AbortController();
+    const onExternalAbort = () => {
+      abortController.abort();
+    };
+    if (externalSignal) {
+      externalSignal.addEventListener('abort', onExternalAbort);
+    }
+    if (externalSignal?.aborted) {
+      abortController.abort();
+    }
+
+    const toolsList = await this.core.prepareTools();
+
+    const initialMessages =
+      initialMessagesOverride && initialMessagesOverride.length > 0
+        ? initialMessagesOverride
+        : [{ role: 'user' as const, parts: [{ text: initialTaskText }] }];
+
+    const startTime = Date.now();
+    this.core.executionStats.startTimeMs = startTime;
+    this.core.stats.start(startTime);
 
     try {
-      const toolsList = await this.core.prepareTools();
+      // Emit start event
+      this.core.eventEmitter?.emit(AgentEventType.START, {
+        subagentId: this.core.subagentId,
+        name: this.core.name,
+        model:
+          this.core.modelConfig.model ||
+          this.core.runtimeContext.getModel() ||
+          DEFAULT_QWEN_MODEL,
+        tools: (this.core.toolConfig?.tools || ['*']).map((t) =>
+          typeof t === 'string' ? t : t.name,
+        ),
+        timestamp: Date.now(),
+      } as AgentStartEvent);
 
-      const initialMessages =
-        initialMessagesOverride && initialMessagesOverride.length > 0
-          ? initialMessagesOverride
-          : [{ role: 'user' as const, parts: [{ text: initialTaskText }] }];
+      // Log telemetry for subagent start
+      const startEvent = new SubagentExecutionEvent(this.core.name, 'started');
+      logSubagentExecution(this.core.runtimeContext, startEvent);
 
-      const startTime = Date.now();
-      this.core.executionStats.startTimeMs = startTime;
-      this.core.stats.start(startTime);
+      // Delegate to AgentCore's reasoning loop
+      const result = await this.core.runReasoningLoop(
+        chat,
+        initialMessages,
+        toolsList,
+        abortController,
+        {
+          maxTurns: this.core.runConfig.max_turns,
+          maxTimeMinutes: this.core.runConfig.max_time_minutes,
+          startTimeMs: startTime,
+          getExternalMessages: this.externalMessageProvider,
+          waitForExternalMessages: this.externalMessageWaiter,
+          shouldWaitForExternalMessages: this.externalMessageWaitPredicate,
+        },
+      );
 
-      try {
-        // Emit start event
-        this.core.eventEmitter?.emit(AgentEventType.START, {
-          subagentId: this.core.subagentId,
-          name: this.core.name,
-          model:
-            this.core.modelConfig.model ||
-            this.core.runtimeContext.getModel() ||
-            DEFAULT_QWEN_MODEL,
-          tools: (this.core.toolConfig?.tools || ['*']).map((t) =>
-            typeof t === 'string' ? t : t.name,
-          ),
-          timestamp: Date.now(),
-        } as AgentStartEvent);
+      this.finalText = result.text;
+      this.terminateMode = result.terminateMode ?? AgentTerminateMode.GOAL;
+    } catch (error) {
+      debugLogger.error('Error during subagent execution:', error);
+      this.terminateMode = AgentTerminateMode.ERROR;
+      this.core.eventEmitter?.emit(AgentEventType.ERROR, {
+        subagentId: this.core.subagentId,
+        error: error instanceof Error ? error.message : String(error),
+        timestamp: Date.now(),
+      } as AgentErrorEvent);
 
-        // Log telemetry for subagent start
-        const startEvent = new SubagentExecutionEvent(
-          this.core.name,
-          'started',
-        );
-        logSubagentExecution(this.core.runtimeContext, startEvent);
-
-        // Delegate to AgentCore's reasoning loop
-        const result = await this.core.runReasoningLoop(
-          chat,
-          initialMessages,
-          toolsList,
-          abortController,
-          {
-            maxTurns: this.core.runConfig.max_turns,
-            maxTimeMinutes: this.core.runConfig.max_time_minutes,
-            startTimeMs: startTime,
-            getExternalMessages: this.externalMessageProvider,
-            waitForExternalMessages: this.externalMessageWaiter,
-            shouldWaitForExternalMessages: this.externalMessageWaitPredicate,
-          },
-        );
-
-        this.finalText = result.text;
-        this.terminateMode = result.terminateMode ?? AgentTerminateMode.GOAL;
-      } catch (error) {
-        debugLogger.error('Error during subagent execution:', error);
-        this.terminateMode = AgentTerminateMode.ERROR;
-        this.core.eventEmitter?.emit(AgentEventType.ERROR, {
-          subagentId: this.core.subagentId,
-          error: error instanceof Error ? error.message : String(error),
-          timestamp: Date.now(),
-        } as AgentErrorEvent);
-
-        throw error;
-      } finally {
-        this.core.executionStats.totalDurationMs = Date.now() - startTime;
-        const summary = this.core.stats.getSummary(Date.now());
-        this.core.eventEmitter?.emit(AgentEventType.FINISH, {
-          subagentId: this.core.subagentId,
-          terminateReason: this.terminateMode,
-          timestamp: Date.now(),
-          rounds: summary.rounds,
-          totalDurationMs: summary.totalDurationMs,
-          totalToolCalls: summary.totalToolCalls,
-          successfulToolCalls: summary.successfulToolCalls,
-          failedToolCalls: summary.failedToolCalls,
-          inputTokens: summary.inputTokens,
-          outputTokens: summary.outputTokens,
-          totalTokens: summary.totalTokens,
-        } as AgentFinishEvent);
-
-        const completionEvent = new SubagentExecutionEvent(
-          this.core.name,
-          this.terminateMode === AgentTerminateMode.GOAL
-            ? 'completed'
-            : 'failed',
-          {
-            terminate_reason: this.terminateMode,
-            result: this.finalText,
-            execution_summary: this.core.stats.formatCompact(
-              'Subagent execution completed',
-            ),
-          },
-        );
-        logSubagentExecution(this.core.runtimeContext, completionEvent);
-
-        await this.core.hooks?.onStop?.({
-          subagentId: this.core.subagentId,
-          name: this.core.name,
-          terminateReason: this.terminateMode,
-          summary: summary as unknown as Record<string, unknown>,
-          timestamp: Date.now(),
-        });
-      }
+      throw error;
     } finally {
-      // Outer finally guarantees the child's parent-signal listener is
-      // detached even if prepareTools or initialMessages prep throws before
-      // the inner try runs.
-      abortController.abort();
+      if (externalSignal) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
+      this.core.executionStats.totalDurationMs = Date.now() - startTime;
+      const summary = this.core.stats.getSummary(Date.now());
+      this.core.eventEmitter?.emit(AgentEventType.FINISH, {
+        subagentId: this.core.subagentId,
+        terminateReason: this.terminateMode,
+        timestamp: Date.now(),
+        rounds: summary.rounds,
+        totalDurationMs: summary.totalDurationMs,
+        totalToolCalls: summary.totalToolCalls,
+        successfulToolCalls: summary.successfulToolCalls,
+        failedToolCalls: summary.failedToolCalls,
+        inputTokens: summary.inputTokens,
+        outputTokens: summary.outputTokens,
+        totalTokens: summary.totalTokens,
+      } as AgentFinishEvent);
+
+      const completionEvent = new SubagentExecutionEvent(
+        this.core.name,
+        this.terminateMode === AgentTerminateMode.GOAL ? 'completed' : 'failed',
+        {
+          terminate_reason: this.terminateMode,
+          result: this.finalText,
+          execution_summary: this.core.stats.formatCompact(
+            'Subagent execution completed',
+          ),
+        },
+      );
+      logSubagentExecution(this.core.runtimeContext, completionEvent);
+
+      await this.core.hooks?.onStop?.({
+        subagentId: this.core.subagentId,
+        name: this.core.name,
+        terminateReason: this.terminateMode,
+        summary: summary as unknown as Record<string, unknown>,
+        timestamp: Date.now(),
+      });
     }
   }
 

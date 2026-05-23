@@ -51,8 +51,9 @@ const createMockUIState = (overrides: UIStateOverrides = {}): UIState => {
 const createMockUIActions = (overrides: UIActionsOverrides = {}): UIActions => {
   const { auth, ...topLevelOverrides } = overrides;
   const authActions = {
-    closeAuthDialog: vi.fn(),
+    handleAuthSelect: vi.fn(),
     handleProviderSubmit: vi.fn(),
+    handleOpenRouterSubmit: vi.fn(),
     setAuthState: vi.fn(),
     onAuthError: vi.fn(),
     openAuthDialog: vi.fn(),
@@ -172,7 +173,15 @@ const navigateToCustomProtocolSelect = async (
 ) => {
   await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Third-party Providers');
-  await moveDownAndWaitForSelection(stdin, lastFrame, 'Custom Provider');
+  await moveDownAndWaitForSelection(stdin, lastFrame, 'OAuth');
+  await vi.waitFor(
+    () => {
+      expect(lastFrame()).toContain('Custom Provider');
+    },
+    { timeout: WAIT_FOR_TIMEOUT },
+  );
+  stdin.write('\u001b[B');
+  await waitForSelectedOption(lastFrame, 'Custom Provider');
   await pressEnterAndWaitFor(
     stdin,
     lastFrame,
@@ -479,9 +488,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // QWEN OAuth no longer has a UI entry; the dialog falls back to the
-      // default Alibaba ModelStudio option.
-      expect(lastFrame()).toContain('Alibaba ModelStudio');
+      // QWEN_OAUTH maps to the OAuth entry in the four-flow main menu
+      expect(lastFrame()).toContain('OAuth');
     });
 
     it('should fall back to default if QWEN_DEFAULT_AUTH_TYPE is not set', () => {
@@ -520,7 +528,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Default is Alibaba ModelStudio (first option).
+      // Default is Alibaba ModelStudio (first option); Qwen OAuth is under OAuth.
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
 
@@ -579,7 +587,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   itWhenTuiInputReliable(
     'should prevent exiting when no auth method is selected and show error message',
     async () => {
-      const closeAuthDialog = vi.fn();
+      const handleAuthSelect = vi.fn();
       const settings: LoadedSettings = new LoadedSettings(
         {
           settings: { ui: { customThemes: {} }, mcpServers: {} },
@@ -616,7 +624,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { lastFrame, stdin, unmount } = renderAuthDialog(
         settings,
         {},
-        { closeAuthDialog },
+        { handleAuthSelect },
         undefined, // config.getAuthType() returns undefined
       );
       await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
@@ -624,16 +632,16 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       // Simulate pressing escape key
       stdin.write('\u001b'); // ESC key
 
-      // Should show error message instead of calling closeAuthDialog
+      // Should show error message instead of calling handleAuthSelect
       await vi.waitFor(
         () => {
           const frame = lastFrame();
-          expect(frame).toContain('You must connect a provider to proceed');
+          expect(frame).toContain('You must select an auth method');
           expect(frame).toContain('Press Ctrl+C again to exit');
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
-      expect(closeAuthDialog).not.toHaveBeenCalled();
+      expect(handleAuthSelect).not.toHaveBeenCalled();
       unmount();
     },
   );
@@ -641,7 +649,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   itWhenTuiInputReliable(
     'should not exit if there is already an error message',
     async () => {
-      const closeAuthDialog = vi.fn();
+      const handleAuthSelect = vi.fn();
       const settings: LoadedSettings = new LoadedSettings(
         {
           settings: { ui: { customThemes: {} }, mcpServers: {} },
@@ -683,7 +691,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
             authError: 'Initial error',
           },
         },
-        { closeAuthDialog },
+        { handleAuthSelect },
         undefined, // config.getAuthType() returns undefined
       );
       await vi.waitFor(
@@ -697,8 +705,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       stdin.write('\u001b'); // ESC key
       await wait();
 
-      // Should not call closeAuthDialog
-      expect(closeAuthDialog).not.toHaveBeenCalled();
+      // Should not call handleAuthSelect
+      expect(handleAuthSelect).not.toHaveBeenCalled();
       unmount();
     },
   );
@@ -706,7 +714,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   itWhenTuiInputReliable(
     'should allow exiting when auth method is already selected',
     async () => {
-      const closeAuthDialog = vi.fn();
+      const handleAuthSelect = vi.fn();
       const settings: LoadedSettings = new LoadedSettings(
         {
           settings: { ui: { customThemes: {} }, mcpServers: {} },
@@ -743,7 +751,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { stdin, lastFrame, unmount } = renderAuthDialog(
         settings,
         {},
-        { closeAuthDialog },
+        { handleAuthSelect },
         AuthType.USE_OPENAI, // config.getAuthType() returns USE_OPENAI
       );
       await vi.waitFor(
@@ -757,8 +765,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       stdin.write('\u001b'); // ESC key
       await wait();
 
-      // Should call closeAuthDialog to exit
-      expect(closeAuthDialog).toHaveBeenCalled();
+      // Should call handleAuthSelect with undefined to exit
+      expect(handleAuthSelect).toHaveBeenCalledWith(undefined);
       unmount();
     },
   );
@@ -808,6 +816,10 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         {
           label: 'Third-party Providers',
           childTitle: 'Third-party Providers · Provider',
+        },
+        {
+          label: 'OAuth',
+          childTitle: 'Select OAuth Provider',
         },
         {
           label: 'Custom Provider',
@@ -1315,6 +1327,71 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       unmount();
     },
   );
+
+  itWhenTuiInputReliable(
+    'should trigger OpenRouter OAuth from OAuth provider options',
+    async () => {
+      const handleOpenRouterSubmit = vi.fn().mockResolvedValue(undefined);
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(
+        settings,
+        {},
+        { handleOpenRouterSubmit },
+      );
+
+      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await moveDownAndWaitForSelection(
+        stdin,
+        lastFrame,
+        'Third-party Providers',
+      );
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'OAuth');
+      await pressEnterAndWaitFor(stdin, lastFrame, 'Select OAuth Provider');
+      await waitForSelectedOption(lastFrame, 'OpenRouter');
+      stdin.write('\r');
+
+      await vi.waitFor(
+        () => {
+          expect(handleOpenRouterSubmit).toHaveBeenCalledTimes(1);
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
+
+      unmount();
+    },
+  );
 });
 
 describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
@@ -1637,14 +1714,14 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       stdin.write('\r');
       await wait();
 
-      // Verify review includes generationConfig (audio is off by default)
+      // Verify review includes generationConfig
       await vi.waitFor(() => {
         const frame = lastFrame();
         expect(frame).toContain('"generationConfig"');
         expect(frame).toContain('"enable_thinking"');
         expect(frame).toContain('"image": true');
         expect(frame).toContain('"video": true');
-        expect(frame).not.toContain('"audio"');
+        expect(frame).toContain('"audio": true');
       });
 
       // Press Enter to save
@@ -1661,6 +1738,7 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
               multimodal: {
                 image: true,
                 video: true,
+                audio: true,
               },
             },
           }),

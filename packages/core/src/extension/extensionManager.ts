@@ -40,7 +40,6 @@ import {
   parseGitHubRepoForReleases,
 } from './github.js';
 import { downloadFromNpmRegistry } from './npm.js';
-import { redactUrlCredentials } from './redaction.js';
 import type { LoadExtensionContext } from './variableSchema.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 import {
@@ -848,7 +847,6 @@ export class ExtensionManager {
       this.telemetrySettings,
     );
     let extension: Extension | null;
-    const redactedInstallSource = redactUrlCredentials(installMetadata.source);
 
     const isUpdate = !!previousExtensionConfig;
     let newExtensionConfig: ExtensionConfig | null = null;
@@ -857,7 +855,7 @@ export class ExtensionManager {
     try {
       if (!this.isWorkspaceTrusted) {
         throw new Error(
-          `Could not install extension from untrusted folder at ${redactedInstallSource}`,
+          `Could not install extension from untrusted folder at ${installMetadata.source}`,
         );
       }
 
@@ -1102,7 +1100,7 @@ export class ExtensionManager {
             new ExtensionInstallEvent(
               newExtensionConfig.name,
               newExtensionConfig!.version,
-              redactUrlCredentials(installMetadata.source),
+              installMetadata.source,
               'success',
             ),
           );
@@ -1157,7 +1155,7 @@ export class ExtensionManager {
           new ExtensionInstallEvent(
             newExtensionConfig?.name ?? '',
             newExtensionConfig?.version ?? '',
-            redactUrlCredentials(installMetadata.source),
+            installMetadata.source,
             'error',
           ),
         );
@@ -1303,7 +1301,7 @@ export class ExtensionManager {
       } catch (e) {
         callback(extension.name, ExtensionUpdateState.ERROR);
         throw new Error(
-          `Updated extension not found after installation, got error:\n${redactUrlCredentials(getErrorMessage(e))}`,
+          `Updated extension not found after installation, got error:\n${e}`,
         );
       }
       const updatedVersion = updatedExtension.version;

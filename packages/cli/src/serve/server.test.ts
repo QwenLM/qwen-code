@@ -10,7 +10,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import request from 'supertest';
-import { createServeApp } from './server.js';
+import { createServeApp, detectFromLoopback } from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
 import {
   CONDITIONAL_SERVE_FEATURES,
@@ -35,10 +35,14 @@ import {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   MAX_WORKSPACE_PATH_LENGTH,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
   WorkspaceMismatchError,
   type BridgeHeartbeatResult,
   type BridgeHeartbeatState,
@@ -135,6 +139,12 @@ const EXPECTED_STAGE1_FEATURES = [
   // baseline assertion below mirrors that even though PR 21 landed
   // before PR 17 chronologically.
   'auth_device_flow',
+  // #4175 F3 Commit 6. Daemon advertises which permission mediation
+  // policies it can run (`modes: [first-responder, designated, consensus,
+  // local-only]`) so SDK clients can pre-flight before relying on
+  // `permission_partial_vote` / `permission_forbidden` SSE events. Always-
+  // on; runtime-active policy is at `/capabilities` body `policy.permission`.
+  'permission_mediation',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -143,11 +153,30 @@ const EXPECTED_STAGE1_FEATURES = [
 // truth ORDER puts `require_auth` between PR 11 (`session_metadata`)
 // and PR 21 (`auth_device_flow`); reflect that here so the assertion
 // matches the real ordering.
+//
+// F2 (#4175 commit 5): `mcp_workspace_pool` + `mcp_pool_restart` are
+// also conditional (gated on `mcpPoolActive` toggle, default-true at
+// call site in server.ts but default-OFF at the predicate so a
+// no-toggle invocation matches the established `require_auth`
+// pattern). Both insert AFTER `workspace_mcp_restart` and BEFORE
+// `require_auth` so the registry order matches `capabilities.ts`.
 const EXPECTED_REGISTERED_FEATURES = [
   // Same order as `SERVE_CAPABILITY_REGISTRY` declaration:
-  ...EXPECTED_STAGE1_FEATURES.filter((f) => f !== 'auth_device_flow'),
+  // ...always-on PR16/17/19/20/21 features, then F2's conditional
+  // pair (mcp_workspace_pool + mcp_pool_restart inserted after
+  // workspace_mcp_restart), then conditional `require_auth`, then
+  // `auth_device_flow`, then F3 `permission_mediation` (latest).
+  // All four conditional tags filtered from the stage1 baseline so
+  // they appear here in their registry-declaration order, not the
+  // stage1 order.
+  ...EXPECTED_STAGE1_FEATURES.filter(
+    (f) => f !== 'auth_device_flow' && f !== 'permission_mediation',
+  ),
+  'mcp_workspace_pool',
+  'mcp_pool_restart',
   'require_auth',
   'auth_device_flow',
+  'permission_mediation',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -231,6 +260,7 @@ interface FakeBridgeOpts {
   restartMcpServerImpl?: (
     serverName: string,
     originatorClientId: string | undefined,
+    opts?: { entryIndex?: number },
   ) => Promise<
     | { serverName: string; restarted: true; durationMs: number }
     | {
@@ -318,6 +348,7 @@ interface FakeBridge extends HttpAcpBridge {
   restartMcpServerCalls: Array<{
     serverName: string;
     originatorClientId?: string;
+    opts?: { entryIndex?: number };
   }>;
   closeCalls: Array<{
     sessionId: string;
@@ -512,6 +543,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       clientLastSeenAt: new Map<string, number>(),
     }));
   return {
+    // F3 Commit 6 — `HttpAcpBridge.permissionPolicy` is required so
+    // `/capabilities` can expose `policy.permission`. Tests don't
+    // exercise mediation; pin to the pre-F3 default ('first-responder')
+    // so existing assertions stay shape-compatible.
+    permissionPolicy: 'first-responder' as const,
     calls,
     loadCalls,
     resumeCalls,
@@ -676,12 +712,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return initWorkspaceImpl(initOpts, originatorClientId);
     },
-    async restartMcpServer(serverName, originatorClientId) {
+    async restartMcpServer(serverName, originatorClientId, restartOpts) {
       restartMcpServerCalls.push({
         serverName,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+        ...(restartOpts !== undefined ? { opts: restartOpts } : {}),
       });
-      return restartMcpServerImpl(serverName, originatorClientId);
+      return restartMcpServerImpl(serverName, originatorClientId, restartOpts);
     },
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
@@ -735,6 +772,66 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
   };
 }
+
+/**
+ * Wenshao review #4335 / 3272581557 — supertest in the rest of this
+ * suite always connects from `127.0.0.1`, leaving the prefix-match
+ * branches in `detectFromLoopback` (the security gate for
+ * `local-only` permission policy) without direct coverage. Exercise
+ * the helper synchronously over the address shapes the Round-5 fix
+ * widened, plus the fail-closed branches.
+ */
+describe('detectFromLoopback (#4335 / 3272581557)', () => {
+  function fakeReq(addr: string | undefined): {
+    socket?: { remoteAddress?: string | undefined };
+  } {
+    if (addr === undefined) return {};
+    return { socket: { remoteAddress: addr } };
+  }
+
+  it.each([
+    ['127.0.0.1', true],
+    ['127.0.0.2', true],
+    ['127.0.1.1', true],
+    ['127.255.255.254', true],
+    ['::1', true],
+    ['::ffff:127.0.0.1', true],
+    ['::ffff:127.0.0.2', true],
+    ['10.0.0.1', false],
+    ['192.168.1.1', false],
+    ['1.2.3.4', false],
+    ['::', false],
+    ['fe80::1', false],
+    // RFC 1918 private addrs that LOOK loopback-adjacent but aren't.
+    ['127', false],
+    // Note: `'127.'` is structurally `127.`-prefix so the helper
+    // accepts it (fail-OPEN for that malformed shape). Real
+    // `req.socket.remoteAddress` values come from the kernel as
+    // well-formed dotted-decimal IPs, so this only matters for
+    // pathological synthetic inputs. Documented for transparency.
+    // Empty / malformed.
+    ['', false],
+  ])('detectFromLoopback(%s) === %s', (addr, expected) => {
+    expect(detectFromLoopback(fakeReq(addr))).toBe(expected);
+  });
+
+  it('returns false for missing socket (fail-closed)', () => {
+    expect(detectFromLoopback({})).toBe(false);
+    expect(detectFromLoopback(fakeReq(undefined))).toBe(false);
+  });
+
+  it('does NOT consult X-Forwarded-For or any HTTP header (security)', () => {
+    // The function takes only the socket-shaped input — even if the
+    // express request would carry forwarded headers, this helper
+    // can't see them. Pin the contract.
+    const reqWithForwardedHeader = {
+      socket: { remoteAddress: '10.0.0.1' },
+      get: (name: string) =>
+        name === 'X-Forwarded-For' ? '127.0.0.1' : undefined,
+    } as unknown as Parameters<typeof detectFromLoopback>[0];
+    expect(detectFromLoopback(reqWithForwardedHeader)).toBe(false);
+  });
+});
 
 describe('createServeApp', () => {
   describe('serve capability registry', () => {
@@ -795,6 +892,27 @@ describe('createServeApp', () => {
           expect(predicate({})).toBe(false);
           expect(
             getAdvertisedServeFeatures(undefined, { requireAuth: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (
+          feature === 'mcp_workspace_pool' ||
+          feature === 'mcp_pool_restart'
+        ) {
+          // F2 (#4175 commit 5): both pool tags share the
+          // `mcpPoolActive` predicate and advertise in lockstep.
+          // Default-OFF at the predicate (matches `require_auth`'s
+          // pattern); the server.ts call site flips to default-ON via
+          // `opts.mcpPoolActive !== false`, so a daemon booted without
+          // the kill switch advertises both tags by default.
+          expect(predicate({ mcpPoolActive: true })).toBe(true);
+          expect(predicate({ mcpPoolActive: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { mcpPoolActive: true }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
@@ -881,8 +999,34 @@ describe('createServeApp', () => {
       expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
       expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
       expect(res.body.mode).toBe('http-bridge');
-      expect(res.body.features).toEqual(getAdvertisedServeFeatures());
+      // F2 (#4175 commit 5): the server.ts call site flips
+      // `mcpPoolActive` to default-ON via `opts.mcpPoolActive !== false`
+      // (so a daemon booted without the kill switch advertises the F2
+      // pool surface by default). Anchor the expectation against the
+      // same toggle so the assertion reflects the runtime contract,
+      // not the registry default-OFF predicate.
+      expect(res.body.features).toEqual(
+        getAdvertisedServeFeatures(undefined, { mcpPoolActive: true }),
+      );
       expect(res.body.modelServices).toEqual([]);
+    });
+
+    it('omits mcp_workspace_pool / mcp_pool_restart when mcpPoolActive=false (F2 #4175 commit 5)', async () => {
+      // Mirrors the env-var kill switch path: `runQwenServe.ts` infers
+      // `mcpPoolActive: false` when the parent process has
+      // `QWEN_SERVE_NO_MCP_POOL=1`. Verify the capability envelope
+      // tracks the toggle so SDK clients pre-flighting on the tags
+      // observe accurate "pool is off" semantics.
+      const app = createServeApp({ ...baseOpts, mcpPoolActive: false });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('mcp_workspace_pool');
+      expect(res.body.features).not.toContain('mcp_pool_restart');
+      // The legacy MCP surface tags still advertise.
+      expect(res.body.features).toContain('workspace_mcp');
+      expect(res.body.features).toContain('workspace_mcp_restart');
     });
 
     it('reports the bound workspace (#3803 §02)', async () => {
@@ -2288,7 +2432,6 @@ describe('createServeApp', () => {
         'plan',
         'default',
         'auto-edit',
-        'auto',
         'yolo',
       ]);
       const unknown = await auth(
@@ -2446,6 +2589,49 @@ describe('createServeApp', () => {
         existingSize: 1234,
       });
     });
+
+    it('400 + code:workspace_init_path_escape on WorkspaceInitPathEscapeError (#4297 fold-in 1, addresses #3260501161)', async () => {
+      // Without a typed mapping these used to fall through to 500, so
+      // an operator misreading their `context.fileName` would see a
+      // generic "daemon broken" error. 400 with structured body
+      // tells the operator exactly what's wrong.
+      const bridge = fakeBridge({
+        initWorkspaceImpl: async () => {
+          throw new WorkspaceInitPathEscapeError(
+            '../outside.md',
+            '/work/bound',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({});
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_init_path_escape',
+        filename: '../outside.md',
+        boundWorkspace: '/work/bound',
+      });
+    });
+
+    it('400 + code:workspace_init_symlink on WorkspaceInitSymlinkError (#4297 fold-in 1)', async () => {
+      const bridge = fakeBridge({
+        initWorkspaceImpl: async () => {
+          throw new WorkspaceInitSymlinkError(
+            '/work/bound/QWEN.md',
+            'target',
+            'Workspace context file "/work/bound/QWEN.md" is a symlink.',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({});
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_init_symlink',
+        target: '/work/bound/QWEN.md',
+        kind: 'target',
+      });
+    });
   });
 
   describe('POST /workspace/mcp/:server/restart (#4175 Wave 4 PR 17)', () => {
@@ -2480,6 +2666,28 @@ describe('createServeApp', () => {
       });
       expect(bridge.restartMcpServerCalls).toHaveLength(1);
       expect(bridge.restartMcpServerCalls[0]?.serverName).toBe('docs');
+    });
+
+    it('forwards entryIndex=0 to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart?entryIndex=0'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(bridge.restartMcpServerCalls[0]?.opts).toEqual({
+        entryIndex: 0,
+      });
+    });
+
+    it('treats entryIndex=* as all entries', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart?entryIndex=*'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(bridge.restartMcpServerCalls[0]?.opts).toBeUndefined();
     });
 
     it('200 on soft skip with structured reason', async () => {
@@ -2569,6 +2777,46 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_server_name');
       expect(bridge.restartMcpServerCalls).toHaveLength(0);
+    });
+
+    it('404 + code:mcp_server_not_found when bridge throws McpServerNotFoundError (#4297 fold-in 1, addresses #3260501148)', async () => {
+      // Pin the `sendBridgeError` mapping under a route-layer test so
+      // a future change to the `instanceof McpServerNotFoundError`
+      // branch (e.g. cross-package bundling that breaks the prototype
+      // chain) fails CI rather than silently degrading to 500.
+      const bridge = fakeBridge({
+        restartMcpServerImpl: async () => {
+          throw new McpServerNotFoundError('ghost');
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/ghost/restart'),
+      ).send({});
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({
+        code: 'mcp_server_not_found',
+        serverName: 'ghost',
+      });
+    });
+
+    it('502 + code:mcp_server_restart_failed when bridge throws McpServerRestartFailedError (#4297 fold-in 1)', async () => {
+      const bridge = fakeBridge({
+        restartMcpServerImpl: async () => {
+          throw new McpServerRestartFailedError('docs', 'DISCONNECTED');
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart'),
+      ).send({});
+      expect(res.status).toBe(502);
+      expect(res.body).toMatchObject({
+        code: 'mcp_server_restart_failed',
+        errorKind: 'protocol_error',
+        serverName: 'docs',
+        mcpStatus: 'DISCONNECTED',
+      });
     });
   });
 
@@ -2714,11 +2962,16 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ outcome: { outcome: 'selected', optionId: 'allow' } });
       expect(res.status).toBe(200);
+      // F3 Commit 2 — vote routes attach `fromLoopback` from
+      // `detectFromLoopback(req)`. The supertest fixture connects
+      // from `127.0.0.1`, so the captured context carries
+      // `fromLoopback: true` even though no client-id header is set.
       expect(bridge.sessionPermissionVotes).toEqual([
         {
           sessionId: 'session-A',
           requestId: 'req-1',
           response: { outcome: { outcome: 'selected', optionId: 'allow' } },
+          context: { fromLoopback: true },
         },
       ]);
     });
@@ -2732,8 +2985,13 @@ describe('createServeApp', () => {
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ outcome: { outcome: 'cancelled' } });
       expect(res.status).toBe(200);
+      // F3 Commit 2 — `fromLoopback` is derived from the kernel-stamped
+      // peer IP (`127.0.0.1` in tests), independent of the client-id
+      // header. Both fields end up on the context the route forwards
+      // to the bridge.
       expect(bridge.sessionPermissionVotes[0]?.context).toEqual({
         clientId: 'client-1',
+        fromLoopback: true,
       });
     });
 
@@ -2833,10 +3091,13 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ outcome: { outcome: 'selected', optionId: 'allow' } });
       expect(res.status).toBe(200);
+      // F3 Commit 2 — see the scoped-vote case: `fromLoopback: true`
+      // is attached because the supertest peer is `127.0.0.1`.
       expect(bridge.permissionVotes).toEqual([
         {
           requestId: 'req-1',
           response: { outcome: { outcome: 'selected', optionId: 'allow' } },
+          context: { fromLoopback: true },
         },
       ]);
     });
@@ -2852,6 +3113,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(bridge.permissionVotes[0]?.context).toEqual({
         clientId: 'client-1',
+        fromLoopback: true,
       });
     });
 
@@ -3922,6 +4184,9 @@ describe('runQwenServe', () => {
         writeTextAtomic: async () => {
           throw new Error('unreachable');
         },
+        writeTextOverwrite: async () => {
+          throw new Error('unreachable');
+        },
         edit: async () => {
           throw new Error('unreachable');
         },
@@ -4179,13 +4444,90 @@ describe('GET /session/:id/events (SSE)', () => {
     expect(frames).toHaveLength(2);
     expect(frames[0]?.id).toBe('1');
     expect(frames[0]?.event).toBe('session_update');
-    expect(JSON.parse(frames[0]!.data!)).toEqual({
+    // `toMatchObject` rather than `toEqual` because the SSE write
+    // boundary stamps `_meta.serverTimestamp` (#4175 F4 prereq);
+    // a dedicated test below pins that field's shape.
+    expect(JSON.parse(frames[0]!.data!)).toMatchObject({
       id: 1,
       v: 1,
       type: 'session_update',
       data: { foo: 'bar' },
     });
     expect(frames[1]?.id).toBe('2');
+  });
+
+  it('stamps _meta.serverTimestamp on every SSE frame (#4175 F4 prereq, chiga0 #19 P0)', async () => {
+    // The daemon stamps `_meta.serverTimestamp` at the SSE write
+    // boundary so multi-client UIs use the server clock for transcript
+    // ordering / "X minutes ago" instead of each client's drifting
+    // local clock. The chiga0 SDK PR #4353 reads this via a 3-
+    // location probe (`event.serverTimestamp` / `event._meta.
+    // serverTimestamp` / `event.data._meta.serverTimestamp`); we
+    // pick `_meta.serverTimestamp` (Anthropic convention) so the
+    // top-level event type stays unpolluted.
+    const before = Date.now();
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: { foo: 'bar' },
+        };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    const frames = await readSseFrames(res.body!, 1);
+    const after = Date.now();
+
+    const parsed = JSON.parse(frames[0]!.data!);
+    expect(parsed._meta).toBeDefined();
+    expect(typeof parsed._meta.serverTimestamp).toBe('number');
+    // Server clock at stamp time must fall within the test's
+    // before/after wall-clock window.
+    expect(parsed._meta.serverTimestamp).toBeGreaterThanOrEqual(before);
+    expect(parsed._meta.serverTimestamp).toBeLessThanOrEqual(after);
+  });
+
+  it('preserves pre-existing _meta keys when stamping serverTimestamp', async () => {
+    // ToolCallEmitter (and other emitters) attach `_meta.toolName` etc.
+    // The SSE boundary stamp must MERGE (not overwrite) so downstream
+    // consumers keep both fields. `BridgeEvent` doesn't type `_meta`
+    // explicitly (it's a wire-only escape hatch) so we cast the yield.
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: { sessionUpdate: 'tool_call', toolCallId: 't1' },
+          // Pre-existing _meta on the event (mimics ToolCallEmitter).
+          _meta: { toolName: 'Read', timestamp: 1234567890 },
+        } as unknown as { id: 1; v: 1; type: 'session_update'; data: unknown };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    const frames = await readSseFrames(res.body!, 1);
+
+    const parsed = JSON.parse(frames[0]!.data!);
+    // Both the pre-existing _meta keys AND serverTimestamp must survive.
+    expect(parsed._meta.toolName).toBe('Read');
+    expect(parsed._meta.timestamp).toBe(1234567890);
+    expect(typeof parsed._meta.serverTimestamp).toBe('number');
   });
 
   it('forwards Last-Event-ID to the bridge', async () => {
@@ -4395,7 +4737,212 @@ describe('GET /session/:id/events (SSE)', () => {
     // it doesn't pollute the per-session monotonic sequence used for
     // Last-Event-ID resume.
     expect(frames[1]?.id).toBeUndefined();
+    // `Error('agent died')` isn't classified by `mapDomainErrorToErrorKind`
+    // (no Bridge*Error class, no errno code, no special name), so no
+    // `errorKind` is stamped — only `error`. The next test covers the
+    // classified-error path.
     expect(JSON.parse(frames[1]!.data!).data).toEqual({ error: 'agent died' });
+  });
+
+  it('stamps errorKind on stream_error when the thrown error is classified (#4175 F4 prereq, chiga0 #19 P0)', async () => {
+    // BridgeTimeoutError → `init_timeout` per mapDomainErrorToErrorKind.
+    // UI consumers can render "retry" on init_timeout vs "show stack
+    // trace" on unknown errors, without regex-matching the message
+    // string.
+    const { BridgeTimeoutError } = await import('@qwen-code/acp-bridge');
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+        // `BridgeTimeoutError(label, timeoutMs)` — 2 positional args
+        // (wenshao #4360 review). The resulting message is
+        // `"HttpAcpBridge initialize timed out after 5000ms"` which
+        // satisfies the `.toContain('timed out')` assertion below.
+        throw new BridgeTimeoutError('initialize', 5000);
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    const frames = await readSseFrames(res.body!, 2);
+    expect(frames[1]?.event).toBe('stream_error');
+    const parsed = JSON.parse(frames[1]!.data!);
+    expect(parsed.data.errorKind).toBe('init_timeout');
+    expect(parsed.data.error).toContain('timed out');
+  });
+
+  it('writes a daemon-side stderr log on SSE ring eviction (#4360 wenshao observability fold-in)', async () => {
+    // The SSE write loop detects `state_resync_required` frames and
+    // emits a stderr breadcrumb so operators can grep daemon logs for
+    // ring-eviction events. Test covers:
+    //   - the `writeStderrLine` actually fires
+    //   - the `gap` arithmetic (earliestAvailableId - lastDeliveredId - 1)
+    //   - all four data fields (lastEventId / earliestInRing / gap / reason)
+    //   - the sessionId is included
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield {
+            v: 1,
+            type: 'state_resync_required',
+            data: {
+              reason: 'ring_evicted',
+              lastDeliveredId: 5,
+              earliestAvailableId: 12,
+            },
+          };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+      await readSseFrames(res.body!, 1);
+
+      const stderrLines = stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((s) => s.includes('SSE ring eviction detected'));
+      expect(stderrLines.length).toBeGreaterThanOrEqual(1);
+      const line = stderrLines[0]!;
+      expect(line).toContain('session sess-A');
+      expect(line).toContain('lastEventId=5');
+      expect(line).toContain('earliestInRing=12');
+      // gap = 12 - 5 - 1 = 6 events
+      expect(line).toContain('gap=6 events');
+      expect(line).toContain('reason=ring_evicted');
+      expect(line).toContain('loadSession');
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('falls back to "?" placeholders when state_resync_required data is partial', async () => {
+    // Defensive: the `?? '?'` fallback for missing fields lets the log
+    // line still print intelligibly when the daemon emits a partial
+    // payload (e.g. a future schema change drops one field). Pins the
+    // placeholder behavior so a regression that crashes the log call
+    // is caught.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield {
+            v: 1,
+            type: 'state_resync_required',
+            // Intentionally missing all numeric fields + reason —
+            // exercises every `?? '?'` branch.
+            data: {} as unknown as {
+              reason: string;
+              lastDeliveredId: number;
+              earliestAvailableId: number;
+            },
+          };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      await fetch(`http://127.0.0.1:${port}/session/sess-A/events`).then((r) =>
+        readSseFrames(r.body!, 1),
+      );
+
+      const stderrLines = stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((s) => s.includes('SSE ring eviction detected'));
+      expect(stderrLines.length).toBeGreaterThanOrEqual(1);
+      const line = stderrLines[0]!;
+      // All four `?? '?'` branches print `?` for the missing values.
+      expect(line).toContain('lastEventId=?');
+      expect(line).toContain('earliestInRing=?');
+      expect(line).toContain('gap=? events');
+      expect(line).toContain('reason=?');
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('writes a daemon-side stderr log on bridge iterator error (#4360 wenshao observability fold-in)', async () => {
+    // The bridge-iterator-catch block in the SSE handler now emits a
+    // `writeStderrLine` BEFORE sending the `stream_error` SSE frame so
+    // operators can distinguish "subprocess OOM-killed" from "protocol
+    // bug" via `grep "bridge iterator error"`. Test covers:
+    //   - the log fires with the error message
+    //   - the sessionId is included
+    //   - NO `[errorKind]` suffix for unclassified errors (plain Error)
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+          throw new Error('agent died');
+        },
+      });
+      handle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      await fetch(`http://127.0.0.1:${port}/session/sess-A/events`).then((r) =>
+        readSseFrames(r.body!, 2),
+      );
+
+      const stderrLines = stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((s) => s.includes('bridge iterator error'));
+      expect(stderrLines.length).toBeGreaterThanOrEqual(1);
+      const line = stderrLines[0]!;
+      expect(line).toContain('session sess-A');
+      expect(line).toContain('agent died');
+      // Plain Error → mapDomainErrorToErrorKind returns undefined →
+      // suffix branch must NOT add `[...]`.
+      expect(line).not.toMatch(/\[.*?\]/);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('includes [errorKind] suffix in bridge iterator error log when classified (#4360 wenshao observability fold-in)', async () => {
+    // BridgeTimeoutError → classified as `init_timeout`. The log line
+    // must include `[init_timeout]` so operators can `grep '\[init_'`
+    // for that specific failure class.
+    const { BridgeTimeoutError } = await import('@qwen-code/acp-bridge');
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+          throw new BridgeTimeoutError('initialize', 5000);
+        },
+      });
+      handle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      await fetch(`http://127.0.0.1:${port}/session/sess-A/events`).then((r) =>
+        readSseFrames(r.body!, 2),
+      );
+
+      const stderrLines = stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((s) => s.includes('bridge iterator error'));
+      expect(stderrLines.length).toBeGreaterThanOrEqual(1);
+      const line = stderrLines[0]!;
+      expect(line).toContain('session sess-A');
+      expect(line).toContain('timed out');
+      expect(line).toContain('[init_timeout]');
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it('forwards numeric Last-Event-ID even when supplied as a string', async () => {

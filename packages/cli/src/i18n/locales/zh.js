@@ -81,7 +81,6 @@ export default {
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
   'for help on Qwen Code': '获取 Qwen Code 帮助',
   'show version info': '显示版本信息',
-  'show paths for current session files and logs': '显示当前会话文件和日志路径',
   'submit a bug report': '提交错误报告',
   Status: '状态',
 
@@ -183,7 +182,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     '在浏览器中打开完整的 Qwen Code 文档',
   'Configuration not available.': '配置不可用',
-  'Connect an LLM provider': '连接 LLM 提供商',
+  'Configure authentication information for login': '配置登录认证信息',
   'Copy the last result or code snippet to clipboard':
     '将最后的结果或代码片段复制到剪贴板',
   'Show working-tree change stats versus HEAD':
@@ -1097,9 +1096,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 欢迎回来！（最后更新：{{timeAgo}}）',
   '🎯 Overall Goal:': '🎯 总体目标：',
-  'Connect a Provider': '连接服务商',
-  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
-    '必须连接一个服务商才能继续。再次按 Ctrl+C 退出',
+  'Select Authentication Method': '选择认证方式',
+  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
+    '您必须选择认证方法才能继续。再次按 Ctrl+C 退出',
   'Terms of Services and Privacy Notice': '服务条款和隐私声明',
   'Qwen OAuth': 'Qwen OAuth (免费)',
   'Discontinued — switch to Coding Plan or API Key':

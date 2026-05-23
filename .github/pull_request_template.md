@@ -1,66 +1,73 @@
 <!--
-Maintainers prioritize PRs with a clear reviewer test plan — without it, review may be delayed.
+Help reviewers verify this PR quickly.
 
-Don't hard-wrap paragraphs: GitHub renders single newlines as <br>, so wrapped text shows as a narrow column. Write each paragraph or list item as one long line.
+Maintainers prioritize PRs that include clear proof of work.
+If a PR does not include enough validation detail to reproduce and verify the change efficiently, review may be delayed.
 -->
 
-## What this PR does
+## Summary
 
-<!-- What this PR does. Describe the change in prose, not by file or function names. -->
+- What changed:
+- Why it changed:
+- Reviewer focus:
 
-## Why it's needed
-
-<!-- Why it's needed: the motivation, the problem being solved, or the user-facing benefit. -->
-
-## Reviewer Test Plan
+## Validation
 
 <!--
-How a reviewer can confirm this PR: reproduction steps, expected vs observed behavior, and evidence. CI runs on macOS, Windows, and Linux — Tested on is what you verified locally.
+Be concrete. Do not write only "tested locally".
+Include the exact commands, prompts, outputs, logs, screenshots, or videos that prove the change was actually run and observed.
 
-User-visible / TUI: Before/After with tmux-real-user-testing skill, screenshots, or a short recording.
-Non–user-visible (refactor, types, docs): commands and output below; write N/A under Before/After.
+For user-visible changes, bug fixes, CLI / TUI behavior changes, or interaction changes, include key screenshots or a short video.
+When possible, show before/after behavior.
+
+If helpful, use the `e2e-testing` skill to gather stronger end-to-end validation evidence.
 -->
 
-### How to verify
+- Commands run:
+  ```bash
+  # paste commands here
+  ```
+- Prompts / inputs used:
+- Expected result:
+- Observed result:
+- Quickest reviewer verification path:
+- Evidence (output, logs, screenshots, video, JSON, before/after, etc.):
 
-<!-- How you reproduced it and what a reviewer should confirm — steps if needed, expected vs observed behavior. Focus on outcomes; paste logs or test output when helpful. -->
-
-### Evidence (Before & After)
-
-<!-- User-visible / TUI changes: paste before-and-after screenshots, tmux logs, or video side by side. Non-UI changes (docs, refactor, types): N/A -->
-
-### Tested on
-
-|     OS     | Status |
-| :--------: | :----: |
-|  🍏 macOS  |        |
-| 🪟 Windows |        |
-|  🐧 Linux  |        |
-
-<!-- ✅ tested · ⚠️ not tested · N/A -->
-
-### Environment (optional)
-
-<!-- Local runtime: e.g. npm run dev, Docker/Podman sandbox, seatbelt. N/A if only unit tests. -->
-
-## Risk & Scope
+## Scope / Risk
 
 - Main risk or tradeoff:
-- Not validated / out of scope:
+- Not covered / not validated:
 - Breaking changes / migration notes:
 
-## Linked Issues
+## Testing Matrix
 
 <!--
-Closes #N / Fixes #N / Resolves #N to auto-close.
-Otherwise reference without a closing keyword.
+Use:
+- ✅ tested
+- ⚠️ not tested
+- N/A
+If anything is ⚠️, explain why briefly below.
 -->
 
-<details>
-<summary>中文说明</summary>
+|          | 🍏  | 🪟  | 🐧  |
+| -------- | --- | --- | --- |
+| npm run  | ⚠️  | ⚠️  | ⚠️  |
+| npx      | ⚠️  | ⚠️  | ⚠️  |
+| Docker   | ⚠️  | ⚠️  | ⚠️  |
+| Podman   | ⚠️  | N/A | N/A |
+| Seatbelt | ⚠️  | N/A | N/A |
+
+Testing matrix notes:
+
+-
+
+## Linked Issues / Bugs
 
 <!--
-完整翻译上面的英文正文，逐段对应，不要省略或缩写。PR 标题保持英文。
--->
+If this PR fully resolves an issue, use one of:
+- Closes #<issue_number>
+- Fixes #<issue_number>
+- Resolves #<issue_number>
 
-</details>
+Otherwise reference related issues without a closing keyword.
+-->

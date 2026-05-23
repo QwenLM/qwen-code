@@ -16,7 +16,6 @@ import {
   ExtensionManager,
   parseInstallSource,
   createDebugLogger,
-  redactUrlCredentials,
 } from '@qwen-code/qwen-code-core';
 import open from 'open';
 
@@ -123,13 +122,10 @@ async function installAction(context: CommandContext, args: string) {
 
   try {
     const installMetadata = await parseInstallSource(source);
-    const redactedSource = redactUrlCredentials(source);
     context.ui.addItem(
       {
         type: MessageType.INFO,
-        text: t('Installing extension from "{{source}}"...', {
-          source: redactedSource,
-        }),
+        text: t('Installing extension from "{{source}}"...', { source }),
       },
       Date.now(),
     );
@@ -150,8 +146,8 @@ async function installAction(context: CommandContext, args: string) {
       {
         type: MessageType.ERROR,
         text: t('Failed to install extension from "{{source}}": {{error}}', {
-          source: redactUrlCredentials(source),
-          error: redactUrlCredentials(getErrorMessage(error)),
+          source,
+          error: getErrorMessage(error),
         }),
       },
       Date.now(),

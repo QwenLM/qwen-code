@@ -13,12 +13,12 @@ import {
   findRightGroupOfChatWebview,
 } from '../../utils/editorGroupUtils.js';
 import { ReadonlyFileSystemProvider } from '../../services/readonlyFileSystemProvider.js';
+import { FileDiscoveryService } from '@qwen-code/qwen-code-core/src/services/fileDiscoveryService.js';
 import {
-  crawlCache,
-  FileDiscoveryService,
   FileSearchFactory,
   type FileSearch,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/src/utils/filesearch/fileSearch.js';
+import * as crawlCache from '@qwen-code/qwen-code-core/src/utils/filesearch/crawlCache.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 
 /**

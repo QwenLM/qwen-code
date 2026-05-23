@@ -12,12 +12,7 @@ import type { Argv, CommandModule } from 'yargs';
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { DEFAULT_RING_SIZE } from '../serve/eventBus.js';
-import {
-  ApprovalMode,
-  MCP_BUDGET_WARN_FRACTION,
-} from '@qwen-code/qwen-code-core';
-import { loadSettings } from '../config/settings.js';
-import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
+import { MCP_BUDGET_WARN_FRACTION } from '@qwen-code/qwen-code-core';
 
 /**
  * Pause the current async function indefinitely. Used after the daemon
@@ -206,37 +201,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
               ? ` (warnings at >=${Math.ceil(mcpClientBudget * MCP_BUDGET_WARN_FRACTION)}, no refusal)`
               : ''),
       );
-    }
-
-    // Emit the headless-YOLO safety warning at daemon startup if
-    // settings.json statically configures yolo + no sandbox. We can't
-    // use `getHeadlessYoloSafetyWarning(config)` here because the daemon
-    // hasn't constructed a `Config` yet — sessions get their own — so
-    // we re-derive the predicate from the same settings.json the
-    // sessions will load. Per-session override (the ACP client flipping
-    // approval mode mid-session) is out of scope here; this warns about
-    // a deployment that's wide-open at boot. Suppress with
-    // QWEN_CODE_SUPPRESS_YOLO_WARNING=1.
-    try {
-      const loaded = loadSettings(argv.workspace ?? process.cwd());
-      const merged = loaded.merged;
-      const approvalMode = merged.tools?.approvalMode;
-      const sandbox = merged.tools?.sandbox;
-      const sandboxEnv = process.env['SANDBOX'];
-      const suppress = process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
-      const suppressed = suppress === '1' || suppress === 'true';
-      if (
-        approvalMode === ApprovalMode.YOLO &&
-        !sandbox &&
-        !sandboxEnv &&
-        !suppressed
-      ) {
-        writeStderrLine(HEADLESS_YOLO_NO_SANDBOX_WARNING);
-      }
-    } catch {
-      // Settings load can fail (corrupt JSON, etc.); don't block
-      // daemon startup just to emit a warning — the existing settings
-      // path will report the same error to the user via Session.
     }
 
     // Lazy-load the serve module so non-serve invocations don't pay for

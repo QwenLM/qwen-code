@@ -27,11 +27,15 @@ import {
   type DeviceFlowProviderId,
   type DeviceFlowPublicView,
 } from './auth/deviceFlow.js';
+import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
+import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
+import { isServeDebugMode } from './debugMode.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
+  CancelSentinelCollisionError,
   createHttpAcpBridge,
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -40,10 +44,15 @@ import {
   MAX_WORKSPACE_PATH_LENGTH,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  PermissionForbiddenError,
+  PermissionPolicyNotImplementedError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
+  WorkspaceInitRaceError,
   WorkspaceMismatchError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
@@ -105,6 +114,53 @@ export function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
       );
     }
   };
+}
+
+/**
+ * Shared `WorkspaceFileSystemFactory` construction used by both
+ * `runQwenServe` and `createServeApp`'s default bridge wiring.
+ * Centralizes the "use the injected factory if provided, otherwise
+ * build one with the given trust + audit-emit posture" logic so a
+ * future change to one call site doesn't silently diverge the other
+ * (#4334 DWcK4 review fold-in).
+ *
+ * Trust is intentionally a **required** parameter — the two call
+ * sites have different correct defaults and centralizing only the
+ * construction shape (not the policy) prevents accidental coupling:
+ *   - `runQwenServe` defaults to `trusted: true` (production daemon
+ *     boots up trusted; an explicit `deps.trustedWorkspace: false`
+ *     overrides for sandboxed runs).
+ *   - `createServeApp` defaults to `trusted: false` (test-safe;
+ *     direct embeds — IDE companions, hosted daemons — must
+ *     explicitly opt in to writes via `deps.fsFactory` or by
+ *     injecting their own `deps.bridge`).
+ *
+ * The audit-emit defaults to `createDefaultFsAuditEmit()` (the
+ * throttled stderr warning) when not provided.
+ */
+/**
+ * Module-scoped once-per-process guard for the `createServeApp`
+ * default-trust stderr warning (#4334 wenshao review DWrbn). Without
+ * this, `server.test.ts`'s ~25 `createServeApp` calls would flood
+ * stderr with identical lines, masking genuine failures in CI logs.
+ * Module scope (not closure-per-app) is intentional — the warning is
+ * a *posture* statement about this binary, not about each individual
+ * createServeApp instance.
+ */
+let warnedDefaultTrust = false;
+
+export function resolveBridgeFsFactory(input: {
+  boundWorkspace: string;
+  injected?: WorkspaceFileSystemFactory;
+  trusted: boolean;
+  emit?: (event: BridgeEvent) => void;
+}): WorkspaceFileSystemFactory {
+  if (input.injected) return input.injected;
+  return createWorkspaceFileSystemFactory({
+    boundWorkspace: input.boundWorkspace,
+    trusted: input.trusted,
+    emit: input.emit ?? createDefaultFsAuditEmit(),
+  });
 }
 
 export interface ServeAppDeps {
@@ -236,6 +292,52 @@ export function createServeApp(
   const boundWorkspace =
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  // F1 follow-up (#4319): construct `fsFactory` BEFORE the bridge so
+  // the bridge can wire it through `BridgeFileSystem` for ACP-side
+  // writeTextFile / readTextFile calls. Symmetric with
+  // `runQwenServe.ts` — without this wiring, direct embeds / tests
+  // that don't inject `deps.bridge` would silently lose the PR 18
+  // defensive fs layer for agent-triggered fs (the inline raw-fs
+  // proxy in `BridgeClient` would still run, bypassing trust /
+  // TOCTOU / audit). Default trust here is `false` (test-safe) to
+  // match the existing `createServeApp` posture below.
+  //
+  // Behavior change warning for embed consumers (#4334 wenshao review):
+  // pre-this-PR, ACP writeTextFile went through `BridgeClient`'s inline
+  // proxy which had no trust gate, so embeds calling `createServeApp`
+  // without providing `deps.fsFactory` had agent writes always succeed.
+  // Now those writes will reject with `untrusted_workspace` unless the
+  // embed either (a) provides its own `deps.fsFactory` with `trusted:
+  // true`, (b) provides its own `deps.bridge` (which controls its own
+  // `BridgeFileSystem` wiring and bypasses the default adapter), or
+  // (c) explicitly accepts the trust-gate-default posture for its
+  // hosting environment. Warn loudly so the asymmetry is visible to
+  // operators rather than appearing as opaque agent-side write failures.
+  // `runQwenServe.ts` consumers are unaffected — that path constructs
+  // `fsFactory` with `trusted: true` by default.
+  //
+  // Suppress the warning when `deps.bridge` is provided — that embed
+  // owns its own fileSystem wiring (the default adapter never runs) so
+  // the warning's claim about ACP writes rejecting would be false.
+  //
+  // Throttled to fire ONCE per process (#4334 wenshao review DWrbn):
+  // `server.test.ts` calls `createServeApp` ~25 times and the
+  // unthrottled warning floods stderr, masking genuine failures in CI
+  // output. Operators see the warning the first time and can take
+  // action; subsequent calls don't add information.
+  if (!deps.fsFactory && !deps.bridge && !warnedDefaultTrust) {
+    warnedDefaultTrust = true;
+    process.stderr.write(
+      'qwen serve: createServeApp default fsFactory uses trusted=false ' +
+        '— agent ACP writeTextFile calls will reject with untrusted_workspace. ' +
+        'Inject deps.fsFactory (with explicit trust) or deps.bridge to override.\n',
+    );
+  }
+  const fsFactory = resolveBridgeFsFactory({
+    boundWorkspace,
+    ...(deps.fsFactory ? { injected: deps.fsFactory } : {}),
+    trusted: false,
+  });
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -256,6 +358,10 @@ export function createServeApp(
       // here preserves byte-for-byte route output on the default
       // bridge construction path.
       statusProvider: createDaemonStatusProvider(),
+      // F1 follow-up (#4319): wire the WorkspaceFileSystem adapter so
+      // ACP writeTextFile / readTextFile pick up trust / TOCTOU /
+      // audit. See `bridgeFileSystemAdapter.ts`.
+      fileSystem: createBridgeFileSystemAdapter(fsFactory),
     });
 
   // Allow same-origin requests from the demo page. Browsers send an
@@ -299,13 +405,12 @@ export function createServeApp(
   // audit destination — `runQwenServe` will inject one whose
   // `trusted` mirrors `Config.isTrustedFolder()` and whose `emit`
   // plumbs into the per-session EventBus once PR 19/20 lands.
-  const fsFactory: WorkspaceFileSystemFactory =
-    deps.fsFactory ??
-    createWorkspaceFileSystemFactory({
-      boundWorkspace,
-      trusted: false,
-      emit: createDefaultFsAuditEmit(),
-    });
+  //
+  // F1 follow-up (#4319): the `fsFactory` is now constructed earlier
+  // (above the bridge) so the bridge can wire it into the
+  // `BridgeFileSystem` seam for ACP fs methods. Re-using the same
+  // instance for HTTP fs routes + ACP fs ensures a single operator
+  // audit stream covers both surfaces.
   // Park the factory on `app.locals` so PR 19/20 route handlers can
   // pick it up via `req.app.locals.fsFactory` without re-threading
   // the value through every handler signature, and so PR 18 tests
@@ -542,13 +647,27 @@ export function createServeApp(
       // ONLY when the operator opted in. Tag presence = behavior is
       // on; older daemons without this PR omit the tag and SDKs that
       // post-PR feature-detect on it stay backward compatible.
+      //
+      // F2 (#4175 commit 5): `mcpPoolActive` advertises
+      // `mcp_workspace_pool` + `mcp_pool_restart` together. Defaults
+      // to `true` when omitted so daemons that don't explicitly set
+      // the option still advertise the F2 surface; operators flip it
+      // to `false` only when `QWEN_SERVE_NO_MCP_POOL=1` is in scope.
       features: getAdvertisedServeFeatures(undefined, {
         requireAuth: opts.requireAuth === true,
+        mcpPoolActive: opts.mcpPoolActive !== false,
       }),
       modelServices: [],
       // #3803 §02: surface the bound workspace so clients can detect
       // mismatch pre-flight and omit `cwd` on `POST /session`.
       workspaceCwd: boundWorkspace,
+      // #4175 F3 Commit 6 — active mediation policy under the
+      // `policy` namespace. Distinct from the `permission_mediation`
+      // capability `modes` list (build-supported set). SDK clients
+      // pre-flight the active strategy and render the matching UX
+      // (e.g. consensus shows partial-vote progress, designated
+      // disables the vote button for non-originators).
+      policy: { permission: bridge.permissionPolicy },
     };
     res.status(200).json(envelope);
   });
@@ -774,18 +893,13 @@ export function createServeApp(
       // would otherwise flood production logs. Operators who hit
       // the symptom can flip QWEN_SERVE_DEBUG=1 and get the
       // breadcrumb on the next reproduction.
-      const callerIsInitiator =
-        (view.initiatorClientId === undefined && clientId === undefined) ||
-        (view.initiatorClientId !== undefined &&
-          clientId !== undefined &&
-          clientId === view.initiatorClientId);
-      if (
-        !callerIsInitiator &&
-        process.env['QWEN_SERVE_DEBUG'] &&
-        !['0', 'false', 'off', 'no'].includes(
-          (process.env['QWEN_SERVE_DEBUG'] ?? '').trim().toLowerCase(),
-        )
-      ) {
+      //
+      // PR #4291 follow-up review (qwen-latest, round-4 #6): the
+      // QWEN_SERVE_DEBUG check is centralized in `isServeDebugMode()`
+      // (./debugMode.js) — already used by workspaceAgents.ts and
+      // workspaceMemory.ts. Inlining a verbatim copy here was a DRY
+      // violation that could drift from the canonical falsy list.
+      if (!callerIsDeviceFlowInitiator(view, clientId) && isServeDebugMode()) {
         writeStderrLine(
           `qwen serve debug: GET /workspace/auth/device-flow/${id} redacted verification fields — caller-clientId mismatch (initiator=${view.initiatorClientId ?? 'anonymous'}, caller=${clientId ?? 'anonymous'})`,
         );
@@ -1444,8 +1558,40 @@ export function createServeApp(
       // identity rather than a forged header.
       const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
+      // F2 (#4175 commit 5): parse `?entryIndex=` query parameter for
+      // pool-mode targeted restarts. Accepts a non-negative integer
+      // (restart only entry #N) or `*` / omitted (restart all entries
+      // matching the server name). Anything else returns 400 — pool
+      // entry indices are bounded small integers, so `entryIndex=foo`
+      // or `entryIndex=-1` is almost certainly a client bug we want
+      // to surface loudly rather than silently route to "all".
+      let entryIndex: number | undefined;
+      const rawEntryIndex = req.query['entryIndex'];
+      if (rawEntryIndex !== undefined && rawEntryIndex !== '*') {
+        const candidate =
+          typeof rawEntryIndex === 'string' ? rawEntryIndex : undefined;
+        const parsed =
+          candidate !== undefined ? Number.parseInt(candidate, 10) : NaN;
+        if (
+          !Number.isInteger(parsed) ||
+          parsed < 0 ||
+          String(parsed) !== candidate
+        ) {
+          res.status(400).json({
+            error:
+              '`entryIndex` query parameter must be a non-negative integer or "*"',
+            code: 'invalid_entry_index',
+          });
+          return;
+        }
+        entryIndex = parsed;
+      }
       try {
-        const result = await bridge.restartMcpServer(serverName, clientId);
+        const result = await bridge.restartMcpServer(
+          serverName,
+          clientId,
+          entryIndex !== undefined ? { entryIndex } : undefined,
+        );
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, {
@@ -1565,13 +1711,26 @@ export function createServeApp(
     if (response === undefined) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+    // F3 Commit 2: thread the kernel-stamped peer-IP loopback bit
+    // through the bridge context so the `local-only` policy can gate
+    // votes by transport. We always pass a context (even when no
+    // header was supplied) so `fromLoopback` reaches the mediator —
+    // the prior gating shape (`clientId !== undefined ? { clientId }
+    // : undefined`) would silently drop the loopback bit for
+    // anonymous loopback voters, which is the exact `local-only`
+    // happy path.
+    const fromLoopback = detectFromLoopback(req);
+    const context = {
+      ...(clientId !== undefined ? { clientId } : {}),
+      fromLoopback,
+    };
     let accepted: boolean;
     try {
       accepted = bridge.respondToSessionPermission(
         sessionId,
         requestId,
         response,
-        clientId !== undefined ? { clientId } : undefined,
+        context,
       );
     } catch (err) {
       sendPermissionVoteError(res, err, {
@@ -1597,13 +1756,15 @@ export function createServeApp(
     if (response === undefined) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+    // Same F3 Commit 2 rationale as the session-scoped route above.
+    const fromLoopback = detectFromLoopback(req);
+    const context = {
+      ...(clientId !== undefined ? { clientId } : {}),
+      fromLoopback,
+    };
     let accepted: boolean;
     try {
-      accepted = bridge.respondToPermission(
-        requestId,
-        response,
-        clientId !== undefined ? { clientId } : undefined,
-      );
+      accepted = bridge.respondToPermission(requestId, response, context);
     } catch (err) {
       sendPermissionVoteError(res, err, {
         route: 'POST /permission/:requestId',
@@ -1812,6 +1973,37 @@ export function createServeApp(
           const next = await iter!.next();
           if (next.done) break;
           if (res.writableEnded) break;
+          // SSE ring eviction observability (#4360 wenshao review):
+          // EventBus.subscribe emits `state_resync_required` when a
+          // consumer reconnects with `Last-Event-ID` past the ring
+          // boundary. Without a daemon-side log, an operator chasing
+          // "my UI is frozen with stale state" has no breadcrumb to
+          // tell whether the ring is undersized, the client reconnects
+          // too slowly, or a network partition caused repeated
+          // reconnects. Log here (at the SSE write boundary) rather
+          // than inside EventBus — keeps the bus implementation pure
+          // and concentrates daemon-side observability in the route
+          // handler that already logs socket errors / heartbeats.
+          if (next.value.type === 'state_resync_required') {
+            const data = next.value.data as {
+              lastDeliveredId?: number;
+              earliestAvailableId?: number;
+              reason?: string;
+            };
+            const gap =
+              typeof data.earliestAvailableId === 'number' &&
+              typeof data.lastDeliveredId === 'number'
+                ? data.earliestAvailableId - data.lastDeliveredId - 1
+                : undefined;
+            writeStderrLine(
+              `qwen serve: SSE ring eviction detected (session ${sessionId}): ` +
+                `lastEventId=${data.lastDeliveredId ?? '?'}, ` +
+                `earliestInRing=${data.earliestAvailableId ?? '?'}, ` +
+                `gap=${gap ?? '?'} events, ` +
+                `reason=${data.reason ?? '?'}. ` +
+                `Consumer must call loadSession to recover.`,
+            );
+          }
           await writeWithBackpressure(formatSseFrame(next.value));
         }
       } catch (err) {
@@ -1822,11 +2014,37 @@ export function createServeApp(
           // hard-coded `id: 0` would regress the client's `Last-Event-ID`
           // tracker. `formatSseFrame` omits the `id:` line when the input
           // event has no id.
+          //
+          // `errorKind` (#4175 F4 prereq, chiga0 issue #19 P0): stamp the
+          // classified error kind so UIs can render typed responses
+          // (auth retry / file picker / proxy hint / etc.) rather than
+          // regex-matching the human-readable `error` string. Returns
+          // `undefined` for unclassified errors — SDK falls back to
+          // rendering `error` text as before, so adding `errorKind` is
+          // strictly additive / backward-compatible.
+          const errorKind = mapDomainErrorToErrorKind(err);
+          // Bridge iterator error observability (#4360 wenshao review):
+          // forwarding the error to the client via `stream_error` is
+          // good for UX but leaves the daemon side blind. The adjacent
+          // `res.on('error', ...)` handler at line ~1925 already logs
+          // socket-level errors with `writeStderrLine`; mirror that
+          // pattern here for protocol/subprocess errors so operators
+          // can grep daemon stderr for "bridge iterator error" instead
+          // of attaching a debugger to distinguish "subprocess
+          // OOM-killed" from "bridge protocol bug".
+          writeStderrLine(
+            `qwen serve: bridge iterator error (session ${sessionId}): ` +
+              `${errorMessage(err)}` +
+              (errorKind ? ` [${errorKind}]` : ''),
+          );
           await writeWithBackpressure(
             formatSseFrame({
               v: 1,
               type: 'stream_error',
-              data: { error: errorMessage(err) },
+              data: {
+                error: errorMessage(err),
+                ...(errorKind ? { errorKind } : {}),
+              },
             }),
           ).catch(() => {});
         }
@@ -1978,6 +2196,41 @@ function parseOptionalWorkspaceCwd(
 }
 
 /**
+ * Returns true iff the GET / POST caller is the same client that
+ * originally started the device flow. Both-undefined is treated as a
+ * match (anonymous-start → anonymous-reattach is the legitimate case).
+ *
+ * **Threat model (consolidated from PR #4291 follow-up reviews):** this
+ * is BEST-EFFORT ATTRIBUTION, not authentication. `X-Qwen-Client-Id`
+ * is a syntactic header, not bound to a server-validated identity —
+ * anyone holding the bearer token can spoof it. The bearer token IS
+ * the auth boundary; this gate exists to prevent ACCIDENTAL cross-
+ * client reads in well-behaved multi-SDK setups, and to keep the POST
+ * take-over and GET state shapes consistent. A determined attacker
+ * who has compromised the daemon bearer token already wins; locking
+ * down further would require binding identity into bearer-token
+ * issuance, which is a separate architectural change.
+ *
+ * PR #4291 follow-up review (qwen-latest, round-4 #2): extracted from
+ * three duplicated copies in the route handler, `toDeviceFlowStart-
+ * ResponseBody`, and `toDeviceFlowStateBody`. The exact bug class
+ * #4291 was fixing was "POST and GET diverged on the same redaction
+ * policy" — duplicating the gate recreated the preconditions for
+ * silent divergence. Single source of truth.
+ */
+function callerIsDeviceFlowInitiator(
+  view: Pick<DeviceFlowPublicView, 'initiatorClientId'>,
+  callerClientId: string | undefined,
+): boolean {
+  return (
+    (view.initiatorClientId === undefined && callerClientId === undefined) ||
+    (view.initiatorClientId !== undefined &&
+      callerClientId !== undefined &&
+      callerClientId === view.initiatorClientId)
+  );
+}
+
+/**
  * PR 21 — translate the registry's redacted `DeviceFlowPublicView` into
  * the wire shape declared by `DaemonDeviceFlowStartResult`. Splitting
  * "start response" from "state body" preserves the `attached` field
@@ -2003,18 +2256,14 @@ function toDeviceFlowStartResponseBody(
   // every POST, including the `attached: true` take-over case, so any
   // bearer-token holder that POSTed `providerId: <existing>` got the
   // verification code another client started. That bypassed the
-  // closed-out GET redaction completely. Apply the same gate here.
-  // Fresh starts naturally pass the gate because `view.initiatorClientId`
-  // was set from the same `callerClientId` on this very request.
-  // Take-over callers that don't match the initiator now see the
-  // public envelope only. The both-undefined branch preserves the
-  // anonymous-start → anonymous-reattach use case.
-  const callerIsInitiator =
-    (view.initiatorClientId === undefined && callerClientId === undefined) ||
-    (view.initiatorClientId !== undefined &&
-      callerClientId !== undefined &&
-      callerClientId === view.initiatorClientId);
-  if (callerIsInitiator) {
+  // closed-out GET redaction completely. Apply the shared gate
+  // (`callerIsDeviceFlowInitiator`) here. Fresh starts naturally
+  // pass the gate because `view.initiatorClientId` was set from the
+  // same `callerClientId` on this very request. Take-over callers
+  // that don't match the initiator see the public envelope only;
+  // anonymous-start → anonymous-reattach also passes via the
+  // both-undefined branch.
+  if (callerIsDeviceFlowInitiator(view, callerClientId)) {
     body['userCode'] = view.userCode ?? '';
     body['verificationUri'] = view.verificationUri ?? '';
     if (view.verificationUriComplete) {
@@ -2056,44 +2305,16 @@ function toDeviceFlowStateBody(
   if (view.expiresAt !== undefined) body['expiresAt'] = view.expiresAt;
   if (view.intervalMs !== undefined) body['intervalMs'] = view.intervalMs;
   if (view.lastPolledAt !== undefined) body['lastPolledAt'] = view.lastPolledAt;
-  // PR #4255 follow-up review thread (deepseek-v4-pro): symmetrize with
-  // the POST take-over response shape — only echo `userCode` /
+  // PR #4255 follow-up review thread (deepseek-v4-pro): symmetrize
+  // with the POST take-over response shape — only echo `userCode` /
   // `verificationUri` / `verificationUriComplete` / `initiatorClientId`
-  // back to the original starter (matched by `X-Qwen-Client-Id`). An
-  // anonymous GET caller, or a caller identifying as a different client,
-  // sees only the public envelope (`status` / `errorKind` / `hint` /
-  // timestamps). Bearer-token gated already (the route uses
-  // `mutate({ strict: true })`), so the blast radius was small, but
-  // multi-client setups sharing a single daemon token could otherwise
-  // enumerate other clients' verification codes.
-  //
-  // **Threat model (PR #4291 follow-up review by Copilot):** this gate
-  // is BEST-EFFORT ATTRIBUTION, not authentication. `X-Qwen-Client-Id`
-  // is a syntactic header, not bound to a server-validated identity —
-  // anyone holding the bearer token can spoof it. The bearer token IS
-  // the auth boundary; this gate exists to prevent ACCIDENTAL
-  // cross-client reads in well-behaved multi-SDK setups (and to keep
-  // GET symmetric with the POST take-over shape closed out in
-  // round-12 #6 of #4255). A determined attacker who has compromised
-  // the daemon bearer token already wins; locking down GET further
-  // would require binding identity into bearer-token issuance, which
-  // is a separate architectural change.
-  // PR #4291 follow-up review (qwen-latest, #3): the gate must accept
-  // the both-undefined case too, otherwise an anonymously-started flow
-  // (POST without `X-Qwen-Client-Id` → `initiatorClientId === undefined`)
-  // becomes silently unreadable: even the same anonymous caller GETting
-  // the same id can no longer retrieve `userCode`/`verificationUri` —
-  // the body switches from "what they got from POST" to a redacted
-  // public envelope, with HTTP 200, no error. Pre-PR-4291 GET returned
-  // these fields to anyone with the bearer; this gate's purpose is to
-  // prevent CROSS-client reads, not to lock anonymous flows out of
-  // their own data.
-  const callerIsInitiator =
-    (view.initiatorClientId === undefined && callerClientId === undefined) ||
-    (view.initiatorClientId !== undefined &&
-      callerClientId !== undefined &&
-      callerClientId === view.initiatorClientId);
-  if (callerIsInitiator) {
+  // back to the original starter (matched by `X-Qwen-Client-Id`).
+  // Bearer-token gated already (the route uses `mutate({ strict: true })`),
+  // but multi-client setups sharing a single daemon token could
+  // otherwise enumerate other clients' verification codes. See
+  // `callerIsDeviceFlowInitiator` JSDoc above for the consolidated
+  // threat-model note (best-effort attribution, NOT auth boundary).
+  if (callerIsDeviceFlowInitiator(view, callerClientId)) {
     if (view.userCode) body['userCode'] = view.userCode;
     if (view.verificationUri) body['verificationUri'] = view.verificationUri;
     if (view.verificationUriComplete) {
@@ -2121,6 +2342,52 @@ function parseClientIdHeader(
     return null;
   }
   return raw;
+}
+
+/**
+ * #4175 F3 Commit 2 — decide whether a permission vote arrived from a
+ * loopback peer.
+ *
+ * Per RFC 1122 the entire `127.0.0.0/8` block is loopback (and the
+ * IPv4-mapped IPv6 form `::ffff:127.0.0.0/104` mirrors that). IPv6
+ * loopback is `::1` (single literal). Wenshao review #4335 /
+ * 3271185597 — the previous exact-match Set of three literals
+ * (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`) silently fail-CLOSED
+ * on legitimate non-`.0.0.1` loopback addresses (`127.0.0.2`,
+ * `127.0.1.1`, etc.), causing unexpected `remote_not_allowed`
+ * rejections under `local-only` policy. Switched to a prefix
+ * test so the entire `/8` and its dual-stack mirror are accepted.
+ *
+ * **Security**: this function reads `req.socket.remoteAddress` only.
+ * It does NOT consult `X-Forwarded-For` or any HTTP header — those
+ * are forgeable, and `local-only` is meant to be a strong gate that
+ * trusts the kernel-stamped peer IP. Operators who want
+ * loopback-equivalent treatment for a reverse-proxied daemon should
+ * use a dedicated daemon process instead, or pick `designated`
+ * policy where loopback identity is irrelevant.
+ *
+ * Direction is fail-CLOSED: an unrecognized `remoteAddress` shape
+ * (missing socket, non-string) returns `false`, gating votes
+ * conservatively rather than admitting them.
+ */
+// Wenshao review #4335 / 3272581557 — exported for unit testing.
+// supertest in the existing server tests always connects from
+// `127.0.0.1`, so the prefix-match logic for `127.x`-beyond-`.0.0.1`,
+// `::1`, `::ffff:127.*`, and the fail-closed non-string branch had
+// no direct test. The factored-out helper takes a minimal shape so
+// tests can exercise it without spinning up Express.
+export function detectFromLoopback(req: {
+  socket?: { remoteAddress?: string | undefined };
+}): boolean {
+  const addr = req.socket?.remoteAddress;
+  if (typeof addr !== 'string') return false;
+  // IPv6 loopback (single literal).
+  if (addr === '::1') return true;
+  // IPv4 loopback: 127.0.0.0/8.
+  if (addr.startsWith('127.')) return true;
+  // IPv4-mapped IPv6 loopback: ::ffff:127.0.0.0/104.
+  if (addr.startsWith('::ffff:127.')) return true;
+  return false;
 }
 
 /**
@@ -2314,6 +2581,45 @@ function sendPermissionVoteError(
     });
     return;
   }
+  // F3 Commit 2 — designated voter mismatch / `local-only` remote
+  // rejection. 403 because the request is well-formed and the voter
+  // was authenticated; the policy refuses their vote.
+  if (err instanceof PermissionForbiddenError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'permission_forbidden',
+      requestId: err.requestId,
+      sessionId: err.sessionId,
+      reason: err.reason,
+    });
+    return;
+  }
+  // F3 Commit 2 — operator configured a permission policy whose
+  // implementation has not landed in this build yet. 501 (not 500)
+  // so the SDK can render "your daemon is older than your settings
+  // expect; upgrade" rather than a generic Internal Server Error.
+  if (err instanceof PermissionPolicyNotImplementedError) {
+    res.status(501).json({
+      error: err.message,
+      code: 'permission_policy_not_implemented',
+      policy: err.policy,
+    });
+    return;
+  }
+  // F3 Commit 2 — agent declared an `allowedOptionIds` set that
+  // includes the cancel-vote sentinel. This is a contract violation
+  // between agent and daemon (not a client mistake), so 500 is the
+  // right shape; structured `code` lets the SDK distinguish from
+  // unrelated 500s.
+  if (err instanceof CancelSentinelCollisionError) {
+    res.status(500).json({
+      error: err.message,
+      code: 'cancel_sentinel_collision',
+      requestId: err.requestId,
+      sentinel: err.sentinel,
+    });
+    return;
+  }
   sendBridgeError(res, err, ctx);
 }
 
@@ -2331,7 +2637,40 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // The SDK parser at `sdk-typescript/src/daemon/sse.ts` handles the
   // multi-line variant on the receive side — input/output asymmetry is
   // intentional.
-  const dataJson = JSON.stringify(event);
+  //
+  // `_meta.serverTimestamp` (#4175 F4 prereq, chiga0 issue #19 P0): stamp
+  // the daemon's wall-clock at SSE write time so multi-client transcript
+  // ordering and "X minutes ago" UIs use the server's clock rather than
+  // each client's drifting local clock. Stamped at the wire boundary
+  // (NOT at EventBus.publish) so the in-memory `BridgeEvent` type stays
+  // unchanged and internal consumers don't see `_meta`.
+  //
+  // **Where `_meta` lives**: this code merges with `event._meta` at the
+  // BridgeEvent top level. **No current producer in the daemon sets
+  // `_meta` at the top level** — wenshao #4360 review noted that
+  // ToolCallEmitter's `_meta` lives nested at `event.data._meta` (the
+  // ACP `session/update` payload's own metadata), and `bridgeClient.ts`
+  // publishes via `events.publish({ type: 'session_update', data:
+  // params })` so the emitter's `_meta` stays inside `data`. The
+  // top-level merge here is a **forward-compat escape hatch** — if a
+  // future emitter ever wants to stamp envelope-level metadata, it can
+  // do so via `_meta` and this spread preserves it. Today
+  // `existingMeta` is always `undefined` in production and the spread
+  // is a no-op merge with `{}`.
+  //
+  // SDK consumer plan: a 3-location probe (event.serverTimestamp /
+  // event._meta.serverTimestamp / event.data._meta.serverTimestamp)
+  // is planned in chiga0's separate PR #4353 (not yet merged into
+  // `daemon_mode_b_main`). When that ships, SDK readers find this
+  // field at the `_meta.serverTimestamp` location. Until then this
+  // stamp is daemon-side only; SDK consumers can read it through an
+  // `as any` cast or wait for #4353.
+  const existingMeta = (event as { _meta?: Record<string, unknown> })._meta;
+  const stamped = {
+    ...event,
+    _meta: { ...(existingMeta ?? {}), serverTimestamp: Date.now() },
+  };
+  const dataJson = JSON.stringify(stamped);
   const idLine =
     'id' in event && event.id !== undefined ? `id: ${event.id}\n` : '';
   return `${idLine}event: ${event.type}\ndata: ${dataJson}\n\n`;
@@ -2366,6 +2705,50 @@ function sendBridgeError(
       code: 'workspace_init_conflict',
       path: err.path,
       existingSize: err.existingSize,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceInitPathEscapeError) {
+    // #4297 fold-in 1 (16:32:44-round S1). The configured
+    // `context.fileName` resolves outside the bound workspace via
+    // path arithmetic. 400 because this is a misconfiguration that
+    // an operator can fix in workspace settings — not a daemon
+    // failure.
+    res.status(400).json({
+      error: err.message,
+      code: 'workspace_init_path_escape',
+      filename: err.filename,
+      boundWorkspace: err.boundWorkspace,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceInitSymlinkError) {
+    // #4297 fold-in 1 (16:32:44-round S1). Either the target file is
+    // a symlink, or a parent directory is a symlink that escapes the
+    // workspace. Same 400 rationale as `WorkspaceInitPathEscapeError`
+    // — operator fix is "replace the symlink with a real file/dir."
+    res.status(400).json({
+      error: err.message,
+      code: 'workspace_init_symlink',
+      target: err.target,
+      kind: err.kind,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceInitRaceError) {
+    // #4297 fold-in 10 (qwen-latest S2, addresses #3263954690).
+    // Race-condition variant: EEXIST after our absence check (target
+    // appeared mid-create) or ENOENT after our content check (target
+    // disappeared mid-overwrite). Same 400 mapping as the symlink
+    // sibling — operator fix is "rerun init" or investigate the
+    // concurrent writer (git checkout, editor save, …). Distinct
+    // `code: 'workspace_init_race'` so dashboards don't misclassify
+    // these as symlink-attack indicators.
+    res.status(400).json({
+      error: err.message,
+      code: 'workspace_init_race',
+      target: err.target,
+      kind: err.kind,
     });
     return;
   }

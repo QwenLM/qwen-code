@@ -201,11 +201,7 @@ async function readFileContent(
 
     if (typeof fileReadResult.llmContent === 'string') {
       let fileContentForLlm = '';
-      if (
-        fileReadResult.isTruncated &&
-        fileReadResult.linesShown &&
-        fileReadResult.originalLineCount !== undefined
-      ) {
+      if (fileReadResult.isTruncated) {
         const [start, end] = fileReadResult.linesShown!;
         const total = fileReadResult.originalLineCount!;
         fileContentForLlm = `Showing lines ${start}-${end} of ${total} total lines.\n---\n${fileReadResult.llmContent}`;

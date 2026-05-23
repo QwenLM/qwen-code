@@ -947,57 +947,6 @@ describe('SessionService', () => {
       expect(history).toEqual([recordA1.message, assistantA1.message]);
     });
 
-    it('does not deep-clone stored messages when rebuilding resume API history', () => {
-      const largePayload = {
-        output: 'x'.repeat(128 * 1024),
-        nested: { keep: true },
-      };
-      const toolResult: ChatRecord = {
-        uuid: 'large-tool-result',
-        parentUuid: recordA1.uuid,
-        sessionId: sessionIdA,
-        timestamp: '2024-01-01T00:02:00Z',
-        type: 'tool_result',
-        message: {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'call-1',
-                name: 'read_file',
-                response: largePayload,
-              },
-            },
-          ],
-        },
-        cwd: '/test/project/root',
-        version: '1.0.0',
-      };
-      const conversation: ConversationRecord = {
-        sessionId: sessionIdA,
-        projectHash: 'test-project-hash',
-        startTime: '2024-01-01T00:00:00Z',
-        lastUpdated: '2024-01-01T00:02:00Z',
-        messages: [recordA1, toolResult],
-      };
-      const structuredCloneSpy = vi
-        .spyOn(globalThis, 'structuredClone')
-        .mockImplementation(() => {
-          throw new Error('unexpected deep clone');
-        });
-
-      const history = buildApiHistoryFromConversation(conversation);
-
-      expect(structuredCloneSpy).not.toHaveBeenCalled();
-      expect(history).toEqual([recordA1.message, toolResult.message]);
-      expect(history[1]).not.toBe(toolResult.message);
-      expect(history[1].parts).not.toBe(toolResult.message!.parts);
-      const response = history[1].parts![0] as {
-        functionResponse: { response: typeof largePayload };
-      };
-      expect(response.functionResponse.response).toBe(largePayload);
-    });
-
     it('merges mid-turn user messages into the preceding tool result on resume', () => {
       const assistantWithToolCall: ChatRecord = {
         uuid: 'a2',

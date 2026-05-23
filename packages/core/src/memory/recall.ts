@@ -219,25 +219,12 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         strategy,
       };
     } catch (error) {
-      // Distinguish three cases so oncall debugging isn't misled:
-      //   - caller-driven abort (user signal / new UserQuery / session
-      //     cleanup): caller signal is aborted → heuristic fallback is
-      //     skipped below at `options.abortSignal?.aborted`, so the
-      //     result really is discarded.
-      //   - 30 s safety-net timeout in relevanceSelector: only the inner
-      //     combined signal aborts; the caller's signal is NOT aborted,
-      //     so the heuristic fallback below DOES run.
-      //   - real model error: warn at the higher level.
+      // Distinguish deadline-triggered cancellation from real model errors
+      // so oncall debugging is not misled by the fallback log.
       if (error instanceof DOMException && error.name === 'AbortError') {
-        if (options.abortSignal?.aborted) {
-          debugLogger.debug(
-            'Model-driven auto-memory recall aborted by caller; heuristic result discarded.',
-          );
-        } else {
-          debugLogger.debug(
-            'Model-driven auto-memory recall timed out (30 s safety net); heuristic fallback will run.',
-          );
-        }
+        debugLogger.debug(
+          'Model-driven auto-memory recall cancelled by deadline; heuristic result discarded.',
+        );
       } else {
         debugLogger.warn(
           'Model-driven auto-memory recall failed; falling back to heuristic selection.',
@@ -247,8 +234,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
     }
   }
 
-  // If the caller's abort signal is already set, skip the heuristic
-  // fallback — the result would be discarded anyway.
+  // If the caller's abort signal is already set (e.g. deadline fired), skip the
+  // heuristic fallback — the result would be discarded anyway.
   if (options.abortSignal?.aborted) {
     return {
       prompt: '',

@@ -3,7 +3,6 @@ export default {
   'file-system': 'File System',
   'multi-file': 'Multi-File Read',
   shell: 'Shell',
-  monitor: 'Monitor',
   'todo-write': 'Todo Write',
   task: 'Task',
   'exit-plan-mode': 'Exit Plan Mode',

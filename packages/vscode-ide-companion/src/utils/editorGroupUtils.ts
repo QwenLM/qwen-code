@@ -29,9 +29,7 @@ function findNeighborGroup(
 ): vscode.ViewColumn | undefined {
   let candidate: vscode.ViewColumn | undefined;
   for (const g of vscode.window.tabGroups.all) {
-    if (!isOnSide(g.viewColumn)) {
-      continue;
-    }
+    if (!isOnSide(g.viewColumn)) continue;
     if (candidate === undefined || isCloser(candidate, g.viewColumn)) {
       candidate = g.viewColumn;
     }

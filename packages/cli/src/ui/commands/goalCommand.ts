@@ -100,7 +100,7 @@ export const goalCommand: SlashCommand = {
   },
   argumentHint: '[<condition> | clear]',
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  supportedModes: ['interactive', 'non_interactive'] as const,
   action: async (
     context: CommandContext,
     args: string,
@@ -158,9 +158,6 @@ export const goalCommand: SlashCommand = {
         durationMs: Date.now() - cleared.setAt,
       };
       context.ui.addItem(clearedItem, Date.now());
-      if (context.executionMode !== 'interactive') {
-        return infoMessage(`Goal cleared: ${cleared.condition}`);
-      }
       return;
     }
 

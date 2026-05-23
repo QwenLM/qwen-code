@@ -20,7 +20,6 @@ import { join } from 'node:path';
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
 import { GeminiClient, SendMessageType } from './client.js';
 import { findCompressSplitPoint } from '../services/chatCompressionService.js';
-import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   AuthType,
   createContentGenerator,
@@ -40,12 +39,7 @@ import {
 import type { ModelsConfig } from '../models/modelsConfig.js';
 import { UnauthorizedError } from '../utils/errors.js';
 import { retryWithBackoff } from '../utils/retry.js';
-import {
-  CompressionStatus,
-  GeminiEventType,
-  Turn,
-  type ServerGeminiStreamEvent,
-} from './turn.js';
+import { CompressionStatus, GeminiEventType, Turn } from './turn.js';
 
 vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
@@ -138,13 +132,6 @@ vi.mock('../utils/getFolderStructure', () => ({
   getFolderStructure: vi.fn().mockResolvedValue('Mock Folder Structure'),
 }));
 vi.mock('../utils/errorReporting', () => ({ reportError: vi.fn() }));
-vi.mock('../utils/gitUtils.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../utils/gitUtils.js')>();
-  return {
-    ...actual,
-    getRecentGitStatus: vi.fn().mockReturnValue(null),
-  };
-});
 vi.mock('../utils/nextSpeakerChecker', () => ({
   checkNextSpeaker: vi.fn().mockResolvedValue(null),
 }));
@@ -464,7 +451,6 @@ describe('Gemini Client (client.ts)', () => {
       getSkipNextSpeakerCheck: vi.fn().mockReturnValue(false),
       getUseModelRouter: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
-      getCwd: vi.fn().mockReturnValue('/test/project/root'),
       storage: {
         getProjectTempDir: vi.fn().mockReturnValue('/test/temp'),
         getProjectDir: vi
@@ -484,7 +470,6 @@ describe('Gemini Client (client.ts)', () => {
       getModelsConfig: vi.fn().mockReturnValue({
         getResolvedModel: vi.fn().mockReturnValue(undefined),
       }),
-      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getArenaManager: vi.fn().mockReturnValue(null),
@@ -1004,80 +989,6 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
-  describe('startChat — repair orphan tool_use on resume', () => {
-    it('synthesizes a functionResponse for a transcript ending in a dangling model[functionCall]', async () => {
-      // --resume of a session that crashed (OOM / SIGKILL / process exit)
-      // between the partial-tool_use push in `processStreamResponse` and
-      // the React scheduler's `submitQuery(ToolResult)`. The persisted
-      // JSONL ends with `model[functionCall]` and no matching user
-      // `functionResponse`. Without the repair pass running at session
-      // load, the first API call after `--resume` would 400 with
-      // "tool_use_id ... must have a corresponding tool_use block in
-      // the previous message" — exactly the wedge this PR is supposed
-      // to escape. Covers the only resume-time integration point for
-      // the repair, so a future reorder/removal of the call in
-      // `startChat()` regresses this test.
-      await client.startChat([
-        {
-          role: 'user',
-          parts: [{ text: 'open /tmp/crash.txt' }],
-        },
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'call_crash_resume',
-                name: 'read_file',
-                args: { path: '/tmp/crash.txt' },
-              },
-            } as never,
-          ],
-        },
-      ]);
-
-      const history = client.getHistory();
-      // startChat prepends a mocked env-context user/model pair, then
-      // appends the supplied extraHistory; the repair pass must then
-      // splice a synthetic user[functionResponse] AFTER the dangling
-      // model[fc]. Locate the dangling model entry by its callId and
-      // verify the immediately-following entry carries the synthetic.
-      const danglingIdx = history.findIndex(
-        (h) =>
-          h.role === 'model' &&
-          h.parts?.some((p) => p.functionCall?.id === 'call_crash_resume'),
-      );
-      expect(danglingIdx).toBeGreaterThanOrEqual(0);
-      const userAfter = history[danglingIdx + 1];
-      expect(userAfter?.role).toBe('user');
-      const fr = userAfter?.parts!.find((p) => p.functionResponse);
-      expect(fr?.functionResponse?.id).toBe('call_crash_resume');
-      expect(fr?.functionResponse?.name).toBe('read_file');
-      expect(
-        (fr?.functionResponse?.response as { error?: string })?.error,
-      ).toMatch(/interrupted/i);
-    });
-
-    it('is a no-op when the resumed transcript has no dangling tool_use', async () => {
-      // Happy resume path: don't inject a synthetic functionResponse
-      // into a transcript whose tool_use pairing is already valid (or,
-      // as here, has no tool_use at all). Defends against a future
-      // regression where the repair pass starts spuriously injecting on
-      // perfectly-formed history.
-      await client.startChat([
-        { role: 'user', parts: [{ text: 'q' }] },
-        { role: 'model', parts: [{ text: 'plain text reply' }] },
-      ]);
-
-      const history = client.getHistory();
-      // No functionResponse anywhere — repair did nothing.
-      const hasAnyFunctionResponse = history.some((h) =>
-        h.parts?.some((p) => p.functionResponse),
-      );
-      expect(hasAnyFunctionResponse).toBe(false);
-    });
-  });
-
   describe('setTools — system instruction refresh', () => {
     // Regression coverage for the progressive-MCP wiring bug: when MCP
     // discovery completes AFTER startChat() (the new default), `setTools()`
@@ -1263,39 +1174,6 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('resetChat', () => {
-    it('clears cached git status so it can be recomputed for the next session', async () => {
-      vi.mocked(getRecentGitStatus)
-        .mockReturnValueOnce('Git snapshot A')
-        .mockReturnValueOnce('Git snapshot B');
-      vi.mocked(getRecentGitStatus).mockClear();
-
-      const instructionBeforeReset = (
-        client as unknown as {
-          getMainSessionSystemInstruction: () => string;
-        }
-      ).getMainSessionSystemInstruction();
-      const instructionBeforeSecondCall = (
-        client as unknown as {
-          getMainSessionSystemInstruction: () => string;
-        }
-      ).getMainSessionSystemInstruction();
-
-      expect(instructionBeforeReset).toContain('Git snapshot A');
-      expect(instructionBeforeSecondCall).toContain('Git snapshot A');
-      expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
-
-      await client.resetChat();
-
-      const instructionAfterReset = (
-        client as unknown as {
-          getMainSessionSystemInstruction: () => string;
-        }
-      ).getMainSessionSystemInstruction();
-
-      expect(instructionAfterReset).toContain('Git snapshot B');
-      expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
-    });
-
     it('should create a new chat session, clearing the old history', async () => {
       // 1. Get the initial chat instance and add some history.
       const initialChat = client.getChat();
@@ -1538,7 +1416,6 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength,
         stripOrphanedUserEntriesFromHistory,
-        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
       } as unknown as GeminiChat;
       mockTurnRunFn.mockReturnValue(
         (async function* () {
@@ -1984,7 +1861,7 @@ describe('Gemini Client (client.ts)', () => {
   // tryCompressChat is now a thin wrapper around GeminiChat.tryCompress.
   // The compression logic itself is exercised in chatCompressionService.test.ts
   // (token math, threshold checks, hook firing) and geminiChat.test.ts (history
-  // mutation, recording, consecutiveFailures circuit breaker). The tests below cover
+  // mutation, recording, hasFailedCompressionAttempt). The tests below cover
   // only what the wrapper itself adds: argument forwarding and the IDE-context
   // flag flip.
   describe('tryCompressChat (delegation)', () => {
@@ -2823,9 +2700,20 @@ hello
     });
 
     it('should not block the main request when auto-memory recall is slow', async () => {
-      // Recall never settles — settledAt stays null so the UserQuery consume
-      // point skips it and turn.run() is called immediately without memory.
-      mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
+      // Simulate a recall that takes longer than the 2.5s deadline
+      mockMemoryManager.recall.mockReturnValue(
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                prompt: '## Relevant memory\n\nSlow memory result.',
+                selectedDocs: [],
+                strategy: 'model',
+              }),
+            10_000,
+          ),
+        ),
+      );
 
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -2838,28 +2726,38 @@ hello
       };
       client['chat'] = mockChat as GeminiChat;
 
-      const stream = client.sendMessageStream(
-        [{ text: 'Quick question' }],
-        new AbortController().signal,
-        'prompt-id-slow-memory',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
+      vi.useFakeTimers();
+      try {
+        const streamPromise = (async () => {
+          const stream = client.sendMessageStream(
+            [{ text: 'Quick question' }],
+            new AbortController().signal,
+            'prompt-id-slow-memory',
+          );
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })();
 
-      // turn.run() must have been called without the slow memory
-      expect(mockTurnRunFn).toHaveBeenCalledWith(
-        'test-model',
-        expect.not.arrayContaining([
-          expect.stringContaining('Slow memory result'),
-        ]),
-        expect.any(AbortSignal),
-      );
+        // Advance past the 2.5s deadline — the main request should proceed
+        await vi.advanceTimersByTimeAsync(3_000);
+        await streamPromise;
+
+        // The main request should have been called without the slow memory
+        expect(mockTurnRunFn).toHaveBeenCalledWith(
+          'test-model',
+          expect.not.arrayContaining([
+            expect.stringContaining('Slow memory result'),
+          ]),
+          expect.any(AbortSignal),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
-    it('should inject auto-memory at UserQuery consume point when recall already settled', async () => {
-      // mockResolvedValue settles synchronously; by the time the consume-point
-      // check runs (after at least one await), settledAt is set.
+    it('should include auto-memory prompt when recall completes within deadline', async () => {
+      // Simulate a fast recall that completes well within the deadline
       mockMemoryManager.recall.mockResolvedValue({
         prompt: '## Relevant memory\n\nFast memory result.',
         selectedDocs: [],
@@ -2891,322 +2789,6 @@ hello
         expect.arrayContaining(['## Relevant memory\n\nFast memory result.']),
         expect.any(AbortSignal),
       );
-    });
-
-    it('should inject auto-memory on first ToolResult when recall settles after UserQuery', async () => {
-      // Controllable promise — recall stays pending across the UserQuery turn
-      // and only settles before the ToolResult turn runs.
-      let resolveRecall:
-        | ((value: {
-            prompt: string;
-            selectedDocs: never[];
-            strategy: 'model';
-          }) => void)
-        | undefined;
-      mockMemoryManager.recall.mockReturnValue(
-        new Promise((resolve) => {
-          resolveRecall = resolve;
-        }),
-      );
-
-      const mockStream = (async function* () {
-        yield { type: 'content', value: 'Hello' };
-      })();
-      mockTurnRunFn.mockReturnValue(mockStream);
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      // Turn 1: UserQuery — recall still pending, no injection
-      const userStream = client.sendMessageStream(
-        [{ text: 'What is my name?' }],
-        new AbortController().signal,
-        'prompt-id-user-query',
-        { type: SendMessageType.UserQuery },
-      );
-      for await (const _ of userStream) {
-        // consume
-      }
-
-      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        'test-model',
-        expect.not.arrayContaining([
-          expect.stringContaining('Deferred memory result'),
-        ]),
-        expect.any(AbortSignal),
-      );
-
-      // Recall settles between turns
-      resolveRecall!({
-        prompt: '## Relevant memory\n\nDeferred memory result.',
-        selectedDocs: [],
-        strategy: 'model',
-      });
-      // Drain microtasks so the settledAt finally() callback runs
-      await Promise.resolve();
-      await Promise.resolve();
-
-      // Turn 2: ToolResult — settledAt is now non-null, memory should inject
-      mockTurnRunFn.mockReturnValue(
-        (async function* () {
-          yield { type: 'content', value: 'world' };
-        })(),
-      );
-      const toolStream = client.sendMessageStream(
-        [{ functionResponse: { name: 'foo', response: { ok: true } } }],
-        new AbortController().signal,
-        'prompt-id-tool-result',
-        { type: SendMessageType.ToolResult },
-      );
-      for await (const _ of toolStream) {
-        // consume
-      }
-
-      // Memory must come AFTER the functionResponse part so the Qwen API
-      // call/response pairing isn't broken (see client.ts:1209-1213).
-      const lastCallArgs = mockTurnRunFn.mock.lastCall;
-      const requestArr = lastCallArgs![1] as unknown[];
-      const functionResponseIdx = requestArr.findIndex(
-        (p) => typeof p === 'object' && p !== null && 'functionResponse' in p,
-      );
-      const memoryIdx = requestArr.findIndex(
-        (p) => p === '## Relevant memory\n\nDeferred memory result.',
-      );
-      expect(functionResponseIdx).toBeGreaterThanOrEqual(0);
-      expect(memoryIdx).toBeGreaterThan(functionResponseIdx);
-    });
-
-    it('should abort the pending prefetch when the caller signal aborts', async () => {
-      let abortHandlerInvoked = false;
-      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
-        opts.abortSignal?.addEventListener('abort', () => {
-          abortHandlerInvoked = true;
-        });
-        return new Promise(() => {});
-      });
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-      mockTurnRunFn.mockReturnValue(
-        (async function* () {
-          yield { type: 'content', value: 'Hello' };
-        })(),
-      );
-
-      const callerController = new AbortController();
-      const stream = client.sendMessageStream(
-        [{ text: 'user typed but then aborted' }],
-        callerController.signal,
-        'prompt-id-aborted',
-        { type: SendMessageType.UserQuery },
-      );
-      for await (const _ of stream) {
-        // consume
-      }
-
-      expect(abortHandlerInvoked).toBe(false);
-      callerController.abort();
-      expect(abortHandlerInvoked).toBe(true);
-    });
-
-    it('should abort the previous prefetch when a new UserQuery arrives mid-flight', async () => {
-      // Pending recall on first UserQuery — never resolves on its own.
-      const abortSignals: AbortSignal[] = [];
-      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
-        abortSignals.push(opts.abortSignal as AbortSignal);
-        return new Promise(() => {});
-      });
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-      mockTurnRunFn.mockReturnValue(
-        (async function* () {
-          yield { type: 'content', value: 'Hello' };
-        })(),
-      );
-
-      // First UserQuery — installs prefetch #1
-      const stream1 = client.sendMessageStream(
-        [{ text: 'first' }],
-        new AbortController().signal,
-        'prompt-id-1',
-        { type: SendMessageType.UserQuery },
-      );
-      for await (const _ of stream1) {
-        // consume
-      }
-      expect(abortSignals.length).toBe(1);
-      expect(abortSignals[0].aborted).toBe(false);
-
-      // Second UserQuery — should abort #1 before installing #2
-      mockTurnRunFn.mockReturnValue(
-        (async function* () {
-          yield { type: 'content', value: 'Hello again' };
-        })(),
-      );
-      const stream2 = client.sendMessageStream(
-        [{ text: 'second' }],
-        new AbortController().signal,
-        'prompt-id-2',
-        { type: SendMessageType.UserQuery },
-      );
-      for await (const _ of stream2) {
-        // consume
-      }
-
-      expect(abortSignals.length).toBe(2);
-      expect(abortSignals[0].aborted).toBe(true);
-      expect(abortSignals[1].aborted).toBe(false);
-    });
-
-    it('should abort the pending prefetch on resetChat', async () => {
-      let abortHandlerInvoked = false;
-      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
-        opts.abortSignal?.addEventListener('abort', () => {
-          abortHandlerInvoked = true;
-        });
-        return new Promise(() => {});
-      });
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-      mockTurnRunFn.mockReturnValue(
-        (async function* () {
-          yield { type: 'content', value: 'Hello' };
-        })(),
-      );
-
-      const stream = client.sendMessageStream(
-        [{ text: 'first' }],
-        new AbortController().signal,
-        'prompt-id-reset-1',
-        { type: SendMessageType.UserQuery },
-      );
-      for await (const _ of stream) {
-        // consume
-      }
-
-      expect(abortHandlerInvoked).toBe(false);
-      await client.resetChat();
-      expect(abortHandlerInvoked).toBe(true);
-      expect(client['pendingMemoryPrefetch']).toBeUndefined();
-    });
-
-    it('should abort the pending prefetch when LoopDetected fires mid-stream', async () => {
-      let abortHandlerInvoked = false;
-      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
-        opts.abortSignal?.addEventListener('abort', () => {
-          abortHandlerInvoked = true;
-        });
-        return new Promise(() => {});
-      });
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-
-      // Force LoopDetector to trip on the first event.
-      const loopDetector = client['loopDetector'];
-      vi.spyOn(loopDetector, 'addAndCheck').mockReturnValue(true);
-      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(null);
-
-      mockTurnRunFn.mockReturnValue(
-        (async function* () {
-          yield { type: 'content', value: 'looping' };
-        })(),
-      );
-
-      const stream = client.sendMessageStream(
-        [{ text: 'trigger a loop' }],
-        new AbortController().signal,
-        'prompt-id-loop',
-        { type: SendMessageType.UserQuery },
-      );
-      const events = [];
-      for await (const event of stream) {
-        events.push(event);
-      }
-
-      expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
-        true,
-      );
-      expect(abortHandlerInvoked).toBe(true);
-      expect(client['pendingMemoryPrefetch']).toBeUndefined();
-    });
-
-    it('should PRESERVE the pending prefetch when next-speaker continueTurn returns', async () => {
-      // Self-inflicted-regression guard for the round-4 finding:
-      // the bottom-of-try `normalCompletion = true` doesn't cover the
-      // `return continueTurn;` path, so the outer's finally used to cancel
-      // the still-pending prefetch — meaning a subsequent ToolResult turn
-      // would have no memory to consume.
-      let abortHandlerInvoked = false;
-      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
-        opts.abortSignal?.addEventListener('abort', () => {
-          abortHandlerInvoked = true;
-        });
-        return new Promise(() => {}); // never settles
-      });
-
-      const mockChat: Partial<GeminiChat> = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      };
-      client['chat'] = mockChat as GeminiChat;
-      mockTurnRunFn.mockReturnValue(
-        (async function* () {
-          yield { type: 'content', value: 'outer reply' };
-        })(),
-      );
-
-      // Force the next-speaker check to recurse so we hit `return continueTurn`.
-      // The recursion call passes through this same mock stream and returns.
-      const { checkNextSpeaker } = await import(
-        '../utils/nextSpeakerChecker.js'
-      );
-      const mockedCheckNextSpeaker = vi.mocked(checkNextSpeaker);
-      mockedCheckNextSpeaker
-        .mockResolvedValueOnce({
-          reasoning: 'forced',
-          next_speaker: 'model',
-        })
-        .mockResolvedValue(null); // inner recursion: stop
-      // Each recursive sendMessageStream call asks turn.run() for a new stream.
-      mockTurnRunFn.mockImplementation(
-        () =>
-          (async function* () {
-            yield { type: 'content', value: 'reply' };
-          })() as unknown as AsyncGenerator<ServerGeminiStreamEvent>,
-      );
-
-      const stream = client.sendMessageStream(
-        [{ text: 'hello' }],
-        new AbortController().signal,
-        'prompt-id-continueturn',
-        { type: SendMessageType.UserQuery },
-      );
-      for await (const _ of stream) {
-        // consume
-      }
-
-      // The prefetch must survive the continueTurn return so a follow-up
-      // ToolResult turn can consume it.
-      expect(abortHandlerInvoked).toBe(false);
-      expect(client['pendingMemoryPrefetch']).not.toBeUndefined();
     });
 
     it('should proceed without auto-memory when managed auto-memory is disabled', async () => {
@@ -4847,7 +4429,6 @@ Other open files:
           getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValue(2),
           setHistory: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
-          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
         client['chat'] = mockChat as GeminiChat;
 
@@ -4880,7 +4461,6 @@ Other open files:
           getHistoryLength: vi.fn().mockReturnValue(0),
           setHistory: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
-          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
         client['chat'] = mockChat as GeminiChat;
 
@@ -5631,49 +5211,7 @@ Other open files:
       );
     });
 
-    it('caches git status across repeated system instruction generation', async () => {
-      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
-      const abortSignal = new AbortController().signal;
-
-      vi.mocked(getRecentGitStatus).mockReturnValue('Git snapshot cached');
-      vi.mocked(getRecentGitStatus).mockClear();
-      vi.mocked(getCoreSystemPrompt).mockReturnValue('Core prompt');
-
-      await client.generateContent(
-        contents,
-        {},
-        abortSignal,
-        DEFAULT_QWEN_FLASH_MODEL,
-      );
-      await client.generateContent(
-        contents,
-        {},
-        abortSignal,
-        DEFAULT_QWEN_FLASH_MODEL,
-      );
-
-      expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
-      expect(mockContentGenerator.generateContent).toHaveBeenNthCalledWith(
-        1,
-        expect.objectContaining({
-          config: expect.objectContaining({
-            systemInstruction: 'Core prompt\n\nGit snapshot cached',
-          }),
-        }),
-        'test-session-id',
-      );
-      expect(mockContentGenerator.generateContent).toHaveBeenNthCalledWith(
-        2,
-        expect.objectContaining({
-          config: expect.objectContaining({
-            systemInstruction: 'Core prompt\n\nGit snapshot cached',
-          }),
-        }),
-        'test-session-id',
-      );
-    });
-
-    it('sets a generic span status when content generation fails', async () => {
+    it('propagates error when content generation fails', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
       mockGenerateContentFn.mockRejectedValueOnce(
@@ -5987,26 +5525,15 @@ Other open files:
         envKey: undefined,
       };
 
-      // The central model-id resolver can now identify the authType from the
-      // configured model list before BaseLlmClient asks ModelsConfig for the
-      // concrete provider settings.
-      vi.mocked(mockConfig.getAllConfiguredModels).mockImplementation(
-        (authTypes?: AuthType[]) =>
-          !authTypes || authTypes.includes(AuthType.USE_OPENAI)
-            ? [
-                {
-                  id: 'fast-model',
-                  label: 'Fast Model',
-                  authType: AuthType.USE_OPENAI,
-                },
-              ]
-            : [],
-      );
-      const getResolvedModel = vi.fn((authType: AuthType, model: string) =>
-        authType === AuthType.USE_OPENAI && model === 'fast-model'
-          ? mockResolvedModel
-          : undefined,
-      );
+      // resolveModelAcrossAuthTypes calls getResolvedModel multiple times:
+      // 1. main authType (QWEN_OAUTH) → undefined (miss)
+      // 2. secondary authType (USE_OPENAI) → mockResolvedModel (hit)
+      // 3. buildAgentContentGeneratorConfig calls getResolvedModel again
+      //    with the resolved authType → mockResolvedModel (hit)
+      const getResolvedModel = vi
+        .fn()
+        .mockReturnValueOnce(undefined)
+        .mockReturnValue(mockResolvedModel);
 
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModel,
@@ -6030,10 +5557,15 @@ Other open files:
         'fast-model',
       );
 
-      // The model-id resolver found the configured OpenAI owner, so
-      // ModelsConfig is queried directly with that authType.
+      // First call uses main authType (QWEN_OAUTH) — misses
       expect(getResolvedModel).toHaveBeenNthCalledWith(
         1,
+        AuthType.QWEN_OAUTH,
+        'fast-model',
+      );
+      // Second call falls through to secondary authType — hits
+      expect(getResolvedModel).toHaveBeenNthCalledWith(
+        2,
         AuthType.USE_OPENAI,
         'fast-model',
       );

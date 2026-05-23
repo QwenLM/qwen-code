@@ -289,11 +289,8 @@ export async function checkPriorRead(
       `notebook payload that the ${ToolNames.READ_FILE} tool returns ` +
       `as a structured value rather than as plain text. The Edit / ` +
       `WriteFile tools cannot mutate that payload safely — re-reading ` +
-      `it would not change this. If this is a Jupyter notebook (.ipynb), ` +
-      `use the ${ToolNames.NOTEBOOK_EDIT} tool for cell-level edits after ` +
-      `reading it. For other non-text files, use a different mechanism ` +
-      `(e.g. shell tool with an appropriate writer) if you need to ` +
-      `${verbBare} it.`;
+      `it would not change this. Use a different mechanism (e.g. shell ` +
+      `tool with a binary-aware writer) if you need to ${verbBare} it.`;
     return {
       ok: false,
       type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,

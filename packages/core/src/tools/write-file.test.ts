@@ -1116,7 +1116,6 @@ describe('WriteFileTool', () => {
         .build({ file_path: filePath, content: 'clobber' })
         .execute(abortSignal);
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
-      expect(result.error?.message).toContain('notebook_edit');
       // Verb in the dead-end guidance must read correctly for
       // overwrite (the WriteFile path), not "edit".
       expect(result.error?.message).toMatch(/if you need to overwrite it\./);

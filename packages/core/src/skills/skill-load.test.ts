@@ -9,8 +9,6 @@ import {
   parseSkillContent,
   loadSkillsFromDir,
   validateConfig,
-  parsePriorityField,
-  normalizeSkillPriority,
 } from './skill-load.js';
 import { parseModelField, parsePathsField } from './types.js';
 import * as fs from 'fs/promises';
@@ -50,13 +48,6 @@ describe('skill-load', () => {
           name: 'test-skill',
           description: 'A test skill',
           'argument-hint': '[topic]',
-        };
-      }
-      if (yamlString.includes('priority:')) {
-        return {
-          name: 'test-skill',
-          description: 'A test skill',
-          priority: yamlString.includes('priority: 25') ? 25 : true,
         };
       }
       // Default case
@@ -203,39 +194,6 @@ Skill body.
       const config = parseSkillContent(markdownWithArgumentHint, testFilePath);
 
       expect(config.argumentHint).toBe('[topic]');
-    });
-
-    it('should parse numeric priority from frontmatter', () => {
-      const markdownWithPriority = `---
-name: test-skill
-description: A test skill
-priority: 25
----
-
-Body.
-`;
-
-      const config = parseSkillContent(markdownWithPriority, testFilePath);
-
-      expect(config.priority).toBe(25);
-    });
-
-    it('should ignore invalid priority values without dropping the skill', () => {
-      const markdownWithInvalidPriority = `---
-name: test-skill
-description: A test skill
-priority: true
----
-
-Body.
-`;
-
-      const config = parseSkillContent(
-        markdownWithInvalidPriority,
-        testFilePath,
-      );
-
-      expect(config.priority).toBeUndefined();
     });
 
     it('should throw error for invalid format without frontmatter', () => {
@@ -461,20 +419,6 @@ Symlinked skill body.
 
       expect(result.isValid).toBe(true);
       expect(result.warnings).toContain('Skill body is empty');
-    });
-
-    it('should return error for invalid priority', () => {
-      const config = {
-        name: 'test-skill',
-        description: 'A test skill',
-        body: 'Skill body',
-        priority: Number.NaN,
-      };
-
-      const result = validateConfig(config);
-
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('"priority" must be a finite number');
     });
   });
 
@@ -711,19 +655,6 @@ Symlinked skill body.
       );
       expect(config.skillRoot).toBe('/test/extension/skills/tsx-helper');
     });
-
-    it('extracts priority', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'priority-helper',
-        description: 'Priority helper',
-        priority: 10,
-      });
-      const config = parseSkillContent(
-        `---\nname: priority-helper\ndescription: Priority helper\npriority: 10\n---\n\nBody.\n`,
-        '/test/extension/skills/priority-helper/SKILL.md',
-      );
-      expect(config.priority).toBe(10);
-    });
   });
 
   describe('parseSkillContent model field', () => {
@@ -771,94 +702,6 @@ Symlinked skill body.
       );
 
       expect(config.model).toBeUndefined();
-    });
-  });
-
-  // Direct unit tests for the exported priority helpers. The behavior is
-  // also exercised end-to-end via parseSkillContent and listSkills, but
-  // those paths can't surface single-input regressions cleanly — e.g. a
-  // future change that accepts numeric strings, swallows Infinity, or
-  // mishandles -0 wouldn't necessarily fail the integration tests.
-  describe('parsePriorityField', () => {
-    const filePath = '/test/skill/SKILL.md';
-
-    it('returns undefined when the field is omitted', () => {
-      expect(parsePriorityField({}, filePath)).toBeUndefined();
-    });
-
-    it('returns undefined when the field is null or empty string', () => {
-      expect(parsePriorityField({ priority: null }, filePath)).toBeUndefined();
-      expect(parsePriorityField({ priority: '' }, filePath)).toBeUndefined();
-    });
-
-    it('accepts finite positive, zero, and negative numbers verbatim', () => {
-      expect(parsePriorityField({ priority: 0 }, filePath)).toBe(0);
-      expect(parsePriorityField({ priority: 42 }, filePath)).toBe(42);
-      expect(parsePriorityField({ priority: -5 }, filePath)).toBe(-5);
-      expect(parsePriorityField({ priority: 1.5 }, filePath)).toBe(1.5);
-    });
-
-    it('rejects booleans (regression guard for the old Number() coercion)', () => {
-      // Number(true) === 1, Number(false) === 0 — both pass isFinite, so a
-      // pre-fix implementation would have silently accepted these.
-      expect(parsePriorityField({ priority: true }, filePath)).toBeUndefined();
-      expect(parsePriorityField({ priority: false }, filePath)).toBeUndefined();
-    });
-
-    it('rejects strings, including numeric-looking strings', () => {
-      expect(
-        parsePriorityField({ priority: 'high' }, filePath),
-      ).toBeUndefined();
-      // Numeric-looking string: the YAML parser already produces a number
-      // for `priority: 5`, so we deliberately do not paper over the case
-      // where a string somehow reaches here.
-      expect(parsePriorityField({ priority: '5' }, filePath)).toBeUndefined();
-    });
-
-    it('rejects NaN and Infinity', () => {
-      expect(
-        parsePriorityField({ priority: Number.NaN }, filePath),
-      ).toBeUndefined();
-      expect(
-        parsePriorityField({ priority: Number.POSITIVE_INFINITY }, filePath),
-      ).toBeUndefined();
-      expect(
-        parsePriorityField({ priority: Number.NEGATIVE_INFINITY }, filePath),
-      ).toBeUndefined();
-    });
-
-    it('rejects objects and arrays', () => {
-      expect(
-        parsePriorityField({ priority: { level: 1 } }, filePath),
-      ).toBeUndefined();
-      expect(parsePriorityField({ priority: [1] }, filePath)).toBeUndefined();
-    });
-  });
-
-  describe('normalizeSkillPriority', () => {
-    it('returns finite numbers verbatim, including 0 and negatives', () => {
-      expect(normalizeSkillPriority(0)).toBe(0);
-      expect(normalizeSkillPriority(42)).toBe(42);
-      expect(normalizeSkillPriority(-5)).toBe(-5);
-      expect(normalizeSkillPriority(1.5)).toBe(1.5);
-    });
-
-    it('coerces undefined, null, and non-finite numbers to 0', () => {
-      expect(normalizeSkillPriority(undefined)).toBe(0);
-      expect(normalizeSkillPriority(null)).toBe(0);
-      expect(normalizeSkillPriority(Number.NaN)).toBe(0);
-      expect(normalizeSkillPriority(Number.POSITIVE_INFINITY)).toBe(0);
-      expect(normalizeSkillPriority(Number.NEGATIVE_INFINITY)).toBe(0);
-    });
-
-    it('coerces non-number types to 0 (defends the sort comparator)', () => {
-      // The sort comparator computes `b - a`. If any value here returned
-      // NaN, the comparator would return NaN and the result order would be
-      // implementation-defined.
-      expect(normalizeSkillPriority('high')).toBe(0);
-      expect(normalizeSkillPriority(true)).toBe(0);
-      expect(normalizeSkillPriority({})).toBe(0);
-      expect(normalizeSkillPriority([5])).toBe(0);
     });
   });
 });

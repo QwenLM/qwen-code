@@ -150,7 +150,7 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
         if (!isIdleRef.current) return;
         const item: HistoryItemAwayRecap = {
           type: 'away_recap',
-          text: recap,
+          text: recap.text,
         };
         addItem(item, Date.now());
 

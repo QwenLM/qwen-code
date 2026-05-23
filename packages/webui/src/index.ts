@@ -14,6 +14,25 @@ import './styles/components.css';
 // Shared UI Components Export
 // Export all shared components from this package
 
+// Daemon UI bindings
+export {
+  DaemonSessionProvider,
+  daemonTranscriptToUnifiedMessages,
+  useDaemonActions,
+  useDaemonConnection,
+  useDaemonPendingPermissions,
+  useDaemonSession,
+  useDaemonTranscriptBlocks,
+  useDaemonTranscriptState,
+  useDaemonTranscriptStore,
+} from './daemon/index';
+export type {
+  DaemonConnectionState,
+  DaemonConnectionStatus,
+  DaemonSessionContextValue,
+  DaemonSessionProviderProps,
+} from './daemon/index';
+
 // Context
 export {
   PlatformContext,

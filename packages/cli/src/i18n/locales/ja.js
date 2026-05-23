@@ -147,7 +147,8 @@ export default {
   'open full Qwen Code documentation in your browser':
     'ブラウザで Qwen Code のドキュメントを開く',
   'Configuration not available.': '設定が利用できません',
-  'Connect an LLM provider': 'LLM プロバイダーに接続',
+  'Configure authentication information for login':
+    'ログイン用の認証情報を設定',
   'Copy the last result or code snippet to clipboard':
     '最後の結果またはコードスニペットをクリップボードにコピー',
 
@@ -829,9 +830,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 おかえりなさい!(最終更新: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 全体目標:',
-  'Connect a Provider': 'プロバイダーに接続',
-  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
-    '続行するにはプロバイダーに接続してください。Ctrl+C をもう一度押すと終了します',
+  'Select Authentication Method': '認証方法を選択',
+  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
+    '続行するには認証方法を選択してください。Ctrl+C をもう一度押すと終了します',
   'Terms of Services and Privacy Notice': '利用規約とプライバシー通知',
   'Qwen OAuth': 'Qwen OAuth',
   'Discontinued — switch to Coding Plan or API Key':

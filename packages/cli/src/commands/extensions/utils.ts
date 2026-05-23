@@ -4,11 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  ExtensionManager,
-  redactUrlCredentials,
-  type Extension,
-} from '@qwen-code/qwen-code-core';
+import { ExtensionManager, type Extension } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import {
   requestConsentOrFail,
@@ -55,7 +51,7 @@ export function extensionToOutputString(
   let output = `${inline ? '' : status} ${extension.config.name} (${extension.config.version})`;
   output += `\n ${t('Path:')} ${extension.path}`;
   if (extension.installMetadata) {
-    output += `\n ${t('Source:')} ${redactUrlCredentials(extension.installMetadata.source)} (${t('Type:')} ${extension.installMetadata.type})`;
+    output += `\n ${t('Source:')} ${extension.installMetadata.source} (${t('Type:')} ${extension.installMetadata.type})`;
     if (extension.installMetadata.ref) {
       output += `\n ${t('Ref:')} ${extension.installMetadata.ref}`;
     }

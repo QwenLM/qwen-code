@@ -198,17 +198,6 @@ describe('useAutoAcceptIndicator', () => {
       } as Key);
     });
     expect(mockConfigInstance.setApprovalMode).toHaveBeenCalledWith(
-      ApprovalMode.AUTO,
-    );
-    expect(result.current).toBe(ApprovalMode.AUTO);
-
-    act(() => {
-      capturedUseKeypressHandler({
-        name: 'tab',
-        shift: true,
-      } as Key);
-    });
-    expect(mockConfigInstance.setApprovalMode).toHaveBeenCalledWith(
       ApprovalMode.YOLO,
     );
     expect(result.current).toBe(ApprovalMode.YOLO);
@@ -362,7 +351,7 @@ describe('useAutoAcceptIndicator', () => {
       );
     });
 
-    it('should show a warning when cycling from AUTO_EDIT to AUTO', () => {
+    it('should show a warning when cycling from AUTO_EDIT to YOLO', () => {
       const errorMessage =
         'Cannot enable privileged approval modes in an untrusted folder.';
       mockConfigInstance.getApprovalMode.mockReturnValue(
@@ -385,7 +374,7 @@ describe('useAutoAcceptIndicator', () => {
       });
 
       expect(mockConfigInstance.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.AUTO,
+        ApprovalMode.YOLO,
       );
       expect(mockAddItem).toHaveBeenCalledWith(
         {
@@ -478,7 +467,7 @@ describe('useAutoAcceptIndicator', () => {
       capturedUseKeypressHandler({ name: 'tab', shift: true } as Key);
     });
 
-    // Switch to AUTO
+    // Switch to YOLO
     act(() => {
       capturedUseKeypressHandler({ name: 'tab', shift: true } as Key);
     });
@@ -490,7 +479,7 @@ describe('useAutoAcceptIndicator', () => {
     );
     expect(mockOnApprovalModeChange).toHaveBeenNthCalledWith(
       2,
-      ApprovalMode.AUTO,
+      ApprovalMode.YOLO,
     );
   });
 

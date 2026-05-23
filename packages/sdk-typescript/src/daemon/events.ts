@@ -6,6 +6,7 @@
 
 import type {
   DaemonEvent,
+  DaemonErrorKind,
   DaemonMcpTransport,
   PermissionOutcome,
 } from './types.js';
@@ -23,6 +24,18 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'client_evicted',
   'slow_client_warning',
   'stream_error',
+  // #4175 F4 prereq (Ilya0527 issue #15) — terminal-style frame
+  // emitted by the daemon when an SSE consumer reconnects with a
+  // `Last-Event-ID` past the ring's earliest available id (the
+  // events between the consumer's last-seen id and the ring head
+  // were evicted before reconnect). The reducer treats this as
+  // "your accumulated state is stale; call `loadSession` and
+  // reseed view state before applying any further deltas". It does
+  // NOT close the stream — the daemon continues replaying surviving
+  // ring frames and live frames, but the reducer auto-skips them
+  // until the consumer reseeds state. Synthetic (no `id`) so it
+  // doesn't burn a slot in the per-session monotonic sequence.
+  'state_resync_required',
   // PR 14b — MCP guardrail push events. See `mcp_guardrail_events`
   // capability tag. Both fire on the per-session SSE bus; consumers
   // should pre-flight `caps.features.includes('mcp_guardrail_events')`
@@ -51,6 +64,15 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'workspace_initialized',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
+  // #4175 F3 (Commit 7) — multi-client permission coordination events.
+  // `permission_partial_vote` only fires under `consensus` policy;
+  // `permission_forbidden` fires under `designated` (originator
+  // mismatch), `consensus` (anonymous voter or not-in-snapshot), and
+  // `local-only` (remote voter). Pre-flight on the
+  // `permission_mediation` capability tag before relying on either —
+  // daemons predating F3 omit both event types.
+  'permission_partial_vote',
+  'permission_forbidden',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -93,6 +115,61 @@ export interface DaemonPermissionAlreadyResolvedData {
   requestId: string;
   sessionId: string;
   outcome: PermissionOutcome;
+  [key: string]: unknown;
+}
+
+/**
+ * F3 Commit 7. `permission_partial_vote` SSE frame fired by the
+ * `consensus` policy on every recorded non-resolving vote. The
+ * snapshot at `GET /workspace/mcp` (etc.) does NOT carry vote-progress
+ * state; SDK consumers reconstruct it from this stream.
+ *
+ * `votesNeeded` = `quorum - max(tally per option)`, clamped to ≥1.
+ * `optionTallies` is a per-option count; the leading option is the
+ * one with the highest tally (ties broken by first-cast order at the
+ * mediator level — not directly reflected here).
+ */
+export interface DaemonPermissionPartialVoteData {
+  requestId: string;
+  sessionId: string;
+  votesReceived: number;
+  votesNeeded: number;
+  quorum: number;
+  optionTallies: Record<string, number>;
+  /**
+   * Wenshao review #4335 / 3270622311. Stamped from the SSE
+   * envelope's `originatorClientId` (= prompt originator per F3 N3)
+   * by the session reducer's `mergeOriginator` step so view-state
+   * consumers can attribute the partial vote to the prompting
+   * client without retaining the original event.
+   */
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * F3 Commit 7. `permission_forbidden` SSE frame fired when a vote is
+ * rejected by the active policy. `clientId` is the rejected voter
+ * (omitted when anonymous); `reason` is the closed contract enum.
+ *
+ * The frame's top-level `originatorClientId` (on the wrapping
+ * `DaemonEvent`, not in `data`) stamps the prompt originator — NOT
+ * the rejected voter — per the F3 N3 invariant. Cross-reference
+ * `data.clientId` for voter attribution.
+ */
+export interface DaemonPermissionForbiddenData {
+  requestId: string;
+  sessionId: string;
+  clientId?: string;
+  reason: 'designated_mismatch' | 'remote_not_allowed';
+  /**
+   * Wenshao review #4335 / 3270622311. Stamped from the SSE
+   * envelope's `originatorClientId` (= prompt originator per F3 N3)
+   * by the session reducer's `mergeOriginator` step. Distinct from
+   * `clientId` (the rejected voter's id) — both are useful and
+   * neither subsumes the other.
+   */
+  originatorClientId?: string;
   [key: string]: unknown;
 }
 
@@ -154,6 +231,51 @@ export interface DaemonSlowClientWarningData {
 
 export interface DaemonStreamErrorData {
   error: string;
+  /**
+   * #4175 F4 prereq (chiga0 issue #19 P0). Classified error kind from
+   * the daemon's `mapDomainErrorToErrorKind` — typed as the closed
+   * `DaemonErrorKind` enum (currently 8 values: `missing_binary` /
+   * `blocked_egress` / `auth_env_error` / `init_timeout` /
+   * `protocol_error` / `missing_file` / `parse_error` /
+   * `budget_exhausted`) with a `(string & {})` widening for forward-
+   * compat. A future daemon may emit additional kinds (e.g.
+   * `stat_failed` already exists on the daemon's `SERVE_ERROR_KINDS`
+   * but is not yet mirrored on this SDK constant) — the union shape
+   * preserves IDE autocomplete on the known values while accepting
+   * forward-compat strings without a type error. Absent for
+   * unclassified errors — the daemon omits the field rather than
+   * stamping a meaningless value. UI consumers key on this for typed
+   * retry / remediation rendering (retry on init_timeout vs install
+   * on missing_binary, etc.) instead of regex-matching the `error`
+   * string.
+   */
+  errorKind?: DaemonErrorKind | (string & {});
+  [key: string]: unknown;
+}
+
+/**
+ * #4175 F4 prereq (Ilya0527 issue #15). Payload for the
+ * `state_resync_required` synthetic frame the daemon emits when an
+ * SSE consumer reconnects with a `Last-Event-ID` past the ring's
+ * earliest available id. The reducer auto-skips subsequent delta
+ * frames until consumer code calls `loadSession` and reseeds view
+ * state — see `DaemonSessionViewState.awaitingResync`.
+ */
+export interface DaemonStateResyncRequiredData {
+  /**
+   * Machine-readable resync reason. Currently always `'ring_evicted'`
+   * (the only case the daemon emits this frame for); reserved for
+   * future causes (e.g. `'schema_version_bump'`).
+   */
+  reason: string;
+  /** Consumer's `Last-Event-ID` at reconnect time. */
+  lastDeliveredId: number;
+  /**
+   * The earliest event id still in the daemon's per-session ring at
+   * reconnect time. The gap is `[lastDeliveredId + 1,
+   * earliestAvailableId - 1]` inclusive.
+   */
+  earliestAvailableId: number;
   [key: string]: unknown;
 }
 
@@ -178,6 +300,17 @@ export interface DaemonMcpBudgetWarningData {
   budget: number;
   thresholdRatio: 0.75;
   mode: 'warn' | 'enforce';
+  /**
+   * F2 (#4175 commit 6): scope of the budget event. Absent on
+   * pre-F2 daemons (means `'session'`) and on F2 daemons running with
+   * `--no-mcp-pool` or without a configured budget. `'workspace'`
+   * indicates the event was fired by the pool's
+   * `WorkspaceMcpBudget` and fanned out simultaneously to every
+   * attached session — so the SDK reducer's `mcpBudgetWarningCount`
+   * will increment in lockstep across all sessions on this
+   * connection. Use `isWorkspaceScopedBudgetEvent` to branch.
+   */
+  scope?: 'workspace' | 'session';
   [key: string]: unknown;
 }
 
@@ -207,6 +340,17 @@ export interface DaemonMcpChildRefusedBatchData {
   liveCount: number;
   reservedCount: number;
   mode: 'enforce';
+  /**
+   * F2 (#4175 commit 6): same `scope` semantics as
+   * `DaemonMcpBudgetWarningData.scope`. Absent on pre-F2 daemons
+   * (means `'session'`); `'workspace'` when fired by the pool's
+   * workspace-scoped budget. Workspace-scoped refused_batch events
+   * fan out to every attached session, so SDK consumers tracking
+   * refusal counts across sessions on the same connection should
+   * gate on `scope` when reconciling event-driven state with the
+   * snapshot route's `refusedServerNames`.
+   */
+  scope?: 'workspace' | 'session';
   [key: string]: unknown;
 }
 
@@ -383,11 +527,19 @@ export interface DaemonWorkspaceInitializedData {
  * `POST /workspace/mcp/:server/restart` successfully reconnected and
  * rediscovered the named MCP server. `durationMs` measures the full
  * disconnect+reconnect+rediscover sequence on the ACP-child side.
+ *
+ * F2 (#4175 commit 5): under pool mode, multi-entry restarts fan
+ * out one event per entry. `entryIndex` (additive, optional)
+ * disambiguates per-entry events when one server name maps to
+ * several pool entries with different fingerprints. Pre-F2 single-
+ * entry restarts omit the field; SDK reducers that ignore unknown
+ * fields keep working.
  */
 export interface DaemonMcpServerRestartedData {
   serverName: string;
   durationMs: number;
   originatorClientId?: string;
+  entryIndex?: number;
   [key: string]: unknown;
 }
 
@@ -397,11 +549,31 @@ export interface DaemonMcpServerRestartedData {
  * (`skipped: true`). `reason` is the same closed enum surfaced on
  * the route's response body, so SDK consumers can branch on a single
  * union when reconciling event-driven state with HTTP-call results.
+ *
+ * F2 (#4175 commit 5): pool-mode hard restart failures fan out one
+ * `mcp_server_restart_refused` event per failed entry with
+ * `reason: 'restart_failed'` (additive enum value) plus a free-form
+ * `details` string carrying the underlying error text. This lets
+ * new SDK reducers track hard failures alongside the existing
+ * soft-skip flow without inventing a new event type. **Old SDK
+ * reducers that pre-date the additive enum** silently DROP these
+ * events: the `MCP_RESTART_REFUSED_REASONS` closed-set predicate in
+ * `isMcpServerRestartRefusedData` rejects unknown reasons, so
+ * `parseDaemonEvent` returns undefined and the reducer never sees
+ * the event. That's the additive-protocol contract — pre-PR SDKs
+ * shouldn't have been observing pool-mode multi-entry restarts in
+ * the first place (the SDK gates on the `mcp_pool_restart` capability
+ * tag before sending `entryIndex`, and the bridge only emits these
+ * events via the pool branch). New SDKs receive both the new
+ * `restart_failed` reason and the optional `entryIndex` / `details`
+ * fields.
  */
 export interface DaemonMcpServerRestartRefusedData {
   serverName: string;
-  reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+  reason: 'in_flight' | 'disabled' | 'budget_would_exceed' | 'restart_failed';
   originatorClientId?: string;
+  entryIndex?: number;
+  details?: string;
   [key: string]: unknown;
 }
 
@@ -420,6 +592,14 @@ export type DaemonPermissionResolvedEvent = DaemonEventEnvelope<
 export type DaemonPermissionAlreadyResolvedEvent = DaemonEventEnvelope<
   'permission_already_resolved',
   DaemonPermissionAlreadyResolvedData
+>;
+export type DaemonPermissionPartialVoteEvent = DaemonEventEnvelope<
+  'permission_partial_vote',
+  DaemonPermissionPartialVoteData
+>;
+export type DaemonPermissionForbiddenEvent = DaemonEventEnvelope<
+  'permission_forbidden',
+  DaemonPermissionForbiddenData
 >;
 export type DaemonModelSwitchedEvent = DaemonEventEnvelope<
   'model_switched',
@@ -452,6 +632,10 @@ export type DaemonSlowClientWarningEvent = DaemonEventEnvelope<
 export type DaemonStreamErrorEvent = DaemonEventEnvelope<
   'stream_error',
   DaemonStreamErrorData
+>;
+export type DaemonStateResyncRequiredEvent = DaemonEventEnvelope<
+  'state_resync_required',
+  DaemonStateResyncRequiredData
 >;
 export type DaemonMcpBudgetWarningEvent = DaemonEventEnvelope<
   'mcp_budget_warning',
@@ -530,6 +714,8 @@ export type DaemonControlEvent =
   | DaemonPermissionRequestEvent
   | DaemonPermissionResolvedEvent
   | DaemonPermissionAlreadyResolvedEvent
+  | DaemonPermissionPartialVoteEvent
+  | DaemonPermissionForbiddenEvent
   | DaemonApprovalModeChangedEvent
   | DaemonToolToggledEvent
   | DaemonWorkspaceInitializedEvent
@@ -539,7 +725,8 @@ export type DaemonControlEvent =
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
   | DaemonSlowClientWarningEvent
-  | DaemonStreamErrorEvent;
+  | DaemonStreamErrorEvent
+  | DaemonStateResyncRequiredEvent;
 
 /**
  * PR 14b: MCP guardrail push events. Grouped as their own union member
@@ -610,6 +797,20 @@ export interface DaemonSessionViewState {
    * one warning per crossing episode. Adapters tap this counter to
    * surface MCP-pressure UI; the snapshot at `GET /workspace/mcp`
    * still carries the authoritative state-after-reconnect.
+   *
+   * **F2 (#4175 commit 6) workspace-scope multiplier**: when the
+   * daemon advertises `mcp_workspace_pool` and the budget is workspace-
+   * scoped (`scope: 'workspace'` on the event payload), a SINGLE
+   * underlying budget crossing fans out as N notifications — one per
+   * attached session. Each session's reducer increments its OWN
+   * counter independently, so this counter is per-stream NOT
+   * per-budget-event. Consumers aggregating `mcpBudgetWarningCount`
+   * across multiple sessions on the same connection will count an
+   * N× multiplier; gate on `isWorkspaceScopedBudgetEvent` (or branch
+   * on `lastMcpBudgetWarning?.scope === 'workspace'`) and divide by
+   * the active session count if a workspace-level "events fired"
+   * tally is needed. The per-stream counter remains the right shape
+   * for "did THIS session see budget pressure" UI.
    */
   mcpBudgetWarningCount: number;
   lastMcpBudgetWarning?: DaemonMcpBudgetWarningData;
@@ -619,6 +820,11 @@ export interface DaemonSessionViewState {
    * length-1 from `readResource`'s lazy-spawn refusal); the count
    * reflects batches not refused-server entries. Mirrors the
    * snapshot's `disabledReason: 'budget'` per-server tag.
+   *
+   * **F2 (#4175 commit 6) workspace-scope multiplier**: same N×
+   * fan-out semantics as `mcpBudgetWarningCount` — one workspace-
+   * scoped refused_batch event becomes N reducer increments across
+   * N attached sessions on the daemon's connection.
    */
   mcpChildRefusedBatchCount: number;
   lastMcpChildRefusedBatch?: DaemonMcpChildRefusedBatchData;
@@ -668,7 +874,100 @@ export interface DaemonSessionViewState {
   lastMcpRestart?: DaemonMcpServerRestartedData;
   mcpRestartRefusedCount: number;
   lastMcpRestartRefused?: DaemonMcpServerRestartRefusedData;
+  /**
+   * F3 Commit 7. Per-pending consensus vote progress, keyed by
+   * `requestId`. Updated on every `permission_partial_vote` frame;
+   * cleared when the corresponding `permission_resolved` /
+   * `permission_already_resolved` arrives. Daemons running
+   * non-consensus policies never populate this map.
+   */
+  permissionVoteProgress: Record<string, DaemonPermissionPartialVoteData>;
+  /**
+   * F3 Commit 7. Bounded history of recent `permission_forbidden`
+   * events on this session — first 32 retained, oldest evicted on
+   * overflow. Adapters use this to render "client X tried to vote
+   * but was rejected" notices for the session.
+   */
+  forbiddenVotes: readonly DaemonPermissionForbiddenData[];
+  /**
+   * F3 Commit 7. Total `permission_forbidden` event count this
+   * stream has observed (including ones evicted from
+   * `forbiddenVotes`).
+   */
+  forbiddenVoteCount: number;
+  /**
+   * #4175 F4 prereq (Ilya0527 issue #15). Set to true when the
+   * reducer observes a `state_resync_required` frame from the daemon
+   * (consumer reconnected with `Last-Event-ID` past the daemon's
+   * ring eviction point — events between last-delivered and ring-
+   * head were lost, so the accumulated view state is stale relative
+   * to the daemon's truth).
+   *
+   * While true, the reducer **auto-skips** all non-terminal delta
+   * events (still advances `lastEventId`) to prevent the consumer
+   * from rendering against a known-stale state. Terminal lifecycle
+   * events (`session_died` / `session_closed` / `client_evicted` /
+   * `stream_error`) still apply because they're critical end-of-
+   * stream signals that don't depend on prior state being current.
+   *
+   * Consumer recovery: when this is true, call `loadSession` to
+   * fetch the daemon's canonical session snapshot, then reconstruct
+   * view state via `createDaemonSessionViewState({...loaded state})`.
+   * The fresh state seed clears the flag implicitly (a new reducer
+   * instance starts fresh).
+   */
+  awaitingResync: boolean;
+  /**
+   * Count of `state_resync_required` frames this stream has observed.
+   * Typically 0 (no resync) or 1 (single ring-eviction event);
+   * higher counts indicate the consumer is reconnecting repeatedly
+   * past the ring boundary, which is itself a debuggable signal
+   * (network instability or ring sizing wrong for the workload).
+   */
+  resyncRequiredCount: number;
+  /** Most recent resync payload (reason + gap range). */
+  lastResyncRequired?: DaemonStateResyncRequiredData;
 }
+
+/**
+ * F3 Commit 7. Bound on `forbiddenVotes` retention. Half of
+ * `MAX_PENDING_PER_SESSION` (64) — forbidden votes are
+ * observability records, not pending state, so we keep the smaller
+ * bound to avoid blowing the SDK heap on a session that's getting
+ * spammed with rejected votes (e.g. an attacker probing
+ * `local-only` from a remote IP). Operators with full audit needs
+ * should subscribe to the daemon-side audit ring, not the SDK
+ * reducer's bounded history.
+ */
+const MAX_FORBIDDEN_VOTES_PER_SESSION = 32;
+
+/**
+ * #4175 F4 prereq (Ilya0527 issue #15). Event types that the reducer
+ * still processes when `awaitingResync` is true. Two categories:
+ *
+ *   - **`state_resync_required` itself** — so the reducer can update
+ *     `lastResyncRequired` / `resyncRequiredCount` for *subsequent*
+ *     resync frames (rare but possible: a consumer that reconnects
+ *     past the ring twice in succession).
+ *   - **Terminal lifecycle frames** — `session_died` / `session_closed`
+ *     / `client_evicted` / `stream_error`. Critical end-of-stream
+ *     signals that don't depend on prior state being current. UIs
+ *     must still see "this session died" even if they were in resync
+ *     limbo at the time.
+ *
+ * Everything else (session_update / permission_* / approval_mode_changed
+ * / workspace mutations / mcp guardrail / auth flow events) is auto-
+ * skipped while `awaitingResync` is true; `lastEventId` still advances
+ * via `advanceLastEventId(base)` so the resync recovery sequence stays
+ * monotonic.
+ */
+const RESYNC_PASSTHROUGH_TYPES = new Set<KnownDaemonEvent['type']>([
+  'state_resync_required',
+  'session_died',
+  'session_closed',
+  'client_evicted',
+  'stream_error',
+]);
 
 export function createDaemonSessionViewState(
   seed: Partial<DaemonSessionViewState> = {},
@@ -711,6 +1010,17 @@ export function createDaemonSessionViewState(
     lastMcpRestart: seed.lastMcpRestart,
     mcpRestartRefusedCount: seed.mcpRestartRefusedCount ?? 0,
     lastMcpRestartRefused: seed.lastMcpRestartRefused,
+    permissionVoteProgress: { ...seed.permissionVoteProgress },
+    forbiddenVotes: seed.forbiddenVotes ? [...seed.forbiddenVotes] : [],
+    forbiddenVoteCount: seed.forbiddenVoteCount ?? 0,
+    // #4175 F4 prereq (Ilya0527 issue #15) — fresh view state always
+    // starts without a resync requirement. A consumer calling
+    // `createDaemonSessionViewState` after `loadSession` to recover
+    // from an earlier resync implicitly clears the flag through this
+    // default.
+    awaitingResync: seed.awaitingResync ?? false,
+    resyncRequiredCount: seed.resyncRequiredCount ?? 0,
+    lastResyncRequired: seed.lastResyncRequired,
   };
 }
 
@@ -726,6 +1036,33 @@ export function isDaemonEventType<TType extends KnownDaemonEvent['type']>(
 ): event is Extract<KnownDaemonEvent, { type: TType }> {
   const known = asKnownDaemonEvent(event);
   return known?.type === type;
+}
+
+/**
+ * F2 (#4175 commit 6): branch on whether an MCP guardrail event is
+ * scoped to the entire workspace (one shared budget across all
+ * sessions on this daemon's connection) or per-session (legacy PR 14
+ * v1 path; one budget per ACP child). SDK reducers maintain a single
+ * counter (`mcpBudgetWarningCount` / `mcpChildRefusedBatchCount`)
+ * regardless of scope, but UI consumers rendering "this workspace
+ * just hit budget pressure" vs "this session just got refused" can
+ * use this helper to disambiguate.
+ *
+ * Returns `true` only when the event carries an explicit
+ * `scope === 'workspace'`. Pre-F2 daemons and F2 daemons running
+ * with `--no-mcp-pool` / no configured budget keep the field absent
+ * (semantically `'session'`); this helper returns `false` for both
+ * cases so existing UI logic ("treat all events as per-session")
+ * keeps working without a code change.
+ *
+ * Accepts both `mcp_budget_warning` and `mcp_child_refused_batch`
+ * data shapes — the only two events that carry the `scope` field
+ * today.
+ */
+export function isWorkspaceScopedBudgetEvent(
+  data: DaemonMcpBudgetWarningData | DaemonMcpChildRefusedBatchData,
+): boolean {
+  return data.scope === 'workspace';
 }
 
 export function asKnownDaemonEvent(
@@ -747,6 +1084,14 @@ export function asKnownDaemonEvent(
     case 'permission_already_resolved':
       return isPermissionAlreadyResolvedData(event.data)
         ? (event as DaemonPermissionAlreadyResolvedEvent)
+        : undefined;
+    case 'permission_partial_vote':
+      return isPermissionPartialVoteData(event.data)
+        ? (event as DaemonPermissionPartialVoteEvent)
+        : undefined;
+    case 'permission_forbidden':
+      return isPermissionForbiddenData(event.data)
+        ? (event as DaemonPermissionForbiddenEvent)
         : undefined;
     case 'model_switched':
       return isModelSwitchedData(event.data)
@@ -779,6 +1124,10 @@ export function asKnownDaemonEvent(
     case 'stream_error':
       return isStreamErrorData(event.data)
         ? (event as DaemonStreamErrorEvent)
+        : undefined;
+    case 'state_resync_required':
+      return isStateResyncRequiredData(event.data)
+        ? (event as DaemonStateResyncRequiredEvent)
         : undefined;
     case 'mcp_budget_warning':
       return isMcpBudgetWarningData(event.data)
@@ -856,6 +1205,20 @@ export function reduceDaemonSessionEvent(
     };
   }
 
+  // #4175 F4 prereq (Ilya0527 issue #15). When `awaitingResync` is
+  // set, the consumer's accumulated view state is known stale —
+  // the daemon's ring evicted events between the consumer's last
+  // delivered id and reconnect. Auto-skip non-terminal delta events
+  // (still advance `lastEventId` via `base`) so the consumer doesn't
+  // render against stale state. Terminal lifecycle events still
+  // apply — they're critical end-of-stream signals that don't
+  // depend on prior state. The flag clears when the consumer calls
+  // `loadSession` and reconstructs view state via
+  // `createDaemonSessionViewState`.
+  if (base.awaitingResync && !RESYNC_PASSTHROUGH_TYPES.has(event.type)) {
+    return base;
+  }
+
   switch (event.type) {
     case 'session_update':
       return {
@@ -887,9 +1250,18 @@ export function reduceDaemonSessionEvent(
       };
     }
     case 'permission_resolved': {
+      // Wenshao review #4335 / 3271041465 — even on the unmatched
+      // path (SDK reconnected mid-permission and missed
+      // `permission_request`), clear any orphan progress entry that
+      // a `permission_partial_vote` may have left behind. Otherwise
+      // `permissionVoteProgress[requestId]` persists until session
+      // end. The matched path also clears it (below).
+      const permissionVoteProgress = { ...base.permissionVoteProgress };
+      delete permissionVoteProgress[event.data.requestId];
       if (!(event.data.requestId in base.pendingPermissions)) {
         return {
           ...base,
+          permissionVoteProgress,
           unmatchedPermissionResolutionCount:
             base.unmatchedPermissionResolutionCount + 1,
           lastUnmatchedPermissionResolutionId: event.data.requestId,
@@ -897,12 +1269,18 @@ export function reduceDaemonSessionEvent(
       }
       const pendingPermissions = { ...base.pendingPermissions };
       delete pendingPermissions[event.data.requestId];
-      return { ...base, pendingPermissions };
+      return { ...base, pendingPermissions, permissionVoteProgress };
     }
     case 'permission_already_resolved': {
+      // Wenshao review #4335 / 3271041465 — same as above:
+      // unconditionally clear any orphan progress entry on the
+      // unmatched / matched paths.
+      const permissionVoteProgress = { ...base.permissionVoteProgress };
+      delete permissionVoteProgress[event.data.requestId];
       if (!(event.data.requestId in base.pendingPermissions)) {
         return {
           ...base,
+          permissionVoteProgress,
           unmatchedPermissionResolutionCount:
             base.unmatchedPermissionResolutionCount + 1,
           lastUnmatchedPermissionResolutionId: event.data.requestId,
@@ -910,7 +1288,51 @@ export function reduceDaemonSessionEvent(
       }
       const pendingPermissions = { ...base.pendingPermissions };
       delete pendingPermissions[event.data.requestId];
-      return { ...base, pendingPermissions };
+      return { ...base, pendingPermissions, permissionVoteProgress };
+    }
+    case 'permission_partial_vote': {
+      // F3 Commit 7 — accumulate consensus vote progress. If the
+      // requestId isn't in `pendingPermissions` (race / replay
+      // misalignment because the SDK reconnected mid-permission and
+      // missed `permission_request`), still record progress here.
+      // Wenshao review #4335 / 3271041465 — both `permission_resolved`
+      // and `permission_already_resolved` reducer cases above now
+      // unconditionally clear any orphan `permissionVoteProgress`
+      // entry, so a missed-request reconnect is recovered as soon
+      // as the corresponding resolution frame arrives.
+      //
+      // Wenshao review #4335 / 3270622311: stamp the envelope's
+      // `originatorClientId` (prompt originator per N3) onto the
+      // stored data so view-state consumers can attribute the
+      // partial vote to the prompting client. Mirrors the
+      // `mergeOriginator` pattern used by approval-mode / tool-
+      // toggle / workspace-init / mcp-restart reducer cases.
+      return {
+        ...base,
+        permissionVoteProgress: {
+          ...base.permissionVoteProgress,
+          [event.data.requestId]: mergeOriginator(event.data, event),
+        },
+      };
+    }
+    case 'permission_forbidden': {
+      // F3 Commit 7 — append to bounded history and bump count.
+      // Wenshao review #4335 / 3270622311: same mergeOriginator
+      // treatment as the partial-vote case above. `event.data` carries
+      // the BLOCKED voter's clientId; the envelope's
+      // `originatorClientId` carries the prompt originator. Both are
+      // useful — consumers reading view state need the prompt
+      // originator without having to keep the original event around.
+      const next = base.forbiddenVotes.slice();
+      next.push(mergeOriginator(event.data, event));
+      while (next.length > MAX_FORBIDDEN_VOTES_PER_SESSION) {
+        next.shift();
+      }
+      return {
+        ...base,
+        forbiddenVotes: next,
+        forbiddenVoteCount: base.forbiddenVoteCount + 1,
+      };
     }
     case 'model_switched':
       return {
@@ -932,6 +1354,14 @@ export function reduceDaemonSessionEvent(
         alive: false,
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
+        permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — terminal
+        // events must also drop `forbiddenVotes` history so adapters
+        // reading view state for a dead session don't render stale
+        // rejection data. Pre-fix only `pendingPermissions` /
+        // `permissionVoteProgress` were cleared.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
       };
     case 'session_closed':
       return {
@@ -940,6 +1370,10 @@ export function reduceDaemonSessionEvent(
         alive: false,
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
+        permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — see session_died.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
       };
     case 'session_metadata_updated':
       return {
@@ -953,6 +1387,10 @@ export function reduceDaemonSessionEvent(
         alive: false,
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
+        permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — see session_died.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
       };
     case 'slow_client_warning':
       // Non-terminal: warning precedes eviction but doesn't close
@@ -971,6 +1409,28 @@ export function reduceDaemonSessionEvent(
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         streamError: event.data,
         pendingPermissions: {},
+        permissionVoteProgress: {},
+        // Wenshao review #4335 / 3272576003 (Critical) — see session_died.
+        forbiddenVotes: [],
+        forbiddenVoteCount: 0,
+      };
+    case 'state_resync_required':
+      // #4175 F4 prereq (Ilya0527 issue #15). Mark the accumulated
+      // view state as stale; subsequent non-terminal deltas are
+      // auto-skipped at the top-of-reducer gate above until consumer
+      // recovery via `loadSession` + `createDaemonSessionViewState`.
+      // `alive` and `terminalEvent` are NOT touched — the stream is
+      // still healthy; only the consumer's local accumulation is
+      // suspect. `pendingPermissions` is intentionally preserved
+      // (cleared by `loadSession`-driven recovery, not by the
+      // resync signal itself) so we don't synthesize a no-op
+      // "permission no longer pending" state transition while the
+      // consumer is still figuring out what's real.
+      return {
+        ...base,
+        awaitingResync: true,
+        resyncRequiredCount: base.resyncRequiredCount + 1,
+        lastResyncRequired: event.data,
       };
     case 'mcp_budget_warning':
       // Non-terminal: budget pressure is a status signal, not a stream
@@ -1367,6 +1827,68 @@ function isPermissionAlreadyResolvedData(
   );
 }
 
+function isPermissionPartialVoteData(
+  value: unknown,
+): value is DaemonPermissionPartialVoteData {
+  // PR #4335 review fold-in (Copilot finding): use `isFiniteNumber`
+  // (and integer + non-negative checks) for tally counters so
+  // malformed frames carrying NaN / Infinity / fractional values are
+  // rejected and counted via `unrecognizedKnownEventCount` instead of
+  // landing in reducer state. Matches the validation posture of the
+  // sibling `isMcpBudgetWarningData` / `isSlowClientWarningData` helpers.
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['requestId']) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !isFiniteNumber(value['votesReceived']) ||
+    !isFiniteNumber(value['votesNeeded']) ||
+    !isFiniteNumber(value['quorum']) ||
+    !Number.isInteger(value['votesReceived']) ||
+    !Number.isInteger(value['votesNeeded']) ||
+    !Number.isInteger(value['quorum']) ||
+    (value['votesReceived'] as number) < 0 ||
+    (value['votesNeeded'] as number) < 0 ||
+    (value['quorum'] as number) < 1 ||
+    !isRecord(value['optionTallies'])
+  ) {
+    return false;
+  }
+  // Validate the optionTallies map values are non-negative integers.
+  for (const tally of Object.values(
+    value['optionTallies'] as Record<string, unknown>,
+  )) {
+    if (typeof tally !== 'number' || !Number.isInteger(tally) || tally < 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isPermissionForbiddenData(
+  value: unknown,
+): value is DaemonPermissionForbiddenData {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['requestId']) ||
+    !isNonEmptyString(value['sessionId'])
+  ) {
+    return false;
+  }
+  const reason = value['reason'];
+  if (reason !== 'designated_mismatch' && reason !== 'remote_not_allowed') {
+    return false;
+  }
+  // `clientId` is optional but if present must be a non-empty string.
+  const clientId = value['clientId'];
+  if (
+    clientId !== undefined &&
+    (typeof clientId !== 'string' || clientId.length === 0)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function isModelSwitchedData(value: unknown): value is DaemonModelSwitchedData {
   return (
     isRecord(value) &&
@@ -1420,6 +1942,17 @@ function isClientEvictedData(value: unknown): value is DaemonClientEvictedData {
     isRecord(value) &&
     isNonEmptyString(value['reason']) &&
     isOptionalNumber(value['droppedAfter'])
+  );
+}
+
+function isStateResyncRequiredData(
+  value: unknown,
+): value is DaemonStateResyncRequiredData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['reason']) &&
+    isFiniteNumber(value['lastDeliveredId']) &&
+    isFiniteNumber(value['earliestAvailableId'])
   );
 }
 
@@ -1659,6 +2192,11 @@ const MCP_RESTART_REFUSED_REASONS: ReadonlySet<string> = new Set([
   'in_flight',
   'disabled',
   'budget_would_exceed',
+  // F2 (#4175 commit 5): pool-mode hard restart failure (entry's
+  // `client.connect()` or rediscover threw). Carried alongside the
+  // soft-skip reasons so SDK reducers maintain a single union for
+  // narrowing the event's `reason` field.
+  'restart_failed',
 ]);
 
 function isMcpServerRestartRefusedData(

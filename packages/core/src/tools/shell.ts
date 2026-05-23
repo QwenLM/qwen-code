@@ -4278,14 +4278,4 @@ export class ShellTool extends BaseDeclarativeTool<
   ): ToolInvocation<ShellToolParams, ToolResult> {
     return new ShellToolInvocation(this.config, params);
   }
-
-  override toAutoClassifierInput(
-    params: ShellToolParams,
-  ): Record<string, unknown> {
-    // The full command is required for safety classification — do not redact.
-    return {
-      command: params.command,
-      cwd: params.directory ?? this.config.getTargetDir(),
-    };
-  }
 }

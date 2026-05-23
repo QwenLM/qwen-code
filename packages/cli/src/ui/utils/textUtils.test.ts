@@ -11,7 +11,6 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   escapeAnsiCtrlCodes,
-  sanitizeFilenameForDisplay,
   sanitizeSensitiveText,
   sliceTextByVisualHeight,
 } from './textUtils.js';
@@ -222,58 +221,6 @@ describe('textUtils', () => {
         expect(sanitized.g).toBe(null);
         expect(sanitized.h()).toBe('\u001b[35mpurple\u001b[0m');
       });
-    });
-  });
-
-  describe('sanitizeFilenameForDisplay', () => {
-    it('passes clean filenames through unchanged', () => {
-      expect(sanitizeFilenameForDisplay('src/foo.ts')).toBe('src/foo.ts');
-      expect(sanitizeFilenameForDisplay('packages/cli/src/index.ts')).toBe(
-        'packages/cli/src/index.ts',
-      );
-      expect(sanitizeFilenameForDisplay('文件.txt')).toBe('文件.txt');
-      expect(sanitizeFilenameForDisplay('')).toBe('');
-    });
-
-    it('escapes C0 control bytes that bypass escapeAnsiCtrlCodes', () => {
-      // Bare \n / \r / NUL / BEL / BS slip past the ANSI regex but would
-      // still inject layout breaks or terminal effects in `<Text>`.
-      expect(sanitizeFilenameForDisplay('a\nb')).toBe('a\\nb');
-      expect(sanitizeFilenameForDisplay('a\rb')).toBe('a\\rb');
-      expect(sanitizeFilenameForDisplay('a\tb')).toBe('a\\tb');
-      expect(sanitizeFilenameForDisplay('a\bb')).toBe('a\\bb');
-      expect(sanitizeFilenameForDisplay('a\fb')).toBe('a\\fb');
-      expect(sanitizeFilenameForDisplay('a\x00b')).toBe('a\\u0000b');
-      expect(sanitizeFilenameForDisplay('a\x07b')).toBe('a\\u0007b');
-    });
-
-    it('escapes DEL (0x7F) and C1 control bytes (0x80–0x9F)', () => {
-      expect(sanitizeFilenameForDisplay('a\x7fb')).toBe('a\\u007fb');
-      expect(sanitizeFilenameForDisplay('a\x80b')).toBe('a\\u0080b');
-      expect(sanitizeFilenameForDisplay('a\x9fb')).toBe('a\\u009fb');
-    });
-
-    it('strips multi-byte ANSI CSI sequences', () => {
-      // SGR color/reset and cursor movement should not survive to the
-      // terminal — `escapeAnsiCtrlCodes` neutralizes the ESC byte, then
-      // the control-char pass cleans up any leftover bare C0/C1 bytes.
-      const ansi = '\x1b[31mred\x1b[0m';
-      const out = sanitizeFilenameForDisplay(ansi);
-      expect(out.includes('\x1b')).toBe(false);
-      expect(out).toContain('red');
-    });
-
-    it('handles a path crafted with mixed C0 controls + ANSI', () => {
-      const crafted = `evil\x1b[2K\npath\x00.txt`;
-      const out = sanitizeFilenameForDisplay(crafted);
-      // No raw C0 / DEL bytes remain in the output.
-      for (let i = 0; i < out.length; i++) {
-        const code = out.charCodeAt(i);
-        expect(code < 0x20 || code === 0x7f).toBe(false);
-      }
-      expect(out).toContain('evil');
-      expect(out).toContain('path');
-      expect(out).toContain('.txt');
     });
   });
 

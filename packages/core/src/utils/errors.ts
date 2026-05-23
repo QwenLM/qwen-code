@@ -181,18 +181,6 @@ export class FatalToolExecutionError extends FatalError {
     super(message, 54);
   }
 }
-/**
- * Raised when a headless / unattended run exceeds a configured budget
- * (`--max-wall-time`, `--max-tool-calls`). Distinct exit code from
- * `FatalTurnLimitedError` (53) so CI scripts can branch on
- * "run exhausted its budget" vs. "run hit the turn cap." See issue
- * QwenLM/qwen-code#4103.
- */
-export class FatalBudgetExceededError extends FatalError {
-  constructor(message: string) {
-    super(message, 55);
-  }
-}
 export class FatalCancellationError extends FatalError {
   constructor(message: string) {
     super(message, 130); // Standard exit code for SIGINT

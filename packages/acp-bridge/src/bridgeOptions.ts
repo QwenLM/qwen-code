@@ -13,7 +13,10 @@
 
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { ChannelFactory } from './channel.js';
+import type { PermissionPolicy } from './permission.js';
+import type { PermissionAuditPublisher } from './permissionMediator.js';
 import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
+import type { BridgeFileSystem } from './bridgeFileSystem.js';
 
 /**
  * Optional injection seam for daemon-host-specific status cells —
@@ -217,6 +220,18 @@ export interface BridgeOptions {
     enabled: boolean,
   ) => Promise<void>;
   /**
+   * #4282 fold-in 5 (Codex P2-1). Optional override for the basename
+   * (or single relative path) of the workspace context file written
+   * by `POST /workspace/init`. When omitted, falls back to
+   * `getCurrentGeminiMdFilename()` — the process-global value, which
+   * the daemon parent never updates because it doesn't go through
+   * `loadCliConfig`. Production callers (`runQwenServe`) snapshot the
+   * resolved filename from the workspace's merged settings at boot
+   * and pass it here so init writes the same file the ACP child
+   * reads. Bridge tests can pass any literal.
+   */
+  contextFilename?: string;
+  /**
    * #4175 Wave 5 PR 22b/2 — optional injection seam for daemon-host
    * status cells (env snapshot, daemon preflight). Production
    * `qwen serve` provides
@@ -239,4 +254,70 @@ export interface BridgeOptions {
    * still query the routes; they'll see empty/idle cells.
    */
   statusProvider?: DaemonStatusProvider;
+
+  /**
+   * Optional fs injection seam (#4175 PR F1 step 5, originally the
+   * 22b' scope). When provided, `BridgeClient.readTextFile` and
+   * `BridgeClient.writeTextFile` delegate every ACP fs call to this
+   * implementation instead of using BridgeClient's inline
+   * `fs.realpath` / `fs.writeFile` / `fs.readFile` proxy.
+   *
+   * The immediate F1 follow-up will land a serve-side adapter that
+   * wraps PR 18's `WorkspaceFileSystem` and a `runQwenServe` wiring
+   * patch so production `qwen serve` writes pick up its TOCTOU +
+   * symlink-substitution + trust-gate + `.gitignore` + audit
+   * machinery — closing the post-PR-18 follow-up thread about
+   * `BridgeClient`'s inline fs proxy bypassing `WorkspaceFileSystem`
+   * (originally raised in #4250 review). Until that lands, BridgeClient's inline
+   * proxy continues to handle writes (current behavior preserved).
+   *
+   * When omitted (tests, Mode A in-process consumers, channels /
+   * IDE companion using the bridge directly), BridgeClient's inline
+   * proxy is used — preserves the pre-F1 behavior verbatim so
+   * existing test fixtures don't need updating and channels /
+   * IDE keep working without depending on `cli/src/serve/fs/`.
+   */
+  fileSystem?: BridgeFileSystem;
+  /**
+   * #4175 F3 Commit 2 — active permission mediation policy for the
+   * `MultiClientPermissionMediator`. When omitted, defaults to
+   * `'first-responder'` (the pre-F3 behavior — any validated voter
+   * wins immediately). The bridge captures this once at construction
+   * time; `runQwenServe` reads it from `settings.policy.
+   * permissionStrategy` and the mediator snapshots it onto every
+   * pending entry at issue time so live-reload of settings does not
+   * change the rules under in-flight requests.
+   */
+  permissionPolicy?: PermissionPolicy;
+  /**
+   * #4175 F3 Commit 2 — optional fixed quorum for `consensus` policy.
+   * MUST be a positive integer if provided; the F3 settings layer
+   * validates this and fails startup on non-integer / non-positive
+   * values. Capped at `M = votersAtIssue.size` at request time to
+   * prevent unreachable quorum. Unset → `floor(M/2) + 1` (default
+   * majority).
+   */
+  permissionConsensusQuorum?: number;
+  /**
+   * #4175 F3 Commit 2 — injection seam for the permission audit
+   * publisher.
+   *
+   * **When omitted**: the bridge falls back to
+   * `createNoOpPermissionAuditPublisher` so embedded callers (and
+   * the bridge unit-test suite) can run the mediator without an
+   * audit consumer.
+   *
+   * **In production** (`qwen serve`), `runQwenServe.ts` allocates a
+   * `PermissionAuditRing` (default capacity 512), wraps it with
+   * `createPermissionAuditPublisher`, and passes the result here.
+   * The ring stays alive for the lifetime of the daemon so a future
+   * `GET /workspace/permission/audit` route (out of F3 v1 scope)
+   * can lift it out for query.
+   *
+   * Permission timeouts also produce a stderr breadcrumb directly
+   * from the mediator's timer callback (independent of this
+   * publisher) so operators tailing daemon stderr always see
+   * timeouts even when the audit publisher is the no-op fallback.
+   */
+  permissionAudit?: PermissionAuditPublisher;
 }
