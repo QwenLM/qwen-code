@@ -525,6 +525,109 @@ describe('convertClaudePluginPackage', () => {
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
+
+  it('should collect resources from same-name root directories (e.g., ./commands/ -> commands/)', async () => {
+    // This tests the fix for #4452: when marketplace config specifies
+    // resources like ["./commands/"], and the plugin source has a root-level
+    // "commands/" directory, the contents should be collected correctly
+    // instead of being skipped.
+    const pluginSourceDir = path.join(testDir, 'plugin-same-name-dirs');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+
+    // Create commands/, skills/, agents/ directories at plugin root
+    const commandsDir = path.join(pluginSourceDir, 'commands');
+    fs.mkdirSync(commandsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(commandsDir, 'generate.md'),
+      '---\nname: generate\n---\nGenerate wiki',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(commandsDir, 'ask.md'),
+      '---\nname: ask\n---\nAsk wiki',
+      'utf-8',
+    );
+
+    const skillsDir = path.join(pluginSourceDir, 'skills');
+    fs.mkdirSync(path.join(skillsDir, 'wiki-architect'), { recursive: true });
+    fs.writeFileSync(
+      path.join(skillsDir, 'wiki-architect', 'SKILL.md'),
+      '# Wiki Architect Skill',
+      'utf-8',
+    );
+
+    const agentsDir = path.join(pluginSourceDir, 'agents');
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(agentsDir, 'wiki-architect.md'),
+      '---\nname: wiki-architect\ndescription: Architect agent\n---\nSystem prompt',
+      'utf-8',
+    );
+
+    // Create marketplace.json pointing to same-name directories
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const pluginJson = { name: 'deep-wiki', version: '2.0.0' };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'plugin.json'),
+      JSON.stringify(pluginJson, null, 2),
+      'utf-8',
+    );
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'deep-wiki',
+          version: '2.0.0',
+          source: './',
+          strict: true,
+          commands: ['./commands/'],
+          skills: ['./skills/'],
+          agents: ['./agents/wiki-architect.md'],
+        },
+      ],
+    };
+
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    // Act
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'deep-wiki',
+    );
+
+    // Verify: commands were collected
+    const convertedCommandsDir = path.join(result.convertedDir, 'commands');
+    expect(fs.existsSync(convertedCommandsDir)).toBe(true);
+    const cmdFiles = fs.readdirSync(convertedCommandsDir);
+    expect(cmdFiles).toContain('generate.md');
+    expect(cmdFiles).toContain('ask.md');
+
+    // Verify: skills were collected
+    const convertedSkillsDir = path.join(result.convertedDir, 'skills');
+    expect(fs.existsSync(convertedSkillsDir)).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(convertedSkillsDir, 'wiki-architect', 'SKILL.md'),
+      ),
+    ).toBe(true);
+
+    // Verify: agents were collected
+    const convertedAgentsDir = path.join(result.convertedDir, 'agents');
+    expect(fs.existsSync(convertedAgentsDir)).toBe(true);
+    const agentFiles = fs.readdirSync(convertedAgentsDir);
+    expect(agentFiles).toContain('wiki-architect.md');
+
+    // Clean up
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
 });
 
 describe('performVariableReplacement for Claude extensions', () => {

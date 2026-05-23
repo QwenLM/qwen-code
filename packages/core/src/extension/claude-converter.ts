@@ -582,22 +582,17 @@ async function collectResources(
     const stat = fs.statSync(resolvedPath);
 
     if (stat.isDirectory()) {
-      // If it's a directory, check if it's already the destination folder
       const dirName = path.basename(resolvedPath);
       const parentDir = path.dirname(resolvedPath);
 
-      // If the directory is already named as the destination folder (e.g., 'commands')
-      // and it's at the plugin root level, skip it
-      if (dirName === destFolderName && parentDir === pluginRoot) {
-        debugLogger.debug(
-          `Skipping ${resolvedPath} as it's already in the correct location`,
-        );
-        continue;
-      }
-
-      // Determine destination: preserve the directory name
-      // e.g., ./skills/xlsx -> tmpDir/skills/xlsx/
-      const finalDestDir = path.join(destDir, dirName);
+      // Determine destination: if the directory has the same name as the
+      // destination folder and sits at the plugin root (e.g., config says
+      // "./commands/" and pluginRoot has a commands/ dir), copy its contents
+      // directly into destDir rather than creating a nested subdirectory.
+      const finalDestDir =
+        dirName === destFolderName && parentDir === pluginRoot
+          ? destDir
+          : path.join(destDir, dirName);
 
       // Copy all files from the directory
       const files = await glob('**/*', {
@@ -631,22 +626,23 @@ async function collectResources(
         fs.copyFileSync(srcFile, destFile);
       }
     } else {
-      // If it's a file, check if it's already in the destination folder
+      // If it's a file, preserve its relative path under the destination.
+      // e.g., ./agents/wiki-architect.md → destDir/wiki-architect.md
       const relativePath = path.relative(pluginRoot, resolvedPath);
-
-      // Check if the file path starts with the destination folder name
-      // e.g., 'commands/test1.md' or 'commands/me/test.md' should be skipped
       const segments = relativePath.split(path.sep);
-      if (segments.length > 0 && segments[0] === destFolderName) {
-        debugLogger.debug(
-          `Skipping ${resolvedPath} as it's already in ${destFolderName}/`,
-        );
-        continue;
-      }
 
-      // Copy the file to destination
-      const fileName = path.basename(resolvedPath);
-      const destFile = path.join(destDir, fileName);
+      // Strip the leading segment if it matches the destination folder name
+      // (e.g., 'agents/wiki-architect.md' → 'wiki-architect.md')
+      const destRelative =
+        segments.length > 1 && segments[0] === destFolderName
+          ? segments.slice(1).join(path.sep)
+          : path.basename(resolvedPath);
+
+      const destFile = path.join(destDir, destRelative);
+      const destFileDir = path.dirname(destFile);
+      if (!fs.existsSync(destFileDir)) {
+        fs.mkdirSync(destFileDir, { recursive: true });
+      }
       fs.copyFileSync(resolvedPath, destFile);
     }
   }
