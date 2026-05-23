@@ -101,6 +101,10 @@ function collectDependencies(packageName, packageLock, dependenciesMap) {
     return;
   }
 
+  if (packageInfo.link) {
+    return;
+  }
+
   dependenciesMap.set(packageName, packageInfo.version);
 
   if (packageInfo.dependencies) {
