@@ -328,12 +328,6 @@ describe('AppContainer State Management', () => {
     // Mock Config
     mockConfig = makeFakeConfig();
 
-    // makeFakeConfig() returns a real Config whose initialize() throws
-    // "Config was already initialized" on the second call. React double-invokes
-    // the mount effect, so the real method rejects and leaks async renders into
-    // later tests — making footer-measurement assertions flaky. Stub it out.
-    vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
-
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
 
@@ -2344,6 +2338,12 @@ describe('AppContainer State Management', () => {
     });
 
     it('does not remeasure footer height for sticky todo status-only updates', async () => {
+      // Scoped stub: makeFakeConfig().initialize() rejects on React's
+      // double-mount, which leaks async renders and destabilizes the
+      // footer-measurement timing this test depends on. Kept per-test so
+      // unrelated tests in this block still exercise the real init gate.
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+
       const historyManager = {
         history: makeTodoHistory('pending'),
         addItem: vi.fn(),
@@ -2382,6 +2382,13 @@ describe('AppContainer State Management', () => {
 
       const heightAfterSettle = capturedUIState.availableTerminalHeight;
 
+      // Switch the mock to a different height so any re-measurement triggered
+      // by the status-only rerender below would change controlsHeight (and
+      // therefore availableTerminalHeight). Without this, the production
+      // same-value short-circuit on setControlsHeight makes the equality
+      // assertion pass even when the optimization regresses.
+      mockedMeasureElement.mockReturnValue({ width: 80, height: 10 });
+
       historyManager.history = makeTodoHistory('in_progress');
       await act(async () => {
         view!.rerender(
@@ -2395,8 +2402,8 @@ describe('AppContainer State Management', () => {
       });
 
       // The sticky todo status change (pending → in_progress) must not alter
-      // the computed terminal height. This asserts on the behavioral outcome
-      // rather than the implementation detail of measureElement call count.
+      // the computed terminal height. Combined with the mock-height swap
+      // above, this fails iff the footer was re-measured.
       expect(capturedUIState.availableTerminalHeight).toBe(heightAfterSettle);
     });
   });
