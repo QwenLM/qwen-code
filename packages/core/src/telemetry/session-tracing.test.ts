@@ -1680,6 +1680,57 @@ describe('session-tracing', () => {
         endInteractionSpan('ok');
       });
 
+      it('startHookSpan OUTSIDE runInSubagentSpanContext but inside a tool context parents under the tool span (documented bg SubagentStart asymmetry)', async () => {
+        // Regression guard for the documented bg-vs-fg SubagentStart
+        // parenting asymmetry (see design doc Edge Cases table). The
+        // background path fires SubagentStart BEFORE wrapping in
+        // runInSubagentSpanContext, so it sees the outer AGENT tool's
+        // toolContext and parents to the tool span — not the subagent.
+        // If a future refactor changes this (or implements the deferred
+        // fix), this test trips. wenshao @ #4410 DeepSeek 3293174101.
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        // Simulate the outer AGENT tool context active.
+        const agentToolSpan = startToolSpan('agent');
+        const agentToolRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.tool',
+        )!;
+        // Open a subagent span as if a bg invocation will eventually
+        // wrap its body. Note we do NOT call runInSubagentSpanContext —
+        // mirroring the bg path where SubagentStart fires BEFORE the
+        // wrapper.
+        const subagentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'background',
+        });
+
+        await runInToolSpanContext(agentToolSpan, async () => {
+          // Hook fires here, inside the AGENT tool's toolContext but
+          // OUTSIDE runInSubagentSpanContext.
+          startHookSpan({
+            hookEvent: 'PreToolUse',
+            toolName: 'subagent',
+          });
+        });
+
+        const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+        expect(hookRecord).toBeDefined();
+        const parentSpan = (
+          hookRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        // Locks in the asymmetry: parent is the AGENT tool, NOT the
+        // subagent span (even though the subagent span exists in
+        // activeSpans). Documented in design doc Edge Cases.
+        expect(parentSpan).toBe(agentToolRecord);
+        endSubagentSpan(subagentSpan, { status: 'completed' });
+        endToolSpan(agentToolSpan);
+        endInteractionSpan('ok');
+      });
+
       it('nested subagent: innermost subagent shadows outer for child parenting', async () => {
         const config = createMockConfig();
         startInteractionSpan(config, {
