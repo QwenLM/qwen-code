@@ -26,6 +26,11 @@ if (!process.cwd().includes('packages')) {
   process.exit(1);
 }
 
+// Clean stale outputs first to avoid TS5055 when tsbuildinfo is out of sync
+// with sources (e.g. after a version bump or branch switch) under composite
+// project references.
+execSync('tsc --build --clean', { stdio: 'inherit' });
+
 // build typescript files
 execSync('tsc --build', { stdio: 'inherit' });
 
