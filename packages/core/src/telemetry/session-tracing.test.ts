@@ -1508,6 +1508,24 @@ describe('session-tracing', () => {
       );
     });
 
+    it('TTL: background subagent at 30 min stays alive (4h window)', () => {
+      // Mirror of the fork test — wenshao @ #4410 DeepSeek 3291876056.
+      // Catches the regression where someone trims
+      // LONG_TTL_SUBAGENT_KINDS and drops `'background'` silently.
+      startSubagentSpan({ ...baseOpts, invocationKind: 'background' });
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+
+      runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
+      expect(record.ended).toBe(false);
+
+      runTTLSweepForTesting(Date.now() + (4 * 60 + 1) * 60 * 1000);
+      expect(record.ended).toBe(true);
+      expect(record.attributes['qwen-code.subagent.status']).toBe('aborted');
+      expect(record.attributes['qwen-code.subagent.terminate_reason']).toBe(
+        'ttl_swept',
+      );
+    });
+
     it('TTL: foreground subagent at 31 min IS swept (default 30 min TTL)', () => {
       const span = startSubagentSpan({
         ...baseOpts,
@@ -1588,6 +1606,43 @@ describe('session-tracing', () => {
         expect(toolRecord).toBeDefined();
         const parentSpan = (
           toolRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        expect(parentSpan).toBe(subagentRecord);
+        endSubagentSpan(subagentSpan, { status: 'completed' });
+        endInteractionSpan('ok');
+      });
+
+      it('startHookSpan inside runInSubagentSpanContext (no inner tool) parents under the subagent span', async () => {
+        // Regression: startHookSpan reads tool > subagent > interaction.
+        // The AGENT tool's own toolContext was leaking into the subagent
+        // body and mis-parenting SubagentStart/Stop hooks. Fix at
+        // runInSubagentSpanContext clears toolContext for the body's
+        // duration. wenshao @ #4410 DeepSeek 3291876051 / 3291876055.
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        const subagentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'foreground',
+        });
+        const subagentRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.subagent',
+        )!;
+
+        await runInSubagentSpanContext(subagentSpan, async () => {
+          startHookSpan({
+            hookEvent: 'PreToolUse',
+            toolName: 'read_file',
+          });
+        });
+
+        const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+        expect(hookRecord).toBeDefined();
+        const parentSpan = (
+          hookRecord!.parentContext as { __parentSpan?: unknown } | undefined
         )?.__parentSpan;
         expect(parentSpan).toBe(subagentRecord);
         endSubagentSpan(subagentSpan, { status: 'completed' });

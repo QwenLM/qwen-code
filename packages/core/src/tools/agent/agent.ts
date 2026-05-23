@@ -728,9 +728,17 @@ function deriveSubagentOutcomeMetadata(opts: {
   if (terminateMode === AgentTerminateMode.GOAL) {
     return { status: 'completed', resultSummaryPresent };
   }
+  // Non-throwing failure paths (ERROR / MAX_TURNS / TIMEOUT) — populate
+  // `error`/`errorType` so endSubagentSpan sets standard OTel exception
+  // attributes instead of a generic `'subagent failed'` placeholder.
+  // Otherwise dashboards relying on `exception.message`/`error.type` see
+  // no signal for these (reachable) outcomes. wenshao @ #4410 DeepSeek
+  // 3291876053.
   return {
     status: 'failed',
     terminateReason: String(terminateMode).toLowerCase(),
+    error: `subagent terminated with mode: ${terminateMode}`,
+    errorType: terminateMode,
     resultSummaryPresent,
   };
 }
@@ -1375,8 +1383,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // Get the results
+      const subagentRawText = subagent.getFinalText();
       const finalText = appendStopHookBlockingCapWarning(
-        subagent.getFinalText(),
+        subagentRawText,
         stopHookWarning,
       );
       const terminateMode = subagent.getTerminateMode();
@@ -1387,11 +1396,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // updateDisplay throws, the subagent's real terminal state must
       // still reach telemetry instead of being clobbered by the catch
       // branch's exception derivation. Review wenshao @ #4410.
+      //
+      // `resultSummaryPresent` checks the RAW subagent text (not finalText
+      // with stop-hook warning) so a subagent that produced no result but
+      // hit a stop-hook block doesn't false-positive as having a summary.
+      // Matches the bgBody pattern. wenshao @ #4410 DeepSeek 3291876047.
       opts.recordSpanOutcome?.(
         deriveSubagentOutcomeMetadata({
           terminateMode,
           signalAborted: signal?.aborted ?? false,
-          resultSummaryPresent: Boolean(finalText && finalText.length > 0),
+          resultSummaryPresent: Boolean(
+            subagentRawText && subagentRawText.length > 0,
+          ),
         }),
       );
 
@@ -2240,7 +2256,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 lastUpdatedAt: new Date().toISOString(),
                 lastError: undefined,
               });
-            } else if (terminateMode === AgentTerminateMode.CANCELLED) {
+            } else if (
+              terminateMode === AgentTerminateMode.CANCELLED ||
+              terminateMode === AgentTerminateMode.SHUTDOWN
+            ) {
+              // SHUTDOWN is grouped with CANCELLED in the span taxonomy
+              // (deriveSubagentOutcomeMetadata); align the registry side
+              // so dashboards don't see span=cancelled / registry=failed
+              // mismatch on graceful arena/team-session shutdown.
+              // wenshao @ #4410 DeepSeek 3291876034.
               registry.finalizeCancelled(
                 hookOpts.agentId,
                 finalText,

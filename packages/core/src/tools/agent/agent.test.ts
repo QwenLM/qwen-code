@@ -847,6 +847,34 @@ describe('AgentTool', () => {
         expect(meta.terminateReason).toBe('subagent_cancelled');
       });
 
+      it('SHUTDOWN terminateMode → status="cancelled" + terminateReason="subagent_shutdown"', async () => {
+        // SHUTDOWN is graceful arena/team-session-end, not failure.
+        // wenshao @ #4410 DeepSeek 3291876034.
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.SHUTDOWN,
+        );
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('cancelled');
+        expect(meta.terminateReason).toBe('subagent_shutdown');
+      });
+
+      it('ERROR terminateMode populates error + errorType for OTel exception attrs', async () => {
+        // Non-throwing failure paths (ERROR/MAX_TURNS/TIMEOUT) must
+        // populate error/errorType so endSubagentSpan sets the standard
+        // OTel exception attributes — generic 'subagent failed' was
+        // hiding the reason from dashboards. wenshao @ #4410 DeepSeek
+        // 3291876053.
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.ERROR,
+        );
+        await runForegroundOnce();
+        const meta = lastEndMeta();
+        expect(meta.status).toBe('failed');
+        expect(meta.error).toBe('subagent terminated with mode: ERROR');
+        expect(meta.errorType).toBe('ERROR');
+      });
+
       it('subagent.execute throws → status="failed" + errorType=Error', async () => {
         vi.mocked(mockAgent.execute).mockRejectedValue(
           new Error('catastrophic boom'),

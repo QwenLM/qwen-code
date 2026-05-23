@@ -421,10 +421,16 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
   // attaches to the tool span instead of skipping back to the session root.
   const ctx = resolveParentContext(parentCtx);
 
+  // Tri-state so subagent-parented LLM calls don't get mis-classified as
+  // "interaction" in dashboards. wenshao @ #4410 DeepSeek 3291876044.
   const attributes: Attributes = {
     'qwen-code.model': model,
     'qwen-code.prompt_id': promptId,
-    'llm_request.context': parentCtx ? 'interaction' : 'standalone',
+    'llm_request.context': subagentContext.getStore()
+      ? 'subagent'
+      : interactionContext.getStore()
+        ? 'interaction'
+        : 'standalone',
     // Dual-emit OTel GenAI semantic convention (Stable). Private name
     // (qwen-code.model) remains authoritative; gen_ai.* is a compat layer
     // for spec-aware backends. See docs/design/telemetry-llm-request-timing-design.md (D8).
@@ -1174,9 +1180,18 @@ export function runInSubagentSpanContext<T>(
   // startHookSpan calls inside the body parent under this subagent
   // instead of escaping back to the outer interactionContext.
   // wenshao @ #4410 (DeepSeek 3290820352).
+  //
+  // Also clear `toolContext` for the body's duration. `startHookSpan`'s
+  // parent priority is `tool > subagent > interaction`, and the AGENT
+  // tool's own toolContext is still in scope here — without clearing it,
+  // hooks fired inside the subagent body (e.g. SubagentStart, before any
+  // inner tool call) would parent to the outer AGENT tool span instead
+  // of the subagent. The subagent's own inner tools will re-set
+  // toolContext via runInToolSpanContext, so inner-tool parenting stays
+  // correct. wenshao @ #4410 DeepSeek 3291876051.
   const otelCtxWithSpan = trace.setSpan(otelContext.active(), span);
   return subagentContext.run(spanCtx, () =>
-    otelContext.with(otelCtxWithSpan, fn),
+    toolContext.run(undefined, () => otelContext.with(otelCtxWithSpan, fn)),
   );
 }
 
@@ -1291,6 +1306,10 @@ export function clearSessionTracingForTesting(): void {
   strongSpans.clear();
   interactionContext.enterWith(undefined);
   toolContext.enterWith(undefined);
+  // subagentContext is checked BEFORE interactionContext in startXSpan, so
+  // a leaked subagent ALS frame would silently re-parent every subsequent
+  // test's spans. wenshao @ #4410 DeepSeek 3291876036.
+  subagentContext.enterWith(undefined);
   interactionSequence = 0;
   lastInteractionCtx = undefined;
   clearDetailedSpanState();
