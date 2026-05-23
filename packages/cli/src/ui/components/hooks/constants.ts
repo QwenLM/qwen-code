@@ -127,7 +127,9 @@ export function getHookShortDescription(eventName: string): string {
     [HookEventName.PreToolUse]: t('Before tool execution'),
     [HookEventName.PostToolUse]: t('After tool execution'),
     [HookEventName.PostToolUseFailure]: t('After tool execution fails'),
-    [HookEventName.PostToolBatch]: t('After a batch of tool calls resolves'),
+    [HookEventName.PostToolBatch]: t(
+      'After all tool calls in a batch resolve',
+    ),
     [HookEventName.Notification]: t('When notifications are sent'),
     [HookEventName.UserPromptSubmit]: t('When the user submits a prompt'),
     [HookEventName.SessionStart]: t('When a new session is started'),

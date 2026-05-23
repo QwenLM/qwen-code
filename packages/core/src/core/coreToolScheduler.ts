@@ -712,6 +712,8 @@ const createErrorResponse = (
 function serializeToolResponse(
   response: ToolCallResponseInfo,
 ): Record<string, unknown> {
+  // Keep this payload aligned with the persisted ToolCallResponseInfo fields
+  // hook authors need for batch-level auditing.
   return {
     response_parts: response.responseParts,
     result_display: response.resultDisplay,
@@ -3285,6 +3287,8 @@ export class CoreToolScheduler {
       try {
         const shouldFirePostToolBatch =
           !this.config.getDisableAllHooks() &&
+          // Default to firing when the hook registry cannot answer. This keeps
+          // runtime hook integrations from being silently skipped.
           (this.config.hasHooksForEvent?.('PostToolBatch') ?? true);
         messageBus = shouldFirePostToolBatch
           ? this.config.getMessageBus()
