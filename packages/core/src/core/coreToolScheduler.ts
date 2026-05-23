@@ -3292,6 +3292,7 @@ export class CoreToolScheduler {
     if (this.toolCalls.length > 0 && allCallsAreTerminal) {
       let completedCalls = [...this.toolCalls] as CompletedToolCall[];
       this.toolCalls = [];
+      this.isFinalizingToolCalls = true;
       const batchSignal = completedCalls
         .map((call) =>
           this.callIdToPostToolBatchSignal.get(call.request.callId),
@@ -3316,62 +3317,64 @@ export class CoreToolScheduler {
           }`,
         );
       }
-      if (messageBus) {
-        const batchToolCalls = completedCalls.map(toPostToolBatchToolCall);
-        const permissionMode = this.config.getApprovalMode();
-        const batchHookResult = await this.withHookSpan(
-          { hookEvent: 'PostToolBatch', toolName: 'batch' },
-          () =>
-            firePostToolBatchHook(
-              messageBus,
-              batchToolCalls,
-              permissionMode,
-              batchSignal,
-            ),
-          (r) =>
-            r.hookError
-              ? {
-                  success: false,
-                  error: r.hookError,
-                  shouldStop: false,
-                }
-              : {
-                  success: true,
-                  shouldStop: r.shouldStop,
-                  hasAdditionalContext: !!r.additionalContext,
-                  blockType: r.shouldStop ? 'stop' : undefined,
-                },
-        );
+      try {
+        if (messageBus) {
+          const batchToolCalls = completedCalls.map(toPostToolBatchToolCall);
+          const permissionMode = this.config.getApprovalMode();
+          const batchHookResult = await this.withHookSpan(
+            { hookEvent: 'PostToolBatch', toolName: 'batch' },
+            () =>
+              firePostToolBatchHook(
+                messageBus,
+                batchToolCalls,
+                permissionMode,
+                batchSignal,
+              ),
+            (r) =>
+              r.hookError
+                ? {
+                    success: false,
+                    error: r.hookError,
+                    shouldStop: false,
+                  }
+                : {
+                    success: true,
+                    shouldStop: r.shouldStop,
+                    hasAdditionalContext: !!r.additionalContext,
+                    blockType: r.shouldStop ? 'stop' : undefined,
+                  },
+          );
 
-        // Order matters: stop replaces the last response, so append
-        // additionalContext only after the stop decision is applied.
-        if (batchHookResult.shouldStop) {
-          completedCalls = withPostToolBatchStop(
+          // Order matters: stop replaces the last response, so append
+          // additionalContext only after the stop decision is applied.
+          if (batchHookResult.shouldStop) {
+            completedCalls = withPostToolBatchStop(
+              completedCalls,
+              batchHookResult.stopReason ||
+                'Execution stopped by PostToolBatch hook',
+            );
+          }
+
+          completedCalls = withPostToolBatchAdditionalContext(
             completedCalls,
-            batchHookResult.stopReason ||
-              'Execution stopped by PostToolBatch hook',
+            batchHookResult.additionalContext,
           );
         }
 
-        completedCalls = withPostToolBatchAdditionalContext(
-          completedCalls,
-          batchHookResult.additionalContext,
-        );
-      }
+        for (const call of completedCalls) {
+          logToolCall(this.config, new ToolCallEvent(call));
+        }
 
-      for (const call of completedCalls) {
-        logToolCall(this.config, new ToolCallEvent(call));
-      }
+        // Record tool results before notifying completion
+        this.recordToolResults(completedCalls);
 
-      // Record tool results before notifying completion
-      this.recordToolResults(completedCalls);
-
-      if (this.onAllToolCallsComplete) {
-        this.isFinalizingToolCalls = true;
-        await this.onAllToolCallsComplete(completedCalls);
+        if (this.onAllToolCallsComplete) {
+          await this.onAllToolCallsComplete(completedCalls);
+        }
+        this.notifyToolCallsUpdate();
+      } finally {
         this.isFinalizingToolCalls = false;
       }
-      this.notifyToolCallsUpdate();
       // After completion, process the next item in the queue.
       if (this.requestQueue.length > 0) {
         const next = this.requestQueue.shift()!;
