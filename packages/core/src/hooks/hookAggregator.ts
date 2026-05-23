@@ -10,6 +10,7 @@ import {
   PreToolUseHookOutput,
   PostToolUseHookOutput,
   PostToolUseFailureHookOutput,
+  UserPromptExpansionHookOutput,
   StopHookOutput,
   PermissionRequestHookOutput,
 } from './types.js';
@@ -366,6 +367,8 @@ export class HookAggregator {
         return new PostToolUseHookOutput(output);
       case HookEventName.PostToolUseFailure:
         return new PostToolUseFailureHookOutput(output);
+      case HookEventName.UserPromptExpansion:
+        return new UserPromptExpansionHookOutput(output);
       case HookEventName.Stop:
       case HookEventName.SubagentStop:
         return new StopHookOutput(output);

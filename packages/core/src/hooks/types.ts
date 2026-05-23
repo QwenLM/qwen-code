@@ -281,6 +281,8 @@ export function createHookOutput(
       return new PostToolUseHookOutput(data);
     case HookEventName.PostToolUseFailure:
       return new PostToolUseFailureHookOutput(data);
+    case HookEventName.UserPromptExpansion:
+      return new UserPromptExpansionHookOutput(data);
     case HookEventName.Stop:
     case HookEventName.SubagentStop:
       return new StopHookOutput(data);
@@ -484,6 +486,11 @@ export class PostToolUseFailureHookOutput extends DefaultHookOutput {
     return super.getAdditionalContext();
   }
 }
+
+/**
+ * Specific hook output class for UserPromptExpansion events.
+ */
+export class UserPromptExpansionHookOutput extends DefaultHookOutput {}
 
 /**
  * Specific hook output class for Stop events.

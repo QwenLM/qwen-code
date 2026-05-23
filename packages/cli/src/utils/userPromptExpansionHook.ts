@@ -7,6 +7,8 @@
 import type { PartListUnion } from '@google/genai';
 import { partToString } from '@qwen-code/qwen-code-core';
 
+const MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH = 10_000;
+
 export function appendUserPromptExpansionAdditionalContext(
   content: PartListUnion,
   additionalContext: string | undefined,
@@ -15,7 +17,10 @@ export function appendUserPromptExpansionAdditionalContext(
     return content;
   }
 
-  const suffix = `\n\n${additionalContext}`;
+  const suffix = `\n\n${additionalContext.slice(
+    0,
+    MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+  )}`;
   if (typeof content === 'string') {
     return `${content}${suffix}`;
   }
