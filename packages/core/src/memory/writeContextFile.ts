@@ -118,6 +118,13 @@ export interface WriteContextFileResult {
    */
   resolvedScope: 'workspace' | 'local' | 'global';
   /**
+   * The resolved project root used for path resolution. For
+   * `scope: 'local'` and `scope: 'auto'` (when resolving to a
+   * file at the git root), this may differ from the requested
+   * `projectRoot` in monorepo layouts.
+   */
+  resolvedRoot: string;
+  /**
    * Bytes actually written by this call. `0` on the no-op short-
    * circuit path (`changed: false`). NOT a measurement of the file's
    * on-disk size — callers that need that should `fs.stat` the
@@ -230,7 +237,13 @@ async function runWrite(
     // added in for every whitespace POST. `changed: false` already
     // gives clients the no-op signal; the byte count should remain
     // true to its field name.
-    return { filePath, resolvedScope, bytesWritten: 0, changed: false };
+    return {
+      filePath,
+      resolvedScope,
+      resolvedRoot,
+      bytesWritten: 0,
+      changed: false,
+    };
   }
 
   // Ensure the local context file is gitignored before writing. Covers
@@ -288,6 +301,7 @@ async function runWrite(
     return {
       filePath,
       resolvedScope,
+      resolvedRoot,
       bytesWritten: Buffer.byteLength(options.content, 'utf8'),
       changed: true,
     };
@@ -300,6 +314,7 @@ async function runWrite(
   return {
     filePath,
     resolvedScope,
+    resolvedRoot,
     bytesWritten: Buffer.byteLength(next, 'utf8'),
     changed: true,
   };
