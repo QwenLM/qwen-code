@@ -365,4 +365,41 @@ describe('usePhraseCycler', () => {
 
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
   });
+
+  it('should discard stale fortune quote updates when effect re-runs before promise resolves', async () => {
+    // Mock a slow fortune promise that resolves after effect cleanup
+    let resolvePromise: (value: string) => void;
+    const slowPromise = new Promise<string>((resolve) => {
+      resolvePromise = resolve;
+    });
+    mockGetFortuneQuote.mockReturnValue(slowPromise);
+
+    const { result, rerender } = renderHook(
+      ({ isActive }) =>
+        usePhraseCycler(isActive, false, undefined, true, '/usr/games/fortune'),
+      { initialProps: { isActive: true } },
+    );
+
+    // Wait for the initial fortune call to start
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Verify fortune was called
+    expect(mockGetFortuneQuote).toHaveBeenCalledTimes(1);
+
+    // Rerender with isActive=false to trigger effect cleanup (new generation)
+    // The old promise is still pending
+    rerender({ isActive: false });
+
+    // Now resolve the old (stale) promise
+    await act(async () => {
+      resolvePromise!('Stale Fortune Quote');
+    });
+
+    // The stale update should be discarded, so phrase should remain as the initial witty phrase
+    // (not the stale fortune quote)
+    expect(result.current).not.toBe('Stale Fortune Quote');
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
+  });
 });
