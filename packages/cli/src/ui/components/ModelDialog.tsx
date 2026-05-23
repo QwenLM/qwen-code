@@ -199,6 +199,7 @@ export function ModelDialog({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [highlightedValue, setHighlightedValue] = useState<string | null>(null);
   const isSwitchingRef = useRef(false);
+  const cancelledSwitchRef = useRef(false);
 
   const authType = config?.getAuthType();
 
@@ -401,6 +402,9 @@ export function ModelDialog({
   const handleKeypress = useCallback(
     (key: Key) => {
       if (key.name === 'escape' || (key.name === 'left' && isFastModelMode)) {
+        if (isSwitchingRef.current) {
+          cancelledSwitchRef.current = true;
+        }
         onClose();
         return;
       }
@@ -423,6 +427,7 @@ export function ModelDialog({
         }
 
         isSwitchingRef.current = true;
+        cancelledSwitchRef.current = false;
         setErrorMessage(null);
         void (async () => {
           let after: ContentGeneratorConfig | undefined;
@@ -441,6 +446,9 @@ export function ModelDialog({
               after = config.getContentGeneratorConfig?.() as
                 | ContentGeneratorConfig
                 | undefined;
+              if (cancelledSwitchRef.current) {
+                return;
+              }
               effectiveAuthType = after?.authType ?? entry.authType;
               effectiveModelId = after?.model ?? entry.model.id;
             } catch (e) {

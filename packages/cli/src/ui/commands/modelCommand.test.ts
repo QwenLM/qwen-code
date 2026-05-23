@@ -308,6 +308,54 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should persist the main model when --default follows the model id', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model gpt-4 --default',
+        name: 'model',
+        args: 'gpt-4 --default',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-3.5',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, 'gpt-4 --default');
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'gpt-4',
+      undefined,
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI,
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.name',
+      'gpt-4',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Default model: gpt-4',
+    });
+  });
+
   it('should persist provider-qualified models when --default is provided', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);

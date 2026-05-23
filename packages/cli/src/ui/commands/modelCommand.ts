@@ -214,11 +214,14 @@ export const modelCommand: SlashCommand = {
 
     // Handle --fast flag: /model --fast <modelName>
     const args = context.invocation?.args?.trim() || actionArgs.trim();
-    const isDefaultModelCommand =
-      args === '--default' || args.startsWith('--default ');
-    const isFastModelCommand = args === '--fast' || args.startsWith('--fast ');
+    const argTokens = args.split(/\s+/).filter(Boolean);
+    const isDefaultModelCommand = argTokens.includes('--default');
+    const isFastModelCommand = argTokens.includes('--fast');
     if (isFastModelCommand) {
-      const modelName = args.replace('--fast', '').trim();
+      const modelName =
+        argTokens.find(
+          (token) => token !== '--fast' && token !== '--default',
+        ) ?? '';
       if (!modelName) {
         // Open model dialog in fast-model mode (interactive) or return current fast model (non-interactive)
         if (context.executionMode !== 'interactive') {
@@ -317,8 +320,10 @@ export const modelCommand: SlashCommand = {
     }
 
     const modelName = isDefaultModelCommand
-      ? args.replace('--default', '').trim().split(/\s+/)[0]
-      : (args.trim().split(/\s+/)[0] ?? '');
+      ? (argTokens.find(
+          (token) => token !== '--default' && token !== '--fast',
+        ) ?? '')
+      : (argTokens[0] ?? '');
     if (modelName) {
       if (isDefaultModelCommand && !settings) {
         return {
