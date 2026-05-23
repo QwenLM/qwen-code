@@ -1415,7 +1415,10 @@ export class CoreToolScheduler {
               this.config,
               denialState,
             );
-            if (shouldFirePermissionDeniedForAutoMode(decision, outcome)) {
+            if (
+              !this.config.getDisableAllHooks() &&
+              shouldFirePermissionDeniedForAutoMode(decision, outcome)
+            ) {
               await this.config
                 .getHookSystem?.()
                 ?.firePermissionDeniedEvent(

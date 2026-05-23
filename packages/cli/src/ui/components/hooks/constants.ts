@@ -190,7 +190,7 @@ export function getHookDescription(eventName: string): string {
       'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.',
     ),
     [HookEventName.PermissionDenied]: t(
-      'Input to command is JSON with tool_name, tool_input, tool_use_id, reason, and message.',
+      'Input to command is JSON with tool_name, tool_input, tool_use_id, and reason.',
     ),
     [HookEventName.TodoCreated]: t(
       'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.',
