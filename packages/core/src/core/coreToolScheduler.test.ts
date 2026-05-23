@@ -537,6 +537,7 @@ describe('CoreToolScheduler', () => {
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
         getMessageBus: vi.fn().mockReturnValue(options.messageBus),
+        hasHooksForEvent: vi.fn().mockReturnValue(!options.disableHooks),
         getDisableAllHooks: vi
           .fn()
           .mockReturnValue(options.disableHooks ?? true),

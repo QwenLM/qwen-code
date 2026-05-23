@@ -281,6 +281,8 @@ export function createHookOutput(
       return new PostToolUseHookOutput(data);
     case HookEventName.PostToolUseFailure:
       return new PostToolUseFailureHookOutput(data);
+    case HookEventName.PostToolBatch:
+      return new PostToolBatchHookOutput(data);
     case HookEventName.Stop:
     case HookEventName.SubagentStop:
       return new StopHookOutput(data);
@@ -482,6 +484,18 @@ export class PostToolUseFailureHookOutput extends DefaultHookOutput {
    */
   override getAdditionalContext(): string | undefined {
     return super.getAdditionalContext();
+  }
+}
+
+/**
+ * Specific hook output class for PostToolBatch events.
+ */
+export class PostToolBatchHookOutput extends DefaultHookOutput {
+  /**
+   * Check if batch processing should stop after the resolved tool calls.
+   */
+  override shouldStopExecution(): boolean {
+    return super.shouldStopExecution() || this.isBlockingDecision();
   }
 }
 

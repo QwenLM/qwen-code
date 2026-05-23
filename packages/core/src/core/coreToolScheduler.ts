@@ -3296,9 +3296,7 @@ export class CoreToolScheduler {
       try {
         const shouldFirePostToolBatch =
           !this.config.getDisableAllHooks() &&
-          // Default to firing when the hook registry cannot answer. This keeps
-          // runtime hook integrations from being silently skipped.
-          (this.config.hasHooksForEvent?.('PostToolBatch') ?? true);
+          (this.config.hasHooksForEvent?.('PostToolBatch') ?? false);
         messageBus = shouldFirePostToolBatch
           ? this.config.getMessageBus()
           : undefined;

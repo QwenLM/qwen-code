@@ -471,6 +471,25 @@ describe('toolHookTriggers', () => {
       });
     });
 
+    it('should stop on deny decisions', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {
+          decision: 'deny',
+          reason: 'blocked after batch',
+        },
+      });
+
+      const result = await firePostToolBatchHook(mockMessageBus, []);
+
+      expect(result).toEqual({
+        shouldStop: true,
+        stopReason: 'blocked after batch',
+        additionalContext: undefined,
+      });
+    });
+
     it('should return hookError when hook execution fails without an error message', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
