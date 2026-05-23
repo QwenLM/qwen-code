@@ -1330,6 +1330,29 @@ describe('HookEventHandler', () => {
       });
     });
 
+    it('should block UserPromptExpansion when hook execution setup fails', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
+        throw new Error('UserPromptExpansion planner error');
+      });
+
+      const result = await hookEventHandler.fireUserPromptExpansionEvent(
+        'goal',
+        'write tests',
+        'expanded prompt',
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe(
+        'UserPromptExpansion planner error',
+      );
+      expect(result.finalOutput).toEqual({
+        decision: 'block',
+        reason:
+          'Hook system failed while processing UserPromptExpansion: UserPromptExpansion planner error',
+      });
+    });
+
     it('should redact sensitive todo fields from hook telemetry', async () => {
       const mockPlan = createMockExecutionPlan([
         {
