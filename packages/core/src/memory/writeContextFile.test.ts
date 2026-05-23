@@ -687,6 +687,34 @@ describe('writeWorkspaceContextFile', () => {
       expect(written).toContain('- monorepo auto entry');
     });
 
+    it('resolves auto to committed AGENTS.md at git root when projectRoot is a subdirectory', async () => {
+      const gitRoot = path.join(tmpRoot, 'repo');
+      const subWorkspace = path.join(gitRoot, 'packages', 'cli');
+      await fs.mkdir(subWorkspace, { recursive: true });
+      await fs.mkdir(path.join(gitRoot, '.git'), { recursive: true });
+      await fs.writeFile(path.join(gitRoot, '.git', 'HEAD'), 'ref: main\n');
+      await fs.writeFile(
+        path.join(gitRoot, AGENT_CONTEXT_FILENAME),
+        '# root agents\n',
+        'utf8',
+      );
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'append',
+        content: '- monorepo agents entry',
+        projectRoot: subWorkspace,
+      });
+
+      expect(result.filePath).toBe(path.join(gitRoot, AGENT_CONTEXT_FILENAME));
+      expect(result.resolvedScope).toBe('workspace');
+      expect(result.resolvedRoot).toBe(gitRoot);
+
+      const written = await fs.readFile(result.filePath, 'utf8');
+      expect(written).toContain('# root agents');
+      expect(written).toContain('- monorepo agents entry');
+    });
+
     it('falls back to projectRoot when no git repo exists', async () => {
       // workspace is already a tmpdir with no .git parent
       const result = await writeWorkspaceContextFile({
