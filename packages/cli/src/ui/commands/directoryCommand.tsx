@@ -15,7 +15,7 @@ import {
   ConditionalRulesRegistry,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
-import { SettingScope } from '../../config/settings.js';
+import { SettingScope, saveSettings } from '../../config/settings.js';
 
 export function expandHomeDir(p: string): string {
   if (!p) {
@@ -297,6 +297,298 @@ export const directoryCommand: SlashCommand = {
           );
         }
         return;
+      },
+    },
+    {
+      name: 'remove',
+      get description() {
+        return t('Remove a directory from the workspace');
+      },
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive'] as const,
+      completion: async (context: CommandContext) => {
+        const { services } = context;
+        if (!services.config) return [];
+        if (services.config.isRestrictiveSandbox()) return [];
+        const dirs = services.config.getWorkspaceContext().getDirectories();
+        const initialSet = new Set(
+          services.config.getWorkspaceContext().getInitialDirectories(),
+        );
+        return dirs.filter((d) => !initialSet.has(d));
+      },
+      action: async (context: CommandContext, args: string) => {
+        const {
+          ui: { addItem },
+          services: { config, settings },
+        } = context;
+        if (!config) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Configuration is not available.'),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        const directory = args.trim();
+        if (!directory) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Please provide a directory path to remove.'),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        if (config.isRestrictiveSandbox()) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'The /directory remove command is not supported in restrictive sandbox profiles.',
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        const workspaceContext = config.getWorkspaceContext();
+
+        // Resolve to the same canonical (realpath) form that
+        // WorkspaceContext stores internally, so the persistence filter
+        // matches correctly even when the stored entry uses a symlink or
+        // other non-canonical spelling.
+        const expandedDir = expandHomeDir(directory);
+        let canonicalDirectory: string;
+        try {
+          canonicalDirectory = fs.realpathSync(expandedDir);
+        } catch {
+          canonicalDirectory = path.isAbsolute(expandedDir)
+            ? expandedDir
+            : path.resolve(expandedDir);
+        }
+
+        if (workspaceContext.isInitialDirectory(expandedDir)) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'Cannot remove initial workspace directory: {{directory}}',
+                { directory },
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        // Also check by normalized path in case realpathSync failed above
+        // and the initial directory is stored under a different canonical
+        // form (e.g. symlinked cwd).
+        const normalizedExpanded = path.normalize(expandedDir);
+        const initialDirs = workspaceContext.getInitialDirectories();
+        if (initialDirs.some((d) => path.normalize(d) === normalizedExpanded)) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'Cannot remove initial workspace directory: {{directory}}',
+                { directory },
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        // Persist removal to settings using a two-phase approach:
+        // Phase 1 — compute new directory lists for each scope (async
+        // parallel realpath resolution to avoid N+1 sync I/O).
+        // Phase 2 — commit all scopes atomically so partial failures
+        // can be rolled back cleanly.
+        const targetDir = canonicalDirectory;
+        let found = false;
+
+        // Phase 1: compute pending changes for each scope.
+        const pendingChanges: Array<{
+          scope: SettingScope;
+          dirs: string[];
+        }> = [];
+        for (const scope of [
+          SettingScope.Workspace,
+          SettingScope.User,
+        ] as const) {
+          const scopeDirs =
+            settings.forScope(scope).originalSettings.context
+              ?.includeDirectories ?? [];
+          // Resolve all paths in parallel using async realpath to avoid
+          // blocking the event loop with N+1 sync I/O.
+          const resolutions = await Promise.all(
+            scopeDirs.map(async (d: string) => {
+              try {
+                return {
+                  original: d,
+                  resolved: await fs.promises.realpath(expandHomeDir(d)),
+                };
+              } catch {
+                return { original: d, resolved: null };
+              }
+            }),
+          );
+          const includeDirectories = resolutions
+            .filter((r) => {
+              const normalized = path.normalize(expandHomeDir(r.original));
+              return (
+                r.resolved !== targetDir &&
+                r.original !== targetDir &&
+                normalized !== targetDir
+              );
+            })
+            .map((r) => r.original);
+          if (includeDirectories.length < scopeDirs.length) {
+            found = true;
+            pendingChanges.push({ scope, dirs: includeDirectories });
+          }
+        }
+
+        if (!found) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Directory not found in workspace: {{directory}}', {
+                directory,
+              }),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        // Snapshot deep copies for rollback before any mutations.
+        const workspaceBefore = {
+          settings: structuredClone(settings.workspace.settings),
+          originalSettings: structuredClone(
+            settings.workspace.originalSettings,
+          ),
+        };
+        const userBefore = {
+          settings: structuredClone(settings.user.settings),
+          originalSettings: structuredClone(settings.user.originalSettings),
+        };
+
+        // Phase 2: commit all scopes atomically.
+        // setValue() writes to disk immediately, so on partial failure we
+        // must also restore the disk files for already-committed scopes.
+        const committed: SettingScope[] = [];
+        try {
+          for (const change of pendingChanges) {
+            settings.setValue(
+              change.scope,
+              'context.includeDirectories',
+              change.dirs,
+            );
+            committed.push(change.scope);
+          }
+        } catch (error) {
+          // Roll back in-memory state and disk for committed scopes.
+          for (const scope of committed) {
+            if (scope === SettingScope.Workspace) {
+              settings.workspace.settings = workspaceBefore.settings;
+              settings.workspace.originalSettings =
+                workspaceBefore.originalSettings;
+              // Re-write the disk file to match the restored in-memory state.
+              saveSettings(
+                settings.workspace,
+                workspaceBefore.originalSettings,
+              );
+            } else {
+              settings.user.settings = userBefore.settings;
+              settings.user.originalSettings = userBefore.originalSettings;
+              // Re-write the disk file to match the restored in-memory state.
+              saveSettings(settings.user, userBefore.originalSettings);
+            }
+          }
+          settings.recomputeMerged();
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Error updating settings: {{error}}', {
+                error: (error as Error).message,
+              }),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        // Now remove from memory — persisted settings are already updated.
+        const removed = workspaceContext.removeDirectory(canonicalDirectory);
+        if (!removed) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.',
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        // Report success — the directory has been removed from both
+        // persisted settings and in-memory workspace context.
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t('Removed directory: {{directory}}', { directory }),
+          },
+          Date.now(),
+        );
+
+        // Refresh hierarchical memory to drop QWEN.md content and
+        // conditional rules that were loaded from the removed directory,
+        // mirroring what the add path already does.
+        // This is best-effort: a failure here does not roll back the
+        // directory removal, but the user is warned that stale content
+        // may remain for the rest of the session.
+        if (config.shouldLoadMemoryFromIncludeDirectories()) {
+          try {
+            const { memoryContent, fileCount, conditionalRules, projectRoot } =
+              await loadServerHierarchicalMemory(
+                config.getWorkingDir(),
+                config.getWorkspaceContext().getDirectories(),
+                config.getFileService(),
+                config.getExtensionContextFilePaths(),
+                config.getFolderTrust(),
+                context.services.settings.merged.context?.importFormat ||
+                  'tree',
+                config.getContextRuleExcludes(),
+              );
+            config.setUserMemory(memoryContent);
+            config.setGeminiMdFileCount(fileCount);
+            config.setConditionalRulesRegistry(
+              new ConditionalRulesRegistry(conditionalRules, projectRoot),
+            );
+            context.ui.setGeminiMdFileCount(fileCount);
+          } catch (error) {
+            addItem(
+              {
+                type: MessageType.WARNING,
+                text: t(
+                  'Directory removed but memory refresh failed: {{error}}',
+                  { error: (error as Error).message },
+                ),
+              },
+              Date.now(),
+            );
+          }
+        }
       },
     },
     {

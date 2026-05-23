@@ -1088,6 +1088,8 @@ export default {
   'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}':
     'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}',
   'Error refreshing memory: {{error}}': 'Error refreshing memory: {{error}}',
+  'Directory removed but memory refresh failed: {{error}}':
+    'Directory removed but memory refresh failed: {{error}}',
   'Successfully added directories:\n- {{directories}}':
     'Successfully added directories:\n- {{directories}}',
   'Current workspace directories:\n{{directories}}':
@@ -1313,6 +1315,24 @@ export default {
     'This directory is already in the workspace.',
   'Already covered by existing directory: {{dir}}':
     'Already covered by existing directory: {{dir}}',
+
+  // ============================================================================
+  // /directory remove command
+  // ============================================================================
+  'Remove a directory from the workspace':
+    'Remove a directory from the workspace',
+  'Please provide a directory path to remove.':
+    'Please provide a directory path to remove.',
+  'Cannot remove initial workspace directory: {{directory}}':
+    'Cannot remove initial workspace directory: {{directory}}',
+  'Directory not found in workspace: {{directory}}':
+    'Directory not found in workspace: {{directory}}',
+  'Error updating settings: {{error}}': 'Error updating settings: {{error}}',
+  'Removed directory: {{directory}}': 'Removed directory: {{directory}}',
+  'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.':
+    'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.',
+  'The /directory remove command is not supported in restrictive sandbox profiles.':
+    'The /directory remove command is not supported in restrictive sandbox profiles.',
 
   // ============================================================================
   // Status Bar

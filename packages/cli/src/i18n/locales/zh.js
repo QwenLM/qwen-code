@@ -1034,6 +1034,8 @@ export default {
   'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}':
     '如果存在，已成功从以下目录添加 QWEN.md 文件：\n- {{directories}}',
   'Error refreshing memory: {{error}}': '刷新内存时出错：{{error}}',
+  'Directory removed but memory refresh failed: {{error}}':
+    '目录已移除，但内存刷新失败：{{error}}',
   'Successfully added directories:\n- {{directories}}':
     '成功添加目录：\n- {{directories}}',
   'Current workspace directories:\n{{directories}}':
@@ -1247,7 +1249,24 @@ export default {
   'Directory does not exist.': '目录不存在。',
   'Path is not a directory.': '路径不是目录。',
   'This directory is already in the workspace.': '此目录已在工作区中。',
+
   'Already covered by existing directory: {{dir}}': '已被现有目录覆盖：{{dir}}',
+
+  // ============================================================================
+  // /directory remove command
+  // ============================================================================
+  'Remove a directory from the workspace': '从工作区中移除目录',
+  'Please provide a directory path to remove.': '请提供要移除的目录路径。',
+  'Cannot remove initial workspace directory: {{directory}}':
+    '无法移除初始工作区目录：{{directory}}',
+  'Directory not found in workspace: {{directory}}':
+    '在工作区中找不到目录：{{directory}}',
+  'Error updating settings: {{error}}': '更新设置时出错：{{error}}',
+  'Removed directory: {{directory}}': '已移除目录：{{directory}}',
+  'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.':
+    '目录已从设置中移除，但无法从活动工作区中移除。在当前会话中可能仍然可以访问。',
+  'The /directory remove command is not supported in restrictive sandbox profiles.':
+    '限制性沙箱配置不支持 /directory remove 命令。',
 
   // ============================================================================
   // Status Bar
