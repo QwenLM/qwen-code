@@ -117,6 +117,12 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  *   miss a same-owner inode swap (attacker replaces the file with a
  *   different inode of their own); `!isFile()` catches a special-file
  *   swap that survives `O_NONBLOCK` (e.g. FIFO with a live reader).
+ * - **Post-write `nlink === 0` check** detects the
+ *   fstat-to-close window: a concurrent `rename(other, targetPath)`
+ *   between fstat and close drops our bound inode's link count to
+ *   zero. The data we wrote goes to an anonymous inode that close
+ *   frees — silent data loss. Catching `nlink === 0` surfaces this
+ *   as `EINODE_UNLINKED_DURING_WRITE`.
  *
  * Caller should confirm `existingStat.isFile()` before invoking so the
  * in-place path is skipped for known non-regular targets. Defense in
@@ -128,9 +134,33 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  * - Root (Docker-as-root, the PR's target): chmod succeeds and is
  *   load-bearing — POSIX clears setuid/setgid on write to a file
  *   with those bits, so chmod restores them.
- * - Non-root with `uid !== expectedStat.uid`: chmod is guaranteed to
+ * - Non-root with `uid !== fdStat.uid`: chmod is guaranteed to
  *   fail with EPERM (POSIX requires file owner or root for chmod).
  *   We skip the syscall in that case to avoid the guaranteed failure.
+ *
+ * **Known limitation — no advisory locking between concurrent
+ * in-place writers**: two concurrent `atomicWriteFile` calls that
+ * both take the in-place fallback have no mutual exclusion between
+ * `truncate(0)` and `writeFile` completion. Last-writer-wins with
+ * possibly interleaved content. The atomic rename path is immune to
+ * this. If multi-process coordinated writes against a shared file
+ * are needed, callers should layer their own `flock`/lockfile.
+ *
+ * @remarks
+ * **Freshness contract**: `expectedStat` MUST be captured by a fresh
+ * `fs.stat(targetPath)` immediately before calling this function. A
+ * stale or cached stat silently nullifies every guard (the
+ * dev/ino/uid/gid verification becomes a tautology against the wrong
+ * baseline). The function is exported solely for unit testability;
+ * the only production caller is `atomicWriteFile` in this same file.
+ *
+ * @throws EOWNERSHIP_CHANGED — fstat mismatch (path swapped post-stat).
+ * @throws EINODE_UNLINKED_DURING_WRITE — concurrent rename-over dropped
+ *   our bound inode to nlink 0 between fstat and close.
+ * @throws EINPLACE_TRUNCATE_FAILED — fh.truncate(0) failed; original
+ *   content is still intact.
+ * @throws EINPLACE_WRITE_FAILED — fh.writeFile failed after truncate;
+ *   file is now empty or partially written.
  */
 export async function writeInPlaceWithFdGuards(
   targetPath: string,
@@ -163,12 +193,20 @@ export async function writeInPlaceWithFdGuards(
       err.code = 'EOWNERSHIP_CHANGED';
       throw err;
     }
-    // Verified — now safe to truncate and write through the bound fd.
-    // Wrap writeFile so a mid-write failure surfaces the post-truncate
-    // state explicitly — without this, callers see the raw OS error
-    // (ENOSPC, EIO, …) and may wrongly assume the original file is
-    // intact because this function lives in atomicFileWrite.ts.
-    await fh.truncate(0);
+    // Wrap truncate so callers can distinguish "truncate failed, original
+    // intact" from "write failed after truncate, original lost".
+    try {
+      await fh.truncate(0);
+    } catch (truncErr) {
+      const err: NodeJS.ErrnoException = new Error(
+        `In-place truncate of ${targetPath} failed before any data was lost; ` +
+          `original content is intact. Cause: ` +
+          (truncErr instanceof Error ? truncErr.message : String(truncErr)),
+      );
+      err.code = 'EINPLACE_TRUNCATE_FAILED';
+      (err as Error & { cause?: unknown }).cause = truncErr;
+      throw err;
+    }
     const fhWriteOptions: { encoding?: BufferEncoding; flush?: boolean } = {};
     if (typeof data === 'string' && options.encoding) {
       fhWriteOptions.encoding = options.encoding;
@@ -188,20 +226,63 @@ export async function writeInPlaceWithFdGuards(
     }
     if (options.mode !== undefined) {
       // Skip chmod when we know it will EPERM — non-root callers cannot
-      // chmod files they don't own. Root and same-owner callers proceed.
+      // chmod files they don't own. Use fdStat.uid (fd-bound, verified
+      // by the guard above) rather than expectedStat.uid so a future
+      // refactor of the guard doesn't silently weaken this check.
       const euid = process.geteuid?.();
-      const canChmod =
-        euid === undefined || euid === 0 || euid === expectedStat.uid;
+      const canChmod = euid === undefined || euid === 0 || euid === fdStat.uid;
       if (canChmod) {
         try {
           await fh.chmod(options.mode);
+          // chmod is a metadata-only operation not covered by the data
+          // fsync inside writeFile({ flush: true }). Force a metadata
+          // commit so a crash before lazy metadata flush doesn't lose
+          // the mode restoration (matters for setuid/setgid bits).
+          if (options.flush) {
+            try {
+              await fh.sync();
+            } catch {
+              // Best-effort: if data sync succeeded, metadata sync
+              // failing usually means a filesystem that doesn't
+              // distinguish them. Acceptable.
+            }
+          }
         } catch {
           // Ignore — not all filesystems support chmod.
         }
       }
     }
+    // Fstat-to-close window: a concurrent rename-over after our guard
+    // unlinks the inode we're holding. Our truncate + writeFile land on
+    // an anonymous inode that close will free. Detect via nlink === 0.
+    try {
+      const finalStat = await fh.stat();
+      if (finalStat.nlink === 0) {
+        const err: NodeJS.ErrnoException = new Error(
+          `${targetPath}: bound inode was unlinked between fstat and close ` +
+            `(concurrent rename-over). Our write went to an anonymous inode ` +
+            `that will be freed; data at ${targetPath} reflects the racing ` +
+            `writer's content, not ours.`,
+        );
+        err.code = 'EINODE_UNLINKED_DURING_WRITE';
+        throw err;
+      }
+    } catch (err) {
+      // Re-throw our EINODE_UNLINKED_DURING_WRITE; ignore fstat itself
+      // failing (best-effort detection only).
+      if (isNodeError(err) && err.code === 'EINODE_UNLINKED_DURING_WRITE') {
+        throw err;
+      }
+    }
   } finally {
-    await fh.close();
+    // close() can throw on NFS (COMMIT failure) or FUSE. Don't let it
+    // mask the original try-body exception — flush:true already fsync'd
+    // the data, so close failure here is best-effort.
+    try {
+      await fh.close();
+    } catch {
+      // ignore
+    }
   }
 }
 

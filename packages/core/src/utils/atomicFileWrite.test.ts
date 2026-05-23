@@ -618,4 +618,81 @@ describe('writeInPlaceWithFdGuards', () => {
       expect(await fs.readFile(realFile, 'utf-8')).toBe('real-content');
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'should wrap fh.writeFile failure as EINPLACE_WRITE_FAILED after truncate',
+    async () => {
+      // Trigger the data-loss path: truncate succeeds, then writeFile
+      // throws. Verify the error is wrapped with EINPLACE_WRITE_FAILED
+      // + cause, and the file is observably empty (truncate ran).
+      const filePath = path.join(tmpDir, 'will-be-truncated.txt');
+      await fs.writeFile(filePath, 'original content longer than zero');
+      const beforeStat = await fs.stat(filePath);
+
+      // Monkey-patch FileHandle.prototype.writeFile to fail. Use an
+      // open handle to find the prototype, then restore after the test.
+      const probeFh = await fs.open(filePath, 'r');
+      const FileHandleProto = Object.getPrototypeOf(probeFh);
+      const origWriteFile = FileHandleProto.writeFile;
+      await probeFh.close();
+
+      FileHandleProto.writeFile =
+        async function mockWriteFile(): Promise<void> {
+          const err: NodeJS.ErrnoException = new Error('mock ENOSPC');
+          err.code = 'ENOSPC';
+          throw err;
+        };
+
+      try {
+        await expect(
+          writeInPlaceWithFdGuards(filePath, 'updated', beforeStat, {
+            encoding: 'utf-8',
+          }),
+        ).rejects.toMatchObject({
+          code: 'EINPLACE_WRITE_FAILED',
+          message: expect.stringMatching(/empty or partially written/),
+          cause: expect.objectContaining({ code: 'ENOSPC' }),
+        });
+      } finally {
+        FileHandleProto.writeFile = origWriteFile;
+      }
+
+      // truncate ran before writeFile threw — file is now empty.
+      expect((await fs.stat(filePath)).size).toBe(0);
+    },
+  );
+
+  it.skipIf(
+    process.platform === 'win32' || typeof process.geteuid !== 'function',
+  )(
+    'should actually skip chmod (not just no-op set to same mode) when canChmod is false',
+    async () => {
+      // The skip-when-non-root optimization fires when euid is neither
+      // root nor the file owner. Pass a desiredMode that differs from
+      // the file's current mode so we can observe the skip via the
+      // file's final mode being unchanged.
+      const filePath = path.join(tmpDir, 'skip-chmod.txt');
+      await fs.writeFile(filePath, 'original');
+      await fs.chmod(filePath, 0o644);
+      const beforeStat = await fs.stat(filePath);
+
+      // Mock geteuid to a "foreign" uid so canChmod=false.
+      const realGeteuid = process.geteuid!;
+      process.geteuid = () => beforeStat.uid + 1;
+
+      try {
+        await writeInPlaceWithFdGuards(filePath, 'updated', beforeStat, {
+          encoding: 'utf-8',
+          mode: 0o755, // intentionally different from 0o644
+        });
+      } finally {
+        process.geteuid = realGeteuid;
+      }
+
+      // Write went through, but chmod was skipped — mode stays at 0o644.
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('updated');
+      const afterStat = await fs.stat(filePath);
+      expect(afterStat.mode & 0o777).toBe(0o644);
+    },
+  );
 });
