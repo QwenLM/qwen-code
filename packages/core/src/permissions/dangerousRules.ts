@@ -20,9 +20,9 @@ import type { PermissionRule } from './types.js';
  * model execute arbitrary code under the AUTO classifier's nose. Covers
  * Unix and Windows shell interpreters, scripting-language interpreters,
  * remote shells, and build/package tools that themselves run arbitrary
- * scripts (`cargo run`, `npm run`, …). Mirrors Claude Code's shell and
- * scripting-interpreter checks, then extends them with additional
- * security-relevant runners.
+ * scripts (`cargo run`, `npm run`, …). The exact token set is intentionally
+ * self-contained so AUTO-mode stripping does not depend on an external
+ * upstream identifier.
  */
 const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   // Unix shells
@@ -108,6 +108,7 @@ const SHELL_LIKE_TOOLS: readonly string[] = Object.freeze([
  *   - absolute-path forms (`/usr/bin/python3` → trailing segment `python3`)
  *   - trailing-wildcard forms (`python3*`)
  *   - colon form (`python:`)
+ *   - Windows executable suffixes (`python.exe`)
  */
 function isInterpreterToken(rawToken: string): boolean {
   if (!rawToken) return false;
@@ -120,10 +121,18 @@ function isInterpreterToken(rawToken: string): boolean {
     end--;
   }
   const noWildcard = rawToken.slice(0, end);
-  const beforeColon = noWildcard.split(':')[0];
+  const beforeColon = /^[a-z]:[\\/]/i.test(noWildcard)
+    ? noWildcard
+    : noWildcard.split(':')[0];
   // Last path segment so `/usr/bin/python3` → `python3`
-  const lastSegment = (beforeColon ?? '').split('/').pop() ?? '';
-  return DANGEROUS_BASH_INTERPRETERS.includes(lastSegment);
+  const lastSegment = (beforeColon ?? '').split(/[\\/]/).pop() ?? '';
+  const withoutExe = lastSegment.endsWith('.exe')
+    ? lastSegment.slice(0, -'.exe'.length)
+    : lastSegment;
+  return (
+    DANGEROUS_BASH_INTERPRETERS.includes(lastSegment) ||
+    DANGEROUS_BASH_INTERPRETERS.includes(withoutExe)
+  );
 }
 
 /**
@@ -152,12 +161,12 @@ export function isDangerousBashRule(rule: PermissionRule): boolean {
   // dangerous when it appears as the first token of either form
   // (`python -c *` or `python:*`). For colon-form, the part after `:` is
   // the specifier — we'll separately check whether it's concrete below.
-  const firstToken = content.split(/[\s:]/)[0] ?? '';
+  const firstToken = content.split(/\s/)[0] ?? '';
   if (!isInterpreterToken(firstToken)) return false;
 
   // Bare interpreter name (`python`, `/usr/bin/python3`) — caller decides
   // what to do, classifier never sees it. Dangerous.
-  if (firstToken === content) return true;
+  if (firstToken === content && !content.includes(':')) return true;
 
   // Wildcard anywhere paired with an interpreter defeats the classifier:
   // `python *`, `python -c *`, `bun run *`, `/usr/bin/python3 *`,
