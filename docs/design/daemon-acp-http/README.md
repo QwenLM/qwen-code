@@ -313,3 +313,50 @@ thin compat shim over `/acp` (separate, later PR).
 | HTTP/1.1 vs required HTTP/2 | Localhost/CLI clients unaffected; documented; h2 is a transport swap later. |
 | Two transports on one bridge race | Bridge already supports multi-client; reuse its locking. |
 | `fs/*` forwarding vs daemon-local FS | Capability-gated: forward when client declares `fs`, else local. |
+
+---
+
+## 10. Implementation & verification log (v1)
+
+Implemented in `packages/cli/src/serve/acpHttp/` (`jsonRpc.ts`, `sseStream.ts`,
+`connectionRegistry.ts`, `dispatch.ts`, `index.ts`), mounted from `server.ts`
+via `mountAcpHttp(app, bridge, { boundWorkspace })`.
+
+### Automated (`packages/cli/src/serve/acpHttp/*.test.ts`)
+
+`transport.test.ts` boots a real Express server + the real `mountAcpHttp` over
+a controllable fake bridge and drives it with `fetch` + manual SSE parsing.
+15 tests green, covering: `initialize` 200 + `Acp-Connection-Id`; unknown-conn
+400; `session/new` reply on the connection stream; prompt → `session/update`
+stream + final result correlation; `session/request_permission` agent→client→
+agent round-trip; `_qwen/session/set_model`; method-not-found; `DELETE` teardown.
+
+### Live daemon (real model)
+
+Booted `qwen serve --port 8767 --token … --workspace …` (bundle entry so the
+spawned `qwen --acp` child is self-contained) and ran `scripts/acp-http-smoke.mjs`:
+
+```
+✓ initialize: connectionId=… protocolVersion=1
+✓ session/new: sessionId=…
+→ prompt: "Reply with the single word: pong"
+pong
+✓ prompt complete: 10 session/update frames, stopReason=end_turn
+✓ DELETE /acp — connection closed
+ALL CHECKS PASSED ✅
+```
+
+Error-path was also confirmed live: when the child failed to start, the bridge
+timeout surfaced to the client as a JSON-RPC error frame on the connection
+stream (`{"id":2,"error":{"code":-32603,…}}`), proving id-correlation + the
+202/SSE split under failure.
+
+### Review fold-in — bridge-issued clientId (found in live verify)
+
+First live run failed `session/prompt` with *"client id … is not registered for
+session"*. Root cause: `spawnOrAttach`/`loadSession` **ignore** a caller-supplied
+clientId the bridge has never issued and stamp a fresh one (returned in
+`BridgeSession.clientId`); the dispatcher was echoing the connection's own
+(unregistered) id on `sendPrompt`. Fix: persist the bridge-stamped id on the
+`SessionBinding` and echo it on every per-session call (`sessionCtx`). Re-verified
+green above.

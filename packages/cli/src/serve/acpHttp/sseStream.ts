@@ -1,0 +1,112 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { Response } from 'express';
+
+/**
+ * A long-lived Server-Sent-Events writer for the ACP-over-HTTP transport.
+ *
+ * Unlike the REST `/session/:id/events` stream (qwen event envelopes), the
+ * ACP transport carries raw JSON-RPC 2.0 objects as the SSE `data:` payload
+ * — one object per frame. The RFD keeps these streams open for the life of
+ * the connection/session, so the writer must:
+ *   - serialize writes through a single chain (heartbeat can't interleave),
+ *   - respect backpressure (`res.write` → false ⇒ await `drain`),
+ *   - emit periodic comment heartbeats to keep NAT/proxies alive.
+ *
+ * This mirrors the battle-tested pattern in `server.ts`'s SSE handler but
+ * trimmed to what the ACP transport needs (no ring-buffer `id:` sequencing —
+ * resumability is RFD Phase 4, deferred per the design doc §7).
+ */
+export class SseStream {
+  private writeChain: Promise<void> = Promise.resolve();
+  private heartbeat: ReturnType<typeof setInterval> | undefined;
+  private closed = false;
+
+  constructor(
+    private readonly res: Response,
+    private readonly onClose?: () => void,
+  ) {}
+
+  /** Write SSE headers + retry hint and start the heartbeat. */
+  open(): void {
+    this.res.status(200);
+    this.res.setHeader('Content-Type', 'text/event-stream');
+    this.res.setHeader('Cache-Control', 'no-cache, no-transform');
+    this.res.setHeader('Connection', 'keep-alive');
+    this.res.setHeader('X-Accel-Buffering', 'no');
+    this.res.flushHeaders();
+    void this.writeRaw('retry: 3000\n\n');
+
+    this.heartbeat = setInterval(() => {
+      if (!this.closed) void this.writeRaw(': hb\n\n');
+    }, 15_000);
+    this.heartbeat.unref();
+
+    const cleanup = () => this.close();
+    this.res.req.on('close', cleanup);
+    this.res.on('error', cleanup);
+  }
+
+  /** Serialize a JSON-RPC message as one SSE frame. */
+  send(message: unknown): Promise<void> {
+    return this.writeRaw(`data: ${JSON.stringify(message)}\n\n`);
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    try {
+      if (!this.res.writableEnded) this.res.end();
+    } catch {
+      // socket already gone — nothing to flush
+    }
+    this.onClose?.();
+  }
+
+  private writeRaw(chunk: string): Promise<void> {
+    const next = this.writeChain.then(() => this.doWrite(chunk));
+    // Tail-swallow so one failed write doesn't poison the chain; the
+    // caller's returned promise still rejects.
+    this.writeChain = next.catch(() => undefined);
+    return next;
+  }
+
+  private doWrite(chunk: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (this.closed || this.res.writableEnded) {
+        resolve();
+        return;
+      }
+      let ok: boolean;
+      try {
+        ok = this.res.write(chunk);
+      } catch (err) {
+        reject(err as Error);
+        return;
+      }
+      if (ok) {
+        resolve();
+        return;
+      }
+      const onDrain = () => {
+        this.res.off('close', onCloseEv);
+        resolve();
+      };
+      const onCloseEv = () => {
+        this.res.off('drain', onDrain);
+        resolve();
+      };
+      this.res.once('drain', onDrain);
+      this.res.once('close', onCloseEv);
+    });
+  }
+}
