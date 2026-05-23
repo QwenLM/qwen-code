@@ -183,7 +183,13 @@ export function saveTrustedFolders(
     atomicWriteFileSync(
       trustedFoldersFile.path,
       JSON.stringify(trustedFoldersFile.config, null, 2),
-      { encoding: 'utf-8', mode: 0o600, forceMode: true },
+      // noFollow: refuse to follow any pre-placed symlink at the
+      // config path — a redirected write could either leak the
+      // trusted-folder list to an attacker target or leave the user's
+      // real config silently stale. Matches the credential write
+      // sites' security posture (sharedTokenManager, oauth-token-storage,
+      // file-token-storage all use noFollow:true).
+      { encoding: 'utf-8', mode: 0o600, forceMode: true, noFollow: true },
     );
   } catch (error) {
     writeStderrLine('Error saving trusted folders file.');

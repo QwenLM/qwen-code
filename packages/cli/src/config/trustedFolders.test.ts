@@ -204,7 +204,15 @@ describe('Trusted Folders Loading', () => {
     expect(atomicWriteFileSync).toHaveBeenCalledWith(
       getTrustedFoldersPath(),
       JSON.stringify({ '/new/path': TrustLevel.TRUST_FOLDER }, null, 2),
-      { encoding: 'utf-8', mode: 0o600, forceMode: true },
+      // noFollow:true mirrors the credential write sites' security
+      // posture — a pre-placed symlink at the config path could leak
+      // the trusted-folder list or leave the user's real config stale.
+      {
+        encoding: 'utf-8',
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      },
     );
   });
 });

@@ -235,9 +235,13 @@ export async function atomicWriteFile(
     await tryChmod(tmpPath);
     await renameWithRetry(tmpPath, targetPath, retries, delayMs, renameImpl);
   } catch (error) {
-    // Clean up temp file.
+    // Clean up temp file. Routed through unlinkImpl so the test
+    // seam covers every fs.unlink call site in this function (pre-open,
+    // tmp cleanup, orphan cleanup) — keeps the seam abstraction
+    // consistent for future test authors even though this branch is
+    // best-effort.
     try {
-      await fs.unlink(tmpPath);
+      await unlinkImpl(tmpPath);
     } catch {
       // Ignore cleanup errors.
     }
@@ -560,8 +564,9 @@ export function atomicWriteFileSync(
     tryChmodSync(tmpPath);
     renameWithRetrySync(tmpPath, targetPath, retries, delayMs, renameImpl);
   } catch (error) {
+    // See atomicWriteFile for the unlinkImpl-seam routing rationale.
     try {
-      fsSync.unlinkSync(tmpPath);
+      unlinkImpl(tmpPath);
     } catch {
       // Ignore cleanup errors.
     }

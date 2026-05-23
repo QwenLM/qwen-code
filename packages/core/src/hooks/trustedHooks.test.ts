@@ -34,7 +34,7 @@ describe('TrustedHooksManager', () => {
     vi.restoreAllMocks();
   });
 
-  it('trustHooks writes via atomicWriteFileSync with {mode: 0o600, forceMode: true}', () => {
+  it('trustHooks writes via atomicWriteFileSync with credentials-grade options', () => {
     const manager = new TrustedHooksManager();
     const hook: HookConfig = {
       type: HookType.Command,
@@ -45,7 +45,15 @@ describe('TrustedHooksManager', () => {
 
     expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
     const [, , options] = vi.mocked(atomicWriteFileSync).mock.calls[0];
-    expect(options).toEqual({ mode: 0o600, forceMode: true });
+    // mode 0o600 + forceMode: + noFollow:true — mirrors the credential
+    // write sites (sharedTokenManager / oauth-token-storage /
+    // file-token-storage). noFollow prevents a pre-placed symlink at
+    // the config path from redirecting the executable-trust list.
+    expect(options).toEqual({
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
   });
 
   it('trustHooks writes the configPath under the global qwen dir', () => {
