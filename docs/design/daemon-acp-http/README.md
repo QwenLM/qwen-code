@@ -1,0 +1,315 @@
+# Daemon ACP-over-HTTP → Official ACP Streamable HTTP Transport
+
+> Targets `daemon_mode_b_main`. Branch: `feat/daemon-acp-http-streamable`.
+> Author: arnoo.gao. Date: 2026-05-24. Status: **Design v1 → implementation**.
+> Design-first per repo workflow: this doc lands before/with the implementation PR so the wire contract is reviewable.
+
+---
+
+## 0. TL;DR
+
+The daemon (`qwen serve`) today speaks a **bespoke REST + SSE** dialect to web/SDK
+clients, while speaking **real ACP JSON-RPC over stdio** to the spawned `qwen --acp`
+child. This proposal adds a **second northbound transport** that implements the
+**official ACP Streamable HTTP transport** (RFD #721) at a single `/acp` endpoint,
+so any ACP-native client (Zed, Goose, future SDKs) can drive the daemon directly
+over the standard protocol — no qwen-specific REST knowledge required.
+
+**Decision: dual-transport, additive.** The new `/acp` endpoint is mounted
+alongside the existing REST surface, reusing the same `HttpAcpBridge` +
+`EventBus` underneath. The REST API is *not* removed. Rationale in §6.
+
+**Decision: extension namespace = `_qwen/…`** (single-underscore prefix, the
+ACP-spec-reserved form for custom methods) for daemon features that have no
+standard ACP method (model switch, workspace introspection, heartbeat,
+multi-client permission policy, SSE backpressure tuning). Rationale in §5.
+
+A complete, locally-runnable reference implementation ships in this PR
+(`packages/cli/src/serve/acpHttp/`) plus a verification harness
+(`scripts/acp-http-smoke.mjs`).
+
+---
+
+## 1. Background — what "ACP over HTTP" means today
+
+Three tiers (verified at commit `0c0430939`):
+
+```
+┌──────────────┐  bespoke REST + SSE (HTTP/1.1)   ┌────────────┐  ACP JSON-RPC   ┌──────────────┐
+│ web / SDK    │ ───────────────────────────────► │  qwen      │  (stdio NDJSON) │ qwen --acp   │
+│ client       │ ◄─── GET /session/:id/events ──── │  serve     │ ◄─────────────► │ child (Agent)│
+│ (ACP client) │       (text/event-stream)        │  (daemon)  │  ndJsonStream   │              │
+└──────────────┘                                   └────────────┘                 └──────────────┘
+        northbound: NOT ACP wire                       bridge          southbound: real ACP
+```
+
+### 1.1 Northbound (client ↔ daemon) — bespoke, today
+
+- Express 5 app in `packages/cli/src/serve/server.ts` (~30 routes).
+- Discrete REST verbs, **not** JSON-RPC:
+  - `POST /session` (create), `POST /session/:id/prompt`, `POST /session/:id/cancel`,
+    `POST /session/:id/load|resume`, `POST /session/:id/model`,
+    `POST /session/:id/permission/:requestId`, `POST /session/:id/heartbeat`,
+    `DELETE /session/:id`, plus `/workspace/*`, `/capabilities`, `/health`.
+- Server→client streaming: `GET /session/:id/events` → `text/event-stream`.
+  - Frames: `id: <n>\nevent: <type>\ndata: <json>\n\n` (`server.ts:formatSseFrame`, ~2626).
+  - Per-session **monotonic `id`** + `Last-Event-ID` resume backed by a
+    ring-buffer `EventBus` (`acp-bridge/src/eventBus.ts`).
+  - Event `type`s: `session_update`, `client_evicted`, `slow_client_warning`,
+    `state_resync_required`, `stream_error`, …
+- Auth: `Authorization: Bearer <token>` (`serve/auth.ts`), CORS deny + host allowlist.
+- Backpressure: per-connection serialized write chain + 15 s heartbeat comments.
+
+### 1.2 Southbound (daemon ↔ child) — already ACP
+
+- `acp-bridge/src/spawnChannel.ts` spawns `qwen --acp`, wraps stdin/stdout with
+  `ndJsonStream` from `@agentclientprotocol/sdk` (`^0.14.1`).
+- `acp-bridge/src/bridge.ts:729` `new ClientSideConnection(() => client, channel.stream)`
+  — the daemon is the ACP **client**, the child is the ACP **agent**.
+- Extension methods already in use on this leg: `unstable_setSessionModel`,
+  `unstable_resumeSession`, `unstable_listSessions` (`acp-integration/acpAgent.ts`).
+
+### 1.3 Why migrate the northbound
+
+- Every client (webui, TS SDK, Java SDK, Python SDK, VSCode companion) re-implements
+  the bespoke REST mapping. An ACP-standard endpoint lets ACP-native editors attach
+  with zero qwen-specific glue.
+- Aligns the daemon's remote surface with the protocol it already speaks internally.
+
+---
+
+## 2. Target: ACP Streamable HTTP (RFD #721)
+
+Merged **Draft** RFD (`agentclientprotocol/agent-client-protocol#721`, merged 2026-04-22).
+Not yet normative; not yet in any SDK. We implement against the RFD wire design.
+
+### 2.1 Endpoint & verbs (single `/acp`)
+
+| Verb | Behavior |
+|------|----------|
+| `POST /acp` | Send JSON-RPC. `initialize` → **`200`** + JSON body (capabilities) and sets `Acp-Connection-Id`. All other requests/notifications → **`202 Accepted`**, empty body; the *response* (if any) is delivered on the matching long-lived SSE stream. |
+| `GET /acp` | Open a long-lived **SSE** stream. (`Upgrade: websocket` → WebSocket; **deferred**, see §7.) |
+| `DELETE /acp` | Terminate the connection → `202`. |
+
+### 2.2 Two-tier long-lived streams
+
+- **Connection-scoped stream**: `GET /acp` with header `Acp-Connection-Id`, no session
+  header. Carries connection-level responses (`session/new`, `session/load`,
+  `authenticate`) and connection-level notifications.
+- **Session-scoped stream**: `GET /acp` with `Acp-Connection-Id` **and** `Acp-Session-Id`.
+  Carries `session/update` notifications, **agent→client requests**
+  (`session/request_permission`, `fs/read_text_file`, …), and responses to
+  session POSTs (`session/prompt`, `session/cancel`).
+
+### 2.3 Identity (3 layers)
+
+- `Acp-Connection-Id` (HTTP header) — transport binding, minted at `initialize`.
+- `Acp-Session-Id` (HTTP header) — required on session-scoped GET + session POSTs.
+- `sessionId` (JSON-RPC param) — inside method params (must match the header).
+
+### 2.4 Divergences from MCP StreamableHTTP
+
+ACP uses **long-lived** streams (not per-request SSE), **two** ID headers (connection
+vs session), `202`-for-non-initialize, HTTP/2-required, WebSocket-required-client. We
+borrow the single-endpoint + POST/GET-SSE + session-header skeleton but adapt to the
+long-lived dual-ID model. We do **not** reuse `@modelcontextprotocol/sdk`'s
+`StreamableHTTPServerTransport` (its per-request stream model and single
+`Mcp-Session-Id` don't fit).
+
+### 2.5 Standard methods (confirmed from current schema)
+
+- Client→Agent requests: `initialize`, `authenticate`, `session/new`, `session/load`,
+  `session/prompt`, `session/resume`, `session/close`, `session/list`,
+  `session/set_mode`, `session/set_config_option`, `logout`.
+- Client→Agent notification: `session/cancel`.
+- Agent→Client requests: `fs/read_text_file`, `fs/write_text_file`,
+  `session/request_permission`, `terminal/create|output|wait_for_exit|kill|release`.
+- Agent→Client notification: `session/update`.
+
+---
+
+## 3. Architecture of the new transport
+
+The daemon must present an **ACP Agent surface over HTTP** northbound, while it
+remains an ACP **client** to the child southbound. The `/acp` layer is therefore a
+**JSON-RPC router** that terminates the HTTP transport and bridges into the existing
+`HttpAcpBridge`.
+
+```
+            POST /acp (JSON-RPC requests/responses/notifs)
+client  ──────────────────────────────────────────────►  ┌───────────────────────────┐
+(editor)                                                  │  AcpHttpTransport         │
+        ◄── GET /acp  (connection-scoped SSE) ──────────  │  - connection registry    │
+        ◄── GET /acp  (session-scoped SSE) ─────────────  │  - JSON-RPC id correlation│
+                                                          │  - method dispatch        │
+                                                          └────────────┬──────────────┘
+                                                                       │ reuses
+                                                          ┌────────────▼──────────────┐
+                                                          │  HttpAcpBridge + EventBus  │  (unchanged)
+                                                          └────────────┬──────────────┘
+                                                                       │ ACP stdio (unchanged)
+                                                                 qwen --acp child
+```
+
+### 3.1 New module layout (`packages/cli/src/serve/acpHttp/`)
+
+| File | Responsibility |
+|------|----------------|
+| `index.ts` | `mountAcpHttp(app, bridge, opts)` — registers `/acp` routes on the existing Express app. |
+| `connectionRegistry.ts` | `Acp-Connection-Id` → `AcpConnection` (connection SSE writer, `Map<sessionId, SessionStream>`, pending agent→client requests by JSON-RPC id, monotonic id allocator). TTL + DELETE cleanup. |
+| `jsonRpc.ts` | JSON-RPC 2.0 parse/validate/serialize helpers; error codes (`-32600` etc.); `_qwen/` namespace guard. |
+| `dispatch.ts` | Maps inbound JSON-RPC methods → `HttpAcpBridge` calls. Maps `BridgeEvent`s → outbound JSON-RPC frames. The translation table (§4). |
+| `sseStream.ts` | Long-lived SSE writer (reuses the backpressure/heartbeat pattern from `server.ts`). Distinct from REST `/events` (different framing: full JSON-RPC objects, not qwen event envelopes). |
+
+No change to `bridge.ts` / `eventBus.ts` (additive consumer only).
+
+### 3.2 Connection & session lifecycle
+
+1. `POST /acp {initialize}` → mint `connectionId`, create `AcpConnection`, reply `200`
+   with `{protocolVersion, agentCapabilities, _meta:{qwen:{…}}}` + `Acp-Connection-Id` header.
+2. Client opens `GET /acp` (connection-scoped) carrying `Acp-Connection-Id`.
+3. `POST /acp {session/new}` → `202`; daemon calls `bridge.createSession(...)`; pushes
+   the JSON-RPC response (with `sessionId`) down the **connection** stream.
+4. Client opens `GET /acp` (session-scoped) with `Acp-Connection-Id`+`Acp-Session-Id`;
+   daemon `bridge.subscribeEvents(sessionId)` and pipes translated frames.
+5. `POST /acp {session/prompt}` → `202`; `bridge.sendPrompt(...)`; `session/update`
+   notifications stream live on the session stream; the final prompt **response**
+   (`{id, result:{stopReason}}`) is pushed on the session stream when it settles.
+6. Agent→client request (e.g. `session/request_permission`) is emitted as a JSON-RPC
+   **request** on the session stream with a daemon-allocated id; the client answers via
+   `POST /acp {id, result}`; `dispatch` resolves it through the bridge's permission API.
+7. `DELETE /acp` (or connection-stream close + TTL) tears down sessions/subscriptions.
+
+---
+
+## 4. Translation table (bridge ⇄ ACP/HTTP)
+
+### 4.1 Inbound (client POST → bridge)
+
+| ACP method | Bridge call | Response routed to |
+|------------|-------------|--------------------|
+| `initialize` | (none; capabilities from `capabilities.ts`) | inline `200` |
+| `authenticate` | existing auth provider (`serve/auth/*`) | connection stream |
+| `session/new` | `bridge.createSession` | connection stream |
+| `session/load` / `session/resume` | `bridge.restoreSession('load'|'resume')` | connection stream |
+| `session/prompt` | `bridge.sendPrompt` | session stream (deferred until settle) |
+| `session/cancel` (notif) | `bridge.cancel` | — |
+| `session/list` | `bridge.listSessions` (`unstable_listSessions`) | connection stream |
+| `session/set_mode` | approval-mode route logic | session stream |
+| JSON-RPC **response** (to agent→client req) | resolve pending (`§4.3`) | — |
+| `_qwen/session/set_model` | `bridge.setSessionModel` (`unstable_setSessionModel`) | session stream |
+| `_qwen/workspace/list` etc. | workspace introspection routes | connection stream |
+| `_qwen/session/heartbeat` | `bridge.heartbeat` | connection stream |
+
+### 4.2 Outbound (BridgeEvent → JSON-RPC on session stream)
+
+| BridgeEvent.type | Emitted as |
+|------------------|-----------|
+| `session_update` | `{method:"session/update", params:<data>}` notification |
+| permission request | `{id:<n>, method:"session/request_permission", params}` request |
+| `client_evicted` / `slow_client_warning` / `state_resync_required` | `{method:"_qwen/notify", params:{kind,…}}` notification |
+| `stream_error` | JSON-RPC error response on the active prompt id (or `_qwen/notify`) |
+| prompt settle | `{id:<promptId>, result:{stopReason}}` |
+
+### 4.3 Pending agent→client requests
+
+`AcpConnection` keeps `Map<jsonRpcId, {sessionId, kind, bridgeRequestId, resolve}>`.
+When the client POSTs a JSON-RPC response object, `dispatch` matches `id`, then calls the
+bridge resolution path (e.g. permission `POST /session/:id/permission/:requestId`
+internal equivalent). `fs/*` requests: the daemon already satisfies file reads via its
+own workspace FS for the REST path; for the ACP surface we **forward** `fs/*` to the
+client (true ACP semantics) and only fall back to local FS when the client lacks the
+`fs` capability (declared in `initialize`).
+
+---
+
+## 5. Extension strategy (requirement #2)
+
+ACP reserves any method starting with `_` for custom extensions and provides `_meta`
+on every type. The codebase's southbound leg already uses `unstable_*` method names.
+
+**Northbound choice:** vendor-namespaced **`_qwen/<area>/<verb>`** method names
+(spec-compliant `_` prefix). Capabilities advertised under
+`agentCapabilities._meta.qwen` at `initialize` so clients feature-detect before use.
+
+| Need | No standard ACP method? | Extension |
+|------|------------------------|-----------|
+| Model switch | yes | `_qwen/session/set_model` |
+| Workspace MCP/skills/providers/env introspection | yes | `_qwen/workspace/list`, `_qwen/workspace/<area>` |
+| Heartbeat / last-seen | yes | `_qwen/session/heartbeat` |
+| Multi-client permission policy (consensus/designated) | partial | `session/request_permission` + `_meta.qwen.policy` |
+| SSE backpressure tuning (`maxQueued`) | yes | `Acp-Qwen-Max-Queued` header on session GET |
+| Resume cursor (ring `Last-Event-ID`) | RFD Phase 4 | `Last-Event-ID` header + `_meta.qwen.eventId` on frames |
+
+Standard methods are **never** renamed; extensions are strictly additive and ignorable.
+
+---
+
+## 6. Dual-transport vs. replace (requirement #4)
+
+**Decision: dual-transport (additive).**
+
+- The official transport is a **Draft** RFD, not normative, and absent from every SDK —
+  hard-replacing would couple us to an unratified design and break webui + 3 SDKs +
+  VSCode companion at once.
+- The REST surface carries features with no clean ACP mapping yet (workspace
+  introspection, multi-client permission mediation, ring-buffer resume, capability
+  registry). Those degrade to `_qwen/*` extensions on `/acp` but the REST surface stays
+  authoritative until the RFD ratifies.
+- Both transports share **one** `HttpAcpBridge` + `EventBus` instance, so there is no
+  state duplication — `/acp` and `/session/*` can even drive the same live session
+  concurrently (multi-client is already supported by the bridge).
+- Toggle: on by default; `QWEN_SERVE_ACP_HTTP=0` (or `--no-acp-http`) disables mount.
+  Advertised via a `acp_http` tag in `/capabilities`.
+
+Migration path: once the RFD ratifies and SDKs ship, REST routes can be reframed as a
+thin compat shim over `/acp` (separate, later PR).
+
+---
+
+## 7. Scope of the implementation PR
+
+**In scope (runnable + verified locally):**
+- `POST /acp` dispatch for `initialize`, `session/new`, `session/prompt`,
+  `session/cancel`, `session/load`, JSON-RPC response handling.
+- Connection-scoped + session-scoped `GET /acp` SSE streams with JSON-RPC framing.
+- `session/update` streaming + final prompt response correlation.
+- `session/request_permission` agent→client round-trip.
+- `_qwen/session/set_model` extension as the worked example of #2.
+- Bearer-auth + host allowlist reuse (same middleware as REST).
+- Unit tests (`acpHttp/*.test.ts`) + a black-box smoke script driving a real daemon.
+
+**Deferred (documented, not built now):**
+- WebSocket upgrade path (RFD-required client cap; SSE suffices for local verify).
+- HTTP/2 multiplexing (we run HTTP/1.1; POST and long-lived GET use separate sockets,
+  which works for CLI/Node clients and ≤6-connection browsers). Documented divergence.
+- Full `fs/*` + `terminal/*` agent→client forwarding (permission path proves the
+  mechanism; rest is mechanical follow-up).
+- SSE resumability hardening parity with the ring buffer (Phase 4 in RFD).
+
+---
+
+## 8. Local verification plan
+
+1. `npm run build` (or workspace build of `cli` + `acp-bridge`).
+2. Start daemon: `qwen serve --listen 127.0.0.1:0 --token <t>` (or env token).
+3. Run `node scripts/acp-http-smoke.mjs`:
+   - `POST /acp {initialize}` → assert `200` + `Acp-Connection-Id`.
+   - Open connection SSE; `POST {session/new}` → assert response on stream.
+   - Open session SSE; `POST {session/prompt:"say hi"}` → assert ≥1 `session/update`
+     then a final `{result:{stopReason}}`.
+   - Trigger a tool needing permission → assert `session/request_permission` request,
+     POST a grant response → assert prompt completes.
+   - `POST {_qwen/session/set_model}` → assert model switch + `session/update`.
+4. Vitest: `acpHttp/*.test.ts` green.
+
+---
+
+## 9. Risks
+
+| Risk | Mitigation |
+|------|-----------|
+| RFD changes before ratification | Behind capability tag + `_qwen` namespace; isolated module; easy to revise. |
+| HTTP/1.1 vs required HTTP/2 | Localhost/CLI clients unaffected; documented; h2 is a transport swap later. |
+| Two transports on one bridge race | Bridge already supports multi-client; reuse its locking. |
+| `fs/*` forwarding vs daemon-local FS | Capability-gated: forward when client declares `fs`, else local. |
