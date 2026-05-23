@@ -681,9 +681,13 @@ function sanitizeUrl(url: string): string {
 
 /**
  * Protocol-only validation for URLs that need XSS defense even when the
- * caller hasn't opted into full sanitization. `javascript:` / `data:` /
- * `vbscript:` URLs are never legitimate in `<img src>` / `![image]()`
- * contexts; reject them up front regardless of `sanitizeUrls`.
+ * caller hasn't opted into full sanitization. `javascript:` / `vbscript:`
+ * URLs are never legitimate in `<img src>` / `![image]()` contexts;
+ * reject them up front regardless of `sanitizeUrls`. `data:` URIs are
+ * allowed ONLY when they carry an image media-type — modern browsers
+ * don't execute `<img src="data:text/html,...">`, but tightening the
+ * allow-list to `data:image/*` removes a defense-in-depth gap flagged
+ * in the post-merge audit.
  *
  * wenshao R2 (qwen3.7-max): added because `sanitizeUrls` is opt-in and
  * defaults to false, but image-URL XSS exposure has no legitimate
@@ -691,11 +695,23 @@ function sanitizeUrl(url: string): string {
  */
 function ensureSafeImageUrl(url: string): string {
   try {
-    const protocol = new URL(url).protocol.toLowerCase();
-    if (protocol !== 'http:' && protocol !== 'https:' && protocol !== 'data:') {
-      return '#';
+    const parsed = new URL(url);
+    const protocol = parsed.protocol.toLowerCase();
+    if (protocol === 'http:' || protocol === 'https:') {
+      return url;
     }
-    return url;
+    if (protocol === 'data:') {
+      // Only `data:image/<subtype>[;base64],<payload>` is acceptable in
+      // an `<img>` context. Other MIME types open avenues like
+      // `data:text/html,<script>` which (while not directly executed by
+      // browsers as `<img>` content) shouldn't be normalized as a valid
+      // image source.
+      const mediaType = parsed.pathname.split(',')[0]?.split(';')[0]?.toLowerCase() ?? '';
+      if (mediaType.startsWith('image/')) {
+        return url;
+      }
+    }
+    return '#';
   } catch {
     return '#';
   }

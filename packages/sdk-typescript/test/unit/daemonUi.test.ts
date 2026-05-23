@@ -4550,3 +4550,48 @@ describe('Late permission.resolved after sentinel pruned (wenshao R3 qwen3.7-max
 // keeping it co-located with the adapter ensures path resolution goes
 // through webui's tsconfig path-mapping into source rather than the
 // SDK dist (which doesn't exist in CI before this PR builds).
+
+describe('ensureSafeImageUrl tightened to data:image/* (audit follow-up)', () => {
+  it('allows http/https/data:image/* but rejects data:text/html', async () => {
+    const {
+      daemonBlockToMarkdown,
+      createDaemonToolPreview,
+    } = await import('../../src/daemon/ui/index.js');
+    const mkBlock = (thumbnailUrl: string) =>
+      ({
+        id: 'b',
+        kind: 'tool' as const,
+        toolCallId: 't',
+        title: 'gen',
+        status: 'completed',
+        preview: createDaemonToolPreview(
+          { prompt: 'p', thumbnailUrl },
+          { toolName: 'image_generator', toolKind: 'tool' },
+        ),
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      });
+
+    // https → passthrough
+    expect(daemonBlockToMarkdown(mkBlock('https://cdn.example.com/x.png'))).toContain(
+      'cdn.example.com',
+    );
+    // data:image/png → passthrough
+    expect(
+      daemonBlockToMarkdown(
+        mkBlock('data:image/png;base64,iVBORw0KGgo='),
+      ),
+    ).toContain('data:image/png');
+    // data:text/html → rejected to '#'
+    expect(
+      daemonBlockToMarkdown(
+        mkBlock('data:text/html,<script>alert(1)</script>'),
+      ),
+    ).toContain('![image](#)');
+    // javascript: → rejected to '#'
+    expect(daemonBlockToMarkdown(mkBlock('javascript:alert(1)'))).toContain(
+      '![image](#)',
+    );
+  });
+});
