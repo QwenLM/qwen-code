@@ -190,6 +190,7 @@ export {
 // SDK MCP Server exports
 export { tool } from './mcp/tool.js';
 export { createSdkMcpServer } from './mcp/createSdkMcpServer.js';
+export { createServeBridgeMcpServer } from './mcp/serve-bridge/index.js';
 
 export type { SdkMcpToolDefinition } from './mcp/tool.js';
 
@@ -197,6 +198,8 @@ export type {
   CreateSdkMcpServerOptions,
   McpSdkServerConfigWithInstance,
 } from './mcp/createSdkMcpServer.js';
+
+export type { ServeBridgeMcpServerOptions } from './mcp/serve-bridge/index.js';
 
 export type { QueryOptions } from './query/createQuery.js';
 export type { LogLevel, LoggerConfig, ScopedLogger } from './utils/logger.js';
