@@ -154,6 +154,11 @@ describe('bundled review skill', () => {
       'gh pr diff https://github.com/owner/repo/pull/1',
       'cd /tmp && ls',
       'ls -la',
+      // Rule 6 ($IFS) must NOT fire on commit-message / changelog text that
+      // references $IFS literally — anchor narrowing regression.
+      "git commit -m 'fix: deny $IFS in guard.sh'",
+      "echo 'documenting $IFS bypass' >> CHANGELOG.md",
+      'echo $IFS',
     ])('allows %s', (cmd) => {
       const { stdout } = runGuard({
         tool_name: 'run_shell_command',

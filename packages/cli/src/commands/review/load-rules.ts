@@ -26,7 +26,10 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { gitOpt } from './lib/git.js';
-import { requireFetchReportFor } from './lib/session.js';
+import {
+  addPrSessionOptions,
+  requirePrSessionFromArgs,
+} from './lib/session.js';
 
 interface LoadRulesArgs {
   base_ref: string;
@@ -119,21 +122,12 @@ function loadCombined(baseRef: string): {
 }
 
 async function runLoadRules(args: LoadRulesArgs): Promise<void> {
-  const { base_ref: baseRef, out, pr } = args;
-  const ownerRepo = args['owner-repo'];
+  const { base_ref: baseRef, out } = args;
   // For PR reviews, refuse to load rules unless fetch-pr already ran AND
-  // wrote a report bound to this owner/repo. Without the owner/repo binding
-  // a stale report from reviewing PR #N in another repo would satisfy the
-  // gate and the LLM driver would inherit rules under a stale session;
-  // matches the same precondition pr-context / presubmit enforce.
-  if (pr) {
-    if (!ownerRepo) {
-      throw new Error(
-        '--owner-repo is required when --pr is set (must match the repo `fetch-pr` was run against).',
-      );
-    }
-    requireFetchReportFor({ prNumber: pr, ownerRepo });
-  }
+  // wrote a report bound to this owner/repo. Shared helper enforces the
+  // identical contract used by pr-context / presubmit / deterministic /
+  // autofix-gate, so the four downstream gates can't drift.
+  requirePrSessionFromArgs(args);
   const { combined, loaded } = loadCombined(baseRef);
 
   mkdirSync(dirname(out), { recursive: true });
@@ -155,29 +149,21 @@ export const loadRulesCommand: CommandModule = {
   describe:
     'Read project review rules from the base branch (.qwen/review-rules.md, .github/copilot-instructions.md, AGENTS.md, QWEN.md) and write a combined Markdown file',
   builder: (yargs) =>
-    yargs
-      .positional('base_ref', {
-        type: 'string',
-        demandOption: true,
-        describe:
-          'Base ref to read rules from — typically the PR base branch (e.g. "origin/main"). Loading from the base branch (not the PR branch) prevents a malicious PR from injecting bypass rules.',
-      })
-      .option('out', {
-        type: 'string',
-        demandOption: true,
-        describe:
-          'Output Markdown path (will be overwritten — empty if no rules found)',
-      })
-      .option('pr', {
-        type: 'string',
-        describe:
-          'PR number — when provided, validates that an active fetch-pr session exists for the same owner/repo (requires --owner-repo). Omit for local-uncommitted or file-path reviews.',
-      })
-      .option('owner-repo', {
-        type: 'string',
-        describe:
-          'PR owner/repo (e.g. "octo/repo"). Required when --pr is set so the session report can be bound to this repo and stale reports for the same PR number in another repo are rejected.',
-      }),
+    addPrSessionOptions(
+      yargs
+        .positional('base_ref', {
+          type: 'string',
+          demandOption: true,
+          describe:
+            'Base ref to read rules from — typically the PR base branch (e.g. "origin/main"). Loading from the base branch (not the PR branch) prevents a malicious PR from injecting bypass rules.',
+        })
+        .option('out', {
+          type: 'string',
+          demandOption: true,
+          describe:
+            'Output Markdown path (will be overwritten — empty if no rules found)',
+        }),
+    ),
   handler: async (argv) => {
     await runLoadRules(argv as unknown as LoadRulesArgs);
   },

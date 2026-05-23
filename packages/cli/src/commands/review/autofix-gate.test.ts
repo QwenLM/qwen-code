@@ -149,6 +149,35 @@ describe('qwen review autofix-gate', () => {
     expect(decision.reason).toMatch(/No fetch-pr report for PR #99/);
   });
 
+  it('returns skip when --owner-repo does not match the report', async () => {
+    writeReport('99', { ownerRepo: 'octo/repo' });
+    const { stdout } = await runGate([
+      'autofix-gate',
+      'pr-99',
+      '--findings-count',
+      '5',
+      '--owner-repo',
+      'attacker/repo',
+    ]);
+    const decision = JSON.parse(stdout.trim());
+    expect(decision.decision).toBe('skip');
+    expect(decision.reason).toMatch(/bound to octo\/repo, not attacker\/repo/);
+  });
+
+  it('accepts --owner-repo that differs only in case from the report', async () => {
+    writeReport('99', { ownerRepo: 'Octo/Repo' });
+    const { stdout } = await runGate([
+      'autofix-gate',
+      'pr-99',
+      '--findings-count',
+      '3',
+      '--owner-repo',
+      'octo/repo',
+    ]);
+    const decision = JSON.parse(stdout.trim());
+    expect(decision.decision).toBe('ask');
+  });
+
   it('falls through to findings-count when legacy report omits commentMode', async () => {
     // Pre-existing fetch-pr reports on disk (written before this PR) lack
     // the `commentMode` field. The gate must read the absent field as

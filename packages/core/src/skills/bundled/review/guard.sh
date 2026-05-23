@@ -135,17 +135,18 @@ if matches "${P}git[[:space:]]+checkout[[:space:]]+([^-]|-[^-[:space:]]|--[^[:sp
   deny
 fi
 
-# 6. `$IFS` / `${IFS}` anywhere in the command. Bash expands `git$IFS` to
+# 6. `$IFS` / `${IFS}` adjacent to `git` or `gh`. Bash expands `git$IFS` to
 #    `git ` (space) at runtime, so `git$IFS checkout main` actually runs
-#    `git checkout main` even though the regex above sees `git$IFS` as one
-#    word. There is no legitimate use of `$IFS` inside a /review shell
-#    invocation — denying it outright closes the most common
-#    parameter-expansion bypass without trying to parse bash. Other
-#    parameter expansions (`${cmd:-git}`, `$(echo git)`, etc.) remain
+#    `git checkout main` even though rules 1-5 see `git$IFS` as one word.
+#    Anchor the deny to the same `git`/`gh` neighborhoods rules 1-5 use so
+#    legitimate strings that mention `$IFS` literally — most importantly
+#    commit messages and CHANGELOG entries authored from inside a /review
+#    session ("fix: deny $IFS in guard.sh") — pass through untouched.
+#    Other parameter expansions (`${cmd:-git}`, `$(echo git)`, etc.) remain
 #    documented bypasses; the CLI gates (`requireFetchReportFor` in
-#    pr-context / presubmit / deterministic --pr) are the deterministic
-#    control.
-if matches '\$IFS|\$\{IFS'; then
+#    pr-context / presubmit / deterministic --pr / load-rules --pr /
+#    autofix-gate) are the deterministic primary control.
+if matches "${P}(git|gh)\\\$\\{?IFS"; then
   deny
 fi
 

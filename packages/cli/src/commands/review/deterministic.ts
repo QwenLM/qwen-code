@@ -43,8 +43,9 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
+  addPrSessionOptions,
   ensureWorktreeMatches,
-  requireFetchReportFor,
+  requirePrSessionFromArgs,
 } from './lib/session.js';
 
 const TIMEOUT_TYPECHECK_MS = 120_000;
@@ -662,14 +663,8 @@ async function runDeterministic(args: DeterministicArgs): Promise<void> {
   // `ensureWorktreeMatches` would still narrow the gap, but matching the
   // pr-context / presubmit / load-rules contract here removes the
   // asymmetry SKILL.md line 35 advertises.
-  if (args.pr) {
-    const ownerRepo = args['owner-repo'];
-    if (!ownerRepo) {
-      throw new Error(
-        '--owner-repo is required when --pr is set (must match the repo `fetch-pr` was run against).',
-      );
-    }
-    const report = requireFetchReportFor({ prNumber: args.pr, ownerRepo });
+  const report = requirePrSessionFromArgs(args);
+  if (report) {
     ensureWorktreeMatches(report, worktree);
   }
 
@@ -742,33 +737,25 @@ export const deterministicCommand: CommandModule = {
   describe:
     'Run deterministic typecheck / lint on changed files (TypeScript/JavaScript: tsc + eslint)',
   builder: (yargs) =>
-    yargs
-      .positional('worktree', {
-        type: 'string',
-        demandOption: true,
-        describe: 'Worktree directory to run tools in',
-      })
-      .option('changed-files', {
-        type: 'string',
-        demandOption: true,
-        describe:
-          'Path to a JSON file containing an array of changed file paths (relative to worktree)',
-      })
-      .option('out', {
-        type: 'string',
-        demandOption: true,
-        describe: 'Output JSON path (will be overwritten)',
-      })
-      .option('pr', {
-        type: 'string',
-        describe:
-          'PR number — when provided, validates that an active fetch-pr session exists for the same owner/repo (requires --owner-repo) and the worktree arg matches the report. Omit for local-uncommitted or file-path reviews.',
-      })
-      .option('owner-repo', {
-        type: 'string',
-        describe:
-          'PR owner/repo (e.g. "octo/repo"). Required when --pr is set so the session report can be bound to this repo and stale reports for the same PR number in another repo are rejected.',
-      }),
+    addPrSessionOptions(
+      yargs
+        .positional('worktree', {
+          type: 'string',
+          demandOption: true,
+          describe: 'Worktree directory to run tools in',
+        })
+        .option('changed-files', {
+          type: 'string',
+          demandOption: true,
+          describe:
+            'Path to a JSON file containing an array of changed file paths (relative to worktree)',
+        })
+        .option('out', {
+          type: 'string',
+          demandOption: true,
+          describe: 'Output JSON path (will be overwritten)',
+        }),
+    ),
   handler: async (argv) => {
     await runDeterministic(argv as unknown as DeterministicArgs);
   },

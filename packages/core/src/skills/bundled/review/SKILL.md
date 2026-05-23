@@ -470,10 +470,10 @@ If the user responds with "post comments" (or similar intent like "yes post them
 **The decision to skip / noop / prompt is made by `qwen review autofix-gate`, NOT by you.** Run it before doing anything else in this step:
 
 ```bash
-qwen review autofix-gate <target> --findings-count <N>
+qwen review autofix-gate <target> --findings-count <N> [--owner-repo <owner>/<repo>]
 ```
 
-Where `<target>` is `pr-<n>` for PR reviews, `local` for uncommitted-changes reviews, or the filename for a file review. `<N>` is the count of Critical/Suggestion findings with concrete, unambiguous fixes that can be expressed as file edits. The command prints a single JSON line: `{"decision": "skip" | "ask" | "noop", "reason": "..."}`.
+Where `<target>` is `pr-<n>` for PR reviews, `local` for uncommitted-changes reviews, or the filename for a file review. `<N>` is the count of Critical/Suggestion findings with concrete, unambiguous fixes that can be expressed as file edits. For PR-target reviews, also pass `--owner-repo <owner>/<repo>` so the gate can refuse to autofix against a stale cross-repo session — matches the binding contract used by `pr-context` / `presubmit` / `load-rules --pr` / `deterministic --pr`. The command prints a single JSON line: `{"decision": "skip" | "ask" | "noop", "reason": "..."}`.
 
 - **`decision: "skip"`** — fall through to Step 9 immediately. This is the deterministic rule for `--comment` (the user wanted inline PR comments, not code mutations) and for any PR-target whose fetch report is missing (treat as no worktree available). Do NOT ask the user; do NOT prompt for autofix. (Cross-repo lightweight mode produces no fetch report, so it lands in this branch naturally; fork PRs reviewed via `upstream` DO have a worktree and proceed to "ask" / "noop" like any same-repo PR.)
 - **`decision: "noop"`** — there are no auto-fixable findings; fall through to Step 9.

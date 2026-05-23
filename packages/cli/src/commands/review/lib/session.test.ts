@@ -147,4 +147,31 @@ describe('review/lib/session', () => {
       requireFetchReportFor({ prNumber: '42', ownerRepo: 'octo/repo' }),
     ).toThrow(/Missing fetch-pr report/);
   });
+
+  it('requireFetchReportFor matches owner/repo case-insensitively', () => {
+    // GitHub treats `Owner/Repo` and `owner/repo` as the same repository.
+    // fetch-pr can preserve URL casing (`Owner/Repo`) while downstream
+    // commands may receive canonical-cased values from `gh repo view`.
+    writeFileSync(
+      fetchReportPath('42'),
+      JSON.stringify({ ...REPORT_FIXTURE, ownerRepo: 'Octo/Repo' }),
+      'utf8',
+    );
+    expect(() =>
+      requireFetchReportFor({ prNumber: '42', ownerRepo: 'octo/repo' }),
+    ).not.toThrow();
+    expect(() =>
+      requireFetchReportFor({ prNumber: '42', ownerRepo: 'OCTO/REPO' }),
+    ).not.toThrow();
+  });
+
+  it('requireFetchReport recovery message hints at preserving --remote / --comment', () => {
+    // Weakly instruction-following models that hit this error mid-pipeline
+    // need an explicit reminder; otherwise the literal recovery defaults
+    // --remote to `origin` (breaking fork-via-upstream workflows) and drops
+    // --comment (re-enabling interactive autofix mid-`--comment` review).
+    expect(() => requireFetchReport('42')).toThrow(
+      /Preserve any `--remote.*--comment.*flags from the original/s,
+    );
+  });
 });

@@ -23,11 +23,12 @@
 
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { readFetchReport } from './lib/session.js';
+import { addOwnerRepoOption, readFetchReport } from './lib/session.js';
 
 interface AutofixGateArgs {
   target: string;
   'findings-count': number;
+  'owner-repo'?: string;
 }
 
 interface AutofixDecision {
@@ -35,7 +36,11 @@ interface AutofixDecision {
   reason: string;
 }
 
-function decide(target: string, findingsCount: number): AutofixDecision {
+function decide(
+  target: string,
+  findingsCount: number,
+  ownerRepo: string | undefined,
+): AutofixDecision {
   // PR target → consult the fetch-pr report. Anything else (local, filename)
   // never had --comment / cross-repo modes, so only the findings-count check
   // applies.
@@ -53,6 +58,22 @@ function decide(target: string, findingsCount: number): AutofixDecision {
       return {
         decision: 'skip',
         reason: `No fetch-pr report for PR #${prNumber}; cannot determine autofix safety. Re-run \`qwen review fetch-pr\` first.`,
+      };
+    }
+    // When `--owner-repo` is supplied, treat a repo mismatch as a "no
+    // session" condition rather than a hard throw — autofix-gate is the only
+    // gated subcommand whose contract is "soft skip on missing session", and
+    // we keep that shape so callers see uniform decision JSON instead of an
+    // exception bubbling out of Step 8. The repo-mismatch case still has to
+    // skip, because letting it fall through to `report.commentMode` would
+    // honour another repo's commentMode flag for THIS PR review.
+    if (
+      ownerRepo &&
+      report.ownerRepo.toLowerCase() !== ownerRepo.toLowerCase()
+    ) {
+      return {
+        decision: 'skip',
+        reason: `Fetch-pr report for PR #${prNumber} is bound to ${report.ownerRepo}, not ${ownerRepo}; refusing to autofix against a stale cross-repo worktree. Re-run \`qwen review fetch-pr ${prNumber} ${ownerRepo}\` to refresh the session.`,
       };
     }
     if (report.commentMode) {
@@ -85,7 +106,11 @@ function decide(target: string, findingsCount: number): AutofixDecision {
 }
 
 function runAutofixGate(args: AutofixGateArgs): void {
-  const decision = decide(args.target, args['findings-count']);
+  const decision = decide(
+    args.target,
+    args['findings-count'],
+    args['owner-repo'],
+  );
   // Single-line JSON so a `jq` invocation in a shell wrapper can parse it
   // without juggling whitespace.
   writeStdoutLine(JSON.stringify(decision));
@@ -96,19 +121,21 @@ export const autofixGateCommand: CommandModule = {
   describe:
     'Decide whether /review Step 8 (autofix) should skip / noop / prompt — reads the fetch-pr report so the rule is enforced in code, not prose.',
   builder: (yargs) =>
-    yargs
-      .positional('target', {
-        type: 'string',
-        demandOption: true,
-        describe:
-          'Review target — "pr-<n>" for a PR review, "local" for an uncommitted review, or a filename for a file review.',
-      })
-      .option('findings-count', {
-        type: 'number',
-        default: 0,
-        describe:
-          'Number of auto-fixable findings detected by Step 7. The session-state checks (commentMode set, missing fetch-pr report) take precedence and produce "skip" before this value is consulted; otherwise 0 yields "noop" and non-zero yields "ask".',
-      }),
+    addOwnerRepoOption(
+      yargs
+        .positional('target', {
+          type: 'string',
+          demandOption: true,
+          describe:
+            'Review target — "pr-<n>" for a PR review, "local" for an uncommitted review, or a filename for a file review.',
+        })
+        .option('findings-count', {
+          type: 'number',
+          default: 0,
+          describe:
+            'Number of auto-fixable findings detected by Step 7. The session-state checks (commentMode set, missing fetch-pr report, cross-repo report mismatch) take precedence and produce "skip" before this value is consulted; otherwise 0 yields "noop" and non-zero yields "ask".',
+        }),
+    ),
   handler: (argv) => {
     runAutofixGate(argv as unknown as AutofixGateArgs);
   },
