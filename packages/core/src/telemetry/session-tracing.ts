@@ -1162,6 +1162,20 @@ export function startSubagentSpan(opts: StartSubagentSpanOptions): Span {
  * background paths so child spans don't escape into the ambient context
  * after the caller's AgentTool.execute has already returned.
  *
+ * **Side effects (intentional, callers should be aware):**
+ *
+ *  - Enters `subagentContext` ALS for the body's duration so
+ *    `startLLMRequestSpan` / `startToolSpan` / `startHookSpan` prefer
+ *    this subagent over the outer interaction as the parent.
+ *  - **Clears `toolContext`** for the body's duration. Any code that
+ *    reads `toolContext` inside the subagent body BEFORE the first
+ *    inner tool call will see `undefined`. The subagent's own inner
+ *    tools re-set `toolContext` via `runInToolSpanContext`, so
+ *    inner-tool parenting remains correct. This is required so hooks
+ *    fired inside a subagent body (e.g. SubagentStart) don't
+ *    incorrectly parent under the outer AGENT tool span (#4410
+ *    DeepSeek 3291876051).
+ *
  * Mirrors opencode's `withRunSpan` pattern.
  */
 export function runInSubagentSpanContext<T>(

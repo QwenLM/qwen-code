@@ -23,6 +23,12 @@ import {
 } from '@opentelemetry/resources';
 
 import { EVENT_SUBAGENT_EXECUTION, SERVICE_NAME } from './constants.js';
+import {
+  deriveTraceId,
+  randomHexString,
+  randomSpanId,
+} from './trace-id-utils.js';
+import { getCurrentSessionId } from './session-context.js';
 
 /**
  * LogRecord event names that have native span coverage elsewhere and
@@ -35,12 +41,6 @@ import { EVENT_SUBAGENT_EXECUTION, SERVICE_NAME } from './constants.js';
  * (QwenLogger RUM, metrics counter) — only the span bridge is skipped.
  */
 const BRIDGE_SKIP_EVENT_NAMES = new Set<string>([EVENT_SUBAGENT_EXECUTION]);
-import {
-  deriveTraceId,
-  randomHexString,
-  randomSpanId,
-} from './trace-id-utils.js';
-import { getCurrentSessionId } from './session-context.js';
 
 const EXPORT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER_SIZE = 10_000;

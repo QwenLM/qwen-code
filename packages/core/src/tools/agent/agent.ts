@@ -1241,6 +1241,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    * returned promise; the span only closes when the body actually finishes
    * (or the 4h TTL safety net fires). See `telemetry-subagent-spans-design.md`.
    *
+   * **Rejection-handling contract for void'd callers:** the body is expected
+   * to never reject — both `runSubagentWithHooks` and `bgBody` have their
+   * own try/catch and publish outcomes via `recordOutcome`. This wrapper's
+   * own `catch` is a defensive fallback for synchronous setup throws.
+   * Callers using `void` must NOT remove the body's try/catch under the
+   * assumption that this wrapper covers it: a rejection escaping the
+   * `void` boundary becomes an unhandled-promise event (terminates the
+   * process on Node ≥ 15 in default mode). If a new void'd call site is
+   * added, wrap it in `.catch(...)` defensively. wenshao @ #4410 DeepSeek
+   * 3292370970.
+   *
    * #3731 Phase 3.
    */
   private async runWithSubagentSpan<T>(
@@ -1309,16 +1320,25 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       throw error;
     } finally {
       // No `recordOutcome` call AND no throw → body resolved normally
-      // without opting in. Treat as completed and surface a warn so the
-      // missing wiring is observable in production (every current site
-      // calls recordOutcome; future paths might forget). Review wenshao
-      // @ #4410.
+      // without opting in. Default to FAILED (not completed) so a
+      // future wiring bug surfaces proactively in dashboards instead
+      // of silently masking every failure as a success. Production
+      // logs alone don't catch this (debug-level), but a real
+      // `status=failed` will. Review wenshao @ #4410 DeepSeek
+      // 3292370968.
       if (!recordedMetadata) {
         debugLogger.warn(
-          `runWithSubagentSpan: body did not call recordOutcome for ${spec.subagentName}/${spec.agentId} — defaulting span status to completed`,
+          `runWithSubagentSpan: body did not call recordOutcome for ${spec.subagentName}/${spec.agentId} — defaulting span status to failed (wiring bug)`,
         );
       }
-      endSubagentSpan(span, recordedMetadata ?? { status: 'completed' });
+      endSubagentSpan(
+        span,
+        recordedMetadata ?? {
+          status: 'failed',
+          error: 'recordOutcome was never called (wiring bug)',
+          terminateReason: 'unknown',
+        },
+      );
     }
   }
 
@@ -2388,7 +2408,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 bgBody(recordOutcome),
               ),
           );
-        void (isFork ? runInForkContext(framedBgBody) : framedBgBody());
+        // Defensive `.catch`: bgBody is supposed to handle its own
+        // errors, but runWithSubagentSpan's `endSubagentSpan` finally
+        // call could theoretically throw if OTel internals break.
+        // Without this, such a throw becomes an unhandled rejection
+        // (Node ≥15 default = process termination). Review wenshao @
+        // #4410 DeepSeek 3292370970 + silent-failure-hunter.
+        const bgPromise = isFork
+          ? runInForkContext(framedBgBody)
+          : framedBgBody();
+        bgPromise.catch((err) =>
+          debugLogger.warn(
+            `[Agent] background subagent ${hookOpts.agentId} body raised unexpected rejection: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
         return {
@@ -2479,7 +2512,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 }
               }),
           );
-        void runInForkContext(runFramedFork);
+        // Defensive `.catch` — same reason as the bg path above.
+        runInForkContext(runFramedFork).catch((err) =>
+          debugLogger.warn(
+            `[Agent] fork subagent ${hookOpts.agentId} body raised unexpected rejection: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
         return {
           llmContent: [{ text: FORK_PLACEHOLDER_RESULT }],
           returnDisplay: this.currentDisplay!,
