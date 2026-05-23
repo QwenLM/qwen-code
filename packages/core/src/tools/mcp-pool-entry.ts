@@ -130,8 +130,6 @@ export interface PooledConnection {
 interface SweepResult {
   /** Set when `listDescendantPids` itself threw (sandbox blocking pgrep, ESRCH on root, etc.). */
   pidSweepError?: Error;
-  /** Set when `client.disconnect()` threw. Rare — usually transport bug. */
-  disconnectError?: Error;
   /** Number of descendant pids `listDescendantPids` returned. Undefined if root pid unavailable or sweep threw. */
   descendantsFound?: number;
   /** Number of descendant pids `sigtermPids` successfully signaled. May be < `descendantsFound`. */
@@ -841,8 +839,14 @@ export class PoolEntry {
     try {
       await this.client.disconnect();
     } catch (err) {
-      result.disconnectError =
-        err instanceof Error ? err : new Error(String(err));
+      // Disconnect failure is rare (usually a transport bug worth
+      // surfacing) and gets a structured error log here. No
+      // SweepResult field captures this — the silent-drop chain
+      // doesn't gate the outer warn on it (the inner error log
+      // already gives operators the signal), and forceShutdown /
+      // doRestart callers ignore the return entirely. Per wenshao
+      // review #4460: was previously stored on `SweepResult.disconnectError`
+      // but had no reader — removed as dead data.
       debugLogger.error(
         `client.disconnect failed for ${this.id} (${reason}): ${String(err)}`,
       );
