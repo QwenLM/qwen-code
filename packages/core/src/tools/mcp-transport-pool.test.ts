@@ -39,11 +39,15 @@ vi.mock('./pid-descendants.js', () => ({
 // return a vi.fn-backed stub. All existing tests are unaffected — they
 // don't assert on debugLogger output.
 //
-// Singleton stub: production code calls `createDebugLogger('McpPool:Entry')`
-// once at module load, and the test calls it again to retrieve the
-// same stub. Returning a fresh object per call would have given the
-// test a different vi.fn than the one production code captured at
-// module load, defeating the assertion.
+// Singleton-stub design: the `stub` object is constructed once when
+// the factory body runs (vitest evaluates the factory once per
+// `vi.mock` call), and the inner arrow `() => stub` returns that same
+// object on every `createDebugLogger(...)` invocation. So both the
+// production module-load call inside `mcp-pool-entry.ts` AND the
+// test's later retrieval get the exact same vi.fn instances —
+// `mockMock.warn` in the test is the same warn the production code
+// fired against. A factory that constructed a new object per call
+// would have broken that link.
 vi.mock('../utils/debugLogger.js', () => {
   const stub = {
     debug: vi.fn(),
@@ -726,8 +730,8 @@ describe('McpTransportPool', () => {
       });
 
       // Trigger via the production code path: invoke the SDK Client
-      // mock's `onerror` (set by McpClient.connect() at
-      // mcp-client.ts:130 during the acquire above). The arrow runs
+      // mock's `onerror` (assigned by `McpClient.connect()`'s arrow
+      // during the acquire above). The arrow runs
       // `this.lastTransportError = error` AND `updateStatus(DISCONNECTED)`
       // synchronously, so by the time the W120 listener fires, the
       // upstream error is already populated for `getLastTransportError()`.
@@ -846,6 +850,12 @@ describe('McpTransportPool', () => {
       )!;
       expect(obsCall[0]).toContain('orphan-process pressure');
       expect(obsCall[0]).toContain('pgrep blocked by sandbox');
+      // F2 (#4175 follow-up — copilot review T2 on #4460): when the
+      // pid sweep itself throws, the count fields are genuinely
+      // unmeasured. The warn payload should distinguish "not measured"
+      // from "0 found" via an explicit sentinel.
+      expect(obsCall[0]).toContain('descendantsFound=unknown');
+      expect(obsCall[0]).toContain('descendantsSignaled=unknown');
     });
 
     it('emits structured warn log when silent-drop sweep partially signals descendants (W134 partial-signal)', async () => {

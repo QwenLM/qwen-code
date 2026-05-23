@@ -110,10 +110,11 @@ export interface PooledConnection {
 /**
  * F2 (#4175 follow-up — W134): structured outcome of
  * `PoolEntry.sweepAndDisconnect`. The silent-drop fire-and-forget
- * caller (`mcp-pool-entry.ts:383`) reads this off the chained promise
- * to surface orphan-process pressure to operators via a structured
- * `warn` log. `forceShutdown` and `doRestart` callers ignore the
- * return — their own catch paths carry richer error signals already.
+ * caller (the W120 silent-drop block inside `statusChangeListener`)
+ * reads this off the chained promise to surface orphan-process
+ * pressure to operators via a structured `warn` log. `forceShutdown`
+ * and `doRestart` callers ignore the return — their own catch paths
+ * carry richer error signals already.
  *
  * Both `descendantsFound` and `descendantsSignaled` are tracked
  * because partial-signal failure (`signaled < found`) is itself
@@ -447,10 +448,20 @@ export class PoolEntry {
               result.descendantsSignaled !== undefined &&
               result.descendantsSignaled < result.descendantsFound;
             if (result.pidSweepError !== undefined || partialSignal) {
+              // F2 (#4175 follow-up — copilot review T2 on #4460):
+              // log `'unknown'` instead of `0` when the count fields are
+              // undefined. They are undefined ONLY in the
+              // `pidSweepError` branch (the throw happened before
+              // assignment); operators triaging the warn should be able
+              // to distinguish "0 found" (sweep succeeded, no children
+              // — unusual but possible if grandchildren already exited)
+              // from "not measured" (sweep itself threw, count is
+              // genuinely unknown). Logging `0` for both was factually
+              // ambiguous.
               debugLogger.warn(
                 `PoolEntry ${this.id} silent-drop sweep observability: ` +
-                  `descendantsFound=${result.descendantsFound ?? 0}, ` +
-                  `descendantsSignaled=${result.descendantsSignaled ?? 0}, ` +
+                  `descendantsFound=${result.descendantsFound ?? 'unknown'}, ` +
+                  `descendantsSignaled=${result.descendantsSignaled ?? 'unknown'}, ` +
                   `pidSweepError=${result.pidSweepError?.message ?? 'none'}. ` +
                   `Possible orphan-process pressure — operator should ` +
                   `check for lingering subprocess descendants of the dead ` +

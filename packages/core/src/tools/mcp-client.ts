@@ -105,7 +105,8 @@ export class McpClient {
   /**
    * F2 (#4175 follow-up — W133-a): captures the most recent error
    * delivered to the SDK Client's `onerror` callback. The pool entry's
-   * W120 silent-drop block (`mcp-pool-entry.ts:346`) reads this via
+   * W120 silent-drop block (the DISCONNECTED-on-active branch inside
+   * `PoolEntry.statusChangeListener`) reads this via
    * `getLastTransportError()` to thread the upstream cause (EPIPE,
    * OAuth 401, server crash) into the `'failed'` event's `lastError`
    * string instead of emitting only the synthetic
@@ -337,8 +338,9 @@ export class McpClient {
    * the upstream cause (EPIPE, OAuth 401, server-side crash) into the
    * `'failed'` event's `lastError` string. Returns `undefined` if no
    * error has been observed since the last `connect()`. Caller falls
-   * back to the synthetic marker on `undefined`. See `mcp-client.ts:130`
-   * for the population site, `mcp-pool-entry.ts:346` for the consumer.
+   * back to the synthetic marker on `undefined`. Population site: the
+   * `client.onerror` arrow inside `connect()` (this file). Consumer:
+   * the W120 silent-drop block inside `PoolEntry.statusChangeListener`.
    */
   getLastTransportError(): Error | undefined {
     return this.lastTransportError;
