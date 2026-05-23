@@ -15,12 +15,13 @@ import { loadRulesCommand } from './review/load-rules.js';
 import { deterministicCommand } from './review/deterministic.js';
 import { presubmitCommand } from './review/presubmit.js';
 import { autofixGateCommand } from './review/autofix-gate.js';
+import { lintReviewCommand } from './review/lint-review.js';
 import { cleanupCommand } from './review/cleanup.js';
 
 export const reviewCommand: CommandModule = {
   command: 'review',
   describe:
-    'Internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, deterministic analysis, presubmit checks, autofix gating, cleanup)',
+    'Internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, deterministic analysis, presubmit checks, autofix gating, lint, cleanup)',
   builder: (yargs: Argv) =>
     yargs
       .command(fetchPrCommand)
@@ -29,10 +30,11 @@ export const reviewCommand: CommandModule = {
       .command(deterministicCommand)
       .command(presubmitCommand)
       .command(autofixGateCommand)
+      .command(lintReviewCommand)
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: fetch-pr, pr-context, load-rules, deterministic, presubmit, autofix-gate, or cleanup.',
+        'Specify a subcommand: fetch-pr, pr-context, load-rules, deterministic, presubmit, autofix-gate, lint-review, or cleanup.',
       )
       .version(false),
   handler: () => {

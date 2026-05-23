@@ -608,6 +608,20 @@ Rules:
 - Use ` ```suggestion ` for one-click fixes; regular code blocks if fix spans multiple locations.
 - Only ONE comment per unique issue.
 
+**🚫 Red line — never do these:**
+
+- **Never** submit a review with a placeholder/test `body` like `"test"`, `"Test single comment submission"`, `"Test batch 1"`, `"checking"`, `"foo"`, or any short throwaway string. The GitHub Create Review API has **no dry-run / staging** — every POST is a public review. If you need to verify the JSON shape, run `qwen review lint-review <path>` (below) which validates locally; do **not** POST an exploratory request to the API.
+- **Never** submit more than one Create Review API call per `/review` invocation. ALL findings go into a single POST via the `comments` array. Multiple `gh api .../pulls/<n>/reviews` calls — even when the bodies look "real" — produce N separate Review entries that clutter the PR conversation thread.
+- **Never** assume placeholder text gets silently dropped. The API echoes the body verbatim into the PR timeline. Treat each POST as final.
+
+**Lint the prepared review JSON before submitting** — local check, no network, fail-fast:
+
+```bash
+qwen review lint-review .qwen/tmp/qwen-review-{target}-review.json
+```
+
+Exit 0 → safe to submit. Non-zero → fix the issues it reports and re-run the lint before posting. The lint catches the most common bad submissions: short/placeholder body without inline comments, body starting with "test", inline-comment bodies missing the required `via Qwen Code /review` footer, and unknown `event` values.
+
 Then submit:
 
 ```bash
