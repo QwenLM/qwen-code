@@ -4783,3 +4783,111 @@ describe('R5 review batch — coverage additions', () => {
     expect(store.getSnapshot().awaitingResync).toBe(false);
   });
 });
+
+describe('R6 review batch — recovery flow + pending pointer', () => {
+  it('newly-created tool block with undefined status sets currentToolCallId to its default `pending`', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'unspecified',
+            title: 'starting',
+            // no status — daemon emit without explicit status field
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    // Block has effective status 'pending' AND currentToolCallId points to it.
+    const block = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'unspecified',
+    )!;
+    expect(block.status).toBe('pending');
+    expect(state.currentToolCallId).toBe('unspecified');
+  });
+
+  it('clearAwaitingResync FIRST then dispatch new events: events flow', async () => {
+    const { createDaemonTranscriptStore } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const store = createDaemonTranscriptStore();
+    // Set the latch.
+    store.dispatch({
+      type: 'session.state_resync_required',
+      reason: 'sse_eviction',
+      lastDeliveredId: 5,
+      earliestAvailableId: 12,
+    } as never);
+    expect(store.getSnapshot().awaitingResync).toBe(true);
+    // Clear BEFORE the new event stream.
+    store.clearAwaitingResync();
+    expect(store.getSnapshot().awaitingResync).toBe(false);
+    // Now dispatch a normal event — should land in transcript.
+    store.dispatch(
+      normalizeDaemonEvent({
+        id: 100,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'replay-event-1' },
+          },
+        },
+      } as never),
+    );
+    const text = store
+      .getSnapshot()
+      .blocks.map((b) =>
+        b.kind === 'assistant' ? (b as { text: string }).text : '',
+      )
+      .join('');
+    expect(text).toContain('replay-event-1');
+  });
+
+  it('clearAwaitingResync AFTER dispatching events: events ARE dropped (documents the flow)', async () => {
+    // This test pins the correct flow as documented: latch drops everything
+    // until cleared. If a consumer dispatches events FIRST then clears, the
+    // events are lost.
+    const { createDaemonTranscriptStore } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const store = createDaemonTranscriptStore();
+    store.dispatch({
+      type: 'session.state_resync_required',
+      reason: 'sse_eviction',
+      lastDeliveredId: 5,
+      earliestAvailableId: 12,
+    } as never);
+    // WRONG order — dispatch BEFORE clear (replay window).
+    store.dispatch(
+      normalizeDaemonEvent({
+        id: 101,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'replay-event-2' },
+          },
+        },
+      } as never),
+    );
+    store.clearAwaitingResync();
+    // Event was dropped by the latch.
+    const text = store
+      .getSnapshot()
+      .blocks.map((b) =>
+        b.kind === 'assistant' ? (b as { text: string }).text : '',
+      )
+      .join('');
+    expect(text).not.toContain('replay-event-2');
+  });
+});

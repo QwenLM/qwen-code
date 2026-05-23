@@ -695,11 +695,16 @@ export interface DaemonTranscriptStore {
   reset(seed?: Partial<DaemonTranscriptState>): void;
   /**
    * Clear the `awaitingResync` latch that gets set when the daemon emits
-   * `session.state_resync_required`. Call this after re-subscribing to
-   * SSE with `Last-Event-ID: 0` and the replay stream has fully drained
-   * (or after dropping state via your own flow). Without this API, the
-   * latch could only be cleared by `reset()`, which forces session-id
-   * change semantics that don't fit same-session reconnect.
+   * `session.state_resync_required`.
+   *
+   * **Recovery flow (call BEFORE the new SSE stream starts):**
+   * 1. Receive `session.state_resync_required` event → latch sets
+   * 2. Call `clearAwaitingResync()` (keep blocks) OR `reset()` (clean slate)
+   * 3. Re-subscribe to SSE (optionally with `Last-Event-ID: 0` for replay)
+   *
+   * (R6 review caught a flow bug — the earlier JSDoc said "after replay
+   * drains" but while the latch is set every replay event is dropped.
+   * Clear FIRST, then stream events.)
    */
   clearAwaitingResync(): void;
 }

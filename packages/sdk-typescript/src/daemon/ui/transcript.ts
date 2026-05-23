@@ -498,7 +498,17 @@ function upsertToolBlock(
       }
     }
   }
-  updateCurrentToolPointer(state, event.toolCallId, event.status);
+  // wenshao R6 (qwen3.7-max): pass the EFFECTIVE status — the block
+  // was just created with `event.status ?? 'pending'`. If we pass
+  // raw `event.status === undefined`, `updateCurrentToolPointer` early-
+  // returns and the block sits as visually-pending but currentToolCallId
+  // never points at it. Effective-status keeps the pointer in sync
+  // with what was actually written to the block.
+  updateCurrentToolPointer(
+    state,
+    event.toolCallId,
+    event.status ?? 'pending',
+  );
   clearActiveText(state);
 }
 

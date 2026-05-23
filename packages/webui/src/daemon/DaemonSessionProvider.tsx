@@ -154,6 +154,17 @@ export function DaemonSessionProvider({
               store.reset();
             } else if (previousSessionId !== undefined) {
               store.dispatch({ type: 'assistant.done', reason: 'reconnected' });
+              // wenshao R6 (qwen3.7-max): clear the awaitingResync latch
+              // BEFORE the new SSE event loop starts. Otherwise, if the
+              // prior connection ended after `state_resync_required` set
+              // the latch, every event from the fresh stream gets dropped
+              // by `applyDaemonTranscriptEvent`'s passthrough guard —
+              // transcript stays permanently frozen even though the
+              // connection is healthy. Same-session reconnect IS the
+              // recovery path; signal it to the reducer now.
+              if (store.getSnapshot().awaitingResync) {
+                store.clearAwaitingResync();
+              }
             }
             session = nextSession;
             lastSessionIdRef.current = session.sessionId;
