@@ -35,13 +35,9 @@ const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   'dash',
   'ksh',
   // Windows shells
-  'bash.exe',
   'cmd',
-  'cmd.exe',
   'pwsh',
-  'pwsh.exe',
   'powershell',
-  'powershell.exe',
   // Scripting-language interpreters
   'python',
   'python3',
@@ -159,16 +155,20 @@ export function isDangerousBashRule(rule: PermissionRule): boolean {
   const content = rule.specifier.trim().toLowerCase();
   if (content === '' || content === '*') return true;
 
-  // Treat both whitespace and `:` as token delimiters: an interpreter is
-  // dangerous when it appears as the first token of either form
+  // Treat whitespace as the first-token delimiter; matcher-colon form is
+  // handled separately below because Windows drive letters also contain `:`.
+  // An interpreter is dangerous when it appears as the first token of either
+  // form
   // (`python -c *` or `python:*`). For colon-form, the part after `:` is
   // the specifier — we'll separately check whether it's concrete below.
   const firstToken = content.split(/\s/)[0] ?? '';
   if (!isInterpreterToken(firstToken)) return false;
+  const hasMatcherColon =
+    content.includes(':') && !/^[a-z]:[\\/]/i.test(content);
 
   // Bare interpreter name (`python`, `/usr/bin/python3`) — caller decides
   // what to do, classifier never sees it. Dangerous.
-  if (firstToken === content && !content.includes(':')) return true;
+  if (firstToken === content && !hasMatcherColon) return true;
 
   // Wildcard anywhere paired with an interpreter defeats the classifier:
   // `python *`, `python -c *`, `bun run *`, `/usr/bin/python3 *`,
@@ -182,7 +182,7 @@ export function isDangerousBashRule(rule: PermissionRule): boolean {
   // rules — same shape as `Bash(npm run test)`, which the docstring above
   // commits to NOT flagging. Strip them and we'd silently disable
   // intentional user allow lists in AUTO.
-  if (content.includes(':')) {
+  if (hasMatcherColon) {
     const afterColon = content.slice(content.indexOf(':') + 1).trim();
     return afterColon === '';
   }

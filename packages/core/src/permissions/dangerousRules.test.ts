@@ -188,6 +188,14 @@ describe('isDangerousBashRule', () => {
       expect(isDangerousBashRule(bashRule(s))).toBe(true);
     });
 
+    it.each([
+      'C:\\Python\\python.exe',
+      'C:\\nodejs\\node.exe',
+      'C:\\Users\\me\\bin\\tsx.exe',
+    ])('flags bare Windows interpreter path %s', (s) => {
+      expect(isDangerousBashRule(bashRule(s))).toBe(true);
+    });
+
     it('normalizes Windows executable suffixes in both directions', () => {
       expect(isDangerousBashRule(bashRule('cmd *'))).toBe(true);
       expect(isDangerousBashRule(bashRule('cmd.exe *'))).toBe(true);
