@@ -183,8 +183,12 @@ export default {
   'Theme "{{themeName}}" not found.': 'Tema "{{themeName}}" no trobat.',
   'Theme "{{themeName}}" not found in selected scope.':
     'Tema "{{themeName}}" no trobat en l\'àmbit seleccionat.',
-  'Clear conversation history and free up context':
-    "Esborrar l'historial de la conversa i alliberar context",
+  'Clear conversation history (use --all to also reset IDE/editor context)':
+    'Clear conversation history (use --all to also reset IDE/editor context)',
+  'Complete reset (also clears IDE/editor context store)':
+    'Complete reset (also clears IDE/editor context store)',
+  'Are you sure you want to completely reset the session?':
+    'Are you sure you want to completely reset the session?',
   'Compresses the context by replacing it with a summary.':
     'Comprimeix el context substituint-lo per un resum.',
   'open full Qwen Code documentation in your browser':

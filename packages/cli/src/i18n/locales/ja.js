@@ -140,8 +140,12 @@ export default {
   'Theme "{{themeName}}" not found.': 'テーマ "{{themeName}}" が見つかりません',
   'Theme "{{themeName}}" not found in selected scope.':
     '選択したスコープにテーマ "{{themeName}}" が見つかりません',
-  'Clear conversation history and free up context':
-    '会話履歴をクリアしてコンテキストを解放',
+  'Clear conversation history (use --all to also reset IDE/editor context)':
+    'Clear conversation history (use --all to also reset IDE/editor context)',
+  'Complete reset (also clears IDE/editor context store)':
+    'Complete reset (also clears IDE/editor context store)',
+  'Are you sure you want to completely reset the session?':
+    'Are you sure you want to completely reset the session?',
   'Compresses the context by replacing it with a summary.':
     'コンテキストを要約に置き換えて圧縮',
   'open full Qwen Code documentation in your browser':

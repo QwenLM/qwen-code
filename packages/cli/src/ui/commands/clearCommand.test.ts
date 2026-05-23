@@ -56,6 +56,15 @@ describe('clearCommand', () => {
     mockResetMonitors = vi.fn();
     mockResetBackgroundShells = vi.fn();
     vi.clearAllMocks();
+    // `clearAllMocks` zeroes call counters but does NOT clear
+    // implementations. The module-level `ideContextStore.clear` mock can
+    // pick up a per-test `mockImplementation(...)` override — notably the
+    // ordering test at ~line 373 that pushes onto a per-test `callOrder`
+    // closure — and that override would otherwise leak into every test
+    // that runs afterward. Reset just this mock so the rest of the
+    // per-`beforeEach` fresh-`vi.fn()` assignments above keep their
+    // explicitly-staged implementations.
+    (ideContextStore.clear as ReturnType<typeof vi.fn>).mockReset();
 
     mockContext = createMockCommandContext({
       services: {
