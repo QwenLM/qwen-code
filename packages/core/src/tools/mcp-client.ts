@@ -102,6 +102,21 @@ export class McpClient {
   private transport: Transport | undefined;
   private status: MCPServerStatus = MCPServerStatus.DISCONNECTED;
   private isDisconnecting = false;
+  /**
+   * F2 (#4175 follow-up — W133-a): captures the most recent error
+   * delivered to the SDK Client's `onerror` callback. The pool entry's
+   * W120 silent-drop block (the DISCONNECTED-on-active branch inside
+   * `PoolEntry.statusChangeListener`) reads this via
+   * `getLastTransportError()` to thread the upstream cause (EPIPE,
+   * OAuth 401, server crash) into the `'failed'` event's `lastError`
+   * string instead of emitting only the synthetic
+   * `'transport disconnected (silent transport drop)'` marker. Reset
+   * at the top of `connect()` so a successful reconnect clears stale
+   * state. No reset on `disconnect()` — McpClient instances are GC'd
+   * at pool entry teardown; field staleness has no observable
+   * consumer post-disconnect.
+   */
+  private lastTransportError?: Error;
 
   constructor(
     private readonly serverName: string,
@@ -123,6 +138,12 @@ export class McpClient {
    */
   async connect(): Promise<void> {
     this.isDisconnecting = false;
+    // F2 (#4175 follow-up — W133-a): clear stale upstream error from
+    // any prior connect/disconnect cycle. The W120 silent-drop reader
+    // is otherwise satisfied by `undefined` and falls back to the
+    // synthetic marker — but a stale error from a previous incarnation
+    // would mis-attribute a fresh transport drop to an old cause.
+    this.lastTransportError = undefined;
     this.updateStatus(MCPServerStatus.CONNECTING);
     try {
       this.transport = await this.createTransport();
@@ -131,6 +152,13 @@ export class McpClient {
         if (this.isDisconnecting) {
           return;
         }
+        // F2 (#4175 follow-up — W133-a): capture the upstream error
+        // BEFORE the synchronous `updateStatus(DISCONNECTED)` cascades
+        // to PoolEntry's statusChangeListener. The listener's W120
+        // silent-drop block reads `lastTransportError` inline; setting
+        // it ahead of `updateStatus` guarantees the field is populated
+        // by the time the listener fires.
+        this.lastTransportError = error;
         debugLogger.error(`MCP ERROR (${this.serverName}):`, error.toString());
         this.updateStatus(MCPServerStatus.DISCONNECTED);
       };
@@ -302,6 +330,20 @@ export class McpClient {
     const t = this.transport as { pid?: number | null } | undefined;
     if (!t || typeof t.pid !== 'number' || t.pid <= 0) return undefined;
     return t.pid;
+  }
+
+  /**
+   * F2 (#4175 follow-up — W133-a): expose the most recent SDK Client
+   * `onerror` payload so PoolEntry's W120 silent-drop block can thread
+   * the upstream cause (EPIPE, OAuth 401, server-side crash) into the
+   * `'failed'` event's `lastError` string. Returns `undefined` if no
+   * error has been observed since the last `connect()`. Caller falls
+   * back to the synthetic marker on `undefined`. Population site: the
+   * `client.onerror` arrow inside `connect()` (this file). Consumer:
+   * the W120 silent-drop block inside `PoolEntry.statusChangeListener`.
+   */
+  getLastTransportError(): Error | undefined {
+    return this.lastTransportError;
   }
 
   async readResource(

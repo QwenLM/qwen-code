@@ -24,6 +24,40 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js');
 vi.mock('@modelcontextprotocol/sdk/client/stdio.js');
 vi.mock('@google/genai');
 
+// F2 (#4175 follow-up — W134): mocked so per-test overrides can make
+// `listDescendantPids` throw or return partial signaling. Defaults to
+// empty descendants so existing tests behave unchanged.
+vi.mock('./pid-descendants.js', () => ({
+  listDescendantPids: vi.fn().mockResolvedValue([]),
+  sigtermPids: vi.fn().mockReturnValue(0),
+}));
+
+// F2 (#4175 follow-up — W134): mocked so the test can assert
+// debugLogger.warn was called with the silent-drop sweep observability
+// payload. Production debugLogger is session-gated and a no-op in
+// tests (no AsyncLocalStorage session set), so we mock the factory to
+// return a vi.fn-backed stub. All existing tests are unaffected — they
+// don't assert on debugLogger output.
+//
+// Singleton-stub design: the `stub` object is constructed once when
+// the factory body runs (vitest evaluates the factory once per
+// `vi.mock` call), and the inner arrow `() => stub` returns that same
+// object on every `createDebugLogger(...)` invocation. So both the
+// production module-load call inside `mcp-pool-entry.ts` AND the
+// test's later retrieval get the exact same vi.fn instances —
+// `mockMock.warn` in the test is the same warn the production code
+// fired against. A factory that constructed a new object per call
+// would have broken that link.
+vi.mock('../utils/debugLogger.js', () => {
+  const stub = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  };
+  return { createDebugLogger: () => stub };
+});
+
 function mkPoolOptions(
   overrides: Partial<McpTransportPoolOptions> = {},
 ): McpTransportPoolOptions {
@@ -667,6 +701,222 @@ describe('McpTransportPool', () => {
       const r3 = mkSessionRegistries();
       const c = await pool.acquire('srv', cfg, 's3', r3.tools, r3.prompts);
       expect(c).toBeDefined();
+    });
+
+    // F2 (#4175 follow-up — W133-a / W134 PR B): self-heal observability
+    // tests. W133-a threads the upstream `McpClient.onerror` cause
+    // through to the silent-drop `'failed'` event's `lastError`; W134
+    // surfaces orphan-process pressure to operators via a structured
+    // warn log when the silent-drop's `sweepAndDisconnect` either
+    // throws on pid discovery or partially signals descendants.
+
+    it('threads upstream onerror cause into failed event lastError (W133-a)', async () => {
+      // Pre-fix: the silent-drop `'failed'` event's `lastError` carried
+      // only the synthetic marker `'transport disconnected (silent
+      // transport drop)'` — operators triaging a 'failed' event had to
+      // grep daemon `--debug` logs out of band for the matching `MCP
+      // ERROR (...)` line. Post-fix: McpClient.onerror captures the
+      // error in `lastTransportError`, and the W120 silent-drop block
+      // reads it via `getLastTransportError()` to append `: <message>`
+      // to the synthetic prefix.
+      const mocked = mockMcpSuccess({ toolNames: ['t1'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const r1 = mkSessionRegistries();
+      const conn1 = await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      let failedEvent: { lastError?: string } | undefined;
+      conn1.on('event', (e) => {
+        if (e.kind === 'failed') failedEvent = e;
+      });
+
+      // Trigger via the production code path: invoke the SDK Client
+      // mock's `onerror` (assigned by `McpClient.connect()`'s arrow
+      // during the acquire above). The arrow runs
+      // `this.lastTransportError = error` AND `updateStatus(DISCONNECTED)`
+      // synchronously, so by the time the W120 listener fires, the
+      // upstream error is already populated for `getLastTransportError()`.
+      const upstream = new Error('EPIPE: connection lost');
+      type MockedSdkClient = { onerror?: (e: Error) => void };
+      (mocked as MockedSdkClient).onerror?.(upstream);
+
+      expect(failedEvent).toBeDefined();
+      expect(failedEvent?.lastError).toContain('EPIPE: connection lost');
+      // Preserve the literal pre-fix marker substring so any operator
+      // log-grep tooling that targets `silent transport drop` keeps
+      // matching post-fix.
+      expect(failedEvent?.lastError).toContain('silent transport drop');
+    });
+
+    it('falls back to synthetic-only marker when no upstream onerror was captured (W133-a fallback)', async () => {
+      // Defense for the narrow race where the W120 listener fires from
+      // an external `updateMCPServerStatus(name, DISCONNECTED)` write
+      // that did NOT come from McpClient.onerror (e.g. a sibling
+      // fingerprint's `client.disconnect()` writing the shared map).
+      // `getLastTransportError()` returns undefined → caller falls back
+      // to the synthetic-only string. This test pins the behavior
+      // existing W120/W131 tests relied on pre-fix.
+      const { updateMCPServerStatus, MCPServerStatus } = await import(
+        './mcp-client.js'
+      );
+      mockMcpSuccess({ toolNames: ['t1'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const r1 = mkSessionRegistries();
+      const conn1 = await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      let failedEvent: { lastError?: string } | undefined;
+      conn1.on('event', (e) => {
+        if (e.kind === 'failed') failedEvent = e;
+      });
+
+      // Bypass McpClient.onerror — write directly to the shared map.
+      const targetId = connectionIdOf('srv', cfg);
+      const entries = (pool as unknown as { entries: Map<string, PoolEntry> })
+        .entries;
+      const entry = entries.get(targetId)!;
+      const mockClient = (entry as unknown as { client: { status: unknown } })
+        .client;
+      mockClient.status = MCPServerStatus.DISCONNECTED;
+      updateMCPServerStatus('srv', MCPServerStatus.DISCONNECTED);
+
+      expect(failedEvent).toBeDefined();
+      // Synthetic-only string (no `: <message>` suffix).
+      expect(failedEvent?.lastError).toBe(
+        'transport disconnected (silent transport drop)',
+      );
+    });
+
+    it('emits structured warn log when silent-drop sweep throws on pid discovery (W134)', async () => {
+      // Pre-fix: `void this.sweepAndDisconnect('silent_drop')` swallowed
+      // the pid-sweep failure entirely — operators detecting orphan-
+      // process pressure had no signal beyond tailing `--debug warn+`
+      // for the inner sweep log line out of band. Post-fix: the silent-
+      // drop chain captures the SweepResult and emits a structured
+      // outer warn log when `pidSweepError` is set.
+      const { listDescendantPids } = await import('./pid-descendants.js');
+      const { createDebugLogger } = await import('../utils/debugLogger.js');
+      // The shared mock factory returns the SAME stub for the same call
+      // shape — re-invoke createDebugLogger to grab the warn vi.fn that
+      // mcp-pool-entry.ts captured at module load. (The mock's factory
+      // returns a NEW object each call, so we have to assert via the
+      // module-level mock invocations directly.)
+      const debugMock = createDebugLogger('McpPool:Entry');
+      // The stub is a singleton across tests; clear prior call history
+      // so we only observe THIS test's warn invocations.
+      (debugMock.warn as ReturnType<typeof vi.fn>).mockClear();
+      // Configure the pid-sweep to throw, simulating pgrep blocked by
+      // sandbox or a similar enumeration failure.
+      const sweepError = new Error('pgrep blocked by sandbox');
+      vi.mocked(listDescendantPids).mockRejectedValueOnce(sweepError);
+
+      const mocked = mockMcpSuccess({ toolNames: ['t1'] });
+      // Stub `getTransportPid` so sweepAndDisconnect actually invokes
+      // listDescendantPids (the default transport mock has no `pid`).
+      // Inject a numeric pid via the transport mock so the helper's
+      // `t.pid > 0` guard passes.
+      vi.mocked(SdkClientStdioLib.StdioClientTransport).mockReturnValue({
+        close: vi.fn().mockResolvedValue(undefined),
+        pid: 99999,
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const r1 = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+
+      // Trigger the silent-drop path via the production onerror flow.
+      type MockedSdkClient = { onerror?: (e: Error) => void };
+      (mocked as MockedSdkClient).onerror?.(new Error('upstream EPIPE'));
+
+      // sweepAndDisconnect runs asynchronously off the silent-drop
+      // chain. Flush microtasks to let the chain's `.then(...)` callback
+      // (which contains the warn log decision) settle.
+      await vi.waitFor(() => {
+        const calls = (debugMock.warn as ReturnType<typeof vi.fn>).mock.calls;
+        const obs = calls.find(
+          (c) =>
+            typeof c[0] === 'string' &&
+            c[0].includes('silent-drop sweep observability'),
+        );
+        expect(obs).toBeDefined();
+      });
+
+      // Verify the warn payload carries the orphan-process-pressure
+      // hint and the underlying pid-sweep error message.
+      const warnCalls = (debugMock.warn as ReturnType<typeof vi.fn>).mock.calls;
+      const obsCall = warnCalls.find(
+        (c) =>
+          typeof c[0] === 'string' &&
+          c[0].includes('silent-drop sweep observability'),
+      )!;
+      expect(obsCall[0]).toContain('orphan-process pressure');
+      expect(obsCall[0]).toContain('pgrep blocked by sandbox');
+      // F2 (#4175 follow-up — copilot review T2 on #4460): when the
+      // pid sweep itself throws, the count fields are genuinely
+      // unmeasured. The warn payload should distinguish "not measured"
+      // from "0 found" via an explicit sentinel.
+      expect(obsCall[0]).toContain('descendantsFound=unknown');
+      expect(obsCall[0]).toContain('descendantsSignaled=unknown');
+    });
+
+    it('emits structured warn log when silent-drop sweep partially signals descendants (W134 partial-signal)', async () => {
+      // Pre-fix: a partial signal (sigtermPids killed fewer than
+      // listDescendantPids found — child exited mid-loop, EPERM on a
+      // child the daemon doesn't own, etc.) had no operator-facing
+      // signal at all (sweepAndDisconnect's internal log was at
+      // `debug` for the success-with-partial path). Post-fix: the
+      // silent-drop chain compares descendantsSignaled vs
+      // descendantsFound and emits the same outer warn even though
+      // sweepAndDisconnect itself didn't throw.
+      const { listDescendantPids, sigtermPids } = await import(
+        './pid-descendants.js'
+      );
+      const { createDebugLogger } = await import('../utils/debugLogger.js');
+      const debugMock = createDebugLogger('McpPool:Entry');
+      // The stub is a singleton across tests; clear prior call history
+      // so we only observe THIS test's warn invocations.
+      (debugMock.warn as ReturnType<typeof vi.fn>).mockClear();
+      // Set up the SDK mocks first (mockMcpSuccess installs the
+      // StdioClientTransport spy + ClientLib.Client mock); then
+      // override the transport return value with one that carries a
+      // numeric `pid` so sweepAndDisconnect actually invokes
+      // listDescendantPids.
+      const mocked = mockMcpSuccess({ toolNames: ['t1'] });
+      vi.mocked(SdkClientStdioLib.StdioClientTransport).mockReturnValue({
+        close: vi.fn().mockResolvedValue(undefined),
+        pid: 99999,
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+      // Discovered 3 descendants; only signaled 1.
+      vi.mocked(listDescendantPids).mockResolvedValueOnce([1001, 1002, 1003]);
+      vi.mocked(sigtermPids).mockReturnValueOnce(1);
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const r1 = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+
+      type MockedSdkClient = { onerror?: (e: Error) => void };
+      (mocked as MockedSdkClient).onerror?.(new Error('upstream EPIPE'));
+
+      await vi.waitFor(() => {
+        const calls = (debugMock.warn as ReturnType<typeof vi.fn>).mock.calls;
+        const obs = calls.find(
+          (c) =>
+            typeof c[0] === 'string' &&
+            c[0].includes('silent-drop sweep observability'),
+        );
+        expect(obs).toBeDefined();
+      });
+
+      const warnCalls = (debugMock.warn as ReturnType<typeof vi.fn>).mock.calls;
+      const obsCall = warnCalls.find(
+        (c) =>
+          typeof c[0] === 'string' &&
+          c[0].includes('silent-drop sweep observability'),
+      )!;
+      // descendantsFound=3 / descendantsSignaled=1; pidSweepError=none.
+      expect(obsCall[0]).toContain('descendantsFound=3');
+      expect(obsCall[0]).toContain('descendantsSignaled=1');
+      expect(obsCall[0]).toContain('pidSweepError=none');
+      expect(obsCall[0]).toContain('orphan-process pressure');
     });
   });
 
