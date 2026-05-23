@@ -158,6 +158,29 @@ describe('ReadFileTool', () => {
         'Limit must be a positive number',
       );
     });
+
+    it('should reject offset or limit for notebook files', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.ipynb'),
+        offset: 0,
+        limit: 10,
+      };
+
+      expect(() => tool.build(params)).toThrow(
+        'offset and limit are not supported for Jupyter notebook (.ipynb) files',
+      );
+    });
+
+    it('should reject pages for notebook files', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.ipynb'),
+        pages: '1',
+      };
+
+      expect(() => tool.build(params)).toThrow(
+        'pages is not supported for Jupyter notebook (.ipynb) files',
+      );
+    });
   });
 
   describe('getDefaultPermission', () => {
@@ -505,6 +528,36 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toBe('Read notebook: test.ipynb');
     });
 
+    it('records truncated notebook reads as not full', async () => {
+      const nbPath = path.join(tempRootDir, 'large.ipynb');
+      const notebook = {
+        cells: Array.from({ length: 200 }, (_, i) => ({
+          cell_type: 'code',
+          source: ['x = ' + 'a'.repeat(600) + '\n'],
+          execution_count: i + 1,
+          outputs: [{ output_type: 'stream', text: ['result '.repeat(100)] }],
+          metadata: {},
+        })),
+        metadata: { language_info: { name: 'python' } },
+      };
+      await fsp.writeFile(nbPath, JSON.stringify(notebook), 'utf-8');
+      const invocation = tool.build({
+        file_path: nbPath,
+      }) as ToolInvocation<ReadFileToolParams, ToolResult>;
+
+      const result = await invocation.execute(abortSignal);
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('remaining cells truncated');
+      expect(result.llmContent).not.toContain('Showing lines');
+
+      const status = fileReadCache.check(fs.statSync(nbPath));
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadWasFull).toBe(false);
+        expect(status.entry.lastReadCacheable).toBe(false);
+      }
+    });
+
     it('should reject invalid pages parameter', () => {
       const params: ReadFileToolParams = {
         file_path: '/tmp/test.pdf',
@@ -544,7 +597,9 @@ describe('ReadFileTool', () => {
         file_path: path.join(tempRootDir, 'test.txt'),
         pages: '',
       };
-      expect(() => tool.build(params)).not.toThrow();
+      const invocation = tool.build(params);
+
+      expect(invocation.params.pages).toBeUndefined();
     });
 
     it('should support offset and limit for text files', async () => {

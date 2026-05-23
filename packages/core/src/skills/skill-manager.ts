@@ -27,7 +27,7 @@ import {
   validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
-import { validateConfig } from './skill-load.js';
+import { parsePriorityField, validateConfig } from './skill-load.js';
 import { validateSymlinkTarget } from './symlinkScope.js';
 import {
   SkillActivationRegistry,
@@ -235,7 +235,11 @@ export class SkillManager {
       }
     }
 
-    // Sort by name for consistent ordering
+    // Always return a stable alphabetical order. `priority:` only affects the
+    // `/skills` listing, which applies its own priority sort at the display
+    // layer (skillsCommand). Keeping listSkills() name-sorted means
+    // programmatic consumers — notably SkillTool's model-facing
+    // `<available_skills>` description — are not reordered by priority.
     skills.sort((a, b) => a.name.localeCompare(b.name));
 
     debugLogger.info(`Listed ${skills.length} unique skills`);
@@ -682,6 +686,14 @@ export class SkillManager {
       // is offered to the model (conditional skill).
       const paths = parsePathsField(frontmatter);
 
+      // Optional `priority` frontmatter: higher values sort first.
+      // Pass our own logger so the warning is tagged [SKILL_MANAGER]
+      // rather than [SKILL_LOAD] — matches the namespace of the rest of
+      // the project/user/bundled parse path.
+      const priority = parsePriorityField(frontmatter, filePath, (msg) =>
+        debugLogger.warn(msg),
+      );
+
       const config: SkillConfig = {
         name,
         description,
@@ -696,6 +708,7 @@ export class SkillManager {
         whenToUse,
         disableModelInvocation,
         paths,
+        priority,
       };
 
       // Validate the parsed configuration
@@ -887,7 +900,29 @@ export class SkillManager {
       const skills: SkillConfig[] = [];
       for (const extension of extensions) {
         extension.skills?.forEach((skill) => {
-          skills.push({ ...skill, extensionName: extension.name });
+          // Extension skills bypass parseSkillContent / validateConfig, so a
+          // non-number `priority` would silently sort at the bottom of the
+          // `/skills` listing with no diagnostic. Warn here so the extension
+          // author sees the same signal a SKILL.md author would.
+          const hasInvalidPriority =
+            skill.priority !== undefined &&
+            (typeof skill.priority !== 'number' ||
+              !Number.isFinite(skill.priority));
+          if (hasInvalidPriority) {
+            debugLogger.warn(
+              `Extension "${extension.name}" skill "${skill.name}" has invalid priority (${typeof skill.priority}: ${String(skill.priority)}); treating as 0.`,
+            );
+          }
+          skills.push({
+            ...skill,
+            extensionName: extension.name,
+            // Normalize so downstream consumers reading `skill.priority`
+            // (e.g. the `/skills` display sort) observe the same value
+            // reflected by the warning above.
+            priority: hasInvalidPriority
+              ? 0
+              : (skill.priority as number | undefined),
+          });
         });
       }
       debugLogger.debug(

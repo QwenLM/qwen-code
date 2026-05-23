@@ -77,6 +77,7 @@ export async function evaluateToolCall(
   if (WRITE_TOOLS.has(toolName)) {
     if (
       approvalMode === ApprovalMode.AUTO_EDIT ||
+      approvalMode === ApprovalMode.AUTO ||
       approvalMode === ApprovalMode.YOLO
     ) {
       return { action: 'redirect', reason: `write_tool:${toolName}` };

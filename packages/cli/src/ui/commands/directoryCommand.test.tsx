@@ -5,13 +5,18 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { directoryCommand, expandHomeDir } from './directoryCommand.js';
+import {
+  directoryCommand,
+  expandHomeDir,
+  getDirPathCompletions,
+} from './directoryCommand.js';
 import type { Config, WorkspaceContext } from '@qwen-code/qwen-code-core';
 import type { CommandContext } from './types.js';
 import { MessageType } from '../types.js';
 import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 
 describe('directoryCommand', () => {
   let mockContext: CommandContext;
@@ -321,5 +326,115 @@ describe('directoryCommand', () => {
     expect(path.win32.normalize(result)).toBe(
       path.win32.normalize(expectedPath),
     );
+  });
+});
+
+describe('getDirPathCompletions', () => {
+  let tempTestDir = '';
+
+  beforeEach(() => {
+    // Clean up any previous test runs
+    if (tempTestDir) {
+      try {
+        fs.rmSync(tempTestDir, { recursive: true, force: true });
+      } catch (err) {
+        // ignore cleanup errors
+        void err;
+      }
+    }
+
+    tempTestDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-dir-test-'));
+    // Create a nested directory structure: root/sub1, root/sub2, root/sub1/deep
+    fs.mkdirSync(tempTestDir, { recursive: true });
+    fs.mkdirSync(path.join(tempTestDir, 'sub1'), { recursive: true });
+    fs.mkdirSync(path.join(tempTestDir, 'sub2'), { recursive: true });
+    fs.mkdirSync(path.join(tempTestDir, 'sub1', 'deep'), { recursive: true });
+    // Add some non-directory files (should be filtered out)
+    fs.writeFileSync(path.join(tempTestDir, 'file.txt'), '');
+    fs.writeFileSync(path.join(tempTestDir, 'sub1', 'nested.txt'), '');
+  });
+
+  afterAll(() => {
+    // Cleanup after all tests
+    if (tempTestDir) {
+      try {
+        fs.rmSync(tempTestDir, { recursive: true, force: true });
+      } catch (err) {
+        // ignore cleanup errors
+        void err;
+      }
+    }
+  });
+
+  describe('directory completions should include isDirectory flag', () => {
+    it('should return suggestions with isDirectory: true and trailing /', () => {
+      // Use "/" suffix so getDirPathCompletions searches INSIDE the directory
+      const results = getDirPathCompletions(`${tempTestDir}/`);
+
+      expect(results.length).toBeGreaterThan(0);
+
+      // Each suggestion should be a CommandCompletionItem with isDirectory: true
+      results.forEach((suggestion) => {
+        expect(suggestion.value).toBeDefined();
+        expect(suggestion.isDirectory).toBe(true);
+
+        // Directory values should end with path separator for continued navigation
+        expect(suggestion.value.endsWith(path.sep)).toBe(true);
+
+        // Should match one of our created directories
+        const dirNameWithoutSlash = suggestion.value.slice(0, -1);
+        const basename = path.basename(dirNameWithoutSlash);
+        expect(['sub1', 'sub2'].includes(basename)).toBe(true);
+      });
+    });
+
+    it('should filter by prefix while preserving isDirectory flag', () => {
+      const results = getDirPathCompletions(`${tempTestDir}/su`);
+
+      expect(results.length).toBeGreaterThan(0);
+
+      // Only directories starting with "su" should be returned
+      results.forEach((suggestion) => {
+        expect(suggestion.isDirectory).toBe(true);
+        const sepRe = path.sep === '\\' ? '\\\\' : path.sep;
+        expect(suggestion.value).toMatch(new RegExp(`${sepRe}su.+$`));
+        // Only top-level directories matching the prefix are returned
+        const basename = path.basename(suggestion.value.slice(0, -1));
+        expect(basename).toMatch(/^su/);
+        const dirname = path.dirname(suggestion.value);
+        expect(dirname).toContain(tempTestDir);
+      });
+    });
+
+    it('should support comma-separated paths with isDirectory flag on last segment', () => {
+      const multiPath = `${tempTestDir}, ${tempTestDir}/`;
+      const results = getDirPathCompletions(multiPath);
+
+      expect(results.length).toBeGreaterThan(0);
+
+      // Results should start with the prefix from first part
+      results.forEach((suggestion) => {
+        expect(suggestion.isDirectory).toBe(true);
+        expect(suggestion.value.startsWith(`${tempTestDir}`)).toBe(true);
+        expect(suggestion.value.endsWith(path.sep)).toBe(true);
+      });
+    });
+
+    it('should handle deeply nested directories with isDirectory flag', () => {
+      // Navigate into sub1
+      const deepResults = getDirPathCompletions(`${tempTestDir}/sub1/`);
+
+      expect(deepResults.length).toBeGreaterThan(0);
+
+      // Only directories inside sub1 should be returned
+      deepResults.forEach((suggestion) => {
+        expect(suggestion.isDirectory).toBe(true);
+        expect(suggestion.value).toContain('sub1');
+        expect(suggestion.value.endsWith(path.sep)).toBe(true);
+        // The nested 'deep' directory should be in the results
+        const basename = path.basename(suggestion.value.slice(0, -1));
+        expect(basename).toBe('deep');
+      });
+    });
   });
 });

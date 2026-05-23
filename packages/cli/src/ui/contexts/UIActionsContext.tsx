@@ -44,8 +44,6 @@ export interface UIActions {
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
-  openManageModelsDialog: () => void;
-  closeManageModelsDialog: () => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
@@ -59,7 +57,7 @@ export interface UIActions {
   handleFolderTrustSelect: (choice: FolderTrustChoice) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
-  onSuggestionsVisibilityChange: (visible: boolean) => void;
+  onTabConsumerChange: (active: boolean) => void;
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;
   handleRetryLastPrompt: () => void;
@@ -68,6 +66,10 @@ export interface UIActions {
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;
+  // Worktree exit dialog
+  handleWorktreeExit: (
+    choice: 'keep' | 'remove' | 'cancel',
+  ) => void | Promise<void>;
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
@@ -103,6 +105,9 @@ export interface UIActions {
   openRewindSelector: () => void;
   closeRewindSelector: () => void;
   handleRewindConfirm: (userItem: HistoryItem, option: RestoreOption) => void;
+  // Diff dialog
+  openDiffDialog: () => void;
+  closeDiffDialog: () => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

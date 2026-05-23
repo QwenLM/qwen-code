@@ -322,4 +322,11 @@ export class WebFetchTool extends BaseDeclarativeTool<
   ): ToolInvocation<WebFetchToolParams, ToolResult> {
     return new WebFetchToolInvocation(this.config, params);
   }
+
+  override toAutoClassifierInput(
+    params: WebFetchToolParams,
+  ): Record<string, unknown> {
+    // Do not forward the prompt — it may contain sensitive context.
+    return { url: params.url };
+  }
 }
