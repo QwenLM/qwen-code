@@ -47,7 +47,10 @@ const IGNORED_PATTERNS = [
   /(?:^|\/)package-lock\.json$/,
   /(?:^|\/)pnpm-lock\.yaml$/,
   /(?:^|\/)yarn\.lock$/,
-  /\.generated\./,
+  // Anchor to the filename segment so `.generated.` only matches when it
+  // is part of the filename (the `<name>.generated.<ext>` convention) and
+  // doesn't accidentally match directory names like `foo.generated/bar.ts`.
+  /(?:^|\/)[^/]*\.generated\.[^/]+$/,
   /\.snap$/,
   /^docs\//,
   /^docs-site\//,

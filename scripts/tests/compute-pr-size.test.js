@@ -45,6 +45,18 @@ describe('isIgnored', () => {
     expect(isIgnored('packages/core/src/index.ts')).toBe(false);
     expect(isIgnored('scripts/compute-pr-size.cjs')).toBe(false);
   });
+
+  it('anchors `.generated.` to the filename segment', () => {
+    // `<name>.generated.<ext>` files are auto-generated and ignored.
+    expect(isIgnored('packages/core/src/git-commit.generated.ts')).toBe(true);
+    expect(isIgnored('templates.generated.json')).toBe(true);
+    // A path that merely happens to have `.generated.` somewhere outside
+    // the filename segment should NOT be ignored — closes the
+    // unanchored-substring false-positive surface (e.g., a directory
+    // named `foo.generated/` should not pull all files under it into the
+    // ignored bucket).
+    expect(isIgnored('src/foo.generated/bar.ts')).toBe(false);
+  });
 });
 
 describe('computeMeaningfulSize', () => {

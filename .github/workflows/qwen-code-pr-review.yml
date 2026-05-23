@@ -248,7 +248,7 @@ jobs:
               tier_raw="$(printf '%s' "$additional_instructions" \
                 | grep -oiE -- '--tier=(ultra_light|light|standard|deep)' \
                 | head -n1 \
-                | sed 's/^--tier=//')"
+                | sed 's/^--tier=//I')"
               tier_override="$(printf '%s' "$tier_raw" | tr '[:lower:]' '[:upper:]')"
               # `I` flag = case-insensitive, so a mixed-case `--tier=Light`
               # (accepted by the case-insensitive grep above) is also
@@ -820,8 +820,8 @@ jobs:
           # Guard the parser under `set -e`: a non-zero exit (IO error on
           # the stream file) would otherwise abort the step and skip the
           # partial-flush / near-empty-guard paths below. On failure leave
-          # an empty summary so the 200-byte guard removes it and the
-          # fallback comment fires.
+          # an empty summary so the empty/placeholder guard removes it and
+          # the fallback comment fires.
           node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md LIGHT "$status_label" \
             || { echo "::warning::parse-review-stream.cjs failed; fallback comment will fire."; : > qwen-review-summary.md; }
 
@@ -843,15 +843,17 @@ jobs:
           fi
 
           # If the accumulator only wrote its "no assistant text parsed"
-          # placeholder, delete the file so the post-summary step skips and
-          # the fallback comment fires instead of posting a useless stub.
-          # 200-char threshold leaves room for the metadata header + small
-          # actual reviews (a one-liner finding is still ≥ 200 chars when
-          # wrapped in the markdown skeleton). The `-f` guard keeps this
-          # robust if a future step leaves the file missing — matching the
-          # STANDARD/DEEP near-empty guards.
-          if [ -f qwen-review-summary.md ] && [ "$(wc -c < qwen-review-summary.md)" -lt 200 ]; then
-            echo "::warning::LIGHT review produced near-empty output; removing summary file so fallback comment fires."
+          # placeholder (see scripts/parse-review-stream.cjs:124), delete
+          # the file so the post-summary step skips and the fallback
+          # comment fires instead of posting a useless stub. Match the
+          # placeholder phrase directly rather than relying on a byte-count
+          # heuristic, which conflated "empty placeholder" with "short
+          # legitimate review" (e.g., a 70-byte ULTRA_LIGHT 'LGTM — only
+          # spelling fixes.' review was getting deleted alongside the
+          # empty case). The `-f` guard keeps this robust if a future
+          # step leaves the file missing.
+          if [ -f qwen-review-summary.md ] && { ! [ -s qwen-review-summary.md ] || grep -qF 'no assistant text parsed' qwen-review-summary.md; }; then
+            echo "::warning::LIGHT review produced empty / placeholder-only output; removing summary file so fallback comment fires."
             rm -f qwen-review-summary.md
           fi
 
@@ -955,11 +957,11 @@ jobs:
             mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
           fi
 
-          # Apply LIGHT's 200-byte near-empty guard: if accumulator only
-          # wrote its placeholder, remove the file so the fallback comment
-          # fires instead of posting the placeholder verbatim.
-          if [ -f qwen-review-summary.md ] && [ "$(wc -c < qwen-review-summary.md)" -lt 200 ]; then
-            echo "::warning::STANDARD review produced near-empty output; removing summary file so fallback comment fires."
+          # Apply LIGHT's empty-placeholder guard: see the LIGHT step for
+          # rationale. Match the parser's empty-stream phrase directly so a
+          # short legitimate review (e.g. "LGTM — minor copy fix") survives.
+          if [ -f qwen-review-summary.md ] && { ! [ -s qwen-review-summary.md ] || grep -qF 'no assistant text parsed' qwen-review-summary.md; }; then
+            echo "::warning::STANDARD review produced empty / placeholder-only output; removing summary file so fallback comment fires."
             rm -f qwen-review-summary.md
           fi
 
@@ -1060,11 +1062,11 @@ jobs:
             mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
           fi
 
-          # Apply LIGHT's 200-byte near-empty guard: if accumulator only
-          # wrote its placeholder, remove the file so the fallback comment
-          # fires instead of posting the placeholder verbatim.
-          if [ -f qwen-review-summary.md ] && [ "$(wc -c < qwen-review-summary.md)" -lt 200 ]; then
-            echo "::warning::DEEP review produced near-empty output; removing summary file so fallback comment fires."
+          # Apply LIGHT's empty-placeholder guard: see the LIGHT step for
+          # rationale. Match the parser's empty-stream phrase directly so a
+          # short legitimate review (e.g. "LGTM — minor copy fix") survives.
+          if [ -f qwen-review-summary.md ] && { ! [ -s qwen-review-summary.md ] || grep -qF 'no assistant text parsed' qwen-review-summary.md; }; then
+            echo "::warning::DEEP review produced empty / placeholder-only output; removing summary file so fallback comment fires."
             rm -f qwen-review-summary.md
           fi
 
@@ -1168,8 +1170,12 @@ jobs:
           # review content instead of a generic stub; the transient error
           # has very likely cleared in the seconds since. Case 1 (no
           # markdown at all) falls through to the generic failure note.
-          # The 200-byte floor matches the tier steps' near-empty guard.
-          if [ -f qwen-review-summary.md ] && [ "$(wc -c < qwen-review-summary.md)" -ge 200 ]; then
+          # Match the tier steps' new placeholder-text guard: the tier
+          # steps already delete the file when the parser only emitted
+          # `(no assistant text parsed; ...)`, but check defensively here
+          # so a future change to the deletion logic can't push the
+          # placeholder through this retry path.
+          if [ -f qwen-review-summary.md ] && ! grep -qF 'no assistant text parsed' qwen-review-summary.md; then
             summary_bytes=$(wc -c < qwen-review-summary.md)
             {
               head -c 60000 qwen-review-summary.md

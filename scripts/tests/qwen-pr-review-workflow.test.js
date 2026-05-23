@@ -64,6 +64,34 @@ describe('Qwen PR review workflow safety rails', () => {
     expect(workflow).toContain("steps.size.outputs.should_review == 'true'");
   });
 
+  it('uses placeholder-text guard, not byte-count heuristic, to detect empty reviews', () => {
+    // Regression: an earlier byte-count guard (<200 bytes) conflated the
+    // parser's empty-stream placeholder with short legitimate reviews
+    // (e.g. "LGTM — only spelling fixes." ~70 bytes). Anchor the guard
+    // semantically on the parser's actual placeholder phrase so concise
+    // legitimate reviews survive.
+    const placeholderGuards = workflow.match(
+      /grep -qF 'no assistant text parsed' qwen-review-summary\.md/g,
+    );
+    // 3 tier-step guards (LIGHT/STANDARD/DEEP) + 1 fallback-step defense.
+    expect(placeholderGuards?.length).toBeGreaterThanOrEqual(4);
+    // The old 200-byte threshold must not regress.
+    expect(workflow).not.toContain(
+      'wc -c < qwen-review-summary.md)" -lt 200',
+    );
+    expect(workflow).not.toContain(
+      'wc -c < qwen-review-summary.md)" -ge 200',
+    );
+  });
+
+  it('strips --tier= case-insensitively to match its case-insensitive detector', () => {
+    // The grep that detects `--tier=` is `-i` (case-insensitive). The sed
+    // that strips the matched token must also be case-insensitive so a
+    // mixed-case `--tier=Light` doesn't end up as the literal token
+    // `--TIER=LIGHT` downstream.
+    expect(workflow).toMatch(/sed 's\/\^--tier=\/\/I'/);
+  });
+
   it('fences untrusted model output before writing it to Actions logs', () => {
     expect(workflow).toContain('preflight-raw-');
     expect(workflow).toContain('qwen-light-stream-');

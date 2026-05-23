@@ -188,7 +188,11 @@ jobs:
               /(?:^|\/)package-lock\.json$/,
               /(?:^|\/)pnpm-lock\.yaml$/,
               /(?:^|\/)yarn\.lock$/,
-              /\.generated\./,
+              // Anchor to the start of the filename so `not.generated.ts`,
+              // `templates.generated.test.ts`, etc. aren't accidentally
+              // swept up — the convention is `<name>.generated.<ext>` where
+              // `.generated.` is the file's first dotted segment.
+              /(?:^|\/)[^/]*\.generated\.[^/]+$/,
               /\.snap$/,                                 // jest snapshot
               /^docs\//,                                 // docs prose
               /^docs-site\//,
