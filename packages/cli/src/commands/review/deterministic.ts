@@ -679,13 +679,19 @@ async function runDeterministic(args: DeterministicArgs): Promise<void> {
     ensureWorktreeMatches(report, worktree);
   }
 
+  // Anchor `--changed-files` at projectRoot for the same reason
+  // `args.worktree` is anchored — the LLM driver sometimes invokes the
+  // subcommand from inside the worktree and a relative path would
+  // otherwise resolve to `<worktree>/.qwen/tmp/...` instead of the
+  // canonical `<project>/.qwen/tmp/...` that SKILL.md prescribes.
+  const changedFilesPath = resolve(projectRoot(), args['changed-files']);
   let changedFiles: string[] = [];
   try {
-    const raw = readFileSync(args['changed-files'], 'utf8');
+    const raw = readFileSync(changedFilesPath, 'utf8');
     changedFiles = JSON.parse(raw) as string[];
   } catch (err) {
     throw new Error(
-      `Failed to read changed-files JSON at ${args['changed-files']}: ${(err as Error).message}`,
+      `Failed to read changed-files JSON at ${changedFilesPath}: ${(err as Error).message}`,
     );
   }
   if (!Array.isArray(changedFiles)) {
@@ -732,14 +738,20 @@ async function runDeterministic(args: DeterministicArgs): Promise<void> {
     toolsSkipped,
   };
 
-  mkdirSync(dirname(args.out), { recursive: true });
-  writeFileSync(args.out, JSON.stringify(result, null, 2) + '\n', 'utf8');
+  // Anchor `--out` at projectRoot — same reasoning as `args.worktree` /
+  // `args['changed-files']` above. Without this a relative `--out` from
+  // inside the worktree would write the report under `<worktree>/...`,
+  // making the next step (SKILL.md Step 5+) blind to the deterministic
+  // findings even though the subcommand reported success.
+  const outPath = resolve(projectRoot(), args.out);
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, JSON.stringify(result, null, 2) + '\n', 'utf8');
 
   const summary = toolsRun
     .map((r) => `${r.tool}=${r.findingsCount}${r.timedOut ? ' (timeout)' : ''}`)
     .join(', ');
   writeStdoutLine(
-    `Wrote deterministic report to ${args.out}: ${findings.length} findings (${summary || 'no tools applicable'}; skipped ${toolsSkipped.length})`,
+    `Wrote deterministic report to ${outPath}: ${findings.length} findings (${summary || 'no tools applicable'}; skipped ${toolsSkipped.length})`,
   );
 }
 

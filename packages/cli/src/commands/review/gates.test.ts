@@ -272,4 +272,57 @@ describe('review subcommand gates (require fetch-pr report)', () => {
     expect(err).not.toBeNull();
     expect(err?.message).toMatch(/Worktree path mismatch/);
   });
+
+  it('load-rules --pr passes the gate when report + ownerRepo match', async () => {
+    // Happy-path companion to the four `load-rules` failure tests above —
+    // proves the gate actually opens for a valid session and we're not just
+    // testing a door that's always locked. The git fixture below (init +
+    // empty initial commit) lets `git show HEAD:.qwen/review-rules.md`
+    // resolve cleanly to "file not present" rather than blowing up the
+    // subcommand on the unrelated git layer.
+    const { execSync } = await import('node:child_process');
+    execSync('git init -q', { cwd });
+    execSync(
+      'git -c user.email=a@b.c -c user.name=test commit --allow-empty -m init -q',
+      { cwd },
+    );
+    writeReport('7', { ownerRepo: 'octo/repo' });
+    const err = await runOrCapture([
+      'load-rules',
+      'HEAD',
+      '--out',
+      '.qwen/tmp/rules.md',
+      '--pr',
+      '7',
+      '--owner-repo',
+      'octo/repo',
+    ]);
+    expect(err).toBeNull();
+  });
+
+  it('deterministic --pr passes the gate when report + worktree + ownerRepo all match', async () => {
+    // Happy-path companion to the four `deterministic` failure tests.
+    // No tsconfig.json / eslint config / etc. is present, so every tool
+    // is skipped — the subcommand still completes successfully and
+    // writes an empty findings report, proving the gate opened.
+    writeReport('7', {
+      ownerRepo: 'octo/repo',
+      worktreePath: '.qwen/tmp/review-pr-7',
+    });
+    mkdirSync('.qwen/tmp/review-pr-7', { recursive: true });
+    writeFileSync('.qwen/tmp/changed.json', '[]', 'utf8');
+    const err = await runOrCapture([
+      'deterministic',
+      '.qwen/tmp/review-pr-7',
+      '--changed-files',
+      '.qwen/tmp/changed.json',
+      '--out',
+      '.qwen/tmp/det.json',
+      '--pr',
+      '7',
+      '--owner-repo',
+      'octo/repo',
+    ]);
+    expect(err).toBeNull();
+  });
 });

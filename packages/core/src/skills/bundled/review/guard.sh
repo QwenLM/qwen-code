@@ -16,13 +16,15 @@
 # Known bypass classes the regex deliberately does NOT plug — anyone trying
 # to defeat the guard can drive the runtime command to `git checkout main`
 # while the literal string seen here contains no `git checkout`:
-#   - parameter expansion:  git${IFS}checkout main, ${cmd:-git} checkout main
+#   - parameter expansion (other than `$IFS`):  ${cmd:-git} checkout main
 #   - command substitution producing the verb:  $(echo git) checkout main
 #   - backslash-newline line continuation that bash collapses pre-tokenise
 #   - xargs argument-supply:  echo main | xargs git checkout
 #   - PATH-prefixed binaries: /usr/bin/git checkout main
 #   - global git options:    git -C /repo checkout main
-# Plugging these would require parsing bash ourselves, which is the wrong
+# Rule 6 below explicitly closes the `git$IFS` / `gh${IFS}` neighborhood
+# variants (the most common parameter-expansion bypass tried in practice).
+# Plugging the rest would require parsing bash ourselves, which is the wrong
 # tool. Trust the CLI gates as the deterministic control; treat this script
 # as documentation-with-teeth for the everyday case.
 #
@@ -84,7 +86,14 @@ fi
 
 deny() {
   local reason='Blocked during /review: this command would modify HEAD or the working tree. The review skill must use the isolated worktree created by `qwen review fetch-pr` and operate inside the returned `worktreePath`. Re-run `qwen review fetch-pr <pr> <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<pr>-fetch.json` and `cd` into the worktreePath instead of switching the user'\''s branch.'
-  printf '%s' "$reason" | jq -Rs '{decision:"deny", reason:., hookSpecificOutput:{permissionDecision:"deny", permissionDecisionReason:.}}'
+  # Fail closed: if jq itself errors out (e.g. corrupt install, exotic
+  # locale) the `set -eu` at the top would otherwise abort the function
+  # before any JSON is printed, and the hook runner would default to
+  # `allow` on missing output. Emit a static deny JSON as a fallback so
+  # the guard's decision still reaches the caller even when jq is sick.
+  if ! printf '%s' "$reason" | jq -Rs '{decision:"deny", reason:., hookSpecificOutput:{permissionDecision:"deny", permissionDecisionReason:.}}'; then
+    printf '{"decision":"deny","reason":"Blocked during /review (static deny: jq failed)."}\n'
+  fi
   exit 0
 }
 

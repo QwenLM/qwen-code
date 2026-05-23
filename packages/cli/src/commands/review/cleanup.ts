@@ -14,13 +14,14 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { refExists } from './lib/git.js';
 import {
   worktreePath,
   reviewBranch,
   REVIEW_TMP_DIR,
+  projectRoot,
   tmpPrefix,
 } from './lib/paths.js';
 
@@ -66,19 +67,22 @@ function runCleanup(target: string): void {
   }
 
   // --- Per-target side files (under .qwen/tmp/) -------------------------
+  // Anchor at projectRoot so the cleanup actually finds the canonical
+  // `<project>/.qwen/tmp/` directory even when the LLM driver invokes
+  // `cleanup` from inside the PR worktree — otherwise readdirSync hits
+  // `<worktree>/.qwen/tmp/` (empty / absent) and silently no-ops.
+  const tmpDir = resolve(projectRoot(), REVIEW_TMP_DIR);
   const prefix = tmpPrefix(target);
   let tmpEntries: string[] = [];
   try {
-    tmpEntries = existsSync(REVIEW_TMP_DIR) ? readdirSync(REVIEW_TMP_DIR) : [];
+    tmpEntries = existsSync(tmpDir) ? readdirSync(tmpDir) : [];
   } catch (err) {
-    writeStderrLine(
-      `Failed to read ${REVIEW_TMP_DIR}: ${(err as Error).message}`,
-    );
+    writeStderrLine(`Failed to read ${tmpDir}: ${(err as Error).message}`);
   }
 
   for (const file of tmpEntries) {
     if (!file.startsWith(prefix)) continue;
-    const full = join(REVIEW_TMP_DIR, file);
+    const full = join(tmpDir, file);
     try {
       unlinkSync(full);
       writeStdoutLine(`Removed temp file: ${full}`);

@@ -168,17 +168,23 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // resolve absolute against projectRoot, so the relative-from-cwd
   // mkdirSync would have created the wrong directory).
   mkdirSync(resolve(projectRoot(), REVIEW_TMP_DIR), { recursive: true });
+  // Anchor `--out` the same way: a relative `--out` argument from a
+  // non-root cwd would otherwise write the report to `<cwd>/...` while
+  // the canonical mirror lands at `<projectRoot>/.qwen/tmp/...`, so
+  // downstream consumers reading from `args.out` and consumers reading
+  // the canonical path would see inconsistent files.
+  const outPath = resolve(projectRoot(), out);
   const json = JSON.stringify(result, null, 2) + '\n';
-  writeFileSync(out, json, 'utf8');
+  writeFileSync(outPath, json, 'utf8');
   // Also mirror to the canonical path so downstream subcommands can locate the
   // session even when `--out` was given a non-canonical destination. When the
   // caller already used the canonical path, this is a no-op overwrite of
   // identical content.
   const canonical = fetchReportPath(prNumber);
-  if (resolve(canonical) !== resolve(out)) {
+  if (canonical !== outPath) {
     writeFileSync(canonical, json, 'utf8');
   }
-  writeStdoutLine(`Wrote fetch-pr report to ${out}`);
+  writeStdoutLine(`Wrote fetch-pr report to ${outPath}`);
   // Surface diff stats to stderr so a human running the command interactively
   // sees something useful even without inspecting the JSON.
   writeStderrLine(

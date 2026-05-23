@@ -15,9 +15,10 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, ghApiAll } from './lib/gh.js';
+import { projectRoot } from './lib/paths.js';
 import { requireFetchReportFor } from './lib/session.js';
 
 interface PrMetadata {
@@ -288,13 +289,18 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
 
   const md = buildMarkdown(prNumber, ownerRepo, meta, inline, issue, reviews);
 
-  mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, md, 'utf8');
+  // Anchor `--out` at projectRoot so a relative path from a worktree
+  // cwd lands at `<project>/.qwen/tmp/...` instead of `<worktree>/...`,
+  // matching the canonical-path contract the other gated subcommands
+  // honour after the projectRoot anchoring change.
+  const outPath = resolve(projectRoot(), out);
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, md, 'utf8');
   const meaningfulReviewCount = reviews.filter((r) =>
     isReviewWorthShowing(r.body),
   ).length;
   writeStdoutLine(
-    `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${meaningfulReviewCount}/${reviews.length} review summaries)`,
+    `Wrote PR context to ${outPath} (${inline.length} inline, ${issue.length} issue comments, ${meaningfulReviewCount}/${reviews.length} review summaries)`,
   );
 }
 

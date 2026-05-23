@@ -23,9 +23,10 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { gitOpt } from './lib/git.js';
+import { projectRoot } from './lib/paths.js';
 import {
   addPrSessionOptions,
   requirePrSessionFromArgs,
@@ -134,16 +135,20 @@ async function runLoadRules(args: LoadRulesArgs): Promise<void> {
   requirePrSessionFromArgs(args);
   const { combined, loaded } = loadCombined(baseRef);
 
-  mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, combined, 'utf8');
+  // Anchor `--out` at projectRoot so a relative path from a worktree cwd
+  // lands at `<project>/.qwen/tmp/...` — matching the canonical-path
+  // contract the rest of the gated subcommands honour.
+  const outPath = resolve(projectRoot(), out);
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, combined, 'utf8');
 
   if (loaded.length === 0) {
     writeStdoutLine(
-      `No review rules found on ${baseRef}; wrote empty file to ${out}`,
+      `No review rules found on ${baseRef}; wrote empty file to ${outPath}`,
     );
   } else {
     writeStdoutLine(
-      `Loaded ${loaded.length} rule source(s) from ${baseRef} → ${out}: ${loaded.join(', ')}`,
+      `Loaded ${loaded.length} rule source(s) from ${baseRef} → ${outPath}: ${loaded.join(', ')}`,
     );
   }
 }
