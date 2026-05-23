@@ -1506,6 +1506,13 @@ describe('session-tracing', () => {
       expect(record.attributes['qwen-code.subagent.terminate_reason']).toBe(
         'ttl_swept',
       );
+      // TTL sweep stamps the subagent-namespaced duration_ms key so
+      // dashboards querying that namespace include swept spans (the
+      // generic qwen-code.span.duration_ms is asserted above).
+      // wenshao @ #4410 DeepSeek 3292560017.
+      expect(
+        record.attributes['qwen-code.subagent.duration_ms'] as number,
+      ).toBeGreaterThan(0);
     });
 
     it('TTL: background subagent at 30 min stays alive (4h window)', () => {

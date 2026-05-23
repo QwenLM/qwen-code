@@ -1254,32 +1254,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    *
    * #3731 Phase 3.
    */
-  /**
-   * Build the spec object passed to `runWithSubagentSpan`. The 3 call
-   * sites differ only in `invocationKind`; this helper de-duplicates the
-   * other fields so renaming `subagentName` (or adding a new spec field)
-   * is a one-place change. wenshao @ #4410 DeepSeek 3292521238.
-   */
-  private buildSubagentSpanSpec(
-    hookOpts: { agentId: string; agentType: string },
-    subagentConfig: SubagentConfig,
-    invocationKind: SubagentInvocationKind,
-  ): {
-    agentId: string;
-    subagentName: string;
-    invocationKind: SubagentInvocationKind;
-    isBuiltIn: boolean;
-    modelOverride?: string;
-  } {
-    return {
-      agentId: hookOpts.agentId,
-      subagentName: hookOpts.agentType,
-      invocationKind,
-      isBuiltIn: subagentConfig.level === 'builtin',
-      modelOverride: subagentConfig.model,
-    };
-  }
-
   private async runWithSubagentSpan<T>(
     spec: {
       agentId: string;
@@ -1369,6 +1343,32 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         },
       );
     }
+  }
+
+  /**
+   * Build the spec object passed to `runWithSubagentSpan`. The 3 call
+   * sites differ only in `invocationKind`; this helper de-duplicates the
+   * other fields so renaming `subagentName` (or adding a new spec field)
+   * is a one-place change. wenshao @ #4410 DeepSeek 3292521238.
+   */
+  private buildSubagentSpanSpec(
+    hookOpts: { agentId: string; agentType: string },
+    subagentConfig: SubagentConfig,
+    invocationKind: SubagentInvocationKind,
+  ): {
+    agentId: string;
+    subagentName: string;
+    invocationKind: SubagentInvocationKind;
+    isBuiltIn: boolean;
+    modelOverride?: string;
+  } {
+    return {
+      agentId: hookOpts.agentId,
+      subagentName: hookOpts.agentType,
+      invocationKind,
+      isBuiltIn: subagentConfig.level === 'builtin',
+      modelOverride: subagentConfig.model,
+    };
   }
 
   /**
