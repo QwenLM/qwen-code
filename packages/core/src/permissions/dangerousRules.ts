@@ -91,6 +91,10 @@ const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   'source',
 ]);
 
+function stripWindowsExecutableSuffix(token: string): string {
+  return token.endsWith('.exe') ? token.slice(0, -'.exe'.length) : token;
+}
+
 /**
  * Tools whose allow rules carry shell-like risk. `monitor` is a long-running
  * shell-command runner and should be treated the same as `shell` for the
@@ -126,12 +130,10 @@ function isInterpreterToken(rawToken: string): boolean {
     : noWildcard.split(':')[0];
   // Last path segment so `/usr/bin/python3` → `python3`
   const lastSegment = (beforeColon ?? '').split(/[\\/]/).pop() ?? '';
-  const withoutExe = lastSegment.endsWith('.exe')
-    ? lastSegment.slice(0, -'.exe'.length)
-    : lastSegment;
-  return (
-    DANGEROUS_BASH_INTERPRETERS.includes(lastSegment) ||
-    DANGEROUS_BASH_INTERPRETERS.includes(withoutExe)
+  const normalizedSegment = stripWindowsExecutableSuffix(lastSegment);
+  return DANGEROUS_BASH_INTERPRETERS.some(
+    (interpreter) =>
+      stripWindowsExecutableSuffix(interpreter) === normalizedSegment,
   );
 }
 

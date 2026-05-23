@@ -188,6 +188,11 @@ describe('isDangerousBashRule', () => {
       expect(isDangerousBashRule(bashRule(s))).toBe(true);
     });
 
+    it('normalizes Windows executable suffixes in both directions', () => {
+      expect(isDangerousBashRule(bashRule('cmd *'))).toBe(true);
+      expect(isDangerousBashRule(bashRule('cmd.exe *'))).toBe(true);
+    });
+
     it.each([
       'cmd /c *',
       'cmd.exe /c *',
