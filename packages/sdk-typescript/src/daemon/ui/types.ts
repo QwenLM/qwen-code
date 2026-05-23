@@ -660,7 +660,15 @@ export interface DaemonTranscriptSidechannelState {
 
 export interface DaemonTranscriptState
   extends DaemonTranscriptSidechannelState {
-  blocks: DaemonTranscriptBlock[];
+  // wenshao R5 (deepseek-v4-pro): `blocks` is frozen at the dispatch
+  // boundary in `reduceDaemonTranscriptEvents` (defense against
+  // consumer in-place mutation poisoning the shared snapshot under
+  // lazy COW). Match the runtime contract at the type level so
+  // consumers get a compile-time error for `state.blocks.sort()` /
+  // `.push()` instead of a runtime `TypeError`. Internal reducer
+  // mutation goes through `takeBlocksOwnership` which casts away
+  // readonly after copying — the only place that's allowed.
+  blocks: readonly DaemonTranscriptBlock[];
   lastEventId?: number;
   activeUserBlockId?: string;
   activeAssistantBlockId?: string;

@@ -146,8 +146,16 @@ function detectFileDiff(
     'newString',
   ]);
   const toolNameLower = (opts.toolName ?? '').toLowerCase();
+  // wenshao R5 (deepseek-v4-pro): use `_`/`-`/start/end boundaries
+  // instead of `\b`. `\b` doesn't match between `write` and `_` in
+  // `write_file` (both are `\w` in regex), so it failed to recognize
+  // the canonical write-tool naming convention. The custom anchor
+  // catches `write_file`/`write-file`/`write` but rejects
+  // `prewrite_check`/`downloader`.
   const writeIntent =
-    /write|create|edit|replace|save|update/.test(toolNameLower) ||
+    /(?:^|[_-])(write|create|edit|replace|save|update|overwrite|modify|patch|generate)(?:$|[_-])/.test(
+      toolNameLower,
+    ) ||
     !!oldText;
   const contentField =
     explicitNewText === undefined && writeIntent

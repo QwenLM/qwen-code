@@ -259,7 +259,7 @@ export function daemonToolPreviewToMarkdown(
     case 'image_generation':
       return [
         `**Image generation**`,
-        `> ${text(preview.prompt)}`,
+        blockquote(text(preview.prompt)),
         preview.model
           ? `_model: ${escapeMarkdownText(preview.model, opts)}_`
           : null,
@@ -284,7 +284,7 @@ export function daemonToolPreviewToMarkdown(
       return [
         `**Delegate -> ${inlineCode(preview.agentName, opts)}**`,
         '',
-        `> ${text(preview.task)}`,
+        blockquote(text(preview.task)),
         preview.parentDelegationId
           ? `_(chained from ${escapeMarkdownText(
               preview.parentDelegationId,
@@ -366,21 +366,27 @@ export function daemonBlockToPlainText(
   block: DaemonTranscriptBlock,
   opts: DaemonRenderOptions = {},
 ): string {
+  // wenshao R5 (qwen3.7-max): sanitize ANSI / bidi controls in plain text
+  // for parity with markdown (which calls sanitizeTerminalText via `text()`)
+  // and HTML (via defaultEscapeHtml). Without this, terminal escapes and
+  // bidi overrides survived into plaintext output — contradicting the
+  // "for copy-paste / logs" JSDoc intent.
   const cap = capLength(opts);
+  const clean = (raw: string) => cap(sanitizeTerminalText(raw));
   switch (block.kind) {
     case 'user':
-      return `You: ${cap(block.text)}`;
+      return `You: ${clean(block.text)}`;
     case 'assistant':
-      return cap(block.text);
+      return clean(block.text);
     case 'thought':
-      return `(thought: ${cap(block.text)})`;
+      return `(thought: ${clean(block.text)})`;
     case 'tool': {
       // wenshao R3 (qwen3.7-max): cap header fields. Markdown + HTML
       // paths cap; plainText path previously rendered uncapped titles.
       const header = [
-        cap(block.title),
-        block.toolName ? `[${cap(block.toolName)}]` : null,
-        block.toolKind ? `(${cap(block.toolKind)})` : null,
+        clean(block.title),
+        block.toolName ? `[${clean(block.toolName)}]` : null,
+        block.toolKind ? `(${clean(block.toolKind)})` : null,
       ]
         .filter(Boolean)
         .join(' ');
@@ -394,26 +400,26 @@ export function daemonBlockToPlainText(
       return [header, preview, status].filter(Boolean).join('\n');
     }
     case 'shell':
-      return `[shell ${block.stream ?? 'stdout'}]\n${cap(block.text)}`;
+      return `[shell ${block.stream ?? 'stdout'}]\n${clean(block.text)}`;
     case 'permission': {
       // wenshao R3 (qwen3.7-max): cap permission fields for parity.
       const optionList = block.options
         .map(
           (opt) =>
-            `  - ${cap(opt.label)}${opt.description ? `: ${cap(opt.description)}` : ''}`,
+            `  - ${clean(opt.label)}${opt.description ? `: ${clean(opt.description)}` : ''}`,
         )
         .join('\n');
       const resolved = block.resolved
-        ? `(resolved: ${cap(block.resolved)})`
+        ? `(resolved: ${clean(block.resolved)})`
         : '(awaiting decision)';
-      return `Permission: ${cap(block.title)}\n${optionList}\n${resolved}`;
+      return `Permission: ${clean(block.title)}\n${optionList}\n${resolved}`;
     }
     case 'status':
-      return `[status] ${cap(block.text)}`;
+      return `[status] ${clean(block.text)}`;
     case 'debug':
-      return `[debug] ${cap(block.text)}`;
+      return `[debug] ${clean(block.text)}`;
     case 'error':
-      return `[error] ${cap(block.text)}`;
+      return `[error] ${clean(block.text)}`;
     default:
       return '';
   }
@@ -688,6 +694,15 @@ function sanitizeUrl(url: string): string {
         u.searchParams.delete(key);
       }
     }
+    // wenshao R5 (qwen3.7-max) Critical: clear the URL fragment. OAuth
+    // 2.0 implicit-grant flow places `access_token` directly in
+    // `#fragment` (e.g., `https://app/#access_token=gho_xxx&token_type=bearer`),
+    // and some Azure SAS variants similarly use the fragment. The
+    // previous serialization preserved `u.hash` and leaked credentials
+    // even when the query path was scrubbed. The fragment is for
+    // client-side state only; for rendered output, dropping it is safe
+    // and removes the leak surface entirely.
+    u.hash = '';
     return u.toString();
   } catch {
     return '#';

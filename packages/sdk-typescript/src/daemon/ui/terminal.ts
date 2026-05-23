@@ -5,6 +5,7 @@
  */
 
 import type { DaemonTranscriptBlock, DaemonUiEvent } from './types.js';
+import { formatMissedRange } from './transcript.js';
 import { sanitizeTerminalText } from './utils.js';
 
 export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
@@ -60,20 +61,14 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       );
     case 'session.available_commands':
       return terminalLine('commands', `available ${event.count}`, '2');
-    case 'session.state_resync_required': {
-      // Same defensive range formula as the transcript reducer — see
-      // `formatMissedRange` in transcript.ts. Inline here to keep the
-      // terminal module self-contained.
-      const first = event.lastDeliveredId + 1;
-      const last = event.earliestAvailableId - 1;
-      const gap =
-        last < first
-          ? 'no events lost'
-          : last === first
-            ? `missed 1 event (id ${first})`
-            : `missed ${first}-${last}`;
-      return terminalLine('resync-required', `${event.reason}: ${gap}`, '31');
-    }
+    case 'session.state_resync_required':
+      // wenshao R5 (deepseek-v4-pro): reuse the exported formatter from
+      // transcript.ts so the two sites can't silently diverge.
+      return terminalLine(
+        'resync-required',
+        `${event.reason}: ${formatMissedRange(event.lastDeliveredId, event.earliestAvailableId)}`,
+        '31',
+      );
     case 'workspace.memory.changed':
       return terminalLine(
         'memory',

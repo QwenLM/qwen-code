@@ -204,16 +204,19 @@ export function normalizeDaemonEvent(
       return normalizeAuthDeviceFlowCancelled(event, base);
 
     default:
+      // wenshao R5 (qwen3.7-max): emit a single `debug` block instead
+      // of `status + debug`. In long sessions where the daemon adds
+      // unknown event types, the doubled block-consumption rate
+      // accelerated `maxBlocks` trimming of real content. The `debug`
+      // shape already carries the event-type as a prefix, so the
+      // status block was redundant. Adapters that want a user-visible
+      // banner can pattern-match on `event.type === 'debug'` and the
+      // text prefix.
       return [
         {
           ...base,
-          type: 'status',
-          text: `${event.type} (unrecognized daemon event)`,
-        },
-        {
-          ...base,
           type: 'debug',
-          text: `${event.type}: ${stringifyRedactedJson(event.data)}`,
+          text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
         },
       ];
   }

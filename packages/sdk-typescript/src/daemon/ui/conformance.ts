@@ -152,11 +152,28 @@ export function runAdapterConformanceSuite(
   const failed: ConformanceFailure[] = [];
   let passed = 0;
   for (const fx of fixtures) {
-    const events = fx.envelopes.flatMap((env) =>
-      normalizeDaemonEvent(env as never, fx.normalizeOptions ?? {}),
-    );
-    const state = adapter.reduce(events);
-    const rendered = adapter.renderToText(state);
+    // wenshao R5 (qwen3.7-max): wrap adapter calls in try/catch so an
+    // adapter throw is reported as a fixture failure (with the error
+    // captured in `renderedExcerpt`) instead of aborting the whole
+    // suite. JSDoc promises "does not throw"; without the wrapper the
+    // promise was broken by adapter authors writing buggy reducers.
+    let rendered: string;
+    try {
+      const events = fx.envelopes.flatMap((env) =>
+        normalizeDaemonEvent(env as never, fx.normalizeOptions ?? {}),
+      );
+      const state = adapter.reduce(events);
+      rendered = adapter.renderToText(state);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      failed.push({
+        fixture: fx.name,
+        missingPhrases: fx.expectedContains,
+        leakedPhrases: [],
+        renderedExcerpt: `[adapter threw: ${msg.slice(0, 360)}]`,
+      });
+      continue;
+    }
     const missing = fx.expectedContains.filter(
       (phrase) => !rendered.includes(phrase),
     );

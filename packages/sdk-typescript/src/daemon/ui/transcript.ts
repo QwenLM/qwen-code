@@ -151,6 +151,7 @@ function applyDaemonTranscriptEvent(
     // an uncaught issue. Throttled at the call site is the consumer's
     // job — this fires once per dropped event.
     if (typeof console !== 'undefined' && console.warn) {
+      // eslint-disable-next-line no-console -- intentional diagnostic for awaitingResync silent-drop, per wenshao R5
       console.warn(
         `[daemon-ui] dropping event \`${event.type}\` while awaitingResync; ` +
           `state may be stale until session reconnect (lastResyncRequired: ${
@@ -299,7 +300,7 @@ function handleStateResyncRequired(
  * single-event range for `gap == 1`. Round all edge cases to natural
  * phrasing so the diagnostic stays readable. wenshao R4 (qwen3.7-max).
  */
-function formatMissedRange(
+export function formatMissedRange(
   lastDeliveredId: number,
   earliestAvailableId: number,
 ): string {

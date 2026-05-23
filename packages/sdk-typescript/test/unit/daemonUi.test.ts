@@ -1246,13 +1246,18 @@ describe('daemon UI normalizer and transcript reducer', () => {
       },
     });
 
+    // wenshao R5 (qwen3.7-max): unrecognized daemon events now emit a
+    // single `debug` block (was status + debug). The text prefix
+    // `<event-type> (unrecognized daemon event)` carries the same
+    // information without doubling block consumption.
     expect(events).toMatchObject([
-      { type: 'status' },
       {
         type: 'debug',
         text: expect.stringContaining('[redacted]') as string,
       },
     ]);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe('debug');
     // `DaemonUiStatusEvent` has `type: 'status' | 'debug'` — both share a
     // `text` field. Cast through the union variant (not Extract on a
     // sub-literal, which yields `never`).
@@ -4597,5 +4602,184 @@ describe('ensureSafeImageUrl tightened to data:image/* (audit follow-up)', () =>
     expect(daemonBlockToMarkdown(mkBlock('javascript:alert(1)'))).toContain(
       '![image](#)',
     );
+  });
+});
+
+describe('R5 review batch — coverage additions', () => {
+  it('normalizeAuthDeviceFlowCancelled happy path', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'auth_device_flow_cancelled',
+      data: { deviceFlowId: 'flow-123' },
+    } as never);
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'auth.device_flow.cancelled',
+        deviceFlowId: 'flow-123',
+      }),
+    ]);
+  });
+
+  it('normalizeAuthDeviceFlowCancelled malformed → fallback debug', () => {
+    const events = normalizeDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'auth_device_flow_cancelled',
+      data: { /* no deviceFlowId */ },
+    } as never);
+    expect(events[0]?.type).toBe('debug');
+  });
+
+  it('sanitizeUrl clears OAuth implicit-grant access_token in #fragment', async () => {
+    const {
+      daemonBlockToMarkdown,
+      createDaemonToolPreview,
+    } = await import('../../src/daemon/ui/index.js');
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'fetch',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        {
+          url: 'https://app.example.com/callback#access_token=gho_FRAGMENT_LEAK&token_type=bearer',
+          method: 'GET',
+        },
+        { toolName: 'WebFetch', toolKind: 'tool' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const out = daemonBlockToMarkdown(block, { sanitizeUrls: true });
+    expect(out).not.toContain('FRAGMENT_LEAK');
+    expect(out).not.toContain('access_token=');
+  });
+
+  it('sanitizeUrl strips AWS / GCP / Azure SAS credential params', async () => {
+    const {
+      daemonBlockToMarkdown,
+      createDaemonToolPreview,
+    } = await import('../../src/daemon/ui/index.js');
+    const mkBlock = (url: string) => ({
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'fetch',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        { url, method: 'GET' },
+        { toolName: 'WebFetch', toolKind: 'tool' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    // AWS S3 presigned
+    const aws = daemonBlockToMarkdown(
+      mkBlock('https://bucket.s3.amazonaws.com/x?AWSAccessKeyId=AKIA_LEAK&Expires=1234&Signature=SIG_LEAK'),
+      { sanitizeUrls: true },
+    );
+    expect(aws).not.toContain('AKIA_LEAK');
+    expect(aws).not.toContain('SIG_LEAK');
+    // GCP signed URL
+    const gcp = daemonBlockToMarkdown(
+      mkBlock('https://storage.googleapis.com/b/o?GoogleAccessId=svc_LEAK@proj.iam.gserviceaccount.com&Expires=999&Signature=GCP_LEAK'),
+      { sanitizeUrls: true },
+    );
+    expect(gcp).not.toContain('svc_LEAK');
+    expect(gcp).not.toContain('GCP_LEAK');
+    // Azure SAS
+    const az = daemonBlockToMarkdown(
+      mkBlock('https://acct.blob.core.windows.net/c/x?sv=2020-08-04&se=2026-12-31&sig=AZ_LEAK&sp=r'),
+      { sanitizeUrls: true },
+    );
+    expect(az).not.toContain('AZ_LEAK');
+  });
+
+  it('formatMissedRange handles no-gap / single-event / multi-event', async () => {
+    const { formatMissedRange } = await import(
+      '../../src/daemon/ui/transcript.js'
+    );
+    expect(formatMissedRange(5, 6)).toContain('no events lost');
+    expect(formatMissedRange(5, 7)).toContain('1 daemon event');
+    expect(formatMissedRange(5, 10)).toContain('6-9');
+  });
+
+  it('detectFileDiff content alias rejected for non-write tools', async () => {
+    const { createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    // `{ path, content }` with READ-like tool name → NOT file_diff
+    const read = createDaemonToolPreview(
+      { path: '/x', content: 'expected text' },
+      { toolName: 'read_file' },
+    );
+    expect(read.kind).not.toBe('file_diff');
+    // Same shape with WRITE-like tool name → IS file_diff
+    const write = createDaemonToolPreview(
+      { path: '/x', content: 'new content' },
+      { toolName: 'write_file' },
+    );
+    expect(write.kind).toBe('file_diff');
+  });
+
+  it('writeIntent regex word-boundary: prewrite_check does NOT match write', async () => {
+    const { createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const preview = createDaemonToolPreview(
+      { path: '/x', content: 'data' },
+      { toolName: 'prewrite_check' },
+    );
+    expect(preview.kind).not.toBe('file_diff');
+  });
+
+  it('conformance suite captures adapter throw as fixture failure (does not abort)', async () => {
+    const { runAdapterConformanceSuite } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const result = runAdapterConformanceSuite(
+      {
+        reduce: () => {
+          throw new Error('adapter bug — intentional');
+        },
+        renderToText: () => '',
+      } as never,
+      { only: ['simple-chat'] },
+    );
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]!.renderedExcerpt).toContain('adapter threw');
+    expect(result.failed[0]!.renderedExcerpt).toContain('adapter bug');
+    // Suite did not throw — caller's assertion contract holds.
+  });
+
+  it('unrecognized daemon event emits single debug block (not status+debug)', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'future_event_in_2027' as never,
+      data: {},
+    } as never);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe('debug');
+  });
+
+  it('store.clearAwaitingResync clears latch', async () => {
+    const { createDaemonTranscriptStore } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const store = createDaemonTranscriptStore();
+    store.dispatch({
+      type: 'session.state_resync_required',
+      reason: 'sse_eviction',
+      lastDeliveredId: 5,
+      earliestAvailableId: 12,
+    } as never);
+    expect(store.getSnapshot().awaitingResync).toBe(true);
+    store.clearAwaitingResync();
+    expect(store.getSnapshot().awaitingResync).toBe(false);
   });
 });

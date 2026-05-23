@@ -20,7 +20,6 @@ import {
   DaemonSessionClient,
   createDaemonTranscriptStore,
   normalizeDaemonEvent,
-  selectPendingPermissionBlocks,
   type CreateSessionRequest,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
@@ -462,8 +461,20 @@ export function useDaemonTranscriptBlocks(): readonly DaemonTranscriptBlock[] {
 }
 
 export function useDaemonPendingPermissions() {
-  const state = useDaemonTranscriptState();
-  return useMemo(() => selectPendingPermissionBlocks(state), [state]);
+  // wenshao R5 (qwen3.7-max): subscribe at the blocks level instead of
+  // the full transcript state. `selectPendingPermissionBlocks` reads
+  // only `state.blocks`; subscribing to the full state caused this
+  // hook to re-render on every daemon event (text deltas, tool
+  // updates, sidechannel changes) even when blocks were unchanged.
+  const blocks = useDaemonTranscriptBlocks();
+  return useMemo(
+    () =>
+      blocks.filter(
+        (block): block is Extract<DaemonTranscriptBlock, { kind: 'permission' }> =>
+          block.kind === 'permission' && block.resolved === undefined,
+      ),
+    [blocks],
+  );
 }
 
 export function useDaemonActions(): DaemonUiSessionActions {
