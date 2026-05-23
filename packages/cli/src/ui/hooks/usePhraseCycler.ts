@@ -58,8 +58,11 @@ export const usePhraseCycler = (
     loadingPhrases[0],
   );
   const phraseIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const generationRef = useRef(0);
 
   useEffect(() => {
+    const generation = ++generationRef.current;
+
     if (isWaiting) {
       setCurrentLoadingPhrase(t('Waiting for user confirmation...'));
       if (phraseIntervalRef.current) {
@@ -76,6 +79,8 @@ export const usePhraseCycler = (
         const shouldUseFortune = enableFortunes && fortuneCommand?.trim();
         if (shouldUseFortune) {
           const fortuneQuote = await getFortuneQuote(fortuneCommand);
+          // Check if this effect is still current before updating state
+          if (generation !== generationRef.current) return;
           setCurrentLoadingPhrase(
             fortuneQuote ?? selectRandomPhrase(loadingPhrases),
           );
@@ -86,12 +91,14 @@ export const usePhraseCycler = (
 
       // Set initial loading phrase
       updatePhrase().catch(() => {
+        if (generation !== generationRef.current) return;
         setCurrentLoadingPhrase(selectRandomPhrase(loadingPhrases));
       });
 
       phraseIntervalRef.current = setInterval(() => {
         // Update with new loading phrase every interval
         updatePhrase().catch(() => {
+          if (generation !== generationRef.current) return;
           setCurrentLoadingPhrase(selectRandomPhrase(loadingPhrases));
         });
       }, PHRASE_CHANGE_INTERVAL_MS);
