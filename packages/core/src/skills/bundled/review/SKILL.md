@@ -101,15 +101,23 @@ After determining the scope, count the total diff lines. If the diff exceeds 500
 
 ## Step 2: Load project review rules
 
-Run `qwen review load-rules` to read project-specific rules. **For PR reviews, read from the base branch** (the PR branch is untrusted — a malicious PR could otherwise inject bypass rules):
+Run `qwen review load-rules` to read project-specific rules. **For PR reviews, read from the base branch** (the PR branch is untrusted — a malicious PR could otherwise inject bypass rules).
+
+For **PR reviews**, `--pr` and `--owner-repo` are MANDATORY — both together — so the subcommand can hard-fail when no fetch-pr report exists for that PR+repo combination (catches a weakly instruction-following model that bypassed the worktree setup, or a stale report from another repo trying to satisfy the gate):
 
 ```bash
 qwen review load-rules <resolved_base_ref> \
   --out .qwen/tmp/qwen-review-<target>-rules.md \
-  [--pr <pr_number> --owner-repo <owner>/<repo>]
+  --pr <pr_number> \
+  --owner-repo <owner>/<repo>
 ```
 
-Pass `--pr <pr_number> --owner-repo <owner>/<repo>` together for PR reviews; the subcommand will hard-fail if no fetch-pr report exists for that PR+repo combination, catching the case where the worktree setup was skipped or a stale report from another repo would otherwise satisfy the gate. Omit both flags for local-uncommitted or file-path reviews.
+For **local-uncommitted or file-path reviews**, omit both:
+
+```bash
+qwen review load-rules <resolved_base_ref> \
+  --out .qwen/tmp/qwen-review-<target>-rules.md
+```
 
 `<resolved_base_ref>` is the base ref to load from: prefer `<base>` if it exists locally, otherwise `<remote>/<base>` (run `git fetch <remote> <base>` first if not yet fetched). For local-uncommitted or file-path reviews use `HEAD`.
 
@@ -127,7 +135,9 @@ Before launching LLM review agents, run the project's existing linter and type c
 
 Extract the list of changed files from the diff output. For local uncommitted reviews, take the union of files from both `git diff` and `git diff --staged` so staged-only and unstaged-only changes are both included. **Exclude deleted files** — use `git diff --diff-filter=d --name-only` (or filter out deletions from `git diff --name-status`) since running linters on non-existent paths would produce false failures. For file path reviews with no diff (reviewing a file's current state), use the specified file as the target. Then run the applicable checks:
 
-1. **Bundled deterministic checks** (covers TypeScript/JavaScript, Python, Rust, Go in one call): the subcommand auto-detects each language's config files (`tsconfig.json` / eslint config / `pyproject.toml [tool.ruff]` / `Cargo.toml` / `go.mod`), runs the applicable tool on changed files (or whole project filtered to changed files for whole-project tools), parses each tool's structured output (JSON or line-based), and emits a single findings JSON:
+1. **Bundled deterministic checks** (covers TypeScript/JavaScript, Python, Rust, Go in one call): the subcommand auto-detects each language's config files (`tsconfig.json` / eslint config / `pyproject.toml [tool.ruff]` / `Cargo.toml` / `go.mod`), runs the applicable tool on changed files (or whole project filtered to changed files for whole-project tools), parses each tool's structured output (JSON or line-based), and emits a single findings JSON.
+
+   For **PR reviews**, `--pr` and `--owner-repo` are MANDATORY — both together — so the subcommand refuses to run when no fetch-pr report exists for that PR+repo combination or `<worktree>` doesn't match the path recorded by `fetch-pr`. That blocks accidental analysis of the user's main working tree and of a stale worktree from a same-PR-number review in another repo:
 
    ```bash
    echo '<json array of changed files relative to worktree>' \
@@ -135,10 +145,17 @@ Extract the list of changed files from the diff output. For local uncommitted re
    qwen review deterministic <worktree> \
      --changed-files .qwen/tmp/qwen-review-<target>-changed.json \
      --out .qwen/tmp/qwen-review-<target>-deterministic.json \
-     [--pr <pr_number> --owner-repo <owner>/<repo>]
+     --pr <pr_number> \
+     --owner-repo <owner>/<repo>
    ```
 
-   Pass `--pr <pr_number> --owner-repo <owner>/<repo>` together for PR reviews — the subcommand will then refuse to run if no fetch-pr report exists for that PR+repo combination or if `<worktree>` doesn't match the path recorded by `fetch-pr`, blocking accidental analysis of the user's main working tree or of a stale worktree from a same-PR-number review in another repo. Omit both flags for local / file reviews.
+   For **local-uncommitted or file-path reviews**, omit both flags:
+
+   ```bash
+   qwen review deterministic <worktree> \
+     --changed-files .qwen/tmp/qwen-review-<target>-changed.json \
+     --out .qwen/tmp/qwen-review-<target>-deterministic.json
+   ```
 
    Tools currently covered:
 

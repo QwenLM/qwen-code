@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
-import { describe, expect, it, beforeAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { SkillManager } from '../../skill-manager.js';
 import type { CommandHookConfig } from '../../../hooks/types.js';
 import { HookEventName } from '../../../hooks/types.js';
@@ -82,6 +82,13 @@ describe('bundled review skill', () => {
         path.join(cwd, '.qwen', 'tmp', 'qwen-review-pr-1-fetch.json'),
         '{}',
       );
+    });
+
+    afterAll(() => {
+      // The individual self-disable test creates its own tmpdir and
+      // cleans up; the shared one created here was being left behind on
+      // every test run. Remove it explicitly.
+      fs.rmSync(cwd, { recursive: true, force: true });
     });
 
     function runGuard(input: object): { stdout: string; exitCode: number } {

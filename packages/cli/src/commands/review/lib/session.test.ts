@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
@@ -76,9 +76,50 @@ describe('review/lib/session', () => {
     expect(readFetchReport('42')).toBeNull();
   });
 
-  it('readFetchReport returns null when the file is malformed', () => {
+  it('readFetchReport returns null when the file is malformed and warns to stderr', () => {
     writeFileSync(fetchReportPath('42'), '{not json', 'utf8');
-    expect(readFetchReport('42')).toBeNull();
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      expect(readFetchReport('42')).toBeNull();
+      expect(spy).toHaveBeenCalledWith(
+        expect.stringContaining('failed to parse'),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('readFetchReport returns null when the parsed JSON is missing required fields', () => {
+    // Shape-corrupt: parses cleanly but lacks prNumber / ownerRepo /
+    // worktreePath. Without runtime validation the downstream gates
+    // crash on `.toLowerCase()` / `anchoredPath(undefined)` — read as
+    // "missing" so callers land in the actionable recovery instead.
+    writeFileSync(fetchReportPath('42'), '{}', 'utf8');
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      expect(readFetchReport('42')).toBeNull();
+      expect(spy).toHaveBeenCalledWith(
+        expect.stringContaining('missing required fields'),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('readFetchReport returns null when the parsed JSON is an array', () => {
+    writeFileSync(fetchReportPath('42'), '[]', 'utf8');
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      expect(readFetchReport('42')).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('readFetchReport returns the parsed report when present', () => {

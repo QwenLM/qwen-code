@@ -126,17 +126,23 @@ if matches "${P}git[[:space:]]+pull([[:space:]]|\$)"; then
   deny
 fi
 
-# 4. `git reset` in any form that moves HEAD. The only safe form is
-#    `git reset -- <pathspec>` (unstage specific files — does NOT move HEAD).
-#    `git reset HEAD~1` (default --mixed), `git reset --soft/--mixed/--hard`,
-#    `git reset --merge`, and `git reset --keep` all move HEAD and are
-#    denied. Bare `git reset` (no args, unstage-all) falls through because
-#    the outer pattern requires whitespace after `reset` — that's safe
-#    semantically too.
-if matches "${P}git[[:space:]]+reset[[:space:]]"; then
-  if ! matches "${P}git[[:space:]]+reset[[:space:]]+-- "; then
-    deny
-  fi
+# 4. `git reset` in any form that moves HEAD or unstages everything. The
+#    only safe forms that fall through are:
+#      - bare `git reset` (no args)
+#      - `git reset -- <pathspec>`  (the `-- ` after `reset ` doesn't
+#        match `--[a-z]` or `[^-]` below)
+#    Single-token forms that move HEAD or change index state are denied:
+#      - `git reset HEAD~1`            (matched by `[^-]`)
+#      - `git reset --hard <ref>`      (matched by `--[a-z]`)
+#      - `git reset --soft/mixed/merge/keep <ref>` (same)
+#      - `git reset HEAD`              (matched by `[^-]`; conservative —
+#        semantically equivalent to bare `git reset` but explicit)
+#    Mirrors rule 5's deny-the-dangerous-form approach rather than
+#    allow-the-safe-form-only — the previous unanchored inner allow let
+#    `git reset --hard HEAD && git reset -- file.ts` slide through because
+#    the second `reset -- ` satisfied the exception for the first.
+if matches "${P}git[[:space:]]+reset[[:space:]]+(--[a-z]|[^-])"; then
+  deny
 fi
 
 # 5. `git checkout`. The only safe form is `git checkout -- <pathspec>`

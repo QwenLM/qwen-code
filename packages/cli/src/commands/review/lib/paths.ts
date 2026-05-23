@@ -22,6 +22,8 @@
 import { execSync } from 'node:child_process';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
+let _gitFailureWarned = false;
+
 function findProjectRoot(): string {
   const envRoot = process.env['QWEN_PROJECT_DIR'];
   if (envRoot && isAbsolute(envRoot)) {
@@ -30,7 +32,9 @@ function findProjectRoot(): string {
   try {
     const commonDir = execSync('git rev-parse --git-common-dir', {
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
+      // Capture stderr (was 'ignore') so a `safe.directory` rejection or
+      // similar non-trivial git failure surfaces in the warning below.
+      stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
     if (commonDir) {
       const abs = isAbsolute(commonDir) ? commonDir : resolve(commonDir);
@@ -40,8 +44,22 @@ function findProjectRoot(): string {
       // gated subcommands read.
       return dirname(abs);
     }
-  } catch {
-    // Not a git repo, or `git` not available. Fall through to cwd.
+  } catch (err) {
+    // Warn once per process so a non-trivial git failure
+    // (`safe.directory` rejection on a sudo-mediated checkout, corrupt
+    // `.git`, permission errors, …) is observable rather than silently
+    // collapsing to a cwd-anchored canonical path that downstream
+    // subcommands will look for at a different cwd. Stays at `warn`
+    // because the `process.cwd()` fallback is still a reasonable answer
+    // when the caller happens to be at the project root.
+    if (!_gitFailureWarned) {
+      _gitFailureWarned = true;
+      const stderr = (err as { stderr?: Buffer | string }).stderr;
+      const tail = stderr ? `: ${stderr.toString().trim()}` : '';
+      process.stderr.write(
+        `Warning: \`git rev-parse --git-common-dir\` failed; falling back to process.cwd() for projectRoot()${tail}\n`,
+      );
+    }
   }
   return process.cwd();
 }
@@ -66,6 +84,7 @@ export function projectRoot(): string {
 /** @internal Test-only — clears the cache so the next `projectRoot()` call re-resolves. */
 export function _resetProjectRootCache(): void {
   _cachedRoot = undefined;
+  _gitFailureWarned = false;
 }
 
 /**

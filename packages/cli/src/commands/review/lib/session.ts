@@ -43,6 +43,15 @@ export interface FetchReport {
    * the findings-count check. Keeping the type honest forces callers to
    * handle the missing case explicitly rather than getting silently-wrong
    * `=== false` comparisons or default-destructuring behavior on stale state.
+   *
+   * Deprecation contract: this remains optional until a future minor
+   * release that bumps the fetch report schema. At that point
+   * `readFetchReport`'s `hasMinimalShape` check should add
+   * `typeof r['commentMode'] === 'boolean'` as a required field — every
+   * legacy report on disk will be re-emitted by the very-next `fetch-pr`
+   * run, and stale reports cleared by `qwen review cleanup`. Until then,
+   * a missing `commentMode` is operationally indistinguishable from an
+   * explicit `false`; both produce non-comment-mode behavior.
    */
   commentMode?: boolean;
 }
@@ -52,15 +61,35 @@ export function fetchReportPath(prNumber: string | number): string {
   return tmpFile(`pr-${prNumber}`, 'fetch.json');
 }
 
-/** Returns the report or null if missing / unparseable. */
+/**
+ * Minimum field set every downstream gate dereferences. Anything missing
+ * here would throw `TypeError: Cannot read properties of undefined` at
+ * `report.ownerRepo.toLowerCase()` / `anchoredPath(report.worktreePath)` /
+ * etc. — violating the gates' "actionable recovery error, never opaque
+ * crash" contract. Validated at parse time so a shape-corrupt report
+ * (`{}`, an array, a future schema bump missing a required field) lands
+ * in the same actionable recovery path as a missing file.
+ */
+function hasMinimalShape(parsed: unknown): parsed is FetchReport {
+  if (typeof parsed !== 'object' || parsed === null) return false;
+  const r = parsed as Record<string, unknown>;
+  return (
+    typeof r['prNumber'] === 'string' &&
+    typeof r['ownerRepo'] === 'string' &&
+    typeof r['worktreePath'] === 'string'
+  );
+}
+
+/** Returns the report or null if missing / unparseable / shape-corrupt. */
 export function readFetchReport(prNumber: string | number): FetchReport | null {
   const path = fetchReportPath(prNumber);
   if (!existsSync(path)) return null;
   // readFileSync moved inside the try so EACCES / EISDIR / etc. on a present
   // file degrade to "no report" rather than throwing past the recovery
   // pointer in requireFetchReport.
+  let parsed: unknown;
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as FetchReport;
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch (err) {
     // Surface the root cause to stderr so the LLM driver doesn't get the
     // misleading "Missing fetch-pr report" recovery pointer when the file
@@ -72,6 +101,13 @@ export function readFetchReport(prNumber: string | number): FetchReport | null {
     );
     return null;
   }
+  if (!hasMinimalShape(parsed)) {
+    process.stderr.write(
+      `Warning: fetch-pr report at ${path} parsed but is missing required fields (prNumber / ownerRepo / worktreePath). Treating as missing.\n`,
+    );
+    return null;
+  }
+  return parsed;
 }
 
 /**
