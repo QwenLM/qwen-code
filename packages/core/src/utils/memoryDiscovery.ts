@@ -45,7 +45,14 @@ export async function findProjectRoot(
     try {
       const stats = await fs.lstat(gitPath);
       if (stats.isDirectory()) {
-        return currentDir;
+        try {
+          await fs.access(path.join(gitPath, 'HEAD'), fsSync.constants.R_OK);
+          return currentDir;
+        } catch {
+          // Ignore empty placeholder .git directories. Some sandboxed
+          // environments expose one at /tmp, which should not make every
+          // temp workspace resolve to /tmp as the project root.
+        }
       }
     } catch (error: unknown) {
       // Don't log ENOENT errors as they're expected when .git doesn't exist
@@ -398,31 +405,36 @@ export async function loadServerHierarchicalMemory(
   if (folderTrust && !options.explicitOnly) {
     const localPath = getLocalContextFilePath(effectiveRoot);
     try {
-      await fs.access(localPath, fsSync.constants.R_OK);
-      const globalQwenDir = Storage.getGlobalQwenDir();
-      // filePaths is interleaved per configured filename, e.g.
-      // [global/QWEN.md, workspace/QWEN.md, global/AGENTS.md, ...].
-      // Insert local AFTER the last global path so every global file
-      // stays ahead of it (global → local → committed). Inserting before
-      // the first non-global would strand later global entries (e.g.
-      // global/AGENTS.md) behind the local file.
-      let lastGlobalIdx = -1;
-      for (let i = 0; i < filePaths.length; i++) {
-        if (filePaths[i].startsWith(globalQwenDir)) {
-          lastGlobalIdx = i;
+      const localLstat = await fs.lstat(localPath);
+      if (localLstat.isSymbolicLink()) {
+        logger.warn(`Skipping symlinked local context file: ${localPath}`);
+      } else {
+        await fs.access(localPath, fsSync.constants.R_OK);
+        const globalQwenDir = Storage.getGlobalQwenDir();
+        // filePaths is interleaved per configured filename, e.g.
+        // [global/QWEN.md, workspace/QWEN.md, global/AGENTS.md, ...].
+        // Insert local AFTER the last global path so every global file
+        // stays ahead of it (global → local → committed). Inserting before
+        // the first non-global would strand later global entries (e.g.
+        // global/AGENTS.md) behind the local file.
+        let lastGlobalIdx = -1;
+        for (let i = 0; i < filePaths.length; i++) {
+          if (filePaths[i].startsWith(globalQwenDir)) {
+            lastGlobalIdx = i;
+          }
         }
+        filePaths.splice(lastGlobalIdx + 1, 0, localPath);
+        logger.debug(`Found local context file: ${localPath}`);
       }
-      filePaths.splice(lastGlobalIdx + 1, 0, localPath);
-      logger.debug(`Found local context file: ${localPath}`);
     } catch (err) {
       // ENOENT is the common case — file doesn't exist, skip silently.
       // Log non-ENOENT errors (EACCES, EPERM, EIO) so the operator
       // can diagnose permission issues; don't swallow them silently.
-      if (
-        typeof err !== 'object' ||
-        err === null ||
-        (err as { code?: string }).code === 'ENOENT'
-      ) {
+      const code =
+        typeof err === 'object' && err !== null
+          ? (err as { code?: string }).code
+          : undefined;
+      if (code === 'ENOENT') {
         // Not found — expected.
       } else {
         logger.warn(

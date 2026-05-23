@@ -450,20 +450,18 @@ describe('writeWorkspaceContextFile', () => {
       ).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
-    it('falls back to global when no project context file exists', async () => {
-      const result = await writeWorkspaceContextFile({
-        scope: 'auto',
-        mode: 'append',
-        content: '- fallback entry',
-        projectRoot: workspace,
-      });
-
-      expect(result.filePath).toBe(
-        path.join(globalDir, DEFAULT_CONTEXT_FILENAME),
+    it('refuses to fall back to global when no project context file exists', async () => {
+      await expect(
+        writeWorkspaceContextFile({
+          scope: 'auto',
+          mode: 'append',
+          content: '- fallback entry',
+          projectRoot: workspace,
+        }),
+      ).rejects.toThrow(
+        "scope='auto' is not allowed when auto resolves to the global directory",
       );
       expect(getGlobalQwenDirSpy).toHaveBeenCalled();
-      const written = await fs.readFile(result.filePath, 'utf8');
-      expect(written).toBe(MEMORY_SECTION_HEADER + '\n- fallback entry\n');
     });
 
     it('prefers QWEN.md over AGENTS.md when both exist (QWEN.md first in filenames list)', async () => {
@@ -606,6 +604,75 @@ describe('writeWorkspaceContextFile', () => {
     });
   });
 
+  describe('monorepo path resolution', () => {
+    it('resolves local scope to git root when projectRoot is a subdirectory', async () => {
+      const gitRoot = path.join(tmpRoot, 'repo');
+      const subWorkspace = path.join(gitRoot, 'packages', 'cli');
+      await fs.mkdir(subWorkspace, { recursive: true });
+      await fs.mkdir(path.join(gitRoot, '.git'), { recursive: true });
+      await fs.writeFile(path.join(gitRoot, '.git', 'HEAD'), 'ref: main\n');
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'local',
+        mode: 'append',
+        content: '- monorepo local entry',
+        projectRoot: subWorkspace,
+      });
+
+      expect(result.filePath).toBe(
+        path.join(gitRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME),
+      );
+      expect(result.resolvedScope).toBe('local');
+
+      const written = await fs.readFile(result.filePath, 'utf8');
+      expect(written).toContain('- monorepo local entry');
+
+      // .gitignore should be at git root, not the subdirectory
+      const gitignore = await fs.readFile(
+        path.join(gitRoot, '.gitignore'),
+        'utf8',
+      );
+      expect(gitignore).toContain(`${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}`);
+    });
+
+    it('resolves auto to local file at git root when no committed file exists', async () => {
+      const gitRoot = path.join(tmpRoot, 'repo');
+      const subWorkspace = path.join(gitRoot, 'packages', 'cli');
+      await fs.mkdir(subWorkspace, { recursive: true });
+      await fs.mkdir(path.join(gitRoot, '.git'), { recursive: true });
+      await fs.writeFile(path.join(gitRoot, '.git', 'HEAD'), 'ref: main\n');
+
+      const localPath = path.join(gitRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME);
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      await fs.writeFile(localPath, '# local\n', 'utf8');
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'append',
+        content: '- auto local entry',
+        projectRoot: subWorkspace,
+      });
+
+      expect(result.filePath).toBe(localPath);
+      expect(result.resolvedScope).toBe('local');
+    });
+
+    it('falls back to projectRoot when no git repo exists', async () => {
+      // workspace is already a tmpdir with no .git parent
+      const result = await writeWorkspaceContextFile({
+        scope: 'local',
+        mode: 'append',
+        content: '- no git entry',
+        projectRoot: workspace,
+      });
+
+      expect(result.filePath).toBe(
+        path.join(workspace, QWEN_DIR, LOCAL_CONTEXT_FILENAME),
+      );
+      expect(result.resolvedScope).toBe('local');
+    });
+  });
+
   describe('resolvedScope', () => {
     it('returns resolvedScope matching the requested scope for workspace', async () => {
       const result = await writeWorkspaceContextFile({
@@ -676,11 +743,11 @@ describe('writeWorkspaceContextFile', () => {
       expect(result.filePath).toBe(localPath);
     });
 
-    it('resolves auto to global when no project file exists', async () => {
+    it('returns resolvedScope matching explicit global writes', async () => {
       const result = await writeWorkspaceContextFile({
-        scope: 'auto',
+        scope: 'global',
         mode: 'append',
-        content: '- auto global entry',
+        content: '- explicit global entry',
         projectRoot: workspace,
       });
 
@@ -700,7 +767,22 @@ describe('writeWorkspaceContextFile', () => {
           content: '- dangerous replace',
           projectRoot: workspace,
         }),
-      ).rejects.toThrow("scope='auto' with mode='replace' is not allowed");
+      ).rejects.toThrow(
+        "scope='auto' is not allowed when auto resolves to the global directory",
+      );
+    });
+
+    it('refuses mode=append when auto resolves to global', async () => {
+      await expect(
+        writeWorkspaceContextFile({
+          scope: 'auto',
+          mode: 'append',
+          content: '- dangerous append',
+          projectRoot: workspace,
+        }),
+      ).rejects.toThrow(
+        "scope='auto' is not allowed when auto resolves to the global directory",
+      );
     });
 
     it('allows mode=replace when auto resolves to workspace', async () => {
@@ -787,6 +869,79 @@ describe('writeWorkspaceContextFile', () => {
         'utf8',
       );
       expect(gitignore).toContain(`${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}`);
+    });
+
+    it('refuses to write when the target file is a symlink', async () => {
+      const targetFile = path.join(tmpRoot, 'symlink-target');
+      await fs.writeFile(targetFile, 'original\n', 'utf8');
+
+      const localPath = getLocalContextFilePath(workspace);
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      fsSync.symlinkSync(targetFile, localPath);
+
+      await expect(
+        writeWorkspaceContextFile({
+          scope: 'local',
+          mode: 'append',
+          content: '- entry',
+          projectRoot: workspace,
+        }),
+      ).rejects.toThrow(/is a symbolic link/);
+
+      // The symlink target must be untouched
+      const targetContent = await fs.readFile(targetFile, 'utf8');
+      expect(targetContent).toBe('original\n');
+    });
+
+    it('refuses to write local memory when .qwen is a symlink', async () => {
+      const targetDir = path.join(tmpRoot, 'symlink-target-dir');
+      await fs.mkdir(targetDir, { recursive: true });
+      fsSync.symlinkSync(targetDir, path.join(workspace, QWEN_DIR), 'dir');
+
+      await expect(
+        writeWorkspaceContextFile({
+          scope: 'local',
+          mode: 'append',
+          content: '- entry',
+          projectRoot: workspace,
+        }),
+      ).rejects.toThrow(/is a symlink/);
+
+      await expect(
+        fs.access(path.join(targetDir, LOCAL_CONTEXT_FILENAME)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('refuses to write in replace mode when target is a symlink', async () => {
+      const targetFile = path.join(tmpRoot, 'symlink-target');
+      await fs.writeFile(targetFile, 'original\n', 'utf8');
+
+      const qwenPath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);
+      fsSync.symlinkSync(targetFile, qwenPath);
+
+      await expect(
+        writeWorkspaceContextFile({
+          scope: 'workspace',
+          mode: 'replace',
+          content: 'replacement',
+          projectRoot: workspace,
+        }),
+      ).rejects.toThrow(/is a symbolic link/);
+    });
+
+    it('allows write when target does not exist (no symlink)', async () => {
+      const localPath = getLocalContextFilePath(workspace);
+      // No pre-existing file, no symlink — should succeed
+      const result = await writeWorkspaceContextFile({
+        scope: 'local',
+        mode: 'append',
+        content: '- fresh entry',
+        projectRoot: workspace,
+      });
+
+      expect(result.changed).toBe(true);
+      const written = await fs.readFile(localPath, 'utf8');
+      expect(written).toContain('- fresh entry');
     });
   });
 });

@@ -545,6 +545,10 @@ describe('loadServerHierarchicalMemory', () => {
       await fsPromises.mkdir(path.join(projectRoot, '.git'), {
         recursive: true,
       });
+      await fsPromises.writeFile(
+        path.join(projectRoot, '.git', 'HEAD'),
+        'ref: main\n',
+      );
     });
 
     it('loads local context file when present at project root', async () => {
@@ -566,6 +570,31 @@ describe('loadServerHierarchicalMemory', () => {
       expect(result.memoryContent).toContain(
         path.relative(cwd, localFile).toString(),
       );
+    });
+
+    it('does not load local context file when it is a symlink', async () => {
+      const sensitiveFile = await createTestFile(
+        path.join(testRootDir, 'sensitive.txt'),
+        'sensitive instructions',
+      );
+      const localPath = path.join(
+        projectRoot,
+        QWEN_DIR,
+        LOCAL_CONTEXT_FILENAME,
+      );
+      await fsPromises.mkdir(path.dirname(localPath), { recursive: true });
+      await fsPromises.symlink(sensitiveFile, localPath);
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(0);
+      expect(result.memoryContent).not.toContain('sensitive instructions');
     });
 
     it('places local file between committed and global files', async () => {

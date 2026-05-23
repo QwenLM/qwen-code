@@ -21,6 +21,7 @@ import {
   MEMORY_SECTION_HEADER,
 } from './const.js';
 import { QWEN_DIR } from '../utils/paths.js';
+import { findProjectRoot } from '../utils/memoryDiscovery.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const logger = createDebugLogger('MEMORY_WRITE');
@@ -162,24 +163,19 @@ export async function writeWorkspaceContextFile(
       `writeWorkspaceContextFile: projectRoot must be absolute, got "${options.projectRoot}"`,
     );
   }
-  const { filePath, resolvedScope } = await resolveContextFilePath(
-    options.scope,
-    options.projectRoot,
-  );
+  const { filePath, resolvedScope, resolvedRoot } =
+    await resolveContextFilePath(options.scope, options.projectRoot);
 
-  // Safety guard: refuse `replace` when `auto` resolves to global.
-  // `scope: 'auto'` with `mode: 'replace'` would wipe all global
-  // memories across every workspace with no confirmation. Require
-  // explicit `scope: 'global'` for that destructive operation.
-  if (
-    options.scope === 'auto' &&
-    resolvedScope === 'global' &&
-    options.mode === 'replace'
-  ) {
+  // Safety guard: refuse any `auto` write that resolves to global.
+  // Project-specific memory sent through `auto` should not silently
+  // land in the user's global file. Require an explicit global scope
+  // when the caller really wants to touch cross-workspace memory.
+  if (options.scope === 'auto' && resolvedScope === 'global') {
     throw new Error(
-      `scope='auto' with mode='replace' is not allowed when auto resolves ` +
+      `scope='auto' is not allowed when auto resolves ` +
         `to the global directory. Use scope='global' to explicitly target ` +
-        `the global memory file, or use mode='append'.`,
+        `the global memory file, or create a project QWEN.md or ` +
+        `${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME} first.`,
     );
   }
 
@@ -195,7 +191,8 @@ export async function writeWorkspaceContextFile(
   // composite.
   try {
     return await getFileLock(filePath).runExclusive(
-      async () => await runWrite(filePath, options, resolvedScope),
+      async () =>
+        await runWrite(filePath, options, resolvedScope, resolvedRoot),
     );
   } catch (err) {
     // `withTimeout` rejects with the `E_TIMEOUT` sentinel when the
@@ -217,6 +214,7 @@ async function runWrite(
   filePath: string,
   options: WriteContextFileOptions,
   resolvedScope: 'workspace' | 'local' | 'global',
+  resolvedRoot: string,
 ): Promise<WriteContextFileResult> {
   if (options.mode === 'append' && isWhitespaceOnly(options.content)) {
     // No-op short-circuit. Skip the mkdir + writeFile path entirely
@@ -242,12 +240,9 @@ async function runWrite(
   // whitespace-only append never touches .gitignore, and wrapped so a
   // permission/read-only failure (EACCES/EROFS) degrades to a warning
   // rather than aborting the memory write itself.
-  if (
-    options.scope === 'local' ||
-    filePath === getLocalContextFilePath(options.projectRoot)
-  ) {
+  if (resolvedScope === 'local') {
     try {
-      await ensureGitignoreEntry(options.projectRoot);
+      await ensureGitignoreEntry(resolvedRoot);
     } catch (err) {
       logger.warn(
         `Failed to ensure .gitignore entry for ${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}: ${
@@ -257,9 +252,35 @@ async function runWrite(
     }
   }
 
+  if (resolvedScope === 'local') {
+    // Verify .qwen/ is not a symlink (parent-directory attack mitigation).
+    // A malicious repo can ship `.qwen/` as a symlink to `~/.ssh/` or
+    // `~/.config/`, causing local writes to escape the repository. We
+    // check before `fs.mkdir` so the directory is not traversed when
+    // it's a symlink.
+    const qwenDir = path.dirname(filePath);
+    try {
+      const dirLstat = await fs.lstat(qwenDir);
+      if (dirLstat.isSymbolicLink()) {
+        throw new Error(
+          `Refusing to write: ${qwenDir} is a symlink. ` +
+            `A symlink here could redirect the write to an arbitrary location. ` +
+            `Remove the symlink and retry.`,
+        );
+      }
+    } catch (err) {
+      if (isEnoent(err)) {
+        // Directory doesn't exist yet — that's fine, we'll create it below.
+      } else {
+        throw err;
+      }
+    }
+  }
+
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 
   if (options.mode === 'replace') {
+    await assertNotSymlink(filePath);
     await fs.writeFile(filePath, options.content, {
       encoding: 'utf8',
       mode: 0o644,
@@ -272,7 +293,9 @@ async function runWrite(
     };
   }
 
+  await assertNotSymlink(filePath);
   const next = await composeAppendedContent(filePath, options.content);
+  await assertNotSymlink(filePath);
   await fs.writeFile(filePath, next, { encoding: 'utf8', mode: 0o644 });
   return {
     filePath,
@@ -280,6 +303,33 @@ async function runWrite(
     bytesWritten: Buffer.byteLength(next, 'utf8'),
     changed: true,
   };
+}
+
+/**
+ * Security guard: refuse to write through a symlink. A malicious repo
+ * can ship `.qwen/QWEN.local.md` (or any target file) as a symlink
+ * pointing to `~/.ssh/authorized_keys`, `~/.bashrc`, etc. Without this
+ * check, `fs.writeFile` would follow the symlink and corrupt the target.
+ *
+ * ENOENT is expected and safe — the file doesn't exist yet and we are
+ * about to create it. Any other error (EACCES, EPERM) is rethrown so
+ * the caller knows the filesystem state could not be verified.
+ */
+async function assertNotSymlink(filePath: string): Promise<void> {
+  try {
+    const lstat = await fs.lstat(filePath);
+    if (lstat.isSymbolicLink()) {
+      throw new Error(
+        `Refusing to write: ${filePath} is a symbolic link. ` +
+          `Remove the symlink and try again.`,
+      );
+    }
+  } catch (err) {
+    if (isEnoent(err)) {
+      return;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -339,7 +389,9 @@ async function resolveContextFilePath(
 ): Promise<{
   filePath: string;
   resolvedScope: 'workspace' | 'local' | 'global';
+  resolvedRoot: string;
 }> {
+  const gitRoot = (await findProjectRoot(projectRoot)) ?? projectRoot;
   // Honor `setGeminiMdFilename()` overrides so POST writes to the same
   // file GET surfaces.
   const filename = getCurrentGeminiMdFilename();
@@ -347,13 +399,15 @@ async function resolveContextFilePath(
     return {
       filePath: path.join(projectRoot, filename),
       resolvedScope: 'workspace',
+      resolvedRoot: projectRoot,
     };
   }
 
   if (scope === 'local') {
     return {
-      filePath: getLocalContextFilePath(projectRoot),
+      filePath: getLocalContextFilePath(gitRoot),
       resolvedScope: 'local',
+      resolvedRoot: gitRoot,
     };
   }
 
@@ -369,18 +423,46 @@ async function resolveContextFilePath(
       try {
         const stat = await fs.stat(candidatePath);
         if (stat.isFile()) {
-          return { filePath: candidatePath, resolvedScope: 'workspace' };
+          return {
+            filePath: candidatePath,
+            resolvedScope: 'workspace',
+            resolvedRoot: projectRoot,
+          };
         }
       } catch (err) {
         if (!isEnoent(err)) throw err;
       }
     }
-    // Check for local file before falling back to global.
-    const localPath = getLocalContextFilePath(projectRoot);
+    // Also check at gitRoot when it differs from projectRoot — covers
+    // monorepo layouts where QWEN.md/AGENTS.md lives at the repo root
+    // but projectRoot is a subdirectory.
+    if (gitRoot !== projectRoot) {
+      for (const candidateName of candidates) {
+        const candidatePath = path.join(gitRoot, candidateName);
+        try {
+          const stat = await fs.stat(candidatePath);
+          if (stat.isFile()) {
+            return {
+              filePath: candidatePath,
+              resolvedScope: 'workspace',
+              resolvedRoot: gitRoot,
+            };
+          }
+        } catch (err) {
+          if (!isEnoent(err)) throw err;
+        }
+      }
+    }
+    // Check for local file at the git root before falling back to global.
+    const localPath = getLocalContextFilePath(gitRoot);
     try {
       const stat = await fs.stat(localPath);
       if (stat.isFile()) {
-        return { filePath: localPath, resolvedScope: 'local' };
+        return {
+          filePath: localPath,
+          resolvedScope: 'local',
+          resolvedRoot: gitRoot,
+        };
       }
     } catch (err) {
       if (!isEnoent(err)) throw err;
@@ -397,12 +479,14 @@ async function resolveContextFilePath(
     return {
       filePath: path.join(Storage.getGlobalQwenDir(), filename),
       resolvedScope: 'global',
+      resolvedRoot: projectRoot,
     };
   }
 
   return {
     filePath: path.join(Storage.getGlobalQwenDir(), filename),
     resolvedScope: 'global',
+    resolvedRoot: projectRoot,
   };
 }
 

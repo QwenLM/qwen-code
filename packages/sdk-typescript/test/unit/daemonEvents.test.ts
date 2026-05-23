@@ -146,6 +146,39 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
   });
 
+  it.each(['workspace', 'local', 'global'] as const)(
+    'accepts memory_changed events for resolved %s scope',
+    (scope) => {
+      const event: DaemonEvent = {
+        v: 1,
+        type: 'memory_changed',
+        data: {
+          scope,
+          filePath: '/workspace/QWEN.md',
+          mode: 'append',
+          bytesWritten: 42,
+        },
+      };
+
+      expect(asKnownDaemonEvent(event)).toBe(event);
+    },
+  );
+
+  it('rejects memory_changed events with unresolved auto scope', () => {
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'memory_changed',
+        data: {
+          scope: 'auto',
+          filePath: '/workspace/QWEN.md',
+          mode: 'append',
+          bytesWritten: 42,
+        },
+      }),
+    ).toBeUndefined();
+  });
+
   it('reduces permission, model, and terminal events into a session view', () => {
     const state = reduceDaemonSessionEvents([
       {

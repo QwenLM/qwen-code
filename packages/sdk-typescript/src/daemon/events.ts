@@ -213,13 +213,12 @@ export interface DaemonMcpChildRefusedBatchData {
 /**
  * Issue #4175 PR 16: a `POST /workspace/memory` write completed
  * successfully. `scope` records which file was touched (workspace QWEN.md,
- * `.qwen/QWEN.local.md`, or global ~/.qwen/QWEN.md). `'auto'` may appear
- * when the daemon did not resolve the scope before emitting the event.
- * `mode` is the requested write mode, and `bytesWritten` is the size of
- * the file post-write.
+ * `.qwen/QWEN.local.md`, or global ~/.qwen/QWEN.md). `mode` is the
+ * requested write mode, and `bytesWritten` is the size of the file
+ * post-write.
  */
 export interface DaemonMemoryChangedData {
-  scope: 'workspace' | 'local' | 'global' | 'auto';
+  scope: 'workspace' | 'local' | 'global';
   filePath: string;
   mode: 'append' | 'replace';
   bytesWritten: number;
@@ -1514,10 +1513,7 @@ function isMemoryChangedData(value: unknown): value is DaemonMemoryChangedData {
   const scope = value['scope'];
   const mode = value['mode'];
   return (
-    (scope === 'workspace' ||
-      scope === 'local' ||
-      scope === 'global' ||
-      scope === 'auto') &&
+    (scope === 'workspace' || scope === 'local' || scope === 'global') &&
     isNonEmptyString(value['filePath']) &&
     (mode === 'append' || mode === 'replace') &&
     isFiniteNumber(value['bytesWritten'])

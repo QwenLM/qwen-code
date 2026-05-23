@@ -353,7 +353,7 @@ export interface DaemonWorkspaceProvidersStatus {
  * pattern used by mcp/skills/providers — adapters can render any of
  * the four with the same component.
  */
-export type DaemonContextFileScope = 'workspace' | 'global';
+export type DaemonContextFileScope = 'workspace' | 'local' | 'global';
 
 export interface DaemonWorkspaceMemoryFile {
   kind: 'memory_file';
