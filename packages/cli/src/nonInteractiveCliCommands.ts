@@ -183,6 +183,13 @@ async function fireUserPromptExpansionHook(
   blockedResult?: NonInteractiveSlashCommandResult;
   content: PartListUnion;
 }> {
+  if (
+    config.getDisableAllHooks?.() ||
+    !(config.hasHooksForEvent?.('UserPromptExpansion') ?? false)
+  ) {
+    return { content };
+  }
+
   const hookSystem = config.getHookSystem();
   if (!hookSystem) {
     return { content };
@@ -309,7 +316,7 @@ export const handleSlashCommand = async (
         name,
         args,
         result.content,
-        new AbortController().signal,
+        abortController.signal,
       );
       if (hookResult.blockedResult) return null;
       const content = hookResult.content;

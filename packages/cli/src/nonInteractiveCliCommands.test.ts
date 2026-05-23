@@ -64,6 +64,7 @@ describe('handleSlashCommand', () => {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(true),
       getHookSystem: vi.fn().mockReturnValue({
         addFunctionHook: vi.fn().mockReturnValue('goal-hook-id'),
         removeFunctionHook: vi.fn().mockReturnValue(true),

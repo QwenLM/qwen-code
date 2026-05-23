@@ -152,6 +152,7 @@ describe('useSlashCommandProcessor', () => {
     openMcpDialog: vi.fn(),
     openHooksDialog: vi.fn(),
     openRewindSelector: vi.fn(),
+    openDiffDialog: vi.fn(),
   });
 
   beforeEach(() => {
@@ -163,6 +164,8 @@ describe('useSlashCommandProcessor', () => {
     mockOpenModelDialog.mockClear();
     mockOpenMemoryDialog.mockClear();
     mockFireUserPromptExpansionEvent.mockResolvedValue(undefined);
+    mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+    mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
     mockConfig.getHookSystem = vi.fn().mockReturnValue({
       addFunctionHook: vi.fn().mockReturnValue('goal-hook-id'),
       removeFunctionHook: vi.fn().mockReturnValue(true),
@@ -783,6 +786,7 @@ describe('useSlashCommandProcessor', () => {
         'filecmd',
         'with args',
         'The actual prompt from the TOML file.',
+        expect.any(AbortSignal),
       );
       expect(content).toBe(
         'The actual prompt from the TOML file.\n\nHook context',

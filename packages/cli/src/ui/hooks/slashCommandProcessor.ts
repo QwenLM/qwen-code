@@ -66,6 +66,14 @@ import {
 type SerializableHistoryItem = Record<string, unknown>;
 const debugLogger = createDebugLogger('SLASH_COMMAND_PROCESSOR');
 
+function hasUserPromptExpansionHooks(config: Config | null): config is Config {
+  return (
+    !!config &&
+    !config.getDisableAllHooks?.() &&
+    (config.hasHooksForEvent?.('UserPromptExpansion') ?? false)
+  );
+}
+
 function serializeHistoryItemForRecording(
   item: Omit<HistoryItem, 'id'>,
 ): SerializableHistoryItem {
@@ -472,13 +480,16 @@ export const useSlashCommandProcessor = (
               } as unknown as Parameters<typeof cmd.action>[0];
               const result = await cmd.action(minimalContext, args);
               if (!result || result.type !== 'submit_prompt') return null;
-              const output = await config
-                .getHookSystem()
-                ?.fireUserPromptExpansionEvent(
-                  name,
-                  args,
-                  serializeUserPromptExpansionPrompt(result.content),
-                );
+              const output = hasUserPromptExpansionHooks(config)
+                ? await config
+                    .getHookSystem()
+                    ?.fireUserPromptExpansionEvent(
+                      name,
+                      args,
+                      serializeUserPromptExpansionPrompt(result.content),
+                      controller.signal,
+                    )
+                : undefined;
               if (output) {
                 const blockingError = output.getBlockingError();
                 if (blockingError.blocked || output.shouldStopExecution()) {
@@ -788,14 +799,16 @@ export const useSlashCommandProcessor = (
                 case 'submit_prompt': {
                   const invocation = fullCommandContext.invocation;
                   let content = result.content;
-                  const output = await config
-                    ?.getHookSystem()
-                    ?.fireUserPromptExpansionEvent(
-                      invocation?.name ?? '',
-                      invocation?.args ?? '',
-                      serializeUserPromptExpansionPrompt(content),
-                      abortController.signal,
-                    );
+                  const output = hasUserPromptExpansionHooks(config)
+                    ? await config
+                        .getHookSystem()
+                        ?.fireUserPromptExpansionEvent(
+                          invocation?.name ?? '',
+                          invocation?.args ?? '',
+                          serializeUserPromptExpansionPrompt(content),
+                          abortController.signal,
+                        )
+                    : undefined;
                   if (output) {
                     const blockingError = output.getBlockingError();
                     if (blockingError.blocked || output.shouldStopExecution()) {
