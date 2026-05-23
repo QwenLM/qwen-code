@@ -502,10 +502,30 @@ describe('osc8 helpers', () => {
       expect(supportsHyperlinks()).toBe(true);
     });
 
-    it('mintty is enabled via TERM_PROGRAM=mintty', () => {
+    it('mintty ≥ 3.3 is enabled, < 3.3 is not, missing version refuses', () => {
+      // Older mintty builds (still shipping in some Git-for-Windows distros
+      // and dev environments like Laragon) print raw OSC 8 escape bytes as
+      // visible garbage instead of ignoring them — see issue #4420. mintty
+      // has set TERM_PROGRAM_VERSION since 2.7 (2017), so a missing version
+      // implies an ancient build and we refuse.
       setTTY(true);
       process.env['TERM_PROGRAM'] = 'mintty';
+      process.env['TERM_PROGRAM_VERSION'] = '4.0.0';
       expect(supportsHyperlinks()).toBe(true);
+      process.env['TERM_PROGRAM_VERSION'] = '3.7.1';
+      expect(supportsHyperlinks()).toBe(true);
+      process.env['TERM_PROGRAM_VERSION'] = '3.3.0';
+      expect(supportsHyperlinks()).toBe(true);
+      process.env['TERM_PROGRAM_VERSION'] = '3.2.9';
+      expect(supportsHyperlinks()).toBe(false);
+      process.env['TERM_PROGRAM_VERSION'] = '3.1.0';
+      expect(supportsHyperlinks()).toBe(false);
+      process.env['TERM_PROGRAM_VERSION'] = '2.9.8';
+      expect(supportsHyperlinks()).toBe(false);
+      process.env['TERM_PROGRAM_VERSION'] = '';
+      expect(supportsHyperlinks()).toBe(false);
+      delete process.env['TERM_PROGRAM_VERSION'];
+      expect(supportsHyperlinks()).toBe(false);
     });
 
     it('Hyper is intentionally not auto-detected (requires FORCE_HYPERLINK)', () => {
