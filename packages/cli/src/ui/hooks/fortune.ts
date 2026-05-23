@@ -15,7 +15,6 @@ const debugLogger = createDebugLogger('fortune');
 
 /**
  * Get a random fortune quote by calling the fortune command.
- * Exported for testing purposes.
  */
 export async function getFortuneQuote(command: string): Promise<string | null> {
   try {
