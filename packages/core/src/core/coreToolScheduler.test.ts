@@ -990,6 +990,110 @@ describe('CoreToolScheduler', () => {
     });
   });
 
+  it('drains queued tool calls when completion finalization throws', async () => {
+    const executeA = vi.fn().mockResolvedValue({
+      llmContent: 'alpha output',
+      returnDisplay: 'alpha output',
+    });
+    const executeB = vi.fn().mockResolvedValue({
+      llmContent: 'beta output',
+      returnDisplay: 'beta output',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'alpha',
+        new MockTool({
+          name: 'alpha',
+          kind: Kind.Read,
+          execute: executeA,
+        }),
+      ],
+      [
+        'beta',
+        new MockTool({
+          name: 'beta',
+          kind: Kind.Read,
+          execute: executeB,
+        }),
+      ],
+    ]);
+    let resolveBatchHookStarted!: () => void;
+    const batchHookStarted = new Promise<void>((resolve) => {
+      resolveBatchHookStarted = resolve;
+    });
+    let releaseBatchHook!: () => void;
+    const batchHookRelease = new Promise<void>((resolve) => {
+      releaseBatchHook = resolve;
+    });
+    const messageBus = {
+      request: vi.fn().mockImplementation(
+        async (request: {
+          eventName: string;
+        }): Promise<HookExecutionResponse> => {
+          if (request.eventName === 'PostToolBatch') {
+            resolveBatchHookStarted();
+            await batchHookRelease;
+          }
+          return {
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: `${request.eventName}-hook`,
+            success: true,
+            output: { decision: 'allow' },
+          };
+        },
+      ),
+    };
+    const onAllToolCallsComplete = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('completion failed'))
+      .mockResolvedValue(undefined);
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      messageBus,
+      disableHooks: false,
+      onAllToolCallsComplete,
+    });
+
+    const firstSchedule = scheduler.schedule(
+      [
+        {
+          callId: 'call-alpha',
+          name: 'alpha',
+          args: { value: 'a' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-batch-throws',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await batchHookStarted;
+    const secondSchedule = scheduler.schedule(
+      [
+        {
+          callId: 'call-beta',
+          name: 'beta',
+          args: { value: 'b' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-batch-after-throw',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await Promise.resolve();
+    expect(executeB).not.toHaveBeenCalled();
+
+    releaseBatchHook();
+    await firstSchedule;
+    await secondSchedule;
+
+    await vi.waitFor(() => {
+      expect(executeB).toHaveBeenCalled();
+      expect(onAllToolCallsComplete).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it('applies PostToolBatch stop decisions and preserves additional context', async () => {
     const executeA = vi.fn().mockResolvedValue({
       llmContent: 'alpha output',

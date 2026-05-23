@@ -1154,7 +1154,13 @@ export class CoreToolScheduler {
       }
     });
     this.notifyToolCallsUpdate();
-    this.checkAndNotifyCompletion();
+    void this.checkAndNotifyCompletion().catch((error: unknown) => {
+      debugLogger.warn(
+        `Tool completion notification failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
   }
 
   private setArgsInternal(targetCallId: string, args: unknown): void {
@@ -2183,7 +2189,13 @@ export class CoreToolScheduler {
         }
       }
       await this.attemptExecutionOfScheduledCalls(signal);
-      void this.checkAndNotifyCompletion();
+      void this.checkAndNotifyCompletion().catch((error: unknown) => {
+        debugLogger.warn(
+          `Tool completion notification failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
       // Listener removal happens inside `finalizeToolSpan` →
       // `releaseBatchListenerIfDrained` for every callId, so we don't
       // need a duplicate cleanup here. That path also covers the
@@ -3374,13 +3386,13 @@ export class CoreToolScheduler {
         this.notifyToolCallsUpdate();
       } finally {
         this.isFinalizingToolCalls = false;
-      }
-      // After completion, process the next item in the queue.
-      if (this.requestQueue.length > 0) {
-        const next = this.requestQueue.shift()!;
-        this._schedule(next.request, next.signal)
-          .then(next.resolve)
-          .catch(next.reject);
+        // Always drain the queue, even if completion callbacks throw.
+        if (this.requestQueue.length > 0) {
+          const next = this.requestQueue.shift()!;
+          this._schedule(next.request, next.signal)
+            .then(next.resolve)
+            .catch(next.reject);
+        }
       }
     }
   }
