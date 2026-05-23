@@ -418,12 +418,11 @@ export async function firePostToolBatchHook(
     // PostToolBatch uses DefaultHookOutput intentionally: it only needs the
     // common stop and additional-context helpers.
     const batchOutput = createHookOutput('PostToolBatch', response.output);
+    const shouldStop = batchOutput.shouldStopExecution();
 
     return {
-      shouldStop: batchOutput.shouldStopExecution(),
-      stopReason: batchOutput.shouldStopExecution()
-        ? batchOutput.getEffectiveReason()
-        : undefined,
+      shouldStop,
+      stopReason: shouldStop ? batchOutput.getEffectiveReason() : undefined,
       additionalContext: batchOutput.getAdditionalContext(),
     };
   } catch (error) {

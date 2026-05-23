@@ -745,13 +745,19 @@ function appendContextToResponsePart(
   const response = part.functionResponse.response ?? {};
   const output = response['output'];
   const error = response['error'];
-  const key = typeof output === 'string' ? 'output' : 'error';
+  const hasOutput = Object.prototype.hasOwnProperty.call(response, 'output');
+  const key =
+    typeof output === 'string' || (hasOutput && typeof error !== 'string')
+      ? 'output'
+      : 'error';
   const currentText =
     typeof output === 'string'
       ? output
-      : typeof error === 'string'
-        ? error
-        : JSON.stringify(response);
+      : hasOutput
+        ? JSON.stringify(output)
+        : typeof error === 'string'
+          ? error
+          : JSON.stringify(response);
 
   return {
     ...part,
@@ -3282,6 +3288,9 @@ export class CoreToolScheduler {
     if (this.toolCalls.length > 0 && allCallsAreTerminal) {
       let completedCalls = [...this.toolCalls] as CompletedToolCall[];
       this.toolCalls = [];
+      const batchSignal = completedCalls
+        .map((call) => this.callIdToBatch.get(call.request.callId)?.signal)
+        .find((candidate): candidate is AbortSignal => !!candidate);
 
       let messageBus: MessageBus | undefined;
       try {
@@ -3307,6 +3316,7 @@ export class CoreToolScheduler {
             firePostToolBatchHook(
               messageBus,
               completedCalls.map(toPostToolBatchToolCall),
+              batchSignal,
             ),
           (r) =>
             r.hookError
@@ -3323,11 +3333,6 @@ export class CoreToolScheduler {
                 },
         );
 
-        completedCalls = withPostToolBatchAdditionalContext(
-          completedCalls,
-          batchHookResult.additionalContext,
-        );
-
         if (batchHookResult.shouldStop) {
           completedCalls = withPostToolBatchStop(
             completedCalls,
@@ -3335,6 +3340,11 @@ export class CoreToolScheduler {
               'Execution stopped by PostToolBatch hook',
           );
         }
+
+        completedCalls = withPostToolBatchAdditionalContext(
+          completedCalls,
+          batchHookResult.additionalContext,
+        );
       }
 
       for (const call of completedCalls) {

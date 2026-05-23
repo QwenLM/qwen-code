@@ -1604,7 +1604,7 @@
           }
         },
         "PostToolBatch": {
-          "description": "Hooks that execute after every tool call in a batch resolves.",
+          "description": "Hooks that execute once after all tool calls in a batch resolve.",
           "type": "array",
           "items": {
             "description": "A hook definition with an optional matcher and a list of hook configurations.",

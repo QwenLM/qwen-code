@@ -809,6 +809,7 @@ describe('CoreToolScheduler', () => {
       onAllToolCallsComplete,
     });
 
+    const abortController = new AbortController();
     await scheduler.schedule(
       [
         {
@@ -826,7 +827,7 @@ describe('CoreToolScheduler', () => {
           prompt_id: 'prompt-batch',
         },
       ],
-      new AbortController().signal,
+      abortController.signal,
     );
 
     await vi.waitFor(() => {
@@ -840,6 +841,7 @@ describe('CoreToolScheduler', () => {
     expect(batchRequests[0][0]).toEqual(
       expect.objectContaining({
         eventName: 'PostToolBatch',
+        signal: abortController.signal,
         input: {
           tool_calls: [
             expect.objectContaining({
@@ -877,6 +879,98 @@ describe('CoreToolScheduler', () => {
     expect(lastResponse?.functionResponse?.response?.['output']).toContain(
       'batch context',
     );
+  });
+
+  it('applies PostToolBatch stop decisions and preserves additional context', async () => {
+    const executeA = vi.fn().mockResolvedValue({
+      llmContent: 'alpha output',
+      returnDisplay: 'alpha output',
+    });
+    const executeB = vi.fn().mockResolvedValue({
+      llmContent: 'beta output',
+      returnDisplay: 'beta output',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'alpha',
+        new MockTool({
+          name: 'alpha',
+          kind: Kind.Read,
+          execute: executeA,
+        }),
+      ],
+      [
+        'beta',
+        new MockTool({
+          name: 'beta',
+          kind: Kind.Read,
+          execute: executeB,
+        }),
+      ],
+    ]);
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'PostToolBatch-hook',
+        success: true,
+        output: {
+          continue: false,
+          stopReason: 'halt',
+          hookSpecificOutput: {
+            hookEventName: 'PostToolBatch',
+            additionalContext: 'batch context',
+          },
+        },
+      }),
+    };
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      messageBus,
+      disableHooks: false,
+      onAllToolCallsComplete,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-alpha',
+          name: 'alpha',
+          args: { value: 'a' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-batch-stop',
+        },
+        {
+          callId: 'call-beta',
+          name: 'beta',
+          args: { value: 'b' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-batch-stop',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completionCalls = onAllToolCallsComplete.mock
+      .calls as unknown as Array<[ToolCall[]]>;
+    const completedCalls = completionCalls[0]?.[0];
+    const lastCompletedCall = completedCalls?.at(-1);
+    expect(lastCompletedCall?.status).toBe('error');
+    if (lastCompletedCall?.status === 'error') {
+      expect(lastCompletedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      expect(lastCompletedCall.response.error?.message).toContain('halt');
+      const lastResponse =
+        lastCompletedCall.response.responseParts.at(-1)?.functionResponse
+          ?.response;
+      expect(lastResponse?.['error']).toContain('halt');
+      expect(lastResponse?.['error']).toContain('batch context');
+    }
   });
 
   it('should cancel a tool call if the signal is aborted before confirmation', async () => {

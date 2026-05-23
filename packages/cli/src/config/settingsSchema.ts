@@ -2176,7 +2176,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: [],
         description:
-          'Hooks that execute after every tool call in a batch resolves.',
+          'Hooks that execute once after all tool calls in a batch resolve.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
