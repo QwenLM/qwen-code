@@ -29,4 +29,25 @@ const server = createServeBridgeMcpServer({
 });
 
 const transport = new StdioServerTransport();
+
+// Graceful shutdown on signals
+function shutdown() {
+  server.instance.close().catch(() => {});
+  process.exit(0);
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+// Prevent silent crashes from unhandled rejections
+process.on('unhandledRejection', (err) => {
+  process.stderr.write(
+    `[qwen-serve-bridge] unhandled rejection: ${err instanceof Error ? err.message : String(err)}\n`,
+  );
+  process.exit(1);
+});
+
+// Exit cleanly when stdio pipe closes (parent process gone)
+process.stdin.on('close', shutdown);
+
 await server.instance.connect(transport);
