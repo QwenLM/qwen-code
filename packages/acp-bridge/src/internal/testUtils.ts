@@ -26,11 +26,13 @@
  *      `testUtils.ts` doesn't require rebuilding acp-bridge.
  *
  * External consumers of `@qwen-code/acp-bridge` should NOT depend on
- * these helpers — the `internal/` directory + `@internal` JSDoc tag
- * match the neighboring `internal/stderrLine.ts` convention. The
- * file does ship in `dist/internal/testUtils.js` (alpha-stage 0.0.1
- * tradeoff); a future `stripInternal` tsconfig flag or `.npmignore`
- * entry could exclude it once external consumers exist.
+ * these helpers — the `internal/` directory matches the neighboring
+ * `internal/stderrLine.ts` convention; the `@internal` JSDoc tag is
+ * an additional package-private signal (stderrLine.ts uses prose
+ * rather than the tag, but the intent is the same). The compiled
+ * file is excluded from npm publish via the package's `.npmignore`,
+ * so external consumers can't `import` it even though the source
+ * remains in the build for in-repo cli vitest resolution.
  */
 
 import * as path from 'node:path';

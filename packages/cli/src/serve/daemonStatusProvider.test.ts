@@ -36,12 +36,16 @@ import {
 } from '@qwen-code/acp-bridge/internal/testUtils';
 
 /**
- * Cli-side variant of `makeBridge` that wires the real
- * `createDaemonStatusProvider()` — the inverse of the acp-bridge
- * `testUtils.makeBridge` which omits the provider for the no-provider
- * fallback assertions.
+ * Cli-side bridge factory wired to the real
+ * `createDaemonStatusProvider()`. Distinct name + JSDoc from
+ * `testUtils.makeBridge` (which omits the provider for the
+ * no-provider fallback assertions in `bridge.test.ts`) so a
+ * contributor adding a test can't pick the wrong helper by accident
+ * — wenshao review #4445 thread.
  */
-function makeBridge(opts: Partial<BridgeOptions> = {}): HttpAcpBridge {
+function makeBridgeWithDaemonStatusProvider(
+  opts: Partial<BridgeOptions> = {},
+): HttpAcpBridge {
   return createHttpAcpBridge({
     boundWorkspace: WS_A,
     statusProvider: createDaemonStatusProvider(),
@@ -52,7 +56,7 @@ function makeBridge(opts: Partial<BridgeOptions> = {}): HttpAcpBridge {
 describe('createHttpAcpBridge — daemon-host status provider integration', () => {
   it('answers /workspace/env from process state without consulting ACP, idle or live', async () => {
     const handles: ChannelHandle[] = [];
-    const bridge = makeBridge({
+    const bridge = makeBridgeWithDaemonStatusProvider({
       channelFactory: async () => {
         const h = makeChannel();
         handles.push(h);
@@ -88,7 +92,7 @@ describe('createHttpAcpBridge — daemon-host status provider integration', () =
 
   it('returns daemon preflight cells with not_started ACP cells when idle', async () => {
     const handles: ChannelHandle[] = [];
-    const bridge = makeBridge({
+    const bridge = makeBridgeWithDaemonStatusProvider({
       channelFactory: async () => {
         const h = makeChannel();
         handles.push(h);
@@ -134,6 +138,7 @@ describe('createHttpAcpBridge — daemon-host status provider integration', () =
     }
 
     expect(handles).toHaveLength(0);
+    await bridge.shutdown();
   });
 
   it('merges daemon cells with live ACP-side preflight cells when a channel is up', async () => {
@@ -146,7 +151,7 @@ describe('createHttpAcpBridge — daemon-host status provider integration', () =
       { kind: 'tool_registry', status: 'ok', locality: 'acp' },
       { kind: 'egress', status: 'not_started', locality: 'acp' },
     ];
-    const bridge = makeBridge({
+    const bridge = makeBridgeWithDaemonStatusProvider({
       channelFactory: async () => {
         const h = makeChannel({
           extMethodImpl: (method) => {
@@ -194,7 +199,7 @@ describe('createHttpAcpBridge — daemon-host status provider integration', () =
 
   it('falls back to idle ACP cells + envelope error when extMethod throws mid-preflight', async () => {
     const handles: ChannelHandle[] = [];
-    const bridge = makeBridge({
+    const bridge = makeBridgeWithDaemonStatusProvider({
       channelFactory: async () => {
         const h = makeChannel({
           extMethodImpl: () => {

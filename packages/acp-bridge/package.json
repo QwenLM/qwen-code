@@ -82,7 +82,9 @@
     "typecheck": "tsc --noEmit"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/internal/testUtils.*",
+    "!dist/**/*.test.*"
   ],
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
