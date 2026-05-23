@@ -501,6 +501,18 @@ describe('toolHookTriggers', () => {
       expect(result.shouldStop).toBe(false);
       expect(result.hookError).toMatch(/success: false/);
     });
+
+    it('should return hookError when messageBus.request throws', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('bus timeout'),
+      );
+
+      const result = await firePostToolBatchHook(mockMessageBus, []);
+
+      expect(result.shouldStop).toBe(false);
+      expect(result.hookError).toContain('bus timeout');
+    });
   });
 
   describe('firePostToolUseFailureHook', () => {

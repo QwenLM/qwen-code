@@ -910,19 +910,26 @@ describe('CoreToolScheduler', () => {
       ],
     ]);
     const messageBus = {
-      request: vi.fn().mockResolvedValue({
-        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
-        correlationId: 'PostToolBatch-hook',
-        success: true,
-        output: {
-          continue: false,
-          stopReason: 'halt',
-          hookSpecificOutput: {
-            hookEventName: 'PostToolBatch',
-            additionalContext: 'batch context',
-          },
-        },
-      }),
+      request: vi.fn().mockImplementation(
+        async (request: {
+          eventName: string;
+        }): Promise<HookExecutionResponse> => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output:
+            request.eventName === 'PostToolBatch'
+              ? {
+                  continue: false,
+                  stopReason: 'halt',
+                  hookSpecificOutput: {
+                    hookEventName: 'PostToolBatch',
+                    additionalContext: 'batch context',
+                  },
+                }
+              : { decision: 'allow' },
+        }),
+      ),
     };
     const onAllToolCallsComplete = vi.fn();
     const { scheduler } = createSchedulerForLegacyToolTests({
@@ -960,6 +967,9 @@ describe('CoreToolScheduler', () => {
       .calls as unknown as Array<[ToolCall[]]>;
     const completedCalls = completionCalls[0]?.[0];
     const lastCompletedCall = completedCalls?.at(-1);
+    expect(completedCalls?.some((call) => call.status === 'success')).toBe(
+      true,
+    );
     expect(lastCompletedCall?.status).toBe('error');
     if (lastCompletedCall?.status === 'error') {
       expect(lastCompletedCall.response.errorType).toBe(

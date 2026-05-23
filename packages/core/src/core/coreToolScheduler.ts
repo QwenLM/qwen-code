@@ -746,18 +746,16 @@ function appendContextToResponsePart(
   const output = response['output'];
   const error = response['error'];
   const hasOutput = Object.prototype.hasOwnProperty.call(response, 'output');
-  const key =
-    typeof output === 'string' || (hasOutput && typeof error !== 'string')
-      ? 'output'
-      : 'error';
-  const currentText =
-    typeof output === 'string'
+  const useOutputKey =
+    typeof output === 'string' || (hasOutput && typeof error !== 'string');
+  const key = useOutputKey ? 'output' : 'error';
+  const currentText = useOutputKey
+    ? typeof output === 'string'
       ? output
-      : hasOutput
-        ? JSON.stringify(output)
-        : typeof error === 'string'
-          ? error
-          : JSON.stringify(response);
+      : JSON.stringify(output)
+    : typeof error === 'string'
+      ? error
+      : JSON.stringify(response);
 
   return {
     ...part,
@@ -950,6 +948,10 @@ export class CoreToolScheduler {
   // sessions reusing the same AbortSignal don't accumulate listeners
   // and trip Node's MaxListenersExceededWarning (#4321 review-3).
   private callIdToBatch = new Map<string, BatchAbortState>();
+  // Keep the scheduling signal until the all-calls-complete hook fires.
+  // callIdToBatch is drained earlier when spans end, so it cannot be used
+  // to recover the PostToolBatch AbortSignal reliably.
+  private callIdToPostToolBatchSignal = new Map<string, AbortSignal>();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
@@ -1726,6 +1728,7 @@ export class CoreToolScheduler {
         this.toolSpans.set(reqInfo.callId, toolSpan);
         batchState.callIds.add(reqInfo.callId);
         this.callIdToBatch.set(reqInfo.callId, batchState);
+        this.callIdToPostToolBatchSignal.set(reqInfo.callId, signal);
 
         try {
           if (signal.aborted) {
@@ -3289,8 +3292,13 @@ export class CoreToolScheduler {
       let completedCalls = [...this.toolCalls] as CompletedToolCall[];
       this.toolCalls = [];
       const batchSignal = completedCalls
-        .map((call) => this.callIdToBatch.get(call.request.callId)?.signal)
+        .map((call) =>
+          this.callIdToPostToolBatchSignal.get(call.request.callId),
+        )
         .find((candidate): candidate is AbortSignal => !!candidate);
+      for (const call of completedCalls) {
+        this.callIdToPostToolBatchSignal.delete(call.request.callId);
+      }
 
       let messageBus: MessageBus | undefined;
       try {
@@ -3308,14 +3316,10 @@ export class CoreToolScheduler {
         );
       }
       if (messageBus) {
+        const batchToolCalls = completedCalls.map(toPostToolBatchToolCall);
         const batchHookResult = await this.withHookSpan(
           { hookEvent: 'PostToolBatch', toolName: 'batch' },
-          () =>
-            firePostToolBatchHook(
-              messageBus,
-              completedCalls.map(toPostToolBatchToolCall),
-              batchSignal,
-            ),
+          () => firePostToolBatchHook(messageBus, batchToolCalls, batchSignal),
           (r) =>
             r.hookError
               ? {
@@ -3331,6 +3335,8 @@ export class CoreToolScheduler {
                 },
         );
 
+        // Order matters: stop replaces the last response, so append
+        // additionalContext only after the stop decision is applied.
         if (batchHookResult.shouldStop) {
           completedCalls = withPostToolBatchStop(
             completedCalls,
