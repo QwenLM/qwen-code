@@ -231,9 +231,10 @@ export async function sendImage(params: {
   const encrypted = encryptAesEcb(fileBuffer, aesKeyBytes);
   const cdnEncryptParam = await uploadToCdn(uploadParam, filekey, encrypted);
 
-  // Step 4: send message with image_item using CDN's x-encrypted-param
-  // aes_key: base64(raw 16 bytes) for images per protocol
-  const aesKeyBase64 = aesKeyBytes.toString('base64');
+  // Step 4: send message with image_item using CDN's x-encrypted-param.
+  // WeChat image messages expect the AES key as a hex string, with media.aes_key
+  // carrying base64(hex string), not base64(raw bytes).
+  const aesKeyBase64 = Buffer.from(aesKeyHex, 'ascii').toString('base64');
 
   await sendMessage(baseUrl, token, {
     to_user_id: to,
@@ -246,6 +247,8 @@ export async function sendImage(params: {
       {
         type: MessageItemType.IMAGE,
         image_item: {
+          aeskey: aesKeyHex,
+          mid_size: encryptedSize,
           media: {
             encrypt_query_param: cdnEncryptParam,
             aes_key: aesKeyBase64,

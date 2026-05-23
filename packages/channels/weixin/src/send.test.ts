@@ -325,8 +325,13 @@ describe('sendImage', () => {
       expectedEncrypted,
     );
 
-    // Step 4: send message with image_item using CDN's x-encrypted-param
-    const expectedAesKeyBase64 = aesKeyBytes.toString('base64');
+    // Step 4: send message with image_item using CDN's x-encrypted-param.
+    // WeChat expects images to include the hex key both directly and
+    // base64-encoded in the media payload.
+    const expectedAesKeyBase64 = Buffer.from(
+      expectedAesKeyHex,
+      'ascii',
+    ).toString('base64');
     expect(mockSendMessage).toHaveBeenCalledWith(
       'https://api.example.com',
       'token-abc',
@@ -337,6 +342,8 @@ describe('sendImage', () => {
           expect.objectContaining({
             type: 2, // MessageItemType.IMAGE
             image_item: expect.objectContaining({
+              aeskey: expectedAesKeyHex,
+              mid_size: encryptedSize,
               media: {
                 encrypt_query_param: 'cdn-encrypt-param',
                 aes_key: expectedAesKeyBase64,
