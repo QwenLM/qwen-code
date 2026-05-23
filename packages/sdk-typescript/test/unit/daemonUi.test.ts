@@ -4082,3 +4082,191 @@ describe('transcriptBlockToTerminalText (wenshao review — coverage)', () => {
     expect(out).toContain('Unhandled');
   });
 });
+
+describe('daemon UI WeakMap memo hits (wenshao glm-5.1 review)', () => {
+  // wenshao 5-23 13:03: lazy COW means non-block-mutating dispatches
+  // preserve `state.blocks` reference, so the WeakMap caches actually hit
+  // across renders. Verify by checking reference identity.
+  it('selectTranscriptBlocksOrderedByEventId returns the same array reference for sidechannel-only events', async () => {
+    const { selectTranscriptBlocksOrderedByEventId } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    // Dispatch a tool_call event to populate blocks.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 't1',
+            title: 'Tool 1',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    const firstSort = selectTranscriptBlocksOrderedByEventId(state);
+    // Dispatch a sidechannel event that doesn't touch blocks (status).
+    state = reduceDaemonTranscriptEvents(
+      state,
+      // Use a true sidechannel event (approval_mode.changed) that updates
+      // `state.approvalMode` without touching `state.blocks`. `'status'`
+      // produces a block and would invalidate the array reference.
+      [
+        {
+          type: 'session.approval_mode.changed',
+          previous: 'default',
+          next: 'plan',
+        } as never,
+      ],
+      { now: 3 },
+    );
+    // Second selector call should return SAME array reference (cache hit).
+    const secondSort = selectTranscriptBlocksOrderedByEventId(state);
+    // The blocks array reference is preserved (lazy COW: no mutation
+    // happened, so no copy). Therefore the WeakMap cache hits.
+    expect(secondSort).toBe(firstSort);
+  });
+
+  it('selectSubagentChildBlocks returns same memoized array across sidechannel dispatches', async () => {
+    const { selectSubagentChildBlocks } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'parent',
+            title: 'P',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'child',
+            title: 'C',
+            status: 'running',
+            _meta: { parentToolCallId: 'parent' },
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+    // After block dispatches, sidechannel dispatch should NOT invalidate
+    // the children index — the underlying WeakMap entry keyed on
+    // state.blocks should still be reusable.
+    const blocksBefore = state.blocks;
+    state = reduceDaemonTranscriptEvents(
+      state,
+      // Use a true sidechannel event (approval_mode.changed) that updates
+      // `state.approvalMode` without touching `state.blocks`. `'status'`
+      // produces a block and would invalidate the array reference.
+      [
+        {
+          type: 'session.approval_mode.changed',
+          previous: 'default',
+          next: 'plan',
+        } as never,
+      ],
+      { now: 4 },
+    );
+    expect(state.blocks).toBe(blocksBefore);
+    // Two independent invocations should be deeply equal (each returns
+    // a shallow copy per glm-5.1 suggestion).
+    const a = selectSubagentChildBlocks(state, 'parent');
+    const b = selectSubagentChildBlocks(state, 'parent');
+    expect(a).toEqual(b);
+    expect(a).toHaveLength(1);
+  });
+
+  it('selectSubagentChildBlocks returns a shallow copy (caller mutation does not leak)', async () => {
+    const { selectSubagentChildBlocks } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'p',
+            title: 'P',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'c',
+            title: 'C',
+            status: 'running',
+            _meta: { parentToolCallId: 'p' },
+          },
+        },
+      } as never),
+      { now: 3 },
+    );
+    const result = selectSubagentChildBlocks(state, 'p') as Array<unknown>;
+    // Mutate the result; a second call must still return the original
+    // children list (no corruption).
+    result.length = 0;
+    const second = selectSubagentChildBlocks(state, 'p');
+    expect(second).toHaveLength(1);
+  });
+});
+
+describe('KNOWN_DEVICE_FLOW_ERROR_KINDS stays in sync with public type', async () => {
+  // wenshao 5-23 13:03 (glm-5.1) suggestion: ensure the known-set
+  // documentation export doesn't go stale.
+  it('only contains canonical device-flow error kinds (compile-time assertion)', async () => {
+    const { KNOWN_DEVICE_FLOW_ERROR_KINDS } = await import(
+      '../../src/daemon/ui/normalizer.js'
+    );
+    // The `as const satisfies readonly DaemonAuthDeviceFlowSdkErrorKind[]`
+    // at the declaration site already enforces type-level membership.
+    // This runtime test guards against the array being silently emptied
+    // and adds a stable count assertion so adding/removing kinds requires
+    // an explicit test update.
+    expect(KNOWN_DEVICE_FLOW_ERROR_KINDS).toContain('expired_token');
+    expect(KNOWN_DEVICE_FLOW_ERROR_KINDS).toContain('access_denied');
+    expect(KNOWN_DEVICE_FLOW_ERROR_KINDS).toContain('invalid_grant');
+    expect(KNOWN_DEVICE_FLOW_ERROR_KINDS).toContain('upstream_error');
+    expect(KNOWN_DEVICE_FLOW_ERROR_KINDS).toContain('persist_failed');
+    expect(KNOWN_DEVICE_FLOW_ERROR_KINDS).toContain('not_found_or_evicted');
+    expect(KNOWN_DEVICE_FLOW_ERROR_KINDS).toHaveLength(6);
+  });
+});

@@ -1123,7 +1123,7 @@ export const KNOWN_DEVICE_FLOW_ERROR_KINDS = [
   'upstream_error',
   'persist_failed',
   'not_found_or_evicted',
-] as const satisfies ReadonlyArray<DaemonAuthDeviceFlowSdkErrorKind>;
+] as const satisfies readonly DaemonAuthDeviceFlowSdkErrorKind[];
 
 function isDeviceFlowErrorKind(
   value: unknown,

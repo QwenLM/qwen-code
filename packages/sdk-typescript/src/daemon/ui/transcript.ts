@@ -678,8 +678,18 @@ function cloneTranscriptState(
     ...state,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? state.maxBlocks,
-    blocks: [...state.blocks],
-    blockIndexById: { ...state.blockIndexById },
+    // wenshao review (glm-5.1, 2026-05-23 13:03): lazy copy-on-write for
+    // `blocks` + `blockIndexById`. Eager `[...state.blocks]` defeated the
+    // `sortedBlocksCache` / `childrenIndexCache` WeakMaps — every dispatch
+    // (even sidechannel-only events that don't touch blocks) produced a
+    // fresh `blocks` reference, so the caches never hit. Now share the
+    // reference; `takeBlocksOwnership` below copies just-in-time at the
+    // first mutation. Identical behavior; the only observable diff is
+    // that snapshots for non-block-mutating events keep the same
+    // `state.blocks` identity, which is exactly what `useSyncExternalStore`
+    // consumers + the WeakMap caches want.
+    blocks: state.blocks,
+    blockIndexById: state.blockIndexById,
     toolBlockByCallId: { ...state.toolBlockByCallId },
     trimmedToolNotificationByCallId: {
       ...state.trimmedToolNotificationByCallId,
@@ -709,6 +719,10 @@ function trimTranscriptState(
   const keptIds = new Set(blocks.map((block) => block.id));
   state.blocks = blocks;
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(blocks);
+  // Trim replaces both arrays with fresh objects; register that this
+  // state now owns its blocks so future appends in the same dispatch
+  // don't double-copy.
+  ownedBlocks.set(state, state.blocks);
   for (const [toolCallId, blockId] of Object.entries(state.toolBlockByCallId)) {
     if (!keptIds.has(blockId)) {
       state.toolBlockByCallId[toolCallId] = TRIMMED_TOOL_BLOCK_ID;
@@ -767,12 +781,40 @@ function shouldRecreateTrimmedToolBlock(
   );
 }
 
+/**
+ * Lazy copy-on-write for `state.blocks` / `state.blockIndexById`.
+ *
+ * `cloneTranscriptState` shares the parent's `blocks` reference (not
+ * eager-copies) so non-block-mutating events keep the same array
+ * identity — enabling the `sortedBlocksCache` / `childrenIndexCache`
+ * WeakMaps to actually hit across dispatches. The first call to this
+ * helper within a given reducer pass converts the shared reference into
+ * an owned copy; subsequent calls in the same dispatch are no-ops
+ * (already owned).
+ *
+ * Ownership is tracked via the module-level `ownedBlocks` WeakMap keyed
+ * on the state object. The WeakMap value matches `state.blocks` once
+ * the state has taken ownership of that array.
+ */
+const ownedBlocks = new WeakMap<
+  DaemonTranscriptState,
+  readonly DaemonTranscriptBlock[]
+>();
+
+function takeBlocksOwnership(state: DaemonTranscriptState): void {
+  if (ownedBlocks.get(state) === state.blocks) return;
+  state.blocks = [...state.blocks];
+  state.blockIndexById = { ...state.blockIndexById };
+  ownedBlocks.set(state, state.blocks);
+}
+
 function appendBlock(
   state: DaemonTranscriptState,
   block: DaemonTranscriptBlock,
 ): void {
+  takeBlocksOwnership(state);
   state.blockIndexById[block.id] = state.blocks.length;
-  state.blocks.push(block);
+  (state.blocks as DaemonTranscriptBlock[]).push(block);
 }
 
 function getWritableBlockById(
@@ -785,7 +827,10 @@ function getWritableBlockById(
   const block = state.blocks[index];
   if (!block || block.id !== blockId) return undefined;
   const cloned = cloneBlockForWrite(block);
-  state.blocks[index] = cloned;
+  // Lazy COW: this writes to `state.blocks[index]`. Without ownership,
+  // we'd mutate the parent state's array. Take ownership first.
+  takeBlocksOwnership(state);
+  (state.blocks as DaemonTranscriptBlock[])[index] = cloned;
   return cloned;
 }
 
@@ -1015,7 +1060,7 @@ const childrenIndexCache = new WeakMap<
   Map<string, DaemonToolTranscriptBlock[]>
 >();
 
-const EMPTY_CHILD_LIST: ReadonlyArray<DaemonToolTranscriptBlock> = Object.freeze(
+const EMPTY_CHILD_LIST: readonly DaemonToolTranscriptBlock[] = Object.freeze(
   [],
 );
 
@@ -1038,9 +1083,13 @@ function getOrBuildChildrenIndex(
 export function selectSubagentChildBlocks(
   state: DaemonTranscriptState,
   parentToolCallId: string,
-): ReadonlyArray<DaemonToolTranscriptBlock> {
-  const index = getOrBuildChildrenIndex(state.blocks);
-  return index.get(parentToolCallId) ?? EMPTY_CHILD_LIST;
+): readonly DaemonToolTranscriptBlock[] {
+  // wenshao review (glm-5.1): return a shallow copy so downstream
+  // accidental mutation (e.g., callers calling `.sort()` in-place on the
+  // result) cannot corrupt the WeakMap-cached children index for other
+  // consumers sharing the same `state.blocks` snapshot.
+  const cached = getOrBuildChildrenIndex(state.blocks).get(parentToolCallId);
+  return cached ? [...cached] : EMPTY_CHILD_LIST;
 }
 
 /**
