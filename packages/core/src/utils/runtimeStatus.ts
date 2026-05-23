@@ -82,11 +82,16 @@ export interface WriteRuntimeStatusFields {
 }
 
 /**
- * Atomically write the runtime status file at `filePath`.
+ * Write the runtime status file at `filePath`.
  *
- * Writes via tmp-file + rename so an external observer never sees a
- * partially written file: it sees either the previous contents or the
- * fully committed new contents.
+ * Normally atomic (tmp-file + rename) so an external observer sees
+ * either the previous contents or the fully committed new contents.
+ * Falls back to in-place truncate+write when the existing file's
+ * uid/gid differs from the daemon process (rare, e.g. bind-mounted
+ * state dir in container-as-root setups) — see {@link atomicWriteJSON}
+ * for the conditional-atomic contract. In the fallback path,
+ * concurrent readers can transiently observe a partially-written
+ * file.
  *
  * The parent directory of `filePath` is created on demand. Exceptions
  * from the underlying I/O propagate to the caller; this function does
