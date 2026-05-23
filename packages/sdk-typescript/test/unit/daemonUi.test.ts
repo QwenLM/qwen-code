@@ -4270,3 +4270,29 @@ describe('KNOWN_DEVICE_FLOW_ERROR_KINDS stays in sync with public type', async (
     expect(KNOWN_DEVICE_FLOW_ERROR_KINDS).toHaveLength(6);
   });
 });
+
+describe('daemonBlockToPlainText forwards opts (wenshao review 4350741340)', () => {
+  it('sanitizes URL on tool preview when opts.sanitizeUrls is set', async () => {
+    const {
+      daemonBlockToPlainText,
+      createDaemonToolPreview,
+    } = await import('../../src/daemon/ui/index.js');
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'fetch',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        { url: 'https://api.example.com/x?token=SECRET&q=keep', method: 'GET' },
+        { toolName: 'WebFetch', toolKind: 'tool' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const sanitized = daemonBlockToPlainText(block, { sanitizeUrls: true });
+    expect(sanitized).not.toContain('SECRET');
+    expect(sanitized).toContain('keep');
+  });
+});

@@ -357,7 +357,12 @@ export function daemonBlockToPlainText(
       ]
         .filter(Boolean)
         .join(' ');
-      const preview = daemonToolPreviewToPlainText(block.preview);
+      // wenshao review (review 4350741340): forward `opts` so
+      // `sanitizeUrls` + `maxFieldLength` reach the preview's URL fields
+      // (web_fetch URL, image_generation thumbnailUrl). The HTML path at
+      // line 509 already did this; plainText was missed in the prior
+      // doudouOUC fix.
+      const preview = daemonToolPreviewToPlainText(block.preview, opts);
       const status = `status: ${block.status}`;
       return [header, preview, status].filter(Boolean).join('\n');
     }
