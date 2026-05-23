@@ -86,13 +86,13 @@ export const usePhraseCycler = (
 
       // Set initial loading phrase
       updatePhrase().catch(() => {
-        setCurrentLoadingPhrase(loadingPhrases[0]);
+        setCurrentLoadingPhrase(selectRandomPhrase(loadingPhrases));
       });
 
       phraseIntervalRef.current = setInterval(() => {
         // Update with new loading phrase every interval
         updatePhrase().catch(() => {
-          setCurrentLoadingPhrase(loadingPhrases[0]);
+          setCurrentLoadingPhrase(selectRandomPhrase(loadingPhrases));
         });
       }, PHRASE_CHANGE_INTERVAL_MS);
     } else {

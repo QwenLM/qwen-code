@@ -65,6 +65,13 @@ describe('usePhraseCycler', () => {
   });
 
   it('should cycle through witty phrases when isActive is true and not waiting', () => {
+    // Mock Math.random to guarantee different phrases
+    let randomCall = 0;
+    vi.spyOn(Math, 'random').mockImplementation(() => {
+      const val = randomCall++ % MOCK_WITTY_PHRASES.length;
+      return val / MOCK_WITTY_PHRASES.length;
+    });
+
     const { result } = renderHook(() => usePhraseCycler(true, false));
     // Initial phrase should be one of the witty phrases
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
@@ -313,7 +320,7 @@ describe('usePhraseCycler', () => {
     expect(result.current).toBe(differentQuotes[1]);
   });
 
-  it('should fall back to first witty phrase when fortune command throws an error', async () => {
+  it('should fall back to a witty phrase when fortune command throws an error', async () => {
     mockGetFortuneQuote.mockRejectedValue(
       new Error('Fortune command not found'),
     );
@@ -327,10 +334,10 @@ describe('usePhraseCycler', () => {
       await Promise.resolve();
     });
 
-    expect(result.current).toBe(MOCK_WITTY_PHRASES[0]);
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
   });
 
-  it('should fall back to first witty phrase when fortune command throws on interval update', async () => {
+  it('should fall back to a witty phrase when fortune command throws on interval update', async () => {
     // First call succeeds, second call throws
     mockGetFortuneQuote
       .mockResolvedValueOnce(MOCK_FORTUNE_QUOTE)
@@ -356,6 +363,6 @@ describe('usePhraseCycler', () => {
       await Promise.resolve();
     });
 
-    expect(result.current).toBe(MOCK_WITTY_PHRASES[0]);
+    expect(MOCK_WITTY_PHRASES).toContain(result.current);
   });
 });
