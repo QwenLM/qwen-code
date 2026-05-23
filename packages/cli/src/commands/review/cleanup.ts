@@ -14,14 +14,14 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, unlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { refExists } from './lib/git.js';
 import {
   worktreePath,
   reviewBranch,
   REVIEW_TMP_DIR,
-  projectRoot,
+  anchoredPath,
   tmpPrefix,
 } from './lib/paths.js';
 
@@ -71,7 +71,7 @@ function runCleanup(target: string): void {
   // `<project>/.qwen/tmp/` directory even when the LLM driver invokes
   // `cleanup` from inside the PR worktree — otherwise readdirSync hits
   // `<worktree>/.qwen/tmp/` (empty / absent) and silently no-ops.
-  const tmpDir = resolve(projectRoot(), REVIEW_TMP_DIR);
+  const tmpDir = anchoredPath(REVIEW_TMP_DIR);
   const prefix = tmpPrefix(target);
   let tmpEntries: string[] = [];
   try {

@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import yargs from 'yargs';
 import { autofixGateCommand } from './autofix-gate.js';
 import { fetchReportPath, type FetchReport } from './lib/session.js';
+import { _resetProjectRootCache } from './lib/paths.js';
 
 const BASE_REPORT: FetchReport = {
   prNumber: '99',
@@ -62,6 +63,8 @@ describe('qwen review autofix-gate', () => {
     originalCwd = process.cwd();
     cwd = mkdtempSync(join(tmpdir(), 'qwen-review-autofix-'));
     process.chdir(cwd);
+    // Flush the cached projectRoot from the previous test's tmpdir.
+    _resetProjectRootCache();
   });
 
   afterEach(() => {
@@ -76,6 +79,8 @@ describe('qwen review autofix-gate', () => {
       'pr-99',
       '--findings-count',
       '5',
+      '--owner-repo',
+      'octo/repo',
     ]);
     const decision = JSON.parse(stdout.trim());
     expect(decision.decision).toBe('skip');
@@ -94,6 +99,8 @@ describe('qwen review autofix-gate', () => {
       'pr-99',
       '--findings-count',
       '5',
+      '--owner-repo',
+      'octo/repo',
     ]);
     const decision = JSON.parse(stdout.trim());
     expect(decision.decision).toBe('ask');
@@ -106,6 +113,8 @@ describe('qwen review autofix-gate', () => {
       'pr-99',
       '--findings-count',
       '3',
+      '--owner-repo',
+      'octo/repo',
     ]);
     const decision = JSON.parse(stdout.trim());
     expect(decision.decision).toBe('ask');
@@ -119,6 +128,8 @@ describe('qwen review autofix-gate', () => {
       'pr-99',
       '--findings-count',
       '0',
+      '--owner-repo',
+      'octo/repo',
     ]);
     const decision = JSON.parse(stdout.trim());
     expect(decision.decision).toBe('noop');
@@ -135,6 +146,23 @@ describe('qwen review autofix-gate', () => {
     expect(decision.decision).toBe('ask');
   });
 
+  it('returns skip when --owner-repo is missing for a PR target', async () => {
+    // PR targets require --owner-repo to verify session binding; without
+    // it the gate would silently honour a stale report from a same-PR-
+    // number review in another repo. Soft-skip preserves the
+    // "always emits a decision JSON" contract (vs. throwing).
+    writeReport('99', { commentMode: false });
+    const { stdout } = await runGate([
+      'autofix-gate',
+      'pr-99',
+      '--findings-count',
+      '5',
+    ]);
+    const decision = JSON.parse(stdout.trim());
+    expect(decision.decision).toBe('skip');
+    expect(decision.reason).toMatch(/--owner-repo is required/);
+  });
+
   it('returns skip when fetch report is missing for a PR target', async () => {
     // No report written for pr-99 — refuse rather than prompting the user
     // for autofix on a worktree that may not exist.
@@ -143,6 +171,8 @@ describe('qwen review autofix-gate', () => {
       'pr-99',
       '--findings-count',
       '5',
+      '--owner-repo',
+      'octo/repo',
     ]);
     const decision = JSON.parse(stdout.trim());
     expect(decision.decision).toBe('skip');
@@ -208,6 +238,8 @@ describe('qwen review autofix-gate', () => {
       'pr-77',
       '--findings-count',
       '3',
+      '--owner-repo',
+      'octo/repo',
     ]);
     const decision = JSON.parse(stdout.trim());
     expect(decision.decision).toBe('ask');

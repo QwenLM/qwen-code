@@ -16,9 +16,8 @@
 // following model can skip.
 
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import type { Argv } from 'yargs';
-import { projectRoot, tmpFile, worktreePath } from './paths.js';
+import { anchoredPath, tmpFile, worktreePath } from './paths.js';
 
 /** Schema written by `qwen review fetch-pr` — read by every downstream step. */
 export interface FetchReport {
@@ -62,7 +61,15 @@ export function readFetchReport(prNumber: string | number): FetchReport | null {
   // pointer in requireFetchReport.
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as FetchReport;
-  } catch {
+  } catch (err) {
+    // Surface the root cause to stderr so the LLM driver doesn't get the
+    // misleading "Missing fetch-pr report" recovery pointer when the file
+    // actually exists but is corrupt / unreadable / etc. The function still
+    // returns null so `requireFetchReport` can emit its actionable recovery
+    // text — the stderr line is supplementary diagnostic context.
+    process.stderr.write(
+      `Warning: fetch-pr report at ${path} exists but failed to parse: ${(err as Error).message}. Treating as missing.\n`,
+    );
     return null;
   }
 }
@@ -205,13 +212,13 @@ export function ensureWorktreeMatches(
 ): void {
   // Anchor both sides at the main project root rather than `process.cwd()`
   // so the comparison holds even when the subcommand is invoked from
-  // inside the PR worktree itself (cwd != project root). `resolve(root, p)`
-  // treats `p` as-is if absolute, or as project-relative if not — covers
-  // both legacy reports (which stored relative `.qwen/tmp/review-pr-N`)
-  // and reports written after the paths.ts change to absolute.
-  const root = projectRoot();
-  const expected = resolve(root, report.worktreePath);
-  const got = resolve(root, providedWorktree);
+  // inside the PR worktree itself. `anchoredPath` treats an absolute
+  // path as-is and an absolute-as-cwd-relative-falls-back path as
+  // project-relative — covers both legacy reports (relative
+  // `.qwen/tmp/review-pr-N`) and reports written after the paths.ts
+  // change to absolute.
+  const expected = anchoredPath(report.worktreePath);
+  const got = anchoredPath(providedWorktree);
   if (expected !== got) {
     throw new Error(
       `Worktree path mismatch for PR #${report.prNumber}.\n` +

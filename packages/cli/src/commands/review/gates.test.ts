@@ -20,6 +20,7 @@ import { presubmitCommand } from './presubmit.js';
 import { deterministicCommand } from './deterministic.js';
 import { loadRulesCommand } from './load-rules.js';
 import { fetchReportPath, type FetchReport } from './lib/session.js';
+import { _resetProjectRootCache } from './lib/paths.js';
 
 const FIXTURE: FetchReport = {
   prNumber: '7',
@@ -74,6 +75,8 @@ describe('review subcommand gates (require fetch-pr report)', () => {
     originalCwd = process.cwd();
     cwd = mkdtempSync(join(tmpdir(), 'qwen-review-gate-'));
     process.chdir(cwd);
+    // Flush the cached projectRoot from the previous test's tmpdir.
+    _resetProjectRootCache();
   });
 
   afterEach(() => {

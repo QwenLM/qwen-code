@@ -18,24 +18,10 @@ import {
   parseCargoClippyNdjson,
   parseGoVetOutput,
   parseGolangciJson,
-  type Finding,
 } from './deterministic.js';
 
 const WORKTREE = '/work/tree';
 const CHANGED = new Set(['src/a.ts', 'src/b.ts', 'lib/c.py', 'main.rs', 'cmd/x.go']);
-
-function find(file: string, fields: Partial<Finding> = {}): Finding {
-  return {
-    source: 'typecheck',
-    tool: 'tsc',
-    file,
-    line: 1,
-    column: 1,
-    severity: 'Critical',
-    message: '',
-    ...fields,
-  } as Finding;
-}
 
 describe('parseTscOutput', () => {
   it('parses tsc errors with line/column and maps error→Critical', () => {
@@ -198,6 +184,24 @@ describe('parseCargoClippyNdjson', () => {
   it('returns empty for empty stdout', () => {
     expect(parseCargoClippyNdjson('', WORKTREE, CHANGED)).toEqual([]);
   });
+
+  it('maps error level to Critical (companion to the warning→Nice to have case)', () => {
+    const line = JSON.stringify({
+      reason: 'compiler-message',
+      message: {
+        level: 'error',
+        message: 'borrow of moved value',
+        code: { code: 'E0382' },
+        spans: [
+          { is_primary: true, file_name: '/work/tree/main.rs', line_start: 7, column_start: 5 },
+        ],
+      },
+    });
+    const findings = parseCargoClippyNdjson(line, WORKTREE, CHANGED);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('Critical');
+    expect(findings[0].ruleId).toBe('E0382');
+  });
 });
 
 describe('parseGoVetOutput', () => {
@@ -225,6 +229,12 @@ describe('parseGoVetOutput', () => {
 
   it('returns empty for empty input', () => {
     expect(parseGoVetOutput('', WORKTREE, CHANGED)).toEqual([]);
+  });
+
+  it('filters by changed-files set', () => {
+    const out = 'cmd/x.go:1:1: msg\ncmd/skipped.go:1:1: msg';
+    const findings = parseGoVetOutput(out, WORKTREE, CHANGED);
+    expect(findings.map((f) => f.file)).toEqual(['cmd/x.go']);
   });
 });
 
@@ -276,11 +286,3 @@ describe('parseGolangciJson', () => {
   });
 });
 
-// `find` helper is a typed shorthand for the fixture above; assert it's
-// referenced so a future refactor that drops a test doesn't leave it
-// dangling unnoticed.
-describe('test helpers', () => {
-  it('find() builds a Finding shape', () => {
-    expect(find('x.ts').tool).toBe('tsc');
-  });
-});

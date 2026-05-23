@@ -22,13 +22,13 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh } from './lib/gh.js';
 import { git, refExists } from './lib/git.js';
 import {
   REVIEW_TMP_DIR,
-  projectRoot,
+  anchoredPath,
   reviewBranch,
   worktreePath,
 } from './lib/paths.js';
@@ -167,13 +167,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // fetch-pr is invoked from a non-root cwd (`tmpFile` / `fetchReportPath`
   // resolve absolute against projectRoot, so the relative-from-cwd
   // mkdirSync would have created the wrong directory).
-  mkdirSync(resolve(projectRoot(), REVIEW_TMP_DIR), { recursive: true });
-  // Anchor `--out` the same way: a relative `--out` argument from a
-  // non-root cwd would otherwise write the report to `<cwd>/...` while
-  // the canonical mirror lands at `<projectRoot>/.qwen/tmp/...`, so
-  // downstream consumers reading from `args.out` and consumers reading
-  // the canonical path would see inconsistent files.
-  const outPath = resolve(projectRoot(), out);
+  mkdirSync(anchoredPath(REVIEW_TMP_DIR), { recursive: true });
+  const outPath = anchoredPath(out);
   const json = JSON.stringify(result, null, 2) + '\n';
   writeFileSync(outPath, json, 'utf8');
   // Also mirror to the canonical path so downstream subcommands can locate the

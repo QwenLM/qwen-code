@@ -47,6 +47,20 @@ function decide(
   const prMatch = /^pr-(\d+)$/.exec(target);
   if (prMatch) {
     const prNumber = prMatch[1];
+    // For PR targets `--owner-repo` is required so the gate can verify
+    // session binding (matching pr-context / presubmit / load-rules --pr /
+    // deterministic --pr). Without it the gate would silently read any
+    // stale report that happens to exist for this PR number in another
+    // repo — exactly the cross-repo stale-session attack the binding
+    // closes for the other four gated subcommands. Return `skip` rather
+    // than throw so autofix-gate keeps its "always emits a decision JSON,
+    // never crashes Step 8" contract.
+    if (!ownerRepo) {
+      return {
+        decision: 'skip',
+        reason: `--owner-repo is required for PR-target autofix-gate so the session binding can be verified. Re-invoke as \`qwen review autofix-gate pr-${prNumber} --findings-count <N> --owner-repo <owner>/<repo>\`.`,
+      };
+    }
     const report = readFetchReport(prNumber);
     if (!report) {
       // No fetch-pr report for a PR target means the LLM driver jumped
@@ -60,17 +74,11 @@ function decide(
         reason: `No fetch-pr report for PR #${prNumber}; cannot determine autofix safety. Re-run \`qwen review fetch-pr\` first.`,
       };
     }
-    // When `--owner-repo` is supplied, treat a repo mismatch as a "no
-    // session" condition rather than a hard throw — autofix-gate is the only
-    // gated subcommand whose contract is "soft skip on missing session", and
-    // we keep that shape so callers see uniform decision JSON instead of an
-    // exception bubbling out of Step 8. The repo-mismatch case still has to
-    // skip, because letting it fall through to `report.commentMode` would
-    // honour another repo's commentMode flag for THIS PR review.
-    if (
-      ownerRepo &&
-      report.ownerRepo.toLowerCase() !== ownerRepo.toLowerCase()
-    ) {
+    // Same skip-on-mismatch shape as the missing-report branch — the gate
+    // is "soft skip on broken session" by contract. Mismatch counts as
+    // broken because the stale report's commentMode flag would otherwise
+    // be honoured for a different repo's PR review.
+    if (report.ownerRepo.toLowerCase() !== ownerRepo.toLowerCase()) {
       return {
         decision: 'skip',
         reason: `Fetch-pr report for PR #${prNumber} is bound to ${report.ownerRepo}, not ${ownerRepo}; refusing to autofix against a stale cross-repo worktree. Re-run \`qwen review fetch-pr ${prNumber} ${ownerRepo}\` to refresh the session.`,

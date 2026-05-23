@@ -46,12 +46,37 @@ function findProjectRoot(): string {
   return process.cwd();
 }
 
+let _cachedRoot: string | undefined;
+
 /**
- * Absolute path of the main project root. Computed every call so tests that
- * `process.chdir(...)` between assertions get fresh resolution.
+ * Absolute path of the main project root. Cached after first resolution
+ * because a single review subcommand invocation calls this 5–10 times
+ * transitively (via `fetchReportPath`, `worktreePath`, `tmpFile`, …) and
+ * the `git rev-parse --git-common-dir` subprocess is the dominant cost.
+ * Tests that `process.chdir(...)` between assertions must call
+ * `_resetProjectRootCache()` to invalidate.
  */
 export function projectRoot(): string {
-  return findProjectRoot();
+  if (_cachedRoot === undefined) {
+    _cachedRoot = findProjectRoot();
+  }
+  return _cachedRoot;
+}
+
+/** @internal Test-only — clears the cache so the next `projectRoot()` call re-resolves. */
+export function _resetProjectRootCache(): void {
+  _cachedRoot = undefined;
+}
+
+/**
+ * Resolve a path against the main project root. Convenience wrapper around
+ * `resolve(projectRoot(), p)` so the 5+ gated-subcommand callsites
+ * (deterministic / fetch-pr / pr-context / presubmit / load-rules / cleanup)
+ * can share one identical anchoring helper and one JSDoc comment instead of
+ * repeating the rationale at each site.
+ */
+export function anchoredPath(p: string): string {
+  return resolve(projectRoot(), p);
 }
 
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');

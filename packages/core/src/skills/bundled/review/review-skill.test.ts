@@ -110,6 +110,14 @@ describe('bundled review skill', () => {
       'git switch feature',
       'git pull origin main',
       'git reset --hard HEAD~1',
+      // Rule-4 broaden: every `git reset` variant that moves HEAD is now
+      // denied; only `git reset -- <pathspec>` (and bare `git reset`)
+      // remain in the allow list below.
+      'git reset HEAD~1',
+      'git reset --soft HEAD~1',
+      'git reset --mixed HEAD~1',
+      'git reset --keep BRANCH',
+      'git reset --merge',
       // Flag-based HEAD mutations the previous `[^-]` rule let through.
       'git checkout -b new',
       'git checkout -B existing',
@@ -150,6 +158,11 @@ describe('bundled review skill', () => {
       'git checkout -- src/foo.ts',
       'git checkout -- .',
       'git checkout', // bare info form, no HEAD movement
+      // Rule-4 safe forms — `git reset -- pathspec` unstages, `git reset`
+      // alone unstages everything; neither moves HEAD.
+      'git reset -- src/foo.ts',
+      'git reset -- .',
+      'git reset',
       'qwen review fetch-pr 123 octo/repo --out .qwen/tmp/x.json',
       'gh pr diff https://github.com/owner/repo/pull/1',
       'cd /tmp && ls',

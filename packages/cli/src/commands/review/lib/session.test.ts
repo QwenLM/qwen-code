@@ -22,6 +22,7 @@ import {
   ensureWorktreeMatches,
   type FetchReport,
 } from './session.js';
+import { _resetProjectRootCache } from './paths.js';
 
 const REPORT_FIXTURE: FetchReport = {
   prNumber: '42',
@@ -47,6 +48,9 @@ describe('review/lib/session', () => {
     // doesn't make string equality on absolute paths fail spuriously.
     cwd = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-review-session-')));
     process.chdir(cwd);
+    // `projectRoot()` caches its result; flush so each test resolves
+    // against this beforeEach's fresh tmpdir.
+    _resetProjectRootCache();
     mkdirSync('.qwen/tmp', { recursive: true });
   });
 
@@ -206,6 +210,7 @@ describe('review/lib/session', () => {
     const prevEnv = process.env['QWEN_PROJECT_DIR'];
     process.env['QWEN_PROJECT_DIR'] = cwd;
     process.chdir(worktreeCwd);
+    _resetProjectRootCache();
     try {
       const fromWorktree = fetchReportPath('42');
       expect(fromWorktree).toBe(fromProjectRoot);
@@ -214,6 +219,7 @@ describe('review/lib/session', () => {
       expect(report.prNumber).toBe('42');
     } finally {
       process.chdir(cwd);
+      _resetProjectRootCache();
       if (prevEnv === undefined) {
         delete process.env['QWEN_PROJECT_DIR'];
       } else {

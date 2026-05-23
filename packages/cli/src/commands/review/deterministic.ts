@@ -40,14 +40,14 @@ import {
   type ExecFileSyncOptionsWithStringEncoding,
 } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, dirname, resolve } from 'node:path';
+import { join, dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   addPrSessionOptions,
   ensureWorktreeMatches,
   requirePrSessionFromArgs,
 } from './lib/session.js';
-import { projectRoot } from './lib/paths.js';
+import { anchoredPath } from './lib/paths.js';
 
 const TIMEOUT_TYPECHECK_MS = 120_000;
 const TIMEOUT_LINTER_MS = 60_000;
@@ -658,12 +658,9 @@ interface DeterministicArgs {
 
 async function runDeterministic(args: DeterministicArgs): Promise<void> {
   // Anchor at projectRoot so a relative `<worktree>` arg resolves against
-  // the main project root rather than `process.cwd()`. The LLM driver
-  // sometimes invokes the subcommand from inside the worktree itself; a
-  // bare `resolve(args.worktree)` would then double-nest the path
-  // (`<worktree>/.qwen/tmp/review-pr-N`) and the existsSync check would
-  // fail spuriously.
-  const worktree = resolve(projectRoot(), args.worktree);
+  // the main project root rather than `process.cwd()` (see paths.ts
+  // `anchoredPath` for the full rationale).
+  const worktree = anchoredPath(args.worktree);
   if (!existsSync(worktree)) {
     throw new Error(`Worktree not found: ${worktree}`);
   }
@@ -679,12 +676,7 @@ async function runDeterministic(args: DeterministicArgs): Promise<void> {
     ensureWorktreeMatches(report, worktree);
   }
 
-  // Anchor `--changed-files` at projectRoot for the same reason
-  // `args.worktree` is anchored — the LLM driver sometimes invokes the
-  // subcommand from inside the worktree and a relative path would
-  // otherwise resolve to `<worktree>/.qwen/tmp/...` instead of the
-  // canonical `<project>/.qwen/tmp/...` that SKILL.md prescribes.
-  const changedFilesPath = resolve(projectRoot(), args['changed-files']);
+  const changedFilesPath = anchoredPath(args['changed-files']);
   let changedFiles: string[] = [];
   try {
     const raw = readFileSync(changedFilesPath, 'utf8');
@@ -738,12 +730,7 @@ async function runDeterministic(args: DeterministicArgs): Promise<void> {
     toolsSkipped,
   };
 
-  // Anchor `--out` at projectRoot — same reasoning as `args.worktree` /
-  // `args['changed-files']` above. Without this a relative `--out` from
-  // inside the worktree would write the report under `<worktree>/...`,
-  // making the next step (SKILL.md Step 5+) blind to the deterministic
-  // findings even though the subcommand reported success.
-  const outPath = resolve(projectRoot(), args.out);
+  const outPath = anchoredPath(args.out);
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, JSON.stringify(result, null, 2) + '\n', 'utf8');
 

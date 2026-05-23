@@ -12,8 +12,7 @@
 
 import type { CommandModule } from 'yargs';
 import { writeFileSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { projectRoot } from './lib/paths.js';
+import { anchoredPath } from './lib/paths.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   gh,
@@ -152,15 +151,9 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     commit_sha: commitSha,
     owner_repo: ownerRepo,
   } = args;
-  // Anchor `<out_path>` and `--new-findings` at projectRoot so a relative
-  // path from a worktree cwd still lands in `<project>/.qwen/tmp/...`.
-  // Without this, a `cd .qwen/tmp/review-pr-N && qwen review presubmit ...`
-  // would write the report under the worktree and the file would never
-  // be seen by the post-presubmit step that reads it from the canonical
-  // path.
-  const outPath = resolve(projectRoot(), args.out_path);
+  const outPath = anchoredPath(args.out_path);
   const newFindingsPath = args['new-findings']
-    ? resolve(projectRoot(), args['new-findings'])
+    ? anchoredPath(args['new-findings'])
     : undefined;
 
   const slash = ownerRepo.indexOf('/');

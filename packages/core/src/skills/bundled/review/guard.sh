@@ -126,9 +126,17 @@ if matches "${P}git[[:space:]]+pull([[:space:]]|\$)"; then
   deny
 fi
 
-# 4. `git reset --hard` — discards working-tree state against another ref.
-if matches "${P}git[[:space:]]+reset[[:space:]]+--hard"; then
-  deny
+# 4. `git reset` in any form that moves HEAD. The only safe form is
+#    `git reset -- <pathspec>` (unstage specific files — does NOT move HEAD).
+#    `git reset HEAD~1` (default --mixed), `git reset --soft/--mixed/--hard`,
+#    `git reset --merge`, and `git reset --keep` all move HEAD and are
+#    denied. Bare `git reset` (no args, unstage-all) falls through because
+#    the outer pattern requires whitespace after `reset` — that's safe
+#    semantically too.
+if matches "${P}git[[:space:]]+reset[[:space:]]"; then
+  if ! matches "${P}git[[:space:]]+reset[[:space:]]+-- "; then
+    deny
+  fi
 fi
 
 # 5. `git checkout`. The only safe form is `git checkout -- <pathspec>`
