@@ -119,7 +119,27 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       '--json',
       'headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,isCrossRepository',
     );
-    meta = JSON.parse(json) as PrMetadata;
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    // Runtime shape check so a future `gh` CLI schema change can't
+    // silently propagate `undefined` strings into the fetch report
+    // (e.g., `headRefOid: undefined` becomes the literal string
+    // `"undefined"` downstream, breaking the SHA-based incremental
+    // cache and presubmit's CI status query). Mirrors the
+    // `hasMinimalShape` defense the read side has in session.ts.
+    if (
+      typeof parsed['headRefName'] !== 'string' ||
+      typeof parsed['headRefOid'] !== 'string' ||
+      typeof parsed['baseRefName'] !== 'string' ||
+      typeof parsed['additions'] !== 'number' ||
+      typeof parsed['deletions'] !== 'number' ||
+      typeof parsed['changedFiles'] !== 'number' ||
+      typeof parsed['isCrossRepository'] !== 'boolean'
+    ) {
+      throw new Error(
+        `gh pr view returned unexpected JSON shape: ${JSON.stringify(parsed).slice(0, 200)}`,
+      );
+    }
+    meta = parsed as unknown as PrMetadata;
   } catch (err) {
     // Roll back the fetched ref so the next run starts clean.
     tryRemove(() =>

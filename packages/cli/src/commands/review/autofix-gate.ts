@@ -22,8 +22,14 @@
 // gate falls back to the findings-count check (skip rules don't apply).
 
 import type { CommandModule } from 'yargs';
+import { existsSync } from 'node:fs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { addOwnerRepoOption, readFetchReport } from './lib/session.js';
+import { anchoredPath } from './lib/paths.js';
+import {
+  addOwnerRepoOption,
+  ownerRepoMatches,
+  readFetchReport,
+} from './lib/session.js';
 
 interface AutofixGateArgs {
   target: string;
@@ -77,11 +83,26 @@ function decide(
     // Same skip-on-mismatch shape as the missing-report branch — the gate
     // is "soft skip on broken session" by contract. Mismatch counts as
     // broken because the stale report's commentMode flag would otherwise
-    // be honoured for a different repo's PR review.
-    if (report.ownerRepo.toLowerCase() !== ownerRepo.toLowerCase()) {
+    // be honoured for a different repo's PR review. Shared
+    // `ownerRepoMatches` predicate so any future normalization (GHES
+    // hostnames, trailing slashes, ...) lands in one place and both
+    // `requireFetchReportFor` and autofix-gate inherit it.
+    if (!ownerRepoMatches(report, ownerRepo)) {
       return {
         decision: 'skip',
         reason: `Fetch-pr report for PR #${prNumber} is bound to ${report.ownerRepo}, not ${ownerRepo}; refusing to autofix against a stale cross-repo worktree. Re-run \`qwen review fetch-pr ${prNumber} ${ownerRepo}\` to refresh the session.`,
+      };
+    }
+    // The session is bound to the right repo, but the worktree it
+    // points at may have been removed (an unrelated `qwen review
+    // cleanup` ran, the user manually deleted the directory, …) while
+    // the report stayed on disk. Editing files inside a non-existent
+    // worktree would land them on the user's main tree — refuse.
+    const worktreeDir = anchoredPath(report.worktreePath);
+    if (!existsSync(worktreeDir)) {
+      return {
+        decision: 'skip',
+        reason: `Fetch-pr report for PR #${prNumber} points at ${report.worktreePath}, but that directory does not exist. Re-run \`qwen review fetch-pr ${prNumber} ${ownerRepo}\` to recreate the worktree.`,
       };
     }
     if (report.commentMode) {

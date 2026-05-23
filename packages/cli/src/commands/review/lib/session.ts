@@ -15,7 +15,7 @@
 // hard precondition rather than a prose rule that a weakly instruction-
 // following model can skip.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import type { Argv } from 'yargs';
 import { anchoredPath, tmpFile, worktreePath } from './paths.js';
 
@@ -73,10 +73,16 @@ export function fetchReportPath(prNumber: string | number): string {
 function hasMinimalShape(parsed: unknown): parsed is FetchReport {
   if (typeof parsed !== 'object' || parsed === null) return false;
   const r = parsed as Record<string, unknown>;
+  // `commentMode` is deliberately NOT in this check — see the field's
+  // JSDoc above for the deprecation contract. Legacy reports parse
+  // without it; treat undefined as falsy at the call site.
   return (
     typeof r['prNumber'] === 'string' &&
     typeof r['ownerRepo'] === 'string' &&
-    typeof r['worktreePath'] === 'string'
+    typeof r['worktreePath'] === 'string' &&
+    typeof r['isCrossRepository'] === 'boolean' &&
+    typeof r['diffStat'] === 'object' &&
+    r['diffStat'] !== null
   );
 }
 
@@ -146,6 +152,27 @@ export function requireFetchReport(prNumber: string | number): FetchReport {
  * Same recovery message shape as `requireFetchReport` — the LLM driver can
  * always fix the mismatch by re-running `fetch-pr` with the right repo arg.
  */
+/**
+ * Single source of truth for the report's owner/repo equality check.
+ * `autofix-gate` reimplements the comparison inline because its
+ * soft-skip contract (must emit a decision JSON, never throw) makes it
+ * incompatible with `requireFetchReportFor`'s throw-on-mismatch shape.
+ * Extracting the predicate here so any future normalization (e.g.,
+ * GHES hostnames, trailing slashes) lands in one place and both
+ * call paths inherit it.
+ */
+export function ownerRepoMatches(
+  report: FetchReport,
+  ownerRepo: string,
+): boolean {
+  // GitHub treats owner/repo slugs as case-insensitive — `Owner/Repo` and
+  // `owner/repo` are the same repository. Mirrors `presubmit.ts`'s
+  // self-PR username compare so a `fetch-pr` run using URL casing
+  // (`Owner/Repo`) doesn't fail the gate when a downstream subcommand
+  // receives the canonical casing from `gh repo view`.
+  return report.ownerRepo.toLowerCase() === ownerRepo.toLowerCase();
+}
+
 export function requireFetchReportFor({
   prNumber,
   ownerRepo,
@@ -154,13 +181,7 @@ export function requireFetchReportFor({
   ownerRepo: string;
 }): FetchReport {
   const report = requireFetchReport(prNumber);
-  // GitHub treats owner/repo slugs as case-insensitive — `Owner/Repo` and
-  // `owner/repo` are the same repository. Mirroring the precedent set by
-  // `presubmit.ts` for the self-PR username compare. Without this, a
-  // fetch-pr run with the URL casing (`Owner/Repo`) would spuriously fail
-  // the gate when a downstream subcommand received the canonical casing
-  // from `gh repo view`.
-  if (report.ownerRepo.toLowerCase() !== ownerRepo.toLowerCase()) {
+  if (!ownerRepoMatches(report, ownerRepo)) {
     const path = fetchReportPath(prNumber);
     throw new Error(
       `Fetch-pr report for PR #${prNumber} is bound to a different repo.\n` +
@@ -253,8 +274,26 @@ export function ensureWorktreeMatches(
   // project-relative — covers both legacy reports (relative
   // `.qwen/tmp/review-pr-N`) and reports written after the paths.ts
   // change to absolute.
-  const expected = anchoredPath(report.worktreePath);
-  const got = anchoredPath(providedWorktree);
+  // Additionally `realpathSync` both sides so the macOS
+  // `/tmp → /private/tmp` and `/var → /private/var` symlinks (and
+  // similar CI-runner-symlinked paths) compare cleanly. Fall back to
+  // the raw anchored path if realpath throws (e.g., the worktree was
+  // already removed) so the equality check is the next operation that
+  // catches the divergence — not a confusing `ENOENT` from realpath.
+  const rawExpected = anchoredPath(report.worktreePath);
+  const rawGot = anchoredPath(providedWorktree);
+  let expected = rawExpected;
+  let got = rawGot;
+  try {
+    expected = realpathSync(rawExpected);
+  } catch {
+    /* leave at rawExpected */
+  }
+  try {
+    got = realpathSync(rawGot);
+  } catch {
+    /* leave at rawGot */
+  }
   if (expected !== got) {
     throw new Error(
       `Worktree path mismatch for PR #${report.prNumber}.\n` +

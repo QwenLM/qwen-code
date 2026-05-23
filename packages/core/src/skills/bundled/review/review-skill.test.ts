@@ -131,6 +131,8 @@ describe('bundled review skill', () => {
       'git checkout -c new',
       'git checkout --detach HEAD',
       'git checkout --orphan greenfield',
+      // `git checkout -` switches to the previous branch — HEAD movement.
+      'git checkout -',
       'git switch -c new',
       'git switch -C existing',
       'git switch --detach HEAD',

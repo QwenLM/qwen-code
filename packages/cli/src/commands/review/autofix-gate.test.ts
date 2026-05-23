@@ -28,12 +28,14 @@ const BASE_REPORT: FetchReport = {
 };
 
 function writeReport(prNumber: string, overrides: Partial<FetchReport>): void {
+  const report = { ...BASE_REPORT, ...overrides, prNumber };
   mkdirSync('.qwen/tmp', { recursive: true });
-  writeFileSync(
-    fetchReportPath(prNumber),
-    JSON.stringify({ ...BASE_REPORT, ...overrides, prNumber }),
-    'utf8',
-  );
+  writeFileSync(fetchReportPath(prNumber), JSON.stringify(report), 'utf8');
+  // Materialize the worktree directory too so autofix-gate's
+  // `existsSync(report.worktreePath)` check passes for the happy paths;
+  // tests that explicitly need a missing worktree pass a non-existent
+  // path via the override.
+  mkdirSync(report.worktreePath, { recursive: true });
 }
 
 async function runGate(args: string[]): Promise<{ stdout: string }> {
@@ -179,6 +181,32 @@ describe('qwen review autofix-gate', () => {
     expect(decision.reason).toMatch(/No fetch-pr report for PR #99/);
   });
 
+  it('returns skip when the worktree directory referenced by the report does not exist', async () => {
+    // Report exists and ownerRepo matches, but the worktree directory it
+    // points at has been deleted (an unrelated `qwen review cleanup`
+    // ran, the user manually removed it, …) — the report can't safely
+    // drive autofix because edits would land outside the worktree.
+    mkdirSync('.qwen/tmp', { recursive: true });
+    writeFileSync(
+      fetchReportPath('99'),
+      JSON.stringify({ ...BASE_REPORT, prNumber: '99' }),
+      'utf8',
+    );
+    // NB: NOT calling `mkdirSync(BASE_REPORT.worktreePath)` here — the
+    // missing directory is the point.
+    const { stdout } = await runGate([
+      'autofix-gate',
+      'pr-99',
+      '--findings-count',
+      '5',
+      '--owner-repo',
+      'octo/repo',
+    ]);
+    const decision = JSON.parse(stdout.trim());
+    expect(decision.decision).toBe('skip');
+    expect(decision.reason).toMatch(/does not exist/);
+  });
+
   it('returns skip when --owner-repo does not match the report', async () => {
     writeReport('99', { ownerRepo: 'octo/repo' });
     const { stdout } = await runGate([
@@ -233,6 +261,7 @@ describe('qwen review autofix-gate', () => {
       }),
       'utf8',
     );
+    mkdirSync('.qwen/tmp/review-pr-77', { recursive: true });
     const { stdout } = await runGate([
       'autofix-gate',
       'pr-77',

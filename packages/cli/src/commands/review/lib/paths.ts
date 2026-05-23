@@ -52,7 +52,10 @@ function findProjectRoot(): string {
     // subcommands will look for at a different cwd. Stays at `warn`
     // because the `process.cwd()` fallback is still a reasonable answer
     // when the caller happens to be at the project root.
-    if (!_gitFailureWarned) {
+    // Suppress under vitest — the test fixtures use a tmpdir that isn't a
+    // git repo, so every test would otherwise print this warning. Tests
+    // exercising the warning behavior directly spy on stderr explicitly.
+    if (!_gitFailureWarned && !process.env['VITEST']) {
       _gitFailureWarned = true;
       const stderr = (err as { stderr?: Buffer | string }).stderr;
       const tail = stderr ? `: ${stderr.toString().trim()}` : '';

@@ -689,6 +689,16 @@ async function runDeterministic(args: DeterministicArgs): Promise<void> {
   if (!Array.isArray(changedFiles)) {
     throw new Error('changed-files JSON must be an array of paths');
   }
+  // Element type check — without this, `[1, 2, 3]` passes Array.isArray
+  // and crashes on `.replace()` with `TypeError: n.replace is not a
+  // function` later in the pipeline.
+  for (const entry of changedFiles) {
+    if (typeof entry !== 'string') {
+      throw new Error(
+        `changed-files JSON entry is not a string: ${JSON.stringify(entry).slice(0, 80)}`,
+      );
+    }
+  }
   const normalizedChanged = changedFiles.map((f) => normalizePath(f, worktree));
   const changedFilesSet = new Set(normalizedChanged);
 

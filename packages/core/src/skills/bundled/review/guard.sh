@@ -148,13 +148,16 @@ fi
 # 5. `git checkout`. The only safe form is `git checkout -- <pathspec>`
 #    (file-restore — does NOT move HEAD). Everything else moves HEAD:
 #      - `git checkout BRANCH`             (matched by `[^-]`)
-#      - `git checkout -b/-B/-c/-C NEW`    (matched by `-[^-[:space:]]`)
+#      - `git checkout -`                  (matched by `-($|[^-])` — "previous branch")
+#      - `git checkout -b/-B/-c/-C NEW`    (matched by `-($|[^-])`)
 #      - `git checkout --detach <commit>`  (matched by `--[^[:space:]]`)
 #      - `git checkout --orphan NEW`       (matched by `--[^[:space:]]`)
 #    The allow form `git checkout -- file.ts` has a space after `--`, which
-#    does not match any of the three alternations and therefore falls
-#    through to allow. Bare `git checkout` (no args) also falls through.
-if matches "${P}git[[:space:]]+checkout[[:space:]]+([^-]|-[^-[:space:]]|--[^[:space:]])"; then
+#    does not match any of the three alternations (`-($|[^-])` fails on
+#    the first `-` because next char is `-`, and `--[^[:space:]]` fails
+#    because next char after `--` is space). Bare `git checkout` (no args)
+#    also falls through.
+if matches "${P}git[[:space:]]+checkout[[:space:]]+([^-]|-($|[^-])|--[^[:space:]])"; then
   deny
 fi
 

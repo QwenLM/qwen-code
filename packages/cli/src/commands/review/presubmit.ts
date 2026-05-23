@@ -212,7 +212,35 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
 
   let newFindings: FindingAnchor[] = [];
   if (newFindingsPath) {
-    newFindings = JSON.parse(readFileSync(newFindingsPath, 'utf8'));
+    // Wrap the read + parse + shape check in a single try/catch so a
+    // missing file, malformed JSON, or wrong shape all surface with the
+    // same actionable error pointing at the path. Without this, a
+    // missing file throws an opaque ENOENT and a wrong shape produces
+    // `"undefined:undefined"` keys that silently never overlap with
+    // existing comments (causing presubmit to under-count duplicates).
+    try {
+      const parsed = JSON.parse(readFileSync(newFindingsPath, 'utf8'));
+      if (!Array.isArray(parsed)) {
+        throw new Error('new-findings JSON must be an array of {path, line}');
+      }
+      for (const entry of parsed) {
+        if (
+          typeof entry !== 'object' ||
+          entry === null ||
+          typeof (entry as { path?: unknown }).path !== 'string' ||
+          typeof (entry as { line?: unknown }).line !== 'number'
+        ) {
+          throw new Error(
+            'new-findings JSON entries must each have {path: string, line: number}',
+          );
+        }
+      }
+      newFindings = parsed as FindingAnchor[];
+    } catch (err) {
+      throw new Error(
+        `Failed to read new-findings JSON at ${newFindingsPath}: ${(err as Error).message}`,
+      );
+    }
   }
   const newFindingKeys = new Set(newFindings.map((f) => `${f.path}:${f.line}`));
 
