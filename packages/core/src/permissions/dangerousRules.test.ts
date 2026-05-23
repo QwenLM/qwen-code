@@ -184,6 +184,9 @@ describe('isDangerousBashRule', () => {
       'tsx.exe -e *',
       'bunx.exe -p dangerous-pkg *',
       'C:\\Python\\python.exe -c *',
+      'C:\\Python\\python.exe:*',
+      'C:\\Python\\python:*',
+      'C:\\Program Files\\Python\\python.exe -c *',
     ])('flags Windows executable suffix wildcard %s', (s) => {
       expect(isDangerousBashRule(bashRule(s))).toBe(true);
     });
@@ -192,6 +195,7 @@ describe('isDangerousBashRule', () => {
       'C:\\Python\\python.exe',
       'C:\\nodejs\\node.exe',
       'C:\\Users\\me\\bin\\tsx.exe',
+      'C:\\Program Files\\Python\\python.exe',
     ])('flags bare Windows interpreter path %s', (s) => {
       expect(isDangerousBashRule(bashRule(s))).toBe(true);
     });
@@ -239,6 +243,8 @@ describe('isDangerousBashRule', () => {
       'python.exe script.py',
       'node.exe script.js',
       'bunx eslint .',
+      'C:\\Python\\python.exe script.py',
+      'C:\\Program Files\\Python\\python.exe script.py',
     ])('does NOT flag concrete commands using new tokens %s', (s) => {
       expect(isDangerousBashRule(bashRule(s))).toBe(false);
     });

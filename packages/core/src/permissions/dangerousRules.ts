@@ -91,6 +91,25 @@ function stripWindowsExecutableSuffix(token: string): string {
   return token.endsWith('.exe') ? token.slice(0, -'.exe'.length) : token;
 }
 
+function matcherColonIndex(content: string): number {
+  const firstColon = content.indexOf(':');
+  if (firstColon < 0) return -1;
+  if (/^[a-z]:[\\/]/i.test(content)) {
+    return content.indexOf(':', 2);
+  }
+  return firstColon;
+}
+
+function leadingCommandToken(content: string): string {
+  if (/^[a-z]:[\\/]/i.test(content)) {
+    const exeIndex = content.indexOf('.exe');
+    if (exeIndex >= 0) {
+      return content.slice(0, exeIndex + '.exe'.length);
+    }
+  }
+  return content.split(/\s/)[0] ?? '';
+}
+
 /**
  * Tools whose allow rules carry shell-like risk. `monitor` is a long-running
  * shell-command runner and should be treated the same as `shell` for the
@@ -121,9 +140,9 @@ function isInterpreterToken(rawToken: string): boolean {
     end--;
   }
   const noWildcard = rawToken.slice(0, end);
-  const beforeColon = /^[a-z]:[\\/]/i.test(noWildcard)
-    ? noWildcard
-    : noWildcard.split(':')[0];
+  const colonIndex = matcherColonIndex(noWildcard);
+  const beforeColon =
+    colonIndex >= 0 ? noWildcard.slice(0, colonIndex) : noWildcard;
   // Last path segment so `/usr/bin/python3` → `python3`
   const lastSegment = (beforeColon ?? '').split(/[\\/]/).pop() ?? '';
   const normalizedSegment = stripWindowsExecutableSuffix(lastSegment);
@@ -161,10 +180,10 @@ export function isDangerousBashRule(rule: PermissionRule): boolean {
   // form
   // (`python -c *` or `python:*`). For colon-form, the part after `:` is
   // the specifier — we'll separately check whether it's concrete below.
-  const firstToken = content.split(/\s/)[0] ?? '';
+  const firstToken = leadingCommandToken(content);
   if (!isInterpreterToken(firstToken)) return false;
-  const hasMatcherColon =
-    content.includes(':') && !/^[a-z]:[\\/]/i.test(content);
+  const colonIndex = matcherColonIndex(content);
+  const hasMatcherColon = colonIndex >= 0;
 
   // Bare interpreter name (`python`, `/usr/bin/python3`) — caller decides
   // what to do, classifier never sees it. Dangerous.
@@ -183,7 +202,7 @@ export function isDangerousBashRule(rule: PermissionRule): boolean {
   // commits to NOT flagging. Strip them and we'd silently disable
   // intentional user allow lists in AUTO.
   if (hasMatcherColon) {
-    const afterColon = content.slice(content.indexOf(':') + 1).trim();
+    const afterColon = content.slice(colonIndex + 1).trim();
     return afterColon === '';
   }
 
