@@ -1417,6 +1417,25 @@ describe('session-tracing', () => {
       expect(record.attributes['qwen-code.subagent.status']).toBe('failed');
     });
 
+    it('endSubagentSpan: failed without explicit error → generic "subagent failed" SpanStatus message', () => {
+      // Coverage for the fallback in endSubagentSpan's ERROR branch:
+      // `metadata.error ? truncateSpanError(metadata.error) : 'subagent failed'`.
+      // Every prior failure test passes an explicit error; this verifies
+      // the generic fallback so a regression that drops it would be
+      // caught. wenshao @ #4410 DeepSeek 3293036600.
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'foreground',
+      });
+      endSubagentSpan(span, { status: 'failed' });
+
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+      expect(record.statuses[0].code).toBe(SpanStatusCode.ERROR);
+      expect(record.statuses[0].message).toBe('subagent failed');
+      expect(record.attributes['exception.message']).toBeUndefined();
+      expect(record.attributes['error.type']).toBeUndefined();
+    });
+
     it.each(['cancelled', 'aborted'] as const)(
       'endSubagentSpan: %s → SpanStatus UNSET (Phase 2 cancellation convention)',
       (status) => {
@@ -1586,6 +1605,11 @@ describe('session-tracing', () => {
         // The LLM span MUST parent to the subagent span, NOT the
         // interaction span.
         expect(parentSpan).toBe(subagentRecord);
+        // Regression guard for the `llm_request.context` tri-state:
+        // subagent-parented LLM calls MUST stamp 'subagent' (not
+        // 'interaction') so dashboards classify them correctly.
+        // wenshao @ #4410 DeepSeek 3293036596.
+        expect(llmRecord!.attributes['llm_request.context']).toBe('subagent');
         endSubagentSpan(subagentSpan, { status: 'completed' });
         endInteractionSpan('ok');
       });
