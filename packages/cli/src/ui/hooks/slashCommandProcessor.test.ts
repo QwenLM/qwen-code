@@ -793,7 +793,7 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
-    it('should return block reason for blocked model-invocable command execution', async () => {
+    it('should return null for blocked model-invocable command execution', async () => {
       mockFireUserPromptExpansionEvent.mockResolvedValue({
         getBlockingError: () => ({
           blocked: true,
@@ -822,7 +822,7 @@ describe('useSlashCommandProcessor', () => {
       expect(executor).toBeDefined();
       const content = await executor?.('filecmd', 'with args');
 
-      expect(content).toBe('UserPromptExpansion blocked: Blocked by policy');
+      expect(content).toBeNull();
     });
   });
 
