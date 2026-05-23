@@ -17,7 +17,7 @@ import {
   type ContentGeneratorConfig,
   type InputModalities,
 } from '@qwen-code/qwen-code-core';
-import { useKeypress } from '../hooks/useKeypress.js';
+import { type Key, useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
@@ -395,8 +395,11 @@ export function ModelDialog({
     );
   }, [highlightedValue, preferredKey, availableModelEntries]);
 
-  useKeypress(
-    (key) => {
+  const highlightedEntryRef = useRef(highlightedEntry);
+  highlightedEntryRef.current = highlightedEntry;
+
+  const handleKeypress = useCallback(
+    (key: Key) => {
       if (key.name === 'escape' || (key.name === 'left' && isFastModelMode)) {
         onClose();
         return;
@@ -407,10 +410,11 @@ export function ModelDialog({
           setErrorMessage(t('Configuration not available.'));
           return;
         }
-        if (!highlightedEntry || highlightedEntry.isRuntime) {
+        const entry = highlightedEntryRef.current;
+        if (!entry || entry.isRuntime) {
           return;
         }
-        if (highlightedEntry.authType === AuthType.QWEN_OAUTH) {
+        if (entry.authType === AuthType.QWEN_OAUTH) {
           setErrorMessage(qwenOAuthDiscontinuedMessage());
           return;
         }
@@ -422,30 +426,28 @@ export function ModelDialog({
         setErrorMessage(null);
         void (async () => {
           let after: ContentGeneratorConfig | undefined;
-          let effectiveAuthType = highlightedEntry.authType;
-          let effectiveModelId = highlightedEntry.model.id;
+          let effectiveAuthType = entry.authType;
+          let effectiveModelId = entry.model.id;
 
           try {
             try {
-              await config.switchModel(
-                highlightedEntry.authType,
-                highlightedEntry.model.id,
-                { baseUrl: highlightedEntry.model.baseUrl },
-              );
+              await config.switchModel(entry.authType, entry.model.id, {
+                baseUrl: entry.model.baseUrl,
+              });
               logModelSlashCommand(
                 config,
-                new ModelSlashCommandEvent(highlightedEntry.model.id),
+                new ModelSlashCommandEvent(entry.model.id),
               );
               after = config.getContentGeneratorConfig?.() as
                 | ContentGeneratorConfig
                 | undefined;
-              effectiveAuthType = after?.authType ?? highlightedEntry.authType;
-              effectiveModelId = after?.model ?? highlightedEntry.model.id;
+              effectiveAuthType = after?.authType ?? entry.authType;
+              effectiveModelId = after?.model ?? entry.model.id;
             } catch (e) {
               const baseErrorMessage =
                 e instanceof Error ? e.message : String(e);
               setErrorMessage(
-                `Failed to switch model to '${highlightedEntry.model.id}'.\n\n${baseErrorMessage}`,
+                `Failed to switch model to '${entry.model.id}'.\n\n${baseErrorMessage}`,
               );
               return;
             }
@@ -480,8 +482,10 @@ export function ModelDialog({
         })();
       }
     },
-    { isActive: true },
+    [config, isFastModelMode, onClose, settings, uiState],
   );
+
+  useKeypress(handleKeypress, { isActive: true });
 
   const handleSelect = useCallback(
     async (selected: string) => {
