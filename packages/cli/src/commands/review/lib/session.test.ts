@@ -203,8 +203,8 @@ describe('review/lib/session', () => {
 
     const worktreeCwd = join(cwd, '.qwen', 'tmp', 'review-pr-42');
     mkdirSync(worktreeCwd, { recursive: true });
-    const prevEnv = process.env.QWEN_PROJECT_DIR;
-    process.env.QWEN_PROJECT_DIR = cwd;
+    const prevEnv = process.env['QWEN_PROJECT_DIR'];
+    process.env['QWEN_PROJECT_DIR'] = cwd;
     process.chdir(worktreeCwd);
     try {
       const fromWorktree = fetchReportPath('42');
@@ -215,9 +215,9 @@ describe('review/lib/session', () => {
     } finally {
       process.chdir(cwd);
       if (prevEnv === undefined) {
-        delete process.env.QWEN_PROJECT_DIR;
+        delete process.env['QWEN_PROJECT_DIR'];
       } else {
-        process.env.QWEN_PROJECT_DIR = prevEnv;
+        process.env['QWEN_PROJECT_DIR'] = prevEnv;
       }
     }
   });

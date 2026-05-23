@@ -209,7 +209,7 @@ describe('bundled review skill', () => {
       // test failing — exactly the failure shape the env-var anchor
       // was added to prevent.
       const env = { ...process.env };
-      delete env.QWEN_PROJECT_DIR;
+      delete env['QWEN_PROJECT_DIR'];
       const stdout = execFileSync('bash', [guardScript], {
         input: JSON.stringify({
           tool_name: 'run_shell_command',

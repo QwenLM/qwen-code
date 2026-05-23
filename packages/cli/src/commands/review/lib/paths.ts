@@ -23,7 +23,7 @@ import { execSync } from 'node:child_process';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 function findProjectRoot(): string {
-  const envRoot = process.env.QWEN_PROJECT_DIR;
+  const envRoot = process.env['QWEN_PROJECT_DIR'];
   if (envRoot && isAbsolute(envRoot)) {
     return envRoot;
   }
