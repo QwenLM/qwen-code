@@ -19,7 +19,11 @@ import {
   selectPendingPermissionBlocks,
   selectTranscriptBlocksOrderedByEventId,
 } from '../../src/daemon/ui/index.js';
-import type { DaemonTranscriptBlock } from '../../src/daemon/ui/index.js';
+import type {
+  DaemonTranscriptBlock,
+  DaemonTranscriptState,
+  DaemonUiEvent,
+} from '../../src/daemon/ui/index.js';
 
 describe('daemon UI normalizer and transcript reducer', () => {
   it('normalizes daemon stream chunks and merges assistant transcript blocks', () => {
@@ -299,7 +303,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
           requestId: 'perm-1',
           sessionId: 'session-1',
           toolCall: { name: 'Bash', command: 'npm test' },
-          options: [{ optionId: 'allow', label: 'Allow' }],
+          options: [{ optionId: 'allow', label: 'Allow', raw: null }],
         },
       }),
       { now: 2 },
@@ -941,7 +945,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     const block = state.blocks[0];
     expect(block).toMatchObject({ kind: 'tool', toolKind: 'updated_plan' });
     if (block?.kind !== 'tool') throw new Error('expected plan tool block');
-    const firstContent = block.content?.[0];
+    const firstContent = (block.content as Array<Record<string, unknown>> | undefined)?.[0];
     expect(firstContent).toMatchObject({
       content: {
         type: 'text',
@@ -1033,7 +1037,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
         data: {
           requestId: 'perm-trimmed',
           toolCall: { name: 'Bash', command: 'npm test' },
-          options: [{ optionId: 'allow', label: 'Allow' }],
+          options: [{ optionId: 'allow', label: 'Allow', raw: null }],
         },
       }),
       { now: 2 },
@@ -1054,7 +1058,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
         data: {
           requestId: 'perm-trimmed',
           toolCall: { name: 'Bash', command: 'npm test' },
-          options: [{ optionId: 'allow', label: 'Allow' }],
+          options: [{ optionId: 'allow', label: 'Allow', raw: null }],
         },
       }),
       { now: 4 },
@@ -1194,7 +1198,8 @@ describe('daemon UI normalizer and transcript reducer', () => {
       if (originalReportError) {
         globalWithReportError.reportError = originalReportError;
       } else {
-        delete globalWithReportError.reportError;
+        delete (globalWithReportError as { reportError?: unknown })
+          .reportError;
       }
     }
   });
@@ -1248,7 +1253,12 @@ describe('daemon UI normalizer and transcript reducer', () => {
         text: expect.stringContaining('[redacted]') as string,
       },
     ]);
-    const debug = events.find((event) => event.type === 'debug');
+    // `DaemonUiStatusEvent` has `type: 'status' | 'debug'` — both share a
+    // `text` field. Cast through the union variant (not Extract on a
+    // sub-literal, which yields `never`).
+    const debug = events.find((event) => event.type === 'debug') as
+      | (DaemonUiEvent & { text: string })
+      | undefined;
     expect(debug?.text).not.toContain('Bearer secret');
     expect(debug?.text).not.toContain('key-secret');
     expect(debug?.text).not.toContain('client-secret');
@@ -1376,25 +1386,25 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(serialized).not.toContain('returned-secret-do-not-leak');
 
     // Structural keys preserved; only sensitive VALUES are redacted.
-    expect((event.rawInput as Record<string, unknown>).apiKey).toBe(
+    expect((event.rawInput as Record<string, unknown>)['apiKey']).toBe(
       '[redacted]',
     );
     expect(
       (
-        (event.rawInput as Record<string, unknown>).headers as Record<
+        (event.rawInput as Record<string, unknown>)['headers'] as Record<
           string,
           unknown
         >
-      ).Authorization,
+      )['Authorization'],
     ).toBe('[redacted]');
-    expect((event.rawOutput as Record<string, unknown>).token).toBe(
+    expect((event.rawOutput as Record<string, unknown>)['token']).toBe(
       '[redacted]',
     );
     // Non-sensitive fields survive verbatim.
-    expect((event.rawInput as Record<string, unknown>).command).toBe(
+    expect((event.rawInput as Record<string, unknown>)['command']).toBe(
       'curl https://api.example.com',
     );
-    expect((event.rawOutput as Record<string, unknown>).text).toBe('OK');
+    expect((event.rawOutput as Record<string, unknown>)['text']).toBe('OK');
     expect(event.details).toContain('[redacted]');
     expect(event.details).not.toContain('sk-prod-do-not-leak');
     expect(event.details).not.toContain('Bearer secret-do-not-leak');
@@ -1431,7 +1441,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
             Authorization: 'Bearer permission-secret-do-not-leak',
           },
         },
-        options: [{ optionId: 'allow', label: 'Allow' }],
+        options: [{ optionId: 'allow', label: 'Allow', raw: null }],
       },
     } as never);
 
@@ -1459,11 +1469,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
       .spyOn(globalThis.console, 'error')
       .mockImplementation(() => {});
     try {
-      (
-        globalThis as typeof globalThis & {
-          reportError?: (error: unknown) => void;
-        }
-      ).reportError = undefined;
+      delete (globalThis as { reportError?: unknown }).reportError;
       const store = createDaemonTranscriptStore();
       const listenerError = new Error('listener failed');
       store.subscribe(() => {
@@ -3760,8 +3766,10 @@ describe('daemon UI subagent nesting — review hardening (R1-R4)', () => {
             createDaemonTranscriptState(),
             events,
           ),
-        renderToText: (state) =>
-          state.blocks.map((b) => daemonBlockToMarkdown(b)).join('\n\n'),
+        renderToText: (state: DaemonTranscriptState) =>
+          state.blocks
+            .map((b: DaemonTranscriptBlock) => daemonBlockToMarkdown(b))
+            .join('\n\n'),
       },
       { only: ['subagent-nesting'] },
     );
@@ -3784,7 +3792,7 @@ describe('daemon UI permission trim contract — wenshao review hardening', () =
           update: {
             sessionUpdate: 'request_permission',
             permissionRequestId: 'req-evict',
-            options: [{ optionId: 'allow', label: 'Allow' }],
+            options: [{ optionId: 'allow', label: 'Allow', raw: null }],
             toolCall: { name: 'Bash', command: 'rm -rf /tmp/x' },
           },
         },
@@ -3851,7 +3859,7 @@ describe('daemon UI permission trim contract — wenshao review hardening', () =
             update: {
               sessionUpdate: 'request_permission',
               permissionRequestId: `req-${i}`,
-              options: [{ optionId: 'allow', label: 'Allow' }],
+              options: [{ optionId: 'allow', label: 'Allow', raw: null }],
               toolCall: { name: 'Bash', command: `echo ${i}` },
             },
           },
@@ -3882,5 +3890,195 @@ describe('daemon UI permission trim contract — wenshao review hardening', () =
     // Index size capped at maxBlocks (= 2), not unbounded (would be 10).
     const indexSize = Object.keys(state.permissionBlockByRequestId).length;
     expect(indexSize).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('transcriptBlockToTerminalText (wenshao review — coverage)', () => {
+  // wenshao 5-23 Critical: transcriptBlockToTerminalText is a public
+  // export with ~9 switch branches and zero test coverage. Note that the
+  // `default:` case calls assertNever which returns a terminal line (not
+  // throws) so unknown kinds degrade gracefully, but covering each
+  // branch protects against silent regressions when adding new block
+  // kinds.
+  const baseFields = {
+    id: 'b1',
+    clientReceivedAt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  it('renders user block with qwen label', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const out = transcriptBlockToTerminalText({
+      ...baseFields,
+      kind: 'user',
+      text: 'hello daemon',
+    });
+    expect(out).toContain('qwen');
+    expect(out).toContain('hello daemon');
+  });
+
+  it('renders assistant block as sanitized text (no label prefix)', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const out = transcriptBlockToTerminalText({
+      ...baseFields,
+      kind: 'assistant',
+      text: 'response\nwith newline',
+    });
+    expect(out).toContain('response');
+    expect(out).toContain('with newline');
+  });
+
+  it('renders thought block dimly', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const out = transcriptBlockToTerminalText({
+      ...baseFields,
+      kind: 'thought',
+      text: 'reasoning step',
+    });
+    expect(out).toContain('thought');
+    expect(out).toContain('reasoning step');
+  });
+
+  it('renders tool block with status and title', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const out = transcriptBlockToTerminalText({
+      ...baseFields,
+      kind: 'tool',
+      toolCallId: 't1',
+      title: 'Bash ls',
+      status: 'running',
+      preview: { kind: 'generic', summary: '' },
+    });
+    expect(out).toContain('tool running');
+    expect(out).toContain('Bash ls');
+  });
+
+  it('renders shell block (stdout)', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const out = transcriptBlockToTerminalText({
+      ...baseFields,
+      kind: 'shell',
+      text: 'shell output line',
+      stream: 'stdout',
+    });
+    expect(out).toContain('shell');
+    expect(out).toContain('shell output line');
+  });
+
+  it('renders shell block (stderr)', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const out = transcriptBlockToTerminalText({
+      ...baseFields,
+      kind: 'shell',
+      text: 'error from shell',
+      stream: 'stderr',
+    });
+    expect(out).toContain('error from shell');
+  });
+
+  it('renders unresolved permission block with options', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const out = transcriptBlockToTerminalText({
+      ...baseFields,
+      kind: 'permission',
+      requestId: 'req-1',
+      title: 'Allow Bash?',
+      options: [
+        { optionId: 'allow', label: 'Allow', raw: null },
+        { optionId: 'deny', label: 'Deny', raw: null },
+      ],
+      preview: { kind: 'generic', summary: '' },
+    });
+    expect(out).toContain('permission');
+    expect(out).toContain('Allow Bash?');
+    expect(out).toContain('Allow / Deny');
+    expect(out).not.toContain('resolved=');
+  });
+
+  it('renders resolved permission block with resolved suffix', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const out = transcriptBlockToTerminalText({
+      ...baseFields,
+      kind: 'permission',
+      requestId: 'req-2',
+      title: 'Allow rm?',
+      options: [{ optionId: 'allow', label: 'Allow', raw: null }],
+      resolved: 'selected:allow',
+      preview: { kind: 'generic', summary: '' },
+    });
+    expect(out).toContain('resolved=selected:allow');
+  });
+
+  it('renders status block', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const out = transcriptBlockToTerminalText({
+      ...baseFields,
+      kind: 'status',
+      text: 'restarting daemon',
+    });
+    expect(out).toContain('status');
+    expect(out).toContain('restarting daemon');
+  });
+
+  it('renders debug block', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const out = transcriptBlockToTerminalText({
+      ...baseFields,
+      kind: 'debug',
+      text: 'debug payload',
+    });
+    expect(out).toContain('debug');
+    expect(out).toContain('debug payload');
+  });
+
+  it('renders error block', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const out = transcriptBlockToTerminalText({
+      ...baseFields,
+      kind: 'error',
+      text: 'fatal',
+    });
+    expect(out).toContain('error');
+    expect(out).toContain('fatal');
+  });
+
+  it('degrades gracefully on unknown block kind (returns error line, does NOT throw)', async () => {
+    const { transcriptBlockToTerminalText } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const fauxBlock = {
+      ...baseFields,
+      kind: 'experimental_kind_from_future_daemon' as never,
+      payload: { something: 'unknown' },
+    };
+    expect(() =>
+      transcriptBlockToTerminalText(fauxBlock as never),
+    ).not.toThrow();
+    const out = transcriptBlockToTerminalText(fauxBlock as never);
+    expect(out).toContain('error');
+    expect(out).toContain('Unhandled');
   });
 });

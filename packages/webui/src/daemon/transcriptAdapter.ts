@@ -200,10 +200,16 @@ function daemonToolBlockToToolCallData(
   block: DaemonToolTranscriptBlock,
   enrichDetails: boolean = false,
 ): ToolCallData {
-  // When enrichDetails is true, surface the preview's markdown projection
-  // as part of the tool card content. This lets renderers without
-  // per-preview-kind components still show file_diff / mcp_invocation /
-  // tabular previews in a useful form.
+  // doudouOUC review (Important): do NOT overwrite `rawOutput` with the
+  // preview markdown. The previous code replaced the structured tool
+  // output with a string summary when `enrichDetails === true`, which
+  // (a) broke downstream consumers that expect an object shape on
+  //     `ToolCallData.rawOutput`, and
+  // (b) silently dropped the actual tool output (e.g., a 500-line file)
+  //     in favor of a short summary.
+  // Surface the preview markdown on a new optional `previewMarkdown`
+  // field instead. `rawOutput` is now always the verbatim (sanitized)
+  // daemon-emitted value.
   const previewMarkdown = enrichDetails
     ? sanitizeDisplayText(daemonToolPreviewToMarkdown(block.preview))
     : undefined;
@@ -216,7 +222,8 @@ function daemonToolBlockToToolCallData(
       | object
       | string
       | undefined,
-    rawOutput: previewMarkdown ?? sanitizeDaemonValue(block.rawOutput),
+    rawOutput: sanitizeDaemonValue(block.rawOutput),
+    ...(previewMarkdown !== undefined ? { previewMarkdown } : {}),
     ...(block.content !== undefined
       ? { content: normalizeToolContent(block.content) }
       : {}),

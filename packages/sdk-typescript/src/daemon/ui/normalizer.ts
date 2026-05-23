@@ -95,24 +95,22 @@ export function normalizeDaemonEvent(
             'Model switch failed (no details available)',
         },
       ];
-    case 'session_died':
+    case 'session_died': {
+      // doudouOUC review: hoist `asDaemonErrorKind` to a const — original
+      // double-eval walked the record + Set twice per event.
+      const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       return [
         {
           ...base,
           type: 'error',
           recoverable: false,
-          ...(asDaemonErrorKind(getString(event.data, 'errorKind'))
-            ? {
-                errorKind: asDaemonErrorKind(
-                  getString(event.data, 'errorKind'),
-                )!,
-              }
-            : {}),
+          ...(errorKind ? { errorKind } : {}),
           text:
             getString(event.data, 'reason') ??
             'Session died (no details available)',
         },
       ];
+    }
     case 'session_closed':
       return [
         {
@@ -140,24 +138,20 @@ export function normalizeDaemonEvent(
           text: 'SSE stream is lagging',
         },
       ];
-    case 'stream_error':
+    case 'stream_error': {
+      const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       return [
         {
           ...base,
           type: 'error',
           recoverable: true,
-          ...(asDaemonErrorKind(getString(event.data, 'errorKind'))
-            ? {
-                errorKind: asDaemonErrorKind(
-                  getString(event.data, 'errorKind'),
-                )!,
-              }
-            : {}),
+          ...(errorKind ? { errorKind } : {}),
           text:
             getString(event.data, 'error') ??
             'SSE stream error (no details available)',
         },
       ];
+    }
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
 
@@ -1104,9 +1098,39 @@ function normalizeAuthDeviceFlowFailed(
   ];
 }
 
+/**
+ * Known closed-set of `DaemonAuthDeviceFlowErrorKind` values, exported as
+ * documentation of the canonical kinds the daemon emits today.
+ *
+ * Reviewers (wenshao + doudouOUC, PR #4353 round 2026-05-23): both
+ * suggested strict validation against this set. We intentionally keep
+ * lenient pass-through — the public type
+ * `DaemonAuthDeviceFlowSdkErrorKind` explicitly includes `(string & {})`
+ * as a forward-compat escape hatch so future daemon emissions of new
+ * kinds remain typed-acceptable AND propagate end-to-end without an SDK
+ * release. The existing test `keeps future auth_device_flow_failed
+ * errorKind values observable` enforces this contract.
+ *
+ * Downstream consumers `switch(errorKind)` exhaustively MUST include a
+ * `default:` arm for the open `(string & {})` case — the typed
+ * known-set arms cover the listed kinds. The known set is referenced
+ * here in code only so it surfaces in IDE hovers / type-doc tooling.
+ */
+export const KNOWN_DEVICE_FLOW_ERROR_KINDS = [
+  'expired_token',
+  'access_denied',
+  'invalid_grant',
+  'upstream_error',
+  'persist_failed',
+  'not_found_or_evicted',
+] as const satisfies ReadonlyArray<DaemonAuthDeviceFlowSdkErrorKind>;
+
 function isDeviceFlowErrorKind(
   value: unknown,
 ): value is DaemonAuthDeviceFlowSdkErrorKind {
+  // Lenient pass-through. See `KNOWN_DEVICE_FLOW_ERROR_KINDS` above for
+  // the canonical set; the `(string & {})` arm of the public type
+  // tolerates anything else for forward-compat.
   return typeof value === 'string' && value.trim().length > 0;
 }
 

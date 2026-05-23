@@ -74,7 +74,7 @@ export function daemonBlockToMarkdown(
     case 'thought':
       return `> *thought:* ${text(block.text)}`;
     case 'tool': {
-      const header = renderToolHeader(block);
+      const header = renderToolHeader(block, opts);
       const previewMd = daemonToolPreviewToMarkdown(block.preview, opts);
       const status = `_status: ${escapeMarkdownText(block.status, opts)}_`;
       const details = block.details ? `\n\n${text(block.details)}` : '';
@@ -117,10 +117,16 @@ export function daemonBlockToMarkdown(
 
 function renderToolHeader(
   block: Extract<DaemonTranscriptBlock, { kind: 'tool' }>,
+  opts: DaemonRenderOptions = {},
 ): string {
-  const parts: string[] = [`### ${escapeMarkdownText(block.title)}`];
-  if (block.toolName) parts.push(inlineCode(block.toolName));
-  if (block.toolKind) parts.push(`(${escapeMarkdownText(block.toolKind)})`);
+  // doudouOUC review: forward `opts` so `maxFieldLength` is honored for
+  // tool titles / kinds (previously bypassed — a 20KB title would render
+  // uncapped while every other text field hit the 8192 default).
+  // `escapeMarkdownText` / `inlineCode` apply `capLength` internally when
+  // `opts` is provided.
+  const parts: string[] = [`### ${escapeMarkdownText(block.title, opts)}`];
+  if (block.toolName) parts.push(inlineCode(block.toolName, opts));
+  if (block.toolKind) parts.push(`(${escapeMarkdownText(block.toolKind, opts)})`);
   return parts.join(' ');
 }
 
@@ -380,7 +386,16 @@ export function daemonBlockToPlainText(
   }
 }
 
-function daemonToolPreviewToPlainText(preview: DaemonToolPreview): string {
+function daemonToolPreviewToPlainText(
+  preview: DaemonToolPreview,
+  opts: DaemonRenderOptions = {},
+): string {
+  // doudouOUC review (Important): thread `sanitizeUrls` through. The HTML
+  // path calls this helper to render the tool preview inside the `<pre>`
+  // block, but previously the helper took no opts — so even when the
+  // caller set `sanitizeUrls: true` to strip auth tokens from URLs, the
+  // HTML path leaked tokens into the DOM (markdown path was already safe).
+  const url = (u: string) => (opts.sanitizeUrls ? sanitizeUrl(u) : u);
   switch (preview.kind) {
     case 'ask_user_question':
       return preview.questions
@@ -400,7 +415,7 @@ function daemonToolPreviewToPlainText(preview: DaemonToolPreview): string {
         ? `${preview.path} (lines ${preview.range[0]}-${preview.range[1]})`
         : preview.path;
     case 'web_fetch':
-      return `${preview.method ?? 'GET'} ${preview.url}`;
+      return `${preview.method ?? 'GET'} ${url(preview.url)}`;
     case 'mcp_invocation':
       return `${preview.serverId}::${preview.toolName}${preview.argsSummary ? ` (${preview.argsSummary})` : ''}`;
     case 'code_block':
@@ -435,8 +450,12 @@ function daemonToolPreviewToPlainText(preview: DaemonToolPreview): string {
       }
       return lines.join('\n');
     }
-    case 'image_generation':
-      return `image: "${preview.prompt}"${preview.model ? ` (${preview.model})` : ''}`;
+    case 'image_generation': {
+      const thumb = preview.thumbnailUrl
+        ? ` [${url(preview.thumbnailUrl)}]`
+        : '';
+      return `image: "${preview.prompt}"${preview.model ? ` (${preview.model})` : ''}${thumb}`;
+    }
     case 'subagent_delegation':
       return `delegate to ${preview.agentName}: ${preview.task}`;
     case 'key_value':
@@ -487,9 +506,9 @@ export function daemonBlockToHtml(
       return `<div class="daemon-block daemon-thought"><em>${sanitizer(cap(block.text))}</em></div>`;
     case 'tool': {
       const previewHtml = sanitizer(
-        daemonToolPreviewToPlainText(block.preview),
+        daemonToolPreviewToPlainText(block.preview, opts),
       );
-      const safeTitle = sanitizer(block.title);
+      const safeTitle = sanitizer(cap(block.title));
       const safeStatus = sanitizer(block.status);
       return `<div class="daemon-block daemon-tool" data-status="${safeStatus}"><div class="title">${safeTitle}</div><pre>${previewHtml}</pre></div>`;
     }

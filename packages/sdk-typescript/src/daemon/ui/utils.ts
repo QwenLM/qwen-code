@@ -61,6 +61,9 @@ export function redactSensitiveFields(value: unknown, depth = 0): unknown {
 export function isSensitiveKey(key: string): boolean {
   const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
   return (
+    // Exact matches (doudouOUC review: deduplicated — `privatekey` is
+    // covered by `endsWith('privatekey')` below; `secretkey` / `accesskey`
+    // similarly).
     normalized === 'authorization' ||
     normalized === 'auth' ||
     normalized === 'cookie' ||
@@ -69,7 +72,6 @@ export function isSensitiveKey(key: string): boolean {
     normalized === 'credentials' ||
     normalized === 'password' ||
     normalized === 'passphrase' ||
-    normalized === 'privatekey' ||
     normalized === 'apikey' ||
     normalized === 'clientsecret' ||
     normalized === 'idtoken' ||
@@ -77,15 +79,15 @@ export function isSensitiveKey(key: string): boolean {
     normalized === 'xapikey' ||
     normalized === 'xauthkey' ||
     normalized === 'xauthtoken' ||
+    // Suffix matches — each pattern listed once.
     normalized.endsWith('password') ||
     normalized.endsWith('token') ||
     normalized.endsWith('secret') ||
     normalized.endsWith('secretkey') ||
     normalized.endsWith('accesskey') ||
     normalized.endsWith('apikey') ||
-    normalized.endsWith('accesskey') ||
-    normalized.endsWith('secretkey') ||
     normalized.endsWith('privatekey') ||
+    // Token-shaped substrings.
     normalized.includes('accesstoken') ||
     normalized.includes('refreshtoken') ||
     normalized.includes('bearertoken') ||

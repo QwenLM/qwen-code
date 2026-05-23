@@ -493,7 +493,14 @@ function findLatestInFlightToolCallId(
 function propagateCancellationToInFlightTools(
   state: DaemonTranscriptState,
 ): void {
+  // wenshao review: skip trimmed sentinels up front. Without this filter
+  // each cancellation walked the entire historical tool-call index (which
+  // can hold up to `maxBlocks` trimmed sentinels in long sessions), even
+  // though only 1-3 tools are typically in-flight. The `block.kind` check
+  // would correctly reject sentinels later, but only after a redundant
+  // index dereference.
   for (const blockId of Object.values(state.toolBlockByCallId)) {
+    if (blockId === TRIMMED_TOOL_BLOCK_ID) continue;
     const block = getWritableBlockById(state, blockId);
     if (!block || block.kind !== 'tool') continue;
     if (!IN_FLIGHT_TOOL_STATUSES.has(block.status)) continue;
@@ -678,7 +685,15 @@ function cloneTranscriptState(
       ...state.trimmedToolNotificationByCallId,
     },
     permissionBlockByRequestId: { ...state.permissionBlockByRequestId },
-    toolProgress: { ...state.toolProgress },
+    // doudouOUC + wenshao reviews: deep-clone the inner progress records.
+    // The outer spread alone shares `{ ratio?, step? }` references between
+    // snapshots — once `tool.progress` event handlers start mutating in
+    // place, the prior snapshot leaks. Pre-empt that here; cost is bounded
+    // by `Object.keys(state.toolProgress).length` which is small (only
+    // in-flight tools).
+    toolProgress: Object.fromEntries(
+      Object.entries(state.toolProgress).map(([k, v]) => [k, { ...v }]),
+    ),
     lastResyncRequired:
       state.lastResyncRequired !== undefined
         ? { ...state.lastResyncRequired }
@@ -893,13 +908,30 @@ function cloneJsonLike<T>(value: T, depth = 0): T {
  * untouched blocks (structural sharing in the reducer) but the array
  * itself is fresh.
  */
+/**
+ * wenshao review: memoize by `state.blocks` array reference. The reducer
+ * already preserves the same array reference for non-block-mutating events
+ * (approval_mode change, session metadata, status, etc.), so this WeakMap
+ * cache returns the same sorted array across renders that don't touch
+ * `blocks`. Frees React `useSyncExternalStore`-style consumers from the
+ * O(n log n) re-sort on every dispatch.
+ */
+const sortedBlocksCache = new WeakMap<
+  readonly DaemonTranscriptBlock[],
+  readonly DaemonTranscriptBlock[]
+>();
+
 export function selectTranscriptBlocksOrderedByEventId(
   state: DaemonTranscriptState,
 ): readonly DaemonTranscriptBlock[] {
+  const cached = sortedBlocksCache.get(state.blocks);
+  if (cached) return cached;
   const orderKeyByBlockId = buildEventOrderKeys(state.blocks);
-  return [...state.blocks].sort((a, b) =>
+  const sorted = [...state.blocks].sort((a, b) =>
     compareBlocksByEventOrder(a, b, orderKeyByBlockId),
   );
+  sortedBlocksCache.set(state.blocks, sorted);
+  return sorted;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -970,14 +1002,45 @@ export function selectToolProgress(
  * would surface as mutual children here; renderers walking parents must
  * detect cycles defensively.
  */
+/**
+ * wenshao review: memoized reverse index. The naive `state.blocks.filter`
+ * was O(n) per call; in a render tree with m parent blocks each querying
+ * their children, total work was O(n*m). Now we build a single
+ * `Map<parentToolCallId, DaemonToolTranscriptBlock[]>` lazily per
+ * `state.blocks` reference (via WeakMap) — each lookup becomes O(1)
+ * after the first call for a given snapshot.
+ */
+const childrenIndexCache = new WeakMap<
+  readonly DaemonTranscriptBlock[],
+  Map<string, DaemonToolTranscriptBlock[]>
+>();
+
+const EMPTY_CHILD_LIST: ReadonlyArray<DaemonToolTranscriptBlock> = Object.freeze(
+  [],
+);
+
+function getOrBuildChildrenIndex(
+  blocks: readonly DaemonTranscriptBlock[],
+): Map<string, DaemonToolTranscriptBlock[]> {
+  const cached = childrenIndexCache.get(blocks);
+  if (cached) return cached;
+  const index = new Map<string, DaemonToolTranscriptBlock[]>();
+  for (const block of blocks) {
+    if (block.kind !== 'tool' || !block.parentToolCallId) continue;
+    const list = index.get(block.parentToolCallId);
+    if (list) list.push(block);
+    else index.set(block.parentToolCallId, [block]);
+  }
+  childrenIndexCache.set(blocks, index);
+  return index;
+}
+
 export function selectSubagentChildBlocks(
   state: DaemonTranscriptState,
   parentToolCallId: string,
 ): ReadonlyArray<DaemonToolTranscriptBlock> {
-  return state.blocks.filter(
-    (block): block is DaemonToolTranscriptBlock =>
-      block.kind === 'tool' && block.parentToolCallId === parentToolCallId,
-  );
+  const index = getOrBuildChildrenIndex(state.blocks);
+  return index.get(parentToolCallId) ?? EMPTY_CHILD_LIST;
 }
 
 /**
