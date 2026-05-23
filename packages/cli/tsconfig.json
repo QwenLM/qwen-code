@@ -100,6 +100,7 @@
     { "path": "../channels/base" },
     { "path": "../channels/telegram" },
     { "path": "../channels/weixin" },
-    { "path": "../channels/dingtalk" }
+    { "path": "../channels/dingtalk" },
+    { "path": "../channels/feishu" }
   ]
 }

@@ -48,6 +48,15 @@ export async function downloadMedia(
       return null;
     }
 
+    const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
+    const contentLength = resp.headers.get('content-length');
+    if (contentLength && parseInt(contentLength, 10) > MAX_DOWNLOAD_BYTES) {
+      process.stderr.write(
+        `[Feishu] downloadMedia rejected: size ${contentLength} exceeds ${MAX_DOWNLOAD_BYTES} byte limit\n`,
+      );
+      return null;
+    }
+
     const mimeType =
       resp.headers.get('content-type') || 'application/octet-stream';
     const buffer = Buffer.from(await resp.arrayBuffer());
