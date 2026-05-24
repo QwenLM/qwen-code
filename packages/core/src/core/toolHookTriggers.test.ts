@@ -407,6 +407,12 @@ describe('toolHookTriggers', () => {
   });
 
   describe('firePostToolBatchHook', () => {
+    it('should return shouldStop: false when no messageBus is provided', async () => {
+      const result = await firePostToolBatchHook(undefined, []);
+
+      expect(result).toEqual({ shouldStop: false });
+    });
+
     it('should send resolved tool calls and return additional context', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -505,6 +511,19 @@ describe('toolHookTriggers', () => {
 
       expect(result.shouldStop).toBe(false);
       expect(result.hookError).toMatch(/success: false/);
+    });
+
+    it('should return hookError when hook returns success without output', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: undefined,
+      });
+
+      const result = await firePostToolBatchHook(mockMessageBus, []);
+
+      expect(result.shouldStop).toBe(false);
+      expect(result.hookError).toMatch(/no output/);
     });
 
     it('should return hookError when messageBus.request throws', async () => {
