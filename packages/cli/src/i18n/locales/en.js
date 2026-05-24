@@ -1046,6 +1046,8 @@ export default {
     'Switch the model for this session (--default to persist, --fast for suggestion model).',
   'Default model': 'Default model',
   'session only': 'session only',
+  'Runtime models cannot be set as default.':
+    'Runtime models cannot be set as default.',
   'Persist the selected model as the default':
     'Persist the selected model as the default',
   'Usage: /model --default <model-id>': 'Usage: /model --default <model-id>',

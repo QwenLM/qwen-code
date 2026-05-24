@@ -664,10 +664,10 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
-  it('ignores runtime models when "d" is pressed', () => {
+  it('shows feedback when "d" is pressed on runtime models', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const runtimeSnapshotId = `$runtime|${AuthType.USE_OPENAI}|gpt-4`;
-    const { props, mockSettings } = renderComponent({}, {
+    const { props, mockSettings, queryByText } = renderComponent({}, {
       getAuthType: vi.fn(() => AuthType.USE_OPENAI),
       getModel: vi.fn(() => 'gpt-4'),
       switchModel,
@@ -691,18 +691,23 @@ describe('<ModelDialog />', () => {
     } as unknown as Partial<Config>);
 
     const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
-    keyPressHandler({
-      name: 'd',
-      ctrl: false,
-      meta: false,
-      shift: false,
-      paste: false,
-      sequence: 'd',
+    await act(async () => {
+      keyPressHandler({
+        name: 'd',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: 'd',
+      });
     });
 
     expect(mockSettings.setValue).not.toHaveBeenCalled();
     expect(switchModel).not.toHaveBeenCalled();
     expect(props.onClose).not.toHaveBeenCalled();
+    expect(
+      queryByText(/Runtime models cannot be set as default/),
+    ).not.toBeNull();
   });
 
   it('ignores "d" in fast model mode', () => {
@@ -973,6 +978,40 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('shows an error when fast model runtime sync fails', async () => {
+    const setFastModel = vi.fn(() => {
+      throw new Error('Runtime config rejected the model');
+    });
+    const { props, mockSettings, queryByText } = renderComponent(
+      { isFastModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'gpt-4'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'gpt-4',
+            label: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setFastModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await act(async () => {
+      await childOnSelect('gpt-4');
+    });
+
+    await waitFor(() => {
+      expect(queryByText(/Failed to set fast model to 'gpt-4'/)).not.toBeNull();
+      expect(queryByText(/Runtime config rejected the model/)).not.toBeNull();
+    });
+    expect(setFastModel).toHaveBeenCalledWith('gpt-4');
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
   it('shows an error when fast model persistence fails', async () => {
     const setFastModel = vi.fn();
     const { props, mockSettings, queryByText } = renderComponent(
@@ -1000,10 +1039,12 @@ describe('<ModelDialog />', () => {
     });
 
     await waitFor(() => {
-      expect(queryByText(/Failed to set fast model to 'gpt-4'/)).not.toBeNull();
+      expect(
+        queryByText(/Fast model set to 'gpt-4' for this session/),
+      ).not.toBeNull();
       expect(queryByText(/Disk is read-only/)).not.toBeNull();
     });
-    expect(setFastModel).not.toHaveBeenCalled();
+    expect(setFastModel).toHaveBeenCalledWith('gpt-4');
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
@@ -1031,9 +1072,7 @@ describe('<ModelDialog />', () => {
     });
 
     expect(queryByText(/Failed to switch model to 'gpt-4'/)).not.toBeNull();
-    expect(
-      queryByText(/Failed to switch model to 'openai::gpt-4/),
-    ).toBeNull();
+    expect(queryByText(/Failed to switch model to 'openai::gpt-4/)).toBeNull();
   });
 
   it('highlights the cross-auth row for a bare fast-model setting', () => {

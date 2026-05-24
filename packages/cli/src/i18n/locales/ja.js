@@ -1671,6 +1671,8 @@ export default {
     'このセッションのモデルを切り替えます（--default で永続化、--fast で提案モデルを設定）。',
   'Default model': 'デフォルトモデル',
   'session only': 'このセッションのみ',
+  'Runtime models cannot be set as default.':
+    'ランタイムモデルはデフォルトに設定できません。',
   'Persist the selected model as the default':
     '選択したモデルをデフォルトとして保存',
   'Enter to select, d to set default, ↑↓ to navigate, Esc to close':

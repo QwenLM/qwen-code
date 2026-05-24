@@ -1900,6 +1900,8 @@ export default {
     'Changer le modèle pour cette session (--default pour persister, --fast pour le modèle de suggestion).',
   'Default model': 'Modèle par défaut',
   'session only': 'session uniquement',
+  'Runtime models cannot be set as default.':
+    'Les modèles d’exécution ne peuvent pas être définis par défaut.',
   'Persist the selected model as the default':
     'Persister le modèle sélectionné comme modèle par défaut',
   'Enter to select, d to set default, ↑↓ to navigate, Esc to close':

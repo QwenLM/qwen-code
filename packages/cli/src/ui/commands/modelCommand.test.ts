@@ -586,6 +586,40 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should reject qwen-oauth models for session-only switches', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: `/model qwen-max(${AuthType.QWEN_OAUTH})`,
+        name: 'model',
+        args: `qwen-max(${AuthType.QWEN_OAUTH})`,
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi.fn(),
+          switchModel,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      `qwen-max(${AuthType.QWEN_OAUTH})`,
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
+    });
+  });
+
   it('should return settings error when --default is used without settings', async () => {
     const switchModel = vi.fn();
     mockContext = createMockCommandContext({
@@ -992,6 +1026,102 @@ describe('modelCommand', () => {
       type: 'message',
       messageType: 'info',
       content: 'Fast Model: openai:deepseek-v4-flash',
+    });
+  });
+
+  it('should not persist fast model when runtime sync fails', async () => {
+    const setValue = vi.fn();
+    const setFastModel = vi.fn(() => {
+      throw new Error('Runtime config rejected the model');
+    });
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --fast deepseek-v4-flash',
+        name: 'model',
+        args: '--fast deepseek-v4-flash',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'deepseek-v4-flash',
+              label: 'deepseek-v4-flash',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--fast deepseek-v4-flash',
+    );
+
+    expect(setFastModel).toHaveBeenCalledWith('deepseek-v4-flash');
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Failed to set fast model to 'deepseek-v4-flash'.\n\n" +
+        'Runtime config rejected the model',
+    });
+  });
+
+  it('should report persistence failures after setting the session fast model', async () => {
+    const setValue = vi.fn(() => {
+      throw new Error('Disk is read-only');
+    });
+    const setFastModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --fast deepseek-v4-flash',
+        name: 'model',
+        args: '--fast deepseek-v4-flash',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'deepseek-v4-flash',
+              label: 'deepseek-v4-flash',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--fast deepseek-v4-flash',
+    );
+
+    expect(setFastModel).toHaveBeenCalledWith('deepseek-v4-flash');
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'fastModel',
+      'deepseek-v4-flash',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Fast model set to 'deepseek-v4-flash' for this session, but failed to persist.\n\n" +
+        'Disk is read-only',
     });
   });
 

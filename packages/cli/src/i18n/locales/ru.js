@@ -1882,6 +1882,8 @@ export default {
     'Переключить модель для этой сессии (--default для сохранения, --fast для модели подсказок).',
   'Default model': 'Модель по умолчанию',
   'session only': 'только эта сессия',
+  'Runtime models cannot be set as default.':
+    'Модели времени выполнения нельзя сделать моделью по умолчанию.',
   'Persist the selected model as the default':
     'Сохранить выбранную модель как модель по умолчанию',
   'Enter to select, d to set default, ↑↓ to navigate, Esc to close':

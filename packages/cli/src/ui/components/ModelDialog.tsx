@@ -416,6 +416,9 @@ export function ModelDialog({
         }
         const entry = highlightedEntryRef.current;
         if (!entry || entry.isRuntime) {
+          if (entry?.isRuntime) {
+            setErrorMessage(t('Runtime models cannot be set as default.'));
+          }
           return;
         }
         if (entry.authType === AuthType.QWEN_OAUTH) {
@@ -521,17 +524,9 @@ export function ModelDialog({
             fastModel = selected;
           }
           try {
-            const scope = getPersistScopeForModelSelection(settings);
-            settings.setValue(scope, 'fastModel', fastModel);
-            // Sync the runtime Config so forked agents pick up the change immediately.
+            // Sync the runtime Config first; do not persist a fast model the
+            // current session cannot actually use.
             config?.setFastModel(fastModel);
-            uiState?.historyManager.addItem(
-              {
-                type: 'success',
-                text: `${t('Fast Model')}: ${fastModel}`,
-              },
-              Date.now(),
-            );
           } catch (e) {
             const baseErrorMessage = e instanceof Error ? e.message : String(e);
             setErrorMessage(
@@ -539,6 +534,25 @@ export function ModelDialog({
             );
             return;
           }
+
+          try {
+            const scope = getPersistScopeForModelSelection(settings);
+            settings.setValue(scope, 'fastModel', fastModel);
+          } catch (e) {
+            const baseErrorMessage = e instanceof Error ? e.message : String(e);
+            setErrorMessage(
+              `Fast model set to '${fastModel}' for this session, but failed to persist.\n\n${baseErrorMessage}`,
+            );
+            return;
+          }
+
+          uiState?.historyManager.addItem(
+            {
+              type: 'success',
+              text: `${t('Fast Model')}: ${fastModel}`,
+            },
+            Date.now(),
+          );
           onClose();
           return;
         }

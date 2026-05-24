@@ -1906,6 +1906,8 @@ export default {
     'Modell für diese Sitzung wechseln (--default zum Speichern, --fast für das Vorschlagsmodell).',
   'Default model': 'Standardmodell',
   'session only': 'nur diese Sitzung',
+  'Runtime models cannot be set as default.':
+    'Laufzeitmodelle können nicht als Standard festgelegt werden.',
   'Persist the selected model as the default':
     'Ausgewähltes Modell als Standard speichern',
   'Enter to select, d to set default, ↑↓ to navigate, Esc to close':

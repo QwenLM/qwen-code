@@ -298,10 +298,32 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'fastModel', normalizedFastModel);
-      // Sync the runtime Config so forked agents pick up the change immediately
-      // without requiring a restart.
-      config.setFastModel(normalizedFastModel);
+      try {
+        // Sync the runtime Config first; do not persist a fast model the
+        // current session cannot actually use.
+        config.setFastModel(normalizedFastModel);
+      } catch (e) {
+        const baseErrorMessage = e instanceof Error ? e.message : String(e);
+        return {
+          type: 'message',
+          messageType: 'error',
+          content:
+            `Failed to set fast model to '${normalizedFastModel}'.\n\n` +
+            baseErrorMessage,
+        };
+      }
+      try {
+        persistSetting(settings, 'fastModel', normalizedFastModel);
+      } catch (e) {
+        const baseErrorMessage = e instanceof Error ? e.message : String(e);
+        return {
+          type: 'message',
+          messageType: 'error',
+          content:
+            `Fast model set to '${normalizedFastModel}' for this session, ` +
+            `but failed to persist.\n\n${baseErrorMessage}`,
+        };
+      }
       return {
         type: 'message',
         messageType: 'info',
@@ -342,7 +364,10 @@ export const modelCommand: SlashCommand = {
       }
       const parsed = parseAcpModelOption(modelName);
       const targetAuthType = parsed.authType ?? authType;
-      if (isDefaultModelCommand && targetAuthType === AuthType.QWEN_OAUTH) {
+      if (
+        targetAuthType === AuthType.QWEN_OAUTH &&
+        (isDefaultModelCommand || parsed.authType)
+      ) {
         return {
           type: 'message',
           messageType: 'error',

@@ -890,6 +890,8 @@ export default {
     '切換此會話的模型（--default 可持久化，--fast 可設置建議模型）',
   'Default model': '預設模型',
   'session only': '僅此會話',
+  'Runtime models cannot be set as default.':
+    '執行階段模型不能設定為預設模型。',
   'Persist the selected model as the default': '將所選模型持久化為預設模型',
   'Usage: /model --default <model-id>': '用法：/model --default <模型 ID>',
   'Use either --default or --fast, not both.':

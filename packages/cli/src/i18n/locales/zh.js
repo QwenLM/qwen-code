@@ -997,6 +997,7 @@ export default {
     '切换此会话的模型（--default 可持久化，--fast 可设置建议模型）',
   'Default model': '默认模型',
   'session only': '仅本会话',
+  'Runtime models cannot be set as default.': '运行时模型不能设置为默认模型。',
   'Persist the selected model as the default': '将所选模型持久化为默认模型',
   'Usage: /model --default <model-id>': '用法：/model --default <模型 ID>',
   'Use either --default or --fast, not both.':

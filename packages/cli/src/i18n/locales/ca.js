@@ -1862,6 +1862,8 @@ export default {
     "Canvia el model d'aquesta sessió (--default per persistir, --fast per al model de suggeriments).",
   'Default model': 'Model predeterminat',
   'session only': 'només aquesta sessió',
+  'Runtime models cannot be set as default.':
+    'Els models d’execució no es poden definir com a predeterminats.',
   'Persist the selected model as the default':
     'Persistir el model seleccionat com a predeterminat',
   'Enter to select, d to set default, ↑↓ to navigate, Esc to close':
