@@ -479,13 +479,6 @@ export function ModelDialog({
               return;
             }
 
-            logModelSwitchResult({
-              uiState,
-              after,
-              effectiveAuthType,
-              effectiveModelId,
-              isRuntime: false,
-            });
             onClose();
           } finally {
             isSwitchingRef.current = false;
