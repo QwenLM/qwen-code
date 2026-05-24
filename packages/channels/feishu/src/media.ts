@@ -59,7 +59,28 @@ export async function downloadMedia(
 
     const mimeType =
       resp.headers.get('content-type') || 'application/octet-stream';
-    const buffer = Buffer.from(await resp.arrayBuffer());
+
+    // Stream-read with size enforcement (handles chunked transfer without Content-Length)
+    const reader = resp.body?.getReader();
+    if (!reader) {
+      return null;
+    }
+    const chunks: Buffer[] = [];
+    let totalSize = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalSize += value.byteLength;
+      if (totalSize > MAX_DOWNLOAD_BYTES) {
+        reader.cancel();
+        process.stderr.write(
+          `[Feishu] downloadMedia rejected: actual size exceeds ${MAX_DOWNLOAD_BYTES} byte limit\n`,
+        );
+        return null;
+      }
+      chunks.push(Buffer.from(value));
+    }
+    const buffer = Buffer.concat(chunks);
 
     return { buffer, mimeType };
   } catch (err) {

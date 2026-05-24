@@ -136,6 +136,14 @@ describe('Feishu markdown utilities', () => {
         expect(chunks[1]!.trimStart().startsWith('```')).toBe(true);
       }
     });
+
+    it('hard-splits a single line exceeding CHUNK_LIMIT', () => {
+      const longLine = 'a'.repeat(5000);
+      const chunks = splitChunks(longLine);
+      expect(chunks.length).toBe(2);
+      expect(chunks[0]!.length).toBe(4000);
+      expect(chunks[1]!.length).toBe(1000);
+    });
   });
 
   describe('buildCardContent table splitting', () => {

@@ -211,6 +211,12 @@ export function splitChunks(text: string): string[] {
 
     buf += (buf ? '\n' : '') + line;
 
+    // Hard-split oversized lines that exceed the limit on their own
+    while (buf.length > CHUNK_LIMIT) {
+      chunks.push(buf.slice(0, CHUNK_LIMIT));
+      buf = buf.slice(CHUNK_LIMIT);
+    }
+
     if (fenceCount % 2 === 1) {
       if (!inCode) {
         fenceLine = line.trim();

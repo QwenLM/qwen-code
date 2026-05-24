@@ -52,6 +52,8 @@ interface CardSessionState {
   accumulatedText: string;
   lastUpdateAt: number;
   pendingUpdateTimer?: ReturnType<typeof setTimeout>;
+  /** Captured before cleanup so the creating→stopped callback retains the @sender prefix. */
+  atPrefix?: string;
 }
 
 /** Track seen message IDs to deduplicate retried events. */
@@ -163,6 +165,7 @@ export class FeishuChannel extends ChannelBase {
       for (const [msgId, state] of this.cardSessions) {
         if (now - state.lastUpdateAt > STALE_MS && !state.creating) {
           this.cleanupCard(msgId);
+          this.stoppedMessages.delete(msgId);
         }
       }
     }, 60_000);
@@ -722,6 +725,11 @@ export class FeishuChannel extends ChannelBase {
       const cs = cardState;
       setTimeout(async () => {
         try {
+          if (cs.stopped || this.stoppedMessages.has(inboundMsgId)) {
+            cs.creating = false;
+            this.cleanupCard(inboundMsgId);
+            return;
+          }
           const atPrefix = this.msgToSenderName.get(inboundMsgId);
           const displayContent = atPrefix
             ? `${atPrefix}\n\n${cs.accumulatedText}`
@@ -732,6 +740,24 @@ export class FeishuChannel extends ChannelBase {
             undefined,
             inboundMsgId,
           );
+          if (cs.stopped || this.stoppedMessages.has(inboundMsgId)) {
+            if (result.success) {
+              const prefix =
+                cs.atPrefix || this.msgToSenderName.get(inboundMsgId) || '';
+              const stopText = prefix
+                ? `${prefix}\n\n*已停止生成*`
+                : '*已停止生成*';
+              this.updateCard(
+                result.messageId,
+                stopText,
+                true,
+                inboundMsgId,
+              ).catch(() => {});
+            }
+            cs.creating = false;
+            this.cleanupCard(inboundMsgId);
+            return;
+          }
           if (result.success) {
             cs.messageId = result.messageId;
             cs.created = true;
@@ -758,10 +784,16 @@ export class FeishuChannel extends ChannelBase {
         if (cs.stopped) return;
         cs.lastUpdateAt = Date.now();
         try {
+          const MAX_CARD_CHARS = 20_000;
           const atPrefix = this.msgToSenderName.get(inboundMsgId);
-          const displayContent = atPrefix
+          let displayContent = atPrefix
             ? `${atPrefix}\n\n${cs.accumulatedText}`
             : cs.accumulatedText;
+          if (displayContent.length > MAX_CARD_CHARS) {
+            displayContent =
+              displayContent.slice(-MAX_CARD_CHARS) +
+              '\n\n_(内容过长，已截断早期内容)_';
+          }
           const ok = await this.updateCard(
             cs.messageId,
             displayContent,
@@ -881,23 +913,102 @@ export class FeishuChannel extends ChannelBase {
   }
 
   protected override onPromptStart(
-    _chatId: string,
+    chatId: string,
     sessionId: string,
     messageId?: string,
   ): void {
     if (messageId) {
       this.sessionToInboundMsg.set(sessionId, messageId);
       this.addReaction(messageId, 'OnIt').catch(() => {});
+
+      // Create streaming card now that gating has passed
+      if (!this.cardSessions.has(messageId)) {
+        const atSender = this.msgToSenderName.get(messageId) || '';
+        const placeholderText = atSender
+          ? `${atSender}，思考中...`
+          : '思考中...';
+        const cardState: CardSessionState = {
+          messageId: '',
+          created: false,
+          creating: true,
+          stopped: false,
+          accumulatedText: '',
+          lastUpdateAt: 0,
+        };
+        this.cardSessions.set(messageId, cardState);
+
+        this.createStreamingCard(chatId, placeholderText, undefined, messageId)
+          .then((result) => {
+            if (cardState.stopped || this.stoppedMessages.has(messageId)) {
+              if (result.success) {
+                // Use cardState.atPrefix (captured by onCardAction before cleanupCard)
+                const prefix =
+                  cardState.atPrefix ||
+                  this.msgToSenderName.get(messageId) ||
+                  '';
+                const stopText = prefix
+                  ? `${prefix}\n\n*已停止生成*`
+                  : '*已停止生成*';
+                this.updateCard(
+                  result.messageId,
+                  stopText,
+                  true,
+                  messageId,
+                ).catch(() => {});
+              }
+              cardState.creating = false;
+              this.cleanupCard(messageId);
+              return;
+            }
+            if (result.success) {
+              cardState.messageId = result.messageId;
+              cardState.created = true;
+              cardState.lastUpdateAt = Date.now();
+            }
+            cardState.creating = false;
+          })
+          .catch((err) => {
+            process.stderr.write(
+              `[Feishu:${this.name}] Processing card error: ${err}\n`,
+            );
+            cardState.creating = false;
+            this.cleanupCard(messageId);
+          });
+      }
     }
   }
 
   protected override onPromptEnd(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
     if (messageId) {
       this.removeReaction(messageId, 'OnIt').catch(() => {});
+    }
+    // Finalize card if onResponseComplete didn't run (prompt was cancelled)
+    const inboundMsgId = messageId || this.sessionToInboundMsg.get(sessionId);
+    if (inboundMsgId) {
+      // Don't delete stoppedMessages here — let onResponseComplete / stale timer handle it.
+      // Deleting here causes a race where the stop button's card callback loses the @sender prefix.
+      const cs = this.cardSessions.get(inboundMsgId);
+      if (cs && !cs.stopped) {
+        if (cs.creating) {
+          // Card still being created — mark stopped so the callback will finalize it
+          cs.stopped = true;
+        } else if (cs.created) {
+          const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
+          const text = cs.accumulatedText
+            ? (atPrefix
+                ? `${atPrefix}\n\n${cs.accumulatedText}`
+                : cs.accumulatedText) + '\n\n---\n*已取消*'
+            : (atPrefix ? `${atPrefix}\n\n` : '') + '*已取消*';
+          this.updateCard(cs.messageId, text, true, inboundMsgId).catch(
+            () => {},
+          );
+          this.cleanupCard(inboundMsgId);
+        }
+      }
     }
   }
 
@@ -1001,7 +1112,8 @@ export class FeishuChannel extends ChannelBase {
       }
 
       const cardState = this.cardSessions.get(targetInboundMsgId);
-      if (!cardState?.created) return false;
+      if (!cardState) return false;
+      if (!cardState.created && !cardState.creating) return false;
 
       // Only the original sender can stop (group chat protection)
       const operator = data['operator'] as { open_id?: string } | undefined;
@@ -1013,6 +1125,8 @@ export class FeishuChannel extends ChannelBase {
 
       // Mark as stopped
       cardState.stopped = true;
+      // Preserve the @sender prefix before cleanupCard can delete msgToSenderName
+      cardState.atPrefix = this.msgToSenderName.get(targetInboundMsgId) || '';
       this.stoppedMessages.add(targetInboundMsgId);
       if (cardState.pendingUpdateTimer) {
         clearTimeout(cardState.pendingUpdateTimer);
@@ -1034,15 +1148,24 @@ export class FeishuChannel extends ChannelBase {
         if (sessionId) {
           await this.bridge.cancelSession(sessionId).catch(() => {});
         }
-        // Finalize card — show "stopped" notice with sender prefix
-        const atPrefix = this.msgToSenderName.get(inboundId) || '';
-        const contentPart = cardState.accumulatedText.trim()
-          ? cardState.accumulatedText + '\n\n---\n*已停止生成*'
-          : '*已停止生成*';
-        const finalText = atPrefix
-          ? `${atPrefix}\n\n${contentPart}`
-          : contentPart;
-        await this.updateCard(cardState.messageId, finalText, true, inboundId);
+        // Only update card if it was actually created (skip if still creating —
+        // the createStreamingCard callback will finalize using cardState.atPrefix)
+        if (cardState.created && cardState.messageId) {
+          const prefix =
+            cardState.atPrefix || this.msgToSenderName.get(inboundId) || '';
+          const contentPart = cardState.accumulatedText.trim()
+            ? cardState.accumulatedText + '\n\n---\n*已停止生成*'
+            : '*已停止生成*';
+          const finalText = prefix
+            ? `${prefix}\n\n${contentPart}`
+            : contentPart;
+          await this.updateCard(
+            cardState.messageId,
+            finalText,
+            true,
+            inboundId,
+          );
+        }
         this.cleanupCard(inboundId);
       };
 
@@ -1187,37 +1310,6 @@ export class FeishuChannel extends ChannelBase {
         this.msgToSenderName.set(msgId, atSender);
         this.msgToSenderId.set(msgId, senderId);
 
-        // Create "processing" card immediately for fast user feedback
-        const placeholderText = `${atSender}，思考中...`;
-        const cardState: CardSessionState = {
-          messageId: '',
-          created: false,
-          creating: true,
-          stopped: false,
-          accumulatedText: '',
-          lastUpdateAt: 0,
-        };
-        this.cardSessions.set(msgId, cardState);
-
-        try {
-          const result = await this.createStreamingCard(
-            chatId,
-            placeholderText,
-            undefined,
-            msgId,
-          );
-          if (result.success) {
-            cardState.messageId = result.messageId;
-            cardState.created = true;
-            cardState.lastUpdateAt = Date.now();
-          }
-        } catch (err) {
-          process.stderr.write(
-            `[Feishu:${this.name}] Processing card error: ${err}\n`,
-          );
-        }
-        cardState.creating = false;
-
         // Download media if present
         if (content.imageKey) {
           const token = await this.getTenantAccessToken();
@@ -1278,10 +1370,6 @@ export class FeishuChannel extends ChannelBase {
         // If user clicked stop while we were preparing (downloading media, etc.), abort
         if (this.stoppedMessages.has(msgId)) {
           this.stoppedMessages.delete(msgId);
-          return;
-        }
-        const preCallState = this.cardSessions.get(msgId);
-        if (preCallState?.stopped) {
           return;
         }
 
