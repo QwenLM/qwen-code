@@ -502,6 +502,7 @@ export function ModelDialog({
       }
 
       isSwitchingRef.current = true;
+      cancelledSwitchRef.current = false;
       try {
         setErrorMessage(null);
 
@@ -560,6 +561,7 @@ export function ModelDialog({
         let after: ContentGeneratorConfig | undefined;
         let effectiveAuthType: AuthType | undefined;
         let effectiveModelId = selected;
+        let attemptedModelId = selected;
         let isRuntime = false;
 
         if (!config) {
@@ -590,6 +592,7 @@ export function ModelDialog({
             const parsed = parseModelSelectionKey(selected);
             selectedAuthType = (parsed.authType || authType) as AuthType;
             modelId = parsed.modelId;
+            attemptedModelId = modelId;
             selectedBaseUrl = parsed.baseUrl;
           }
 
@@ -618,7 +621,7 @@ export function ModelDialog({
           const baseErrorMessage = e instanceof Error ? e.message : String(e);
           const errorPrefix = isRuntime
             ? 'Failed to switch to runtime model.'
-            : `Failed to switch model to '${effectiveModelId ?? selected}'.`;
+            : `Failed to switch model to '${attemptedModelId}'.`;
           setErrorMessage(`${errorPrefix}\n\n${baseErrorMessage}`);
           return;
         }

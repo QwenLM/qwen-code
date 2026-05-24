@@ -1007,6 +1007,35 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
+  it('uses the parsed model id in switch failure messages', async () => {
+    const switchModel = vi
+      .fn()
+      .mockRejectedValue(new Error('Provider rejected the model'));
+    const { queryByText } = renderComponent({}, {
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getModel: vi.fn(() => 'gpt-4'),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'gpt-4',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://custom.api',
+        },
+      ]),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await act(async () => {
+      await childOnSelect(`${AuthType.USE_OPENAI}::gpt-4\0https://custom.api`);
+    });
+
+    expect(queryByText(/Failed to switch model to 'gpt-4'/)).not.toBeNull();
+    expect(
+      queryByText(/Failed to switch model to 'openai::gpt-4/),
+    ).toBeNull();
+  });
+
   it('highlights the cross-auth row for a bare fast-model setting', () => {
     // `/model --fast deepseek-v4-flash` validates across all providers and
     // persists the bare model id. When the dialog re-opens, it must locate

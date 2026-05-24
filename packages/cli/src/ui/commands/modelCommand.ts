@@ -15,6 +15,8 @@ import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
   AuthType,
+  ModelSlashCommandEvent,
+  logModelSlashCommand,
   type AvailableModel,
   type Config,
   resolveModelId,
@@ -381,6 +383,12 @@ export const modelCommand: SlashCommand = {
               `but failed to persist as default.\n\n${baseErrorMessage}`,
           };
         }
+      }
+      if (typeof config.getUsageStatisticsEnabled === 'function') {
+        logModelSlashCommand(
+          config,
+          new ModelSlashCommandEvent(effectiveModelName),
+        );
       }
       return {
         type: 'message',
