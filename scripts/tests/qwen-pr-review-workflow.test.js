@@ -14,6 +14,18 @@ const workflow = readFileSync(
   resolve(__dirname, '../../.github/workflows/qwen-code-pr-review.yml'),
   'utf8',
 );
+const gitignore = readFileSync(resolve(__dirname, '../../.gitignore'), 'utf8');
+const deepTestCoveragePrompt = readFileSync(
+  resolve(__dirname, '../../.qwen/deep-review-test-coverage-prompt.md'),
+  'utf8',
+);
+
+const deepPromptTemplates = [
+  '.qwen/deep-review-correctness-security-prompt.md',
+  '.qwen/deep-review-test-coverage-prompt.md',
+  '.qwen/deep-review-maintainability-performance-prompt.md',
+  '.qwen/deep-review-undirected-audit-prompt.md',
+];
 
 describe('Qwen PR review workflow safety rails', () => {
   it('keeps qwen invocations toolless and without a GitHub token', () => {
@@ -50,6 +62,33 @@ describe('Qwen PR review workflow safety rails', () => {
     expect(workflow).toContain(
       'contradicts user_facing blast_radius; upgrading to STANDARD',
     );
+    expect(workflow).toContain('blast_radius | type == "object"');
+  });
+
+  it('runs DEEP as a CI-safe bundled review profile', () => {
+    expect(workflow).toContain('Extract bundled review rubric for CI DEEP');
+    expect(workflow).toContain(
+      'packages/core/src/skills/bundled/review/SKILL.md',
+    );
+    for (const template of deepPromptTemplates) {
+      expect(workflow).toContain(template);
+    }
+    expect(workflow).toContain(
+      'CI-safe profile adapted from bundled `/review`',
+    );
+  });
+
+  it('keeps DEEP prompt templates versioned despite the .qwen ignore rule', () => {
+    for (const template of deepPromptTemplates) {
+      expect(gitignore).toContain(`!${template}`);
+    }
+  });
+
+  it('keeps the project-required Validation Evidence section in split DEEP reviews', () => {
+    expect(deepTestCoveragePrompt).toContain('## Validation Evidence');
+    expect(deepTestCoveragePrompt).toContain(
+      'This is an automated, advisory, comment-only review',
+    );
   });
 
   it('posts a fallback comment whenever the summary comment did not succeed', () => {
@@ -75,13 +114,12 @@ describe('Qwen PR review workflow safety rails', () => {
     );
     // 3 tier-step guards (LIGHT/STANDARD/DEEP) + 1 fallback-step defense.
     expect(placeholderGuards?.length).toBeGreaterThanOrEqual(4);
+    expect(workflow).toContain(
+      "[ -s qwen-review-summary.md ] && ! grep -qF 'no assistant text parsed' qwen-review-summary.md",
+    );
     // The old 200-byte threshold must not regress.
-    expect(workflow).not.toContain(
-      'wc -c < qwen-review-summary.md)" -lt 200',
-    );
-    expect(workflow).not.toContain(
-      'wc -c < qwen-review-summary.md)" -ge 200',
-    );
+    expect(workflow).not.toContain('wc -c < qwen-review-summary.md)" -lt 200');
+    expect(workflow).not.toContain('wc -c < qwen-review-summary.md)" -ge 200');
   });
 
   it('strips --tier= case-insensitively to match its case-insensitive detector', () => {

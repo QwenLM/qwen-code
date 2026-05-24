@@ -965,14 +965,14 @@ jobs:
             rm -f qwen-review-summary.md
           fi
 
-      # ─── DEEP: large single-shot review, deliberately toolless ─────────────
+      # ─── DEEP: CI-safe bundled review profile, deliberately toolless ───────
       #
       # This workflow runs under pull_request_target with model secrets.
-      # Running the bundled multi-agent /review skill here would expose those
-      # secrets to model-controlled shell/file/network tools. DEEP therefore
-      # uses the same trusted-shell data collection pattern as STANDARD but
-      # with a larger diff window and a high-risk review prompt. The qwen
-      # process receives no GitHub token and no invocable tools.
+      # Running the bundled multi-agent /review skill directly here would
+      # expose those secrets to model-controlled shell/file/network tools.
+      # DEEP therefore adapts the bundled /review rubric into several
+      # focused, tool-free CI passes. It reuses the review dimensions
+      # without fetch-pr/worktree/install/autofix/inline-review behavior.
       - name: 'Run DEEP review'
         id: 'review'
         if: |-
@@ -1010,63 +1010,149 @@ jobs:
             printf '**PR body (first 8KB):**\n%s\n' "$pr_body"
           } > /tmp/deep-pr-context.md
 
-          node scripts/render-review-prompt.cjs \
-            .qwen/preflight-deep-review-prompt.md \
-            /tmp/deep-prompt-rendered.md \
-            --context /tmp/deep-pr-context.md \
-            --rules .qwen/review-rules.md
+          echo "::group::Extract bundled review rubric for CI DEEP"
+          node <<'NODE' > /tmp/bundled-review-rubric.md
+          const fs = require('fs');
+          const source = 'packages/core/src/skills/bundled/review/SKILL.md';
+          const text = fs.readFileSync(source, 'utf8');
 
-          out=qwen-review-stream.jsonl
-          echo "::group::Qwen DEEP review (live stream-json events)"
-          set +e
-          # qwen output is model text derived from untrusted PR content.
-          # Fence it so GitHub Actions does not interpret accidental or
-          # prompt-injected `::workflow-command::` lines from the stream.
-          stop_token="qwen-deep-stream-$(date +%s%N)"
-          echo "::stop-commands::${stop_token}"
-          timeout --kill-after=30s 15m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
-            --approval-mode default \
-            --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
-            --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
-            --allowed-mcp-server-names __qwen_review_no_mcp__ \
-            --output-format stream-json --include-partial-messages \
-            --prompt "$(cat /tmp/deep-prompt-rendered.md)" 2>&1 | tee "$out"
-          status=${PIPESTATUS[0]}
-          echo "::${stop_token}::"
-          set -e
+          function section(start, end) {
+            const startIdx = text.indexOf(start);
+            if (startIdx === -1) return '';
+            const endIdx = end ? text.indexOf(end, startIdx + start.length) : -1;
+            return text.slice(startIdx, endIdx === -1 ? undefined : endIdx).trim();
+          }
+
+          const parts = [
+            section(
+              '## Step 4: Parallel multi-dimensional review',
+              '### Agent 7: Build & Test Verification',
+            ),
+            section(
+              '### Cross-file impact analysis',
+              '## Step 5: Deduplicate, verify, and aggregate',
+            ),
+            section(
+              '## Step 5: Deduplicate, verify, and aggregate',
+              '## Step 7: Present findings',
+            ),
+            section('## Exclusion Criteria', '## Guidelines'),
+            section('## Guidelines', ''),
+          ].filter(Boolean);
+
+          process.stdout.write(parts.join('\n\n---\n\n') + '\n');
+          NODE
           echo "::endgroup::"
 
-          status_label="complete"
-          if [ "$status" -eq 124 ]; then
-            status_label="timeout"
-            echo "::warning::DEEP review timed out at 15m; flushing partial output."
-          elif [ "$status" -ne 0 ]; then
-            status_label="error"
-            echo "::warning::DEEP review exited with status $status (non-timeout failure); flushing any partial output."
+          {
+            printf '## Bundled /review rubric excerpt\n\n'
+            printf 'The following rubric is extracted from '
+            printf '`packages/core/src/skills/bundled/review/SKILL.md`. '
+            printf 'Use it as review guidance only; do not execute its tool, '
+            printf 'worktree, autofix, or GitHub review-submission steps.\n\n'
+            cat /tmp/bundled-review-rubric.md
+            printf '\n\n## CI-collected PR context\n\n'
+            cat /tmp/deep-pr-context.md
+          } > /tmp/deep-ci-review-context.md
+
+          run_deep_focus() {
+            local focus="$1"
+            local prompt_template="$2"
+            local rendered="/tmp/deep-${focus}-prompt-rendered.md"
+            local out="qwen-review-stream-${focus}.jsonl"
+            local summary="qwen-review-summary-${focus}.md"
+
+            node scripts/render-review-prompt.cjs \
+              "$prompt_template" \
+              "$rendered" \
+              --context /tmp/deep-ci-review-context.md \
+              --rules .qwen/review-rules.md
+
+            echo "::group::Qwen DEEP ${focus} review (live stream-json events)"
+            set +e
+            # qwen output is model text derived from untrusted PR content.
+            # Fence it so GitHub Actions does not interpret accidental or
+            # prompt-injected `::workflow-command::` lines from the stream.
+            local stop_token
+            stop_token="qwen-deep-stream-${focus}-$(date +%s%N)"
+            echo "::stop-commands::${stop_token}"
+            timeout --kill-after=20s 4m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
+              --approval-mode default \
+              --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
+              --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+              --allowed-mcp-server-names __qwen_review_no_mcp__ \
+              --output-format stream-json --include-partial-messages \
+              --prompt "$(cat "$rendered")" 2>&1 | tee "$out"
+            local status
+            status=${PIPESTATUS[0]}
+            echo "::${stop_token}::"
+            set -e
+            echo "::endgroup::"
+
+            local status_label="complete"
+            if [ "$status" -eq 124 ]; then
+              status_label="timeout"
+              echo "::warning::DEEP ${focus} review timed out at 4m; flushing partial output."
+            elif [ "$status" -ne 0 ]; then
+              status_label="error"
+              echo "::warning::DEEP ${focus} review exited with status $status; flushing any partial output."
+            fi
+
+            node scripts/parse-review-stream.cjs "$out" "$summary" "DEEP-${focus}" "$status_label" \
+              || { echo "::warning::parse-review-stream.cjs failed for ${focus}; continuing with remaining sections."; : > "$summary"; }
+
+            if [ "$status_label" = "timeout" ]; then
+              {
+                printf '## ⚠️ DEEP %s review was time-capped at 4 min — partial output below\n\n' "$focus"
+                cat "$summary"
+              } > "/tmp/${summary}.with-warning"
+              mv "/tmp/${summary}.with-warning" "$summary"
+            elif [ "$status_label" = "error" ]; then
+              {
+                printf '## ⚠️ DEEP %s review exited with error (status %s) — partial output below\n\n' "$focus" "$status"
+                cat "$summary"
+              } > "/tmp/${summary}.with-warning"
+              mv "/tmp/${summary}.with-warning" "$summary"
+            fi
+
+            if [ -f "$summary" ] && { ! [ -s "$summary" ] || grep -qF 'no assistant text parsed' "$summary"; }; then
+              echo "::warning::DEEP ${focus} review produced empty / placeholder-only output; omitting this section."
+              rm -f "$summary"
+            fi
+          }
+
+          run_deep_focus correctness-security .qwen/deep-review-correctness-security-prompt.md
+          run_deep_focus test-coverage .qwen/deep-review-test-coverage-prompt.md
+          run_deep_focus maintainability-performance .qwen/deep-review-maintainability-performance-prompt.md
+          run_deep_focus undirected-audit .qwen/deep-review-undirected-audit-prompt.md
+
+          section_count=0
+          : > /tmp/deep-combined-body.md
+          for focus in correctness-security test-coverage maintainability-performance undirected-audit; do
+            summary="qwen-review-summary-${focus}.md"
+            if [ -s "$summary" ]; then
+              if [ "$section_count" -gt 0 ]; then
+                printf '\n\n---\n\n' >> /tmp/deep-combined-body.md
+              fi
+              cat "$summary" >> /tmp/deep-combined-body.md
+              section_count=$((section_count + 1))
+            fi
+          done
+
+          if [ "$section_count" -gt 0 ]; then
+            {
+              printf '## Qwen Code Review (DEEP)\n\n'
+              printf '_CI-safe profile adapted from bundled `/review`; '
+              printf 'focused tool-free passes: correctness/security, test coverage, '
+              printf 'maintainability/performance, and undirected audit._\n'
+              cat /tmp/deep-combined-body.md
+            } > qwen-review-summary.md
+          else
+            : > qwen-review-summary.md
           fi
 
-          node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md DEEP "$status_label" \
-            || { echo "::warning::parse-review-stream.cjs failed; fallback comment will fire."; : > qwen-review-summary.md; }
-
-          if [ "$status_label" = "timeout" ]; then
-            {
-              printf '## ⚠️ DEEP review was time-capped at 15 min — partial output below\n\n'
-              cat qwen-review-summary.md
-            } > /tmp/qwen-review-summary-with-warning.md
-            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
-          elif [ "$status_label" = "error" ]; then
-            {
-              printf '## ⚠️ DEEP review exited with error (status %s) — partial output below\n\n' "$status"
-              cat qwen-review-summary.md
-            } > /tmp/qwen-review-summary-with-warning.md
-            mv /tmp/qwen-review-summary-with-warning.md qwen-review-summary.md
-          fi
-
-          # Apply LIGHT's empty-placeholder guard: see the LIGHT step for
-          # rationale. Match the parser's empty-stream phrase directly so a
-          # short legitimate review (e.g. "LGTM — minor copy fix") survives.
           if [ -f qwen-review-summary.md ] && { ! [ -s qwen-review-summary.md ] || grep -qF 'no assistant text parsed' qwen-review-summary.md; }; then
-            echo "::warning::DEEP review produced empty / placeholder-only output; removing summary file so fallback comment fires."
+            echo "::warning::DEEP review produced no usable focused sections; removing summary file so fallback comment fires."
             rm -f qwen-review-summary.md
           fi
 
@@ -1175,7 +1261,7 @@ jobs:
           # `(no assistant text parsed; ...)`, but check defensively here
           # so a future change to the deletion logic can't push the
           # placeholder through this retry path.
-          if [ -f qwen-review-summary.md ] && ! grep -qF 'no assistant text parsed' qwen-review-summary.md; then
+          if [ -f qwen-review-summary.md ] && [ -s qwen-review-summary.md ] && ! grep -qF 'no assistant text parsed' qwen-review-summary.md; then
             summary_bytes=$(wc -c < qwen-review-summary.md)
             {
               head -c 60000 qwen-review-summary.md

@@ -37,6 +37,29 @@ function extractPrTemplateScript() {
   return scriptLines.join('\n');
 }
 
+function extractNamedStepScript(stepName) {
+  const workflow = readFileSync(workflowPath, 'utf8');
+  const stepIdx = workflow.indexOf(`      - name: '${stepName}'`);
+  expect(stepIdx).toBeGreaterThanOrEqual(0);
+
+  const marker = '          script: |\n';
+  const scriptIdx = workflow.indexOf(marker, stepIdx);
+  expect(scriptIdx).toBeGreaterThanOrEqual(0);
+
+  const lines = workflow.slice(scriptIdx + marker.length).split('\n');
+  const scriptLines = [];
+  for (const line of lines) {
+    if (line.startsWith('            ')) {
+      scriptLines.push(line.slice(12));
+    } else if (line.trim() === '') {
+      scriptLines.push('');
+    } else {
+      break;
+    }
+  }
+  return scriptLines.join('\n');
+}
+
 async function validateBody(body) {
   const failures = [];
   const core = {
@@ -53,6 +76,52 @@ async function validateBody(body) {
 }
 
 const script = extractPrTemplateScript();
+const sizeScript = extractNamedStepScript('Compute reviewability size');
+
+async function computeSize(files, labels = []) {
+  const failures = [];
+  const warnings = [];
+  const infos = [];
+  const core = {
+    setFailed(message) {
+      failures.push(message);
+    },
+    warning(message) {
+      warnings.push(message);
+    },
+    info(message) {
+      infos.push(message);
+    },
+  };
+  const context = {
+    issue: { number: 4359 },
+    repo: { owner: 'QwenLM', repo: 'qwen-code' },
+    payload: {
+      pull_request: {
+        labels: labels.map((name) => ({ name })),
+        user: { login: 'author' },
+      },
+    },
+  };
+  const github = {
+    paginate: async (_method, _options, mapper) => mapper({ data: files }),
+    rest: {
+      pulls: { listFiles: Symbol('listFiles') },
+      issues: { listEvents: Symbol('listEvents') },
+    },
+  };
+  const fn = new AsyncFunction(
+    'core',
+    'context',
+    'github',
+    'require',
+    sizeScript,
+  );
+  await fn(core, context, github, () => {
+    throw new Error('pr-size script must stay self-contained');
+  });
+  return { failures, warnings, infos };
+}
 
 function completeBody(validation) {
   return `## Summary
@@ -107,5 +176,30 @@ npm run typecheck
     expect(failures[0]).toContain('Missing "Validation" section');
     expect(failures[0]).toContain('Missing "Linked Issues" section');
     expect(failures[0]).toContain('.github/pull_request_template.md');
+  });
+});
+
+describe('PR Size workflow validation', () => {
+  it('warns instead of failing when the meaningful size is over 1500 lines', async () => {
+    const { failures, warnings } = await computeSize([
+      { filename: 'src/large.ts', additions: 1501, deletions: 0 },
+    ]);
+
+    expect(sizeScript).not.toContain('core.setFailed');
+    expect(failures).toEqual([]);
+    expect(warnings.join('\n')).toContain('over the size threshold');
+    expect(warnings.join('\n')).toContain('Merge is allowed');
+  });
+
+  it('does not claim maintainer acknowledgement when the label applier is unknown', async () => {
+    const { warnings } = await computeSize(
+      [{ filename: 'src/large.ts', additions: 1501, deletions: 0 }],
+      ['oversized-ok'],
+    );
+
+    expect(warnings.join('\n')).toContain('could not be verified');
+    expect(warnings.join('\n')).not.toContain(
+      'a maintainer has consciously acknowledged',
+    );
   });
 });

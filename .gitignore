@@ -35,6 +35,10 @@ CLAUDE.md
 !.qwen/preflight-light-review-prompt.md
 !.qwen/preflight-standard-review-prompt.md
 !.qwen/preflight-deep-review-prompt.md
+!.qwen/deep-review-correctness-security-prompt.md
+!.qwen/deep-review-test-coverage-prompt.md
+!.qwen/deep-review-maintainability-performance-prompt.md
+!.qwen/deep-review-undirected-audit-prompt.md
 !.qwen/commands/
 !.qwen/commands/**
 !.qwen/skills/

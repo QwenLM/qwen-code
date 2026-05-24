@@ -16,7 +16,7 @@ name: 'PR Gate'
 #    check status. Without 'edited', a failed PR Title / PR Template
 #    check would stay red forever even after correction.
 #  - 'labeled'/'unlabeled' are needed so the PR Size `oversized-ok`
-#    escape-hatch label takes effect (or is revoked) without an extra
+#    acknowledgement label takes effect (or is revoked) without an extra
 #    push or edit to re-trigger the check.
 
 on:
@@ -57,7 +57,7 @@ jobs:
   pr-template:
     name: 'PR Template'
     # `labeled`/`unlabeled` are in the workflow triggers only for the
-    # pr-size `oversized-ok` escape hatch. PR Template does not depend on
+    # pr-size `oversized-ok` acknowledgement. PR Template does not depend on
     # labels at all, so skip it on label events — otherwise every
     # unrelated label add/remove re-runs (and, with cancel-in-progress,
     # can cancel) this check for no reason.
@@ -155,7 +155,7 @@ jobs:
   pr-size:
     name: 'PR Size'
     # Re-run on non-label events as usual; on label events run ONLY when
-    # the `oversized-ok` escape-hatch label itself is added or removed —
+    # the `oversized-ok` acknowledgement label itself is added or removed —
     # an unrelated label (`bug`, `priority/*`) must not churn this check.
     if: |-
       (github.event.action != 'labeled' &&
@@ -164,7 +164,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 3
     steps:
-      - name: 'Compute size and block XL'
+      - name: 'Compute reviewability size'
         uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
         with:
           script: |
@@ -188,10 +188,10 @@ jobs:
               /(?:^|\/)package-lock\.json$/,
               /(?:^|\/)pnpm-lock\.yaml$/,
               /(?:^|\/)yarn\.lock$/,
-              // Anchor to the start of the filename so `not.generated.ts`,
-              // `templates.generated.test.ts`, etc. aren't accidentally
-              // swept up — the convention is `<name>.generated.<ext>` where
-              // `.generated.` is the file's first dotted segment.
+              // Anchor to the filename segment so generated-file exclusion
+              // applies only to filenames following the
+              // `<name>.generated.<ext>` convention, not to directory names
+              // such as `foo.generated/bar.ts`.
               /(?:^|\/)[^/]*\.generated\.[^/]+$/,
               /\.snap$/,                                 // jest snapshot
               /^docs\//,                                 // docs prose
@@ -209,37 +209,36 @@ jobs:
             );
             const totalFiles = meaningful.length;
 
-            const BLOCK_THRESHOLD = 1500;
+            const REVIEWABILITY_THRESHOLD = 1500;
             const WARN_THRESHOLD = 1000;
 
-            // Escape hatch: a maintainer can consciously accept an
-            // over-threshold PR (a large but cohesive infra change, a
-            // generated-file refactor the exclusion list doesn't catch,
-            // etc.) by applying the `oversized-ok` label. With it the
-            // size limit downgrades from a hard block to a warning — the
-            // PR still gets a visible "this is large" signal, but is not
-            // wedged. Without an escape hatch a legitimately large PR has
-            // no path to merge at all.
+            // A maintainer can consciously acknowledge an over-threshold PR
+            // (a large but cohesive infra change, a generated-file refactor
+            // the exclusion list doesn't catch, etc.) by applying the
+            // `oversized-ok` label. Size is a reviewability signal, not a
+            // correctness failure, so this job warns but does not block merge
+            // solely because a PR is large.
             const OVERSIZE_OK_LABEL = 'oversized-ok';
             const labels = (context.payload.pull_request?.labels || [])
               .map((l) => l.name);
-            const sizeWaived = labels.includes(OVERSIZE_OK_LABEL);
+            const sizeAcknowledged = labels.includes(OVERSIZE_OK_LABEL);
 
-            // Self-waiver guard: a PR author applying `oversized-ok` to
-            // their own PR would bypass the size gate unilaterally — that
-            // is not a real maintainer decision, so reject it.
+            // Self-acknowledgement guard: a PR author applying `oversized-ok`
+            // to their own PR is not a real maintainer acknowledgement, so
+            // keep it visible as a warning rather than treating it as an
+            // accepted maintainer signal.
             //
             // The applier is resolved from the issue events timeline, NOT
             // from `payload.sender`. `sender` only names the applier on
             // the `labeled` event itself; on a later `synchronize` the
             // label is still on the PR but `sender` is just the pusher.
-            // A `sender`-only check could be dodged: self-apply the label
-            // (labeled event fails RED) then push a commit — the
-            // synchronize run sees `sizeWaived` true, a labeled-only guard
-            // would not fire, and the size check flips GREEN. Resolving
-            // the actual applier makes the guard hold on every event.
-            let waiverApplier = null;
-            if (sizeWaived) {
+            // A `sender`-only check can misclassify the label on later runs:
+            // self-apply the label, then push a commit — the synchronize run
+            // sees `sizeAcknowledged` true while `sender` is just the pusher.
+            // Resolving the actual applier makes the warning accurate on
+            // every event.
+            let acknowledgementApplier = null;
+            if (sizeAcknowledged) {
               const events = await github.paginate(
                 github.rest.issues.listEvents,
                 {
@@ -259,68 +258,63 @@ jobs:
                   ev.label &&
                   ev.label.name === OVERSIZE_OK_LABEL
                 ) {
-                  waiverApplier = ev.actor ? ev.actor.login : null;
+                  acknowledgementApplier = ev.actor ? ev.actor.login : null;
                 }
               }
             }
 
             const prAuthor = context.payload.pull_request?.user?.login || null;
-            if (
-              sizeWaived &&
-              waiverApplier !== null &&
+            const selfAcknowledged =
+              sizeAcknowledged &&
+              acknowledgementApplier !== null &&
               prAuthor !== null &&
-              waiverApplier === prAuthor
-            ) {
-              core.setFailed(
+              acknowledgementApplier === prAuthor;
+            if (selfAcknowledged) {
+              core.warning(
                 `\`${OVERSIZE_OK_LABEL}\` was applied by the PR author ` +
-                `(@${waiverApplier}); the size waiver must be applied by a ` +
-                'different maintainer. Remove the label and ask a maintainer ' +
-                'to re-apply it.'
+                `(@${acknowledgementApplier}); this is recorded as a self-acknowledgement, ` +
+                'not a maintainer acknowledgement.'
               );
-              return;
             }
-            // `sizeWaived` true but applier unresolved (events API returned
+            // `sizeAcknowledged` true but applier unresolved (events API returned
             // no matching `labeled` event — e.g. the label predates event
-            // retention). Honor the label but flag it, so the waiver stays
-            // auditable instead of being trusted silently.
-            if (sizeWaived && waiverApplier === null) {
+            // retention). Honor the label but flag it, so the acknowledgement
+            // stays auditable instead of being trusted silently.
+            if (sizeAcknowledged && acknowledgementApplier === null) {
               core.warning(
                 `Could not resolve who applied the \`${OVERSIZE_OK_LABEL}\` ` +
-                'label from the issue events timeline; honoring the waiver ' +
+                'label from the issue events timeline; honoring the acknowledgement ' +
                 'but it could not be verified as maintainer-applied.'
               );
             }
 
             core.info(
               `PR size: ${totalChanges} meaningful lines across ${totalFiles} files ` +
-              `(block at ${BLOCK_THRESHOLD}, warn at ${WARN_THRESHOLD}; lockfile/docs/snapshot/generated excluded).`
+              `(reviewability threshold at ${REVIEWABILITY_THRESHOLD}, warn at ${WARN_THRESHOLD}; lockfile/docs/snapshot/generated excluded).`
             );
 
-            if (totalChanges > BLOCK_THRESHOLD && sizeWaived) {
+            if (totalChanges > REVIEWABILITY_THRESHOLD && sizeAcknowledged && !selfAcknowledged) {
               // Name the applier (resolved from the events timeline above,
               // so it works on every event, not just `labeled`) to keep an
               // audit trail in the job log instead of relying only on
               // GitHub's separate label event log.
-              const applier = waiverApplier ? ` (applied by @${waiverApplier})` : '';
+              const applier = acknowledgementApplier ? ` (applied by @${acknowledgementApplier})` : '';
+              const acknowledgementText = acknowledgementApplier
+                ? 'a maintainer has consciously acknowledged the size'
+                : 'the label records explicit size acknowledgement';
               core.warning(
-                `PR is over the size threshold (${totalChanges} > ${BLOCK_THRESHOLD} ` +
+                `PR is over the size threshold (${totalChanges} > ${REVIEWABILITY_THRESHOLD} ` +
                 `meaningful lines) but carries the \`${OVERSIZE_OK_LABEL}\` label${applier} — ` +
-                'a maintainer has consciously accepted the size. Not blocking.'
+                `${acknowledgementText}. Merge is allowed.`
               );
-            } else if (totalChanges > BLOCK_THRESHOLD) {
-              core.setFailed(
-                `PR is too large: ${totalChanges} meaningful lines across ${totalFiles} files ` +
-                `(threshold: ${BLOCK_THRESHOLD}).\n\n` +
-                'Please split this PR into smaller, independently reviewable PRs. ' +
-                'Suggestions:\n' +
-                '  • Separate refactors from feature changes.\n' +
-                '  • Split by module/package or by concern.\n' +
-                '  • Ship test scaffolding in its own PR, then the implementation.\n\n' +
-                `If the PR is large but genuinely cohesive, a maintainer can apply the ` +
-                `\`${OVERSIZE_OK_LABEL}\` label to downgrade this block to a warning.\n\n` +
-                'Lockfile, docs, snapshot, and generated-file changes are already excluded ' +
-                'from this count. If the count still seems off, check ' +
-                '`.github/workflows/pr-gate.yml` for the exclusion list.'
+            } else if (totalChanges > REVIEWABILITY_THRESHOLD) {
+              core.warning(
+                `PR is over the size threshold: ${totalChanges} meaningful lines across ${totalFiles} files ` +
+                `(threshold: ${REVIEWABILITY_THRESHOLD}). Merge is allowed, but this PR may be hard to review.\n\n` +
+                'Consider splitting future large PRs by module/package or by concern. ' +
+                `If this PR is large but cohesive, a maintainer can apply the ` +
+                `\`${OVERSIZE_OK_LABEL}\` label to record explicit acknowledgement. ` +
+                'Lockfile, docs, snapshot, and generated-file changes are already excluded from this count.'
               );
             } else if (totalChanges > WARN_THRESHOLD) {
               core.warning(
