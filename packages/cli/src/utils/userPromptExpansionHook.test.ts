@@ -59,6 +59,12 @@ describe('appendUserPromptExpansionAdditionalContext', () => {
 });
 
 describe('formatUserPromptExpansionBlockedMessage', () => {
+  it('escapes ampersands before angle brackets', () => {
+    const result = formatUserPromptExpansionBlockedMessage('a&b<c>');
+
+    expect(result).toBe('UserPromptExpansion blocked: a&amp;b&lt;c&gt;');
+  });
+
   it('sanitizes and truncates block reasons', () => {
     const longReason = `<policy>${'x'.repeat(10_000)}</policy>`;
 
