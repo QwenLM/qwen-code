@@ -61,22 +61,21 @@ export function redactSensitiveFields(value: unknown, depth = 0): unknown {
 export function isSensitiveKey(key: string): boolean {
   const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
   return (
+    // Exact matches — only keep names NOT already covered by the suffix
+    // / substring rules below. wenshao R3 (qwen3.7-max): the following
+    // were redundant and removed — `password` / `apikey` / `idtoken` /
+    // `sessiontoken` / `clientsecret` / `xapikey` / `xauthtoken` —
+    // already caught by `endsWith('password' | 'token' | 'secret' |
+    // 'apikey')` respectively.
     normalized === 'authorization' ||
     normalized === 'auth' ||
     normalized === 'cookie' ||
     normalized === 'setcookie' ||
     normalized === 'credential' ||
     normalized === 'credentials' ||
-    normalized === 'password' ||
     normalized === 'passphrase' ||
-    normalized === 'privatekey' ||
-    normalized === 'apikey' ||
-    normalized === 'clientsecret' ||
-    normalized === 'idtoken' ||
-    normalized === 'sessiontoken' ||
-    normalized === 'xapikey' ||
     normalized === 'xauthkey' ||
-    normalized === 'xauthtoken' ||
+    // Suffix matches — each pattern listed once.
     normalized.endsWith('password') ||
     normalized.endsWith('token') ||
     normalized.endsWith('secret') ||
@@ -84,6 +83,7 @@ export function isSensitiveKey(key: string): boolean {
     normalized.endsWith('accesskey') ||
     normalized.endsWith('apikey') ||
     normalized.endsWith('privatekey') ||
+    // Token-shaped substrings.
     normalized.includes('accesstoken') ||
     normalized.includes('refreshtoken') ||
     normalized.includes('bearertoken') ||
@@ -96,6 +96,114 @@ export function getTextContent(value: unknown): string {
   if (!isRecord(value)) return '';
   const text = value['text'];
   return typeof text === 'string' ? text : '';
+}
+
+/**
+ * PR-C: discriminated content part extracted from a daemon `content` field.
+ *
+ * Existing `getTextContent` returns only the `text` field, silently dropping
+ * multimodal content (`image` / `audio` / `resource`). `extractContentPart`
+ * returns the typed shape so renderers can decide how to project each kind:
+ * a chat bubble for `text`, a thumbnail for `image`, a play button for
+ * `audio`, an attachment link for `resource`.
+ *
+ * Returns `undefined` for unrecognized payloads — callers should treat that
+ * as "skip this content" rather than synthesizing a placeholder.
+ */
+export type DaemonUiContentPart =
+  | { kind: 'text'; text: string }
+  | {
+      kind: 'image';
+      mediaType: string;
+      source: { url?: string; data?: string };
+    }
+  | {
+      kind: 'audio';
+      mediaType: string;
+      source: { url?: string; data?: string };
+    }
+  | {
+      kind: 'resource';
+      uri: string;
+      mediaType?: string;
+      description?: string;
+    };
+
+export function extractContentPart(
+  value: unknown,
+): DaemonUiContentPart | undefined {
+  if (typeof value === 'string') return { kind: 'text', text: value };
+  if (!isRecord(value)) return undefined;
+  const type = value['type'];
+  if (type === 'text' || type === undefined) {
+    const text = value['text'];
+    if (typeof text === 'string') return { kind: 'text', text };
+    return undefined;
+  }
+  if (type === 'image') {
+    const source = isRecord(value['source']) ? value['source'] : undefined;
+    if (!source) return undefined;
+    const mediaType =
+      (typeof value['mediaType'] === 'string'
+        ? (value['mediaType'] as string)
+        : undefined) ??
+      (typeof source['mediaType'] === 'string'
+        ? (source['mediaType'] as string)
+        : undefined) ??
+      'image/*';
+    const url =
+      typeof source['url'] === 'string' ? (source['url'] as string) : undefined;
+    const data =
+      typeof source['data'] === 'string'
+        ? (source['data'] as string)
+        : undefined;
+    if (!url && !data) return undefined;
+    return {
+      kind: 'image',
+      mediaType,
+      source: { ...(url ? { url } : {}), ...(data ? { data } : {}) },
+    };
+  }
+  if (type === 'audio') {
+    const source = isRecord(value['source']) ? value['source'] : undefined;
+    if (!source) return undefined;
+    const mediaType =
+      (typeof value['mediaType'] === 'string'
+        ? (value['mediaType'] as string)
+        : undefined) ?? 'audio/*';
+    const url =
+      typeof source['url'] === 'string' ? (source['url'] as string) : undefined;
+    const data =
+      typeof source['data'] === 'string'
+        ? (source['data'] as string)
+        : undefined;
+    if (!url && !data) return undefined;
+    return {
+      kind: 'audio',
+      mediaType,
+      source: { ...(url ? { url } : {}), ...(data ? { data } : {}) },
+    };
+  }
+  if (type === 'resource' || type === 'resource_link') {
+    const uri =
+      typeof value['uri'] === 'string' ? (value['uri'] as string) : undefined;
+    if (!uri) return undefined;
+    const mediaType =
+      typeof value['mediaType'] === 'string'
+        ? (value['mediaType'] as string)
+        : undefined;
+    const description =
+      typeof value['description'] === 'string'
+        ? (value['description'] as string)
+        : undefined;
+    return {
+      kind: 'resource',
+      uri,
+      ...(mediaType ? { mediaType } : {}),
+      ...(description ? { description } : {}),
+    };
+  }
+  return undefined;
 }
 
 const MAX_OUTPUT_TEXT_DEPTH = 64;

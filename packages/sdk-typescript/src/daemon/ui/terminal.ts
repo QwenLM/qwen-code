@@ -5,6 +5,7 @@
  */
 
 import type { DaemonTranscriptBlock, DaemonUiEvent } from './types.js';
+import { formatMissedRange } from './transcript.js';
 import { sanitizeTerminalText } from './utils.js';
 
 export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
@@ -42,6 +43,112 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       return terminalLine(event.type, event.text, '2');
     case 'error':
       return terminalLine('error', event.text, '31');
+    // Session-meta / workspace / auth events: emit a short structured line
+    // in terminal mode so they show up in tail-style debug, but do not
+    // flood the terminal with full payloads. UI clients with richer
+    // surfaces (web / IDE) consume the typed events directly.
+    case 'session.metadata.changed':
+      return terminalLine(
+        'session',
+        `metadata: ${event.displayName ?? '(no display name)'}`,
+        '36',
+      );
+    case 'session.approval_mode.changed':
+      return terminalLine(
+        'approval-mode',
+        `${event.previous} → ${event.next}${event.persisted ? ' (persisted)' : ''}`,
+        '36',
+      );
+    case 'session.available_commands':
+      return terminalLine('commands', `available ${event.count}`, '2');
+    case 'session.state_resync_required':
+      // wenshao R5 (deepseek-v4-pro): reuse the exported formatter from
+      // transcript.ts so the two sites can't silently diverge.
+      return terminalLine(
+        'resync-required',
+        `${event.reason}: ${formatMissedRange(event.lastDeliveredId, event.earliestAvailableId)}`,
+        '31',
+      );
+    case 'workspace.memory.changed':
+      return terminalLine(
+        'memory',
+        `${event.mode} ${event.scope} ${event.filePath} +${event.bytesWritten}b`,
+        '36',
+      );
+    case 'workspace.agent.changed':
+      return terminalLine(
+        'agent',
+        `${event.change} ${event.level}/${event.name}`,
+        '36',
+      );
+    case 'workspace.tool.toggled':
+      return terminalLine(
+        'tool',
+        `${event.toolName} ${event.enabled ? 'enabled' : 'disabled'}`,
+        '36',
+      );
+    case 'workspace.initialized':
+      return terminalLine(
+        'workspace',
+        `init ${event.action} ${event.path}`,
+        '36',
+      );
+    case 'workspace.mcp.budget_warning':
+      return terminalLine(
+        'mcp',
+        `${event.mode}: ${event.liveCount}/${event.budget} (${Math.round(
+          event.thresholdRatio * 100,
+        )}% threshold)`,
+        '33',
+      );
+    case 'workspace.mcp.child_refused':
+      return terminalLine(
+        'mcp',
+        `refused ${event.refusedServers.length} servers (budget ${event.budget})`,
+        '31',
+      );
+    case 'workspace.mcp.server_restarted':
+      return terminalLine(
+        'mcp',
+        `${event.serverName} restarted in ${event.durationMs}ms`,
+        '36',
+      );
+    case 'workspace.mcp.server_restart_refused':
+      return terminalLine(
+        'mcp',
+        `${event.serverName} restart refused: ${event.reason}`,
+        '33',
+      );
+    case 'auth.device_flow.started':
+      return terminalLine(
+        'auth',
+        `${event.providerId} device-flow started (${event.deviceFlowId})`,
+        '36',
+      );
+    case 'auth.device_flow.throttled':
+      return terminalLine(
+        'auth',
+        `device-flow throttled, retry after ${event.intervalMs}ms`,
+        '33',
+      );
+    case 'auth.device_flow.authorized':
+      return terminalLine(
+        'auth',
+        `${event.providerId} authorized${event.accountAlias ? ` as ${event.accountAlias}` : ''}`,
+        '32',
+      );
+    case 'auth.device_flow.failed':
+      return terminalLine(
+        'auth',
+        `device-flow failed: ${event.errorKind}${event.hint ? ` (${event.hint})` : ''}`,
+        '31',
+      );
+    case 'auth.device_flow.cancelled':
+      return terminalLine(
+        'auth',
+        `device-flow cancelled (${event.deviceFlowId})`,
+        '2',
+      );
     default:
       return assertNever(event);
   }

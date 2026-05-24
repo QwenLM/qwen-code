@@ -97,6 +97,15 @@ export interface ToolCallData {
   content?: ToolCallContent[];
   locations?: ToolCallLocation[];
   timestamp?: number;
+  /**
+   * Optional markdown summary projection of the tool's preview (file
+   * diff, MCP invocation, tabular, etc.) — populated by
+   * `daemonTranscriptToUnifiedMessages` when
+   * `enrichToolDetailsWithPreview: true`. Renderers can show it
+   * alongside `rawOutput` (which is now preserved verbatim, addressing
+   * the doudouOUC review on PR #4353).
+   */
+  previewMarkdown?: string;
 }
 
 /**

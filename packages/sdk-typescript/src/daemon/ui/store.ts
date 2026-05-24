@@ -68,6 +68,36 @@ export function createDaemonTranscriptStore(
       });
       scheduleNotify();
     },
+    // wenshao R4-R6 (qwen3.7-max): explicit recovery from the
+    // `awaitingResync` one-way latch.
+    //
+    // RECOVERY FLOW (correct order — wenshao R6 caught a flow bug):
+    //   1. Daemon emits `session.state_resync_required`; reducer sets
+    //      `state.awaitingResync = true` and starts dropping events.
+    //   2. Consumer decides on recovery strategy and calls EITHER:
+    //        a. `reset()` — clean slate, discard local blocks
+    //        b. `clearAwaitingResync()` — keep local blocks, accept
+    //           new events. Call BEFORE the new SSE stream starts
+    //           delivering events (or BEFORE a `Last-Event-ID: 0`
+    //           replay starts), otherwise the replay events get
+    //           dropped by the latch guard.
+    //   3. Re-subscribe to SSE; events flow normally.
+    //
+    // (The earlier JSDoc said "after replay drains" — that was wrong.
+    // While the latch is set, every replay event is dropped, so the
+    // window between latch-clear and stream-start is what receives
+    // events. Clear early; if dispatch order misses something the
+    // daemon will eventually emit a new `state_resync_required`.)
+    clearAwaitingResync() {
+      if (!state.awaitingResync) return;
+      state = {
+        ...state,
+        awaitingResync: false,
+        // Keep lastResyncRequired for diagnostic visibility — consumers
+        // who want a clean slate can also call reset().
+      };
+      scheduleNotify();
+    },
   };
 }
 
@@ -106,5 +136,10 @@ function createState(
     permissionBlockByRequestId: {
       ...(seed.permissionBlockByRequestId ?? {}),
     },
+    toolProgress: { ...(seed.toolProgress ?? {}) },
+    lastResyncRequired:
+      seed.lastResyncRequired !== undefined
+        ? { ...seed.lastResyncRequired }
+        : undefined,
   };
 }

@@ -5,6 +5,8 @@
  */
 
 import {
+  daemonBlockToMarkdown,
+  daemonToolPreviewToMarkdown,
   isDaemonUiSensitiveKey,
   sanitizeDaemonTerminalText,
   type DaemonTranscriptBlock,
@@ -18,9 +20,35 @@ import type {
   ToolCallStatus,
 } from '../components/toolcalls/shared/index.js';
 
+export interface DaemonTranscriptAdapterOptions {
+  /**
+   * When true, user/assistant/thought block content is projected via the
+   * SDK's `daemonBlockToMarkdown` helper instead of raw sanitized text.
+   * This gives the WebUI's markdown renderer (markdown-it) richer
+   * formatting — bold "You" labels, thought blockquotes, structured
+   * permission lists.
+   *
+   * Default: `false` — preserves the legacy plain-text behavior.
+   * Pass `true` to opt into the PR-D render contract.
+   */
+  useMarkdown?: boolean;
+  /**
+   * When true, tool block `details`/`rawOutput` is enriched with the
+   * preview's markdown projection (file_diff fenced as diff, mcp_invocation
+   * as server::tool, tabular as GFM table). Renderers that already have
+   * structured renderers for each preview kind should leave this `false`.
+   *
+   * Default: `false`.
+   */
+  enrichToolDetailsWithPreview?: boolean;
+}
+
 export function daemonTranscriptToUnifiedMessages(
   blocks: readonly DaemonTranscriptBlock[],
+  options: DaemonTranscriptAdapterOptions = {},
 ): UnifiedMessage[] {
+  const useMarkdown = options.useMarkdown ?? false;
+  const enrichToolDetails = options.enrichToolDetailsWithPreview ?? false;
   const visibleBlocks = blocks.filter((block) => block.kind !== 'debug');
   return visibleBlocks.flatMap((block, index, arr): UnifiedMessage[] => {
     const prev = arr[index - 1];
@@ -36,7 +64,9 @@ export function daemonTranscriptToUnifiedMessages(
             id: block.id,
             type: 'user',
             timestamp,
-            content: sanitizeDisplayText(block.text),
+            content: useMarkdown
+              ? sanitizeDisplayText(daemonBlockToMarkdown(block))
+              : sanitizeDisplayText(block.text),
             isFirst,
             isLast,
           },
@@ -47,7 +77,9 @@ export function daemonTranscriptToUnifiedMessages(
             id: block.id,
             type: 'assistant',
             timestamp,
-            content: sanitizeDisplayText(block.text),
+            content: useMarkdown
+              ? sanitizeDisplayText(daemonBlockToMarkdown(block))
+              : sanitizeDisplayText(block.text),
             isFirst,
             isLast,
           },
@@ -58,7 +90,9 @@ export function daemonTranscriptToUnifiedMessages(
             id: block.id,
             type: 'thinking',
             timestamp,
-            content: sanitizeDisplayText(block.text),
+            content: useMarkdown
+              ? sanitizeDisplayText(daemonBlockToMarkdown(block))
+              : sanitizeDisplayText(block.text),
             isFirst,
             isLast,
           },
@@ -69,7 +103,7 @@ export function daemonTranscriptToUnifiedMessages(
             id: block.id,
             type: 'tool_call',
             timestamp,
-            toolCall: daemonToolBlockToToolCallData(block),
+            toolCall: daemonToolBlockToToolCallData(block, enrichToolDetails),
             isFirst,
             isLast,
           },
@@ -164,7 +198,21 @@ export function daemonTranscriptToUnifiedMessages(
 
 function daemonToolBlockToToolCallData(
   block: DaemonToolTranscriptBlock,
+  enrichDetails: boolean = false,
 ): ToolCallData {
+  // doudouOUC review (Important): do NOT overwrite `rawOutput` with the
+  // preview markdown. The previous code replaced the structured tool
+  // output with a string summary when `enrichDetails === true`, which
+  // (a) broke downstream consumers that expect an object shape on
+  //     `ToolCallData.rawOutput`, and
+  // (b) silently dropped the actual tool output (e.g., a 500-line file)
+  //     in favor of a short summary.
+  // Surface the preview markdown on a new optional `previewMarkdown`
+  // field instead. `rawOutput` is now always the verbatim (sanitized)
+  // daemon-emitted value.
+  const previewMarkdown = enrichDetails
+    ? sanitizeDisplayText(daemonToolPreviewToMarkdown(block.preview))
+    : undefined;
   return {
     toolCallId: block.toolCallId,
     kind: block.toolKind ?? block.toolName ?? 'tool',
@@ -175,6 +223,7 @@ function daemonToolBlockToToolCallData(
       | string
       | undefined,
     rawOutput: sanitizeDaemonValue(block.rawOutput),
+    ...(previewMarkdown !== undefined ? { previewMarkdown } : {}),
     ...(block.content !== undefined
       ? { content: normalizeToolContent(block.content) }
       : {}),
@@ -251,11 +300,33 @@ function normalizePermissionStatus(
       return 'completed';
     case 'selected':
       // A selected option resolves the prompt even when the option id is a
-      // domain value like a city name rather than allow/deny terminology.
-      return classifyPermissionToken(detailParts.join(':')) ?? 'completed';
+      // domain value like a city name or an option id containing deny/cancel.
+      return classifySelectedPermissionOption(detailParts.join(':'));
     default:
       return classifyPermissionToken(primary) ?? 'failed';
   }
+}
+
+function classifySelectedPermissionOption(detail: string): ToolCallStatus {
+  // Design intent (see caller comment at the `selected` branch): a
+  // selected option resolves the prompt even when the option id contains
+  // labels like `cancel` / `abort` / `dismiss`. The user actively
+  // chose the option, so the prompt is resolved — not cancelled. Only
+  // the FAILED set is honored here, because daemons distinguish
+  // explicit-fail (`failed:reason`) from option-selection (`selected:x`)
+  // at the caller layer.
+  //
+  // wenshao R3 (qwen3.7-max) proposed adding a CANCELLED check here, but
+  // that conflicts with the explicit design intent and the existing
+  // `cancelled-substring-permission` test (input `selected:abort`,
+  // expected status `completed`). When the daemon means "user cancelled
+  // the prompt", it emits `cancelled` as the primary token, NOT
+  // `selected:cancel` — and that path is handled separately.
+  const normalized = detail.trim().toLowerCase();
+  if (FAILED_PERMISSION_TERMS.has(normalized)) {
+    return 'failed';
+  }
+  return 'completed';
 }
 
 function classifyPermissionToken(token: string): ToolCallStatus | undefined {
