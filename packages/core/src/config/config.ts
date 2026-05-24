@@ -69,6 +69,11 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import {
+  type AutoModeDenialState,
+  createDenialState,
+  resetDenialState,
+} from '../permissions/denialTracking.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -171,6 +176,7 @@ export enum ApprovalMode {
   PLAN = 'plan',
   DEFAULT = 'default',
   AUTO_EDIT = 'auto-edit',
+  AUTO = 'auto',
   YOLO = 'yolo',
 }
 
@@ -222,12 +228,35 @@ export const APPROVAL_MODE_INFO: Record<ApprovalMode, ApprovalModeInfo> = {
     name: 'Auto Edit',
     description: 'Automatically approve file edits',
   },
+  [ApprovalMode.AUTO]: {
+    id: ApprovalMode.AUTO,
+    name: 'Auto',
+    description: 'LLM classifier auto-approves safe actions, blocks risky ones',
+  },
   [ApprovalMode.YOLO]: {
     id: ApprovalMode.YOLO,
     name: 'YOLO',
     description: 'Automatically approve all tools',
   },
 };
+
+/**
+ * Settings for the AUTO approval mode classifier.
+ *
+ * `hints` and `environment` are natural-language strings injected additively
+ * into the classifier's system prompt; they do NOT use rule-matching syntax.
+ * Use `permissions.allow / ask / deny` for hard rules.
+ */
+export interface AutoModeSettings {
+  hints?: {
+    /** Natural-language descriptions of actions the user wants AUTO mode to allow. */
+    allow?: string[];
+    /** Natural-language descriptions of actions the user wants AUTO mode to block. */
+    deny?: string[];
+  };
+  /** Environment / context lines injected into the classifier's system prompt. */
+  environment?: string[];
+}
 
 export interface AccessibilitySettings {
   enableLoadingPhrases?: boolean;
@@ -275,6 +304,37 @@ export interface TelemetrySettings {
   logPrompts?: boolean;
   includeSensitiveSpanAttributes?: boolean;
   outfile?: string;
+  /**
+   * Static resource attributes attached to every span/log/metric the SDK
+   * exports (OTLP or file outfile — they share the same Resource).
+   * Merged with `OTEL_RESOURCE_ATTRIBUTES`; settings win on key conflict.
+   * Reserved keys (`service.version`, `session.id`) are dropped with a
+   * `diag.warn`.
+   */
+  resourceAttributes?: Record<string, string>;
+  /** Per-signal cardinality controls. */
+  metrics?: TelemetryMetricsSettings;
+  /**
+   * Human-readable diagnostics produced while resolving
+   * `resourceAttributes` (drops, coercions, reserved-key strips).
+   * Populated by `resolveTelemetrySettings()`; the SDK emits a one-time
+   * console summary at startup when this is non-empty so users notice
+   * silent drops without scanning the OTel debug log.
+   *
+   * Not a user-settable field — operators should leave it unset.
+   */
+  resourceAttributeWarnings?: string[];
+}
+
+export interface TelemetryMetricsSettings {
+  /**
+   * Include `session.id` on every metric data point. Default: false.
+   *
+   * WARNING: each CLI session creates a new value, causing unbounded
+   * metric time-series fan-out at the backend. Only enable for
+   * short-term debugging — spans and logs still carry session.id.
+   */
+  includeSessionId?: boolean;
 }
 
 export interface OutputSettings {
@@ -488,6 +548,8 @@ export interface ConfigParameters {
     allow?: string[];
     ask?: string[];
     deny?: string[];
+    /** Settings consumed by the AUTO approval mode classifier. */
+    autoMode?: AutoModeSettings;
   };
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
@@ -721,6 +783,7 @@ export interface ConfigInitializeOptions {
 const DEFAULT_BARE_CORE_TOOLS = [
   ToolNames.READ_FILE,
   ToolNames.EDIT,
+  ToolNames.NOTEBOOK_EDIT,
   ToolNames.SHELL,
 ];
 
@@ -794,6 +857,7 @@ export class Config {
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
+  private readonly permissionsAutoMode: AutoModeSettings;
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
@@ -811,6 +875,7 @@ export class Config {
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
+  private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
@@ -949,6 +1014,7 @@ export class Config {
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
+    this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -976,6 +1042,9 @@ export class Config {
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
       outfile: params.telemetry?.outfile,
+      resourceAttributes: params.telemetry?.resourceAttributes,
+      metrics: params.telemetry?.metrics,
+      resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
@@ -1950,52 +2019,35 @@ export class Config {
   }
 
   /**
-   * Returns the fast model if one is configured and valid for the current auth
-   * type, otherwise returns undefined. Direct runtime paths use this as a
-   * cheaper alternative to the main session model, so it intentionally stays
-   * current-auth-only.
+   * Returns the configured fast model selector when it resolves to an available
+   * model. Bare selectors stay bare and authType-qualified selectors keep their
+   * authType prefix so selector-aware runtime paths can route cross-auth calls.
    */
   getFastModel(): string | undefined {
-    const authType =
-      this.contentGeneratorConfig?.authType ??
-      this.modelsConfig.getCurrentAuthType();
-    if (!authType) return undefined;
-    const selector = this.resolveFastModelSelector();
-    if (!selector) return undefined;
-    if (selector.authType && selector.authType !== authType) return undefined;
-
-    const available = this.getAllConfiguredModels([authType]);
-    return available.some((m) => m.id === selector.modelId)
-      ? selector.modelId
-      : undefined;
-  }
-
-  /**
-   * Returns the fast model for side-query paths. Unlike {@link getFastModel},
-   * this can return an authType-qualified selector because BaseLlmClient can
-   * route a single request through a provider different from the main session.
-   */
-  getFastModelForSideQuery(): string | undefined {
     const selector = this.resolveFastModelSelector();
     if (!selector) return undefined;
 
-    if (selector.authType) {
-      const available = this.getAllConfiguredModels([selector.authType]);
-      return available.some((m) => m.id === selector.modelId)
-        ? `${selector.authType}:${selector.modelId}`
-        : undefined;
+    const available = selector.authType
+      ? this.getAllConfiguredModels([selector.authType])
+      : this.getAllConfiguredModels();
+    if (!available.some((m) => m.id === selector.modelId)) {
+      return undefined;
     }
 
-    const available = this.getAllConfiguredModels();
-    return available.some((m) => m.id === selector.modelId)
-      ? selector.modelId
-      : undefined;
+    const rawSelector = resolveModelId(this.fastModel);
+    return rawSelector?.authType
+      ? `${rawSelector.authType}:${selector.modelId}`
+      : selector.modelId;
   }
 
   private resolveFastModelSelector() {
     if (!this.fastModel) return undefined;
     try {
-      return resolveModelId(this.fastModel);
+      return resolveModelId(this.fastModel, {
+        currentAuthType: this.getContentGeneratorConfig()?.authType,
+        getAvailableModels: (authTypes) =>
+          this.getAllConfiguredModels(authTypes),
+      });
     } catch {
       return undefined;
     }
@@ -2613,6 +2665,32 @@ export class Config {
   }
 
   /**
+   * Returns the AUTO approval mode classifier settings (hints + environment).
+   * Returns an empty object when no settings are configured.
+   */
+  getAutoModeSettings(): AutoModeSettings {
+    return this.permissionsAutoMode;
+  }
+
+  /**
+   * Returns the AUTO mode denialTracking state for the current session.
+   * Used by the scheduler to decide whether to fall back from classifier
+   * evaluation to manual approval. Session-scoped, never persisted.
+   */
+  getAutoModeDenialState(): AutoModeDenialState {
+    return this.autoModeDenialState;
+  }
+
+  /**
+   * Replace the AUTO mode denialTracking state. Caller produces the new
+   * state via one of the pure transitions in `permissions/denialTracking.ts`
+   * (recordAllow / recordBlock / recordUnavailable / recordFallback*).
+   */
+  setAutoModeDenialState(state: AutoModeDenialState): void {
+    this.autoModeDenialState = state;
+  }
+
+  /**
    * Returns the approval mode that was active before entering plan mode.
    * Falls back to DEFAULT if no pre-plan mode was recorded.
    */
@@ -2638,6 +2716,25 @@ export class Config {
       this.approvalMode === ApprovalMode.PLAN
     ) {
       this.prePlanMode = undefined;
+    }
+    // Strip over-broad allow rules (Bash interpreter wildcards, any Agent /
+    // Skill allow) on AUTO entry; restore them on AUTO exit. Settings on
+    // disk are NEVER touched — this is a runtime-only adjustment of the
+    // active PermissionManager rule set. The PermissionManager is `null`
+    // until initialize() is called, so skip the hook on early-startup
+    // mode changes (the strip will happen via initialize for AUTO-default
+    // sessions).
+    const fromMode = this.approvalMode;
+    if (this.permissionManager) {
+      if (mode === ApprovalMode.AUTO && fromMode !== ApprovalMode.AUTO) {
+        this.permissionManager.stripDangerousRulesForAutoMode();
+      } else if (fromMode === ApprovalMode.AUTO && mode !== ApprovalMode.AUTO) {
+        this.permissionManager.restoreDangerousRules();
+      }
+    }
+    // Any deliberate mode change invalidates the AUTO denialTracking signal.
+    if (fromMode !== mode) {
+      this.autoModeDenialState = resetDenialState();
     }
     this.approvalMode = mode;
   }
@@ -2840,6 +2937,18 @@ export class Config {
 
   getTelemetryTarget(): TelemetryTarget {
     return this.telemetrySettings.target ?? DEFAULT_TELEMETRY_TARGET;
+  }
+
+  getTelemetryResourceAttributes(): Record<string, string> {
+    return this.telemetrySettings.resourceAttributes ?? {};
+  }
+
+  getTelemetryMetricsIncludeSessionId(): boolean {
+    return this.telemetrySettings.metrics?.includeSessionId ?? false;
+  }
+
+  getTelemetryResourceAttributeWarnings(): readonly string[] {
+    return this.telemetrySettings.resourceAttributeWarnings ?? [];
   }
 
   getTelemetryOutfile(): string | undefined {
@@ -3629,6 +3738,10 @@ export class Config {
         const { EditTool } = await import('../tools/edit.js');
         return new EditTool(this);
       });
+      await registerLazy(ToolNames.NOTEBOOK_EDIT, async () => {
+        const { NotebookEditTool } = await import('../tools/notebook-edit.js');
+        return new NotebookEditTool(this);
+      });
       await registerLazy(ToolNames.SHELL, async () => {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
@@ -3712,6 +3825,10 @@ export class Config {
     await registerLazy(ToolNames.EDIT, async () => {
       const { EditTool } = await import('../tools/edit.js');
       return new EditTool(this);
+    });
+    await registerLazy(ToolNames.NOTEBOOK_EDIT, async () => {
+      const { NotebookEditTool } = await import('../tools/notebook-edit.js');
+      return new NotebookEditTool(this);
     });
     await registerLazy(ToolNames.WRITE_FILE, async () => {
       const { WriteFileTool } = await import('../tools/write-file.js');

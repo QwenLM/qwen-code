@@ -165,6 +165,11 @@ vi.mock('../../telemetry/index.js', () => {
           success: boolean;
           inputTokens?: number;
           outputTokens?: number;
+          cachedInputTokens?: number;
+          ttftMs?: number;
+          requestSetupMs?: number;
+          attempt?: number;
+          retryTotalDelayMs?: number;
           durationMs?: number;
           error?: string;
         },
@@ -349,7 +354,7 @@ describe('LoggingContentGenerator', () => {
     };
     const generator = new LoggingContentGenerator(
       wrapped,
-      createConfig(),
+      createConfig({ authType: AuthType.USE_ANTHROPIC }),
       generatorConfig,
     );
 
@@ -402,6 +407,7 @@ describe('LoggingContentGenerator', () => {
     expect(responseEvent.response_id).toBe('resp-1');
     expect(responseEvent.model).toBe('model-v2');
     expect(responseEvent.prompt_id).toBe('prompt-1');
+    expect(responseEvent.auth_type).toBe(AuthType.USE_OPENAI);
     expect(responseEvent.input_token_count).toBe(3);
     expect(responseEvent.response_text).toBe('ok');
 
@@ -612,6 +618,150 @@ describe('LoggingContentGenerator', () => {
       success: true,
       inputTokens: 100,
       outputTokens: 50,
+    });
+  });
+
+  it('captures ttftMs on the first user-visible stream chunk (Phase 4a)', async () => {
+    // Two chunks: first has text (user-visible), second has only usage.
+    // ttftMs must be set on the first chunk and not overwritten by the second.
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r1', 'test-model', [{ text: 'hi' }]);
+        yield createResponse('r2', 'test-model', [], {
+          promptTokenCount: 10,
+          candidatesTokenCount: 2,
+          totalTokenCount: 12,
+        });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-ttft',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    const meta = spanRecord.endMetadata as { ttftMs?: number } | undefined;
+    expect(meta).toBeDefined();
+    expect(typeof meta!.ttftMs).toBe('number');
+    expect(meta!.ttftMs!).toBeGreaterThanOrEqual(0);
+  });
+
+  it('forwards cachedInputTokens from usageMetadata to endLLMRequestSpan (Phase 4a)', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r1', 'test-model', [{ text: 'ok' }], {
+          promptTokenCount: 100,
+          candidatesTokenCount: 20,
+          cachedContentTokenCount: 40,
+          totalTokenCount: 160,
+        });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-cache',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: true,
+      inputTokens: 100,
+      cachedInputTokens: 40,
+    });
+  });
+
+  it('leaves ttftMs undefined when stream yields no user-visible chunks (Phase 4a)', async () => {
+    // Stream emits only usage-metadata chunks (no text/functionCall/etc).
+    // ttftMs must stay undefined — TTFT is only meaningful when content arrives.
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r1', 'test-model', [], {
+          promptTokenCount: 5,
+          candidatesTokenCount: 0,
+          totalTokenCount: 5,
+        });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-no-content',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    const meta = spanRecord.endMetadata as { ttftMs?: number } | undefined;
+    expect(meta!.ttftMs).toBeUndefined();
+  });
+
+  it('forwards cachedInputTokens to endLLMRequestSpan on non-stream success (Phase 4a)', async () => {
+    const generateFn = vi.fn().mockResolvedValue(
+      createResponse('resp-cache', 'test-model', [{ text: 'ok' }], {
+        promptTokenCount: 100,
+        candidatesTokenCount: 30,
+        cachedContentTokenCount: 60,
+        totalTokenCount: 190,
+      }),
+    );
+    const wrapped = createWrappedGenerator(generateFn, vi.fn());
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hi',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-cache-non-stream');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: true,
+      inputTokens: 100,
+      outputTokens: 30,
+      cachedInputTokens: 60,
     });
   });
 

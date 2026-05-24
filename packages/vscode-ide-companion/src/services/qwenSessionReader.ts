@@ -8,8 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import * as crypto from 'crypto';
-import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
-import { getGitBranch } from '@qwen-code/qwen-code-core/src/utils/gitUtils.js';
+import { getGitBranch, getProjectHash } from '@qwen-code/qwen-code-core';
 import { getRuntimeBaseDir } from '../utils/paths.js';
 import { truncatePanelTitle } from '../webview/utils/panelTitleUtils.js';
 

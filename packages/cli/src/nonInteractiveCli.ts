@@ -26,6 +26,7 @@ import {
   parseAndFormatApiError,
   createDebugLogger,
   SendMessageType,
+  restoreWorktreeContext,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -372,6 +373,39 @@ export async function runNonInteractive(
 
       if (!initialPartList) {
         initialPartList = [{ text: input }];
+      }
+
+      // Phase C: when --resume restored a session with an active worktree,
+      // prepend a system-reminder block to the user prompt so the model
+      // knows to keep using the worktree path. Stale sidecars (worktree
+      // dir deleted between sessions) are cleaned up inside the helper.
+      // TUI does this via historyManager.addItem(INFO); headless does it
+      // here because there is no UI history to write into.
+      if (config.getResumedSessionData()) {
+        try {
+          const sessionPath = config
+            .getSessionService()
+            .getWorktreeSessionPath(sessionId);
+          const restored = await restoreWorktreeContext(sessionPath);
+          if (restored.contextMessage) {
+            const reminderPart: Part = {
+              text: `<system-reminder>\n${restored.contextMessage}\n</system-reminder>\n\n`,
+            };
+            const partsArr = Array.isArray(initialPartList)
+              ? initialPartList
+              : [initialPartList];
+            initialPartList = [reminderPart, ...partsArr];
+            // Also surface the notice in the JSON stream so SDK consumers
+            // can react to it (logging, UI hints, etc.).
+            adapter.emitSystemMessage('worktree_restored', {
+              slug: restored.session?.slug,
+              path: restored.session?.worktreePath,
+              branch: restored.session?.worktreeBranch,
+            });
+          }
+        } catch (error) {
+          debugLogger.warn(`worktree restore failed (non-fatal):`, error);
+        }
       }
 
       const initialParts = normalizePartList(initialPartList);

@@ -1129,7 +1129,7 @@ Request:
 { "mode": "auto-edit", "persist": false }
 ```
 
-`mode` must be one of `'plan' | 'default' | 'auto-edit' | 'yolo'` (mirror of core's `ApprovalMode` enum; the SDK exports `DAEMON_APPROVAL_MODES` for runtime validation). `persist` defaults to `false`.
+`mode` must be one of `'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo'` (mirror of core's `ApprovalMode` enum; the SDK exports `DAEMON_APPROVAL_MODES` for runtime validation). `persist` defaults to `false`.
 
 Response (200):
 

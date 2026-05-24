@@ -9,7 +9,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import pathMod from 'node:path';
 import { useState, useCallback, useEffect, useMemo, useReducer } from 'react';
-import { createDebugLogger, unescapePath } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  unescapePath,
+  getExternalEditorCommand,
+  type EditorType,
+} from '@qwen-code/qwen-code-core';
 import {
   toCodePoints,
   cpLen,
@@ -804,6 +809,7 @@ interface UseTextBufferProps {
   onChange?: (text: string) => void; // Callback for when text changes
   isValidPath: (path: string) => boolean;
   shellModeActive?: boolean; // Whether the text buffer is in shell mode
+  preferredEditor?: EditorType;
 }
 
 interface UndoHistoryEntry {
@@ -1902,6 +1908,7 @@ export function useTextBuffer({
   onChange,
   isValidPath,
   shellModeActive = false,
+  preferredEditor,
 }: UseTextBufferProps): TextBuffer {
   const initialState = useMemo((): TextBufferState => {
     const lines = initialText.split('\n');
@@ -2210,47 +2217,140 @@ export function useTextBuffer({
 
   const openInExternalEditor = useCallback(
     async (opts: { editor?: string } = {}): Promise<void> => {
-      const editor =
-        opts.editor ??
-        process.env['VISUAL'] ??
-        process.env['EDITOR'] ??
-        (process.platform === 'win32' ? 'notepad' : 'vi');
-      const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
-      const filePath = pathMod.join(tmpDir, 'buffer.txt');
-      fs.writeFileSync(filePath, text, 'utf8');
+      let tmpDir: string;
+      let filePath: string;
+      try {
+        tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
+        filePath = pathMod.join(tmpDir, 'buffer.txt');
+      } catch (err) {
+        debugLogger.error(
+          '[useTextBuffer] failed to create temp directory',
+          err,
+        );
+        return;
+      }
 
-      dispatch({ type: 'create_undo_snapshot' });
+      let editorCmd: string;
+      let editorArgs: string[];
+      let useShell = false;
+      let editorSource: 'opts' | 'preferred' | 'env/default' = 'env/default';
+
+      if (opts.editor) {
+        // Explicit programmatic override takes highest priority
+        editorCmd = opts.editor;
+        editorArgs = [filePath];
+        editorSource = 'opts';
+        if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
+          if (/["|%!]/.test(editorCmd)) {
+            debugLogger.error(
+              `[useTextBuffer] opts.editor command contains unsafe characters: ${editorCmd}`,
+            );
+            try {
+              fs.rmSync(tmpDir, { recursive: true, force: true });
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
+          useShell = true;
+        }
+      } else {
+        const resolved = preferredEditor
+          ? getExternalEditorCommand(preferredEditor, filePath)
+          : null;
+
+        if (resolved) {
+          editorCmd = resolved.command;
+          editorArgs = resolved.args;
+          useShell = resolved.needsShell;
+          editorSource = 'preferred';
+        } else {
+          if (preferredEditor) {
+            debugLogger.warn(
+              `[useTextBuffer] preferred editor "${preferredEditor}" not found, falling back to env/default`,
+            );
+          }
+          editorCmd =
+            process.env['VISUAL'] ??
+            process.env['EDITOR'] ??
+            (process.platform === 'win32' ? 'notepad' : 'vi');
+          editorArgs = [filePath];
+          if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
+            if (/["|%!]/.test(editorCmd)) {
+              debugLogger.error(
+                `[useTextBuffer] Editor command from environment contains unsafe characters: ${editorCmd}`,
+              );
+              try {
+                fs.rmSync(tmpDir, { recursive: true, force: true });
+              } catch {
+                /* ignore */
+              }
+              return;
+            }
+            useShell = true;
+          }
+        }
+      }
+
+      if (useShell) {
+        // .cmd/.bat launch through cmd.exe on Windows. Quote both the
+        // command and args so paths with spaces survive cmd.exe parsing.
+        // These are process-generated paths; do not reuse for
+        // user-controlled arguments.
+        editorCmd = `"${editorCmd}"`;
+        editorArgs = editorArgs.map((a) => `"${a}"`);
+      }
 
       const wasRaw = stdin?.isRaw ?? false;
       try {
+        fs.writeFileSync(filePath, text, { encoding: 'utf8', mode: 0o600 });
         setRawMode?.(false);
-        const { status, error } = spawnSync(editor, [filePath], {
+
+        debugLogger.warn(
+          `[useTextBuffer] launching external editor (cmd=${editorCmd}, shell=${useShell}, source=${editorSource}, file=${filePath})`,
+        );
+        const { status, error, signal } = spawnSync(editorCmd, editorArgs, {
           stdio: 'inherit',
+          shell: useShell,
+          timeout: 30 * 60 * 1000,
         });
         if (error) throw error;
+        if (signal)
+          throw new Error(`External editor was killed by signal ${signal}`);
         if (typeof status === 'number' && status !== 0)
           throw new Error(`External editor exited with status ${status}`);
 
         let newText = fs.readFileSync(filePath, 'utf8');
         newText = newText.replace(/\r\n?/g, '\n');
-        dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
+        if (newText !== text) {
+          dispatch({ type: 'create_undo_snapshot' });
+          dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
+        }
       } catch (err) {
-        debugLogger.error('[useTextBuffer] external editor error', err);
+        debugLogger.error(
+          `[useTextBuffer] external editor error (cmd=${editorCmd}, shell=${useShell}, source=${editorSource}, file=${filePath})`,
+          err,
+        );
       } finally {
-        if (wasRaw) setRawMode?.(true);
         try {
-          fs.unlinkSync(filePath);
-        } catch {
-          /* ignore */
+          if (wasRaw) setRawMode?.(true);
+        } catch (rawErr) {
+          debugLogger.error(
+            '[useTextBuffer] failed to restore raw mode after external editor',
+            rawErr,
+          );
         }
         try {
-          fs.rmdirSync(tmpDir);
+          // recursive+force handles leftover swap files (.swp) from vim/neovim.
+          // On Windows, EPERM/EBUSY from locked files may still cause a partial
+          // delete — the catch below keeps it non-fatal.
+          fs.rmSync(tmpDir, { recursive: true, force: true });
         } catch {
-          /* ignore */
+          /* best-effort cleanup */
         }
       }
     },
-    [text, stdin, setRawMode],
+    [text, stdin, setRawMode, preferredEditor],
   );
 
   const handleInput = useCallback(
@@ -2595,19 +2695,14 @@ export interface TextBuffer {
     sequence: string;
   }) => void;
   /**
-   * Opens the current buffer contents in the user's preferred terminal text
-   * editor ($VISUAL or $EDITOR, falling back to "vi").  The method blocks
-   * until the editor exits, then reloads the file and replaces the in‑memory
-   * buffer with whatever the user saved.
+   * Opens the current buffer contents in an external editor.  Resolution
+   * order: `/editor` preference → `$VISUAL` → `$EDITOR` → platform default (`vi` on Unix, `notepad` on Windows).
    *
-   * The operation is treated as a single undoable edit – we snapshot the
-   * previous state *once* before launching the editor so one `undo()` will
-   * revert the entire change set.
+   * The undo snapshot is created *after* the editor exits and only when
+   * the content actually changed, so one `undo()` reverts the entire edit.
    *
-   * Note: We purposefully rely on the *synchronous* spawn API so that the
-   * calling process genuinely waits for the editor to close before
-   * continuing.  This mirrors Git's behaviour and simplifies downstream
-   * control‑flow (callers can simply `await` the Promise).
+   * Uses the synchronous spawn API so the calling process blocks until the
+   * editor closes, mirroring Git's behaviour.
    */
   openInExternalEditor: (opts?: { editor?: string }) => Promise<void>;
 

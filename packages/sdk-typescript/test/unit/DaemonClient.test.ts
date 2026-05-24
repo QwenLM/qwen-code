@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   DaemonClient,
   DaemonHttpError,
@@ -497,9 +497,82 @@ describe('DaemonClient', () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { status: 'ok' }),
       );
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-      await client.health();
-      expect(calls[0]?.headers['authorization']).toBeUndefined();
+      // Defensive: an inherited test-runner export of QWEN_SERVER_TOKEN
+      // would otherwise activate the PR 27 env fallback and turn this
+      // assertion into a false positive ("got Bearer <leaked-value>"
+      // instead of the expected `undefined`). Snapshot + restore in a
+      // try/finally so the rest of the suite sees the same env state.
+      const ORIGINAL = process.env['QWEN_SERVER_TOKEN'];
+      delete process.env['QWEN_SERVER_TOKEN'];
+      try {
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBeUndefined();
+      } finally {
+        if (ORIGINAL === undefined) delete process.env['QWEN_SERVER_TOKEN'];
+        else process.env['QWEN_SERVER_TOKEN'] = ORIGINAL;
+      }
+    });
+
+    describe('QWEN_SERVER_TOKEN env fallback (PR 27 / #4175 v0.16-alpha)', () => {
+      const ORIGINAL = process.env['QWEN_SERVER_TOKEN'];
+      afterEach(() => {
+        if (ORIGINAL === undefined) delete process.env['QWEN_SERVER_TOKEN'];
+        else process.env['QWEN_SERVER_TOKEN'] = ORIGINAL;
+      });
+
+      it('uses QWEN_SERVER_TOKEN when no explicit token is passed', async () => {
+        process.env['QWEN_SERVER_TOKEN'] = 'env-token-abc';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBe('Bearer env-token-abc');
+      });
+
+      it('explicit opts.token wins over env', async () => {
+        process.env['QWEN_SERVER_TOKEN'] = 'env-token-loses';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'explicit-wins',
+          fetch,
+        });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBe('Bearer explicit-wins');
+      });
+
+      it('treats empty / whitespace-only env var as unset', async () => {
+        // A stale `export QWEN_SERVER_TOKEN=""` would otherwise let the
+        // Authorization header through as `Bearer ` (no token), which
+        // the daemon rejects but is confusing to debug. PR 27 collapses
+        // empty / whitespace-only onto the same "unset" branch as
+        // truly-unset; verify both shapes here.
+        process.env['QWEN_SERVER_TOKEN'] = '   ';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBeUndefined();
+      });
+
+      it('strips leading/trailing whitespace from env var', async () => {
+        // Matches the daemon-side `--token` trim behavior — handy for
+        // `export QWEN_SERVER_TOKEN="$(cat token.txt)"` where `cat`
+        // produces a trailing newline that would otherwise corrupt
+        // the Authorization header value.
+        process.env['QWEN_SERVER_TOKEN'] = '  trimmed-value  \n';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBe('Bearer trimmed-value');
+      });
     });
   });
 

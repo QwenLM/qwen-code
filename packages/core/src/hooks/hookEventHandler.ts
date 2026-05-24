@@ -6,6 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import type { HookPlanner, HookEventContext } from './hookPlanner.js';
+import { getHookMatcherTarget } from './hookPlanner.js';
 import type { HookRunner } from './hookRunner.js';
 import type { HookAggregator, AggregatedHookResult } from './hookAggregator.js';
 import type { SessionHooksManager } from './sessionHooksManager.js';
@@ -568,14 +569,17 @@ export class HookEventHandler {
 
       // Get session hooks and merge with registry hooks
       const sessionId = input.session_id;
-      const targetName = context?.toolName || '';
-      const sessionHooks = sessionId
-        ? this.sessionHooksManager.getMatchingHooks(
-            sessionId,
-            eventName,
-            targetName,
-          )
-        : [];
+      const matcherTarget = getHookMatcherTarget(eventName, context)?.target;
+      const sessionHooks =
+        sessionId !== undefined
+          ? matcherTarget === undefined
+            ? this.sessionHooksManager.getHooksForEvent(sessionId, eventName)
+            : this.sessionHooksManager.getMatchingHooks(
+                sessionId,
+                eventName,
+                matcherTarget,
+              )
+          : [];
 
       // Merge hook configs from registry plan and session hooks
       const registryHookConfigs = plan?.hookConfigs || [];

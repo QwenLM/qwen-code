@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import {
   convertClaudeToQwenConfig,
+  convertClaudeAgentConfig,
   mergeClaudeConfigs,
   isClaudePluginConfig,
   convertClaudePluginPackage,
@@ -76,6 +77,18 @@ describe('convertClaudeToQwenConfig', () => {
     } as ClaudePluginConfig;
 
     expect(() => convertClaudeToQwenConfig(invalidConfig)).toThrow();
+  });
+});
+
+describe('convertClaudeAgentConfig', () => {
+  it('should map Claude NotebookEdit to Qwen NotebookEdit', () => {
+    const result = convertClaudeAgentConfig({
+      name: 'notebook-agent',
+      description: 'Works on notebooks',
+      tools: ['Read', 'NotebookEdit', 'Edit'],
+    });
+
+    expect(result['tools']).toEqual(['ReadFile', 'NotebookEdit', 'Edit']);
   });
 });
 

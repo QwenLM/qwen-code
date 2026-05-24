@@ -16,6 +16,7 @@
  * and how to interpret the results.
  */
 
+import { randomUUID } from 'node:crypto';
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
@@ -271,7 +272,7 @@ export class AgentCore {
     hooks?: AgentHooks,
     runtimeView?: RuntimeContentGeneratorView,
   ) {
-    const randomPart = Math.random().toString(36).slice(2, 8);
+    const randomPart = randomUUID().replace(/-/g, '').slice(0, 8);
     this.subagentId = `${name}-${randomPart}`;
     this.name = name;
     this.runtimeContext = runtimeContext;

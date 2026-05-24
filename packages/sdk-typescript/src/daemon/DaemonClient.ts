@@ -127,6 +127,48 @@ function stripTrailingSlashes(url: string): string {
 }
 
 /**
+ * PR 27 (#4175 v0.16-alpha): SDK env fallback for the daemon bearer
+ * token. Mirrors the daemon-side `--token` CLI fallback to
+ * `QWEN_SERVER_TOKEN` (the daemon's own token-resolution path in
+ * `runQwenServe` reads the same env var in the same shape) so a
+ * developer with `export QWEN_SERVER_TOKEN=...` in their shell never
+ * has to thread the value through every `DaemonClient` construction.
+ *
+ * Defensive on three axes:
+ *   1. **Browser-safe**: `globalThis.process` indirection. The SDK is
+ *      imported by `@qwen-code/webui` (#4328); a literal
+ *      `process.env[...]` would explode at module load on browser
+ *      bundles. Browser globals don't expose `process` so this returns
+ *      `undefined` cleanly there.
+ *   2. **Whitespace stripped**: matches the daemon-side trim behavior
+ *      documented in the `qwen-serve` user guide under the CLI flags
+ *      section — handy for `$(cat token.txt)` that produces a trailing
+ *      newline.
+ *   3. **Empty / whitespace-only treated as unset**: a stale
+ *      `export QWEN_SERVER_TOKEN=""` would otherwise let the
+ *      Authorization header through as `Bearer ` (no token), which
+ *      the daemon rejects but is confusing to debug. Returning
+ *      `undefined` here means the constructor's `?? readTokenFromEnv()`
+ *      fallback chain treats both "unset" and "set-but-empty"
+ *      identically — no header sent.
+ */
+function readTokenFromEnv(): string | undefined {
+  try {
+    const proc = (
+      globalThis as {
+        process?: { env?: Record<string, string | undefined> };
+      }
+    ).process;
+    const raw = proc?.env?.['QWEN_SERVER_TOKEN'];
+    if (typeof raw !== 'string') return undefined;
+    const trimmed = raw.trim();
+    return trimmed.length === 0 ? undefined : trimmed;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Thrown for any non-2xx daemon response. `status` and `body` are surfaced
  * so callers can branch on the standard daemon HTTP semantics (404 missing
  * session, 401 bad token, 400 malformed body, 500 agent failure).
@@ -229,7 +271,13 @@ export class DaemonClient {
 
   constructor(opts: DaemonClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts.baseUrl);
-    this.token = opts.token;
+    // PR 27 (#4175 v0.16-alpha): when no explicit token is passed, fall
+    // back to QWEN_SERVER_TOKEN env var so clients with
+    // `export QWEN_SERVER_TOKEN=...` in their shell don't have to
+    // thread the value through every construction. Matches the
+    // daemon-side `--token` CLI fallback for symmetry. See
+    // `readTokenFromEnv` above for browser-safety + trim semantics.
+    this.token = opts.token ?? readTokenFromEnv();
     this._fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
     // Coerce non-positive / non-finite to 0 (= disabled). Without this
     // a caller passing `-1` or `NaN` would slip past the

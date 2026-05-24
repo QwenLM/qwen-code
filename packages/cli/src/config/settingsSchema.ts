@@ -620,6 +620,16 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      autoModeAcknowledged: {
+        type: 'boolean',
+        label: 'Auto Mode Acknowledged',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'True once the user has seen the first-time information message about the AUTO approval mode. Set automatically; not intended for manual configuration.',
+        showInDialog: false,
+      },
       statusLine: {
         type: 'object',
         label: 'Status Line',
@@ -650,6 +660,16 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: {} as Record<string, CustomTheme>,
         description: 'Custom theme definitions.',
+        showInDialog: false,
+      },
+      hideBuiltinWorktreeIndicator: {
+        type: 'boolean',
+        label: 'Hide Built-in Worktree Indicator',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When true, the built-in `⎇ worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself — otherwise an active worktree silently has no UI affordance.',
         showInDialog: false,
       },
       hideWindowTitle: {
@@ -991,6 +1011,26 @@ const SETTINGS_SCHEMA = {
             'When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.',
           type: 'boolean',
           default: false,
+        },
+        resourceAttributes: {
+          description:
+            'Static resource attributes attached to every span/log/metric the SDK exports (OTLP or file outfile — they share the same Resource). Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version, session.id) are dropped with a warning.',
+          type: 'object',
+          additionalProperties: { type: 'string' },
+          default: {},
+        },
+        metrics: {
+          description: 'Per-signal cardinality controls for exported metrics.',
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            includeSessionId: {
+              description:
+                'Include session.id on every metric data point. WARNING: each CLI session creates a new value, causing unbounded metric time-series fan-out at the backend. Only enable for short-term debugging — spans and logs still carry session.id.',
+              type: 'boolean',
+              default: false,
+            },
+          },
         },
       },
       additionalProperties: true,
@@ -1448,6 +1488,62 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
+      autoMode: {
+        type: 'object',
+        label: 'Auto Mode',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description: 'Settings consumed by the AUTO approval mode classifier.',
+        showInDialog: false,
+        properties: {
+          hints: {
+            type: 'object',
+            label: 'Classifier Hints',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description:
+              'Natural-language hints injected into the classifier system prompt.',
+            showInDialog: false,
+            properties: {
+              allow: {
+                type: 'array',
+                label: 'Auto Mode Allow Hints',
+                category: 'Tools',
+                requiresRestart: true,
+                default: undefined as string[] | undefined,
+                description:
+                  'Natural-language descriptions of actions AUTO mode should allow.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.UNION,
+              },
+              deny: {
+                type: 'array',
+                label: 'Auto Mode Deny Hints',
+                category: 'Tools',
+                requiresRestart: true,
+                default: undefined as string[] | undefined,
+                description:
+                  'Natural-language descriptions of actions AUTO mode should block.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.UNION,
+              },
+            },
+          },
+          environment: {
+            type: 'array',
+            label: 'Auto Mode Environment',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as string[] | undefined,
+            description:
+              'Environment / context lines injected into the classifier system prompt.',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.UNION,
+          },
+        },
+      },
     },
   },
 
@@ -1595,6 +1691,7 @@ const SETTINGS_SCHEMA = {
           { value: ApprovalMode.PLAN, label: 'Plan' },
           { value: ApprovalMode.DEFAULT, label: 'Default' },
           { value: ApprovalMode.AUTO_EDIT, label: 'Auto Edit' },
+          { value: ApprovalMode.AUTO, label: 'Auto' },
           { value: ApprovalMode.YOLO, label: 'YOLO' },
         ],
       },

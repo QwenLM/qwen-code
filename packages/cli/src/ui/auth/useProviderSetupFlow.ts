@@ -5,22 +5,19 @@
  */
 
 import { useState, useCallback } from 'react';
-import { AuthType } from '@qwen-code/qwen-code-core';
-import type { InputModalities } from '@qwen-code/qwen-code-core';
-import { t } from '../../i18n/index.js';
-
-const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
-  [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
-  [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
-  [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
-};
 import {
+  AuthType,
   shouldShowStep,
   resolveBaseUrl,
+  getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
-  type ProviderConfig,
-  type ProviderSetupInputs,
-} from '../../auth/providerConfig.js';
+} from '@qwen-code/qwen-code-core';
+import type {
+  InputModalities,
+  ProviderConfig,
+  ProviderSetupInputs,
+} from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 import { normalizeModelIds, maskApiKey } from './useAuth.js';
 
 // ---------------------------------------------------------------------------
@@ -66,6 +63,7 @@ export interface ProviderSetupState {
 
   // BaseUrl
   baseUrl: string;
+  baseUrlPlaceholder: string;
   baseUrlOptionIndex: number;
   baseUrlError: string | null;
 
@@ -107,6 +105,7 @@ export function useProviderSetupFlow(
 
   const [protocol, setProtocol] = useState<AuthType>(AuthType.USE_OPENAI);
   const [baseUrl, setBaseUrl] = useState('');
+  const [baseUrlPlaceholder, setBaseUrlPlaceholder] = useState('');
   const [baseUrlOptionIndex, setBaseUrlOptionIndex] = useState(0);
   const [baseUrlError, setBaseUrlError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState('');
@@ -117,7 +116,7 @@ export function useProviderSetupFlow(
   const [modalityEnabled, setModalityEnabled] = useState(false);
   const [modalityImage, setModalityImage] = useState(true);
   const [modalityVideo, setModalityVideo] = useState(true);
-  const [modalityAudio, setModalityAudio] = useState(true);
+  const [modalityAudio, setModalityAudio] = useState(false);
   const [modalityPdf, setModalityPdf] = useState(false);
   const [contextWindowSize, setContextWindowSize] = useState('');
   const [focusedConfigIndex, setFocusedConfigIndex] = useState(0);
@@ -139,9 +138,14 @@ export function useProviderSetupFlow(
 
       const proto = initialProtocol ?? config.protocol;
       setProtocol(proto);
-      const defaultUrl =
-        resolveBaseUrl(config) || DEFAULT_BASE_URLS[proto] || '';
-      setBaseUrl(defaultUrl);
+      // For presets the baseUrl is fixed (string) or selected from options;
+      // for the custom provider it's empty and the placeholder hints at the
+      // default endpoint for the chosen protocol.
+      const resolved = resolveBaseUrl(config);
+      setBaseUrl(resolved);
+      setBaseUrlPlaceholder(
+        resolved ? '' : getDefaultBaseUrlForProtocol(proto),
+      );
       setBaseUrlOptionIndex(0);
       setBaseUrlError(null);
 
@@ -149,7 +153,7 @@ export function useProviderSetupFlow(
       if (existingEnv) {
         const envKeyName =
           typeof config.envKey === 'function'
-            ? config.envKey(proto, defaultUrl)
+            ? config.envKey(proto, resolved)
             : config.envKey;
         prefillKey = existingEnv[envKeyName] ?? '';
       }
@@ -162,7 +166,7 @@ export function useProviderSetupFlow(
       setModalityEnabled(false);
       setModalityImage(true);
       setModalityVideo(true);
-      setModalityAudio(true);
+      setModalityAudio(false);
       setModalityPdf(false);
       setContextWindowSize('');
       setFocusedConfigIndex(0);
@@ -194,8 +198,10 @@ export function useProviderSetupFlow(
   const selectProtocol = useCallback(
     (selectedProtocol: AuthType) => {
       setProtocol(selectedProtocol);
-      const nextBaseUrl = DEFAULT_BASE_URLS[selectedProtocol] ?? '';
-      setBaseUrl(nextBaseUrl);
+      // Clear baseUrl so the user types fresh; show the protocol's default
+      // endpoint as a placeholder (used if they submit blank).
+      setBaseUrl('');
+      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
       setApiKey('');
       setApiKeyError(null);
       goNext();
@@ -213,19 +219,24 @@ export function useProviderSetupFlow(
   );
 
   const submitBaseUrl = useCallback((): boolean => {
-    const trimmed = baseUrl.trim();
-    if (!trimmed) {
+    // Empty input falls back to the placeholder default so the visible hint
+    // matches what gets written.
+    const effective = baseUrl.trim() || baseUrlPlaceholder.trim();
+    if (!effective) {
       setBaseUrlError(t('Base URL cannot be empty.'));
       return false;
     }
-    if (!/^https?:\/\//i.test(trimmed)) {
+    if (!/^https?:\/\//i.test(effective)) {
       setBaseUrlError(t('Base URL must start with http:// or https://.'));
       return false;
+    }
+    if (!baseUrl.trim()) {
+      setBaseUrl(effective);
     }
     setBaseUrlError(null);
     goNext();
     return true;
-  }, [baseUrl, goNext]);
+  }, [baseUrl, baseUrlPlaceholder, goNext]);
 
   const changeBaseUrl = useCallback((value: string) => {
     setBaseUrl(value);
@@ -460,6 +471,7 @@ export function useProviderSetupFlow(
     totalSteps: visibleSteps.length,
     protocol,
     baseUrl,
+    baseUrlPlaceholder,
     baseUrlOptionIndex,
     baseUrlError,
     apiKey,

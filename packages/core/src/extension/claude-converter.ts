@@ -102,7 +102,7 @@ const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
   Glob: 'Glob',
   Grep: 'Grep',
   KillShell: 'None',
-  NotebookEdit: 'None',
+  NotebookEdit: 'NotebookEdit',
   Read: 'ReadFile',
   Skill: 'Skill',
   Task: 'Task',

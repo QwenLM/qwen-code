@@ -891,7 +891,7 @@ export async function main() {
       settings,
     );
 
-    const prompt_id = Math.random().toString(16).slice(2);
+    const prompt_id = createNonInteractivePromptId(config.getSessionId());
 
     if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
@@ -946,6 +946,10 @@ export async function main() {
     await runExitCleanup();
     process.exit(exitCode);
   }
+}
+
+export function createNonInteractivePromptId(sessionId: string): string {
+  return `${sessionId}########0`;
 }
 
 function setWindowTitle(title: string, settings: LoadedSettings) {

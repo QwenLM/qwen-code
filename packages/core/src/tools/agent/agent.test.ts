@@ -696,7 +696,13 @@ describe('AgentTool', () => {
       expect(result.returnDisplay).toHaveProperty('status', 'completed');
     });
 
-    it('should not require confirmation', async () => {
+    it("L3 default is 'ask' so AUTO mode routes through the classifier", async () => {
+      // Previously this returned 'allow', but launching a sub-agent
+      // hands control to a new instance with its own tool access — a
+      // privileged sink. The AUTO scheduler short-circuits at L4 when
+      // finalPermission === 'allow', so without this override the
+      // classifier projection added in PR #4151 would never be reached
+      // and arbitrary sub-agent spawns would bypass classifier review.
       const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
@@ -708,7 +714,7 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       const permission = await invocation.getDefaultPermission();
 
-      expect(permission).toBe('allow');
+      expect(permission).toBe('ask');
     });
 
     it('should provide correct description', async () => {

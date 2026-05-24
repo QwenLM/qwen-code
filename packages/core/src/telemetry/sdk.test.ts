@@ -137,6 +137,9 @@ describe('Telemetry SDK', () => {
       getTelemetryTarget: () => 'local',
       getTelemetryOutfile: () => undefined,
       getTelemetryIncludeSensitiveSpanAttributes: () => false,
+      getTelemetryResourceAttributes: () => ({}),
+      getTelemetryMetricsIncludeSessionId: () => false,
+      getTelemetryResourceAttributeWarnings: () => [],
       getDebugMode: () => false,
       getSessionId: () => 'test-session',
       getCliVersion: () => '1.0.0-test',
@@ -512,6 +515,126 @@ describe('Telemetry SDK', () => {
     };
     expect(resource.attributes['service.version']).toBe('unknown');
   });
+
+  describe('Resource attributes', () => {
+    function getResourceAttributes(): Record<string, string> {
+      const constructorCall = vi.mocked(NodeSDK).mock.calls[0]![0]!;
+      return (
+        constructorCall.resource as { attributes: Record<string, string> }
+      ).attributes;
+    }
+
+    it('does not place session.id on the Resource', () => {
+      initializeTelemetry(mockConfig);
+      expect(getResourceAttributes()['session.id']).toBeUndefined();
+    });
+
+    it('always sets service.name and service.version from runtime', () => {
+      initializeTelemetry(mockConfig);
+      const attrs = getResourceAttributes();
+      expect(attrs['service.name']).toBe('qwen-code');
+      expect(attrs['service.version']).toBe('1.0.0-test');
+    });
+
+    it('attaches user-provided resource attributes', () => {
+      vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
+        team: 'platform',
+        env: 'prod',
+      });
+      initializeTelemetry(mockConfig);
+      const attrs = getResourceAttributes();
+      expect(attrs['team']).toBe('platform');
+      expect(attrs['env']).toBe('prod');
+    });
+
+    it('user-provided service.name wins over default', () => {
+      vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
+        'service.name': 'qwen-code-ci',
+      });
+      initializeTelemetry(mockConfig);
+      expect(getResourceAttributes()['service.name']).toBe('qwen-code-ci');
+    });
+
+    it('user-provided service.version is ignored (runtime value wins)', () => {
+      vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
+        'service.version': '99.0.0-fake',
+      });
+      initializeTelemetry(mockConfig);
+      expect(getResourceAttributes()['service.version']).toBe('1.0.0-test');
+    });
+
+    it('empty-string service.name from settings falls back to default', () => {
+      // Reviewer caught: `??` would let "" pass; `||` correctly falls back
+      // so backends never see a blank service name.
+      vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
+        'service.name': '',
+      });
+      initializeTelemetry(mockConfig);
+      expect(getResourceAttributes()['service.name']).toBe('qwen-code');
+    });
+
+    it('whitespace-only service.name from settings falls back to default', () => {
+      // Reviewer caught: plain `||` lets `" "` through (truthy). The
+      // `.trim() || SERVICE_NAME` fallback covers both empty and
+      // whitespace-only values (env path can produce these via `%20`).
+      vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
+        'service.name': '   ',
+      });
+      initializeTelemetry(mockConfig);
+      expect(getResourceAttributes()['service.name']).toBe('qwen-code');
+    });
+
+    it('emits a console summary when resource-attribute warnings are present', () => {
+      const consoleWarnSpy = vi
+        .spyOn(console, 'warn')
+        .mockImplementation(() => {});
+      try {
+        vi.spyOn(
+          mockConfig,
+          'getTelemetryResourceAttributeWarnings',
+        ).mockReturnValue([
+          'OTEL_RESOURCE_ATTRIBUTES cannot override reserved key "service.version"; ignoring',
+          'Skipping malformed OTEL_RESOURCE_ATTRIBUTES entry: "bogus"',
+        ]);
+        initializeTelemetry(mockConfig);
+        const header = consoleWarnSpy.mock.calls[0]?.[0] ?? '';
+        expect(header).toContain('2 resource attribute issue');
+        expect(
+          consoleWarnSpy.mock.calls.some((c) =>
+            String(c[0]).includes('reserved key'),
+          ),
+        ).toBe(true);
+      } finally {
+        consoleWarnSpy.mockRestore();
+      }
+    });
+
+    it('no console output when warnings list is empty', () => {
+      const consoleWarnSpy = vi
+        .spyOn(console, 'warn')
+        .mockImplementation(() => {});
+      try {
+        initializeTelemetry(mockConfig);
+        expect(consoleWarnSpy).not.toHaveBeenCalled();
+      } finally {
+        consoleWarnSpy.mockRestore();
+      }
+    });
+
+    it('user-provided session.id is stripped (defense-in-depth)', () => {
+      // Simulates a caller that bypasses resolveTelemetrySettings() and feeds
+      // raw user input straight into Config. Resource must still not carry
+      // session.id, otherwise it would leak onto every metric data point.
+      vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
+        'session.id': 'spoofed',
+        team: 'x',
+      });
+      initializeTelemetry(mockConfig);
+      const attrs = getResourceAttributes();
+      expect(attrs['session.id']).toBeUndefined();
+      expect(attrs['team']).toBe('x');
+    });
+  });
 });
 
 describe('refreshSessionContext', () => {
@@ -528,6 +651,9 @@ describe('refreshSessionContext', () => {
       getTelemetryOtlpMetricsEndpoint: () => undefined,
       getTelemetryTarget: () => 'local',
       getTelemetryOutfile: () => undefined,
+      getTelemetryResourceAttributes: () => ({}),
+      getTelemetryMetricsIncludeSessionId: () => false,
+      getTelemetryResourceAttributeWarnings: () => [],
       getDebugMode: () => false,
       getSessionId: () => 'test-session',
       getCliVersion: () => '1.0.0-test',

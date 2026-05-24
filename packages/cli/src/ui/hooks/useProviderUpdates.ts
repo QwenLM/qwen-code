@@ -5,11 +5,14 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ProviderModelConfig, Config } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../../config/settings.js';
-import { t } from '../../i18n/index.js';
-import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
+import type {
+  ProviderModelConfig,
+  Config,
+  ProviderConfig,
+} from '@qwen-code/qwen-code-core';
 import {
+  ALL_PROVIDERS,
+  applyProviderInstallPlan,
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
@@ -18,9 +21,10 @@ import {
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,
-  type ProviderConfig,
-} from '../../auth/providerConfig.js';
-import { ALL_PROVIDERS } from '../../auth/allProviders.js';
+} from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
+import { t } from '../../i18n/index.js';
+import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
 // ---------------------------------------------------------------------------
@@ -234,9 +238,12 @@ export function useProviderUpdates(
         }
 
         await applyProviderInstallPlan(installPlan, {
-          settings,
-          config,
-          refreshAuth: false,
+          settings: createLoadedSettingsAdapter(settings),
+          reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
+          syncAuthState: (authType, modelId) =>
+            config.getModelsConfig().syncAfterAuthRefresh(authType, modelId),
+          refreshAuth: (authType) => config.refreshAuth(authType),
+          doRefreshAuth: false,
         });
 
         const activeModel = config.getModel();

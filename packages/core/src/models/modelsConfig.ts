@@ -877,7 +877,7 @@ export class ModelsConfig {
     this.currentAuthType = authType;
 
     // Step 1: If modelId exists in registry, always use config from modelRegistry
-    // Manual credentials won't have a modelId that matches a provider model (handleAuthSelect prevents it),
+    // Manual credentials won't have a modelId that matches a provider model (the /auth provider-setup flow prevents it),
     // so if modelId exists in registry, we should always use provider config.
     // This handles provider switching even within the same authType.
     // Prefer exact match (id+baseUrl) when the current baseUrl was set by a

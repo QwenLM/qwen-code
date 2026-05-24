@@ -554,7 +554,13 @@ describe('SkillTool', () => {
       expect(llmText).toContain('Loading failed');
     });
 
-    it('should not require confirmation', async () => {
+    it("L3 default is 'ask' so AUTO mode routes through the classifier", async () => {
+      // Previously this returned 'allow', but skills load user-defined
+      // code that runs with the agent's tool access — a privileged sink.
+      // The AUTO scheduler short-circuits at L4 when finalPermission ===
+      // 'allow', so without this override the classifier projection
+      // added in PR #4151 would never be reached and arbitrary skill
+      // invocations would bypass classifier review.
       const params: SkillParams = {
         skill: 'code-review',
       };
@@ -564,7 +570,7 @@ describe('SkillTool', () => {
       ).createInvocation(params);
       const permission = await invocation.getDefaultPermission();
 
-      expect(permission).toBe('allow');
+      expect(permission).toBe('ask');
     });
 
     it('should provide correct description', () => {
@@ -790,22 +796,25 @@ describe('SkillTool', () => {
   });
 
   describe('modelOverride propagation', () => {
-    it('should propagate model from skill config to ToolResult', async () => {
-      const skillWithModel: SkillConfig = {
-        ...mockSkills[0],
-        model: 'qwen-max',
-      };
-      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
-        skillWithModel,
-      );
+    it.each(['qwen-max', 'fast', 'openai:qwen-max'])(
+      'should propagate model selector "%s" from skill config to ToolResult',
+      async (model) => {
+        const skillWithModel: SkillConfig = {
+          ...mockSkills[0],
+          model,
+        };
+        vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+          skillWithModel,
+        );
 
-      const invocation = (
-        skillTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'code-review' });
-      const result = (await invocation.execute()) as unknown as ToolResult;
+        const invocation = (
+          skillTool as SkillToolWithProtectedMethods
+        ).createInvocation({ skill: 'code-review' });
+        const result = (await invocation.execute()) as unknown as ToolResult;
 
-      expect(result.modelOverride).toBe('qwen-max');
-    });
+        expect(result.modelOverride).toBe(model);
+      },
+    );
 
     it('should set modelOverride to undefined when skill has no model', async () => {
       const skillWithoutModel: SkillConfig = {
