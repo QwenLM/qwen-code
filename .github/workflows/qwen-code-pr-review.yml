@@ -91,9 +91,10 @@ jobs:
       group: 'qwen-pr-review-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.pr_number }}'
       cancel-in-progress: true
     # 30 min was empirically too low for the former multi-agent deep path
-    # on a ~800-line PR. The current review tiers are toolless single-shot
-    # qwen calls, but opened/comment/review/dispatch still need room for
-    # package install, preflight, and a large DEEP prompt.
+    # on a ~800-line PR. LIGHT/STANDARD are toolless single-shot qwen
+    # calls; DEEP is four bounded, toolless focus passes that reuse the
+    # bundled /review rubric. Opened/comment/review/dispatch still need
+    # room for package install, preflight, and a large DEEP prompt.
     timeout-minutes: 60
     runs-on: 'ubuntu-latest'
     permissions:
@@ -486,7 +487,7 @@ jobs:
 
           echo "::group::Gather preflight inputs"
           pr_json="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json title,body,additions,deletions,changedFiles,files,headRefName,baseRefName)"
+            --json title,body,author,comments,additions,deletions,changedFiles,files,headRefName,baseRefName)"
           pr_title="$(jq -r '.title' <<< "$pr_json")"
           # Trim the body to keep prompt size bounded.
           # `{ producer || true; } | head -c N`: head closes the pipe after
@@ -495,6 +496,17 @@ jobs:
           # swallows the producer's SIGPIPE so only an oversized body is
           # truncated, not the whole review run.
           pr_body="$( { jq -r '.body // ""' <<< "$pr_json" || true; } | head -c 2000)"
+          author_comments_block="$( { jq -r '
+            .author.login as $author |
+            [
+              .comments[]?
+              | select(.author.login == $author)
+              | "- @" + .author.login + " (" + (.createdAt // "unknown time") + "):\n" + (.body // "")
+            ] | join("\n\n---\n\n")
+          ' <<< "$pr_json" || true; } | head -c 8000)"
+          if [ -z "$author_comments_block" ]; then
+            author_comments_block="(no author PR comments)"
+          fi
           base_ref="$(jq -r '.baseRefName' <<< "$pr_json")"
           head_ref="$(jq -r '.headRefName' <<< "$pr_json")"
           changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
@@ -535,6 +547,7 @@ jobs:
             printf '```\n%s\n```\n\n' "$diff_stat"
             printf '**First 50KB of unified diff:**\n'
             printf '```diff\n%s\n```\n\n' "$unified_diff"
+            printf '**Author PR comments (first 8KB):**\n%s\n\n' "$author_comments_block"
             printf '**PR body (first 2KB):**\n%s\n' "$pr_body"
           } > /tmp/preflight-pr-context.md
 
@@ -752,7 +765,7 @@ jobs:
           set -euo pipefail
 
           pr_json="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json title,body,files)"
+            --json title,body,files,author,comments)"
           pr_title="$(jq -r '.title' <<< "$pr_json")"
           # `{ producer || true; } | head -c N`: head closes the pipe after
           # N bytes, the producer then dies of SIGPIPE (exit 141), and under
@@ -760,6 +773,17 @@ jobs:
           # swallows the producer's SIGPIPE so only an oversized body is
           # truncated, not the whole review run.
           pr_body="$( { jq -r '.body // ""' <<< "$pr_json" || true; } | head -c 2000)"
+          author_comments_block="$( { jq -r '
+            .author.login as $author |
+            [
+              .comments[]?
+              | select(.author.login == $author)
+              | "- @" + .author.login + " (" + (.createdAt // "unknown time") + "):\n" + (.body // "")
+            ] | join("\n\n---\n\n")
+          ' <<< "$pr_json" || true; } | head -c 8000)"
+          if [ -z "$author_comments_block" ]; then
+            author_comments_block="(no author PR comments)"
+          fi
           changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
           # `|| true` so `gh`'s SIGPIPE (when head closes the pipe at the
           # byte cap) doesn't trip `pipefail` and abort the step — see the
@@ -775,6 +799,7 @@ jobs:
             printf '**Changed files:**\n```\n%s\n```\n\n' "$changed_files_block"
             printf '**Unified diff (first 50KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
             printf '**Preflight focus_areas (hints, not mandatory):**\n```json\n%s\n```\n\n' "$focus_areas"
+            printf '**Author PR comments (first 8KB):**\n%s\n\n' "$author_comments_block"
             printf '**PR body (first 2KB):**\n%s\n' "$pr_body"
           } > /tmp/light-pr-context.md
 
@@ -877,11 +902,22 @@ jobs:
           set -euo pipefail
 
           pr_json="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json title,body,files)"
+            --json title,body,files,author,comments)"
           pr_title="$(jq -r '.title' <<< "$pr_json")"
           # `|| true` so an oversized body's SIGPIPE doesn't abort the step
           # under pipefail (see the preflight step for the full rationale).
           pr_body="$( { jq -r '.body // ""' <<< "$pr_json" || true; } | head -c 4000)"
+          author_comments_block="$( { jq -r '
+            .author.login as $author |
+            [
+              .comments[]?
+              | select(.author.login == $author)
+              | "- @" + .author.login + " (" + (.createdAt // "unknown time") + "):\n" + (.body // "")
+            ] | join("\n\n---\n\n")
+          ' <<< "$pr_json" || true; } | head -c 8000)"
+          if [ -z "$author_comments_block" ]; then
+            author_comments_block="(no author PR comments)"
+          fi
           changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
           # STANDARD gets a larger diff window than LIGHT (200KB vs 50KB).
           # `|| true` so `gh`'s SIGPIPE at the byte cap doesn't abort the
@@ -899,6 +935,7 @@ jobs:
             printf '**Unified diff (first 200KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
             printf '**Preflight focus_areas (hints):**\n```json\n%s\n```\n\n' "$focus_areas"
             printf '**Preflight agents_to_run (hints):**\n```json\n%s\n```\n\n' "$agents_to_run"
+            printf '**Author PR comments (first 8KB):**\n%s\n\n' "$author_comments_block"
             printf '\n\n**PR body (first 4KB):**\n%s\n' "$pr_body"
           } > /tmp/standard-pr-context.md
 
@@ -992,9 +1029,20 @@ jobs:
           set -euo pipefail
 
           pr_json="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json title,body,files)"
+            --json title,body,files,author,comments)"
           pr_title="$(jq -r '.title' <<< "$pr_json")"
           pr_body="$( { jq -r '.body // ""' <<< "$pr_json" || true; } | head -c 8000)"
+          author_comments_block="$( { jq -r '
+            .author.login as $author |
+            [
+              .comments[]?
+              | select(.author.login == $author)
+              | "- @" + .author.login + " (" + (.createdAt // "unknown time") + "):\n" + (.body // "")
+            ] | join("\n\n---\n\n")
+          ' <<< "$pr_json" || true; } | head -c 8000)"
+          if [ -z "$author_comments_block" ]; then
+            author_comments_block="(no author PR comments)"
+          fi
           changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
           unified_diff="$( { gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch || true; } | head -c 500000)"
           focus_areas="$(cat /tmp/qwen-focus-areas.json 2>/dev/null || echo '[]')"
@@ -1009,6 +1057,7 @@ jobs:
             printf '**Unified diff (first 500KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
             printf '**Preflight focus_areas (hints):**\n```json\n%s\n```\n\n' "$focus_areas"
             printf '**Preflight agents_to_run (hints):**\n```json\n%s\n```\n\n' "$agents_to_run"
+            printf '**Author PR comments (first 8KB):**\n%s\n\n' "$author_comments_block"
             printf '**PR body (first 8KB):**\n%s\n' "$pr_body"
           } > /tmp/deep-pr-context.md
 
@@ -1025,24 +1074,42 @@ jobs:
             return text.slice(startIdx, endIdx === -1 ? undefined : endIdx).trim();
           }
 
-          const parts = [
-            section(
+          const requestedSections = [
+            [
               '## Step 4: Parallel multi-dimensional review',
               '### Agent 7: Build & Test Verification',
-            ),
-            section(
+            ],
+            [
               '### Cross-file impact analysis',
               '## Step 5: Deduplicate, verify, and aggregate',
-            ),
-            section(
+            ],
+            [
               '## Step 5: Deduplicate, verify, and aggregate',
               '## Step 7: Present findings',
-            ),
-            section('## Exclusion Criteria', '## Guidelines'),
-            section('## Guidelines', ''),
-          ].filter(Boolean);
+            ],
+            ['## Exclusion Criteria', '## Guidelines'],
+            ['## Guidelines', ''],
+          ];
+          const missingSections = [];
+          const parts = [];
+          for (const [start, end] of requestedSections) {
+            const value = section(start, end);
+            if (value) {
+              parts.push(value);
+            } else {
+              missingSections.push(start);
+            }
+          }
 
-          process.stdout.write(parts.join('\n\n---\n\n') + '\n');
+          if (missingSections.length > 0) {
+            console.error(
+              `::warning::Bundled review rubric headings changed or disappeared; ` +
+                `falling back to the full bundled review skill. Missing: ${missingSections.join(', ')}`,
+            );
+            process.stdout.write(text.trim() + '\n');
+          } else {
+            process.stdout.write(parts.join('\n\n---\n\n') + '\n');
+          }
           NODE
           echo "::endgroup::"
 
@@ -1063,12 +1130,18 @@ jobs:
             local rendered="/tmp/deep-${focus}-prompt-rendered.md"
             local out="qwen-review-stream-${focus}.jsonl"
             local summary="qwen-review-summary-${focus}.md"
+            local status=0
+            local status_label="complete"
 
-            node scripts/render-review-prompt.cjs \
+            if ! node scripts/render-review-prompt.cjs \
               "$prompt_template" \
               "$rendered" \
               --context /tmp/deep-ci-review-context.md \
-              --rules .qwen/review-rules.md
+              --rules .qwen/review-rules.md; then
+              echo "::warning::Failed to render DEEP ${focus} prompt; omitting this section and continuing with remaining focus passes."
+              : > "$summary"
+              return 0
+            fi
 
             echo "::group::Qwen DEEP ${focus} review (live stream-json events)"
             set +e
@@ -1085,13 +1158,11 @@ jobs:
               --allowed-mcp-server-names __qwen_review_no_mcp__ \
               --output-format stream-json --include-partial-messages \
               --prompt "$(cat "$rendered")" 2>&1 | tee "$out"
-            local status
             status=${PIPESTATUS[0]}
             echo "::${stop_token}::"
             set -e
             echo "::endgroup::"
 
-            local status_label="complete"
             if [ "$status" -eq 124 ]; then
               status_label="timeout"
               echo "::warning::DEEP ${focus} review timed out at 4m; flushing partial output."
@@ -1123,14 +1194,22 @@ jobs:
             fi
           }
 
-          run_deep_focus correctness-security .qwen/deep-review-correctness-security-prompt.md
-          run_deep_focus test-coverage .qwen/deep-review-test-coverage-prompt.md
-          run_deep_focus maintainability-performance .qwen/deep-review-maintainability-performance-prompt.md
-          run_deep_focus undirected-audit .qwen/deep-review-undirected-audit-prompt.md
+          deep_focus_passes=(
+            "correctness-security|.qwen/deep-review-correctness-security-prompt.md"
+            "test-coverage|.qwen/deep-review-test-coverage-prompt.md"
+            "maintainability-performance|.qwen/deep-review-maintainability-performance-prompt.md"
+            "undirected-audit|.qwen/deep-review-undirected-audit-prompt.md"
+          )
+          for pass in "${deep_focus_passes[@]}"; do
+            focus="${pass%%|*}"
+            prompt_template="${pass#*|}"
+            run_deep_focus "$focus" "$prompt_template"
+          done
 
           section_count=0
           : > /tmp/deep-combined-body.md
-          for focus in correctness-security test-coverage maintainability-performance undirected-audit; do
+          for pass in "${deep_focus_passes[@]}"; do
+            focus="${pass%%|*}"
             summary="qwen-review-summary-${focus}.md"
             if [ -s "$summary" ]; then
               if [ "$section_count" -gt 0 ]; then

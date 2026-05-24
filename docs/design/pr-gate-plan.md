@@ -6,7 +6,7 @@
 >
 > - `.github/workflows/pr-gate.yml` — 两个独立 job (PR Template / PR Size)。PR Title (Conventional Commits) check 不做 —— 仓库已有本地 commit-msg hook 把住格式。
 > - `.github/pull_request_template.md` — 仓库**已有**，结构与本 plan 兼容（`## Linked Issues / Bugs` 包含 `## Linked Issues` 子串），无需重写
-> - `.github/workflows/qwen-code-pr-review.yml` — Phase B 已应用：size 超限不再发"请拆分"评论，阻断职责完全交给 `pr-gate.yml`
+> - `.github/workflows/qwen-code-pr-review.yml` — Phase B 已应用：size 超限记录 Large PR warning，但继续运行 AI review
 > - Branch Protection / CODEOWNERS — 在 Settings 配，不在代码里，详见下面 §Phase D
 >
 > 配套的 AI review tier 路由设计见 [`code-review/preflight-triage.md`](./code-review/preflight-triage.md)。两条线本 PR 一起合入，可分开评审。
@@ -24,7 +24,7 @@
 
 ## 设计原则
 
-1. **快慢分离**：秒级门禁（body、size）与分钟级检查（lint、test、AI review）拆成不同 workflow
+1. **快慢分离**：秒级门禁（body）/ 秒级 advisory signal（size）与分钟级检查（lint、test、AI review）拆成不同 workflow
 2. **职责单一**：每个 job 产出一个 named status check，Branch Protection 按 name 引用
 3. **失败可读**：社区贡献者看到具体哪项不过、怎么修，而不是笼统的 "review failed"
 4. **AI review 不阻断**：qwen-code review 作为 informational check，提供建议但不 block merge
@@ -39,7 +39,7 @@
 │                                                             │
 │  Required status checks (必须全绿才能 Merge):                │
 │    • "PR Template"     ← pr-gate.yml                        │
-│    • "PR Size"         ← pr-gate.yml                        │
+│    • "PR Size"         ← pr-gate.yml (warning-only signal)   │
 │    • "Lint"            ← ci.yml                             │
 │    • "Test (ubuntu-latest, Node 22.x)" ← ci.yml            │
 │    • "CodeQL"          ← ci.yml                             │
@@ -153,22 +153,22 @@ pr-size:
           const warnThreshold = 800;
           const blockThreshold = 1500;
 
-          // escape hatch：带 `oversized-ok` label 时，超限降级为 warning
+          // acknowledgement：带 `oversized-ok` label 时，日志标明已确认
           const sizeWaived = (context.payload.pull_request?.labels || [])
             .map(l => l.name).includes('oversized-ok');
 
           if (totalChanges > blockThreshold && sizeWaived) {
             core.warning(
-              `PR 超过 size 阈值但带 oversized-ok label，maintainer 已确认，不阻断。`
+              `PR 超过 size 阈值且带 oversized-ok label，maintainer 已确认 reviewability 风险。`
             );
           } else if (totalChanges > blockThreshold) {
-            core.setFailed(
+            core.warning(
               `PR 变更 ${totalChanges} 行 (${totalFiles} 文件)，超过阈值 ${blockThreshold} 行。\n\n` +
               `建议拆分为更小的、可独立 review 的 PR。拆分思路：\n` +
               `• 将重构与功能变更分开\n` +
               `• 将测试与实现分开提交\n` +
               `• 按模块/关注点拆分\n\n` +
-              `若 PR 大但确实内聚，maintainer 可打 oversized-ok label 降级为 warning。`
+              `若 PR 大但确实内聚，maintainer 可打 oversized-ok label 记录显式确认。`
             );
           } else if (totalChanges > warnThreshold) {
             core.warning(
@@ -179,9 +179,9 @@ pr-size:
 
 **参考**：CodelyTV/pr-size-labeler 的思路，但这里用 github-script 做自定义逻辑，不依赖第三方 action。
 
-> **`oversized-ok` escape hatch**：size gate 是 required check，但一个合法的大型基建 PR（例如本 preflight-triage PR 自身）若没有逃生口就**永远无法合并**。因此 maintainer 可给 PR 打 `oversized-ok` label：超限时 size 检查从 hard block 降级为 warning（PR 仍能看到"过大"信号，但不被卡死）。workflow 需监听 `labeled`/`unlabeled` 事件，label 增删才能即时重跑 check。该 label 需在仓库预先创建。
+> **`oversized-ok` acknowledgement**：size 是 reviewability signal，不是 correctness failure。`PR Size` check 可作为 required check 确保这条 signal 一定运行，但 over-threshold 本身只发 warning，不阻断合并。maintainer 可给 PR 打 `oversized-ok` label 来记录"已看到并接受本次 PR 较大"；workflow 监听 `labeled`/`unlabeled` 事件，label 增删才能即时重跑 check。该 label 需在仓库预先创建。
 >
-> **self-waiver guard**：PR 作者给自己的 PR 打 `oversized-ok` 等于单方面绕过 size gate，必须拒绝。判定不能只看 `payload.sender`——它只在 `labeled` 事件当下等于打标签的人；后续 `synchronize` 事件里 `sender` 只是推送者，作者可以「先自打 label（labeled 事件红）→ 再推一个 commit（synchronize 事件重跑，labeled-only 守卫不触发，check 变绿）」来绕过。因此实现改为通过 issue events timeline（`issues.listEvents`）解析出 `oversized-ok` 最近一次 `labeled` 事件的 `actor`，与 PR 作者比对——守卫在所有事件上都成立。该查询需要 `issues: read` 权限。
+> **self-acknowledgement guard**：PR 作者给自己的 PR 打 `oversized-ok` 不是独立 maintainer acknowledgement。判定不能只看 `payload.sender`——它只在 `labeled` 事件当下等于打标签的人；后续 `synchronize` 事件里 `sender` 只是推送者。因此实现通过 issue events timeline（`issues.listEvents`）解析出 `oversized-ok` 最近一次 `labeled` 事件的 `actor`，与 PR 作者比对，并把 self-acknowledgement 作为 warning 明确记录。该查询需要 `issues: read` 权限。
 
 #### 完整 workflow 触发配置
 
@@ -189,7 +189,7 @@ pr-size:
 name: PR Gate
 on:
   pull_request:
-    # labeled/unlabeled 是 oversized-ok 逃生口所必需（见上文）；
+    # labeled/unlabeled 是 oversized-ok acknowledgement 即时生效所必需（见上文）；
     # reopened 也要带上。pr-template job 用 job 级 if: 跳过 label 事件，
     # pr-size 只在 oversized-ok label 变动时才因 label 事件重跑。
     types:
@@ -212,8 +212,8 @@ permissions:
 
 ### Phase B：调整 `qwen-code-pr-review.yml`
 
-1. **移除 size check 的合并阻断语义**：现有 `Check PR size` step 改为仅输出 warning 到 job summary，不再 `exit 1` 或发评论阻止（阻断职责已移至 `pr-gate.yml`）
-2. **保留 size 超限时跳过深度 review 的逻辑**：超大 PR 不跑 LLM 是合理的资源保护，但这只影响 review 自身是否执行，不影响合并
+1. **移除 size check 的合并阻断语义**：现有 `Check PR size` step 改为输出 warning 到 job summary 和最终 review 评论，不再 `exit 1` 或发评论阻止。
+2. **继续运行 AI review**：超大 PR 不再跳过 LLM；review 评论会带 Large PR warning，提醒 maintainer 信号可能不完整。
 3. **考虑 review 结果不作为 required check**：Branch Protection 中不勾选此 workflow 的 job name
 
 ### Phase C：新增 CODEOWNERS
@@ -305,9 +305,9 @@ pr-label:
      │ pr-gate.yml│ │  ci.yml  │ │ qwen-code-pr-    │
      │ (秒级)     │ │ (分钟级)  │ │ review.yml       │
      │            │ │          │ │ (5-30 分钟)       │
-     │ • Title    │ │ • Lint   │ │                  │
-     │ • Body     │ │ • Test   │ │ • AI deep review │
-     │ • Size     │ │ • CodeQL │ │ • qwen-code 产品 │
+     │ • Body     │ │ • Lint   │ │                  │
+     │ • Size warn│ │ • Test   │ │ • AI deep review │
+     │            │ │ • CodeQL │ │ • qwen-code 产品 │
      └─────┬──────┘ └────┬─────┘ └───────┬──────────┘
            │              │               │
            ▼              ▼               ▼
@@ -321,7 +321,7 @@ pr-label:
 
 | 优先级 | 内容                                          | 预估工作量 | 依赖               |
 | ------ | --------------------------------------------- | ---------- | ------------------ |
-| P0     | 新建 `pr-gate.yml` (title + body + size)      | 1-2h       | 无                 |
+| P0     | 新建 `pr-gate.yml` (body + size warning)      | 1-2h       | 无                 |
 | P0     | Branch Protection 配置                        | 10min      | pr-gate.yml 合入后 |
 | P1     | 调整 `qwen-code-pr-review.yml` 移除 size 阻断 | 30min      | pr-gate.yml 合入后 |
 | P1     | 新建 CODEOWNERS                               | 30min      | 确认团队分组       |
@@ -332,6 +332,6 @@ pr-label:
 
 1. **`pull_request` vs `pull_request_target`**：pr-gate.yml 用 `pull_request` 即可（只读操作，不需要 secrets）；qwen-code-pr-review.yml 保持 `pull_request_target`（需要 secrets 调 LLM）
 2. **Fork PR**：`pull_request` 触发对 fork PR 天然支持，status check 正常报告；不存在权限问题
-3. **`edited` 触发**：pr-gate.yml 必须监听 `edited` 事件，否则用户修改 PR title/body 后 check 不会重新运行
-4. **阈值可配置化**：size/body 的阈值可通过 repository variables (`vars.PR_SIZE_BLOCK_THRESHOLD`) 配置，避免改代码
+3. **`edited` 触发**：pr-gate.yml 必须监听 `edited` 事件，否则用户修改 PR body 后 check 不会重新运行
+4. **阈值可配置化**：后续若需要，可把 size/body 阈值移到 repository variables；当前实现先使用代码内常量，避免在首版 gate 中引入额外配置依赖
 5. **渐进上线**：建议先以 non-required 跑一周，观察误报率，再设为 required

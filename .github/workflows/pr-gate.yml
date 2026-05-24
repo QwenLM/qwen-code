@@ -13,8 +13,8 @@ name: 'PR Gate'
 #    status checks the maintainer can see before merge.
 #  - 'edited' is critical: when the contributor edits the PR title or
 #    body to fix a failed check, the workflow re-runs and updates the
-#    check status. Without 'edited', a failed PR Title / PR Template
-#    check would stay red forever even after correction.
+#    check status. Without 'edited', a failed PR Template check would
+#    stay red forever even after correction.
 #  - 'labeled'/'unlabeled' are needed so the PR Size `oversized-ok`
 #    acknowledgement label takes effect (or is revoked) without an extra
 #    push or edit to re-trigger the check.
@@ -33,7 +33,7 @@ on:
 
 permissions:
   contents: 'read'
-  pull-requests: 'read' # read-only: pr-title/pr-template use event payload; pr-size calls listFiles
+  pull-requests: 'read' # read-only: pr-template uses event payload; pr-size calls listFiles
   issues: 'read' # pr-size resolves the oversized-ok label applier via the issue events API
 
 # Cancel earlier in-flight runs on the same PR when a new event arrives.

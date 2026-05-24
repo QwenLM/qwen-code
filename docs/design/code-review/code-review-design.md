@@ -4,9 +4,10 @@
 > `codex/preflight-triage` 分支的当前实现。当前 PR 的实际实现以
 > [`preflight-triage.md`](./preflight-triage.md) 和
 > `.github/workflows/qwen-code-pr-review.yml` 为准：review workflow 已改为
-> preflight tier 路由，LIGHT / STANDARD / DEEP 都是 tool-free 的单发
-> qwen review 路径；早期 bundled `/review` / cross-run review-cache 方案没有在
-> 当前 PR 中继续落地。
+> preflight tier 路由，LIGHT / STANDARD 是 tool-free 单发 qwen review；
+> DEEP 会抽取 bundled `/review` skill 的 rubric，并拆成四个 CI-safe、
+> tool-free focused pass。早期 cross-run review-cache / 直接运行 bundled
+> multi-agent skill 的方案没有在当前 PR 中继续落地。
 
 ## 问题陈述
 
@@ -14,23 +15,25 @@
 
 实际运行暴露三类持续问题，单靠 bundled skill 内部优化解决不了：
 
-1. **不收敛**：作者 push 新 commit 不会自动触发评审；手动 `@qwen /review` 每次都是全量重评，第一轮讨论过的小问题反复在后续轮次被 raise。bundled skill 有 `.qwen/review-cache/pr-<n>.json` 做增量评审，但 GitHub Actions 每次都是全新 runner，cache 在 run 之间丢失，机制从未生效。
+1. **不收敛**：作者 push 新 commit 不会自动触发评审；手动 `@qwen-code /review` 每次都是全量重评，第一轮讨论过的小问题反复在后续轮次被 raise。bundled skill 有 `.qwen/review-cache/pr-<n>.json` 做增量评审，但 GitHub Actions 每次都是全新 runner，cache 在 run 之间丢失，机制从未生效。
 2. **方向偏差**：`review-rules.md` 的 `Product Direction` gate 只是抽象规则，模型靠常识填空，碰到 framing 巧妙的方向漂移会站在作者一边。
 3. **历史决策遗忘**：仓库已有大量"by design 拒过"的 PR，AI review 不感知这些历史决策，新作者重复踩坑。
 
-**本 PR（Phase 1-3）只解决问题 1 的基础设施部分**：把 review workflow 切到 bundled action、补齐跨 run 增量 cache wiring、并把整体设计沉淀成文档供后续阶段引用。问题 2、3 由 Phase 4（Design Gate）、Phase 5（历史感知）解决，不在本 PR 范围。
+**早期 Phase 1-3 方案**原本只解决问题 1 的基础设施部分：把 review
+workflow 切到 bundled action、补齐跨 run 增量 cache wiring、并把整体设计沉淀成文档供后续阶段引用。当前 PR 后来收敛到
+[`preflight-triage.md`](./preflight-triage.md) 描述的 CI-safe tier 路由实现；本文件保留早期方案背景供追溯。
 
-## 现状对比（仅 Phase 1-3 关心的维度）
+## 现状对比（早期 Phase 1-3 草案）
 
-| 维度                         | 改造前                         | 本 PR 后                   |
-| ---------------------------- | ------------------------------ | -------------------------- |
-| PR 打开 / reopened 自动评审  | ✅                             | ✅                         |
-| `@qwen /review` 评论触发     | ✅                             | ✅                         |
-| 作者 push 新 commit 自动评审 | ❌ 未监听 `synchronize`        | ✅ 新增 synchronize 触发   |
-| 增量评审（只评新 commit）    | ⚠️ skill 内置但 cache 不持久   | ✅ 跨 run cache 持久化     |
-| PR 体积 gate                 | ⚠️                             | ✅ 1500 行可配             |
-| 项目级 review 规则文件       | ❌                             | ✅ `.qwen/review-rules.md` |
-| 9-agent 深审 / reverse audit | ✅（bundled skill 内置，不动） | ✅                         |
+| 维度                          | 改造前                         | Phase 1-3 草案后           |
+| ----------------------------- | ------------------------------ | -------------------------- |
+| PR 打开 / reopened 自动评审   | ✅                             | ✅                         |
+| `@qwen-code /review` 评论触发 | ✅                             | ✅                         |
+| 作者 push 新 commit 自动评审  | ❌ 未监听 `synchronize`        | ✅ 新增 synchronize 触发   |
+| 增量评审（只评新 commit）     | ⚠️ skill 内置但 cache 不持久   | ✅ 跨 run cache 持久化     |
+| PR 体积 gate                  | ⚠️                             | ✅ 1500 行可配             |
+| 项目级 review 规则文件        | ❌                             | ✅ `.qwen/review-rules.md` |
+| 9-agent 深审 / reverse audit  | ✅（bundled skill 内置，不动） | ✅                         |
 
 > bundled skill 的 9-agent / 确定性 lint / reverse audit 等能力本设计不改动，详见 `packages/core/src/skills/bundled/review/SKILL.md`。
 
@@ -52,22 +55,25 @@ bundled `/review` skill 跑完一次就退出，不维护跨 run 状态。所有
 - 模型判断结果对 maintainer 是建议，最终决策仍在人
 - 实测数据（详见 [`preflight-triage.md`](./preflight-triage.md) §问题陈述）显示 AI review 长尾耗时不可预测，把它当门禁会让 PR 流卡顿
 
-**合并门禁**由独立的 `pr-gate.yml` workflow 负责（title 格式 / body 必填段 / size 上限），设计见 [`../pr-gate-plan.md`](../pr-gate-plan.md)。两条线正交，可并行推进。
+**合并门禁**由独立的 `pr-gate.yml` workflow 负责（PR body 必填段 /
+Validation 证据）。PR Size 是 warning-only reviewability signal，不因超阈值
+阻断合并；PR title 格式不在 CI 重复校验，维护者在 squash merge 时人工
+spot-check。设计见 [`../pr-gate-plan.md`](../pr-gate-plan.md)。两条线正交，可并行推进。
 
 ## 触发与权限
 
 ### 触发事件
 
-| 事件                                                                                       | 行为                                                               |
-| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| `pull_request_target.opened / reopened / ready_for_review`                                 | 自动跑全量评审                                                     |
-| `pull_request_target.synchronize`                                                          | **新增**：作者 push 时自动跑**增量评审**（依赖 cache）             |
-| `issue_comment` / `pull_request_review_comment` / `pull_request_review` 含 `@qwen /review` | 评论触发，默认**强制重跑**，不因同 SHA cache 命中短路              |
-| `workflow_dispatch`                                                                        | 手动触发，可选 dry-run / comment 模式 + 自定义 focus，默认强制重跑 |
+| 事件                                                                                            | 行为                                                               |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `pull_request_target.opened / reopened / ready_for_review`                                      | 自动跑全量评审                                                     |
+| `pull_request_target.synchronize`                                                               | **新增**：作者 push 时自动跑**增量评审**（依赖 cache）             |
+| `issue_comment` / `pull_request_review_comment` / `pull_request_review` 含 `@qwen-code /review` | 评论触发，默认**强制重跑**，不因同 SHA cache 命中短路              |
+| `workflow_dispatch`                                                                             | 手动触发，可选 dry-run / comment 模式 + 自定义 focus，默认强制重跑 |
 
 ### 权限与 fork 处理
 
-- 所有触发都要求 actor 是 `OWNER / MEMBER / COLLABORATOR`，在 workflow `if:` 表达式实现。**这是当前阶段有意保留的安全闸**：本 workflow 在 `pull_request_target` 下带 secrets 运行且深审耗时长，开放触发等于 denial-of-wallet / 滥用面。外部贡献者的 PR 当前仍可评审 —— 由 maintainer 在 PR 下评论 `@qwen /review`。面向社区 PR 的更宽自动触发（配合按作者限流）推后到后续 Phase，本 PR 暂不放开。
+- 所有触发都要求 actor 是 `OWNER / MEMBER / COLLABORATOR`，在 workflow `if:` 表达式实现。**这是当前阶段有意保留的安全闸**：本 workflow 在 `pull_request_target` 下带 secrets 运行且深审耗时长，开放触发等于 denial-of-wallet / 滥用面。外部贡献者的 PR 当前仍可评审 —— 由 maintainer 在 PR 下评论 `@qwen-code /review`。面向社区 PR 的更宽自动触发（配合按作者限流）推后到后续 Phase，本 PR 暂不放开。
 - **不设跨仓 (fork) 拒评 gate**：fork PR 同样进入评审流程。安全边界由 `pull_request_target` 的检出策略保证 —— 自动触发时 workflow 检出可信的 base（`main`）代码、不检出 PR head；只有 maintainer 手动 `workflow_dispatch` 才检出被 dispatch 的 ref。
 - fork PR 的 merge-base 可能无法由 compare 端点解析；该计算是**尽力而为、非致命**：解析失败只是这一轮无法增量、退回全量评审，不阻塞、不报错。
 
@@ -79,11 +85,11 @@ bundled `/review` skill 跑完一次就退出，不维护跨 run 状态。所有
 
 ## Workflow Review Pipeline（Phase 1-3 形态）
 
-| Stage | 触发动作                                                                | 成本                                                             | 失败处理                                              |
-| ----- | ----------------------------------------------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------- |
-| 0     | GitHub `if:`（event type / author_association / `@qwen /review`）       | 0                                                                | 静默不跑                                              |
-| 1     | workflow shell step（env / model 配置校验、PR size gate、PR 元数据）    | <5s                                                              | post process comment（"PR too large" / 配置缺失）     |
-| 2     | bundled `/review` deep review（9-agent + reverse audit + verification） | 增量 ~5-15 min；全量可达 ~45-60 min（job `timeout-minutes: 60`） | post inline + summary review comment；失败发 fallback |
+| Stage | 触发动作                                                                | 成本                                               | 失败处理                                       |
+| ----- | ----------------------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------- |
+| 0     | GitHub `if:`（event type / author_association / `@qwen-code /review`）  | 0                                                  | 静默不跑                                       |
+| 1     | workflow shell step（env / model 配置校验、PR size warning、PR 元数据） | <5s                                                | 配置缺失 fail；size 只写 warning 并继续 review |
+| 2     | LIGHT/STANDARD 单发或 DEEP 四个 focused pass（复用 bundled rubric）     | LIGHT ~1-2 min；STANDARD ~3-6 min；DEEP ~10-20 min | post summary review comment；失败发 fallback   |
 
 > Phase 4 会在 Stage 1 与 Stage 2 之间插入一个独立的 Design Gate step；本 PR 不含该 step，Stage 1 通过即直接进 bundled `/review`。
 

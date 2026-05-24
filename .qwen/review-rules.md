@@ -54,6 +54,9 @@ by itself block.
 
 - Feature PRs and user-visible behavior changes should include reviewer-facing
   validation evidence, not just "tested locally".
+- Evidence may appear in the PR body or in top-level PR comments from the PR
+  author. Maintainer comments, bot comments, or review suggestions do not count
+  as the author's own validation evidence.
 - Good evidence includes exact commands, prompts, inputs, observed output,
   logs, JSON traces, before/after examples, screenshots, GIFs, or short videos.
 - CLI-only changes can be validated with command transcripts and observed
@@ -75,7 +78,7 @@ of:
   advisory.
 
 End that section with this line verbatim:
-`> This is an automated, advisory, comment-only review — it never approves or requests changes. After adding validation evidence, comment \`@qwen /review\` to re-run; editing the PR description alone does NOT re-trigger this review in the current phase.`
+`> This is an automated, advisory, comment-only review — it never approves or requests changes. After adding validation evidence, comment \`@qwen-code /review\` to re-run; editing the PR description alone does NOT re-trigger this review in the current phase.`
 
 ### Functional Review
 

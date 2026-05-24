@@ -13,30 +13,6 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const workflowPath = resolve(__dirname, '../../.github/workflows/pr-gate.yml');
 
-function extractPrTemplateScript() {
-  const workflow = readFileSync(workflowPath, 'utf8');
-  const stepName = "      - name: 'Validate PR body has required sections'";
-  const stepIdx = workflow.indexOf(stepName);
-  expect(stepIdx).toBeGreaterThanOrEqual(0);
-
-  const marker = '          script: |\n';
-  const scriptIdx = workflow.indexOf(marker, stepIdx);
-  expect(scriptIdx).toBeGreaterThanOrEqual(0);
-
-  const lines = workflow.slice(scriptIdx + marker.length).split('\n');
-  const scriptLines = [];
-  for (const line of lines) {
-    if (line.startsWith('            ')) {
-      scriptLines.push(line.slice(12));
-    } else if (line.trim() === '') {
-      scriptLines.push('');
-    } else {
-      break;
-    }
-  }
-  return scriptLines.join('\n');
-}
-
 function extractNamedStepScript(stepName) {
   const workflow = readFileSync(workflowPath, 'utf8');
   const stepIdx = workflow.indexOf(`      - name: '${stepName}'`);
@@ -47,17 +23,24 @@ function extractNamedStepScript(stepName) {
   expect(scriptIdx).toBeGreaterThanOrEqual(0);
 
   const lines = workflow.slice(scriptIdx + marker.length).split('\n');
+  const firstCodeLine = lines.find((line) => line.trim() !== '');
+  expect(firstCodeLine).toBeDefined();
+  const indent = firstCodeLine.match(/^\s*/)[0];
+  expect(indent.length).toBeGreaterThan(0);
+
   const scriptLines = [];
   for (const line of lines) {
-    if (line.startsWith('            ')) {
-      scriptLines.push(line.slice(12));
+    if (line.startsWith(indent)) {
+      scriptLines.push(line.slice(indent.length));
     } else if (line.trim() === '') {
       scriptLines.push('');
     } else {
       break;
     }
   }
-  return scriptLines.join('\n');
+  const script = scriptLines.join('\n').trimEnd();
+  expect(script.trim().length).toBeGreaterThan(0);
+  return script;
 }
 
 async function validateBody(body) {
@@ -75,7 +58,7 @@ async function validateBody(body) {
   return failures;
 }
 
-const script = extractPrTemplateScript();
+const script = extractNamedStepScript('Validate PR body has required sections');
 const sizeScript = extractNamedStepScript('Compute reviewability size');
 
 async function computeSize(files, labels = []) {
@@ -180,6 +163,15 @@ npm run typecheck
 });
 
 describe('PR Size workflow validation', () => {
+  it('does not warn or fail when the meaningful size is below thresholds', async () => {
+    const { failures, warnings } = await computeSize([
+      { filename: 'src/small.ts', additions: 100, deletions: 0 },
+    ]);
+
+    expect(failures).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+
   it('warns instead of failing when the meaningful size is over 1500 lines', async () => {
     const { failures, warnings } = await computeSize([
       { filename: 'src/large.ts', additions: 1501, deletions: 0 },

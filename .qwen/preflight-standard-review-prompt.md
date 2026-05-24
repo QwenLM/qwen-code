@@ -127,11 +127,11 @@ Apply the requirement defined in `.qwen/review-rules.md` (section
   the author should add.
 
 End that section with this line verbatim:
-`> This is an automated, advisory, comment-only review — it never approves or requests changes. After adding validation evidence, comment \`@qwen /review\` to re-run; editing the PR description alone does NOT re-trigger this review in the current phase.`
+`> This is an automated, advisory, comment-only review — it never approves or requests changes. After adding validation evidence, comment \`@qwen-code /review\` to re-run; editing the PR description alone does NOT re-trigger this review in the current phase.`
 
 ---
 
-_Tier: STANDARD. Reply `@qwen /review --tier=deep` to request a high-risk structured review with a larger diff window._
+_Tier: STANDARD. Reply `@qwen-code /review --tier=deep` to request a high-risk structured review with a larger diff window._
 ```
 
 ---
@@ -146,9 +146,10 @@ budget; they are not exhaustive and not mandatory findings.
 
 ## PR context to review
 
-The workflow shell appends the actual PR data (title, body, changed file
-list with line counts, unified diff truncated to 2000 lines, optional
-focus_areas and agents_to_run) below this line before passing this file
-to `qwen`. Read it and produce the structured STANDARD review markdown.
+The workflow shell appends the actual PR data (title, body, author PR
+comments, changed file list with line counts, unified diff truncated to 2000
+lines, optional focus_areas and agents_to_run) below this line before passing
+this file to `qwen`. Read it and produce the structured STANDARD review
+markdown.
 
 <<<PR_CONTEXT>>>

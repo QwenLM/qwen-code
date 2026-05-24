@@ -1,28 +1,32 @@
 # Preflight Triage（评审前预筛）
 
-> 本文档定义 PR review 的 preflight tier 路由机制。当前实现不再调用
-> bundled `/review` skill；LIGHT / STANDARD / DEEP 都是由可信 workflow shell
-> 收集 PR 数据后发起的 tool-free 单发 qwen review。`code-review-design.md`
-> 只保留早期 Phase 1-3 历史背景，本文档与
+> 本文档定义 PR review 的 preflight tier 路由机制。LIGHT / STANDARD 由可信
+> workflow shell 收集 PR 数据后发起 tool-free 单发 qwen review；DEEP 则抽取
+> bundled `/review` skill 的评审 rubric，并拆成 4 个 CI-safe、tool-free
+> focus pass（correctness/security、test coverage、maintainability/performance、
+> undirected audit）。`code-review-design.md` 只保留早期 Phase 1-3 历史背景，本文档与
 > `.github/workflows/qwen-code-pr-review.yml` 是当前实现来源。
 
 ## 与 PR 合规门禁的关系（重要）
 
 本设计专注于 **AI review 内部的 tier 路由**。**合并阻断（merge gating）由独立的 `pr-gate.yml` workflow 负责**，与本文档正交。两者分工：
 
-| 关注点                                | 由谁负责                  | 是否阻塞合并              | 速度     |
-| ------------------------------------- | ------------------------- | ------------------------- | -------- |
-| PR title 格式                         | `pr-gate.yml`             | ✅ required               | 秒级     |
-| PR body 必填段 (Summary / Validation) | `pr-gate.yml`             | ✅ required               | 秒级     |
-| PR size 上限                          | `pr-gate.yml`             | ✅ required (XL 拒)       | 秒级     |
-| Lint / Test / CodeQL                  | `ci.yml`                  | ✅ required               | 分钟级   |
-| **AI 代码 review (本设计)**           | `qwen-code-pr-review.yml` | ❌ **informational only** | 1–20 min |
+| 关注点                                | 由谁负责                                     | 是否阻塞合并              | 速度     |
+| ------------------------------------- | -------------------------------------------- | ------------------------- | -------- |
+| PR title 格式                         | 本地 commit-msg hook + maintainer spot-check | 不在 CI 重复校验          | 本地     |
+| PR body 必填段 (Summary / Validation) | `pr-gate.yml`                                | ✅ required               | 秒级     |
+| PR size reviewability signal          | `pr-gate.yml`                                | ⚠️ warning-only           | 秒级     |
+| Lint / Test / CodeQL                  | `ci.yml`                                     | ✅ required               | 分钟级   |
+| **AI 代码 review (本设计)**           | `qwen-code-pr-review.yml`                    | ❌ **informational only** | 1–20 min |
 
 **核心定位**：**AI review 永远不应作为 merge gate**。模型抽风、API 限流、偶发 garbage 输出都不该阻断合并。AI review 提供建议，maintainer 看完后用人工判断决定合不合。
 
 合规门禁的完整 plan 见 [`pr-gate-plan.md`](../pr-gate-plan.md)（不在 `code-review/` 目录下，位于 `docs/design/`）。本文档只覆盖 AI review 自身的 tier 路由设计。
 
-> 实施层面：`qwen-code-pr-review.yml` 中 `Check PR size` step **不再发 "PR too large" 评论阻断合并**（已在本 PR 改完），阻断职责由 `pr-gate.yml` 的 `PR Size` job 承担。size 超限时本 workflow 只**内部跳过 AI review**，不影响合并状态。`pr-gate.yml` 与本设计一起在 codex/preflight-triage 分支落地。
+> 实施层面：`pr-gate.yml` 的 `PR Size` job 和 `qwen-code-pr-review.yml` 的
+> `Check PR size` step 都是 warning-only。size 超限会在日志、step summary
+> 和 review 评论中提示"建议拆分 / review 信号可能下降"，但不会阻断合并，也不会跳过 AI review。
+> 需要硬性阻断的大型 PR 政策应由后续 branch protection / ruleset 决策单独引入。
 
 ## 问题陈述
 
@@ -68,9 +72,10 @@
 
 ```mermaid
 flowchart TD
-    A["PR 打开 / 更新 / @qwen /review"] --> B{"Check PR size"}
-    B -->|"超过 1500 实质行"| Z["跳过 AI review<br/>merge-blocking 由 pr-gate.yml 负责"]
+    A["PR 打开 / 更新 / @qwen-code /review"] --> B{"Check PR size"}
+    B -->|"超过 1500 实质行"| W["记录 Large PR warning<br/>继续 review"]
     B -->|"size 在阈值内"| C["Preflight triage<br/>1 次廉价 LLM 调用"]
+    W --> C
     C --> D["对 5 个 blast-radius 维度打布尔分"]
     D --> E{"任一 high-risk 维度为 true?<br/>security_sensitive / public_api<br/>/ build_or_release / data_path"}
     E -->|"是"| DEEP["DEEP<br/>tool-free high-risk review"]
@@ -81,7 +86,7 @@ flowchart TD
     G -->|"是: 单一内聚模块"| LIGHT["LIGHT<br/>单发, 聚焦 prompt"]
 ```
 
-> **判断逻辑读法**：决策树的每个分叉都是**影响面**问题，不是**体量**问题。① size 只有一个硬作用 —— 超 1500 实质行直接跳过(交给 pr-gate)，这是防滥用、不是 tier 路由；② 进入 preflight 后，先看 4 个 high-risk 维度有没有 true，有就 DEEP；③ 否则看广度(跨 package / 跨文件)，有 ripple 就 STANDARD；④ 再否则看是不是真实运行时代码，是就 LIGHT、纯文档/lockfile 就 ULTRA_LIGHT。注意 `user_facing` 单独为 true **不**直接进 DEEP —— 它只是 LLM 综合判断的输入之一。任何一个分叉**模糊**时一律向上升档(P7 保守偏差)。
+> **判断逻辑读法**：决策树的每个分叉都是**影响面**问题，不是**体量**问题。① size 是 reviewability signal，超 1500 实质行只记录 warning 并继续 review；② 进入 preflight 后，先看 4 个 high-risk 维度有没有 true，有就 DEEP；③ 否则看广度(跨 package / 跨文件)，有 ripple 就 STANDARD；④ 再否则看是不是真实运行时代码，是就 LIGHT、纯文档/lockfile 就 ULTRA_LIGHT。注意 `user_facing` 单独为 true **不**直接进 DEEP —— 它只是 LLM 综合判断的输入之一。任何一个分叉**模糊**时一律向上升档(P7 保守偏差)。
 
 ### 决策的真正维度（blast radius）
 
@@ -104,23 +109,24 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 | **ULTRA_LIGHT** | 几乎为 0：纯文档 / lockfile / 单测 fixture / formatting-only / 不影响运行时的资源文件 | 否（preflight 本身那次不算） | 否                             | ~30s–1 min |
 | **LIGHT**       | 低且本地：单模块、不导出、无 security/release/API 信号、无跨文件影响                  | 1 次单发                     | 否                             | ~1–2 min   |
 | **STANDARD**    | 中等：跨多文件 / 同 package 内多模块 / 改了内部 API、但不触及上面 5 个 high-risk 维度 | 1 次单发（带结构化清单）     | 否（除非 maintainer override） | ~3–6 min   |
-| **DEEP**        | 任一 high-risk 维度 = true OR 大幅跨 package 影响 OR `@qwen /review --deep`           | 1 次单发（更大 diff window） | 否                             | ~10–20 min |
+| **DEEP**        | 任一 high-risk 维度 = true OR 大幅跨 package 影响 OR `@qwen-code /review --tier=deep` | 4 个 focused qwen pass       | 复用 bundled `/review` rubric  | ~10–20 min |
 
-> Size 在这个表里**不出现**。它只是 preflight LLM 拿到的输入信号之一。判定逻辑完全在 LLM 自身，**不再有 path-glob / keyword 安全网**（早期草稿设计过 `.qwen/review-tier-rules.yml`，后来意识到这与"用内容判 blast radius"的初衷相悖 —— path 也是机械启发式）。LLM 判错由 maintainer 用 `@qwen /review --tier=...` 显式纠正。
+> Size 在这个表里**不出现**。它只是 preflight LLM 拿到的输入信号之一。判定逻辑完全在 LLM 自身，**不再有 path-glob / keyword 安全网**（早期草稿设计过 `.qwen/review-tier-rules.yml`，后来意识到这与"用内容判 blast radius"的初衷相悖 —— path 也是机械启发式）。LLM 判错由 maintainer 用 `@qwen-code /review --tier=...` 显式纠正。
 >
-> 唯一例外：`size > 1500` 仍维持现有 size-gate 拒评（防止 PR 失控太大根本没法 review），但这是**预防滥用**，不是 tier 路由。
+> `size > 1500` 不改变 tier，也不拒评；它只在 PR Gate、review workflow summary
+> 和最终 review 评论中作为显式 warning 出现。
 
-> Tier 名称是稳定 contract，对外（CI summary、`@qwen /review --tier=...`）都用这些字符串。
+> Tier 名称是稳定 contract，对外（CI summary、`@qwen-code /review --tier=...`）都用这些字符串。
 
 ### 执行路径要点
 
-- **ULTRA_LIGHT / LIGHT / STANDARD / DEEP** 都不调用 bundled skill。除 ULTRA_LIGHT 外，其余三档都是单发 qwen 调用，耗时由命令 timeout 和 step timeout 双层封顶。
+- **ULTRA_LIGHT / LIGHT / STANDARD / DEEP** 都不直接执行 bundled skill 的工具流程。除 ULTRA_LIGHT 外，其余档位都由 CI shell 收集可信 PR context 后调用 qwen；DEEP 额外抽取 bundled `/review` rubric，并拆成多个 focused pass。
 - 单发调用的 prompt 复杂度按 tier 递增：LIGHT 简洁 markdown、STANDARD 带 P0–P3 结构化清单 + cross-file 提示
-- DEEP 保留高风险审查强度，但通过更大的 diff window、项目规则、preflight hints 和专用 prompt 实现，而不是通过可调用工具或多 agent fan-out 实现。
+- DEEP 保留高风险审查强度，通过更大的 diff window、项目规则、preflight hints、专用 prompt 和 bundled `/review` rubric 实现，而不是通过可调用工具、worktree checkout、autofix 或 GitHub review submission 实现。
 
 ## Tier 实现机制
 
-每个 tier 有**明确的执行路径、硬耗时上限、always-emit 兜底**。ULTRA_LIGHT 由 shell 直接 compose 评论；LIGHT / STANDARD / DEEP 走 tool-free 单发 qwen 调用，并通过流式累加器在 timeout / error 时保留 partial review。
+每个 tier 有**明确的执行路径、硬耗时上限、always-emit 兜底**。ULTRA_LIGHT 由 shell 直接 compose 评论；LIGHT / STANDARD 走 tool-free 单发 qwen 调用；DEEP 走 4 个 tool-free focused qwen pass，并通过流式累加器在 timeout / error 时保留 partial review。
 
 ### ULTRA_LIGHT
 
@@ -137,7 +143,7 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
   - changed_files: …
   - changed_lines: …
 
-  Reply `@qwen /review --tier=light|standard|deep` to force a review.
+  Reply `@qwen-code /review --tier=light|standard|deep` to force a review.
   ```
 
 - **耗时硬上限**：preflight `timeout 3m` + step `timeout-minutes: 5`；若命中 ULTRA_LIGHT，后续只做 shell 组装和 comment
@@ -147,7 +153,7 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 
 - **执行路径**：workflow → 单次 qwen 调用（不走 bundled skill）
 - **Prompt 文件**：`.qwen/preflight-light-review-prompt.md`（独立可审阅文件）
-- **输入注入**：PR 标题/正文、changed file list、首 50KB unified diff、`focus_areas`（来自 preflight）
+- **输入注入**：PR 标题/正文、PR 作者评论、changed file list、首 50KB unified diff、`focus_areas`（来自 preflight）
 - **要求模型输出**：简洁 markdown review，**最多 3 项 findings**，不要求 P0-P3 结构
 - **耗时硬上限**：3 min（`timeout 3m qwen ...`） + 5 min step `timeout-minutes`
 - **超时兜底**：3 min timeout 触发 → 走流式累加器，把已生成的部分作为 partial review 发出；不做自动升档重试。
@@ -163,12 +169,12 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 
 ### DEEP
 
-- **执行路径**：workflow → 单次 qwen 调用（不走 bundled skill，不给模型 GitHub token）
-- **Prompt 文件**：`.qwen/preflight-deep-review-prompt.md`
-- **输入注入**：PR 标题/正文、changed file list、首 500KB unified diff、`.qwen/review-rules.md`、`focus_areas`、`agents_to_run`
-- **耗时硬上限**：15 min（`timeout 15m qwen ...`），step `timeout-minutes: 20`
-- **流式累加器**：与 LIGHT / STANDARD 一致，累加所有 assistant text 段到 `qwen-review-summary.md`
-- **超时兜底（always-emit）**：15 min timeout 或非零 exit 时保留 partial review，并在头部加明确的 `⚠️` 提示；若输出低于 near-empty guard，则删除 summary 触发 fallback comment。
+- **执行路径**：workflow → 抽取 `packages/core/src/skills/bundled/review/SKILL.md` 的 review rubric → 4 个 focused qwen pass（不执行 bundled skill 的工具/worktree/autofix/GitHub submission 步骤，不给模型 GitHub token）
+- **Prompt 文件**：`.qwen/deep-review-correctness-security-prompt.md`、`.qwen/deep-review-test-coverage-prompt.md`、`.qwen/deep-review-maintainability-performance-prompt.md`、`.qwen/deep-review-undirected-audit-prompt.md`
+- **输入注入**：PR 标题/正文、PR 作者评论、changed file list、首 500KB unified diff、`.qwen/review-rules.md`、`focus_areas`、`agents_to_run`、bundled `/review` rubric excerpt
+- **耗时硬上限**：每个 focused pass `timeout 4m qwen ...`，整体 step `timeout-minutes: 20`
+- **流式累加器**：每个 focused pass 写入独立 `qwen-review-summary-<focus>.md`，最终合并到 `qwen-review-summary.md`
+- **超时兜底（always-emit）**：单个 focused pass timeout 或非零 exit 时保留该 pass 的 partial review，并在头部加明确的 `⚠️` 提示；若某个 pass 输出低于 near-empty guard，则只省略该 section，其他 pass 继续保留。
 
 ### 跨 tier 共享
 
@@ -178,12 +184,12 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 
 ### 耗时硬上限汇总
 
-| Tier        | qwen 命令 timeout | step timeout-minutes | 累计 wall time 上限               |
-| ----------- | ----------------- | -------------------- | --------------------------------- |
-| ULTRA_LIGHT | n/a               | 1                    | ≤ 60s                             |
-| LIGHT       | 3m                | 5                    | ≤ 2 min（典型）/ 5 min（硬上限）  |
-| STANDARD    | 8m                | 10                   | ≤ 6 min（典型）/ 10 min（硬上限） |
-| DEEP        | 15m               | 20                   | ≤ 20 min（超时发 partial review） |
+| Tier        | qwen 命令 timeout   | step timeout-minutes | 累计 wall time 上限               |
+| ----------- | ------------------- | -------------------- | --------------------------------- |
+| ULTRA_LIGHT | n/a                 | 1                    | ≤ 60s                             |
+| LIGHT       | 3m                  | 5                    | ≤ 2 min（典型）/ 5 min（硬上限）  |
+| STANDARD    | 8m                  | 10                   | ≤ 6 min（典型）/ 10 min（硬上限） |
+| DEEP        | 4m × 4 focused pass | 20                   | ≤ 20 min（超时发 partial review） |
 
 **对比旧 workflow（Phase 1-3）**：旧的单一路径配 `timeout 50m` + `timeout-minutes: 60`，且 timeout 时**没有 always-emit 机制**，整个 50 min token 浪费。本设计把"任意 PR 最大 wall time"从 60 min 砍到 20 min，并保证 timeout / error 时也发 partial 或 fallback comment。
 
@@ -212,8 +218,8 @@ GitHub event
 ULTRA_LIGHT  LIGHT      STANDARD     DEEP
    │           │           │           │
    ▼           ▼           ▼           ▼
-shell-only   单发 qwen   单发 qwen   单发 qwen
-不调 LLM     timeout 3m  timeout 8m  timeout 15m
+shell-only   单发 qwen   单发 qwen   4 个 focused qwen pass
+不调 LLM     timeout 3m  timeout 8m  timeout 4m/pass
 ≤ 60s       ≤ 2m        ≤ 6m         ≤ 20m
                                      + partial flush
                                      ───────────────
@@ -224,12 +230,12 @@ shell-only   单发 qwen   单发 qwen   单发 qwen
 
 ### Inputs
 
-- PR title, body, draft state, author, base branch
+- PR title, body, top-level PR comments from the author, draft state, author, base branch
 - Changed file list + 每文件行数
 - `git diff --stat`
-- 首 200 行 unified diff（行数限是预算保护）
+- 首 50KB unified diff（大小上限是预算保护）
 - `.qwen/review-rules.md` 内容（让模型懂项目规则）
-- 触发事件类型（opened / synchronize / `@qwen /review` / dispatch）
+- 触发事件类型（opened / synchronize / `@qwen-code /review` / dispatch）
 
 ### Model
 
@@ -260,7 +266,7 @@ shell-only   单发 qwen   单发 qwen   单发 qwen
 - shell 层用 `jq` 验证 schema：缺字段 / tier 非法 / blast_radius 不完整 → 视作 preflight 失败，走兜底（见 Failure modes）
 - `focus_areas`、`agents_to_run` 仅 STANDARD/DEEP 使用
 
-> tier 决策**完全由 preflight LLM 看 diff 内容判定**，没有 path-glob 或 keyword 启发式安全网。LLM 判错由 maintainer 用 `@qwen /review --tier=deep` 显式纠正。唯一例外：`size > 1500` 由 `pr-gate.yml` 拒评（与 tier 路由正交，详见 [`../pr-gate-plan.md`](../pr-gate-plan.md)）。
+> tier 决策**完全由 preflight LLM 看 diff 内容判定**，没有 path-glob 或 keyword 启发式安全网。LLM 判错由 maintainer 用 `@qwen-code /review --tier=deep` 显式纠正。`size > 1500` 只产生 warning，不改变 tier，也不跳过 review。
 
 ## Failure modes
 
@@ -268,12 +274,12 @@ shell-only   单发 qwen   单发 qwen   单发 qwen
 
 ### Preflight 阶段
 
-| 故障                                               | 兜底动作                            | 严重度 |
-| -------------------------------------------------- | ----------------------------------- | ------ |
-| preflight 模型超时（> 3 min）                      | tier = DEEP，留 warning（P7 保守）  | 兜底   |
-| preflight 返回非 JSON                              | tier = DEEP，留 warning             | 兜底   |
-| preflight 返回 JSON 但 schema 不完整（缺 tier 等） | tier = DEEP                         | 兜底   |
-| preflight 模型判 DEEP 但 changed_lines > 1500      | size-gate 拒评，不进 preflight 后续 | 既有   |
+| 故障                                               | 兜底动作                           | 严重度 |
+| -------------------------------------------------- | ---------------------------------- | ------ |
+| preflight 模型超时（> 3 min）                      | tier = DEEP，留 warning（P7 保守） | 兜底   |
+| preflight 返回非 JSON                              | tier = DEEP，留 warning            | 兜底   |
+| preflight 返回 JSON 但 schema 不完整（缺 tier 等） | tier = DEEP                        | 兜底   |
+| preflight 模型判 DEEP 且 changed_lines > 1500      | 记录 Large PR warning，继续 DEEP   | 既有   |
 
 ### Review 执行阶段（G3 always-emit 落地）
 
@@ -282,22 +288,22 @@ shell-only   单发 qwen   单发 qwen   单发 qwen
 > 一来重试本身违反"每次 review 是无状态"的 P1 原则；二来上下游成本（preflight 已经花掉一次 LLM 调用，LIGHT 再花一次，再升 STANDARD 又花一次）超过了"对小 PR 也要发详细评论"的边际收益。
 > 现在所有 tier 的失败路径都是统一的"partial flush via accumulator → 加 ⚠️ 警告头 → 发出"。下表反映**实现**。
 
-| 故障                                                               | 兜底动作                                                        | 落地评论                    |
-| ------------------------------------------------------------------ | --------------------------------------------------------------- | --------------------------- |
-| **ULTRA_LIGHT**：shell compose 失败                                | 走 fallback comment 路径                                        | 既有 fallback（"see logs"） |
-| **LIGHT**：`timeout 3m` 触发                                       | accumulator partial flush → 头部加 `⚠️ time-capped` 警告 → 发出 | **partial review markdown** |
-| **LIGHT**：非 timeout 非零 exit（crash / OOM 137 / SIGINT 130 等） | 同上，status_label=error，警告头改 "exited with error"          | partial review markdown     |
-| **LIGHT**：accumulator 输出 < 200 字节（占位符 only）              | 删 summary 文件 → 触发 fallback comment                         | 既有 fallback               |
-| **STANDARD**：`timeout 8m` 触发                                    | accumulator partial flush → 头部加 `⚠️ time-capped` 警告 → 发出 | partial review markdown     |
-| **STANDARD**：非 timeout 非零 exit                                 | 同 LIGHT 同样处理                                               | partial review markdown     |
-| **STANDARD**：accumulator 输出 < 200 字节                          | 删 summary → fallback                                           | 既有 fallback               |
-| **DEEP**：`timeout 15m` 触发                                       | accumulator partial flush → 头部加 `⚠️ time-capped` 警告 → 发出 | partial review markdown     |
-| **DEEP**：非 timeout 非零 exit                                     | 同上，status_label=error，警告头改 "exited with error"          | partial review markdown     |
-| **DEEP**：accumulator 输出 < 200 字节                              | 删 summary → fallback                                           | 既有 fallback               |
-| **DEEP**：正常完成                                                 | accumulator 收集 review → 发出                                  | 完整 review markdown        |
+| 故障                                                               | 兜底动作                                                                  | 落地评论                    |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------- | --------------------------- |
+| **ULTRA_LIGHT**：shell compose 失败                                | 走 fallback comment 路径                                                  | 既有 fallback（"see logs"） |
+| **LIGHT**：`timeout 3m` 触发                                       | accumulator partial flush → 头部加 `⚠️ time-capped` 警告 → 发出           | **partial review markdown** |
+| **LIGHT**：非 timeout 非零 exit（crash / OOM 137 / SIGINT 130 等） | 同上，status_label=error，警告头改 "exited with error"                    | partial review markdown     |
+| **LIGHT**：accumulator 输出 < 200 字节（占位符 only）              | 删 summary 文件 → 触发 fallback comment                                   | 既有 fallback               |
+| **STANDARD**：`timeout 8m` 触发                                    | accumulator partial flush → 头部加 `⚠️ time-capped` 警告 → 发出           | partial review markdown     |
+| **STANDARD**：非 timeout 非零 exit                                 | 同 LIGHT 同样处理                                                         | partial review markdown     |
+| **STANDARD**：accumulator 输出 < 200 字节                          | 删 summary → fallback                                                     | 既有 fallback               |
+| **DEEP focused pass**：`timeout 4m` 触发                           | accumulator partial flush → 头部加 `⚠️ time-capped` 警告 → 合并到最终评论 | partial review markdown     |
+| **DEEP**：非 timeout 非零 exit                                     | 同上，status_label=error，警告头改 "exited with error"                    | partial review markdown     |
+| **DEEP focused pass**：accumulator 输出 near-empty 占位符          | 省略该 section；其他 focused pass 继续保留                                | 其他 sections / fallback    |
+| **DEEP**：正常完成                                                 | 合并 4 个 focused pass 的 review → 发出                                   | 完整 review markdown        |
 
-> **DEEP 与 STANDARD/LIGHT 的关键差异（CI dry-run 实测，PR #4110）**：
-> STANDARD/LIGHT/DEEP 当前都是**单发 tool-free qwen 调用**，模型输出的 review 文本本身就在顶层 assistant text 流里，所以 timeout 时 accumulator flush 出来的 partial **就是**一份「写到一半的真 review」，有价值。DEEP 的差异只在输入窗口更大、prompt 更严格、审查维度更高风险；它不再走 bundled 多 agent skill。
+> **DEEP 与 STANDARD/LIGHT 的关键差异**：
+> STANDARD/LIGHT 是单发 tool-free qwen 调用；DEEP 是 4 个 focused tool-free qwen pass。每个 pass 的模型输出仍在顶层 assistant text 流里，所以 timeout 时 accumulator flush 出来的 partial **就是**该 focus 维度下写到一半的真 review。DEEP 的差异在于输入窗口更大、prompt 更严格、审查维度拆分，并复用了 bundled `/review` rubric；它仍不执行 bundled skill 的工具、worktree、autofix 或 GitHub review-submission 步骤。
 
 **Always-emit 不变量**：每次 review 执行阶段的退出路径只有三种 —— "正常 review 评论"、"partial warning 评论"、"fallback 评论"，前两者覆盖 ≥ 95% 的失败 case，fallback 只在累加器都空或评论发布失败时触发。
 
@@ -310,7 +316,7 @@ shell-only   单发 qwen   单发 qwen   单发 qwen
 - 头部插入元信息：`<!-- tier=…; status=…; segments=N; emitted=M -->`
 - 解析失败时落空文件 → 触发 fallback comment（既有兜底，保留）
 
-> **tier-specific 输出**：LIGHT/STANDARD/DEEP 都是单发 qwen 调用，所有 assistant segment 都是 review 内容，`buildOutput` 直接按 stream 顺序 `join`。DEEP 不 checkout PR head，也不会切换 worktree；workflow 只把可信 shell 收集到的 PR metadata / diff / rules 渲染进 prompt。
+> **tier-specific 输出**：LIGHT/STANDARD 的所有 assistant segment 都是 review 内容，`buildOutput` 直接按 stream 顺序 `join`。DEEP 每个 focused pass 也遵循同一解析规则，只是输出文件按 focus 分片后再合并。DEEP 不 checkout PR head，也不会切换 worktree；workflow 只把可信 shell 收集到的 PR metadata / diff / rules / bundled rubric 渲染进 prompt。
 
 > 这个改动同时让"调试期看进度"（stream 落盘）与"timeout 时有结果"（本设计目标）都得到满足。写入 Actions 日志的模型流和解析后的 DEEP summary 都用随机 `::stop-commands::` fence 包住，避免 PR 内容诱导模型输出 GitHub Actions workflow command。
 
@@ -320,7 +326,7 @@ shell-only   单发 qwen   单发 qwen   单发 qwen
 
 | 层级                    | 表达式                                                              | 效果                            |
 | ----------------------- | ------------------------------------------------------------------- | ------------------------------- |
-| 触发评论                | `@qwen /review --tier=ultra_light\|light\|standard\|deep`           | 跳过 preflight，直接用指定 tier |
+| 触发评论                | `@qwen-code /review --tier=ultra_light\|light\|standard\|deep`      | 跳过 preflight，直接用指定 tier |
 | workflow_dispatch input | 新增 `tier_override` (auto / ultra_light / light / standard / deep) | 跳过 preflight                  |
 
 shell 端最终 tier = override 值（若有）else preflight LLM verdict。
@@ -348,7 +354,7 @@ Deep review verdict: APPROVE
 
 四条独立的 tier 路径，共用一套 `Post review summary comment` + fallback。
 
-> **注**：以下伪 YAML 是设计期的草图，**实现以 `.github/workflows/qwen-code-pr-review.yml` 为准**。已知与实现的差异：① 实现把 "Honor tier override" 与 preflight fan-in 合并成单个 `Compute effective tier` step；② LIGHT 的 `needs_upgrade` 自动升 STANDARD 已在实现阶段取消（见 §Failure modes 的设计 vs 实现说明），LIGHT timeout 走 partial flush 而非升档。
+> **注**：以下伪 YAML 是设计期的草图，**实现以 `.github/workflows/qwen-code-pr-review.yml` 为准**。已知与实现的差异：① 实现把 "Honor tier override" 与 preflight fan-in 合并成单个 `Compute effective tier` step；② LIGHT 的 `needs_upgrade` 自动升 STANDARD 已在实现阶段取消（见 §Failure modes 的设计 vs 实现说明），LIGHT timeout 走 partial flush 而非升档；③ DEEP 不再是单个 15m prompt，而是抽取 bundled `/review` rubric 后运行 4 个 4m focused pass。
 
 ```yaml
 # ─── Stage 0: preflight ──────────────────────────────────────
@@ -468,20 +474,13 @@ Deep review verdict: APPROVE
   timeout-minutes: 20
   run: |-
     set -euo pipefail
-    prompt="$(cat .qwen/preflight-deep-review-prompt.md)"
-    # 注入 PR diff + focus_areas + agents_to_run + review-rules.md
-    set +e
-    stop_token="qwen-deep-stream-$(date +%s%N)"
-    echo "::stop-commands::${stop_token}"
-    timeout --kill-after=30s 15m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
-      --approval-mode default \
-      --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
-      --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
-      --allowed-mcp-server-names __qwen_review_no_mcp__ \
-      --output-format stream-json --include-partial-messages \
-      --prompt "$prompt" 2>&1 | tee qwen-review-stream.jsonl
-    status=${PIPESTATUS[0]}
-    echo "::${stop_token}::"
+    # 1. 抽取 packages/core/src/skills/bundled/review/SKILL.md 的 rubric
+    # 2. 注入 PR diff + author comments + focus_areas + agents_to_run + review-rules.md
+    # 3. 逐个运行 4 个 focused prompt，每个 pass 4m timeout + partial flush
+    for focus in correctness-security test-coverage maintainability-performance undirected-audit; do
+      run_deep_focus "$focus"
+    done
+    # 4. 合并可用 section；全部为空则触发 fallback comment
     set -e
     node scripts/parse-review-stream.cjs qwen-review-stream.jsonl qwen-review-summary.md
     if [ "$status" -ne 0 ]; then
@@ -563,7 +562,7 @@ Deep review verdict: APPROVE
 - **理由**：path 也是机械启发式 —— 跟"size 决定 tier"是同一类毛病；blast radius 应该从 diff 内容判断，path 只是个弱信号
 - **理由**：path 列表会随项目演进腐败，维护成本随时间增长
 - **理由**：preflight LLM 看到 diff 内容比看到 path 更准，重复防御不增加准确率
-- **理由**：LLM 判错由 maintainer 用 `@qwen /review --tier=deep` 显式纠正即可，成本可控
+- **理由**：LLM 判错由 maintainer 用 `@qwen-code /review --tier=deep` 显式纠正即可，成本可控
 - 后果：少 1 个文件、少 1 个 yq 依赖、shell 简化
 
 ### D5 — 校准数据沉淀位置：tracking issue 结构化评论
@@ -586,21 +585,25 @@ Deep review verdict: APPROVE
 - **step-level**：`timeout-minutes: 5` —— 保证整个 step（含 shell 处理）5 min 后被 kill
 - **理由**：单靠 `timeout 3m`，若 qwen 之后的 jq / shell 处理卡住（极少见但可能 —— 比如解析超大 JSON），step 会无限挂；双层叠加最稳
 - **理由**：5 - 3 = 2 min 余量给 schema 验证、`gh` 调用等
-- 同样模式应用到 LIGHT (`timeout 3m` cmd + `timeout-minutes: 5` step)、STANDARD (`timeout 8m` cmd + `timeout-minutes: 10` step)、DEEP (`timeout 15m` cmd + `timeout-minutes: 20` step)
+- 同样模式应用到 LIGHT (`timeout 3m` cmd + `timeout-minutes: 5` step)、STANDARD (`timeout 8m` cmd + `timeout-minutes: 10` step)、DEEP（每个 focused pass `timeout 4m`，整步 `timeout-minutes: 20`）
 
 ## 需要新增的仓库内文件清单
 
-| 文件                                               | 用途                                                                                                 | 来源决策                  |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------- |
-| `.qwen/preflight-prompt.md`                        | preflight 模型的提示词                                                                               | D2                        |
-| `.qwen/preflight-light-review-prompt.md`           | LIGHT tier 的单发 review prompt                                                                      | D3                        |
-| `.qwen/preflight-standard-review-prompt.md`        | STANDARD tier 的单发 review prompt                                                                   | D3                        |
-| `.qwen/preflight-deep-review-prompt.md`            | DEEP tier 的单发 review prompt                                                                       | D3                        |
-| `scripts/compute-pr-size.cjs`                      | 与 PR Size gate 对齐的 meaningful changed-line 计算                                                  | §Workflow step 结构       |
-| `scripts/parse-review-stream.cjs`                  | 累加式 stream-json 解析器（替换 workflow inline node 脚本）                                          | §Failure modes 流式累加器 |
-| `scripts/render-review-prompt.cjs`                 | 将 PR context / review rules 渲染进 prompt 模板，避免 YAML inline 脚本重复                           | §Workflow step 结构       |
-| (修改) `.github/workflows/qwen-code-pr-review.yml` | 加 preflight + 4 tier 执行 + 累加式解析                                                              | §Workflow step 结构       |
-| (修改) `.gitignore`                                | 已对 `.qwen/*` 例外 `review-rules.md`、`commands/`、`skills/`、`agents/`；需追加例外上述 prompt 文件 | 配套                      |
+| 文件                                                      | 用途                                                                                                 | 来源决策                  |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------- |
+| `.qwen/preflight-prompt.md`                               | preflight 模型的提示词                                                                               | D2                        |
+| `.qwen/preflight-light-review-prompt.md`                  | LIGHT tier 的单发 review prompt                                                                      | D3                        |
+| `.qwen/preflight-standard-review-prompt.md`               | STANDARD tier 的单发 review prompt                                                                   | D3                        |
+| `.qwen/preflight-deep-review-prompt.md`                   | 旧版 all-in-one DEEP prompt，保留作 fallback/reference                                               | D3                        |
+| `.qwen/deep-review-correctness-security-prompt.md`        | DEEP correctness/security focused pass                                                               | D3                        |
+| `.qwen/deep-review-test-coverage-prompt.md`               | DEEP test coverage focused pass                                                                      | D3                        |
+| `.qwen/deep-review-maintainability-performance-prompt.md` | DEEP maintainability/performance focused pass                                                        | D3                        |
+| `.qwen/deep-review-undirected-audit-prompt.md`            | DEEP undirected audit focused pass                                                                   | D3                        |
+| `scripts/compute-pr-size.cjs`                             | 与 PR Size gate 对齐的 meaningful changed-line 计算                                                  | §Workflow step 结构       |
+| `scripts/parse-review-stream.cjs`                         | 累加式 stream-json 解析器（替换 workflow inline node 脚本）                                          | §Failure modes 流式累加器 |
+| `scripts/render-review-prompt.cjs`                        | 将 PR context / review rules 渲染进 prompt 模板，避免 YAML inline 脚本重复                           | §Workflow step 结构       |
+| (修改) `.github/workflows/qwen-code-pr-review.yml`        | 加 preflight + 4 tier 执行 + 累加式解析                                                              | §Workflow step 结构       |
+| (修改) `.gitignore`                                       | 已对 `.qwen/*` 例外 `review-rules.md`、`commands/`、`skills/`、`agents/`；需追加例外上述 prompt 文件 | 配套                      |
 
 ## 需要新增的仓库 vars / secrets
 
@@ -615,7 +618,7 @@ Deep review verdict: APPROVE
 
 - **AC1**：docs-only PR（如 #4327 同类 6 行 yaml）→ 路由到 ULTRA_LIGHT，wall time < 2 min
 - **AC2**：mid-size feature PR（200–500 行单模块）→ 路由到 STANDARD，wall time < 12 min
-- **AC3**：含 `**/auth/**` 改动的小 PR → preflight LLM 应该自行判 DEEP（要在 calibration 示例里强化此类 case）；若漏档，maintainer 可用 `@qwen /review --tier=deep` 补救
+- **AC3**：含 `**/auth/**` 改动的小 PR → preflight LLM 应该自行判 DEEP（要在 calibration 示例里强化此类 case）；若漏档，maintainer 可用 `@qwen-code /review --tier=deep` 补救
 - **AC4**：preflight 故意返回 garbage（mock 测试）→ 兜底走 DEEP，留 warning，不导致 job fail
 - **AC5**：existing fallback comment 路径在 STANDARD/DEEP 失败时仍能发出
 
@@ -624,7 +627,7 @@ Deep review verdict: APPROVE
 详细验证证据（GitHub Actions run、PR 评论链接、当前 #4359 gate 状态、size 计算结果）见
 [`preflight-validation.md`](./preflight-validation.md)。
 
-下表是 `codex/preflight-triage` 分支经 `workflow_dispatch` 在真实 CI 上跑出的端到端结果。pre-merge 阶段新版链路只能靠 `workflow_dispatch` 验证 —— `pull_request_target` / `@qwen /review` 自动触发按 GHA 安全机制用 **base 分支(main)** 的 workflow,合并后才生效。
+下表是 `codex/preflight-triage` 分支经 `workflow_dispatch` 在真实 CI 上跑出的端到端结果。pre-merge 阶段新版链路只能靠 `workflow_dispatch` 验证 —— `pull_request_target` / `@qwen-code /review` 自动触发按 GHA 安全机制用 **base 分支(main)** 的 workflow,合并后才生效。
 
 **四档 tier —— 每档一条真实 review 评论:**
 
@@ -637,17 +640,17 @@ Deep review verdict: APPROVE
 
 **Gate 链路:**
 
-- pr-gate `PR Size` 拦截 —— 实证:本 PR 超 1500 行被 `core.setFailed` 拦截;打 `oversized-ok` label 后降级为 warning、转 success。
-- review workflow size 短路 —— 实证:超限 PR 跳过 AI review、不发拦截评论、把 merge-blocking 交给 `pr-gate.yml`。
+- pr-gate `PR Size` warning —— 超过 1500 meaningful lines 时只发 warning，记录是否存在 `oversized-ok` acknowledgement；不调用 `core.setFailed`，不阻断合并。
+- review workflow size warning —— 超限 PR 继续进入 AI review，并在 workflow summary / PR review 评论中附带 Large PR warning。
 - pr-gate `PR Template` —— 检查逻辑(缺必填段 / Validation 空模板 → `core.setFailed`)经静态核验成立。
-- 模型 —— 评论均由 `deepseek-v4-pro` 产出(经 `QWEN_PR_REVIEW_MODEL` 配置),CLI 仅作 agent runtime。
+- 模型 —— 由 `QWEN_PR_REVIEW_MODEL` / `QWEN_PR_PREFLIGHT_MODEL` 仓库变量控制；当前计划使用 `qwen3.7-max` 作为 review 模型。
 
 ## Open questions / 风险
 
 - **R1**：preflight 模型本身的可靠性 —— 便宜模型可能 JSON 结构不稳。需要在实现期 sample 试若干 PR 观察输出质量；不稳就回退到 deep review 模型 SKU。
-- **R2**：preflight 漏档 —— 模型可能把高风险 PR 误判为 LIGHT。**缓解**：calibration 示例里强化 high-blast-radius case；校准 loop 数据驱动 prompt 迭代；maintainer 可用 `@qwen /review --tier=deep` 显式补救。
+- **R2**：preflight 漏档 —— 模型可能把高风险 PR 误判为 LIGHT。**缓解**：calibration 示例里强化 high-blast-radius case；校准 loop 数据驱动 prompt 迭代；maintainer 可用 `@qwen-code /review --tier=deep` 显式补救。
 - **R3**：tier 升档的"棘轮效应" —— 用户感知 preflight 永远只升档不降档，长期可能不再信任。**缓解**：校准 loop 数据驱动 ablation，定期 review 是否过度保守。
-- **R4（安全 — 残留风险）**：review step 会把**不可信的 PR diff / title / body**放进 prompt。当前实现不使用 `--yolo`，并在执行 qwen 时移除 `GITHUB_TOKEN` / `GH_TOKEN`、限制 core tools、禁用 MCP server；评论发布使用独立后置 step。**现有缓解**：① 自动触发与 `@qwen /review` 评论触发都限定 OWNER/MEMBER/COLLABORATOR；② workflow 全程 checkout 可信的 `main`，从不 checkout PR head 代码；③ 所有不可信数据由可信 shell/`gh`/`jq` 收集后渲染进 prompt，杜绝 shell 层注入；④ 第三方 action 全部 SHA pin；⑤ qwen 进程拿不到评论用 token。**未消除的部分**：LLM 语义层注入无法靠上述手段根除，模型仍可能输出误导性 review；因此 AI review 保持 advisory-only，不作为 merge gate。
+- **R4（安全 — 残留风险）**：review step 会把**不可信的 PR diff / title / body**放进 prompt。当前实现不使用 `--yolo`，并在执行 qwen 时移除 `GITHUB_TOKEN` / `GH_TOKEN`、限制 core tools、禁用 MCP server；评论发布使用独立后置 step。**现有缓解**：① 自动触发与 `@qwen-code /review` 评论触发都限定 OWNER/MEMBER/COLLABORATOR；② workflow 全程 checkout 可信的 `main`，从不 checkout PR head 代码；③ 所有不可信数据由可信 shell/`gh`/`jq` 收集后渲染进 prompt，杜绝 shell 层注入；④ 第三方 action 全部 SHA pin；⑤ qwen 进程拿不到评论用 token。**未消除的部分**：LLM 语义层注入无法靠上述手段根除，模型仍可能输出误导性 review；因此 AI review 保持 advisory-only，不作为 merge gate。
 
 ## Rollback / Emergency Disable
 
@@ -670,7 +673,7 @@ Deep review verdict: APPROVE
 操作（任选其一）：
 
 - **临时**：在 `.github/workflows/qwen-code-pr-review.yml` 里，把 `Compute effective tier` step 加一行 `tier="DEEP"` 强制写死
-- **手动**：每个 PR 由 maintainer 评论 `@qwen /review --tier=deep` 覆盖（对外部贡献者 PR 体验差）
+- **手动**：每个 PR 由 maintainer 评论 `@qwen-code /review --tier=deep` 覆盖（对外部贡献者 PR 体验差）
 - **dispatch**：用 `workflow_dispatch` + `tier_override=deep` 触发（仅 maintainer，不影响自动 PR）
 
 代价：所有 PR 都走 tool-free DEEP 深审，成本高于按 tier 路由，但仍受 15m/20m 双层 timeout 和 always-emit 保护。

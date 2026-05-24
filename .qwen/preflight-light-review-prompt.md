@@ -81,7 +81,7 @@ No issues found in the visible diff at this tier.
 
 ---
 
-_Tier: LIGHT. Reply `@qwen /review --tier=deep` to request a high-risk structured review with a larger diff window._
+_Tier: LIGHT. Reply `@qwen-code /review --tier=deep` to request a high-risk structured review with a larger diff window._
 ```
 
 ---
@@ -96,8 +96,9 @@ imprecise. Examine them, but report only what you genuinely see in the diff.
 
 ## PR context to review
 
-The workflow shell appends the actual PR data (title, body, changed file
-list, unified diff, optional focus_areas) below this line before passing
-this file to `qwen`. Read it and produce the brief LIGHT review markdown.
+The workflow shell appends the actual PR data (title, body, author PR
+comments, changed file list, unified diff, optional focus_areas) below this
+line before passing this file to `qwen`. Read it and produce the brief LIGHT
+review markdown.
 
 <<<PR_CONTEXT>>>

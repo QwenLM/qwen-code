@@ -6,7 +6,7 @@
 
 // render-review-prompt.cjs is CommonJS (.cjs ext because the repo root
 // package.json sets "type": "module"). Vitest's ESM<->CJS interop
-// surfaces its named exports as properties of the default import.
+// exposes its CommonJS exports to this ESM test file as named imports.
 import { describe, it, expect } from 'vitest';
 import { render, parseArgs, ArgError } from '../render-review-prompt.cjs';
 

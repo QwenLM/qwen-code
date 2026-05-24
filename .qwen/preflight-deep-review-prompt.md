@@ -5,10 +5,11 @@ judged that this change touches at least one high-risk dimension such as
 security, public API, build/release, persistence/data formats, or broad
 cross-package behavior.
 
-This CI workflow runs in `pull_request_target`, so the review is a
-**single-pass, tool-free deep review**: all PR data is supplied below by
-trusted workflow steps, and you must not ask for shell, file, network,
-GitHub, or agent tool access.
+This prompt is the legacy all-in-one DEEP prompt. The current CI workflow
+uses four focus-specific DEEP prompts and injects a rubric excerpt from the
+bundled `/review` skill. If this prompt is used as a fallback, keep the same
+CI-safe constraint: all PR data is supplied below by trusted workflow steps,
+and you must not ask for shell, file, network, GitHub, or agent tool access.
 
 ---
 
@@ -83,7 +84,7 @@ Apply the requirement defined in `.qwen/review-rules.md` (section
   author should add.
 
 End that section with this line verbatim:
-`> This is an automated, advisory, comment-only review — it never approves or requests changes. After adding validation evidence, comment \`@qwen /review\` to re-run; editing the PR description alone does NOT re-trigger this review in the current phase.`
+`> This is an automated, advisory, comment-only review — it never approves or requests changes. After adding validation evidence, comment \`@qwen-code /review\` to re-run; editing the PR description alone does NOT re-trigger this review in the current phase.`
 
 ---
 
@@ -102,8 +103,9 @@ exhaustive and not mandatory findings.
 
 ## PR context to review
 
-The workflow shell appends the actual PR data (title, body, changed file
-list with line counts, unified diff, optional focus_areas and
-agents_to_run) below this line before passing this file to `qwen`.
+The workflow shell appends the actual PR data (title, body, author PR
+comments, changed file list with line counts, unified diff, optional
+focus_areas and agents_to_run) below this line before passing this file to
+`qwen`.
 
 <<<PR_CONTEXT>>>

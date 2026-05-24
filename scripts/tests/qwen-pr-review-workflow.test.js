@@ -106,6 +106,42 @@ describe('Qwen PR review workflow safety rails', () => {
     );
   });
 
+  it('includes author PR comments in AI review context', () => {
+    expect(workflow).toContain('--json title,body,files,author,comments');
+    expect(workflow).toContain('author_comments_block');
+    expect(workflow).toContain('**Author PR comments');
+  });
+
+  it('guards DEEP status capture and rubric extraction against silent loss', () => {
+    expect(workflow).not.toContain('local status\n            status=');
+    expect(workflow).toContain('local status=0');
+    expect(workflow).toContain('status=${PIPESTATUS[0]}');
+    expect(workflow).toContain('missingSections');
+    expect(workflow).toContain('falling back to the full bundled review skill');
+  });
+
+  it('keeps the DEEP focus pass list single-sourced', () => {
+    expect(workflow).toContain('deep_focus_passes=(');
+    expect(workflow).toContain('run_deep_focus "$focus" "$prompt_template"');
+
+    const literalFocusLoops = workflow.match(
+      /for focus in correctness-security test-coverage maintainability-performance undirected-audit/g,
+    );
+    expect(literalFocusLoops).toBeNull();
+  });
+
+  it('passes explicit tier labels into the review stream parser', () => {
+    expect(workflow).toContain(
+      'node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md LIGHT "$status_label"',
+    );
+    expect(workflow).toContain(
+      'node scripts/parse-review-stream.cjs "$out" qwen-review-summary.md STANDARD "$status_label"',
+    );
+    expect(workflow).toContain(
+      'node scripts/parse-review-stream.cjs "$out" "$summary" "DEEP-${focus}" "$status_label"',
+    );
+  });
+
   it('keeps DEEP prompt templates versioned despite the .qwen ignore rule', () => {
     for (const template of deepPromptTemplates) {
       expect(gitignore).toContain(`!${template}`);
