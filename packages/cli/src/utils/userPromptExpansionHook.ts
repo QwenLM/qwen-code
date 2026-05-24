@@ -43,5 +43,9 @@ export function serializeUserPromptExpansionPrompt(
 export function formatUserPromptExpansionBlockedMessage(
   reason: string,
 ): string {
-  return `UserPromptExpansion blocked: ${reason}`;
+  const sanitizedReason = reason
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH);
+  return `UserPromptExpansion blocked: ${sanitizedReason}`;
 }

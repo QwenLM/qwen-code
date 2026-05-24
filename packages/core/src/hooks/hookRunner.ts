@@ -486,6 +486,19 @@ export class HookRunner {
     if (hookOutput.hookSpecificOutput) {
       switch (eventName) {
         case HookEventName.UserPromptSubmit:
+          if ('additionalContext' in hookOutput.hookSpecificOutput) {
+            const additionalContext =
+              hookOutput.hookSpecificOutput['additionalContext'];
+            if (
+              typeof additionalContext === 'string' &&
+              'prompt' in modifiedInput
+            ) {
+              (modifiedInput as UserPromptSubmitInput).prompt +=
+                '\n\n' + additionalContext;
+            }
+          }
+          break;
+
         case HookEventName.UserPromptExpansion:
           {
             const additionalContext = createHookOutput(
@@ -493,11 +506,8 @@ export class HookRunner {
               hookOutput,
             ).getAdditionalContext();
             if (additionalContext && 'prompt' in modifiedInput) {
-              (
-                modifiedInput as
-                  | UserPromptSubmitInput
-                  | UserPromptExpansionInput
-              ).prompt += '\n\n' + additionalContext;
+              (modifiedInput as UserPromptExpansionInput).prompt +=
+                '\n\n' + additionalContext;
             }
           }
           break;
