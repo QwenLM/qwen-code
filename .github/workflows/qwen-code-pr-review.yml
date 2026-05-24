@@ -4,8 +4,9 @@ on:
   pull_request_target:
     types: ['opened', 'reopened', 'ready_for_review', 'synchronize']
   # 'edited' is intentional: a maintainer who typed a plain comment and
-  # then edits it to add `@qwen /review` (or fixes a typo in the command)
-  # should still trigger the review. The re-trigger surface is bounded —
+  # then edits it to add `@qwen-code /review` (or fixes a typo in the
+  # command) should still trigger the review. The re-trigger surface is
+  # bounded —
   # the job `if:` only fires for OWNER/MEMBER/COLLABORATOR authors, so a
   # stale-comment edit can at worst cost one maintainer-initiated re-run.
   issue_comment:
@@ -47,23 +48,22 @@ on:
 jobs:
   review-pr:
     # NOTE (intentional, current-phase safeguard): auto-triggers and the
-    # @qwen /review comment trigger are gated to OWNER/MEMBER/COLLABORATOR
+    # @qwen-code /review comment trigger are gated to OWNER/MEMBER/COLLABORATOR
     # on purpose. This workflow runs under pull_request_target with
     # repository secrets and a 5-30 min LLM deep review, so an open
     # trigger would be a denial-of-wallet / abuse surface. External
     # contributor PRs are still reviewable today — a maintainer comments
-    # `@qwen /review` on the PR. Broadening auto-trigger for community
+    # `@qwen-code /review` on the PR. Broadening auto-trigger for community
     # PRs (with per-author rate limiting) is deferred to a later phase,
     # not dropped here. See docs/design/code-review/code-review-design.md.
     #
-    # NOTE: contains() below is a substring match, so '@qwen /reviewer'
+    # NOTE: contains() below is a substring match, so '@qwen-code /reviewer'
     # (or any other suffix) also passes this gate. That's intentional:
     # GHA expressions cannot anchor a regex here, and the
     # 'Resolve PR context' shell step re-checks with a properly
-    # end-anchored awk/grep regex (@qwen /review($|[[:space:]])) and sets
-    # should_run_review=false on non-matches. The cost of the extra
-    # runner spin-up on a malformed mention is a few seconds and
-    # acceptable.
+    # end-anchored awk/grep regex (@qwen-code /review($|[[:space:]])) and
+    # sets should_run_review=false on non-matches. The cost of the extra
+    # runner spin-up on a malformed mention is a few seconds and acceptable.
     if: |-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_target' &&
@@ -73,17 +73,17 @@ jobs:
         github.event.pull_request.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
-        contains(github.event.comment.body, '@qwen /review') &&
+        contains(github.event.comment.body, '@qwen-code /review') &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request_review_comment' &&
-        contains(github.event.comment.body, '@qwen /review') &&
+        contains(github.event.comment.body, '@qwen-code /review') &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request_review' &&
-        contains(github.event.review.body, '@qwen /review') &&
+        contains(github.event.review.body, '@qwen-code /review') &&
         (github.event.review.author_association == 'OWNER' ||
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR'))
@@ -212,16 +212,16 @@ jobs:
 
           should_run_review="true"
 
-          # Use grep -qE with end-boundary so '@qwen /review' does not match
-          # '@qwen /reviewer' or similar variants.
+          # Use grep -qE with end-boundary so '@qwen-code /review' does not
+          # match '@qwen-code /reviewer' or similar variants.
           if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$EVENT_NAME" != "pull_request_target" ]; then
-            if printf '%s' "$comment_body" | grep -qE '@qwen /review($|[[:space:]])'; then
+            if printf '%s' "$comment_body" | grep -qE '@qwen-code /review($|[[:space:]])'; then
               additional_instructions="$(
                 printf '%s' "$comment_body" |
                   awk '
                     BEGIN { found = 0 }
                     !found {
-                      if (match($0, /@qwen \/review([[:space:]]|$)/)) {
+                      if (match($0, /@qwen-code \/review([[:space:]]|$)/)) {
                         found = 1
                         rest = substr($0, RSTART + RLENGTH)
                         if (length(rest) > 0) print rest
@@ -259,7 +259,7 @@ jobs:
             fi
           fi
           # Strip leading blank lines so the prompt doesn't start with an
-          # empty line when @qwen /review is on its own line.
+          # empty line when @qwen-code /review is on its own line.
           additional_instructions="$(printf '%s' "$additional_instructions" | sed '/./,$!d')"
           # Keep maintainer focus text from changing the slash-command flags.
           additional_instructions="$(printf '%s' "$additional_instructions" | LC_ALL=C perl -0pe 's/(?<!\S)--comment(?!\S)/`--comment`/g')"
@@ -365,27 +365,29 @@ jobs:
           write_output "changed_files=$changed_files"
           write_output "head_sha=$head_sha"
           write_output "base_sha=$base_sha"
+          write_output "review_size_threshold=$QWEN_PR_REVIEW_MAX_CHANGED_LINES"
           echo "Review target: PR #$PR_NUMBER"
           echo "Review title: $title"
           echo "Review branch: $base_ref ($base_sha) <- $head_ref ($head_sha)"
           echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines reviewable lines after excluding docs/lockfiles/snapshots)"
 
           if [ "$changed_lines" -gt "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" ]; then
-            # Size > AI-review threshold: skip AI review but DO NOT post a
-            # blocking comment. Merge-blocking by oversized PR is the job
-            # of the sibling workflow `pr-gate.yml` (PR Size check). This
-            # step is informational only. See docs/design/pr-gate-plan.md.
-            write_output "should_review=false"
-            echo "::notice::PR size ($changed_lines lines) exceeds AI-review threshold ($QWEN_PR_REVIEW_MAX_CHANGED_LINES). Skipping AI review; pr-gate.yml 'PR Size' check handles merge-blocking for oversized PRs."
+            # Size > AI-review guidance: keep reviewing, but make the
+            # signal-risk explicit in logs, step summary, and the final PR
+            # comment. This workflow is advisory; size should not silently
+            # suppress automated review coverage.
+            write_output "exceeds_review_threshold=true"
+            echo "::warning::PR size ($changed_lines lines) exceeds AI-review size guidance ($QWEN_PR_REVIEW_MAX_CHANGED_LINES). Continuing automated review; expect lower signal and possible truncation."
             {
-              printf '### Qwen PR review skipped (PR too large for AI review)\n\n'
+              printf '### Large PR warning\n\n'
               printf 'PR size: %s lines across %s files (threshold %s).\n\n' \
                 "$changed_lines" "$changed_files" "$QWEN_PR_REVIEW_MAX_CHANGED_LINES"
-              printf 'Skipped automated AI review. Merge-blocking by size is handled by `pr-gate.yml` (PR Size check).\n'
+              printf 'Automated review will continue, but findings may be less complete on oversized diffs.\n'
             } >> "$GITHUB_STEP_SUMMARY"
           else
-            write_output "should_review=true"
+            write_output "exceeds_review_threshold=false"
           fi
+          write_output "should_review=true"
 
       # @qwen-code/qwen-code requires Node >=22; runner default is 20
       # (npm EBADENGINE). Pin Node 22 before installing/invoking qwen.
@@ -452,7 +454,7 @@ jobs:
       # ─── Preflight triage: LLM judges blast radius, picks tier ────────────
       #
       # Skipped when the maintainer explicitly forced a tier via slash flag
-      # (`@qwen /review --tier=...`) or workflow_dispatch input. Otherwise
+      # (`@qwen-code /review --tier=...`) or workflow_dispatch input. Otherwise
       # runs a single qwen call against `.qwen/preflight-prompt.md` with PR
       # context appended, expecting strict JSON output. Any failure mode
       # (timeout, non-JSON, schema invalid) defaults to DEEP (P7 conservative
@@ -729,7 +731,7 @@ jobs:
             # on some bash builds (caught by CI dry-run on 2026-05-20).
             printf -- '- Changed files: %s\n' "$CHANGED_FILES"
             printf -- '- Changed lines: %s\n\n' "$RAW_CHANGED_LINES"
-            printf '_Reply `@qwen /review --tier=light|standard|deep` to force a deeper review._\n'
+            printf '_Reply `@qwen-code /review --tier=light|standard|deep` to force a deeper review._\n'
           } > qwen-review-summary.md
 
       # ─── LIGHT: single-shot qwen with focused prompt ──────────────────────
@@ -1172,11 +1174,19 @@ jobs:
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           EFFECTIVE_TIER: '${{ steps.tier.outputs.tier }}'
+          EXCEEDS_REVIEW_THRESHOLD: '${{ steps.size.outputs.exceeds_review_threshold }}'
+          CHANGED_LINES: '${{ steps.size.outputs.changed_lines }}'
+          REVIEW_SIZE_THRESHOLD: '${{ steps.size.outputs.review_size_threshold }}'
         run: |-
           {
             printf '### Qwen PR review dry run\n\n'
             printf 'Completed %s review for PR #%s without posting PR comments.\n\n' \
               "$EFFECTIVE_TIER" "$PR_NUMBER"
+            if [ "$EXCEEDS_REVIEW_THRESHOLD" = "true" ]; then
+              printf '#### Large PR warning\n\n'
+              printf 'This PR has %s reviewable lines, above the configured %s-line AI-review guidance. The automated review still ran, but findings may be less complete on oversized diffs.\n\n' \
+                "$CHANGED_LINES" "$REVIEW_SIZE_THRESHOLD"
+            fi
             printf 'Review logs are available in this workflow run.\n\n'
             printf '#### Review content (would be posted)\n\n'
             cat qwen-review-summary.md
@@ -1199,11 +1209,19 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           EFFECTIVE_TIER: '${{ steps.tier.outputs.tier }}'
+          EXCEEDS_REVIEW_THRESHOLD: '${{ steps.size.outputs.exceeds_review_threshold }}'
+          CHANGED_LINES: '${{ steps.size.outputs.changed_lines }}'
+          REVIEW_SIZE_THRESHOLD: '${{ steps.size.outputs.review_size_threshold }}'
         run: |-
           set -euo pipefail
 
           summary_bytes=$(wc -c < qwen-review-summary.md)
           {
+            if [ "$EXCEEDS_REVIEW_THRESHOLD" = "true" ]; then
+              printf '> [!WARNING]\n'
+              printf '> Large PR warning: this PR has %s reviewable lines, above the configured %s-line AI-review guidance. The automated review still ran, but findings may be less complete on oversized diffs.\n\n' \
+                "$CHANGED_LINES" "$REVIEW_SIZE_THRESHOLD"
+            fi
             head -c 60000 qwen-review-summary.md
             if [ "$summary_bytes" -gt 60000 ]; then
               printf '\n\n_Review summary was truncated at 60KB. See the workflow logs for the full output._\n'
@@ -1213,7 +1231,7 @@ jobs:
             # printf placeholder filled by the positional arg, so the
             # single quotes are correct here.
             # shellcheck disable=SC2016
-            printf '\n\n---\n_Reviewed by `%s` via Qwen Code `/review` (tier=`%s`). Reply `@qwen /review` to re-run; add `--tier=light|standard|deep` to force a tier._\n' \
+            printf '\n\n---\n_Reviewed by `%s` via Qwen Code `/review` (tier=`%s`). Reply `@qwen-code /review` to re-run; add `--tier=light|standard|deep` to force a tier._\n' \
               "${OPENAI_MODEL:-unknown}" "${EFFECTIVE_TIER:-unknown}"
           } > qwen-pr-review-summary-comment.md
 
@@ -1231,8 +1249,8 @@ jobs:
       # run leave nothing on the PR — breaking the always-emit guarantee.
       # `steps.post-summary.outcome != 'success'` captures all three
       # misses: skipped (no file), failure (gh error), cancelled. The
-      # `should_review == 'true'` gate keeps this from firing on an
-      # intentionally size-skipped PR (which posts no review by design).
+      # `should_review == 'true'` gate keeps this from firing when the
+      # slash-command parser intentionally declined to run a review.
       # The fallback's own `gh pr comment` ends with `|| true` so the step
       # never causes a secondary cascade failure.
       - name: 'Post fallback comment on review failure'
@@ -1247,6 +1265,9 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          EXCEEDS_REVIEW_THRESHOLD: '${{ steps.size.outputs.exceeds_review_threshold }}'
+          CHANGED_LINES: '${{ steps.size.outputs.changed_lines }}'
+          REVIEW_SIZE_THRESHOLD: '${{ steps.size.outputs.review_size_threshold }}'
         run: |-
           set -euo pipefail
 
@@ -1264,6 +1285,11 @@ jobs:
           if [ -f qwen-review-summary.md ] && [ -s qwen-review-summary.md ] && ! grep -qF 'no assistant text parsed' qwen-review-summary.md; then
             summary_bytes=$(wc -c < qwen-review-summary.md)
             {
+              if [ "$EXCEEDS_REVIEW_THRESHOLD" = "true" ]; then
+                printf '> [!WARNING]\n'
+                printf '> Large PR warning: this PR has %s reviewable lines, above the configured %s-line AI-review guidance. The automated review still ran, but findings may be less complete on oversized diffs.\n\n' \
+                  "$CHANGED_LINES" "$REVIEW_SIZE_THRESHOLD"
+              fi
               head -c 60000 qwen-review-summary.md
               if [ "$summary_bytes" -gt 60000 ]; then
                 printf '\n\n_Review summary was truncated at 60KB. See the workflow logs for the full output._\n'
@@ -1273,7 +1299,11 @@ jobs:
           else
             {
               printf '_Qwen Code automated PR review did not complete successfully. See the workflow logs for details: %s_\n' "$RUN_URL"
-              printf "\nThis is an automated message; please retry by commenting \`@qwen /review\` once the underlying issue is resolved.\n"
+              if [ "$EXCEEDS_REVIEW_THRESHOLD" = "true" ]; then
+                printf '\nLarge PR warning: this PR has %s reviewable lines, above the configured %s-line AI-review guidance.\n' \
+                  "$CHANGED_LINES" "$REVIEW_SIZE_THRESHOLD"
+              fi
+              printf "\nThis is an automated message; please retry by commenting \`@qwen-code /review\` once the underlying issue is resolved.\n"
             } > qwen-pr-review-failure-comment.md
           fi
           gh pr comment "$PR_NUMBER" \

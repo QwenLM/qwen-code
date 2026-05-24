@@ -55,6 +55,34 @@ describe('Qwen PR review workflow safety rails', () => {
     expect(workflow).toContain("github.event_name == 'pull_request_review'");
   });
 
+  it('uses @qwen-code /review as the maintainer comment trigger', () => {
+    expect(workflow).toContain('@qwen-code /review');
+    expect(workflow).toContain(
+      "contains(github.event.comment.body, '@qwen-code /review')",
+    );
+    expect(workflow).toContain(
+      "contains(github.event.review.body, '@qwen-code /review')",
+    );
+    expect(workflow).toContain("grep -qE '@qwen-code /review($|[[:space:]])'");
+    expect(workflow).toContain('/@qwen-code \\/review([[:space:]]|$)/');
+    expect(workflow).not.toContain('@qwen /review');
+  });
+
+  it('continues review for oversized PRs while surfacing a warning', () => {
+    expect(workflow).not.toContain('Skipping AI review');
+    expect(workflow).not.toContain(
+      'Qwen PR review skipped (PR too large for AI review)',
+    );
+    expect(workflow).toContain('write_output "exceeds_review_threshold=false"');
+    expect(workflow).toContain('write_output "exceeds_review_threshold=true"');
+    expect(workflow).toContain('write_output "should_review=true"');
+    expect(workflow).toContain('exceeds AI-review size guidance');
+    expect(workflow).toContain(
+      "EXCEEDS_REVIEW_THRESHOLD: '${{ steps.size.outputs.exceeds_review_threshold }}'",
+    );
+    expect(workflow).toContain('Large PR warning');
+  });
+
   it('guards preflight model tier against contradictory blast radius', () => {
     expect(workflow).toContain(
       'contradicts high-risk blast_radius; upgrading to DEEP',
@@ -99,7 +127,7 @@ describe('Qwen PR review workflow safety rails', () => {
     // (no file), failure (gh error), and cancelled alike.
     expect(workflow).toContain('always()');
     expect(workflow).toContain("steps.post-summary.outcome != 'success'");
-    // Still gated so an intentionally size-skipped PR posts nothing.
+    // Still gated so a declined slash-command posts nothing.
     expect(workflow).toContain("steps.size.outputs.should_review == 'true'");
   });
 
