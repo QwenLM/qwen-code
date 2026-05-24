@@ -11,12 +11,12 @@
  * one-liner from `CompactToolGroupDisplay`, which collapsed all useful
  * progress information into a count.
  *
- * Each row shows: status glyph · agent name · current activity · elapsed
- * · tokens. Pulled from `BackgroundTaskRegistry` on a 1s tick so the
- * activity and elapsed columns stay live (same pattern LiveAgentPanel
- * uses for its glance roster). Agents claimed by this display are
- * hidden from `LiveAgentPanel` via `InlineAgentClaimContext`, so the
- * same row never appears twice on screen.
+ * Each row shows: status glyph · agent name · elapsed · tokens.
+ * Rendered in committed phase only; during live phase,
+ * `LiveAgentPanel` below the composer owns the display.
+ * Elapsed and token data fall back to
+ * `AgentResultDisplay.executionSummary` when the registry entry has
+ * been unregistered.
  */
 
 import type React from 'react';
@@ -29,7 +29,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
-import { useClaimedAgentIds } from '../../contexts/InlineAgentClaimContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
@@ -190,15 +189,6 @@ export const InlineParallelAgentsDisplay: React.FC<
     }
     return out;
   }, [toolCalls]);
-
-  const agentIds = useMemo(
-    () => agentEntries.map((e) => deriveAgentId(e.toolCall, e.result)),
-    [agentEntries],
-  );
-
-  // Claim these ids so LiveAgentPanel knows to suppress them — this
-  // panel is now the authoritative live surface for the batch.
-  useClaimedAgentIds(agentIds);
 
   // 1s wall-clock tick to refresh elapsed / activity columns while
   // any agent in the batch is still live. Gating prevents the

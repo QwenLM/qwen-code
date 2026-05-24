@@ -16,10 +16,6 @@ import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
-import {
-  InlineAgentClaimProvider,
-  InlineAgentClaimWriteContext,
-} from '../../contexts/InlineAgentClaimContext.js';
 
 interface AgentCallSeed {
   callId: string;
@@ -79,12 +75,10 @@ function renderInline(options: {
   act(() => {
     result = render(
       <ConfigContext.Provider value={options.config}>
-        <InlineAgentClaimProvider>
-          <InlineParallelAgentsDisplay
-            toolCalls={options.toolCalls}
-            contentWidth={120}
-          />
-        </InlineAgentClaimProvider>
+        <InlineParallelAgentsDisplay
+          toolCalls={options.toolCalls}
+          contentWidth={120}
+        />
       </ConfigContext.Provider>,
     );
   });
@@ -183,12 +177,10 @@ describe('<InlineParallelAgentsDisplay />', () => {
     act(() => {
       result = render(
         <ConfigContext.Provider value={config}>
-          <InlineAgentClaimProvider>
-            <InlineParallelAgentsDisplay
-              toolCalls={toolCalls}
-              contentWidth={120}
-            />
-          </InlineAgentClaimProvider>
+          <InlineParallelAgentsDisplay
+            toolCalls={toolCalls}
+            contentWidth={120}
+          />
         </ConfigContext.Provider>,
       );
     });
@@ -199,54 +191,6 @@ describe('<InlineParallelAgentsDisplay />', () => {
     expect(frame).toContain('**/*.ts');
     // 5s elapsed since the agent's startTime.
     expect(frame).toContain('5s');
-  });
-
-  it('claims agentIds while mounted and releases on unmount', () => {
-    const claims: string[] = [];
-    const releases: string[] = [];
-    // Spy provider for the write side only — read side stays at its
-    // default (empty set), which is fine since this test asserts
-    // claim/release calls rather than visibility.
-    const writeApi = {
-      claim: (id: string) => {
-        claims.push(id);
-      },
-      release: (id: string) => {
-        releases.push(id);
-      },
-    };
-    const toolCalls = [
-      agentToolCall({
-        callId: 'c1',
-        subagentName: 'general-purpose',
-        taskDescription: 'A1',
-      }),
-      agentToolCall({
-        callId: 'c2',
-        subagentName: 'general-purpose',
-        taskDescription: 'A2',
-      }),
-    ];
-    let result!: ReturnType<typeof render>;
-    act(() => {
-      result = render(
-        <ConfigContext.Provider value={undefined}>
-          <InlineAgentClaimWriteContext.Provider value={writeApi}>
-            <InlineParallelAgentsDisplay
-              toolCalls={toolCalls}
-              contentWidth={120}
-            />
-          </InlineAgentClaimWriteContext.Provider>
-        </ConfigContext.Provider>,
-      );
-    });
-    expect(claims.sort()).toEqual(['general-purpose-c1', 'general-purpose-c2']);
-    expect(releases).toEqual([]);
-    act(() => result.unmount());
-    expect(releases.sort()).toEqual([
-      'general-purpose-c1',
-      'general-purpose-c2',
-    ]);
   });
 
   it('falls back to executionSummary when the registry has unregistered the agent', () => {

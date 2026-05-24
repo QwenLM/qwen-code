@@ -284,29 +284,26 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // that surfaces every agent's status / activity / elapsed / tokens
   // on its own row.
   //
-  // Conditions:
-  //   - Group has ≥2 agent calls and ONLY agent calls (mixed groups
-  //     keep the legacy renderer so sibling tools stay visible).
-  //   - Live phase (`isPending`). Once committed to `<Static>`, the
-  //     expanded path with SubagentScrollbackSummary owns the
-  //     persistent record so each agent gets a permanent line.
-  //   - No pending confirmation: those go through the normal renderer
-  //     so the keyboard-focus surface for approval stays intact.
-  //
-  // InlineParallelAgentsDisplay claims its agentIds in
-  // `InlineAgentClaimContext` so LiveAgentPanel below the composer
-  // suppresses the same rows — no duplication across surfaces.
-  if (
-    isPending &&
-    isPureParallelAgentGroup(toolCalls) &&
-    !hasSubagentPendingConfirmation
-  ) {
-    return (
-      <InlineParallelAgentsDisplay
-        toolCalls={toolCalls}
-        contentWidth={contentWidth}
-      />
-    );
+  // Dense inline panel for committed phase; live-phase null-out so
+  // LiveAgentPanel below the composer is the sole live surface.
+  //   - Committed (`!isPending`): dense panel with one row per agent
+  //     showing final status / elapsed / tokens.
+  //   - Live (`isPending`): return null — all agents (including
+  //     terminal ones) are handled by LiveAgentPanel below the input.
+  //     Without this, terminal agents would render as verbose
+  //     ToolMessages above the input while running ones sit below.
+  //   - Pending confirmation: falls through to the normal renderer so
+  //     the keyboard-focus surface for approval stays intact.
+  if (isPureParallelAgentGroup(toolCalls) && !hasSubagentPendingConfirmation) {
+    if (!isPending) {
+      return (
+        <InlineParallelAgentsDisplay
+          toolCalls={toolCalls}
+          contentWidth={contentWidth}
+        />
+      );
+    }
+    return null;
   }
 
   // Hide the entire group when the live-phase filter leaves nothing

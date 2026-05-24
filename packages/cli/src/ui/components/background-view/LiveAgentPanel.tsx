@@ -35,7 +35,6 @@ import {
   ToolNames,
 } from '@qwen-code/qwen-code-core';
 import { useBackgroundTaskViewState } from '../../contexts/BackgroundTaskViewContext.js';
-import { useIsAgentClaimed } from '../../contexts/InlineAgentClaimContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -187,16 +186,6 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   // throws in that case, which would force every consumer to provide
   // a stub Config just to satisfy the panel's "live registry re-pull".
   const config = useContext(ConfigContext);
-  // Inline displays (`InlineParallelAgentsDisplay`) claim agentIds
-  // when they own the live surface for a batch. Suppress those rows
-  // here so the same agent never appears in both surfaces at once.
-  // Subscribes to the read side of the claim context; the returned
-  // predicate's identity changes ONLY when the claimed set changes
-  // (which is the signal we need to add/drop suppressed rows), so the
-  // `liveAgentSnapshots` memo below won't churn on every unrelated
-  // claim/release elsewhere in the tree. Defaults to a no-op when no
-  // provider is mounted.
-  const isClaimed = useIsAgentClaimed();
 
   // Wall-clock tick. Drives elapsed-time refresh, terminal-row eviction,
   // AND the live registry re-pull below. The gate must consider:
@@ -289,16 +278,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   const missingSinceRef = useRef<Map<string, number>>(new Map());
 
   const liveAgentSnapshots: AgentDialogEntry[] = useMemo(() => {
-    // Suppress agents that an inline display (e.g.
-    // `InlineParallelAgentsDisplay` for `/review`'s 9-agent fan-out)
-    // has claimed as its own. The inline panel becomes the
-    // authoritative live surface for the batch; showing the same
-    // rows here too would just be a duplicate roster. When no inline
-    // display is active `isClaimed` is a no-op so behaviour is
-    // unchanged for solo agents.
-    const snapshots = entries
-      .filter(isAgentEntry)
-      .filter((e) => !isClaimed(e.agentId));
+    const snapshots = entries.filter(isAgentEntry);
     if (!config) return snapshots;
     const registry = config.getBackgroundTaskRegistry();
     // `now` participates in the dependency array so the memo recomputes
@@ -368,7 +348,7 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
       if (!seenIds.has(id)) missingSinceRef.current.delete(id);
     }
     return next;
-  }, [entries, config, now, isClaimed]);
+  }, [entries, config, now]);
 
   // Defense in depth: don't compete with the dialog. Under
   // DefaultAppLayout this branch is unreachable because the layout

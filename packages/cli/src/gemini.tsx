@@ -48,7 +48,6 @@ import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './ui/contexts/BackgroundTaskViewContext.js';
-import { InlineAgentClaimProvider } from './ui/contexts/InlineAgentClaimContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
 import { themeManager, AUTO_THEME_NAME } from './ui/themes/theme-manager.js';
 import {
@@ -323,17 +322,6 @@ export async function startInteractiveUI(
                 <VimModeProvider settings={settings}>
                   <AgentViewProvider config={config}>
                     <BackgroundTaskViewProvider config={config}>
-                      {/*
-                        InlineAgentClaimProvider wraps AppContainer so the
-                        shared claim-set is visible to both
-                        InlineParallelAgentsDisplay (inside the pending
-                        tool-group above the composer) and LiveAgentPanel
-                        (anchored beneath the composer). Mounted INSIDE
-                        BackgroundTaskViewProvider so claim reads can sit
-                        alongside the same registry data without crossing
-                        a provider boundary.
-                      */}
-                      <InlineAgentClaimProvider>
                         <AppContainer
                           config={config}
                           settings={settings}
@@ -341,7 +329,6 @@ export async function startInteractiveUI(
                           version={version}
                           initializationResult={initializationResult}
                         />
-                      </InlineAgentClaimProvider>
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
                 </VimModeProvider>
