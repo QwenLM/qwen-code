@@ -407,6 +407,8 @@ export class EventBus {
       // `Last-Event-ID` resume contract (the consumer would think they
       // caught up). If the gap really is enormous, the queue will be
       // primed with a long backlog the consumer drains at its own pace.
+      let replayedCount = 0;
+      let lastReplayedId: number | undefined;
       for (const e of this.ring) {
         // The ring only ever contains live events (publish() always
         // assigns an id before pushing to ring), so `e.id` is never
@@ -415,8 +417,38 @@ export class EventBus {
         // Guard explicitly to keep narrow typing without runtime cost.
         if (e.id !== undefined && e.id > opts.lastEventId) {
           queue.forcePush(e);
+          replayedCount += 1;
+          lastReplayedId = e.id;
         }
       }
+      // Emit a `replay_complete` sentinel so consumers can deterministically
+      // drop catch-up indicators. Fires both when replay actually
+      // delivered frames AND when there was nothing to replay (so the
+      // consumer always sees the transition from "catching up" to
+      // "live"). Synthetic frame — no `id` so it doesn't burn a slot in
+      // the per-session sequence (same pattern as `client_evicted` /
+      // `state_resync_required`).
+      //
+      // Without this sentinel, a consumer attaching via Last-Event-ID
+      // has no positive signal that replay drained — they have to
+      // heuristically time out the spinner. The state_resync_required
+      // path already has its own frame (above); the success path
+      // needed parity.
+      //
+      // `replayedCount` is the actual number of frames force-pushed,
+      // counted in the loop above — NOT `lastId - opts.lastEventId`,
+      // which would over-count when the ring has holes (state_resync
+      // path leaves a gap before the ring's earliest id).
+      queue.forcePush({
+        v: EVENT_SCHEMA_VERSION,
+        type: 'replay_complete',
+        data: {
+          ...(lastReplayedId !== undefined
+            ? { lastEventId: lastReplayedId }
+            : {}),
+          replayedCount,
+        },
+      });
     }
 
     let disposed = false;

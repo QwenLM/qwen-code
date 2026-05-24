@@ -65,7 +65,7 @@ describe('EventBus', () => {
     abort.abort();
   });
 
-  it('replay + live: new events follow the replay tail', async () => {
+  it('replay + live: new events follow the replay tail (with replay_complete sentinel)', async () => {
     const bus = new EventBus();
     bus.publish({ type: 'foo', data: 'a' });
     bus.publish({ type: 'foo', data: 'b' });
@@ -75,8 +75,24 @@ describe('EventBus', () => {
 
     setTimeout(() => bus.publish({ type: 'foo', data: 'c' }), 5);
 
-    const events = await collect(iter, 3);
-    expect(events.map((e) => e.data)).toEqual(['a', 'b', 'c']);
+    // The replay loop drains the ring, emits a `replay_complete`
+    // sentinel (id-less, lets consumers drop catch-up indicators), and
+    // then live events flow. Sentinel goes AFTER the ring tail so the
+    // consumer sees historical frames first, then the "you're live now"
+    // signal, then live events.
+    const events = await collect(iter, 4);
+    expect(events.map((e) => e.type)).toEqual([
+      'foo',
+      'foo',
+      'replay_complete',
+      'foo',
+    ]);
+    expect(events.map((e) => e.data)).toEqual([
+      'a',
+      'b',
+      expect.objectContaining({ lastEventId: 2, replayedCount: 2 }),
+      'c',
+    ]);
     abort.abort();
   });
 
@@ -415,12 +431,15 @@ describe('EventBus', () => {
     const events: BridgeEvent[] = [];
     for await (const e of iter) {
       events.push(e);
-      if (events.length === 11) break;
+      // 10 replay + 1 replay_complete sentinel + 1 live = 12 total
+      if (events.length === 12) break;
     }
     // The live frame must arrive — NOT a `client_evicted` terminal.
     expect(events.find((e) => e.type === 'client_evicted')).toBeUndefined();
     expect(events.at(-1)?.type).toBe('live');
     expect(events.filter((e) => e.type === 'replay')).toHaveLength(10);
+    // `replay_complete` sentinel signals end-of-replay before live frames.
+    expect(events.filter((e) => e.type === 'replay_complete')).toHaveLength(1);
     abort.abort();
   });
 
@@ -574,16 +593,22 @@ describe('EventBus', () => {
       const out: BridgeEvent[] = [];
       for await (const e of iter) {
         out.push(e);
-        if (out.length === 3) break;
+        // 3 replay frames + 1 replay_complete sentinel = 4 total
+        if (out.length === 4) break;
       }
       expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
-      expect(out.map((e) => e.id)).toEqual([3, 4, 5]);
+      // Replay frames in order, then the sentinel (id-less, signals
+      // catch-up complete).
+      expect(out.filter((e) => e.type === 'foo').map((e) => e.id)).toEqual([
+        3, 4, 5,
+      ]);
+      expect(out.filter((e) => e.type === 'replay_complete')).toHaveLength(1);
       abort.abort();
     });
 
     it('does NOT emit state_resync_required when ring is empty', async () => {
       // No publishes yet → earliestInRing is undefined → resync check
-      // skipped. Subscriber just waits for live events.
+      // skipped. Subscriber waits for live events.
       const bus = new EventBus(10);
       const abort = new AbortController();
       const iter = bus.subscribe({
@@ -595,11 +620,18 @@ describe('EventBus', () => {
       const out: BridgeEvent[] = [];
       for await (const e of iter) {
         out.push(e);
-        if (out.length === 1) break;
+        // The empty-ring case still emits `replay_complete` (zero
+        // frames replayed) so consumers always see the catch-up signal
+        // — then the one live event. 2 total.
+        if (out.length === 2) break;
       }
-      // No resync frame — just the one live event.
-      expect(out[0]?.type).toBe('foo');
-      expect(out[0]?.id).toBe(1);
+      // No resync frame — but replay_complete (id-less sentinel) +
+      // the live event.
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      expect(out[0]?.type).toBe('replay_complete');
+      expect(out[0]?.data).toMatchObject({ replayedCount: 0 });
+      expect(out[1]?.type).toBe('foo');
+      expect(out[1]?.id).toBe(1);
       abort.abort();
     });
 

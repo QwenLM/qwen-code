@@ -297,6 +297,61 @@ function writeServeDebugLine(message: string): void {
 
 const MAX_DISPLAY_NAME_LENGTH = 256;
 
+/**
+ * Echo a user prompt to the session bus so multi-client SSE subscribers
+ * see the input alongside the agent response. Iterates content blocks
+ * and emits one `user_message_chunk` per block, mirroring the shape the
+ * agent itself emits in the cron path (`Session.ts` cron handler) and
+ * the history-replay path (`HistoryReplayer`). The regular interactive
+ * `Session#executePrompt` was the historical outlier — it forwarded
+ * the prompt straight to the LLM without going through the session bus.
+ *
+ * Originator dedup: SDK consumers using `normalizeDaemonEvent` with
+ * `suppressOwnUserEcho: true` skip the echo for the originator (the
+ * envelope-level `originatorClientId` matches their own clientId).
+ *
+ * Source marker: `_meta.source: 'bridge-echo'` lets downstream tooling
+ * distinguish bridge-synthesized echoes from agent-emitted content if
+ * needed (e.g., for replay-deduplication when the agent later catches
+ * up and emits the same chunk through `HistoryReplayer`).
+ */
+function echoPromptToSessionBus(
+  entry: SessionEntry,
+  req: PromptRequest,
+  originatorClientId: string | undefined,
+): void {
+  const prompt = (req as { prompt?: unknown }).prompt;
+  if (!Array.isArray(prompt) || prompt.length === 0) return;
+  const serverTimestamp = Date.now();
+  for (const part of prompt) {
+    if (!part || typeof part !== 'object' || Array.isArray(part)) continue;
+    // Text is the dominant path today; multi-modal blocks (image /
+    // audio / resource) flow through unchanged. The SDK's
+    // `normalizeDaemonEvent` accepts any `content` shape and the
+    // reducer surfaces it through `extractContentPart` (PR #4353
+    // helper). Non-text echo will activate once Core's multimodal
+    // user-content emit (#4353 §D) lands; until then, daemon-side echo
+    // for image/audio is best-effort metadata-only.
+    try {
+      entry.events.publish({
+        type: 'session_update',
+        data: {
+          sessionId: req.sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: part,
+            _meta: { serverTimestamp, source: 'bridge-echo' },
+          },
+        },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+    } catch {
+      // bus may be closed (session being torn down); ignore — the
+      // prompt forward still proceeds.
+    }
+  }
+}
+
 function hasControlCharacter(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
@@ -1902,6 +1957,26 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         } else {
           entry.activePromptOriginatorClientId = originatorClientId;
         }
+        // Echo the user prompt to the session bus so other SSE-subscribed
+        // clients see the input alongside the agent response.
+        //
+        // The interactive prompt path was the only one not emitting
+        // `user_message_chunk` — `Session#executePrompt` (the agent
+        // side) forwards the prompt directly to the LLM; the cron path
+        // (Session.ts:1402) and `HistoryReplayer` (line 65) emit it
+        // explicitly. Without this echo, multi-client UIs only saw
+        // assistant text from peer prompts — no record of who said what.
+        //
+        // Originator dedup: SDK consumers' `normalizeDaemonEvent` with
+        // `suppressOwnUserEcho: true` filters the echo when
+        // `event.originatorClientId === opts.clientId`. So the
+        // originator's local UI doesn't double-render its own input.
+        //
+        // Multi-modal: one envelope per content block. Non-text blocks
+        // pass through verbatim (the agent's Core multimodal echo is a
+        // separate follow-up tracked in PR #4353 §D); for now the
+        // common text path is the immediate fix.
+        echoPromptToSessionBus(entry, normalized, originatorClientId);
         const promptPromise = entry.connection
           .prompt(normalized)
           .finally(() => {
@@ -1988,10 +2063,33 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     async cancelSession(sessionId, req, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      resolveTrustedClientId(entry, context?.clientId);
-      // Validation-only: cancellation resolves permissions as system
-      // cancellations, so those generated events intentionally omit an
-      // originator client id.
+      const cancelOriginatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      // Broadcast `prompt_cancelled` so other SSE-subscribed clients see
+      // the cancel as a first-class event rather than inferring it from
+      // the absence of further `agent_message_chunk` frames. Mirrors
+      // `session_closed` (line ~2259) — same audit gap (cross-client
+      // sync audit, 2026-05-24). Publish BEFORE the ACP cancel forward
+      // so other clients learn about the cancel even if the agent is
+      // slow to wind down.
+      //
+      // The pending-permission resolution below intentionally omits the
+      // originator stamp (those resolutions are system-initiated, not
+      // user-voted); this top-level `prompt_cancelled` carries the
+      // cancelling client so peer UIs can attribute it.
+      try {
+        entry.events.publish({
+          type: 'prompt_cancelled',
+          data: { sessionId },
+          ...(cancelOriginatorClientId
+            ? { originatorClientId: cancelOriginatorClientId }
+            : {}),
+        });
+      } catch {
+        /* bus closed */
+      }
       // ACP spec: cancelling a prompt MUST resolve outstanding
       // requestPermission calls with outcome.cancelled. Do this *before*
       // forwarding the notification so the agent's wind-down sees the
@@ -2261,8 +2359,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           data: {
             sessionId,
             reason: 'client_close',
+            // `data.closedBy` is kept for back-compat with existing
+            // wire consumers; new code should read envelope-level
+            // `originatorClientId` (matches `session_metadata_updated`,
+            // `model_switched`, `approval_mode_changed`, etc.).
             ...(originatorClientId ? { closedBy: originatorClientId } : {}),
           },
+          ...(originatorClientId ? { originatorClientId } : {}),
         });
       } catch {
         /* bus already closed */
@@ -2289,9 +2392,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     updateSessionMetadata(sessionId, metadata, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      if (context?.clientId !== undefined) {
-        resolveTrustedClientId(entry, context.clientId);
-      }
+      // Capture the trusted originator so the broadcast envelope can
+      // attribute the change to a specific client (parity with
+      // `model_switched`, `approval_mode_changed`, etc., which stamp
+      // envelope-level `originatorClientId`). Prior to this, the
+      // metadata broadcast had no originator stamp at all — UIs
+      // couldn't tell which client renamed the session.
+      const metadataOriginatorClientId =
+        context?.clientId !== undefined
+          ? resolveTrustedClientId(entry, context.clientId)
+          : undefined;
       if (metadata.displayName !== undefined) {
         if (
           typeof metadata.displayName !== 'string' ||
@@ -2322,6 +2432,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             entry.events.publish({
               type: 'session_metadata_updated',
               data: { sessionId, displayName: entry.displayName },
+              ...(metadataOriginatorClientId
+                ? { originatorClientId: metadataOriginatorClientId }
+                : {}),
             });
           } catch {
             /* bus already closed */
