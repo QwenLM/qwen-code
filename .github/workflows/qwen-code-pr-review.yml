@@ -823,10 +823,11 @@ jobs:
           timeout --kill-after=15s 3m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
             --approval-mode default \
             --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
-            --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
-            --allowed-mcp-server-names __qwen_review_no_mcp__ \
-            --output-format stream-json --include-partial-messages \
-            --prompt "$(cat /tmp/light-prompt-rendered.md)" 2>&1 | tee "$out"
+              --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+              --allowed-mcp-server-names __qwen_review_no_mcp__ \
+              --output-format stream-json --include-partial-messages \
+              --prompt "$(cat /tmp/light-prompt-rendered.md)" \
+              2> >(tee /tmp/qwen-light-stderr.log >&2) | tee "$out"
           status=${PIPESTATUS[0]}
           echo "::${stop_token}::"
           set -e
@@ -956,10 +957,11 @@ jobs:
           timeout --kill-after=30s 8m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
             --approval-mode default \
             --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
-            --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
-            --allowed-mcp-server-names __qwen_review_no_mcp__ \
-            --output-format stream-json --include-partial-messages \
-            --prompt "$(cat /tmp/standard-prompt-rendered.md)" 2>&1 | tee "$out"
+              --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+              --allowed-mcp-server-names __qwen_review_no_mcp__ \
+              --output-format stream-json --include-partial-messages \
+              --prompt "$(cat /tmp/standard-prompt-rendered.md)" \
+              2> >(tee /tmp/qwen-standard-stderr.log >&2) | tee "$out"
           status=${PIPESTATUS[0]}
           echo "::${stop_token}::"
           set -e
@@ -1157,7 +1159,8 @@ jobs:
               --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
               --allowed-mcp-server-names __qwen_review_no_mcp__ \
               --output-format stream-json --include-partial-messages \
-              --prompt "$(cat "$rendered")" 2>&1 | tee "$out"
+              --prompt "$(cat "$rendered")" \
+              2> >(tee "/tmp/qwen-deep-${focus}-stderr.log" >&2) | tee "$out"
             status=${PIPESTATUS[0]}
             echo "::${stop_token}::"
             set -e

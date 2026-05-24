@@ -142,6 +142,19 @@ describe('Qwen PR review workflow safety rails', () => {
     );
   });
 
+  it('keeps tier stderr out of JSONL parser input', () => {
+    expect(workflow).not.toContain('2>&1 | tee "$out"');
+    expect(workflow).toContain(
+      '2> >(tee /tmp/qwen-light-stderr.log >&2) | tee "$out"',
+    );
+    expect(workflow).toContain(
+      '2> >(tee /tmp/qwen-standard-stderr.log >&2) | tee "$out"',
+    );
+    expect(workflow).toContain(
+      '2> >(tee "/tmp/qwen-deep-${focus}-stderr.log" >&2) | tee "$out"',
+    );
+  });
+
   it('keeps DEEP prompt templates versioned despite the .qwen ignore rule', () => {
     for (const template of deepPromptTemplates) {
       expect(gitignore).toContain(`!${template}`);
