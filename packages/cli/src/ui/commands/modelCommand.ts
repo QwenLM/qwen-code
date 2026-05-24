@@ -271,7 +271,10 @@ export const modelCommand: SlashCommand = {
       const availableModels = selector.authType
         ? config.getAvailableModelsForAuthType(selector.authType)
         : config.getAllConfiguredModels();
-      if (!availableModels.some((model) => model.id === selector.modelId)) {
+      const selectedModel = availableModels.find(
+        (model) => model.id === selector.modelId,
+      );
+      if (!selectedModel) {
         return {
           type: 'message',
           messageType: 'error',
@@ -283,6 +286,15 @@ export const modelCommand: SlashCommand = {
                 availableModels,
               )
             : formatUnavailableFastModelMessage(modelName, availableModels),
+        };
+      }
+      if (
+        (selector.authType ?? selectedModel.authType) === AuthType.QWEN_OAUTH
+      ) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: qwenOAuthDiscontinuedMessage(),
         };
       }
 
@@ -386,7 +398,7 @@ export const modelCommand: SlashCommand = {
           };
         }
       }
-      if (typeof config.getUsageStatisticsEnabled === 'function') {
+      if (config.getUsageStatisticsEnabled?.()) {
         logModelSlashCommand(
           config,
           new ModelSlashCommandEvent(effectiveModelName),

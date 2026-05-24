@@ -314,6 +314,61 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should persist effective model values after --default switches', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const getContentGeneratorConfig = vi
+      .fn()
+      .mockReturnValueOnce({
+        model: 'gpt-3.5',
+        authType: AuthType.USE_OPENAI,
+      })
+      .mockReturnValueOnce({
+        model: 'gpt-4.1',
+        authType: AuthType.USE_OPENAI,
+      });
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --default gpt-4',
+        name: 'model',
+        args: '--default gpt-4',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig,
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--default gpt-4');
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'gpt-4',
+      undefined,
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI,
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.name',
+      'gpt-4.1',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Default model: gpt-4',
+    });
+  });
+
   it('should reject combining --default and --fast', async () => {
     const setValue = vi.fn();
     const setFastModel = vi.fn();
@@ -937,6 +992,53 @@ describe('modelCommand', () => {
       type: 'message',
       messageType: 'info',
       content: 'Fast Model: openai:deepseek-v4-flash',
+    });
+  });
+
+  it('should reject qwen-oauth fast models', async () => {
+    const setValue = vi.fn();
+    const setFastModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: `/model --fast qwen-max(${AuthType.QWEN_OAUTH})`,
+        name: 'model',
+        args: `--fast qwen-max(${AuthType.QWEN_OAUTH})`,
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi.fn((authType: AuthType) =>
+            authType === AuthType.QWEN_OAUTH
+              ? [
+                  {
+                    id: 'qwen-max',
+                    label: 'Qwen Max',
+                    authType: AuthType.QWEN_OAUTH,
+                  },
+                ]
+              : [],
+          ),
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      `--fast qwen-max(${AuthType.QWEN_OAUTH})`,
+    );
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setFastModel).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
     });
   });
 
