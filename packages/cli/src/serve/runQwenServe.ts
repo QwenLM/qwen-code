@@ -678,6 +678,15 @@ export async function runQwenServe(
   // a key-name typo from silently nulling out the dispose path.
   const deviceFlowRegistry = getDeviceFlowRegistry(app);
 
+  // ACP-over-HTTP transport handle (#/acp, RFD #721). Pulled off
+  // `app.locals` so the close hook can dispose it (clear the connection
+  // TTL sweep timer + close live SSE streams) before `bridge.shutdown()`,
+  // alongside the device-flow registry. `undefined` when the transport is
+  // disabled via `QWEN_SERVE_ACP_HTTP=0`.
+  const acpHttpHandle = (
+    app.locals as { acpHttpHandle?: { dispose(): void } }
+  ).acpHttpHandle;
+
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
   // operators conventionally type `[::1]` (or copy/paste from URLs that
   // need the brackets to disambiguate the port). Strip brackets at
@@ -909,6 +918,17 @@ export async function runQwenServe(
               } catch (err) {
                 writeStderrLine(
                   `qwen serve: device-flow registry dispose error: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              }
+            }
+            if (acpHttpHandle) {
+              try {
+                acpHttpHandle.dispose();
+              } catch (err) {
+                writeStderrLine(
+                  `qwen serve: ACP-HTTP transport dispose error: ${
                     err instanceof Error ? err.message : String(err)
                   }`,
                 );

@@ -26,6 +26,10 @@ function logStderr(line: string): void {
   process.stderr.write(`${line}\n`);
 }
 
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /**
  * The ACP protocol version this transport speaks (ACP stable = 1).
  */
@@ -57,14 +61,53 @@ export class AcpDispatcher {
     return { clientId };
   }
 
-  /** Build the `initialize` result advertising standard + `_qwen` caps. */
-  buildInitializeResult(connectionId: string): Record<string, unknown> {
+  /**
+   * Cancel a permission request the client abandoned (closed its stream /
+   * connection before voting), so the bridge isn't left blocked. Invoked
+   * by the connection-registry teardown path.
+   */
+  cancelAbandonedPermission(
+    req: { sessionId: string; bridgeRequestId: string },
+    clientId: string | undefined,
+  ): void {
+    try {
+      this.bridge.respondToSessionPermission(
+        req.sessionId,
+        req.bridgeRequestId,
+        { outcome: { outcome: 'cancelled' } } as never,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+    } catch {
+      // Session already gone — nothing to cancel.
+    }
+  }
+
+  /**
+   * Build the `initialize` result advertising standard + `_qwen` caps.
+   * Negotiates the protocol version down to what we support (ACP stable
+   * = 1): we echo `min(requested, ACP_PROTOCOL_VERSION)`.
+   */
+  buildInitializeResult(
+    connectionId: string,
+    requestedVersion?: unknown,
+  ): Record<string, unknown> {
+    const requested =
+      typeof requestedVersion === 'number' && Number.isFinite(requestedVersion)
+        ? requestedVersion
+        : ACP_PROTOCOL_VERSION;
+    const negotiated = Math.min(requested, ACP_PROTOCOL_VERSION);
     return {
-      protocolVersion: ACP_PROTOCOL_VERSION,
+      protocolVersion: negotiated,
       agentCapabilities: {
         loadSession: true,
-        promptCapabilities: { image: true, audio: false, embeddedContext: true },
+        promptCapabilities: {
+          image: true,
+          audio: false,
+          embeddedContext: true,
+        },
         // Advertise qwen extensions so clients feature-detect before use.
+        // Single home for the qwen block — `agentCapabilities._meta.qwen`
+        // per design §5 (no redundant top-level duplicate).
         _meta: {
           qwen: {
             connectionId,
@@ -76,8 +119,32 @@ export class AcpDispatcher {
           },
         },
       },
-      _meta: { qwen: { connectionId } },
     };
+  }
+
+  /**
+   * Gate a per-session operation on connection ownership. Sends a JSON-RPC
+   * error and returns false when this connection never created/attached
+   * the session (prevents driving or eavesdropping on another
+   * connection's session). `session/new|load|resume` are the
+   * ownership-GRANTING ops and skip this.
+   */
+  private requireOwned(
+    conn: AcpConnection,
+    sessionId: string,
+    id: JsonRpcId | undefined,
+  ): boolean {
+    if (conn.ownsSession(sessionId)) return true;
+    if (id !== undefined) {
+      conn.sendConn(
+        error(
+          id,
+          RPC.INVALID_PARAMS,
+          `Session ${sessionId} is not owned by this connection`,
+        ),
+      );
+    }
+    return false;
   }
 
   /**
@@ -86,9 +153,20 @@ export class AcpDispatcher {
    * (`POST` itself answers `202`). `initialize` is handled by the caller
    * (it mints the connection) and never reaches here.
    */
-  async handle(conn: AcpConnection, msg: JsonRpcInbound): Promise<void> {
+  async handle(
+    conn: AcpConnection,
+    msg: JsonRpcInbound,
+    sessionHeader?: string,
+  ): Promise<void> {
+    // A client's JSON-RPC RESPONSE (to an agent→client request) — wrapped
+    // so a throwing bridge call can't reject this promise after index.ts
+    // already sent `202` (which would surface as an unhandled rejection).
     if (isResponse(msg)) {
-      this.resolveClientResponse(conn, msg);
+      try {
+        this.resolveClientResponse(conn, msg);
+      } catch (err) {
+        logStderr(`qwen serve: /acp response handling error: ${errMsg(err)}`);
+      }
       return;
     }
     if (!isRequest(msg) && !isNotification(msg)) return;
@@ -99,6 +177,26 @@ export class AcpDispatcher {
       unknown
     >;
     const id = isRequest(msg) ? msg.id : undefined;
+
+    // RFD §2.3: when both are present the `Acp-Session-Id` header and the
+    // `sessionId` param MUST agree — reject divergence rather than let a
+    // POST act on a session other than the one the header names.
+    if (
+      sessionHeader &&
+      typeof params['sessionId'] === 'string' &&
+      params['sessionId'] !== sessionHeader
+    ) {
+      if (id !== undefined) {
+        conn.sendConn(
+          error(
+            id,
+            RPC.INVALID_PARAMS,
+            'Acp-Session-Id header does not match params.sessionId',
+          ),
+        );
+      }
+      return;
+    }
 
     try {
       switch (method) {
@@ -121,6 +219,7 @@ export class AcpDispatcher {
           // per-session calls MUST echo it (see SessionBinding.clientId).
           conn.getOrCreateSession(session.sessionId).clientId =
             session.clientId;
+          conn.ownSession(session.sessionId);
           this.replyConn(conn, id, { sessionId: session.sessionId });
           return;
         }
@@ -145,6 +244,7 @@ export class AcpDispatcher {
                   clientId: conn.clientId,
                 });
           conn.getOrCreateSession(sessionId).clientId = restored.clientId;
+          conn.ownSession(sessionId);
           this.replyConn(conn, id, restored.state ?? {});
           return;
         }
@@ -159,6 +259,7 @@ export class AcpDispatcher {
 
         case 'session/close': {
           const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
           await this.bridge.closeSession(
             sessionId,
             this.sessionCtx(conn, sessionId),
@@ -169,23 +270,29 @@ export class AcpDispatcher {
         }
 
         case 'session/cancel': {
-          // Notification — no reply.
           const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
           await this.bridge.cancelSession(
             sessionId,
             undefined,
             this.sessionCtx(conn, sessionId),
           );
+          // `session/cancel` is normally a notification (no id), but answer
+          // the request-form so a client that sent an id isn't left hanging.
+          if (id !== undefined) this.replySession(conn, sessionId, id, {});
           return;
         }
 
         case 'session/prompt': {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
           await this.handlePrompt(conn, id, params);
           return;
         }
 
         case `${QWEN_METHOD_NS}session/set_model`: {
           const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
           const result = await this.bridge.setSessionModel(
             sessionId,
             params as never,
@@ -197,6 +304,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}session/heartbeat`: {
           const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
           const result = this.bridge.recordHeartbeat(
             sessionId,
             this.sessionCtx(conn, sessionId),

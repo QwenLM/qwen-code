@@ -33,7 +33,7 @@ import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
 import { isLoopbackBind } from './loopbackBinds.js';
-import { mountAcpHttp } from './acpHttp/index.js';
+import { mountAcpHttp, type AcpHttpHandle } from './acpHttp/index.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
@@ -2107,8 +2107,13 @@ export function createServeApp(
   // `docs/design/daemon-acp-http/README.md` §6 for the dual-transport
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
-  // route through the JSON error contract below.
-  mountAcpHttp(app, bridge, { boundWorkspace });
+  // route through the JSON error contract below. The handle is parked on
+  // `app.locals` so `runQwenServe`'s close hook can `dispose()` it (clear
+  // the TTL sweep timer + tear down live SSE streams) before
+  // `bridge.shutdown()` — mirrors the device-flow registry pattern above.
+  const acpHttpHandle = mountAcpHttp(app, bridge, { boundWorkspace });
+  (app.locals as { acpHttpHandle?: AcpHttpHandle }).acpHttpHandle =
+    acpHttpHandle;
 
   // Final error handler. `express.json()` throws `SyntaxError` (with
   // `status: 400`) on malformed body — without this 4-arg middleware

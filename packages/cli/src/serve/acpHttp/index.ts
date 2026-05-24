@@ -54,8 +54,12 @@ export function mountAcpHttp(
   if (!enabled) return undefined;
 
   const path = opts.path ?? '/acp';
-  const registry = new ConnectionRegistry();
   const dispatcher = new AcpDispatcher(bridge, opts.boundWorkspace);
+  // When a session/connection tears down with a permission still pending,
+  // cancel it on the bridge so the agent's prompt isn't left blocked.
+  const registry = new ConnectionRegistry((req, clientId) =>
+    dispatcher.cancelAbandonedPermission(req, clientId),
+  );
 
   // ── POST /acp ──────────────────────────────────────────────────────
   app.post(path, async (req: Request, res: Response) => {
@@ -69,17 +73,22 @@ export function mountAcpHttp(
     // `initialize` mints a connection and replies inline (200 + JSON).
     if (isRequest(message) && message.method === 'initialize') {
       const conn = registry.create();
+      const requestedVersion =
+        message.params &&
+        typeof message.params === 'object' &&
+        !Array.isArray(message.params)
+          ? (message.params as Record<string, unknown>)['protocolVersion']
+          : undefined;
       res.setHeader('Acp-Connection-Id', conn.connectionId);
-      res
-        .status(200)
-        .json(
-          // success envelope: clients correlate by the request id.
-          {
-            jsonrpc: '2.0',
-            id: message.id,
-            result: dispatcher.buildInitializeResult(conn.connectionId),
-          },
-        );
+      res.status(200).json({
+        // success envelope: clients correlate by the request id.
+        jsonrpc: '2.0',
+        id: message.id,
+        result: dispatcher.buildInitializeResult(
+          conn.connectionId,
+          requestedVersion,
+        ),
+      });
       return;
     }
 
@@ -99,7 +108,18 @@ export function mountAcpHttp(
 
     // Per RFD: non-initialize POST acks 202; the reply rides an SSE stream.
     res.status(202).end();
-    await dispatcher.handle(conn, message);
+    // Response already sent — `handle` delivers everything else over SSE, so
+    // swallow+log any late rejection rather than let it escape as an
+    // unhandled rejection (which could take the daemon down).
+    await dispatcher
+      .handle(conn, message, headerOf(req, ACP_SESSION_HEADER))
+      .catch((err: unknown) => {
+        process.stderr.write(
+          `qwen serve: /acp handle error: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      });
   });
 
   // ── GET /acp (SSE) ─────────────────────────────────────────────────
@@ -119,12 +139,31 @@ export function mountAcpHttp(
       return;
     }
 
-    // Session-scoped stream: attach + start pumping bridge events.
-    const binding = conn.getOrCreateSession(sessionId);
-    const stream = new SseStream(res, () => binding.abort.abort());
+    // Session-scoped stream — only for a session THIS connection owns
+    // (created via session/new or attached via session/load|resume). Stops
+    // one connection eavesdropping on another's session event stream.
+    if (!conn.ownsSession(sessionId)) {
+      res.status(403).json({ error: 'Session not owned by this connection' });
+      return;
+    }
+
+    // Fresh controller per stream so a reconnect gets a live (non-aborted)
+    // signal; `attachSessionStream` installs it and tears down any prior
+    // stream/subscription. onClose aborts THIS stream's controller — a
+    // stale stream closing can't cancel a newer subscription.
+    const ac = new AbortController();
+    const stream = new SseStream(res, () => ac.abort());
+    conn.attachSessionStream(sessionId, stream, ac);
     stream.open();
-    conn.attachSessionStream(sessionId, stream);
-    void dispatcher.pumpSessionEvents(conn, sessionId, binding.abort.signal);
+    void dispatcher
+      .pumpSessionEvents(conn, sessionId, ac.signal)
+      .catch((err: unknown) => {
+        process.stderr.write(
+          `qwen serve: /acp event pump error (${sessionId}): ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      });
   });
 
   // ── DELETE /acp ────────────────────────────────────────────────────

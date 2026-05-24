@@ -211,6 +211,13 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     return fetch(`${base}/acp`, { headers });
   }
 
+  // Establish ownership of the fake bridge's session ('sess-1') so the
+  // ownership-gated session stream + per-session POSTs are allowed.
+  async function newSession(connId: string, id = 99): Promise<void> {
+    await post(connId, { jsonrpc: '2.0', id, method: 'session/new', params: {} });
+    await new Promise((r) => setTimeout(r, 30)); // let handle() register ownership
+  }
+
   it('initialize → 200 + Acp-Connection-Id; unknown conn → 400', async () => {
     await initialize();
     const bad = await post('nope', { jsonrpc: '2.0', id: 2, method: 'session/new' });
@@ -242,6 +249,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       return { stopReason: 'end_turn' };
     };
     const connId = await initialize();
+    await newSession(connId);
     const sessStream = await openStream(connId, 'sess-1');
     const got = takeFrames(sessStream, 2);
     await new Promise((r) => setTimeout(r, 50));
@@ -278,6 +286,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       return { stopReason: 'end_turn' };
     };
     const connId = await initialize();
+    await newSession(connId);
     const sessStream = await openStream(connId, 'sess-1');
     const got = takeFrames(sessStream, 1);
     await new Promise((r) => setTimeout(r, 50));
@@ -302,6 +311,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
   it('_qwen/session/set_model extension reaches the bridge', async () => {
     const connId = await initialize();
+    await newSession(connId);
     const sessStream = await openStream(connId, 'sess-1');
     const got = takeFrames(sessStream, 1);
     await new Promise((r) => setTimeout(r, 50));
@@ -324,6 +334,53 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await post(connId, { jsonrpc: '2.0', id: 11, method: 'bogus/method' });
     const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
     expect(frame.error.code).toBe(-32601);
+  });
+
+  it('session stream for an unowned session → 403', async () => {
+    const connId = await initialize();
+    // No session/new → connection does not own 'sess-1'.
+    const res = await openStream(connId, 'sess-1');
+    expect(res.status).toBe(403);
+  });
+
+  it('prompt for an unowned session → INVALID_PARAMS on conn stream', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 13,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
+    expect(frame.error.code).toBe(-32602);
+  });
+
+  it('Acp-Session-Id header that disagrees with params.sessionId → INVALID_PARAMS', async () => {
+    // Cross-check fires before ownership, so no session/new needed (and
+    // skipping it keeps a buffered session/new reply off the conn stream).
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await fetch(`${base}/acp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 14,
+        method: 'session/prompt',
+        params: { sessionId: 'OTHER', prompt: [{ type: 'text', text: 'x' }] },
+      }),
+    });
+    const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
+    expect(frame.error.code).toBe(-32602);
   });
 
   it('DELETE tears the connection down (subsequent POST 400)', async () => {

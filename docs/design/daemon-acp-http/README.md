@@ -360,3 +360,35 @@ clientId the bridge has never issued and stamp a fresh one (returned in
 (unregistered) id on `sendPrompt`. Fix: persist the bridge-stamped id on the
 `SessionBinding` and echo it on every per-session call (`sessionCtx`). Re-verified
 green above.
+
+---
+
+## 11. Review round 2 — fold-ins
+
+Two independent reviews (correctness/concurrency + protocol-conformance/security) plus a self-read.
+All fixes verified by the expanded vitest suite (**18 tests**) + a fresh live smoke run
+(21 `session/update` frames → `stopReason=end_turn`).
+
+| # | Severity | Finding | Fix |
+|---|----------|---------|-----|
+| R1 | **P0** | Session-stream **reconnect was permanently dead**: `SessionBinding.abort` was created once and reused; on stream close it was aborted forever, so a reconnect's `subscribeEvents(signal)` got an already-aborted signal and received zero events. | `attachSessionStream` now installs a **fresh** `AbortController` per stream (and closes any prior stream); `index.ts` pumps on that fresh signal. |
+| R2 | **P0** | `await dispatcher.handle()` ran **after** `res.end(202)`; a throwing bridge call (notably the un-try/caught `isResponse` path) would reject and surface as an unhandled rejection → possible daemon crash. | Wrapped the `isResponse` path in try/catch; `.catch()` on the awaited `handle(...)` and on `pumpSessionEvents(...)`. |
+| R3 | **P1** | **No connection→session ownership**: any authenticated connection could open the session SSE for, or prompt, *any* sessionId in the workspace (read-eavesdrop; prompt was only blocked incidentally by the unregistered-clientId error). | `AcpConnection.ownedSessions` populated by `session/new`/`load`/`resume`; session stream returns `403` and per-session POSTs return `INVALID_PARAMS` for unowned ids (`requireOwned`). |
+| R4 | **P1** | `mountAcpHttp` handle was discarded → TTL sweep timer + live SSE streams leaked on shutdown. | Handle parked on `app.locals`; `runQwenServe` close hook calls `dispose()` before `bridge.shutdown()` (mirrors the device-flow registry). |
+| R5 | **P1** | **Pending permission leak**: closing a session/connection with a permission outstanding left the bridge blocked awaiting a vote. | `closeSessionStream`/`destroy` cancel matching pending requests via an injected `onAbandonPending` → `cancelAbandonedPermission`. |
+| R6 | **P1** | Pre-attach frame buffers (`connBuffer`/`binding.buffer`) were unbounded. | Capped at 256 frames (drop-oldest), matching the EventBus `maxQueued`. |
+| R7 | **P2** | `initialize` ignored the client's requested `protocolVersion`. | Negotiates `min(requested, 1)`. |
+| R8 | **P2** | No `Acp-Session-Id` ↔ `params.sessionId` cross-check (RFD §2.3). | POST asserts they agree; mismatch → `INVALID_PARAMS`. |
+| R9 | **P2** | `session/cancel` request-form (with id) never answered; duplicate top-level `_meta.qwen`. | Reply when an id is present; single `agentCapabilities._meta.qwen`. |
+
+### Accepted / documented (not fixed in v1)
+
+- **Prompt-result vs trailing `session/update` ordering** (P2): `handlePrompt` awaits `sendPrompt` then
+  writes the result frame, while updates stream concurrently. In practice the bridge publishes all
+  `session/update`s to the bus before `sendPrompt` resolves and both share one ordered SSE write
+  chain, so the result lands last (confirmed: 21 updates then result). A strict barrier is a possible
+  later hardening if a client reducer proves sensitive.
+- **Browser `EventSource` can't set `Authorization`** — `/acp` GET streams require the bearer header,
+  so browsers need the deferred WebSocket path (§7); CLI/Node clients are unaffected.
+- The daemon's real trust boundary remains the **bearer token + single-workspace bind** (same as the
+  REST surface); R3's ownership check is defense-in-depth + contract correctness, not a tenant boundary.
