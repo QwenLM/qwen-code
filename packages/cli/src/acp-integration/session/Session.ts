@@ -2004,7 +2004,7 @@ export class Session implements SessionContext {
             return earlyErrorResponse(new Error(outcome.errorMessage), fc.name);
           case 'fallback':
             // Drop through to the manual-approval flow below.
-            wasAutoModeDenialFallback = fallback.fallback;
+            wasAutoModeDenialFallback = outcome.reason === 'denial_cap';
             break;
           default: {
             const _exhaustive: never = outcome;

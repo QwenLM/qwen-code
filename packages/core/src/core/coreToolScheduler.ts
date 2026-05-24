@@ -1715,6 +1715,13 @@ export class CoreToolScheduler {
                 this.setStatusInternal(reqInfo.callId, 'scheduled');
                 continue;
               case 'blocked':
+                debugLogger.warn(
+                  `Auto mode blocked (${outcome.reason}): tool=${canonicalName}, ` +
+                    `consecutiveBlock=${denialState.consecutiveBlock}, ` +
+                    `consecutiveUnavailable=${denialState.consecutiveUnavailable}, ` +
+                    `totalBlock=${denialState.totalBlock}, ` +
+                    `totalUnavailable=${denialState.totalUnavailable}`,
+                );
                 if (!this.config.getDisableAllHooks()) {
                   const messageBus = this.config.getMessageBus() as
                     | MessageBus
@@ -1746,10 +1753,17 @@ export class CoreToolScheduler {
                 // operators see the cause in the debug log (only when
                 // fallback was specifically armed by denialTracking —
                 // a pmForcedAsk fallback isn't an audit-worthy event).
-                if (fallback.fallback) {
+                if (outcome.reason === 'denial_cap') {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
+                  const fallbackReason = fallback.fallback
+                    ? fallback.reason
+                    : 'total_denial';
                   debugLogger.warn(
-                    `Auto mode fallback to manual approval (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}, totalBlock=${denialState.totalBlock}, totalUnavailable=${denialState.totalUnavailable}`,
+                    `Auto mode fallback to manual approval (${fallbackReason}): ` +
+                      `consecutiveBlock=${denialState.consecutiveBlock}, ` +
+                      `consecutiveUnavailable=${denialState.consecutiveUnavailable}, ` +
+                      `totalBlock=${denialState.totalBlock}, ` +
+                      `totalUnavailable=${denialState.totalUnavailable}`,
                   );
                 }
                 break;

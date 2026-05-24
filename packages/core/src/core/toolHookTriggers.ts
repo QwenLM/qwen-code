@@ -539,7 +539,10 @@ export async function firePermissionDeniedHook(
   }
 
   try {
-    await messageBus.request<HookExecutionRequest, HookExecutionResponse>(
+    const response = await messageBus.request<
+      HookExecutionRequest,
+      HookExecutionResponse
+    >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
         eventName: 'PermissionDenied',
@@ -553,13 +556,22 @@ export async function firePermissionDeniedHook(
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
     );
+    if (!response.success || !response.output) {
+      const message =
+        response.error?.message || 'hook runner returned no output';
+      debugLogger.warn(
+        `PermissionDenied hook response failure for ${toolName}: ${message}`,
+      );
+      return { hookError: message };
+    }
 
     return {};
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     debugLogger.warn(
-      `PermissionDenied hook error: ${error instanceof Error ? error.message : String(error)}`,
+      `PermissionDenied hook error: ${message}`,
     );
-    return {};
+    return { hookError: message };
   }
 }
 

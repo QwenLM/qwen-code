@@ -1116,7 +1116,25 @@ describe('toolHookTriggers', () => {
       );
     });
 
-    it('should swallow hook execution errors', async () => {
+    it('should report hook runner failures', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: { message: 'runner failed' },
+      });
+
+      const result = await firePermissionDeniedHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        'toolu_123',
+        'classifier_unavailable',
+      );
+
+      expect(result).toEqual({ hookError: 'runner failed' });
+    });
+
+    it('should report hook execution errors', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error('Network error'),
@@ -1130,7 +1148,7 @@ describe('toolHookTriggers', () => {
         'classifier_unavailable',
       );
 
-      expect(result).toEqual({});
+      expect(result).toEqual({ hookError: 'Network error' });
     });
   });
 });
