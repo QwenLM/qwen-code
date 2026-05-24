@@ -515,6 +515,7 @@ describe('CoreToolScheduler', () => {
           }) as unknown as ToolRegistry,
         getUsageStatisticsEnabled: () => false,
         getDebugMode: () => false,
+        getChatRecordingService: () => undefined,
       } as unknown as Config,
       onAllToolCallsComplete: vi.fn(),
       onToolCallsUpdate: vi.fn(),
@@ -580,6 +581,22 @@ describe('CoreToolScheduler', () => {
       totalBlock: 0,
       totalUnavailable: 0,
     });
+  });
+
+  it('does not reset denial counters after cancelling a denialTracking fallback prompt', async () => {
+    const { internals, toolCall, setAutoModeDenialState } =
+      createSchedulerForDenialTrackingApprovalTest();
+    internals.autoModeFallbackCallIds.add('call-1');
+
+    await internals._handleConfirmationResponseInner(
+      'call-1',
+      toolCall,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.Cancel,
+      new AbortController().signal,
+    );
+
+    expect(setAutoModeDenialState).not.toHaveBeenCalled();
   });
 
   function createSchedulerForLegacyToolTests(options: {
