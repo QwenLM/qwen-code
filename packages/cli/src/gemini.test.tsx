@@ -14,6 +14,7 @@ import {
   type MockInstance,
 } from 'vitest';
 import {
+  createNonInteractivePromptId,
   main,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
@@ -306,6 +307,12 @@ describe('gemini.tsx main function', () => {
         userHooks: undefined,
         projectHooks: undefined,
       },
+    );
+  });
+
+  it('creates non-interactive prompt ids that preserve session correlation', () => {
+    expect(createNonInteractivePromptId('test-session-id')).toBe(
+      'test-session-id########0',
     );
   });
 

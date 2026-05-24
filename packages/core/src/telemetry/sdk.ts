@@ -153,12 +153,56 @@ export function initializeTelemetry(config: Config): void {
   }
 
   const debugLogger = createDebugLogger('OTEL');
+  // User-provided resource attributes (env + settings, already merged with
+  // RESERVED stripping and OTEL_SERVICE_NAME precedence in the resolver).
+  // We strip service.name/service.version here too as defense-in-depth, then
+  // re-apply runtime-controlled values on top.
+  const userAttrs = config.getTelemetryResourceAttributes() ?? {};
+  const userServiceName = userAttrs['service.name'];
+  // Strip keys we re-inject below (service.name, service.version) plus
+  // session.id, which never belongs on the Resource — Resource attributes
+  // auto-attach to every metric data point, which would bypass the metric
+  // cardinality toggle. The resolver normally drops session.id from user
+  // input already; this destructure is defense-in-depth for callers that
+  // bypass the resolver (e.g. direct Config construction in tests).
+  const {
+    'service.name': _ignoredServiceName,
+    'service.version': _ignoredServiceVersion,
+    'session.id': _ignoredSessionId,
+    ...nonReservedUserAttrs
+  } = userAttrs;
   const resource = resourceFromAttributes({
-    [SemanticResourceAttributes.SERVICE_NAME]: SERVICE_NAME,
+    ...nonReservedUserAttrs,
+    // `.trim() || SERVICE_NAME`: catches both empty string (`""`) and
+    // whitespace-only values (`" "`, `"\t"`) that would otherwise produce
+    // a blank service name on Resource (some backends reject these). Both
+    // settings (no value trimming there) and env (`%20` decodes to `" "`)
+    // can deliver whitespace-only values, so trim at the fallback point.
+    [SemanticResourceAttributes.SERVICE_NAME]:
+      userServiceName?.trim() || SERVICE_NAME,
     [SemanticResourceAttributes.SERVICE_VERSION]:
       config.getCliVersion() || 'unknown',
-    'session.id': config.getSessionId(),
   });
+
+  // One-time user-visible summary of resource-attribute diagnostics
+  // produced during config resolution. The per-warning `diag.warn` calls
+  // route to the OTel debug log; without this summary, an operator whose
+  // attributes are silently dropped has no console signal that anything
+  // happened. Telemetry init runs before Ink renders, so console output
+  // here does not interleave with the TUI.
+  // `?? []` defends against test mocks (`vi.mock('../config/config.js')`)
+  // that auto-stub Config methods to return undefined.
+  const attrWarnings = config.getTelemetryResourceAttributeWarnings() ?? [];
+  if (attrWarnings.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code telemetry] ${attrWarnings.length} resource attribute issue(s):`,
+    );
+    for (const w of attrWarnings) {
+      // eslint-disable-next-line no-console
+      console.warn(`  - ${w}`);
+    }
+  }
 
   const otlpEndpoint = config.getTelemetryOtlpEndpoint();
   const otlpProtocol = config.getTelemetryOtlpProtocol();

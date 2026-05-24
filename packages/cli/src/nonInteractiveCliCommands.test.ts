@@ -234,6 +234,98 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('should report no active goal for empty non-interactive /goal', async () => {
+    mockGetCommands.mockReturnValue([goalCommand]);
+
+    const result = await handleSlashCommand(
+      '/goal',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'No goal set. Usage: `/goal <condition>` (or `/goal clear`).',
+    });
+  });
+
+  it('should report active goal status after setting a non-interactive /goal', async () => {
+    mockGetCommands.mockReturnValue([goalCommand]);
+
+    await handleSlashCommand(
+      '/goal write a hello world script',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+    const result = await handleSlashCommand(
+      '/goal',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+    });
+    if (result.type === 'message') {
+      expect(result.content).toContain(
+        'Goal active: write a hello world script',
+      );
+      expect(result.content).toContain('not yet evaluated');
+    }
+  });
+
+  it('should report cleared goal for non-interactive /goal clear', async () => {
+    mockGetCommands.mockReturnValue([goalCommand]);
+
+    await handleSlashCommand(
+      '/goal write a hello world script',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+    const result = await handleSlashCommand(
+      '/goal clear',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'Goal cleared: write a hello world script',
+    });
+  });
+
+  it('should report cleared goal for ACP /goal clear', async () => {
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
+    mockGetCommands.mockReturnValue([goalCommand]);
+
+    await handleSlashCommand(
+      '/goal write a hello world script',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+    const result = await handleSlashCommand(
+      '/goal clear',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'Goal cleared: write a hello world script',
+    });
+  });
+
   it('should execute FILE commands in any mode without explicit supportedModes', async () => {
     const mockFileCommand = {
       name: 'custom',

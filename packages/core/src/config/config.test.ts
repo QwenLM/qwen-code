@@ -10,6 +10,8 @@ import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
   ApprovalMode,
+  APPROVAL_MODES,
+  APPROVAL_MODE_INFO,
   MCPServerConfig,
   TrustGateError,
 } from './config.js';
@@ -623,7 +625,12 @@ describe('Server Config (config.ts)', () => {
         (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
           (call) => call[0],
         ),
-      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
+        ToolNames.SHELL,
+      ]);
     });
 
     it('skips inline MCP discovery by default (progressive availability)', async () => {
@@ -917,7 +924,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('model switching with different credentials (OpenAI)', () => {
-    it('keeps getFastModel current-auth-only for direct runtime callers', () => {
+    it('returns a bare fast model selector when the model is configured under another auth type', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_ANTHROPIC,
@@ -943,11 +950,10 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBe('deepseek-v4-flash');
+      expect(config.getFastModel()).toBe('deepseek-v4-flash');
     });
 
-    it('returns an authType-qualified fast model selector for side queries', () => {
+    it('returns an authType-qualified fast model selector', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_ANTHROPIC,
@@ -973,11 +979,10 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBe('openai:shared-model');
+      expect(config.getFastModel()).toBe('openai:shared-model');
     });
 
-    it('returns a bare fast model for getFastModel when authType-qualified selector matches the current auth type', () => {
+    it('keeps authType-qualified selectors when the auth type matches the current auth type', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_OPENAI,
@@ -995,10 +1000,7 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBe('deepseek-v4-flash');
-      expect(config.getFastModelForSideQuery()).toBe(
-        'openai:deepseek-v4-flash',
-      );
+      expect(config.getFastModel()).toBe('openai:deepseek-v4-flash');
     });
 
     it('accepts runtime fast models for authType-qualified selectors', () => {
@@ -1029,10 +1031,7 @@ describe('Server Config (config.ts)', () => {
       });
       config.getModelsConfig().detectAndCaptureRuntimeModel();
 
-      expect(config.getFastModel()).toBe('runtime-fast-model');
-      expect(config.getFastModelForSideQuery()).toBe(
-        'openai:runtime-fast-model',
-      );
+      expect(config.getFastModel()).toBe('openai:runtime-fast-model');
     });
 
     it('returns undefined when the fast model is not configured for any auth type', () => {
@@ -1054,7 +1053,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('returns undefined when the fast model selector is malformed', () => {
@@ -1076,7 +1074,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('returns undefined when fastModel points back to the fast selector', () => {
@@ -1098,7 +1095,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('should refresh auth when switching to model with different envKey', async () => {
@@ -1746,20 +1742,26 @@ describe('Server Config (config.ts)', () => {
       expect(config.getCoreTools()).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
       expect(
         (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
+        ToolNames.SHELL,
+      ]);
     });
 
     it('registers structured_output in bare mode when jsonSchema is set', async () => {
-      // Bare mode strips the toolset to READ_FILE/EDIT/SHELL, but the
+      // Bare mode strips the toolset to READ_FILE/EDIT/NOTEBOOK_EDIT/SHELL, but the
       // synthetic structured_output tool is the terminal contract for
       // --json-schema runs. Without it the model loops until
       // maxSessionTurns and exits via the "plain text" failure path —
       // expensive in tokens for what's almost always a CI use case. The
-      // synthetic tool must be registered alongside the bare three.
+      // synthetic tool must be registered alongside the bare toolset.
       const config = new Config({
         ...baseParams,
         bareMode: true,
@@ -1778,6 +1780,7 @@ describe('Server Config (config.ts)', () => {
       ).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
         ToolNames.STRUCTURED_OUTPUT,
       ]);
@@ -1806,8 +1809,8 @@ describe('Server Config (config.ts)', () => {
           ToolRegistry: { prototype: { registerFactory: Mock } };
         }
       ).ToolRegistry.prototype.registerFactory;
-      // Initial bare init registers READ_FILE / EDIT / SHELL /
-      // STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
+      // Initial bare init registers READ_FILE / EDIT / NOTEBOOK_EDIT /
+      // SHELL / STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
       // observe ONLY the forSubAgent rebuild's calls.
       (registerToolMock as Mock).mockClear();
 
@@ -1821,10 +1824,11 @@ describe('Server Config (config.ts)', () => {
         (call) => call[0],
       );
       expect(registeredNames).not.toContain(ToolNames.STRUCTURED_OUTPUT);
-      // The bare three still register so the subagent has its toolset.
+      // The bare tools still register so the subagent has its toolset.
       expect(registeredNames).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
     });
@@ -2328,6 +2332,140 @@ describe('setApprovalMode with folder trust', () => {
       // Setting PLAN again should not overwrite prePlanMode
       config.setApprovalMode(ApprovalMode.PLAN);
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    });
+  });
+
+  describe('AUTO mode', () => {
+    it('should throw an error when setting AUTO mode in an untrusted folder', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).toThrow(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      );
+    });
+
+    it('should NOT throw when setting AUTO mode in a trusted folder', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).not.toThrow();
+    });
+
+    it('should persist AUTO as the active mode', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getApprovalMode()).toBe(ApprovalMode.AUTO);
+    });
+
+    it('setApprovalMode resets the denial-tracking counters', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      // Enter AUTO and simulate having accumulated denial counters.
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setAutoModeDenialState({
+        consecutiveBlock: 3,
+        consecutiveUnavailable: 2,
+        totalBlock: 5,
+        totalUnavailable: 2,
+      });
+
+      // Switch away and back; the counters must be wiped clean.
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getAutoModeDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+
+      // And entering AUTO again should also start fresh (no leftover state).
+      config.setAutoModeDenialState({
+        consecutiveBlock: 1,
+        consecutiveUnavailable: 0,
+        totalBlock: 1,
+        totalUnavailable: 0,
+      });
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getAutoModeDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+    });
+
+    it('setApprovalMode(sameMode) does NOT reset counters', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      const populated = {
+        consecutiveBlock: 2,
+        consecutiveUnavailable: 0,
+        totalBlock: 2,
+        totalUnavailable: 0,
+      };
+      config.setAutoModeDenialState(populated);
+
+      // No-op mode set — state should be preserved.
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getAutoModeDenialState()).toEqual(populated);
+    });
+
+    it('should track AUTO as prePlanMode when entering PLAN from AUTO', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.AUTO);
+    });
+
+    it('AUTO appears in APPROVAL_MODES between AUTO_EDIT and YOLO', () => {
+      const autoEditIdx = APPROVAL_MODES.indexOf(ApprovalMode.AUTO_EDIT);
+      const autoIdx = APPROVAL_MODES.indexOf(ApprovalMode.AUTO);
+      const yoloIdx = APPROVAL_MODES.indexOf(ApprovalMode.YOLO);
+      expect(autoIdx).toBeGreaterThan(autoEditIdx);
+      expect(autoIdx).toBeLessThan(yoloIdx);
+    });
+
+    it('APPROVAL_MODE_INFO has an entry for AUTO', () => {
+      expect(APPROVAL_MODE_INFO[ApprovalMode.AUTO]).toEqual({
+        id: ApprovalMode.AUTO,
+        name: 'Auto',
+        description: expect.stringContaining('classifier'),
+      });
+    });
+  });
+
+  describe('getAutoModeSettings', () => {
+    it('returns an empty object when no autoMode settings are provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getAutoModeSettings()).toEqual({});
+    });
+
+    it('returns the provided autoMode hints and environment', () => {
+      const config = new Config({
+        ...baseParams,
+        permissions: {
+          autoMode: {
+            hints: {
+              allow: ['Allow xyz commands'],
+              deny: ['Block intranet calls'],
+            },
+            environment: ['Open-source monorepo'],
+          },
+        },
+      });
+      expect(config.getAutoModeSettings()).toEqual({
+        hints: {
+          allow: ['Allow xyz commands'],
+          deny: ['Block intranet calls'],
+        },
+        environment: ['Open-source monorepo'],
+      });
     });
   });
 

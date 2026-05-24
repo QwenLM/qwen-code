@@ -48,23 +48,9 @@ export async function checkNextSpeaker(
   abortSignal: AbortSignal,
   promptId: string,
 ): Promise<NextSpeakerResponse | null> {
-  // We need to capture the curated history because there are many moments when the model will return invalid turns
-  // that when passed back up to the endpoint will break subsequent calls. An example of this is when the model decides
-  // to respond with an empty part collection if you were to send that message back to the server it will respond with
-  // a 400 indicating that model part collections MUST have content.
-  const curatedHistory = chat.getHistory(/* curated */ true);
-
-  // Ensure there's a model response to analyze
-  if (curatedHistory.length === 0) {
-    // Cannot determine next speaker if history is empty.
-    return null;
-  }
-
   // Read the last raw history entry by design: functionResponse turns can be
   // stripped from curated history, but they are decisive for next-speaker flow.
   const lastComprehensiveMessage = chat.getLastHistoryEntry();
-  // Raw history can still be empty even if the curated-history guard above is
-  // the normal empty-chat path, so keep this defensive check local.
   if (!lastComprehensiveMessage) {
     return null;
   }
@@ -94,7 +80,10 @@ export async function checkNextSpeaker(
 
   // Things checked out. Let's proceed to potentially making an LLM request.
 
-  const lastMessage = curatedHistory[curatedHistory.length - 1];
+  // The next-speaker prompt only analyzes the immediately preceding response.
+  // Keep the side query and its structuredClone cost bounded to that one
+  // curated message rather than cloning and sending the entire chat history.
+  const [lastMessage] = chat.getHistoryTail(1, /* curated */ true);
   if (!lastMessage || lastMessage.role !== 'model') {
     // Cannot determine next speaker if the last turn wasn't from the model
     // or if history is empty.
@@ -102,7 +91,7 @@ export async function checkNextSpeaker(
   }
 
   const contents: Content[] = [
-    ...curatedHistory,
+    lastMessage,
     { role: 'user', parts: [{ text: CHECK_PROMPT }] },
   ];
 

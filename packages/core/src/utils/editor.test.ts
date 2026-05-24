@@ -19,6 +19,8 @@ import {
   openDiff,
   allowEditorTypeInSandbox,
   isEditorAvailable,
+  isTerminalEditor,
+  getExternalEditorCommand,
   type EditorType,
 } from './editor.js';
 import { execSync, spawn, spawnSync } from 'node:child_process';
@@ -771,6 +773,153 @@ describe('editor utils', () => {
         expect(diffCommand).not.toBeNull();
         expect(diffCommand!.command).toMatch(/MacOS[/\\]cli$/);
       });
+    });
+  });
+
+  describe('isTerminalEditor', () => {
+    it('should return true for terminal editors', () => {
+      expect(isTerminalEditor('vim')).toBe(true);
+      expect(isTerminalEditor('neovim')).toBe(true);
+      expect(isTerminalEditor('emacs')).toBe(true);
+    });
+
+    it('should return false for GUI editors', () => {
+      expect(isTerminalEditor('vscode')).toBe(false);
+      expect(isTerminalEditor('vscodium')).toBe(false);
+      expect(isTerminalEditor('windsurf')).toBe(false);
+      expect(isTerminalEditor('cursor')).toBe(false);
+      expect(isTerminalEditor('zed')).toBe(false);
+      expect(isTerminalEditor('trae')).toBe(false);
+    });
+  });
+
+  describe('getExternalEditorCommand', () => {
+    it('should return null when editor executable is not found', () => {
+      (execSync as Mock).mockImplementation(() => {
+        throw new Error('not found');
+      });
+      (existsSync as unknown as Mock).mockReturnValue(false);
+      const result = getExternalEditorCommand('vscode', '/tmp/file.txt');
+      expect(result).toBeNull();
+    });
+
+    it('should return --wait flag for vscode', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/code'));
+      const result = getExternalEditorCommand('vscode', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.command).toBe('code');
+      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
+    });
+
+    it('should return --wait flag for vscodium', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/codium'));
+      const result = getExternalEditorCommand('vscodium', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.command).toBe('codium');
+      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
+    });
+
+    it('should return --wait flag for windsurf', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/windsurf'));
+      const result = getExternalEditorCommand('windsurf', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.command).toBe('windsurf');
+      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
+    });
+
+    it('should return --wait flag for cursor', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/cursor'));
+      const result = getExternalEditorCommand('cursor', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
+    });
+
+    it('should return --wait flag for trae', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/trae'));
+      const result = getExternalEditorCommand('trae', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.command).toBe('trae');
+      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
+    });
+
+    it('should return --wait flag for zed', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/zed'));
+      const result = getExternalEditorCommand('zed', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
+    });
+
+    it('should return plain args for vim (terminal editor)', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/vim'));
+      const result = getExternalEditorCommand('vim', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.command).toBe('vim');
+      expect(result!.args).toEqual(['/tmp/file.txt']);
+    });
+
+    it('should return plain args for neovim (terminal editor)', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/nvim'));
+      const result = getExternalEditorCommand('neovim', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.command).toBe('nvim');
+      expect(result!.args).toEqual(['/tmp/file.txt']);
+    });
+
+    it('should return plain args for emacs (terminal editor)', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/emacs'));
+      const result = getExternalEditorCommand('emacs', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.command).toBe('emacs');
+      expect(result!.args).toEqual(['/tmp/file.txt']);
+    });
+
+    it('should set needsShell=true for .cmd executables on Windows', () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      (execSync as Mock).mockReturnValue(Buffer.from('C:\\code.cmd'));
+      const result = getExternalEditorCommand('vscode', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.needsShell).toBe(true);
+    });
+
+    it('should set needsShell=true for .bat executables on Windows', () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      (execSync as Mock).mockReturnValue(Buffer.from('C:\\code.bat'));
+      const result = getExternalEditorCommand('vscode', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.needsShell).toBe(true);
+    });
+
+    it('should set needsShell=false for non-.cmd executables on Windows', () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      (execSync as Mock).mockReturnValue(Buffer.from('C:\\cursor'));
+      const result = getExternalEditorCommand('cursor', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.needsShell).toBe(false);
+    });
+
+    it('should set needsShell=false on non-Windows', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/code'));
+      const result = getExternalEditorCommand('vscode', '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      expect(result!.needsShell).toBe(false);
+    });
+
+    it('should return null for invalid editor type', () => {
+      const result = getExternalEditorCommand(
+        'nano' as EditorType,
+        '/tmp/file.txt',
+      );
+      expect(result).toBeNull();
     });
   });
 });

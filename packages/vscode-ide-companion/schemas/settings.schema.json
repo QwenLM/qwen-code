@@ -185,6 +185,11 @@
           "type": "string",
           "default": "Qwen Dark"
         },
+        "autoModeAcknowledged": {
+          "description": "True once the user has seen the first-time information message about the AUTO approval mode. Set automatically; not intended for manual configuration.",
+          "type": "boolean",
+          "default": false
+        },
         "statusLine": {
           "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
           "type": "object",
@@ -194,6 +199,11 @@
           "description": "Custom theme definitions.",
           "type": "object",
           "additionalProperties": true
+        },
+        "hideBuiltinWorktreeIndicator": {
+          "description": "When true, the built-in `⎇ worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself — otherwise an active worktree silently has no UI affordance.",
+          "type": "boolean",
+          "default": false
         },
         "hideWindowTitle": {
           "description": "Hide the window title bar",
@@ -405,6 +415,26 @@
           "description": "When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.",
           "type": "boolean",
           "default": false
+        },
+        "resourceAttributes": {
+          "description": "Static resource attributes attached to every span/log/metric the SDK exports (OTLP or file outfile — they share the same Resource). Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version, session.id) are dropped with a warning.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "metrics": {
+          "description": "Per-signal cardinality controls for exported metrics.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "includeSessionId": {
+              "description": "Include session.id on every metric data point. WARNING: each CLI session creates a new value, causing unbounded metric time-series fan-out at the backend. Only enable for short-term debugging — spans and logs still carry session.id.",
+              "type": "boolean",
+              "default": false
+            }
+          }
         }
       },
       "additionalProperties": true,
@@ -631,6 +661,39 @@
           "items": {
             "type": "string"
           }
+        },
+        "autoMode": {
+          "description": "Settings consumed by the AUTO approval mode classifier.",
+          "type": "object",
+          "properties": {
+            "hints": {
+              "description": "Natural-language hints injected into the classifier system prompt.",
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "description": "Natural-language descriptions of actions AUTO mode should allow.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "deny": {
+                  "description": "Natural-language descriptions of actions AUTO mode should block.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "environment": {
+              "description": "Environment / context lines injected into the classifier system prompt.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     },
@@ -708,11 +771,12 @@
           }
         },
         "approvalMode": {
-          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, yolo",
+          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, auto, yolo",
           "enum": [
             "plan",
             "default",
             "auto-edit",
+            "auto",
             "yolo"
           ],
           "default": "default"

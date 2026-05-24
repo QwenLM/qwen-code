@@ -91,6 +91,9 @@ describe('SkillManager', () => {
           'argument-hint': '[topic]',
         };
       }
+      if (/^priority:/m.test(yamlString)) {
+        return yaml.parse(yamlString);
+      }
       // Match a frontmatter-level `paths:` field, not any incidental
       // occurrence of "paths:" in the body. Multiline + start-anchor matches
       // a top-level YAML key.
@@ -313,6 +316,44 @@ Skill body.
       expect(config.argumentHint).toBe('[topic]');
     });
 
+    it('should parse numeric priority from frontmatter', () => {
+      const markdownWithPriority = `---
+name: test-skill
+description: A test skill
+priority: 25
+---
+
+Skill body.
+`;
+
+      const config = manager.parseSkillContent(
+        markdownWithPriority,
+        validSkillConfig.filePath,
+        'project',
+      );
+
+      expect(config.priority).toBe(25);
+    });
+
+    it('should ignore invalid priority values without dropping the skill', () => {
+      const markdownWithInvalidPriority = `---
+name: test-skill
+description: A test skill
+priority: true
+---
+
+Skill body.
+`;
+
+      const config = manager.parseSkillContent(
+        markdownWithInvalidPriority,
+        validSkillConfig.filePath,
+        'project',
+      );
+
+      expect(config.priority).toBeUndefined();
+    });
+
     it('should parse content with paths (conditional skill)', () => {
       const markdown = `---
 name: tsx-helper
@@ -491,6 +532,16 @@ You are a helpful assistant.
 
       expect(result.isValid).toBe(true); // Still valid
       expect(result.warnings).toContain('Skill body is empty');
+    });
+
+    it('should report error for invalid priority', () => {
+      const result = manager.validateConfig({
+        ...validSkillConfig,
+        priority: 'high' as unknown as number,
+      });
+
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain('"priority" must be a finite number');
     });
   });
 
@@ -682,6 +733,106 @@ Skill 3 content`);
 
       expect(projectSkills).toHaveLength(2); // skill1, skill2
       expect(projectSkills.every((s) => s.level === 'project')).toBe(true);
+    });
+
+    it('should return a stable alphabetical order regardless of priority (priority only affects the /skills display layer)', async () => {
+      vi.mocked(fs.readdir).mockReset();
+      mockParseYaml.mockImplementation((yamlString: string) =>
+        yaml.parse(yamlString),
+      );
+      const projectQwenSkillsDir = path.join(
+        '/test/project',
+        '.qwen',
+        'skills',
+      );
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        if (String(dirPath) === projectQwenSkillsDir) {
+          return Promise.resolve(
+            ['high', 'unset-beta', 'unset-alpha', 'negative'].map((name) => ({
+              name,
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            })) as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+          );
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+      vi.mocked(fs.readFile).mockImplementation((filePath) => {
+        const name = path.basename(path.dirname(String(filePath)));
+        const priorityLine =
+          name === 'high'
+            ? 'priority: 100\n'
+            : name === 'negative'
+              ? 'priority: -1\n'
+              : '';
+        return Promise.resolve(`---
+name: ${name}
+description: ${name} skill
+${priorityLine}---
+Body`);
+      });
+
+      const skills = await manager.listSkills({
+        level: 'project',
+        force: true,
+      });
+
+      expect(skills.map((skill) => skill.name)).toEqual([
+        'high',
+        'negative',
+        'unset-alpha',
+        'unset-beta',
+      ]);
+    });
+
+    it('should normalize non-number extension priorities and stay alphabetical', async () => {
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'test-extension',
+          name: 'test-extension',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extension',
+          config: { name: 'test-extension', version: '1.0.0' },
+          contextFiles: [],
+          skills: [
+            {
+              name: 'bad-priority',
+              description: 'Bad priority',
+              body: 'Body',
+              filePath: '/extension/bad/SKILL.md',
+              level: 'extension',
+              priority: 'high' as unknown as number,
+            },
+            {
+              name: 'high-priority',
+              description: 'High priority',
+              body: 'Body',
+              filePath: '/extension/high/SKILL.md',
+              level: 'extension',
+              priority: 10,
+            },
+          ],
+        },
+      ]);
+
+      const skills = await manager.listSkills({
+        level: 'extension',
+        force: true,
+      });
+
+      expect(skills.map((skill) => skill.name)).toEqual([
+        'bad-priority',
+        'high-priority',
+      ]);
+      // The non-number priority should still be normalized on the skill
+      // itself so downstream consumers (the /skills display sort) see a
+      // clean value.
+      const badSkill = skills.find((s) => s.name === 'bad-priority');
+      expect(badSkill?.priority).toBe(0);
     });
 
     it('should deduplicate same-name skills across provider dirs within a level', async () => {
