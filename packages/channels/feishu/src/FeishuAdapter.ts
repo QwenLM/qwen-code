@@ -84,7 +84,7 @@ export class FeishuChannel extends ChannelBase {
   private msgToSenderName: Map<string, string> = new Map();
   /** Sender open_id keyed by inbound messageId — for stop-button auth in group chats. */
   private msgToSenderId: Map<string, string> = new Map();
-  /** Tracks messages that were stopped — survives cleanupCard to prevent late responses. */
+  /** Tracks messages that were stopped. Cleaned up by cleanupCard, onResponseComplete, stale timer, and disconnect. */
   private stoppedMessages: Set<string> = new Set();
   private botOpenId?: string;
   private tokenCache?: { token: string; expiresAt: number };
