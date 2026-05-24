@@ -229,6 +229,25 @@ describe('HookPlanner', () => {
       expect(result).not.toBeNull();
       expect(result!.hookConfigs).toEqual([entry.config]);
     });
+
+    it('matches user prompt expansion command names with invalid-regex fallback', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.UserPromptExpansion,
+        matcher: '[invalid(regex',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.UserPromptExpansion,
+        { commandName: '[invalid(regex' },
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.hookConfigs).toEqual([entry.config]);
+    });
   });
 
   describe('matchesContext', () => {

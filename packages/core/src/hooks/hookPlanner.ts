@@ -228,7 +228,17 @@ export class HookPlanner {
    * Match slash command name against matcher pattern.
    */
   private matchesCommandName(matcher: string, commandName: string): boolean {
-    return this.matchesToolName(matcher, commandName);
+    try {
+      // Attempt to treat the matcher as a regular expression.
+      const regex = new RegExp(matcher);
+      return regex.test(commandName);
+    } catch (error) {
+      // If it's not a valid regex, treat it as a literal string for an exact match.
+      debugLogger.warn(
+        `Invalid regex in hook matcher "${matcher}" for command "${commandName}", falling back to exact match: ${error}`,
+      );
+      return matcher === commandName;
+    }
   }
 
   /**

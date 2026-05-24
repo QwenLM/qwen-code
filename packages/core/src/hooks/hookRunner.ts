@@ -12,6 +12,7 @@ import type {
   HookOutput,
   HookExecutionResult,
   PreToolUseInput,
+  UserPromptExpansionInput,
   UserPromptSubmitInput,
   CommandHookConfig,
   FunctionHookContext,
@@ -485,16 +486,19 @@ export class HookRunner {
     if (hookOutput.hookSpecificOutput) {
       switch (eventName) {
         case HookEventName.UserPromptSubmit:
+        case HookEventName.UserPromptExpansion:
           if ('additionalContext' in hookOutput.hookSpecificOutput) {
-            // For UserPromptSubmit, we could modify the prompt with additional context
             const additionalContext =
               hookOutput.hookSpecificOutput['additionalContext'];
             if (
               typeof additionalContext === 'string' &&
               'prompt' in modifiedInput
             ) {
-              (modifiedInput as UserPromptSubmitInput).prompt +=
-                '\n\n' + additionalContext;
+              (
+                modifiedInput as
+                  | UserPromptSubmitInput
+                  | UserPromptExpansionInput
+              ).prompt += '\n\n' + additionalContext;
             }
           }
           break;
