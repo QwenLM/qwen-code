@@ -266,6 +266,8 @@ export interface HookOutput {
   hookSpecificOutput?: Record<string, unknown>;
 }
 
+export const MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH = 10_000;
+
 /**
  * Factory function to create the appropriate hook output class based on event name
  * Returns specialized HookOutput subclasses for events with specific methods
@@ -490,7 +492,13 @@ export class PostToolUseFailureHookOutput extends DefaultHookOutput {
 /**
  * Specific hook output class for UserPromptExpansion events.
  */
-export class UserPromptExpansionHookOutput extends DefaultHookOutput {}
+export class UserPromptExpansionHookOutput extends DefaultHookOutput {
+  override getAdditionalContext(): string | undefined {
+    return super
+      .getAdditionalContext()
+      ?.slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH);
+  }
+}
 
 /**
  * Specific hook output class for Stop events.

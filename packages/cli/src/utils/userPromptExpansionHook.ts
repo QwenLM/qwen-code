@@ -5,9 +5,10 @@
  */
 
 import type { PartListUnion } from '@google/genai';
-import { partToString } from '@qwen-code/qwen-code-core';
-
-const MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH = 10_000;
+import {
+  MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+  partToString,
+} from '@qwen-code/qwen-code-core';
 
 export function appendUserPromptExpansionAdditionalContext(
   content: PartListUnion,

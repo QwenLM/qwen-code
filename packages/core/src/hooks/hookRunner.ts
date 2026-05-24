@@ -5,7 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { HookEventName, HookType } from './types.js';
+import { createHookOutput, HookEventName, HookType } from './types.js';
 import type {
   HookConfig,
   HookInput,
@@ -487,13 +487,12 @@ export class HookRunner {
       switch (eventName) {
         case HookEventName.UserPromptSubmit:
         case HookEventName.UserPromptExpansion:
-          if ('additionalContext' in hookOutput.hookSpecificOutput) {
-            const additionalContext =
-              hookOutput.hookSpecificOutput['additionalContext'];
-            if (
-              typeof additionalContext === 'string' &&
-              'prompt' in modifiedInput
-            ) {
+          {
+            const additionalContext = createHookOutput(
+              eventName,
+              hookOutput,
+            ).getAdditionalContext();
+            if (additionalContext && 'prompt' in modifiedInput) {
               (
                 modifiedInput as
                   | UserPromptSubmitInput
