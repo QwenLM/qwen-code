@@ -12,8 +12,8 @@
  * progress information into a count.
  *
  * Each row shows: status glyph · agent name · elapsed · tokens.
- * Rendered in committed phase only; during live phase,
- * `LiveAgentPanel` below the composer owns the display.
+ * Rendered in the committed phase only; during the live phase
+ * `LiveAgentPanel` below the composer owns the per-agent roster.
  * Elapsed and token data fall back to
  * `AgentResultDisplay.executionSummary` when the registry entry has
  * been unregistered.
@@ -34,14 +34,14 @@ import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
 
 interface InlineParallelAgentsDisplayProps {
-  /**
-   * The full tool group as passed to ToolGroupMessage. We filter to
-   * task_execution entries internally so the caller's gating logic
-   * (which is what triggers this path in the first place) doesn't
-   * need to duplicate the filter.
-   */
   toolCalls: readonly IndividualToolCallDisplay[];
   contentWidth: number;
+  /**
+   * Total agent count for the header when `toolCalls` is a subset
+   * (e.g. only terminal agents during the live phase). When omitted,
+   * defaults to the number of agent entries in `toolCalls`.
+   */
+  totalAgentCount?: number;
 }
 
 /**
@@ -170,7 +170,7 @@ function truncateMiddle(input: string, max: number): string {
 
 export const InlineParallelAgentsDisplay: React.FC<
   InlineParallelAgentsDisplayProps
-> = ({ toolCalls, contentWidth }) => {
+> = ({ toolCalls, contentWidth, totalAgentCount }) => {
   const config = useContext(ConfigContext);
 
   // Static slice of agent calls for this group. The caller already
@@ -257,7 +257,8 @@ export const InlineParallelAgentsDisplay: React.FC<
       r.status === 'failed' ||
       r.status === 'cancelled',
   ).length;
-  const headerLabel = `Parallel agents · ${rows.length} · ${doneCount}/${rows.length} done`;
+  const total = totalAgentCount ?? rows.length;
+  const headerLabel = `Parallel agents · ${total} · ${doneCount}/${total} done`;
 
   return (
     <Box

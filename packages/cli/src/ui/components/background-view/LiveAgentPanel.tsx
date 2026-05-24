@@ -59,7 +59,7 @@ interface LiveAgentPanelProps {
   width?: number;
 }
 
-const DEFAULT_MAX_ROWS = 5;
+const DEFAULT_MAX_ROWS = 12;
 // Keep terminal entries on the panel briefly so the user gets visual
 // feedback ("✓ done · 12s") when a subagent finishes, then they fall off
 // and the user goes to BackgroundTasksDialog for a deeper look. Mirrors

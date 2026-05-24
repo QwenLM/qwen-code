@@ -276,34 +276,17 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   const hasSubagentPendingConfirmation = subagentsAwaitingApproval.length > 0;
 
-  // Dense inline panel for parallel agent fan-out (e.g. `/review`'s
-  // 9-agent launch). When a single tool group is composed entirely of
-  // ≥2 task_execution invocations, the legacy path collapses them into
-  // `Agent × N / <last>` via CompactToolGroupDisplay — almost zero
-  // information for a multi-minute run. Route to a dedicated display
-  // that surfaces every agent's status / activity / elapsed / tokens
-  // on its own row.
-  //
-  // Dense inline panel for committed phase; live-phase null-out so
-  // LiveAgentPanel below the composer is the sole live surface.
-  //   - Committed (`!isPending`): dense panel with one row per agent
-  //     showing final status / elapsed / tokens.
-  //   - Live (`isPending`): return null — all agents (including
-  //     terminal ones) are handled by LiveAgentPanel below the input.
-  //     Without this, terminal agents would render as verbose
-  //     ToolMessages above the input while running ones sit below.
-  //   - Pending confirmation: falls through to the normal renderer so
-  //     the keyboard-focus surface for approval stays intact.
+  // Pure parallel agent group (≥2 agents, nothing else).
+  // Dense panel in both phases with all agents. During live phase
+  // LiveAgentPanel below also shows running agents (brief overlap
+  // that resolves as agents complete and expire from the panel).
   if (isPureParallelAgentGroup(toolCalls) && !hasSubagentPendingConfirmation) {
-    if (!isPending) {
-      return (
-        <InlineParallelAgentsDisplay
-          toolCalls={toolCalls}
-          contentWidth={contentWidth}
-        />
-      );
-    }
-    return null;
+    return (
+      <InlineParallelAgentsDisplay
+        toolCalls={toolCalls}
+        contentWidth={contentWidth}
+      />
+    );
   }
 
   // Hide the entire group when the live-phase filter leaves nothing
