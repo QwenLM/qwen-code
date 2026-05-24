@@ -299,8 +299,6 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
-          REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
-          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
         run: |-
           set -euo pipefail
 
@@ -585,8 +583,17 @@ jobs:
             printf '```\n%s\n```\n\n' "$changed_files_block"
             printf '**%s:**\n' "$diff_stat_label"
             printf '```\n%s\n```\n\n' "$diff_stat"
-            printf '**First 50KB of unified diff:**\n'
-            printf '```diff\n%s\n```\n\n' "$unified_diff"
+            # Honour diff_available: when the cache write failed, the file
+            # contains a "(unified diff unavailable …)" placeholder and must
+            # not be wrapped in a ```diff fence — otherwise the preflight
+            # LLM would parse the error text as code and infer false
+            # blast-radius signals.
+            if [ "${DIFF_AVAILABLE:-true}" = "true" ]; then
+              printf '**First 50KB of unified diff:**\n'
+              printf '```diff\n%s\n```\n\n' "$unified_diff"
+            else
+              printf '**Unified diff:** unavailable — `gh pr diff` failed during CI context collection. Triage on the changed-file list above.\n\n'
+            fi
             printf '**Author PR comments (first 8KB):**\n%s\n\n' "$author_comments_block"
             printf '**PR body (first 2KB):**\n%s\n' "$pr_body"
           } > /tmp/preflight-pr-context.md
@@ -642,8 +649,21 @@ jobs:
             echo "::warning::Preflight exited with status $qwen_status; falling back to DEEP."
             rationale="preflight exited non-zero ($qwen_status)"
           else
-            # Strip code fences if the model added them despite instructions.
-            json_text="$(printf '%s' "$raw_out" | sed -E 's/^```(json)?$//; s/^```$//' | sed '/^[[:space:]]*$/d')"
+            extract_preflight_json() {
+              node -e '
+          const fs = require("fs");
+          const raw = fs.readFileSync(0, "utf8").trim();
+          const fenced = raw.match(/```\s*[A-Za-z0-9_-]*\s*\n([\s\S]*?)\n```/);
+          const candidate = (fenced ? fenced[1] : raw).trim();
+          const first = candidate.indexOf("{");
+          const last = candidate.lastIndexOf("}");
+          process.stdout.write(first !== -1 && last >= first ? candidate.slice(first, last + 1).trim() : candidate);
+          '
+            }
+            # Strip common code fences / surrounding prose if the model added
+            # them despite instructions. Keep invalid output invalid so jq
+            # still falls back to DEEP.
+            json_text="$(printf '%s' "$raw_out" | extract_preflight_json)"
             # `.blast_radius` must be an object — a string/number/null would
             # make every `.blast_radius.<flag>` lookup below return null and
             # silently flatten the high-risk dimensions to `false`, routing
@@ -800,6 +820,7 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
+          DIFF_AVAILABLE: '${{ steps.size.outputs.diff_available }}'
         timeout-minutes: 5
         run: |-
           set -euo pipefail
@@ -834,7 +855,15 @@ jobs:
               printf '**Maintainer focus:**\n%s\n\n' "$ADDITIONAL_INSTRUCTIONS"
             fi
             printf '**Changed files:**\n```\n%s\n```\n\n' "$changed_files_block"
-            printf '**Unified diff (first 50KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
+            # Honour the diff_available signal so the placeholder string from
+            # capture_capped_pr_diff failures is never wrapped in a ```diff
+            # fence — that would let the LLM "review" the error text as if
+            # it were real code.
+            if [ "${DIFF_AVAILABLE:-true}" = "true" ]; then
+              printf '**Unified diff (first 50KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
+            else
+              printf '**Unified diff:** unavailable — `gh pr diff` failed during CI context collection. This review proceeds without diff content; rely on the changed-file list above and call this out in the review summary.\n\n'
+            fi
             printf '**Preflight focus_areas (hints, not mandatory):**\n```json\n%s\n```\n\n' "$focus_areas"
             printf '**Author PR comments (first 8KB):**\n%s\n\n' "$author_comments_block"
             printf '**PR body (first 2KB):**\n%s\n' "$pr_body"
@@ -935,6 +964,7 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
+          DIFF_AVAILABLE: '${{ steps.size.outputs.diff_available }}'
         timeout-minutes: 10
         run: |-
           set -euo pipefail
@@ -968,7 +998,13 @@ jobs:
               printf '**Maintainer focus:**\n%s\n\n' "$ADDITIONAL_INSTRUCTIONS"
             fi
             printf '**Changed files:**\n```\n%s\n```\n\n' "$changed_files_block"
-            printf '**Unified diff (first 200KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
+            # See LIGHT step for rationale: never wrap the failure
+            # placeholder in a ```diff fence.
+            if [ "${DIFF_AVAILABLE:-true}" = "true" ]; then
+              printf '**Unified diff (first 200KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
+            else
+              printf '**Unified diff:** unavailable — `gh pr diff` failed during CI context collection. This review proceeds without diff content; rely on the changed-file list above and call this out in the review summary.\n\n'
+            fi
             printf '**Preflight focus_areas (hints):**\n```json\n%s\n```\n\n' "$focus_areas"
             printf '**Preflight agents_to_run (hints):**\n```json\n%s\n```\n\n' "$agents_to_run"
             printf '**Author PR comments (first 8KB):**\n%s\n\n' "$author_comments_block"
@@ -1061,6 +1097,7 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
+          DIFF_AVAILABLE: '${{ steps.size.outputs.diff_available }}'
         timeout-minutes: 20
         run: |-
           set -euo pipefail
@@ -1091,7 +1128,13 @@ jobs:
               printf '**Maintainer focus:**\n%s\n\n' "$ADDITIONAL_INSTRUCTIONS"
             fi
             printf '**Changed files:**\n```\n%s\n```\n\n' "$changed_files_block"
-            printf '**Unified diff (first 500KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
+            # See LIGHT step for rationale: never wrap the failure
+            # placeholder in a ```diff fence.
+            if [ "${DIFF_AVAILABLE:-true}" = "true" ]; then
+              printf '**Unified diff (first 500KB):**\n```diff\n%s\n```\n\n' "$unified_diff"
+            else
+              printf '**Unified diff:** unavailable — `gh pr diff` failed during CI context collection. This review proceeds without diff content; rely on the changed-file list above and call this out in the review summary.\n\n'
+            fi
             printf '**Preflight focus_areas (hints):**\n```json\n%s\n```\n\n' "$focus_areas"
             printf '**Preflight agents_to_run (hints):**\n```json\n%s\n```\n\n' "$agents_to_run"
             printf '**Author PR comments (first 8KB):**\n%s\n\n' "$author_comments_block"
@@ -1139,11 +1182,32 @@ jobs:
           }
 
           if (missingSections.length > 0) {
+            // Never fall back to the full bundled SKILL.md here. SKILL.md
+            // is written for the toolful /review skill (shell, ReadFile,
+            // worktree, autofix, GitHub submission). Dumping it into the
+            // toolless CI DEEP prompt across four focus passes wastes context
+            // budget and invites the model to narrate about tools it
+            // does not have. Send only what we successfully extracted,
+            // with an inline gap notice so the model knows the rubric is
+            // partial.
             console.error(
-              `::warning::Bundled review rubric headings changed or disappeared; ` +
-                `falling back to the full bundled review skill. Missing: ${missingSections.join(', ')}`,
+              `::warning::Bundled review rubric headings drifted; ` +
+                `using partial extracted rubric with ${parts.length} section(s). ` +
+                `Missing: ${missingSections.join(', ')}`,
             );
-            process.stdout.write(text.trim() + '\n');
+            if (parts.length > 0) {
+              const gapNotice =
+                `> Note: ${missingSections.length} rubric section(s) ` +
+                `could not be extracted from SKILL.md (` +
+                `${missingSections.join(', ')}). Review with the partial ` +
+                `rubric below; do not invent steps.`;
+              process.stdout.write(gapNotice + '\n\n' + parts.join('\n\n---\n\n') + '\n');
+            } else {
+              process.stdout.write(
+                '(bundled review rubric unavailable — proceed with the project review rules and ' +
+                  'general code-review judgment)\n',
+              );
+            }
           } else {
             process.stdout.write(parts.join('\n\n---\n\n') + '\n');
           }
@@ -1176,8 +1240,8 @@ jobs:
               --context /tmp/deep-ci-review-context.md \
               --rules .qwen/review-rules.md; then
               echo "::warning::Failed to render DEEP ${focus} prompt; omitting this section and continuing with remaining focus passes."
-              : > "$summary"
-              return 0
+              rm -f "$summary"
+              return 1
             fi
 
             echo "::group::Qwen DEEP ${focus} review (live stream-json events)"
@@ -1230,6 +1294,10 @@ jobs:
               echo "::warning::DEEP ${focus} review produced empty / placeholder-only output; omitting this section."
               rm -f "$summary"
             fi
+
+            # Caller treats "summary file absent" as this pass failing,
+            # so the DEEP step can exit non-zero when every pass fails.
+            [ -e "$summary" ]
           }
 
           deep_focus_passes=(
@@ -1238,10 +1306,15 @@ jobs:
             "maintainability-performance|.qwen/deep-review-maintainability-performance-prompt.md"
             "undirected-audit|.qwen/deep-review-undirected-audit-prompt.md"
           )
+          deep_unusable_section_count=0
           for pass in "${deep_focus_passes[@]}"; do
             focus="${pass%%|*}"
             prompt_template="${pass#*|}"
-            run_deep_focus "$focus" "$prompt_template"
+            if run_deep_focus "$focus" "$prompt_template"; then
+              :
+            else
+              deep_unusable_section_count=$((deep_unusable_section_count + 1))
+            fi
           done
 
           section_count=0
@@ -1282,6 +1355,16 @@ jobs:
           cat qwen-review-summary.md 2>/dev/null || echo "(summary file removed by near-empty guard; fallback comment will fire)"
           echo "::${stop_token}::"
           echo "::endgroup::"
+
+          # Surface "every DEEP pass failed" as a red step in the GitHub
+          # Actions UI. Without this, the step exits 0 (the previous tail
+          # commands all succeed) and the only failure signal is the
+          # fallback PR comment several steps removed from the actual
+          # failure. The always()-gated fallback step still fires.
+          if [ "$section_count" -eq 0 ]; then
+            echo "::error::DEEP review produced no usable focused sections across $deep_unusable_section_count pass(es); fallback comment will be posted."
+            exit 1
+          fi
 
       - name: 'Post dry-run summary'
         if: |-

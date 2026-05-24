@@ -87,11 +87,10 @@ prose before or after. The shell layer parses your output with `jq`.
     "<concrete file:line + concern, downstream review will use these>"
   ],
   "agents_to_run": [
-    "correctness",
-    "security",
-    "code_quality",
-    "performance",
-    "test_coverage"
+    "correctness-security",
+    "test-coverage",
+    "maintainability-performance",
+    "undirected-audit"
   ]
 }
 ```
@@ -108,9 +107,14 @@ Field semantics:
   downstream LIGHT/STANDARD/DEEP review at the highest-value spots
   (`packages/core/src/auth/oauth.ts:120 — token refresh path`). Empty
   list is fine for ULTRA_LIGHT.
-- `agents_to_run`: subset of the standard agent labels. STANDARD typically
-  uses `["correctness", "security", "code_quality"]`. DEEP usually uses
-  all 5. LIGHT/ULTRA_LIGHT can leave it empty.
+- `agents_to_run`: subset of the four DEEP focus-pass labels that match
+  the workflow's `run_deep_focus` invocations exactly:
+  `correctness-security`, `test-coverage`, `maintainability-performance`,
+  `undirected-audit`. STANDARD typically lists
+  `["correctness-security", "test-coverage"]`; DEEP usually lists all
+  four. LIGHT/ULTRA_LIGHT can leave it empty. The labels are only used
+  as advisory hints in downstream prompts; the workflow does not gate any
+  step on this list.
 
 ---
 

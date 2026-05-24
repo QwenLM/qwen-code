@@ -21,6 +21,10 @@ const deepTestCoveragePrompt = readFileSync(
   resolve(__dirname, '../../.qwen/deep-review-test-coverage-prompt.md'),
   'utf8',
 );
+const preflightPrompt = readFileSync(
+  resolve(__dirname, '../../.qwen/preflight-prompt.md'),
+  'utf8',
+);
 
 const deepPromptTemplates = [
   '.qwen/deep-review-correctness-security-prompt.md',
@@ -265,7 +269,20 @@ describe('Qwen PR review workflow safety rails', () => {
     expect(workflow).toContain('local status=0');
     expect(workflow).toContain('status=${PIPESTATUS[0]}');
     expect(workflow).toContain('missingSections');
-    expect(workflow).toContain('falling back to the full bundled review skill');
+    expect(workflow).toContain('using partial extracted rubric');
+    expect(workflow).not.toContain(
+      'falling back to the full bundled review skill',
+    );
+  });
+
+  it('marks DEEP failed when no focused pass produced usable review content', () => {
+    expect(workflow).toContain('deep_unusable_section_count=0');
+    expect(workflow).toContain(
+      'if run_deep_focus "$focus" "$prompt_template"; then',
+    );
+    expect(workflow).toContain(
+      '::error::DEEP review produced no usable focused sections',
+    );
   });
 
   it('keeps the DEEP focus pass list single-sourced', () => {
@@ -313,6 +330,31 @@ describe('Qwen PR review workflow safety rails', () => {
     );
   });
 
+  it('does not present a diff-unavailable placeholder as a fenced diff', () => {
+    expect(workflow).toContain('never wrap the failure');
+    expect(workflow).toContain(
+      '`gh pr diff` failed during CI context collection',
+    );
+    expect(workflow).toContain(
+      "DIFF_AVAILABLE: '${{ steps.size.outputs.diff_available }}'",
+    );
+    expect(
+      workflow.match(/\[ "\$\{DIFF_AVAILABLE:-true\}" = "true" \]/g),
+    ).toHaveLength(4);
+    expect(
+      workflow.match(/This review proceeds without diff content/g),
+    ).toHaveLength(3);
+  });
+
+  it('extracts preflight JSON from common code fence and prose wrappers', () => {
+    expect(workflow).toContain('extract_preflight_json()');
+    expect(workflow).toContain(
+      'raw.match(/```\\s*[A-Za-z0-9_-]*\\s*\\n([\\s\\S]*?)\\n```/)',
+    );
+    expect(workflow).toContain('candidate.indexOf("{")');
+    expect(workflow).toContain('candidate.lastIndexOf("}")');
+  });
+
   it('keeps DEEP prompt templates versioned despite the .qwen ignore rule', () => {
     for (const template of deepPromptTemplates) {
       expect(gitignore).toContain(`!${template}`);
@@ -324,6 +366,14 @@ describe('Qwen PR review workflow safety rails', () => {
     expect(deepTestCoveragePrompt).toContain(
       'This is an automated, advisory, comment-only review',
     );
+  });
+
+  it('keeps preflight agent hints aligned with actual DEEP focused pass names', () => {
+    expect(preflightPrompt).toContain('"correctness-security"');
+    expect(preflightPrompt).toContain('"test-coverage"');
+    expect(preflightPrompt).toContain('"maintainability-performance"');
+    expect(preflightPrompt).toContain('"undirected-audit"');
+    expect(preflightPrompt).not.toContain('"code_quality"');
   });
 
   it('posts a fallback comment whenever the summary comment did not succeed', () => {

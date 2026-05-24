@@ -259,12 +259,18 @@ shell-only   单发 qwen   单发 qwen   4 个 focused qwen pass
     "data_path": false
   },
   "focus_areas": ["<concrete file:line + concern>, …"],
-  "agents_to_run": ["correctness", "security", "code_quality"]
+  "agents_to_run": [
+    "correctness-security",
+    "test-coverage",
+    "maintainability-performance",
+    "undirected-audit"
+  ]
 }
 ```
 
 - shell 层用 `jq` 验证 schema：缺字段 / tier 非法 / blast_radius 不完整 → 视作 preflight 失败，走兜底（见 Failure modes）
-- `focus_areas`、`agents_to_run` 仅 STANDARD/DEEP 使用
+- `focus_areas`、`agents_to_run` 仅 STANDARD/DEEP 使用；`agents_to_run`
+  是 advisory hint，标签与实际 DEEP focused pass 名称保持一致
 
 > tier 决策**完全由 preflight LLM 看 diff 内容判定**，没有 path-glob 或 keyword 启发式安全网。LLM 判错由 maintainer 用 `@qwen-code /review --tier=deep` 显式纠正。`size > 1500` 只产生 warning，不改变 tier，也不跳过 review。
 

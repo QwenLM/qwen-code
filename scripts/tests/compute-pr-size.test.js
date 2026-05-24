@@ -126,4 +126,25 @@ describe('IGNORED_PATTERNS stays in sync with pr-gate.yml', () => {
       .map((m) => m[1]);
     expect(ymlSources).toEqual(IGNORED_PATTERNS.map((re) => re.source));
   });
+
+  it('keeps the PR Size threshold aligned with the review workflow default', () => {
+    const prGate = readFileSync(
+      join(repoRoot, '.github', 'workflows', 'pr-gate.yml'),
+      'utf8',
+    );
+    const reviewWorkflow = readFileSync(
+      join(repoRoot, '.github', 'workflows', 'qwen-code-pr-review.yml'),
+      'utf8',
+    );
+
+    const gateThreshold = prGate.match(
+      /const REVIEWABILITY_THRESHOLD = (\d+);/,
+    )?.[1];
+    const reviewDefault = reviewWorkflow.match(
+      /QWEN_PR_REVIEW_MAX_CHANGED_LINES \|\| '(\d+)'/,
+    )?.[1];
+
+    expect(gateThreshold).toBe('1500');
+    expect(reviewDefault).toBe(gateThreshold);
+  });
 });

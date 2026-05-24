@@ -61,7 +61,7 @@ async function validateBody(body) {
 const script = extractNamedStepScript('Validate PR body has required sections');
 const sizeScript = extractNamedStepScript('Compute reviewability size');
 
-async function computeSize(files, labels = []) {
+async function computeSize(files, labels = [], issueEvents = []) {
   const failures = [];
   const warnings = [];
   const infos = [];
@@ -87,11 +87,19 @@ async function computeSize(files, labels = []) {
     },
   };
   const github = {
-    paginate: async (_method, _options, mapper) => mapper({ data: files }),
     rest: {
       pulls: { listFiles: Symbol('listFiles') },
       issues: { listEvents: Symbol('listEvents') },
     },
+  };
+  github.paginate = async (method, _options, mapper) => {
+    if (method === github.rest.pulls.listFiles) {
+      return mapper({ data: files });
+    }
+    if (method === github.rest.issues.listEvents) {
+      return mapper({ data: issueEvents });
+    }
+    throw new Error(`unexpected paginate method: ${String(method)}`);
   };
   const fn = new AsyncFunction(
     'core',
@@ -205,6 +213,56 @@ describe('PR Size workflow validation', () => {
     expect(failures).toEqual([]);
     expect(warnings.join('\n')).toContain('over the size threshold');
     expect(warnings.join('\n')).toContain('Merge is allowed');
+  });
+
+  it('warns but does not fail when size is between 1000 and 1500 lines', async () => {
+    const { failures, warnings } = await computeSize([
+      { filename: 'src/medium.ts', additions: 1001, deletions: 0 },
+    ]);
+
+    expect(failures).toEqual([]);
+    expect(warnings.join('\n')).toContain('PR is large (1001 lines)');
+    expect(warnings.join('\n')).toContain('Merge is allowed');
+  });
+
+  it('records self-acknowledgement without treating it as maintainer acknowledgement', async () => {
+    const { failures, warnings } = await computeSize(
+      [{ filename: 'src/large.ts', additions: 1501, deletions: 0 }],
+      ['oversized-ok'],
+      [
+        {
+          event: 'labeled',
+          label: { name: 'oversized-ok' },
+          actor: { login: 'author' },
+        },
+      ],
+    );
+
+    expect(failures).toEqual([]);
+    expect(warnings.join('\n')).toContain('self-acknowledgement');
+    expect(warnings.join('\n')).not.toContain(
+      'a maintainer has consciously acknowledged',
+    );
+  });
+
+  it('records maintainer acknowledgement when oversized-ok was applied by a non-author', async () => {
+    const { failures, warnings } = await computeSize(
+      [{ filename: 'src/large.ts', additions: 1501, deletions: 0 }],
+      ['oversized-ok'],
+      [
+        {
+          event: 'labeled',
+          label: { name: 'oversized-ok' },
+          actor: { login: 'maintainer' },
+        },
+      ],
+    );
+
+    expect(failures).toEqual([]);
+    expect(warnings.join('\n')).toContain(
+      'a maintainer has consciously acknowledged',
+    );
+    expect(warnings.join('\n')).toContain('applied by @maintainer');
   });
 
   it('does not claim maintainer acknowledgement when the label applier is unknown', async () => {
