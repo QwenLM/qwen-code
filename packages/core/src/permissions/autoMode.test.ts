@@ -286,15 +286,14 @@ describe('evaluateAutoMode — fast-path gating', () => {
     expect(decision).toEqual({ via: 'fallback', reason: 'ask_rule' });
   });
 
-  it('routes to fallback when skipClassifier=true (denialTracking armed)', async () => {
+  it('routes to fallback with the denialTracking reason when armed', async () => {
     // Regression guard: when denialTracking has already armed a fallback
     // (3 consecutive blocks / 2 consecutive unavailables), the scheduler
-    // passes `skipClassifier: true` so the in-progress call drops to
-    // manual approval without burning another classifier request. Fast
-    // paths still fire — only the classifier dispatch is suppressed.
-    // Tool here is SHELL (not on the allowlist, not an edit), so neither
-    // fast-path applies; without skipClassifier this would dispatch the
-    // classifier.
+    // passes the specific reason so the in-progress call drops to manual
+    // approval without burning another classifier request. Fast paths still
+    // fire — only the classifier dispatch is suppressed. Tool here is SHELL
+    // (not on the allowlist, not an edit), so neither fast-path applies;
+    // without skipClassifierReason this would dispatch the classifier.
     const decision = await evaluateAutoMode({
       ctx: { toolName: ToolNames.SHELL, command: 'rm -rf /' },
       pmForcedAsk: false,
@@ -302,9 +301,9 @@ describe('evaluateAutoMode — fast-path gating', () => {
       messages: [],
       config: baseConfig,
       signal: new AbortController().signal,
-      skipClassifier: true,
+      skipClassifierReason: 'total_denial',
     });
-    expect(decision).toEqual({ via: 'fallback', reason: 'denial_cap' });
+    expect(decision).toEqual({ via: 'fallback', reason: 'total_denial' });
   });
 });
 
@@ -363,12 +362,12 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
   it('passes through fallback reason without mutating denial state', () => {
     const setAutoModeDenialState = vi.fn();
     const result = applyAutoModeDecision(
-      { via: 'fallback', reason: 'denial_cap' },
+      { via: 'fallback', reason: 'consecutive_block' },
       { setAutoModeDenialState } as unknown as Config,
       denialState,
     );
 
-    expect(result).toEqual({ kind: 'fallback', reason: 'denial_cap' });
+    expect(result).toEqual({ kind: 'fallback', reason: 'consecutive_block' });
     expect(setAutoModeDenialState).not.toHaveBeenCalled();
   });
 });

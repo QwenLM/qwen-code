@@ -1698,7 +1698,9 @@ export class CoreToolScheduler {
               messages,
               config: this.config,
               signal,
-              skipClassifier: fallback.fallback,
+              skipClassifierReason: fallback.fallback
+                ? fallback.reason
+                : undefined,
             });
 
             const outcome = applyAutoModeDecision(
@@ -1753,13 +1755,14 @@ export class CoreToolScheduler {
                 // operators see the cause in the debug log (only when
                 // fallback was specifically armed by denialTracking —
                 // a pmForcedAsk fallback isn't an audit-worthy event).
-                if (outcome.reason === 'denial_cap') {
+                if (
+                  outcome.reason === 'consecutive_block' ||
+                  outcome.reason === 'consecutive_unavailable' ||
+                  outcome.reason === 'total_denial'
+                ) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
-                  const fallbackReason = fallback.fallback
-                    ? fallback.reason
-                    : 'total_denial';
                   debugLogger.warn(
-                    `Auto mode fallback to manual approval (${fallbackReason}): ` +
+                    `Auto mode fallback to manual approval (${outcome.reason}): ` +
                       `consecutiveBlock=${denialState.consecutiveBlock}, ` +
                       `consecutiveUnavailable=${denialState.consecutiveUnavailable}, ` +
                       `totalBlock=${denialState.totalBlock}, ` +

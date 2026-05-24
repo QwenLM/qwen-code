@@ -27,6 +27,7 @@ import {
   recordBlock,
   recordUnavailable,
   type AutoModeDenialState,
+  type DenialFallbackReason,
 } from './denialTracking.js';
 import type { PermissionCheckContext } from './types.js';
 
@@ -187,7 +188,7 @@ export type FallbackToAskReason =
   | 'ask_rule'
   | 'plan_mode_floor'
   | 'org_ask_ceiling'
-  | 'denial_cap';
+  | DenialFallbackReason;
 
 /**
  * Reasons AUTO mode denies a call outright. These map to PermissionDenied hook
@@ -316,13 +317,13 @@ export interface EvaluateAutoModeInput {
   config: Config;
   signal: AbortSignal;
   /**
-   * When true, the L5.3 classifier is skipped and an unmatched call
-   * resolves to `{ via: 'fallback', reason: 'denial_cap' }`. Used by
-   * the scheduler to short-circuit classifier dispatch when denialTracking
-   * has already armed a fallback to manual approval — while still letting
-   * safe tools take the L5.1 / L5.2 fast-paths.
+   * When present, the L5.3 classifier is skipped and an unmatched call
+   * resolves to `{ via: 'fallback', reason: skipClassifierReason }`.
+   * Used by the scheduler to short-circuit classifier dispatch when
+   * denialTracking has already armed a fallback to manual approval —
+   * while still letting safe tools take the L5.1 / L5.2 fast-paths.
    */
-  skipClassifier?: boolean;
+  skipClassifierReason?: DenialFallbackReason;
 }
 
 /**
@@ -364,8 +365,8 @@ export async function evaluateAutoMode(
   // Caller (scheduler) has detected an armed fallback state; surface that
   // so the call drops to manual approval instead of burning a classifier
   // request that would deepen the denial streak.
-  if (input.skipClassifier) {
-    return { via: 'fallback', reason: 'denial_cap' };
+  if (input.skipClassifierReason) {
+    return { via: 'fallback', reason: input.skipClassifierReason };
   }
 
   // L5.3: two-stage LLM classifier.
