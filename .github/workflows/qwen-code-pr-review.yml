@@ -127,8 +127,10 @@ jobs:
 
       # Security: pull_request_target runs with repository secrets, so it
       # MUST check out trusted base code (main), never the PR head.
-      # workflow_dispatch is maintainer-triggered, so it runs the
-      # dispatched ref's own code — this is the pre-merge dry-run path.
+      # workflow_dispatch is maintainer-triggered and intentionally runs
+      # the dispatched ref's own code so this workflow can be dry-run before
+      # it reaches main. Only dispatch trusted repository refs; automatic
+      # pull_request_target events always use trusted base code.
       - name: 'Checkout review code'
         uses: 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' # v4.2.2
         with:
@@ -267,6 +269,9 @@ jobs:
           # Hard-cap to 2048 characters to keep prompt-injection surface
           # bounded without using a pipe that can trip pipefail on SIGPIPE.
           # Reviewers should keep instructions short.
+          if [ "${#additional_instructions}" -gt 2048 ]; then
+            echo "::warning::additional_instructions exceeded 2048 characters and was truncated."
+          fi
           additional_instructions="${additional_instructions:0:2048}"
 
           if [ "$review_mode" = "comment" ]; then
@@ -371,6 +376,38 @@ jobs:
           echo "Review title: $title"
           echo "Review branch: $base_ref ($base_sha) <- $head_ref ($head_sha)"
           echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines reviewable lines after excluding docs/lockfiles/snapshots)"
+
+          capture_capped_pr_diff() {
+            local byte_limit="$1"
+            local output_path="$2"
+            local diff_status=0
+            local head_status=0
+
+            set +e
+            gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | head -c "$byte_limit" > "$output_path"
+            diff_status=${PIPESTATUS[0]}
+            head_status=${PIPESTATUS[1]}
+            set -e
+
+            # `head` may close the pipe once the byte cap is reached, causing
+            # gh to report SIGPIPE (141). That is expected. Any other gh
+            # failure means the review would otherwise run on an empty diff.
+            if [ "$diff_status" -ne 0 ] && [ "$diff_status" -ne 141 ]; then
+              echo "::warning::Could not capture PR unified diff (gh pr diff exited $diff_status); continuing with a placeholder."
+              return 1
+            fi
+            if [ "$head_status" -ne 0 ]; then
+              echo "::warning::Could not cap PR unified diff (head exited $head_status); continuing with a placeholder."
+              return 1
+            fi
+          }
+
+          if capture_capped_pr_diff 500000 /tmp/qwen-pr-unified.diff; then
+            write_output "diff_available=true"
+          else
+            printf '%s\n' "(unified diff unavailable; gh pr diff failed during CI context collection)" > /tmp/qwen-pr-unified.diff
+            write_output "diff_available=false"
+          fi
 
           if [ "$changed_lines" -gt "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" ]; then
             # Size > AI-review guidance: keep reviewing, but make the
@@ -477,6 +514,7 @@ jobs:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           CHANGED_LINES: '${{ steps.size.outputs.changed_lines }}'
           RAW_CHANGED_LINES: '${{ steps.size.outputs.raw_changed_lines }}'
+          DIFF_AVAILABLE: '${{ steps.size.outputs.diff_available }}'
         timeout-minutes: 5
         run: |-
           set -euo pipefail
@@ -515,23 +553,25 @@ jobs:
           # changed-file list — NOT `--patch | head`, which would dump raw
           # +/- hunk lines mislabeled as a "stat" and skew the LLM's
           # blast-radius read.
-          if command -v diffstat >/dev/null 2>&1; then
-            diff_stat="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | diffstat -p1)"
-            diff_stat_label='git diff --stat'
+          if command -v diffstat >/dev/null 2>&1 && [ "$DIFF_AVAILABLE" = "true" ]; then
+            if diff_stat="$(diffstat -p1 /tmp/qwen-pr-unified.diff 2>/tmp/qwen-diffstat-stderr.log)"; then
+              diff_stat_label='git diff --stat'
+            else
+              echo "::warning::diffstat failed on the cached PR diff; falling back to the changed-file list."
+              diff_stat="$(printf '%s' "$changed_files_block")"
+              diff_stat_label='changed files (diffstat unavailable on runner)'
+            fi
           else
             # Label the fallback honestly: a bare changed-file list is not
             # a --stat output, and mislabeling it would skew the LLM's
             # blast-radius read.
-            diff_stat="$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --name-only)"
+            diff_stat="$(printf '%s' "$changed_files_block")"
             diff_stat_label='changed files (diffstat unavailable on runner)'
           fi
           # First ~50KB of unified diff for content judgment. Anything beyond
           # is unlikely to flip the tier — preflight is a triage step, not
           # the actual review.
-          # `|| true` so `gh`'s SIGPIPE (when head closes the pipe at the
-          # byte cap) doesn't trip `pipefail` and abort the step — see the
-          # pr_body capture above for the full rationale.
-          unified_diff="$( { gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch || true; } | head -c 50000)"
+          unified_diff="$(head -c 50000 /tmp/qwen-pr-unified.diff)"
           echo "::endgroup::"
 
           # Build the PR context body into a file so the heredoc-with-YAML
@@ -785,10 +825,7 @@ jobs:
             author_comments_block="(no author PR comments)"
           fi
           changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
-          # `|| true` so `gh`'s SIGPIPE (when head closes the pipe at the
-          # byte cap) doesn't trip `pipefail` and abort the step — see the
-          # pr_body capture above for the full rationale.
-          unified_diff="$( { gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch || true; } | head -c 50000)"
+          unified_diff="$(head -c 50000 /tmp/qwen-pr-unified.diff)"
           focus_areas="$(cat /tmp/qwen-focus-areas.json 2>/dev/null || echo '[]')"
 
           {
@@ -823,11 +860,11 @@ jobs:
           timeout --kill-after=15s 3m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
             --approval-mode default \
             --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
-              --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
-              --allowed-mcp-server-names __qwen_review_no_mcp__ \
-              --output-format stream-json --include-partial-messages \
-              --prompt "$(cat /tmp/light-prompt-rendered.md)" \
-              2> >(tee /tmp/qwen-light-stderr.log >&2) | tee "$out"
+            --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+            --allowed-mcp-server-names __qwen_review_no_mcp__ \
+            --output-format stream-json --include-partial-messages \
+            --prompt "$(cat /tmp/light-prompt-rendered.md)" \
+            2> >(tee /tmp/qwen-light-stderr.log >&2) | tee "$out"
           status=${PIPESTATUS[0]}
           echo "::${stop_token}::"
           set -e
@@ -921,9 +958,7 @@ jobs:
           fi
           changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
           # STANDARD gets a larger diff window than LIGHT (200KB vs 50KB).
-          # `|| true` so `gh`'s SIGPIPE at the byte cap doesn't abort the
-          # step under pipefail (see the preflight step for the rationale).
-          unified_diff="$( { gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch || true; } | head -c 200000)"
+          unified_diff="$(head -c 200000 /tmp/qwen-pr-unified.diff)"
           focus_areas="$(cat /tmp/qwen-focus-areas.json 2>/dev/null || echo '[]')"
           agents_to_run="$(cat /tmp/qwen-agents-to-run.json 2>/dev/null || echo '[]')"
 
@@ -957,11 +992,11 @@ jobs:
           timeout --kill-after=30s 8m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
             --approval-mode default \
             --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
-              --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
-              --allowed-mcp-server-names __qwen_review_no_mcp__ \
-              --output-format stream-json --include-partial-messages \
-              --prompt "$(cat /tmp/standard-prompt-rendered.md)" \
-              2> >(tee /tmp/qwen-standard-stderr.log >&2) | tee "$out"
+            --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+            --allowed-mcp-server-names __qwen_review_no_mcp__ \
+            --output-format stream-json --include-partial-messages \
+            --prompt "$(cat /tmp/standard-prompt-rendered.md)" \
+            2> >(tee /tmp/qwen-standard-stderr.log >&2) | tee "$out"
           status=${PIPESTATUS[0]}
           echo "::${stop_token}::"
           set -e
@@ -1046,7 +1081,7 @@ jobs:
             author_comments_block="(no author PR comments)"
           fi
           changed_files_block="$(jq -r '.files[] | "\(.path) (+\(.additions)/-\(.deletions))"' <<< "$pr_json")"
-          unified_diff="$( { gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch || true; } | head -c 500000)"
+          unified_diff="$(cat /tmp/qwen-pr-unified.diff)"
           focus_areas="$(cat /tmp/qwen-focus-areas.json 2>/dev/null || echo '[]')"
           agents_to_run="$(cat /tmp/qwen-agents-to-run.json 2>/dev/null || echo '[]')"
 

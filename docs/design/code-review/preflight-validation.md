@@ -10,11 +10,11 @@ design rationale lives in [`preflight-triage.md`](./preflight-triage.md) and
 
 PR: [#4359](https://github.com/QwenLM/qwen-code/pull/4359)
 
-| Evidence                                | Link                                                                            | Result                                                             |
-| --------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| Qwen Code CI on commit `36eaeaa`        | [run 26362482084](https://github.com/QwenLM/qwen-code/actions/runs/26362482084) | Passed: Lint, CodeQL, macOS/Ubuntu/Windows tests, coverage comment |
-| PR Gate on commit `36eaeaa`             | [run 26362482083](https://github.com/QwenLM/qwen-code/actions/runs/26362482083) | Passed: PR Template, Classify PR, PR Size                          |
-| Final local verification before publish | See [Local Verification](#local-verification)                                   | Passed on the final staged diff                                    |
+| Evidence                                    | Link                                                                            | Result                                                             |
+| ------------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Qwen Code CI on commit `b583706`            | [run 26364525202](https://github.com/QwenLM/qwen-code/actions/runs/26364525202) | Passed: Lint, CodeQL, macOS/Ubuntu/Windows tests, coverage comment |
+| PR Gate on commit `b583706`                 | [run 26364525191](https://github.com/QwenLM/qwen-code/actions/runs/26364525191) | Passed: PR Template, Classify PR, PR Size                          |
+| Focused local verification after follow-ups | See [Local Verification](#local-verification)                                   | Passed on the current local diff                                   |
 
 `PR Size` is now a warning-only reviewability signal. It still computes and
 reports the meaningful size, but it does not call `core.setFailed` solely
@@ -26,8 +26,8 @@ The local size calculation for #4359 produced:
 | Metric                      | Value |
 | --------------------------- | ----: |
 | Changed files               |    24 |
-| Raw changed lines           |  5053 |
-| Meaningful changed lines    |  2973 |
+| Raw changed lines           |  5408 |
+| Meaningful changed lines    |  3312 |
 | Ignored docs/markdown files |    13 |
 
 This confirms the PR is genuinely above the 1500 meaningful-line threshold
@@ -69,20 +69,21 @@ fallback comment path are designed to remove that failure mode.
 
 ## Local Verification
 
-The final local verification pack for this PR used the repository's focused
+The local verification pack for this PR uses the repository's focused
 workflow/script tests rather than a full root-level suite:
 
 ```text
-git diff --check origin/main...HEAD
+git diff --check
 node --check scripts/compute-pr-size.cjs
 node --check scripts/parse-review-stream.cjs
 node --check scripts/render-review-prompt.cjs
 actionlint -color -ignore 'SC2002:' -ignore 'SC2016:' -ignore 'SC2129:' -ignore 'label ".+" is unknown' .github/workflows/pr-gate.yml .github/workflows/qwen-code-pr-review.yml
-npx prettier --check .github/workflows/pr-gate.yml .github/workflows/qwen-code-pr-review.yml docs/design/code-review/code-review-design.md docs/design/code-review/preflight-triage.md docs/design/code-review/preflight-validation.md docs/design/pr-gate-plan.md .qwen/preflight-light-review-prompt.md .qwen/preflight-prompt.md .qwen/preflight-standard-review-prompt.md .qwen/preflight-deep-review-prompt.md scripts/compute-pr-size.cjs scripts/parse-review-stream.cjs scripts/render-review-prompt.cjs scripts/tests/compute-pr-size.test.js scripts/tests/parse-review-stream.test.js scripts/tests/render-review-prompt.test.js scripts/tests/pr-gate-template.test.js scripts/tests/qwen-pr-review-workflow.test.js
+npx prettier --check .github/workflows/pr-gate.yml .github/workflows/qwen-code-pr-review.yml docs/design/code-review/code-review-design.md docs/design/code-review/preflight-triage.md docs/design/code-review/preflight-validation.md docs/design/pr-gate-plan.md .qwen/preflight-light-review-prompt.md .qwen/preflight-prompt.md .qwen/preflight-standard-review-prompt.md .qwen/preflight-deep-review-prompt.md .qwen/deep-review-correctness-security-prompt.md .qwen/deep-review-test-coverage-prompt.md .qwen/deep-review-maintainability-performance-prompt.md .qwen/deep-review-undirected-audit-prompt.md scripts/compute-pr-size.cjs scripts/parse-review-stream.cjs scripts/render-review-prompt.cjs scripts/tests/compute-pr-size.test.js scripts/tests/parse-review-stream.test.js scripts/tests/render-review-prompt.test.js scripts/tests/pr-gate-template.test.js scripts/tests/qwen-pr-review-workflow.test.js
 npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/compute-pr-size.test.js scripts/tests/parse-review-stream.test.js scripts/tests/render-review-prompt.test.js scripts/tests/pr-gate-template.test.js scripts/tests/qwen-pr-review-workflow.test.js
 ```
 
-Expected result: all commands pass.
+Expected result: all commands pass. The latest focused Vitest run covered 5
+files / 66 tests.
 
 ## Follow-Up Notes
 

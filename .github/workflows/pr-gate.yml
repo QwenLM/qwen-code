@@ -9,11 +9,11 @@ name: 'PR Gate'
 # docs/design/pr-gate-plan.md for the full design rationale.
 #
 # Triggers:
-#  - pull_request (not pull_request_target): all three jobs only read PR
+#  - pull_request (not pull_request_target): both jobs only read PR
 #    metadata, no secrets needed. Fork PRs trigger normally and produce
 #    status checks the maintainer can see before merge.
-#  - 'edited' is critical: when the contributor edits the PR title or
-#    body to fix a failed check, the workflow re-runs and updates the
+#  - 'edited' is critical: when the contributor edits the PR body to fix a
+#    failed check, the workflow re-runs and updates the
 #    check status. Without 'edited', a failed PR Template check would
 #    stay red forever even after correction.
 #  - 'labeled'/'unlabeled' are needed so the PR Size `oversized-ok`

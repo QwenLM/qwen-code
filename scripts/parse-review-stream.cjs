@@ -53,8 +53,6 @@
  *   2  bad arguments
  */
 
-'use strict';
-
 const fs = require('fs');
 
 /**
@@ -105,9 +103,11 @@ function accumulateSegments(raw) {
 /**
  * Build the final on-disk markdown body from accumulated segments.
  *
- * All current tiers are single-shot, tool-free qwen calls. Every assistant
- * segment is review content, including partial text captured before a
- * timeout, so segments are joined in stream order.
+ * LIGHT and STANDARD are single-shot, tool-free qwen calls. DEEP is split
+ * into focused tool-free passes, but each pass still writes ordinary
+ * assistant text to its own stream. Every assistant segment is review
+ * content, including partial text captured before a timeout, so segments
+ * are joined in stream order.
  *
  * Empty input gets a placeholder so downstream `gh pr comment
  * --body-file` always has a non-empty body to post.
@@ -135,8 +135,8 @@ function main() {
     process.argv;
 
   if (!inputPath || !outputPath) {
-    console.error(
-      'Usage: parse-review-stream.cjs <input.jsonl> <output.md> [tier] [status]',
+    process.stderr.write(
+      'Usage: parse-review-stream.cjs <input.jsonl> <output.md> [tier] [status]\n',
     );
     process.exit(2);
   }
@@ -145,8 +145,8 @@ function main() {
   try {
     raw = fs.readFileSync(inputPath, 'utf8');
   } catch (err) {
-    console.error(
-      `parse-review-stream: failed to read ${inputPath}: ${err.message}`,
+    process.stderr.write(
+      `parse-review-stream: failed to read ${inputPath}: ${err.message}\n`,
     );
     process.exit(1);
   }
@@ -157,14 +157,14 @@ function main() {
   try {
     fs.writeFileSync(outputPath, full);
   } catch (err) {
-    console.error(
-      `parse-review-stream: failed to write ${outputPath}: ${err.message}`,
+    process.stderr.write(
+      `parse-review-stream: failed to write ${outputPath}: ${err.message}\n`,
     );
     process.exit(1);
   }
 
-  console.error(
-    `parse-review-stream: ${segments.length} segment(s) parsed, ${emitted} emitted, ${body.length} char(s) written to ${outputPath}`,
+  process.stderr.write(
+    `parse-review-stream: ${segments.length} segment(s) parsed, ${emitted} emitted, ${body.length} char(s) written to ${outputPath}\n`,
   );
 }
 

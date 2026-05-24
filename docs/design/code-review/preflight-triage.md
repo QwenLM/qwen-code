@@ -522,7 +522,7 @@ Deep review verdict: APPROVE
 
 ## 不做的事（避免范围漂移）
 
-- **不修改** bundled `/review` skill 内部；当前 workflow 不依赖它
+- **不修改** bundled `/review` skill 内部，也不执行它的工具 / worktree / GitHub review submission 流程；DEEP 仅读取 `SKILL.md` 中的评审 rubric 作为 CI-safe prompt 输入
 - **不引入**历史 PR 感知（属于后续阶段）
 - **不做** GitHub App 切换（属于后续阶段）
 - **不做**方向 / scope / anchor cite 类判定（属于原 Phase 4 Design Gate，与本设计正交）
@@ -684,7 +684,7 @@ Deep review verdict: APPROVE
 
 操作：repo Settings → Actions → 把 `qwen-code-pr-review.yml` 这个 workflow **disable**。GitHub UI 上每个 workflow 有 `...` 菜单可以单独 disable，不需要改代码。
 
-效果：`qwen-code-pr-review.yml` 不再运行，PR 上 **不再有任何 AI review 评论**。**`pr-gate.yml` 不受影响**，依然把 PR Template + PR Size 合规门禁挡住——即合规层完全不降级。
+效果：`qwen-code-pr-review.yml` 不再运行，PR 上 **不再有任何 AI review 评论**。**`pr-gate.yml` 不受影响**：PR Template 仍会阻断缺失必填信息的 PR，PR Size 仍会作为 warning-only reviewability signal 运行。
 
 代价：失去 AI advisory review；reviewer 全靠人工。但**合并门禁仍然有效**。
 
@@ -692,7 +692,7 @@ Deep review verdict: APPROVE
 
 无论降到哪一级：
 
-- `pr-gate.yml` 的 PR Template + PR Size 门禁**始终生效**，PR 合规性不降级
+- `pr-gate.yml` 的 PR Template gate 与 PR Size warning signal **始终生效**，PR 合规性不降级
 - `ci.yml` 的 lint / test / build / CodeQL **始终生效**
 - 合并 gate 完整性不依赖 AI review 任何一档
 

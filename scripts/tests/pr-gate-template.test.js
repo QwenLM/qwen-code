@@ -152,6 +152,30 @@ npm run typecheck
     expect(failures[0]).toContain('Validation section looks like');
   });
 
+  it('rejects validation content that only contains HTML comments', async () => {
+    const failures = await validateBody(
+      completeBody(`<!--
+Test plan placeholder from the PR template.
+-->
+`),
+    );
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain('Validation section looks like');
+  });
+
+  it('rejects validation content that only contains the paste-here code fence', async () => {
+    const failures = await validateBody(
+      completeBody(`\`\`\`text
+# paste commands here
+\`\`\`
+`),
+    );
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain('Validation section looks like');
+  });
+
   it('reports missing required sections', async () => {
     const failures = await validateBody('## Summary\n\nOnly a summary.\n');
 

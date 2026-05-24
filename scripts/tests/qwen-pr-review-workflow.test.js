@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -26,6 +28,103 @@ const deepPromptTemplates = [
   '.qwen/deep-review-maintainability-performance-prompt.md',
   '.qwen/deep-review-undirected-audit-prompt.md',
 ];
+
+function extractRunScript(stepName) {
+  const stepIdx = workflow.indexOf(`      - name: '${stepName}'`);
+  expect(stepIdx).toBeGreaterThanOrEqual(0);
+
+  const marker = '        run: |-\n';
+  const runIdx = workflow.indexOf(marker, stepIdx);
+  expect(runIdx).toBeGreaterThanOrEqual(0);
+
+  const lines = workflow.slice(runIdx + marker.length).split('\n');
+  const firstCodeLine = lines.find((line) => line.trim() !== '');
+  expect(firstCodeLine).toBeDefined();
+  const indent = firstCodeLine.match(/^\s*/)[0];
+  expect(indent.length).toBeGreaterThan(0);
+
+  const scriptLines = [];
+  for (const line of lines) {
+    if (line.startsWith(indent)) {
+      scriptLines.push(line.slice(indent.length));
+    } else if (line.trim() === '') {
+      scriptLines.push('');
+    } else {
+      break;
+    }
+  }
+
+  const script = scriptLines.join('\n').trimEnd();
+  expect(script.trim().length).toBeGreaterThan(0);
+  return script;
+}
+
+function parseGithubOutput(raw) {
+  const outputs = {};
+  const lines = raw.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const heredoc = lines[i].match(/^([^<]+)<<(.+)$/);
+    if (heredoc) {
+      const [, key, delimiter] = heredoc;
+      const valueLines = [];
+      i++;
+      while (i < lines.length && lines[i] !== delimiter) {
+        valueLines.push(lines[i]);
+        i++;
+      }
+      outputs[key] = valueLines.join('\n');
+      continue;
+    }
+
+    const eq = lines[i].indexOf('=');
+    if (eq !== -1) {
+      outputs[lines[i].slice(0, eq)] = lines[i].slice(eq + 1);
+    }
+  }
+  return outputs;
+}
+
+function runResolvePrContext(eventName, eventPayload, extraEnv = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'qwen-pr-context-'));
+  const eventPath = join(dir, 'event.json');
+  const outputPath = join(dir, 'github-output.txt');
+  writeFileSync(eventPath, JSON.stringify(eventPayload));
+
+  try {
+    const result = spawnSync(
+      'bash',
+      ['-c', extractRunScript('Resolve PR context')],
+      {
+        cwd: resolve(__dirname, '../..'),
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_EVENT_PATH: eventPath,
+          GITHUB_OUTPUT: outputPath,
+          EVENT_NAME: eventName,
+          WORKFLOW_PR_NUMBER: '',
+          WORKFLOW_REVIEW_MODE: '',
+          WORKFLOW_TIER_OVERRIDE: '',
+          WORKFLOW_ADDITIONAL_INSTRUCTIONS: '',
+          ...extraEnv,
+        },
+      },
+    );
+    let rawOutput = '';
+    try {
+      rawOutput = readFileSync(outputPath, 'utf8');
+    } catch {
+      rawOutput = '';
+    }
+    return {
+      ...result,
+      githubOutput: rawOutput,
+      outputs: parseGithubOutput(rawOutput),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 describe('Qwen PR review workflow safety rails', () => {
   it('keeps qwen invocations toolless and without a GitHub token', () => {
@@ -66,6 +165,55 @@ describe('Qwen PR review workflow safety rails', () => {
     expect(workflow).toContain("grep -qE '@qwen-code /review($|[[:space:]])'");
     expect(workflow).toContain('/@qwen-code \\/review([[:space:]]|$)/');
     expect(workflow).not.toContain('@qwen /review');
+  });
+
+  it('parses maintainer slash-command tier flags and focus text', () => {
+    const result = runResolvePrContext('issue_comment', {
+      issue: { number: 4359 },
+      comment: {
+        body: '@qwen-code /review --tier=deep\nFocus on workflow token handling.',
+      },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.outputs.number).toBe('4359');
+    expect(result.outputs.review_mode).toBe('comment');
+    expect(result.outputs.should_comment).toBe('true');
+    expect(result.outputs.should_run_review).toBe('true');
+    expect(result.outputs.tier_override).toBe('DEEP');
+    expect(result.outputs.additional_instructions).toBe(
+      'Focus on workflow token handling.',
+    );
+  });
+
+  it('declines malformed @qwen-code review mentions after the coarse Actions gate', () => {
+    const result = runResolvePrContext('issue_comment', {
+      issue: { number: 4359 },
+      comment: { body: '@qwen-code /reviewer' },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.outputs.should_run_review).toBe('false');
+    expect(result.outputs.tier_override).toBe('');
+  });
+
+  it('warns when workflow_dispatch focus text is truncated', () => {
+    const result = runResolvePrContext(
+      'workflow_dispatch',
+      {},
+      {
+        WORKFLOW_PR_NUMBER: '4359',
+        WORKFLOW_REVIEW_MODE: 'dry-run',
+        WORKFLOW_TIER_OVERRIDE: 'auto',
+        WORKFLOW_ADDITIONAL_INSTRUCTIONS: 'x'.repeat(2050),
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      '::warning::additional_instructions exceeded 2048 characters',
+    );
+    expect(result.outputs.additional_instructions).toHaveLength(2048);
   });
 
   it('continues review for oversized PRs while surfacing a warning', () => {
@@ -152,6 +300,16 @@ describe('Qwen PR review workflow safety rails', () => {
     );
     expect(workflow).toContain(
       '2> >(tee "/tmp/qwen-deep-${focus}-stderr.log" >&2) | tee "$out"',
+    );
+  });
+
+  it('does not silently swallow non-SIGPIPE gh pr diff failures', () => {
+    expect(workflow).toContain('capture_capped_pr_diff()');
+    expect(workflow).toContain('diff_status=${PIPESTATUS[0]}');
+    expect(workflow).toContain('Could not capture PR unified diff');
+    expect(workflow.match(/gh pr diff "\$PR_NUMBER"/g)).toHaveLength(1);
+    expect(workflow).not.toMatch(
+      /unified_diff="\$\( \{ gh pr diff[\s\S]*?\|\| true; \} \| head -c/,
     );
   });
 
