@@ -25,6 +25,7 @@ import {
   firePostToolUseHook,
   firePostToolUseFailureHook,
   fireNotificationHook,
+  firePermissionDeniedHook,
   firePermissionRequestHook,
   appendAdditionalContext,
 } from './toolHookTriggers.js';
@@ -1713,6 +1714,21 @@ export class CoreToolScheduler {
                 this.setStatusInternal(reqInfo.callId, 'scheduled');
                 continue;
               case 'blocked':
+                if (!this.config.getDisableAllHooks()) {
+                  const messageBus = this.config.getMessageBus() as
+                    | MessageBus
+                    | undefined;
+                  if (messageBus) {
+                    void firePermissionDeniedHook(
+                      messageBus,
+                      canonicalName,
+                      toolParams,
+                      reqInfo.callId,
+                      outcome.reason,
+                      signal,
+                    );
+                  }
+                }
                 this.setStatusInternal(
                   reqInfo.callId,
                   'error',
@@ -1731,7 +1747,7 @@ export class CoreToolScheduler {
                 // a pmForcedAsk fallback isn't an audit-worthy event).
                 if (fallback.fallback) {
                   debugLogger.warn(
-                    `Auto mode fallback to manual approval (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                    `Auto mode fallback to manual approval (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}, totalBlock=${denialState.totalBlock}, totalUnavailable=${denialState.totalUnavailable}`,
                   );
                 }
                 break;
@@ -2188,11 +2204,10 @@ export class CoreToolScheduler {
     this.setToolCallOutcome(callId, outcome);
 
     // AUTO-mode denialTracking recovery: when the user manually approves a
-    // call that fell back from AUTO (either by streak threshold or by an
-    // explicit ask rule), reset the consecutiveBlock counter so subsequent
-    // calls return to classifier flow. Without this, a session that hit
-    // the denial threshold once would stay in fallback for the rest of
-    // the session even after the user explicitly approves the next call.
+    // call that fell back from AUTO (by denial cap or by an explicit ask
+    // rule), clear the armed counters so subsequent calls return to
+    // classifier flow. Without this, a session that hit a denial threshold
+    // once would stay in fallback even after explicit user approval.
     // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
     // signal that the classifier was correct to block.
     if (

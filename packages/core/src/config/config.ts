@@ -74,6 +74,7 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
+import type { PermissionDeniedReason } from '../permissions/autoMode.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -1303,6 +1304,16 @@ export class Config {
                   (input['permission_suggestions'] as
                     | PermissionSuggestion[]
                     | undefined) || undefined,
+                  signal,
+                );
+                break;
+              case 'PermissionDenied':
+                result = await hookSystem.firePermissionDeniedEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input['reason'] as PermissionDeniedReason) ||
+                    'classifier_blocked',
                   signal,
                 );
                 break;

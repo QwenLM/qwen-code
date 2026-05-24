@@ -41,6 +41,7 @@ import {
   Storage,
   ToolNames,
   fireNotificationHook,
+  firePermissionDeniedHook,
   firePermissionRequestHook,
   firePreToolUseHook,
   firePostToolUseHook,
@@ -1985,6 +1986,19 @@ export class Session implements SessionContext {
             autoModeAllowed = true;
             break;
           case 'blocked':
+            if (!this.config.getDisableAllHooks?.()) {
+              const messageBus = this.config.getMessageBus?.();
+              if (messageBus) {
+                void firePermissionDeniedHook(
+                  messageBus,
+                  fc.name,
+                  toolParams,
+                  toolUseId,
+                  outcome.reason,
+                  abortSignal,
+                );
+              }
+            }
             return earlyErrorResponse(new Error(outcome.errorMessage), fc.name);
           case 'fallback':
             // Drop through to the manual-approval flow below.
@@ -2117,11 +2131,11 @@ export class Session implements SessionContext {
                   .nativeEnum(ToolConfirmationOutcome)
                   .parse(output.outcome.optionId);
 
-          // Reset the AUTO-mode fallback streak when the user manually
+          // Reset AUTO-mode fallback counters when the user manually
           // approves a prompt that was raised because denialTracking forced
-          // fallback. Without this, a single block-streak permanently
-          // downgrades the rest of the session to manual approval until the
-          // mode is toggled. Parallels coreToolScheduler.ts:1705-1717.
+          // fallback. Without this, one denial cap hit would keep the
+          // session in manual approval until the mode is toggled.
+          // Parallels coreToolScheduler.ts.
           // Cancel / abort do NOT reset — treating rejection as a signal
           // the classifier was right to block.
           if (approvalMode === ApprovalMode.AUTO && isApproveOutcome(outcome)) {

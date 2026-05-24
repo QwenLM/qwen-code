@@ -31,6 +31,7 @@ import type {
   PostCompactTrigger,
   NotificationInput,
   NotificationType,
+  PermissionDeniedInput,
   PermissionRequestInput,
   PermissionSuggestion,
   SubagentStartInput,
@@ -357,6 +358,35 @@ export class HookEventHandler {
     // Pass tool name as context for matcher filtering
     return this.executeHooks(
       HookEventName.PermissionRequest,
+      input,
+      {
+        toolName,
+      },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a PermissionDenied event
+   * Called when AUTO mode denies a tool call without asking the user
+   */
+  async firePermissionDeniedEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolUseId: string,
+    reason: PermissionDeniedInput['reason'],
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: PermissionDeniedInput = {
+      ...this.createBaseInput(HookEventName.PermissionDenied),
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_use_id: toolUseId,
+      reason,
+    };
+
+    return this.executeHooks(
+      HookEventName.PermissionDenied,
       input,
       {
         toolName,

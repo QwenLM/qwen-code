@@ -68,6 +68,13 @@ describe('hooks constants', () => {
       expect(exitCodes).toHaveLength(2);
     });
 
+    it('should return exit codes for PermissionDenied event', () => {
+      const exitCodes = getHookExitCodes(HookEventName.PermissionDenied);
+      expect(exitCodes).toHaveLength(2);
+      expect(exitCodes[0].code).toBe(0);
+      expect(exitCodes[1].code).toBe('Other');
+    });
+
     it('should return exit codes for SessionStart event', () => {
       const exitCodes = getHookExitCodes(HookEventName.SessionStart);
       expect(exitCodes).toHaveLength(2);
@@ -110,6 +117,11 @@ describe('hooks constants', () => {
       expect(desc).toBe('When a new session is started');
     });
 
+    it('should return description for PermissionDenied', () => {
+      const desc = getHookShortDescription(HookEventName.PermissionDenied);
+      expect(desc).toBe('When auto mode denies a tool call');
+    });
+
     it('should return empty string for unknown event', () => {
       const desc = getHookShortDescription('unknown_event' as HookEventName);
       expect(desc).toBe('');
@@ -126,6 +138,12 @@ describe('hooks constants', () => {
       const desc = getHookDescription(HookEventName.PostToolUse);
       expect(desc).toContain('inputs');
       expect(desc).toContain('response');
+    });
+
+    it('should return description for PermissionDenied', () => {
+      const desc = getHookDescription(HookEventName.PermissionDenied);
+      expect(desc).toContain('tool_name');
+      expect(desc).toContain('reason');
     });
 
     it('should return empty string for Stop event', () => {
@@ -176,12 +194,13 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PreCompact);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostCompact);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PermissionRequest);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PermissionDenied);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.TodoCreated);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.TodoCompleted);
     });
 
-    it('should have 16 events', () => {
-      expect(DISPLAY_HOOK_EVENTS).toHaveLength(16);
+    it('should have 17 events', () => {
+      expect(DISPLAY_HOOK_EVENTS).toHaveLength(17);
     });
   });
 
@@ -217,6 +236,16 @@ describe('hooks constants', () => {
       expect(info.shortDescription).toBe('');
       expect(info.description).toBe('');
       expect(info.exitCodes).toEqual([]);
+      expect(info.configs).toEqual([]);
+    });
+
+    it('should create empty info for PermissionDenied', () => {
+      const info = createEmptyHookEventInfo(HookEventName.PermissionDenied);
+
+      expect(info.event).toBe(HookEventName.PermissionDenied);
+      expect(info.shortDescription).toBe('When auto mode denies a tool call');
+      expect(info.description).toContain('tool_use_id');
+      expect(info.exitCodes).toHaveLength(2);
       expect(info.configs).toEqual([]);
     });
 

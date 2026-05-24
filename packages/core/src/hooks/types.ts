@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import type { ChildProcess } from 'child_process';
+import type { PermissionDeniedReason } from '../permissions/autoMode.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -46,6 +47,8 @@ export enum HookEventName {
   SessionEnd = 'SessionEnd',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
+  // When AUTO mode denies a tool call without asking the user
+  PermissionDenied = 'PermissionDenied',
   // StopFailure - When the turn ends due to an API error (instead of Stop)
   StopFailure = 'StopFailure',
   // TodoCreated - When a new todo item is added to the list (Qwen Code specific)
@@ -521,6 +524,16 @@ export interface PermissionRequestInput extends HookInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   permission_suggestions?: PermissionSuggestion[];
+}
+
+/**
+ * Input for PermissionDenied hook events
+ */
+export interface PermissionDeniedInput extends HookInput {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  tool_use_id: string;
+  reason: PermissionDeniedReason;
 }
 
 /**

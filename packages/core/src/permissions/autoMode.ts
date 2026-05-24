@@ -167,7 +167,36 @@ export type AutoModeDecision =
       stage: 'fast' | 'thinking';
       durationMs: number;
     }
-  | { via: 'fallback' };
+  | { via: 'fallback'; reason: FallbackToAskReason };
+
+/**
+ * Reasons AUTO mode itself is unavailable before a per-call decision can run.
+ * Kept distinct from per-call fallback and classifier-denial reasons.
+ */
+export type AutoModeUnavailableReason =
+  | 'circuit-breaker'
+  | 'disabled'
+  | 'policy';
+
+/**
+ * Reasons a call falls through to manual approval even though AUTO mode is on.
+ * This is not a denial: the user may still approve the pending request.
+ */
+export type FallbackToAskReason =
+  | 'safety_check'
+  | 'ask_rule'
+  | 'plan_mode_floor'
+  | 'org_ask_ceiling'
+  | 'denial_cap';
+
+/**
+ * Reasons AUTO mode denies a call outright. These map to PermissionDenied hook
+ * payloads in the follow-up hook-surface work.
+ */
+export type PermissionDeniedReason =
+  | 'classifier_blocked'
+  | 'classifier_unavailable'
+  | 'classifier_failure';
 
 /**
  * Outcome of {@link applyAutoModeDecision}. Boils the union of
@@ -178,8 +207,12 @@ export type AutoModeDecision =
  */
 export type AutoModeOutcome =
   | { kind: 'approved' }
-  | { kind: 'blocked'; errorMessage: string }
-  | { kind: 'fallback' };
+  | {
+      kind: 'blocked';
+      errorMessage: string;
+      reason: PermissionDeniedReason;
+    }
+  | { kind: 'fallback'; reason: FallbackToAskReason };
 
 /**
  * Apply an {@link AutoModeDecision} to denial-tracking state and return
@@ -216,12 +249,15 @@ export function applyAutoModeDecision(
         return {
           kind: 'blocked',
           errorMessage: formatClassifierBlockMessage(decision),
+          reason: decision.unavailable
+            ? 'classifier_unavailable'
+            : 'classifier_blocked',
         };
       }
       config.setAutoModeDenialState(recordAllow(denialState));
       return { kind: 'approved' };
     case 'fallback':
-      return { kind: 'fallback' };
+      return { kind: 'fallback', reason: decision.reason };
     default: {
       const _exhaustive: never = decision;
       // Surface drift at runtime — TS exhaustiveness can be bypassed
@@ -232,7 +268,7 @@ export function applyAutoModeDecision(
         `Auto mode: unrecognised decision.via "${(decision as { via: string }).via}" — falling through to manual approval`,
       );
       void _exhaustive;
-      return { kind: 'fallback' };
+      return { kind: 'fallback', reason: 'safety_check' };
     }
   }
 }
@@ -282,10 +318,10 @@ export interface EvaluateAutoModeInput {
   signal: AbortSignal;
   /**
    * When true, the L5.3 classifier is skipped and an unmatched call
-   * resolves to `{ via: 'fallback' }`. Used by the scheduler to short-
-   * circuit classifier dispatch when denialTracking has already armed a
-   * fallback to manual approval — while still letting safe tools take
-   * the L5.1 / L5.2 fast-paths.
+   * resolves to `{ via: 'fallback', reason: 'denial_cap' }`. Used by
+   * the scheduler to short-circuit classifier dispatch when denialTracking
+   * has already armed a fallback to manual approval — while still letting
+   * safe tools take the L5.1 / L5.2 fast-paths.
    */
   skipClassifier?: boolean;
 }
@@ -323,14 +359,14 @@ export async function evaluateAutoMode(
   // the same reason; the classifier path was the missing leg.
   // (auto-mode.md documents this as "ask rules force manual confirmation".)
   if (input.pmForcedAsk) {
-    return { via: 'fallback' };
+    return { via: 'fallback', reason: 'ask_rule' };
   }
 
   // Caller (scheduler) has detected an armed fallback state; surface that
   // so the call drops to manual approval instead of burning a classifier
   // request that would deepen the denial streak.
   if (input.skipClassifier) {
-    return { via: 'fallback' };
+    return { via: 'fallback', reason: 'denial_cap' };
   }
 
   // L5.3: two-stage LLM classifier.

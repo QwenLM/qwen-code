@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   SAFE_TOOL_ALLOWLIST,
+  applyAutoModeDecision,
   evaluateAutoMode,
   formatClassifierBlockMessage,
   isInSafeToolAllowlist,
@@ -282,7 +283,7 @@ describe('evaluateAutoMode — fast-path gating', () => {
       config: baseConfig,
       signal: new AbortController().signal,
     });
-    expect(decision.via).toBe('fallback');
+    expect(decision).toEqual({ via: 'fallback', reason: 'ask_rule' });
   });
 
   it('routes to fallback when skipClassifier=true (denialTracking armed)', async () => {
@@ -303,7 +304,60 @@ describe('evaluateAutoMode — fast-path gating', () => {
       signal: new AbortController().signal,
       skipClassifier: true,
     });
-    expect(decision.via).toBe('fallback');
+    expect(decision).toEqual({ via: 'fallback', reason: 'denial_cap' });
+  });
+});
+
+// ─── applyAutoModeDecision reason mapping ────────────────────────────────
+
+describe('applyAutoModeDecision — blocked reason mapping', () => {
+  const denialState = {
+    consecutiveBlock: 0,
+    consecutiveUnavailable: 0,
+    totalBlock: 0,
+    totalUnavailable: 0,
+  };
+
+  it('maps classifier policy blocks to classifier_blocked', () => {
+    const setAutoModeDenialState = vi.fn();
+    const result = applyAutoModeDecision(
+      {
+        via: 'classifier',
+        shouldBlock: true,
+        reason: 'unsafe command',
+        unavailable: false,
+        stage: 'fast',
+        durationMs: 10,
+      },
+      { setAutoModeDenialState } as unknown as Config,
+      denialState,
+    );
+
+    expect(result).toMatchObject({
+      kind: 'blocked',
+      reason: 'classifier_blocked',
+    });
+  });
+
+  it('maps classifier infrastructure failures to classifier_unavailable', () => {
+    const setAutoModeDenialState = vi.fn();
+    const result = applyAutoModeDecision(
+      {
+        via: 'classifier',
+        shouldBlock: true,
+        reason: 'timeout',
+        unavailable: true,
+        stage: 'thinking',
+        durationMs: 10,
+      },
+      { setAutoModeDenialState } as unknown as Config,
+      denialState,
+    );
+
+    expect(result).toMatchObject({
+      kind: 'blocked',
+      reason: 'classifier_unavailable',
+    });
   });
 });
 

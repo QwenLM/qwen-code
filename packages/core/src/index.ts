@@ -404,11 +404,13 @@ export * from './goals/index.js';
 // Export hook triggers for all hook events
 export {
   fireNotificationHook,
+  firePermissionDeniedHook,
   firePermissionRequestHook,
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
   type NotificationHookResult,
+  type PermissionDeniedHookResult,
   type PermissionRequestHookResult,
   type PreToolUseHookResult,
   type PostToolUseHookResult,
