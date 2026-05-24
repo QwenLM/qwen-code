@@ -103,6 +103,20 @@ describe('BundledSkillLoader', () => {
     });
   });
 
+  it('does not propagate skill.priority to completionPriority', async () => {
+    // Priority is intentionally scoped to the `/skills` listing (sorted in
+    // SkillManager.listSkills) and must NOT leak into the slash-completion
+    // menu / `/help` ordering — typing `/` should keep its prior behavior
+    // regardless of any skill's priority value.
+    const skill = makeSkill({ priority: 42 });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0].completionPriority).toBeUndefined();
+  });
+
   it('should submit skill body as prompt without args', async () => {
     const skill = makeSkill();
     mockSkillManager.listSkills.mockResolvedValue([skill]);

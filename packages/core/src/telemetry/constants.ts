@@ -64,3 +64,7 @@ export const SPAN_INTERACTION = 'qwen-code.interaction';
 export const SPAN_LLM_REQUEST = 'qwen-code.llm_request';
 export const SPAN_TOOL = 'qwen-code.tool';
 export const SPAN_TOOL_EXECUTION = 'qwen-code.tool.execution';
+/** Brackets the time a tool spends in `awaiting_approval` waiting on the user. */
+export const SPAN_TOOL_BLOCKED_ON_USER = 'qwen-code.tool.blocked_on_user';
+/** Wraps each pre/post-tool-use hook fire site for per-hook latency / decision tracking. */
+export const SPAN_HOOK = 'qwen-code.hook';
