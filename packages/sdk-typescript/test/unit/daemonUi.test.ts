@@ -4891,3 +4891,99 @@ describe('R6 review batch — recovery flow + pending pointer', () => {
     expect(text).not.toContain('replay-event-2');
   });
 });
+
+describe('R7 review batch — markdown escape + details sanitization', () => {
+  it('escapeMarkdownText escapes < in metadata fields (titles/kinds) for HTML-backed pipelines', async () => {
+    const {
+      daemonBlockToMarkdown,
+      createDaemonToolPreview,
+    } = await import('../../src/daemon/ui/index.js');
+    // `escapeMarkdownText` is applied to METADATA fields (title /
+    // toolKind / status) — those are reviewer-untrusted and should
+    // escape `<` to prevent raw HTML pass-through when consumers run
+    // the markdown through markdown-it with html:true. Assistant /
+    // user / thought BODIES are intentionally NOT escape-formatted
+    // (they're markdown content; escaping `<` there would mangle
+    // legitimate markdown).
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      // Reviewer-untrusted title from a malicious daemon emit / tool
+      // response. Markdown escape must defang `<`.
+      title: '<img src=x onerror=alert(1)>',
+      status: 'running',
+      preview: createDaemonToolPreview(
+        { command: 'echo hi' },
+        { toolName: 'Bash', toolKind: 'tool' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const md = daemonBlockToMarkdown(block);
+    // The `<` is escaped to `\<` — markdown-it will render that as a
+    // literal `<` character which then gets HTML-escaped in the
+    // markdown→HTML pipeline. Verify the escape is present, AND that
+    // no unescaped `<img` survives.
+    expect(md).toContain('\\<img');
+    expect(md).not.toMatch(/(?<!\\)<img/);
+  });
+
+  it('markdown tool block details strips URL credentials when sanitizeUrls:true', async () => {
+    const {
+      daemonBlockToMarkdown,
+      createDaemonToolPreview,
+    } = await import('../../src/daemon/ui/index.js');
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Fetch',
+      status: 'running',
+      preview: createDaemonToolPreview(
+        { url: 'https://api.example.com/v1', method: 'GET' },
+        { toolName: 'WebFetch', toolKind: 'tool' },
+      ),
+      // details simulates the serialized rawInput JSON containing a URL
+      // with Basic Auth userinfo, query token, and OAuth fragment token.
+      details:
+        '{\n  "url": "https://admin:BASIC_LEAK@api.example.com/v1?token=QUERY_LEAK&x-amz-credential=AWS_LEAK#access_token=FRAG_LEAK"\n}',
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const md = daemonBlockToMarkdown(block, { sanitizeUrls: true });
+    expect(md).not.toContain('BASIC_LEAK');
+    expect(md).not.toContain('QUERY_LEAK');
+    expect(md).not.toContain('AWS_LEAK');
+    expect(md).not.toContain('FRAG_LEAK');
+  });
+
+  it('markdown tool block details preserves URLs verbatim when sanitizeUrls:false (back-compat)', async () => {
+    const {
+      daemonBlockToMarkdown,
+      createDaemonToolPreview,
+    } = await import('../../src/daemon/ui/index.js');
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Fetch',
+      status: 'running',
+      preview: createDaemonToolPreview(
+        { url: 'https://api.example.com/v1', method: 'GET' },
+        { toolName: 'WebFetch', toolKind: 'tool' },
+      ),
+      details:
+        '{\n  "url": "https://api.example.com/v1?token=visible"\n}',
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const md = daemonBlockToMarkdown(block);
+    // Default (no sanitizeUrls) — details survive verbatim per existing
+    // contract; consumers must opt in.
+    expect(md).toContain('token=visible');
+  });
+});

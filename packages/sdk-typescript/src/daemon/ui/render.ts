@@ -79,7 +79,22 @@ export function daemonBlockToMarkdown(
       const header = renderToolHeader(block, opts);
       const previewMd = daemonToolPreviewToMarkdown(block.preview, opts);
       const status = `_status: ${escapeMarkdownText(block.status, opts)}_`;
-      const details = block.details ? `\n\n${text(block.details)}` : '';
+      // wenshao R7 verification finding: `block.details` is the
+      // serialized `rawInput` JSON. When `rawInput.url` contains
+      // credentials (Basic Auth in userinfo / OAuth in `#fragment` /
+      // signed-URL query params), the preview path correctly sanitizes
+      // via `sanitizeUrl`, but the details dump previously passed the
+      // raw JSON through `text()` which only handled ANSI/bidi. HTML +
+      // plaintext branches exclude details entirely; markdown's
+      // asymmetry leaked credentials. When `sanitizeUrls: true`,
+      // run a URL-credential-stripping pass over the details string so
+      // markdown matches the other render paths' safety baseline.
+      const detailsText = block.details
+        ? opts.sanitizeUrls
+          ? sanitizeUrlsInText(block.details)
+          : block.details
+        : undefined;
+      const details = detailsText ? `\n\n${text(detailsText)}` : '';
       return `${header}\n\n${previewMd}\n\n${status}${details}`;
     }
     case 'shell': {
@@ -608,7 +623,14 @@ function escapeMarkdownText(
   opts: DaemonRenderOptions = {},
 ): string {
   const capped = capLength(opts)(sanitizeTerminalText(raw));
-  return capped.replace(/([\\`*_{}[\]()#+!>-])/g, '\\$1');
+  // wenshao R7 (qwen3.7-max): include `<` so consumers piping the
+  // markdown output through markdown-it (with `html: true`) or any
+  // HTML-backed renderer don't see raw `<script>` / `<img onerror>` /
+  // etc. survive through to the DOM. The HTML render path already
+  // escapes via `defaultEscapeHtml`; this brings the markdown path to
+  // the same safety baseline. Pure-markdown consumers see `\<` which
+  // renders as `<` — no visual change.
+  return capped.replace(/([\\`*_{}[\]()#+!><-])/g, '\\$1');
 }
 
 function inlineCode(raw: string, opts: DaemonRenderOptions = {}): string {
@@ -707,6 +729,21 @@ function sanitizeUrl(url: string): string {
   } catch {
     return '#';
   }
+}
+
+/**
+ * Run `sanitizeUrl` over every `http://` / `https://` URL embedded in a
+ * free-text string (e.g., the serialized `rawInput` JSON exposed via
+ * `block.details`). Bounded by URL-shaped substrings; non-URL text is
+ * passed through verbatim.
+ *
+ * wenshao R7 verification: when `rawInput.url` carries credentials in
+ * userinfo / `#fragment` / signed-URL query params, the preview path
+ * sanitizes correctly but the details dump in markdown leaked through.
+ * Apply this helper when `sanitizeUrls: true`.
+ */
+function sanitizeUrlsInText(text: string): string {
+  return text.replace(/https?:\/\/[^\s"'<>\\]+/gi, (url) => sanitizeUrl(url));
 }
 
 /**
