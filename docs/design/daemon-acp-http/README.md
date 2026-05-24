@@ -465,3 +465,18 @@ One more reviewer pass (qwen3.7-max). Suite **26 tests**, live re-verified.
 | D1 | **P0** | `resolveClientResponse` deleted the pending entry BEFORE calling `respondToSessionPermission`. A malformed vote (`result: {}`) makes the bridge mediator throw — and with the pending entry already gone, teardown's `abandonPendingForSession` can't cancel it, so the agent's prompt hangs on a vote that never resolves (a token-holder could stall a session with one bad POST). | Wrap the vote in try/catch; on any failure fall back to `cancelAbandonedPermission` so the mediator is always released. New test covers the malformed-vote path. |
 | D2 | **P1** | Session-stream `onClose` aborted only the event pump, not `binding.promptAbort` — a client disconnect (tab close / network drop) left the in-flight prompt running (quota + FIFO) until idle TTL. | `onClose` now also aborts the session's `promptAbort`. |
 | D3 | **P1** | When `pumpSessionEvents` rejected, the `.catch` only logged — the SSE stream stayed open heartbeating but delivering nothing (zombie, no reconnect signal). | `.catch` now also `closeSessionStream(sessionId)`. |
+
+---
+
+## 15. Review round 6 — PR fold-ins
+
+Another reviewer pass (qwen3.7-max). Suite **28 tests**, live re-verified.
+
+| # | Severity | Finding | Fix |
+|---|----------|---------|-----|
+| E1 | **P0** | `handlePrompt` overwrote `binding.promptAbort` without aborting the prior controller — two concurrent `session/prompt`s for one session orphaned the first (runs to completion in the bridge FIFO, unabortable by `session/cancel`). | Abort the prior `promptAbort` before installing the new one. Test added. |
+| E2 | **P0** | The `subscribeEvents`-throws path sent a `stream_error` notify then `return`ed (resolved) — the caller's `.catch` never fired, leaving a zombie SSE stream (heartbeats, no events, no reconnect signal). | Re-throw after the notify so the caller's `.catch` closes the stream. Test asserts prompt closure. |
+| E3 | **P1** | SSE heartbeat didn't mark the connection active — a long prompt with no intermediate events for >30 min got idle-reaped (streams + prompts killed). | `SseStream` takes an `onHeartbeat` hook; both GET handlers pass `() => conn.touch()`. |
+| E4 | **P2** | `pumpSessionEvents` `.catch` closed by sessionId — a reconnect between the throw and the microtask could kill the NEW stream. | Identity-guard: only close if `binding.stream` is still this stream. |
+| E6 | **P2** | `sendSession` auto-created a binding — a late pump/reply frame after `closeSessionStream` resurrected a ghost binding that buffered up to 256 frames forever. | `sendSession` is now lookup-only: drops frames when the session has no live binding. |
+| E5 | accepted | `session/load`/`resume` don't reject when another live connection owns the session ("hijack"). | **Accepted, not changed:** the daemon's trust boundary is the bearer token + single-workspace bind, and multi-client attach is intentional (the bridge is multi-client by design; REST has the same property). A token-holder gains no capability they lack via REST. Tracked with the other token-boundary items (DELETE ownership, §13). |

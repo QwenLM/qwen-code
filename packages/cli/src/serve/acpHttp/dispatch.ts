@@ -483,15 +483,18 @@ export class AcpDispatcher {
     try {
       iterable = this.bridge.subscribeEvents(sessionId, { signal });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      // Surface the error to the client, then RE-THROW so the caller's
+      // `.catch()` closes the stream. Returning here (resolved) would leave
+      // a zombie SSE stream — heartbeating but delivering nothing, with no
+      // disconnect signal for the client to reconnect on.
       conn.sendSession(
         sessionId,
         notification(`${QWEN_METHOD_NS}notify`, {
           kind: 'stream_error',
-          error: message,
+          error: errMsg(err),
         }),
       );
-      return;
+      throw err;
     }
     for await (const event of iterable) {
       if (signal.aborted) break;
@@ -624,6 +627,11 @@ export class AcpDispatcher {
     // a disconnecting client leaves the agent running, burning model quota
     // and holding the session's prompt FIFO.
     const binding = conn.getOrCreateSession(sessionId);
+    // Abort any prior in-flight prompt for this session before replacing the
+    // controller — two concurrent `session/prompt`s would otherwise orphan
+    // the first (it runs to completion in the bridge FIFO, burning quota,
+    // and `session/cancel` could only reach the latest controller).
+    binding.promptAbort?.abort();
     const abort = new AbortController();
     binding.promptAbort = abort;
     try {

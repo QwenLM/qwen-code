@@ -66,7 +66,11 @@ function pushQueue(signal?: AbortSignal): PushIterable {
 class FakeBridge {
   queues = new Map<string, PushIterable>();
   promptBehavior:
-    | ((sessionId: string, q: PushIterable) => Promise<unknown>)
+    | ((
+        sessionId: string,
+        q: PushIterable,
+        signal?: AbortSignal,
+      ) => Promise<unknown>)
     | undefined;
   lastSetModel: unknown;
 
@@ -104,15 +108,18 @@ class FakeBridge {
     };
   }
 
+  subscribeThrows = false;
+
   subscribeEvents(sessionId: string, opts?: { signal?: AbortSignal }) {
+    if (this.subscribeThrows) throw new Error('subscribe failed');
     const q = pushQueue(opts?.signal);
     this.queues.set(sessionId, q);
     return q.iterable;
   }
 
-  async sendPrompt(sessionId: string) {
+  async sendPrompt(sessionId: string, _req: unknown, signal?: AbortSignal) {
     const q = this.queues.get(sessionId);
-    if (this.promptBehavior && q) return this.promptBehavior(sessionId, q);
+    if (this.promptBehavior && q) return this.promptBehavior(sessionId, q, signal);
     return { stopReason: 'end_turn' };
   }
 
@@ -567,6 +574,63 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await post(connId, { jsonrpc: '2.0', id: reqFrame.id, result: {} });
     await new Promise((r) => setTimeout(r, 50));
     expect(votes).toContainEqual({ outcome: { outcome: 'cancelled' } });
+  });
+
+  it('a second concurrent prompt aborts the first', async () => {
+    let firstSignal: AbortSignal | undefined;
+    bridge.promptBehavior = async (_s, _q, signal) => {
+      if (!firstSignal) {
+        firstSignal = signal;
+        await new Promise<void>((r) =>
+          signal?.addEventListener('abort', () => r(), { once: true }),
+        );
+        return { stopReason: 'cancelled' };
+      }
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const drain = takeFrames(sessStream, 2); // both prompt results
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 60,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'a' }] },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 61,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'b' }] },
+    });
+    await drain;
+    expect(firstSignal?.aborted).toBe(true);
+  });
+
+  it('subscribeEvents throwing closes the session stream promptly (no zombie)', async () => {
+    bridge.subscribeThrows = true;
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    // The guarantee is that the server CLOSES the stream (not a zombie that
+    // heartbeats forever). A safety abort at 3s distinguishes "server closed"
+    // (loop ends fast) from "zombie" (only our timeout ends it).
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 3000);
+    const start = Date.now();
+    try {
+      for await (const _f of readSse(sessStream, ac.signal)) {
+        // drain
+      }
+    } finally {
+      clearTimeout(timer);
+      ac.abort();
+    }
+    // Server-initiated close arrives well under the 3s safety timeout.
+    expect(Date.now() - start).toBeLessThan(1500);
   });
 
   it('DELETE without a connection id → 400', async () => {

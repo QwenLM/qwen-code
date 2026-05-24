@@ -161,11 +161,15 @@ export function mountAcpHttp(
       // half-dead connection (conn stream gone, replies silently buffering)
       // leaves an operator breadcrumb.
       const connId = conn.connectionId;
-      const stream = new SseStream(res, () => {
-        process.stderr.write(
-          `qwen serve: /acp connection stream closed (${connId})\n`,
-        );
-      });
+      const stream = new SseStream(
+        res,
+        () => {
+          process.stderr.write(
+            `qwen serve: /acp connection stream closed (${connId})\n`,
+          );
+        },
+        () => conn.touch(),
+      );
       stream.open();
       conn.attachConnStream(stream);
       return;
@@ -184,13 +188,17 @@ export function mountAcpHttp(
     // stream/subscription. onClose aborts THIS stream's controller — a
     // stale stream closing can't cancel a newer subscription.
     const ac = new AbortController();
-    const stream = new SseStream(res, () => {
-      // Stream closed (tab close / network drop / crash): stop the event
-      // pump AND abort any in-flight prompt for this session — otherwise the
-      // agent keeps running (burning quota, holding the FIFO) until idle TTL.
-      ac.abort();
-      conn.sessions.get(sessionId)?.promptAbort?.abort();
-    });
+    const stream = new SseStream(
+      res,
+      () => {
+        // Stream closed (tab close / network drop / crash): stop the event
+        // pump AND abort any in-flight prompt for this session — otherwise
+        // the agent keeps running (quota, FIFO) until idle TTL.
+        ac.abort();
+        conn.sessions.get(sessionId)?.promptAbort?.abort();
+      },
+      () => conn.touch(),
+    );
     // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
     // handshake precedes any buffered frames the attach flushes.
     stream.open();
@@ -205,7 +213,12 @@ export function mountAcpHttp(
         );
         // Don't leave a zombie SSE stream that heartbeats but delivers
         // nothing — close it so the client gets a disconnect + reconnects.
-        conn.closeSessionStream(sessionId);
+        // Identity-guard: only close if THIS stream is still the session's
+        // current one (a reconnect between the throw and this microtask
+        // would otherwise kill the fresh stream).
+        if (conn.sessions.get(sessionId)?.stream === stream) {
+          conn.closeSessionStream(sessionId);
+        }
       });
   });
 

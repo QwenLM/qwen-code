@@ -176,9 +176,17 @@ export class AcpConnection {
     for (const frame of this.connBuffer.splice(0)) void stream.send(frame);
   }
 
-  /** Send a frame on a session-scoped stream (buffer until it attaches). */
+  /**
+   * Send a frame on a session-scoped stream (buffer until it attaches).
+   * LOOKUP-ONLY: drops the frame when the session has no binding — a binding
+   * always exists for a live session (created at `session/new`/`load`/
+   * `resume`), so a missing one means the session was torn down. Auto-
+   * creating here would resurrect a ghost binding (no stream, no owner) that
+   * buffers up to 256 late pump/reply frames forever.
+   */
   sendSession(sessionId: string, frame: unknown): void {
-    const binding = this.getOrCreateSession(sessionId);
+    const binding = this.sessions.get(sessionId);
+    if (!binding) return;
     if (binding.stream && !binding.stream.isClosed) {
       void binding.stream.send(frame);
     } else {

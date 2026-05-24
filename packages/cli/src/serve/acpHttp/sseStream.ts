@@ -29,6 +29,12 @@ export class SseStream {
   constructor(
     private readonly res: Response,
     private readonly onClose?: () => void,
+    /**
+     * Fired on each heartbeat tick while the stream is open. Used to mark the
+     * connection active so a long-running prompt that emits no intermediate
+     * frames for >30 min isn't reaped by the idle-TTL sweep.
+     */
+    private readonly onHeartbeat?: () => void,
   ) {}
 
   /** Write SSE headers + retry hint and start the heartbeat. */
@@ -42,7 +48,9 @@ export class SseStream {
     void this.writeRaw('retry: 3000\n\n');
 
     this.heartbeat = setInterval(() => {
-      if (!this.closed) void this.writeRaw(': hb\n\n');
+      if (this.closed) return;
+      this.onHeartbeat?.();
+      void this.writeRaw(': hb\n\n');
     }, 15_000);
     this.heartbeat.unref();
 
