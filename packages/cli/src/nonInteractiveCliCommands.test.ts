@@ -449,7 +449,7 @@ describe('handleSlashCommand', () => {
     });
   });
 
-  it('should return null for blocked model-invocable command execution', async () => {
+  it('should return the block reason for blocked model-invocable command execution', async () => {
     mockFireUserPromptExpansionEvent.mockResolvedValue({
       getBlockingError: () => ({
         blocked: true,
@@ -483,7 +483,7 @@ describe('handleSlashCommand', () => {
 
     const content = await executor?.('custom', 'with args');
 
-    expect(content).toBeNull();
+    expect(content).toBe('UserPromptExpansion blocked: Blocked by policy');
   });
 
   it('should return unsupported for other built-in commands like /quit', async () => {
