@@ -217,6 +217,14 @@ export const modelCommand: SlashCommand = {
     const argTokens = args.split(/\s+/).filter(Boolean);
     const isDefaultModelCommand = argTokens.includes('--default');
     const isFastModelCommand = argTokens.includes('--fast');
+    if (isDefaultModelCommand && isFastModelCommand) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Use either --default or --fast, not both.'),
+      };
+    }
+
     if (isFastModelCommand) {
       const modelName =
         argTokens.find(

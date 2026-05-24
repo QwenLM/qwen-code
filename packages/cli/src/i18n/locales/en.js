@@ -1049,6 +1049,8 @@ export default {
   'Persist the selected model as the default':
     'Persist the selected model as the default',
   'Usage: /model --default <model-id>': 'Usage: /model --default <model-id>',
+  'Use either --default or --fast, not both.':
+    'Use either --default or --fast, not both.',
   'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
     'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.',
   'Set a lighter model for prompt suggestions and speculative execution':

@@ -1888,6 +1888,8 @@ export default {
     'Enter — выбрать, d — сделать моделью по умолчанию, ↑↓ — навигация, Esc — закрыть',
   'Usage: /model --default <model-id>':
     'Использование: /model --default <model-id>',
+  'Use either --default or --fast, not both.':
+    'Используйте либо --default, либо --fast, но не оба.',
   'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
     'Текущая модель: {{model}}\nИспользуйте "/model <model-id>" для переключения модели (только эта сессия), "/model --default <model-id>" для сохранения или "/model --fast <model-id>" для быстрой модели.',
   '中国 (China)': 'Китай',

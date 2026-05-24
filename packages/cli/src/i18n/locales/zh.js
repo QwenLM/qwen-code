@@ -999,6 +999,8 @@ export default {
   'session only': '仅本会话',
   'Persist the selected model as the default': '将所选模型持久化为默认模型',
   'Usage: /model --default <model-id>': '用法：/model --default <模型 ID>',
+  'Use either --default or --fast, not both.':
+    '只能使用 --default 或 --fast 其中之一，不能同时使用。',
   'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
     '当前模型：{{model}}\n使用 "/model <model-id>" 切换模型（仅本会话），使用 "/model --default <model-id>" 持久化，或使用 "/model --fast <model-id>" 设置快速模型。',
   'Set a lighter model for prompt suggestions and speculative execution':

@@ -1898,6 +1898,8 @@ export default {
   'Enter to select, d to set default, ↑↓ to navigate, Esc to close':
     'Enter para selecionar, d para definir como padrão, ↑↓ para navegar, Esc para fechar',
   'Usage: /model --default <model-id>': 'Uso: /model --default <id-do-modelo>',
+  'Use either --default or --fast, not both.':
+    'Use --default ou --fast, não ambos.',
   'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
     'Modelo atual: {{model}}\nUse "/model <model-id>" para trocar de modelo (somente nesta sessão), "/model --default <model-id>" para persistir, ou "/model --fast <model-id>" para definir o modelo rápido.',
   '中国 (China)': 'China',

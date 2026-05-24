@@ -1676,6 +1676,8 @@ export default {
   'Enter to select, d to set default, ↑↓ to navigate, Esc to close':
     'Enter で選択、d でデフォルトに設定、↑↓ で移動、Esc で閉じる',
   'Usage: /model --default <model-id>': '使い方: /model --default <model-id>',
+  'Use either --default or --fast, not both.':
+    '--default と --fast のどちらか一方のみを使用してください。',
   'Current model: {{model}}\nUse "/model <model-id>" to switch models (session only), "/model --default <model-id>" to persist, or "/model --fast <model-id>" to set the fast model.':
     '現在のモデル: {{model}}\n"/model <model-id>" でモデルを切り替え（このセッションのみ）、"/model --default <model-id>" で保存、"/model --fast <model-id>" で高速モデルを設定します。',
   '中国 (China)': '中国',

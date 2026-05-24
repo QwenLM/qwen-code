@@ -609,6 +609,9 @@ export function ModelDialog({
           after = config.getContentGeneratorConfig?.() as
             | ContentGeneratorConfig
             | undefined;
+          if (cancelledSwitchRef.current) {
+            return;
+          }
           effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
           effectiveModelId = after?.model ?? modelId;
         } catch (e) {

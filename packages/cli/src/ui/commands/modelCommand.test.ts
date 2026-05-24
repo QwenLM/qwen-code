@@ -308,6 +308,44 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should reject combining --default and --fast', async () => {
+    const setValue = vi.fn();
+    const setFastModel = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model gpt-4 --default --fast',
+        name: 'model',
+        args: 'gpt-4 --default --fast',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-3.5',
+            authType: AuthType.USE_OPENAI,
+          }),
+          switchModel,
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'gpt-4 --default --fast',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setFastModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Use either --default or --fast, not both.',
+    });
+  });
+
   it('should persist the main model when --default follows the model id', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);
