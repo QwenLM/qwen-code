@@ -70,8 +70,35 @@ class FakeBridge {
     | undefined;
   lastSetModel: unknown;
 
+  closedSessions: string[] = [];
+
   async spawnOrAttach() {
-    return { sessionId: 'sess-1', workspaceCwd: '/ws', attached: false };
+    return {
+      sessionId: 'sess-1',
+      workspaceCwd: '/ws',
+      attached: false,
+      clientId: 'client-1',
+    };
+  }
+
+  async loadSession(req: { sessionId: string }) {
+    return {
+      sessionId: req.sessionId,
+      workspaceCwd: '/ws',
+      attached: true,
+      clientId: 'client-load',
+      state: { replayed: true },
+    };
+  }
+
+  async resumeSession(req: { sessionId: string }) {
+    return {
+      sessionId: req.sessionId,
+      workspaceCwd: '/ws',
+      attached: true,
+      clientId: 'client-resume',
+      state: { resumed: true },
+    };
   }
 
   subscribeEvents(sessionId: string, opts?: { signal?: AbortSignal }) {
@@ -104,7 +131,9 @@ class FakeBridge {
   }
 
   async cancelSession() {}
-  async closeSession() {}
+  async closeSession(sessionId: string) {
+    this.closedSessions.push(sessionId);
+  }
 }
 
 // ── SSE client helper ────────────────────────────────────────────────
@@ -167,13 +196,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       enabled: true,
     });
     await new Promise<void>((resolve) => {
-      server = app.listen(0, '127.0.0.1', resolve);
+      server = app.listen(0, '127.0.0.1', () => resolve());
     });
     const addr = server.address() as AddressInfo;
     base = `http://127.0.0.1:${addr.port}`;
   });
 
   afterEach(async () => {
+    // Force-close any long-lived SSE sockets a test left open so
+    // `server.close()` doesn't hang on them.
+    server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
   });
 
@@ -381,6 +413,66 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
     expect(frame.error.code).toBe(-32602);
+  });
+
+  it('session/load owns the session + replies state on the conn stream', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    const [frame] = (await got) as Array<{ id: number; result: { replayed: boolean } }>;
+    expect(frame.id).toBe(20);
+    expect(frame.result.replayed).toBe(true);
+    // Ownership was granted, so the session stream is now allowed.
+    const sess = await openStream(connId, 'loaded-1');
+    expect(sess.status).toBe(200);
+    await sess.body?.cancel(); // release the long-lived SSE socket
+  });
+
+  it('session/resume owns the session + replies state', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 21,
+      method: 'session/resume',
+      params: { sessionId: 'resumed-1' },
+    });
+    const [frame] = (await got) as Array<{ id: number; result: { resumed: boolean } }>;
+    expect(frame.id).toBe(21);
+    expect(frame.result.resumed).toBe(true);
+  });
+
+  it('session/close reaches the bridge + replies on the conn stream', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    // 2 frames: the session/new reply (establishes ownership), then close.
+    const got = takeFrames(connStream, 2);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, { jsonrpc: '2.0', id: 99, method: 'session/new', params: {} });
+    await new Promise((r) => setTimeout(r, 30));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 22,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    const frames = (await got) as Array<{ id: number }>;
+    expect(frames.map((f) => f.id)).toContain(22);
+    expect(bridge.closedSessions).toContain('sess-1');
+  });
+
+  it('DELETE without a connection id → 400', async () => {
+    const res = await fetch(`${base}/acp`, { method: 'DELETE' });
+    expect(res.status).toBe(400);
   });
 
   it('DELETE tears the connection down (subsequent POST 400)', async () => {

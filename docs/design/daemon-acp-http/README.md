@@ -392,3 +392,31 @@ All fixes verified by the expanded vitest suite (**18 tests**) + a fresh live sm
   so browsers need the deferred WebSocket path (§7); CLI/Node clients are unaffected.
 - The daemon's real trust boundary remains the **bearer token + single-workspace bind** (same as the
   REST surface); R3's ownership check is defense-in-depth + contract correctness, not a tenant boundary.
+
+---
+
+## 12. Review round 3 — PR bot fold-ins (#4472)
+
+Two automated PR reviewers plus the summary bot.
+All fixes verified by the suite (now **22 tests**) + a fresh live run (16 `session/update` → `end_turn`).
+
+| # | Severity | Finding | Fix |
+|---|----------|---------|-----|
+| B1 | **P0** | `handlePrompt`'s `AbortController` was never aborted — a disconnecting/cancelling client left the agent running (burned model quota, blocked the session FIFO). Flagged by both bots + 5 sub-agents. | `promptAbort` parked on `SessionBinding`; aborted by `session/cancel` and by session/connection teardown (`closeSessionStream`/`destroy`). |
+| B2 | **P0** | `sessionCtx` missing `fromLoopback` → every ACP permission vote treated as remote; `local-only` policy would reject loopback clients. | Capture loopback at `initialize` (kernel `remoteAddress`, not forgeable headers) → `AcpConnection.fromLoopback` → threaded through `sessionCtx`. |
+| B3 | **P0** | SSE write failures silently swallowed → zombie streams (heartbeats fire, zero events delivered, no logs). | First write failure logs + closes the stream. |
+| B4 | **P0** | Idle sweep destroyed connections with no log + no connection cap (initialize-flood). | Sweep logs each reap; `pumpSessionEvents` calls `touch()` (long quiet prompts aren't reaped); `maxConnections` cap (64) → `503`. |
+| B5 | **P1** | `sessionCtx` silently fell back to the connection's unregistered clientId when the binding lacked one (untested, always-fired in `FakeBridge`). | Throw on missing stamped clientId (invariant violation); `FakeBridge` now stamps one. |
+| B6 | **P1** | `session/new|load|resume` accepted `cwd` unvalidated (REST validates string/length/absolute — amplification DoS). | Shared `parseOptionalWorkspaceCwd` (string, ≤4096, absolute). |
+| B7 | **P1** | `session/prompt` forwarded an unvalidated `prompt` to the bridge. | `validatePrompt` (non-empty array of objects), mirroring REST. |
+| B8 | **P1** | Raw bridge error messages echoed to the client. | `toRpcError` maps known bridge errors to coded, client-safe shapes; unknown → generic `Internal error` (full detail still to stderr). |
+| B9 | **P1** | `nextId` used sequential negatives — a client legally using negative ids could collide in `pending`. | Daemon-originated ids are now strings (`_qwen_perm_N`), disjoint from any client id. |
+| B10 | **P2** | `resolveClientResponse` param type excluded `JsonRpcError`; conn-scoped SSE stream had no `onClose`; `DELETE` with no header was a silent 202; `SseStream.close` ran `onClose` outside try/catch; `session/load`·`resume`·`close` untested. | Widened param to `JsonRpcResponse`; conn stream logs on close; `DELETE` missing header → `400`; `onClose` wrapped in try/catch; added load/resume/close + DELETE-400 tests. |
+
+**Out of scope (base-branch `daemon_mode_b_main`, not this diff)** — the second reviewer flagged
+typecheck errors in `acpAgent.ts` (`entryCount`/`entrySummary`/`sessionClose`) and other pre-existing
+items it explicitly attributed to the base branch (introduced by #4353). Tracked separately; not
+touched here.
+
+**Still deferred** (documented): per-connection secret for `DELETE`/connection ownership (token remains
+the boundary); WebSocket + HTTP/2 (§7); strict prompt-result vs trailing-update barrier (§11).

@@ -72,7 +72,21 @@ export function mountAcpHttp(
 
     // `initialize` mints a connection and replies inline (200 + JSON).
     if (isRequest(message) && message.method === 'initialize') {
-      const conn = registry.create();
+      const conn = registry.create(isLoopbackReq(req));
+      if (!conn) {
+        // Connection cap reached — shed load rather than grow unbounded.
+        res.setHeader('Retry-After', '5');
+        res
+          .status(503)
+          .json(
+            rpcError(
+              message.id,
+              RPC.INTERNAL_ERROR,
+              'Too many ACP connections; retry later',
+            ),
+          );
+        return;
+      }
       const requestedVersion =
         message.params &&
         typeof message.params === 'object' &&
@@ -132,8 +146,15 @@ export function mountAcpHttp(
     const sessionId = headerOf(req, ACP_SESSION_HEADER);
 
     if (!sessionId) {
-      // Connection-scoped stream.
-      const stream = new SseStream(res);
+      // Connection-scoped stream. onClose logs the disconnect so a
+      // half-dead connection (conn stream gone, replies silently buffering)
+      // leaves an operator breadcrumb.
+      const connId = conn.connectionId;
+      const stream = new SseStream(res, () => {
+        process.stderr.write(
+          `qwen serve: /acp connection stream closed (${connId})\n`,
+        );
+      });
       stream.open();
       conn.attachConnStream(stream);
       return;
@@ -169,7 +190,17 @@ export function mountAcpHttp(
   // ── DELETE /acp ────────────────────────────────────────────────────
   app.delete(path, (req: Request, res: Response) => {
     const connectionId = headerOf(req, ACP_CONNECTION_HEADER);
-    if (connectionId) registry.delete(connectionId);
+    if (!connectionId) {
+      res.status(400).json({ error: 'Missing Acp-Connection-Id' });
+      return;
+    }
+    // NOTE: like every other route, DELETE is gated only by the bearer
+    // token — the daemon's trust boundary is "holds the token for this
+    // single-workspace daemon", so any token-holder may tear down any
+    // connection (same posture as the REST `DELETE /session/:id`). A
+    // per-connection secret would add intra-token isolation; deferred with
+    // the rest of the multi-tenant hardening (design §7).
+    registry.delete(connectionId);
     res.status(202).end();
   });
 
@@ -179,4 +210,17 @@ export function mountAcpHttp(
 function headerOf(req: Request, name: string): string | undefined {
   const v = req.headers[name];
   return Array.isArray(v) ? v[0] : v;
+}
+
+/**
+ * True when the request's KERNEL-stamped peer address is loopback. Mirrors
+ * the REST surface's `detectFromLoopback` (NOT derived from forgeable
+ * headers like `X-Forwarded-For`). Replicated here rather than imported
+ * from `server.ts` to avoid a server↔acpHttp import cycle.
+ */
+function isLoopbackReq(req: Request): boolean {
+  const addr = req.socket?.remoteAddress;
+  return (
+    addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+  );
 }

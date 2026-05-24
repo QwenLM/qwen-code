@@ -15,6 +15,13 @@ import type { SseStream } from './sseStream.js';
  */
 const MAX_BUFFERED_FRAMES = 256;
 
+/** Default cap on concurrent live connections (mirrors a bounded resource). */
+const DEFAULT_MAX_CONNECTIONS = 64;
+
+function logStderr(line: string): void {
+  process.stderr.write(`${line}\n`);
+}
+
 /**
  * Invoked when a session/connection tears down while an agent→client
  * request (e.g. a permission prompt) is still outstanding, so the bridge
@@ -53,6 +60,13 @@ export interface SessionBinding {
    * event-starved.
    */
   abort: AbortController;
+  /**
+   * Aborts the in-flight `session/prompt` for this session. Set by
+   * `handlePrompt` while a prompt runs; aborted on `session/cancel` and on
+   * session/connection teardown so a disconnecting client doesn't leave
+   * the agent burning model quota on a result nobody will read.
+   */
+  promptAbort?: AbortController;
 }
 
 /** An agent→client request awaiting the client's JSON-RPC response. */
@@ -77,27 +91,40 @@ export class AcpConnection {
    * connection can't drive or eavesdrop on a session it never claimed.
    */
   readonly ownedSessions = new Set<string>();
-  readonly pending = new Map<number, PendingClientRequest>();
+  /** Agent→client requests awaiting a client response, keyed by JSON-RPC id. */
+  readonly pending = new Map<string, PendingClientRequest>();
   /** Daemon-issued client id reused across this connection's bridge calls. */
   readonly clientId: string;
+  /**
+   * True when the `initialize` POST arrived from a kernel-stamped loopback
+   * peer. Threaded into per-session bridge contexts so the `local-only`
+   * permission policy can gate votes by transport — mirrors the REST
+   * surface's `detectFromLoopback(req)`. NOT derived from forgeable
+   * headers (`X-Forwarded-For` etc).
+   */
+  readonly fromLoopback: boolean;
   lastActiveMs: number = Date.now();
   private idCounter = 0;
 
   constructor(
     connectionId: string | undefined,
+    fromLoopback: boolean,
     private readonly onAbandonPending?: AbandonPendingFn,
   ) {
     this.connectionId = connectionId ?? randomUUID();
     this.clientId = randomUUID();
+    this.fromLoopback = fromLoopback;
   }
 
-  /** Allocate a fresh JSON-RPC id for an agent→client request. */
-  nextId(): number {
-    // Negative ids keep our outbound request ids disjoint from the
-    // client's (clients conventionally use positive ids), so a client
-    // that echoes ids can't collide with our permission requests.
-    this.idCounter -= 1;
-    return this.idCounter;
+  /**
+   * Allocate a fresh JSON-RPC id for an agent→client request. STRING-typed
+   * (`_qwen_perm_N`) so it can never collide with a client-originated id —
+   * JSON-RPC 2.0 permits clients to use any number (incl. negatives) or
+   * string, so a numeric namespace wasn't actually safe.
+   */
+  nextId(): string {
+    this.idCounter += 1;
+    return `_qwen_perm_${this.idCounter}`;
   }
 
   touch(): void {
@@ -173,6 +200,7 @@ export class AcpConnection {
     const binding = this.sessions.get(sessionId);
     if (!binding) return;
     binding.abort.abort();
+    binding.promptAbort?.abort();
     binding.stream?.close();
     this.abandonPendingForSession(sessionId, binding.clientId);
     this.sessions.delete(sessionId);
@@ -182,6 +210,7 @@ export class AcpConnection {
   destroy(): void {
     for (const binding of this.sessions.values()) {
       binding.abort.abort();
+      binding.promptAbort?.abort();
       binding.stream?.close();
       this.abandonPendingForSession(binding.sessionId, binding.clientId);
     }
@@ -220,14 +249,23 @@ export class ConnectionRegistry {
 
   constructor(
     private readonly onAbandonPending?: AbandonPendingFn,
+    private readonly maxConnections = DEFAULT_MAX_CONNECTIONS,
     private readonly idleTtlMs = 30 * 60_000,
   ) {
     this.sweepTimer = setInterval(() => this.sweep(), 60_000);
     this.sweepTimer.unref();
   }
 
-  create(): AcpConnection {
-    const conn = new AcpConnection(undefined, this.onAbandonPending);
+  /**
+   * Mint a connection, or return `undefined` when the live-connection cap
+   * is reached (the caller answers `503`). Bounds an `initialize` flood from
+   * growing the registry without limit through the full TTL window.
+   */
+  create(fromLoopback: boolean): AcpConnection | undefined {
+    if (this.maxConnections > 0 && this.byId.size >= this.maxConnections) {
+      return undefined;
+    }
+    const conn = new AcpConnection(undefined, fromLoopback, this.onAbandonPending);
     this.byId.set(conn.connectionId, conn);
     return conn;
   }
@@ -258,7 +296,17 @@ export class ConnectionRegistry {
   private sweep(): void {
     const cutoff = Date.now() - this.idleTtlMs;
     for (const [id, conn] of this.byId) {
-      if (conn.lastActiveMs < cutoff) this.delete(id);
+      if (conn.lastActiveMs >= cutoff) continue;
+      // Observability: a reaped connection silently dropping its SSE
+      // streams is otherwise invisible to operators chasing "my client
+      // froze". Note that `touch()` fires on inbound HTTP AND on event
+      // delivery (pumpSessionEvents), so a long quiet prompt isn't reaped.
+      logStderr(
+        `qwen serve: /acp reaping idle connection ${id} ` +
+          `(idle > ${Math.round(this.idleTtlMs / 60_000)}m, ` +
+          `${conn.sessions.size} session(s))`,
+      );
+      this.delete(id);
     }
   }
 }

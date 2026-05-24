@@ -20,6 +20,7 @@ import {
   type JsonRpcId,
   type JsonRpcInbound,
   type JsonRpcRequest,
+  type JsonRpcResponse,
 } from './jsonRpc.js';
 
 function logStderr(line: string): void {
@@ -28,6 +29,80 @@ function logStderr(line: string): void {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Matches the REST surface's `MAX_WORKSPACE_PATH_LENGTH` (PATH_MAX). */
+const MAX_WORKSPACE_PATH_LENGTH = 4096;
+
+class AcpParamError extends Error {}
+
+/**
+ * Validate an optional `cwd` param the same way the REST `POST /session`
+ * route does: when present it must be a string, ≤ PATH_MAX, and absolute.
+ * Closes the body-amplification DoS the REST code documents. Returns the
+ * bound workspace when omitted.
+ */
+function parseOptionalWorkspaceCwd(
+  params: Record<string, unknown>,
+  boundWorkspace: string,
+): string {
+  if (!('cwd' in params) || params['cwd'] === undefined) return boundWorkspace;
+  const cwd = params['cwd'];
+  if (typeof cwd !== 'string') {
+    throw new AcpParamError('`cwd` must be a string absolute path when provided');
+  }
+  if (cwd.length > MAX_WORKSPACE_PATH_LENGTH) {
+    throw new AcpParamError(
+      `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+    );
+  }
+  if (!cwd.startsWith('/')) {
+    throw new AcpParamError('`cwd` must be an absolute path when provided');
+  }
+  return cwd;
+}
+
+/** Validate a `session/prompt` body before it reaches the bridge/agent. */
+function validatePrompt(params: Record<string, unknown>): void {
+  const prompt = params['prompt'];
+  if (!Array.isArray(prompt) || prompt.length === 0) {
+    throw new AcpParamError(
+      '`prompt` is required and must be a non-empty array of content blocks',
+    );
+  }
+  if (
+    !prompt.every(
+      (b) => typeof b === 'object' && b !== null && !Array.isArray(b),
+    )
+  ) {
+    throw new AcpParamError('each `prompt` element must be an object');
+  }
+}
+
+/**
+ * Map a thrown error to a JSON-RPC error code + a client-safe message.
+ * Param-validation errors are echoed (they describe the client's own bad
+ * input); bridge/internal errors are coded by class name with their
+ * message preserved (the daemon's trust boundary is the bearer token, so
+ * the operator-facing message is not a cross-tenant leak), and anything
+ * unrecognized collapses to a generic INTERNAL_ERROR string.
+ */
+function toRpcError(err: unknown): { code: number; message: string } {
+  if (err instanceof AcpParamError) {
+    return { code: RPC.INVALID_PARAMS, message: err.message };
+  }
+  const name = err instanceof Error ? err.name : '';
+  switch (name) {
+    case 'SessionNotFoundError':
+    case 'InvalidSessionScopeError':
+    case 'WorkspaceMismatchError':
+    case 'InvalidClientIdError':
+      return { code: RPC.INVALID_PARAMS, message: errMsg(err) };
+    case 'SessionLimitExceededError':
+      return { code: RPC.INTERNAL_ERROR, message: errMsg(err) };
+    default:
+      return { code: RPC.INTERNAL_ERROR, message: 'Internal error' };
+  }
 }
 
 /**
@@ -48,17 +123,29 @@ export class AcpDispatcher {
   ) {}
 
   /**
-   * The clientId to echo on per-session bridge calls: the one the bridge
-   * stamped at create/attach (stored on the binding), falling back to the
-   * connection's own id when we somehow lack a binding.
+   * Build the bridge context for a per-session call. Echoes the clientId the
+   * bridge STAMPED at create/attach (the connection's own id is unregistered
+   * and would be rejected) and threads `fromLoopback` so the `local-only`
+   * permission policy can gate votes by transport — symmetric with the REST
+   * surface's `detectFromLoopback(req)`.
+   *
+   * Throws when no stamped clientId is present: the only callers reach here
+   * AFTER `requireOwned`, so the binding must exist and carry the bridge's
+   * id. A missing id means an invariant broke (a `session/new`/`load` that
+   * didn't record it) — fail loud rather than silently send an unregistered
+   * id whose rejection surfaces asynchronously, far from the cause.
    */
   private sessionCtx(
     conn: AcpConnection,
     sessionId: string,
-  ): { clientId: string } {
-    const clientId =
-      conn.sessions.get(sessionId)?.clientId ?? conn.clientId;
-    return { clientId };
+  ): { clientId: string; fromLoopback: boolean } {
+    const clientId = conn.sessions.get(sessionId)?.clientId;
+    if (!clientId) {
+      throw new Error(
+        `no bridge-stamped clientId for session ${sessionId} (ownership invariant violated)`,
+      );
+    }
+    return { clientId, fromLoopback: conn.fromLoopback };
   }
 
   /**
@@ -207,10 +294,7 @@ export class AcpDispatcher {
           return;
 
         case 'session/new': {
-          const cwd =
-            typeof params['cwd'] === 'string'
-              ? (params['cwd'] as string)
-              : this.boundWorkspace;
+          const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
           const session = await this.bridge.spawnOrAttach({
             workspaceCwd: cwd,
             clientId: conn.clientId,
@@ -227,10 +311,7 @@ export class AcpDispatcher {
         case 'session/load':
         case 'session/resume': {
           const sessionId = String(params['sessionId'] ?? '');
-          const cwd =
-            typeof params['cwd'] === 'string'
-              ? (params['cwd'] as string)
-              : this.boundWorkspace;
+          const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
           const restored =
             method === 'session/load'
               ? await this.bridge.loadSession({
@@ -272,6 +353,10 @@ export class AcpDispatcher {
         case 'session/cancel': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          // Abort our local in-flight prompt controller too — cancelSession
+          // tells the agent to wind down, but the HTTP-side `sendPrompt`
+          // await must also be released so the session FIFO unblocks.
+          conn.sessions.get(sessionId)?.promptAbort?.abort();
           await this.bridge.cancelSession(
             sessionId,
             undefined,
@@ -286,7 +371,8 @@ export class AcpDispatcher {
         case 'session/prompt': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
-          await this.handlePrompt(conn, id, params);
+          validatePrompt(params);
+          await this.handlePrompt(conn, sessionId, id, params);
           return;
         }
 
@@ -322,14 +408,16 @@ export class AcpDispatcher {
           return;
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logStderr(`qwen serve: /acp dispatch error (${method}): ${message}`);
+      // Full detail to stderr for the operator; a coded, client-safe shape
+      // on the wire (raw bridge messages may carry internal paths/details).
+      logStderr(`qwen serve: /acp dispatch error (${method}): ${errMsg(err)}`);
       if (id !== undefined) {
+        const { code, message } = toRpcError(err);
         const sessionId =
           typeof params['sessionId'] === 'string'
             ? (params['sessionId'] as string)
             : undefined;
-        const frame = error(id, RPC.INTERNAL_ERROR, message);
+        const frame = error(id, code, message);
         if (sessionId) this.replySession(conn, sessionId, id, undefined, frame);
         else conn.sendConn(frame);
       }
@@ -361,6 +449,9 @@ export class AcpDispatcher {
     }
     for await (const event of iterable) {
       if (signal.aborted) break;
+      // Count event delivery as connection activity so a long, quiet prompt
+      // (no inbound HTTP) isn't reaped by the idle-TTL sweep.
+      conn.touch();
       this.translateEvent(conn, sessionId, event);
     }
   }
@@ -428,12 +519,11 @@ export class AcpDispatcher {
   }
 
   /** Resolve a client's JSON-RPC response to an agent→client request. */
-  private resolveClientResponse(
-    conn: AcpConnection,
-    msg: Extract<JsonRpcInbound, { id: JsonRpcId }>,
-  ): void {
-    const id = (msg as { id: JsonRpcId }).id;
-    if (typeof id !== 'number') return;
+  private resolveClientResponse(conn: AcpConnection, msg: JsonRpcResponse): void {
+    // Our outbound request ids are strings (`_qwen_perm_N`); a client echoes
+    // the same id verbatim. Anything else can't match a pending entry.
+    const id = msg.id;
+    if (typeof id !== 'string') return;
     const pending = conn.pending.get(id);
     if (!pending) return;
     conn.pending.delete(id);
@@ -459,11 +549,17 @@ export class AcpDispatcher {
 
   private async handlePrompt(
     conn: AcpConnection,
+    sessionId: string,
     id: JsonRpcId | undefined,
     params: Record<string, unknown>,
   ): Promise<void> {
-    const sessionId = String(params['sessionId'] ?? '');
+    // Park the controller on the binding so `session/cancel` and
+    // session/connection teardown can abort an in-flight prompt — otherwise
+    // a disconnecting client leaves the agent running, burning model quota
+    // and holding the session's prompt FIFO.
+    const binding = conn.getOrCreateSession(sessionId);
     const abort = new AbortController();
+    binding.promptAbort = abort;
     try {
       const result = await this.bridge.sendPrompt(
         sessionId,
@@ -473,16 +569,18 @@ export class AcpDispatcher {
       );
       if (id !== undefined) this.replySession(conn, sessionId, id, result);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const { code, message } = toRpcError(err);
       if (id !== undefined) {
         this.replySession(
           conn,
           sessionId,
           id,
           undefined,
-          error(id, RPC.INTERNAL_ERROR, message),
+          error(id, code, message),
         );
       }
+    } finally {
+      if (binding.promptAbort === abort) binding.promptAbort = undefined;
     }
   }
 
