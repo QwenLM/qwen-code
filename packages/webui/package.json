@@ -44,7 +44,7 @@
     "react-dom": "^18.0.0 || ^19.0.0"
   },
   "dependencies": {
-    "@qwen-code/sdk": "~0.1.7",
+    "@qwen-code/sdk": "~0.1.8",
     "markdown-it": "^14.1.0"
   },
   "devDependencies": {

@@ -4,10 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonEvent } from '../types.js';
+import type {
+  DaemonAuthDeviceFlowSdkErrorKind,
+  DaemonAuthProviderId,
+  DaemonErrorKind,
+  DaemonEvent,
+} from '../types.js';
+import { DAEMON_ERROR_KINDS } from '../types.js';
 import type {
   DaemonUiEvent,
   DaemonUiPermissionOption,
+  DaemonUiToolProvenance,
   NormalizeDaemonEventOptions,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
@@ -21,6 +28,24 @@ import {
   stringifyJson,
   stringifyRedactedJson,
 } from './utils.js';
+
+/**
+ * Common base fields stamped on every normalized UI event. Centralized as a
+ * type alias so adding new envelope fields (e.g., `serverTimestamp` in PR-B,
+ * `traceId` in future) doesn't require touching every normalizer helper.
+ */
+type NormalizedEventBase = Pick<
+  DaemonUiEvent,
+  'eventId' | 'serverTimestamp' | 'originatorClientId' | 'rawEvent'
+>;
+
+const DAEMON_ERROR_KIND_SET = new Set<string>(DAEMON_ERROR_KINDS);
+const DEVICE_FLOW_PROVIDER_SET = new Set<string>(['qwen', 'qwen-oauth']);
+const MCP_RESTART_REFUSED_REASONS = new Set<string>([
+  'in_flight',
+  'disabled',
+  'budget_would_exceed',
+]);
 
 const MAX_DETAILS_LENGTH = 4096;
 
@@ -70,17 +95,22 @@ export function normalizeDaemonEvent(
             'Model switch failed (no details available)',
         },
       ];
-    case 'session_died':
+    case 'session_died': {
+      // doudouOUC review: hoist `asDaemonErrorKind` to a const — original
+      // double-eval walked the record + Set twice per event.
+      const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       return [
         {
           ...base,
           type: 'error',
           recoverable: false,
+          ...(errorKind ? { errorKind } : {}),
           text:
             getString(event.data, 'reason') ??
             'Session died (no details available)',
         },
       ];
+    }
     case 'session_closed':
       return [
         {
@@ -108,39 +138,127 @@ export function normalizeDaemonEvent(
           text: 'SSE stream is lagging',
         },
       ];
-    case 'stream_error':
+    case 'stream_error': {
+      const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       return [
         {
           ...base,
           type: 'error',
           recoverable: true,
+          ...(errorKind ? { errorKind } : {}),
           text:
             getString(event.data, 'error') ??
             'SSE stream error (no details available)',
         },
       ];
+    }
+    case 'state_resync_required':
+      return normalizeStateResyncRequired(event, base);
+
+    // ── Session-meta events ──────────────────────────────────────────────
+    case 'session_metadata_updated':
+      return normalizeSessionMetadataUpdated(event, base);
+
+    case 'approval_mode_changed':
+      return normalizeApprovalModeChanged(event, base);
+
+    // ── Workspace events (Wave 3-4) ──────────────────────────────────────
+    case 'memory_changed':
+      return normalizeMemoryChanged(event, base);
+
+    case 'agent_changed':
+      return normalizeAgentChanged(event, base);
+
+    case 'tool_toggled':
+      return normalizeToolToggled(event, base);
+
+    case 'workspace_initialized':
+      return normalizeWorkspaceInitialized(event, base);
+
+    case 'mcp_budget_warning':
+      return normalizeMcpBudgetWarning(event, base);
+
+    case 'mcp_child_refused_batch':
+      return normalizeMcpChildRefused(event, base);
+
+    case 'mcp_server_restarted':
+      return normalizeMcpServerRestarted(event, base);
+
+    case 'mcp_server_restart_refused':
+      return normalizeMcpServerRestartRefused(event, base);
+
+    // ── Auth device-flow events (Wave 4 OAuth, RFC 8628) ─────────────────
+    case 'auth_device_flow_started':
+      return normalizeAuthDeviceFlowStarted(event, base);
+
+    case 'auth_device_flow_throttled':
+      return normalizeAuthDeviceFlowThrottled(event, base);
+
+    case 'auth_device_flow_authorized':
+      return normalizeAuthDeviceFlowAuthorized(event, base);
+
+    case 'auth_device_flow_failed':
+      return normalizeAuthDeviceFlowFailed(event, base);
+
+    case 'auth_device_flow_cancelled':
+      return normalizeAuthDeviceFlowCancelled(event, base);
+
     default:
+      // wenshao R5 (qwen3.7-max): emit a single `debug` block instead
+      // of `status + debug`. In long sessions where the daemon adds
+      // unknown event types, the doubled block-consumption rate
+      // accelerated `maxBlocks` trimming of real content. The `debug`
+      // shape already carries the event-type as a prefix, so the
+      // status block was redundant. Adapters that want a user-visible
+      // banner can pattern-match on `event.type === 'debug'` and the
+      // text prefix.
       return [
         {
           ...base,
-          type: 'status',
-          text: `${event.type} (unrecognized daemon event)`,
-        },
-        {
-          ...base,
           type: 'debug',
-          text: `${event.type}: ${stringifyRedactedJson(event.data)}`,
+          text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
         },
       ];
   }
 }
 
+function normalizeStateResyncRequired(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const reason = getString(event.data, 'reason');
+  const lastDeliveredId = numberField(event.data, 'lastDeliveredId');
+  const earliestAvailableId = numberField(event.data, 'earliestAvailableId');
+  if (
+    !reason ||
+    lastDeliveredId === undefined ||
+    earliestAvailableId === undefined
+  ) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed state_resync_required payload',
+    );
+  }
+  return [
+    {
+      ...base,
+      type: 'session.state_resync_required',
+      reason,
+      lastDeliveredId,
+      earliestAvailableId,
+    },
+  ];
+}
+
 function createBase(
   event: DaemonEvent,
   opts: NormalizeDaemonEventOptions,
-): Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'> {
+): NormalizedEventBase {
+  const serverTimestamp = extractServerTimestamp(event);
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
+    ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
@@ -150,9 +268,39 @@ function createBase(
   };
 }
 
+/**
+ * Extract daemon-authoritative timestamp from envelope. Looks at three
+ * candidate locations in order:
+ *
+ *   1. `event.serverTimestamp` — top-level, preferred when daemon adds it
+ *   2. `event._meta.serverTimestamp` — Anthropic-style metadata convention
+ *   3. `event.data._meta.serverTimestamp` — sessionUpdate nested location
+ *
+ * Returns undefined when none of them are present or all are non-finite.
+ * Forward-compat: SDK reads whichever location the daemon eventually emits
+ * without requiring a coordinated SDK release.
+ */
+function extractServerTimestamp(event: DaemonEvent): number | undefined {
+  const direct = (event as { serverTimestamp?: unknown }).serverTimestamp;
+  if (typeof direct === 'number' && Number.isFinite(direct)) return direct;
+  const envelopeMeta = (event as { _meta?: unknown })._meta;
+  if (isRecord(envelopeMeta)) {
+    const ts = envelopeMeta['serverTimestamp'];
+    if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+  }
+  if (isRecord(event.data)) {
+    const dataMeta = (event.data as Record<string, unknown>)['_meta'];
+    if (isRecord(dataMeta)) {
+      const ts = dataMeta['serverTimestamp'];
+      if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+    }
+  }
+  return undefined;
+}
+
 function normalizeSessionUpdate(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
   opts: NormalizeDaemonEventOptions,
 ): DaemonUiEvent[] {
   const update = getSessionUpdatePayload(event.data);
@@ -206,14 +354,18 @@ function normalizeSessionUpdate(
         : [];
     }
     case 'available_commands_update': {
-      const commands = Array.isArray(update['availableCommands'])
+      const rawCommands = Array.isArray(update['availableCommands'])
         ? update['availableCommands']
         : [];
+      const commands = rawCommands.filter(isRecord) as ReadonlyArray<
+        Record<string, unknown>
+      >;
       return [
         {
           ...base,
-          type: 'status',
-          text: `Available commands updated (${commands.length})`,
+          type: 'session.available_commands',
+          count: commands.length,
+          commands,
         },
       ];
     }
@@ -232,7 +384,7 @@ function normalizeSessionUpdate(
 
 function normalizeToolUpdate(
   update: Record<string, unknown>,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent {
   const metadata = isRecord(update['_meta']) ? update['_meta'] : undefined;
   const toolName =
@@ -275,6 +427,27 @@ function normalizeToolUpdate(
       text: `Tool update missing toolCallId${title ? ` (${title})` : ''}`,
     };
   }
+  const { provenance, serverId } = extractToolProvenance(update, toolName);
+  // PR-K (post-rebase): daemon stamps `parentToolCallId` + `subagentType` in
+  // `tool_call._meta` when the call was invoked inside a sub-agent
+  // delegation (see core's `SubAgentTracker.getSubagentMeta()`). Forward
+  // these into the typed UI event so the reducer can correlate sub-agent
+  // blocks under their parent for nested rendering. Both undefined for
+  // top-level (non-sub-agent) tool calls.
+  //
+  // Self-reference guard: defensively drop `parentToolCallId === toolCallId`.
+  // The daemon should never emit this, but accepting it would make the
+  // block its own parent — selectors loop, renderers cycle.
+  const rawParentToolCallId =
+    getString(update, 'parentToolCallId') ??
+    (metadata ? getString(metadata, 'parentToolCallId') : undefined);
+  const parentToolCallId =
+    rawParentToolCallId && rawParentToolCallId !== toolCallId
+      ? rawParentToolCallId
+      : undefined;
+  const subagentType =
+    getString(update, 'subagentType') ??
+    (metadata ? getString(metadata, 'subagentType') : undefined);
   return {
     ...base,
     type: 'tool.update',
@@ -285,6 +458,10 @@ function normalizeToolUpdate(
     ...(toolKind ? { toolKind } : {}),
     ...(content !== undefined ? { content } : {}),
     ...(locations !== undefined ? { locations } : {}),
+    ...(provenance ? { provenance } : {}),
+    ...(serverId ? { serverId } : {}),
+    ...(parentToolCallId ? { parentToolCallId } : {}),
+    ...(subagentType ? { subagentType } : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(rawInput !== undefined
@@ -342,6 +519,49 @@ function getPlanEntryMarker(status: string | undefined): string {
   }
 }
 
+/**
+ * Pull `provenance` + `serverId` from the tool update payload, falling back
+ * to the `mcp__<serverId>__<tool>` naming convention when the daemon
+ * doesn't stamp the fields explicitly. Returns `undefined` for both when
+ * provenance is genuinely unknown — UI defaults to `'unknown'` in that case.
+ */
+function extractToolProvenance(
+  update: Record<string, unknown>,
+  toolName: string | undefined,
+): {
+  provenance?: DaemonUiToolProvenance;
+  serverId?: string;
+} {
+  const explicit = getString(update, 'provenance');
+  const explicitServerId = getString(update, 'serverId');
+  if (explicit === 'builtin' || explicit === 'mcp' || explicit === 'subagent') {
+    return {
+      provenance: explicit,
+      ...(explicit === 'mcp' && explicitServerId
+        ? { serverId: explicitServerId }
+        : {}),
+    };
+  }
+  // Heuristic fallback: MCP server tools follow `mcp__<serverId>__<tool>`.
+  if (toolName && toolName.startsWith('mcp__')) {
+    const rest = toolName.slice('mcp__'.length);
+    const sep = rest.indexOf('__');
+    if (sep > 0) {
+      return { provenance: 'mcp', serverId: rest.slice(0, sep) };
+    }
+  }
+  return {};
+}
+
+function asDaemonErrorKind(
+  value: string | undefined,
+): DaemonErrorKind | undefined {
+  if (!value) return undefined;
+  return DAEMON_ERROR_KIND_SET.has(value)
+    ? (value as DaemonErrorKind)
+    : undefined;
+}
+
 function capDetails(details: string): string {
   if (details.length <= MAX_DETAILS_LENGTH) return details;
   return `${details.slice(0, MAX_DETAILS_LENGTH)}... [truncated]`;
@@ -349,7 +569,7 @@ function capDetails(details: string): string {
 
 function normalizePermissionRequest(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   if (!isRecord(event.data)) {
     return [
@@ -391,7 +611,7 @@ function normalizePermissionRequest(
 
 function normalizePermissionResolved(
   event: DaemonEvent,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const requestId = getString(event.data, 'requestId');
   if (!requestId) {
@@ -472,4 +692,472 @@ function describeToolCall(value: unknown): string {
 function getShellStream(value: unknown): 'stdout' | 'stderr' | undefined {
   const stream = getString(value, 'stream');
   return stream === 'stdout' || stream === 'stderr' ? stream : undefined;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Session-meta + workspace + auth normalizers (Wave 3-4 coverage)
+ *
+ * Each daemon event with a closed-shape `data` interface in `events.ts` gets
+ * its own normalizer that validates required fields and emits a typed UI
+ * event. Events with invalid payloads fall through to a `debug` text — UI
+ * never silently drops a known event type, but malformed data is surfaced
+ * for operator triage.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+function fallbackDebug(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+  reason: string,
+): DaemonUiEvent[] {
+  return [
+    {
+      ...base,
+      type: 'debug',
+      text: `${event.type}: ${reason}`,
+    },
+  ];
+}
+
+function normalizeSessionMetadataUpdated(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const sessionId = getString(event.data, 'sessionId');
+  if (!sessionId) return fallbackDebug(event, base, 'missing sessionId');
+  const displayName = getString(event.data, 'displayName');
+  return [
+    {
+      ...base,
+      type: 'session.metadata.changed',
+      sessionId,
+      ...(displayName !== undefined ? { displayName } : {}),
+    },
+  ];
+}
+
+function normalizeApprovalModeChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const sessionId = getString(event.data, 'sessionId');
+  const previous = getString(event.data, 'previous');
+  const next = getString(event.data, 'next');
+  if (!sessionId || !previous || !next) {
+    return fallbackDebug(event, base, 'missing sessionId / previous / next');
+  }
+  const persisted =
+    isRecord(event.data) && typeof event.data['persisted'] === 'boolean'
+      ? (event.data['persisted'] as boolean)
+      : false;
+  return [
+    {
+      ...base,
+      type: 'session.approval_mode.changed',
+      sessionId,
+      previous,
+      next,
+      persisted,
+    },
+  ];
+}
+
+function normalizeMemoryChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const scope = getString(event.data, 'scope');
+  const filePath = getString(event.data, 'filePath');
+  const mode = getString(event.data, 'mode');
+  // wenshao R3 (claude-opus-4-7): use the `numberField` helper so NaN /
+  // Infinity are rejected — every other numeric field in the normalizer
+  // already routes through it. A daemon emitting `bytesWritten: NaN`
+  // would otherwise propagate to renderers as `+NaNb`.
+  const bytesWritten = numberField(
+    isRecord(event.data) ? event.data : undefined,
+    'bytesWritten',
+  );
+  if (
+    (scope !== 'workspace' && scope !== 'global') ||
+    !filePath ||
+    (mode !== 'append' && mode !== 'replace') ||
+    bytesWritten === undefined
+  ) {
+    return fallbackDebug(event, base, 'malformed memory_changed payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.memory.changed',
+      scope,
+      filePath,
+      mode,
+      bytesWritten,
+    },
+  ];
+}
+
+function normalizeAgentChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const change = getString(event.data, 'change');
+  const name = getString(event.data, 'name');
+  const level = getString(event.data, 'level');
+  if (
+    (change !== 'created' && change !== 'updated' && change !== 'deleted') ||
+    !name ||
+    (level !== 'project' && level !== 'user')
+  ) {
+    return fallbackDebug(event, base, 'malformed agent_changed payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.agent.changed',
+      change,
+      name,
+      level,
+    },
+  ];
+}
+
+function normalizeToolToggled(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const toolName = getString(event.data, 'toolName');
+  const enabled =
+    isRecord(event.data) && typeof event.data['enabled'] === 'boolean'
+      ? (event.data['enabled'] as boolean)
+      : undefined;
+  if (!toolName || enabled === undefined) {
+    return fallbackDebug(event, base, 'malformed tool_toggled payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.tool.toggled',
+      toolName,
+      enabled,
+    },
+  ];
+}
+
+function normalizeWorkspaceInitialized(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const path = getString(event.data, 'path');
+  const action = getString(event.data, 'action');
+  if (
+    !path ||
+    (action !== 'created' && action !== 'overwrote' && action !== 'noop')
+  ) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed workspace_initialized payload',
+    );
+  }
+  return [{ ...base, type: 'workspace.initialized', path, action }];
+}
+
+function normalizeMcpBudgetWarning(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  if (!isRecord(event.data)) {
+    return fallbackDebug(event, base, 'non-object payload');
+  }
+  const liveCount = numberField(event.data, 'liveCount');
+  const reservedCount = numberField(event.data, 'reservedCount');
+  const budget = numberField(event.data, 'budget');
+  const thresholdRatio = numberField(event.data, 'thresholdRatio');
+  const mode = getString(event.data, 'mode');
+  if (
+    liveCount === undefined ||
+    reservedCount === undefined ||
+    budget === undefined ||
+    thresholdRatio === undefined ||
+    (mode !== 'warn' && mode !== 'enforce')
+  ) {
+    return fallbackDebug(event, base, 'malformed mcp_budget_warning payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.mcp.budget_warning',
+      liveCount,
+      reservedCount,
+      budget,
+      thresholdRatio,
+      mode,
+    },
+  ];
+}
+
+function normalizeMcpChildRefused(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  if (!isRecord(event.data)) {
+    return fallbackDebug(event, base, 'non-object payload');
+  }
+  const refusedServers = Array.isArray(event.data['refusedServers'])
+    ? (event.data['refusedServers'] as unknown[])
+        .filter(isRecord)
+        .map((s) => {
+          const name = getString(s, 'name');
+          const transport = getString(s, 'transport');
+          const reason = getString(s, 'reason');
+          if (!name || !transport || reason !== 'budget_exhausted') return null;
+          return {
+            name,
+            transport,
+            reason: 'budget_exhausted' as const,
+          };
+        })
+        .filter(
+          (
+            v,
+          ): v is {
+            name: string;
+            transport: string;
+            reason: 'budget_exhausted';
+          } => v !== null,
+        )
+    : [];
+  const budget = numberField(event.data, 'budget');
+  const liveCount = numberField(event.data, 'liveCount');
+  const reservedCount = numberField(event.data, 'reservedCount');
+  if (
+    refusedServers.length === 0 ||
+    budget === undefined ||
+    liveCount === undefined ||
+    reservedCount === undefined
+  ) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed mcp_child_refused_batch payload',
+    );
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.mcp.child_refused',
+      refusedServers,
+      budget,
+      liveCount,
+      reservedCount,
+    },
+  ];
+}
+
+function normalizeMcpServerRestarted(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const serverName = getString(event.data, 'serverName');
+  const durationMs = numberField(event.data, 'durationMs');
+  if (!serverName || durationMs === undefined) {
+    return fallbackDebug(event, base, 'malformed mcp_server_restarted payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.mcp.server_restarted',
+      serverName,
+      durationMs,
+    },
+  ];
+}
+
+function normalizeMcpServerRestartRefused(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const serverName = getString(event.data, 'serverName');
+  const reason = getString(event.data, 'reason');
+  if (!serverName || !reason || !MCP_RESTART_REFUSED_REASONS.has(reason)) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed mcp_server_restart_refused payload',
+    );
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.mcp.server_restart_refused',
+      serverName,
+      reason: reason as 'in_flight' | 'disabled' | 'budget_would_exceed',
+    },
+  ];
+}
+
+function normalizeAuthDeviceFlowStarted(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const deviceFlowId = getString(event.data, 'deviceFlowId');
+  const providerId = getString(event.data, 'providerId');
+  const expiresAt = numberField(event.data, 'expiresAt');
+  if (
+    !deviceFlowId ||
+    !providerId ||
+    !DEVICE_FLOW_PROVIDER_SET.has(providerId) ||
+    expiresAt === undefined
+  ) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed auth_device_flow_started payload',
+    );
+  }
+  return [
+    {
+      ...base,
+      type: 'auth.device_flow.started',
+      deviceFlowId,
+      providerId: providerId as DaemonAuthProviderId,
+      expiresAt,
+    },
+  ];
+}
+
+function normalizeAuthDeviceFlowThrottled(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const deviceFlowId = getString(event.data, 'deviceFlowId');
+  const intervalMs = numberField(event.data, 'intervalMs');
+  if (!deviceFlowId || intervalMs === undefined) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed auth_device_flow_throttled payload',
+    );
+  }
+  return [
+    {
+      ...base,
+      type: 'auth.device_flow.throttled',
+      deviceFlowId,
+      intervalMs,
+    },
+  ];
+}
+
+function normalizeAuthDeviceFlowAuthorized(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const deviceFlowId = getString(event.data, 'deviceFlowId');
+  const providerId = getString(event.data, 'providerId');
+  if (
+    !deviceFlowId ||
+    !providerId ||
+    !DEVICE_FLOW_PROVIDER_SET.has(providerId)
+  ) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed auth_device_flow_authorized payload',
+    );
+  }
+  const expiresAt = numberField(event.data, 'expiresAt');
+  const accountAlias = getString(event.data, 'accountAlias');
+  return [
+    {
+      ...base,
+      type: 'auth.device_flow.authorized',
+      deviceFlowId,
+      providerId: providerId as DaemonAuthProviderId,
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
+      ...(accountAlias ? { accountAlias } : {}),
+    },
+  ];
+}
+
+function normalizeAuthDeviceFlowFailed(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const deviceFlowId = getString(event.data, 'deviceFlowId');
+  const errorKind = getString(event.data, 'errorKind');
+  if (!deviceFlowId || !isDeviceFlowErrorKind(errorKind)) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed auth_device_flow_failed payload',
+    );
+  }
+  const hint = getString(event.data, 'hint');
+  return [
+    {
+      ...base,
+      type: 'auth.device_flow.failed',
+      deviceFlowId,
+      errorKind,
+      ...(hint ? { hint } : {}),
+    },
+  ];
+}
+
+/**
+ * Known closed-set of `DaemonAuthDeviceFlowErrorKind` values, exported as
+ * documentation of the canonical kinds the daemon emits today.
+ *
+ * Reviewers (wenshao + doudouOUC, PR #4353 round 2026-05-23): both
+ * suggested strict validation against this set. We intentionally keep
+ * lenient pass-through — the public type
+ * `DaemonAuthDeviceFlowSdkErrorKind` explicitly includes `(string & {})`
+ * as a forward-compat escape hatch so future daemon emissions of new
+ * kinds remain typed-acceptable AND propagate end-to-end without an SDK
+ * release. The existing test `keeps future auth_device_flow_failed
+ * errorKind values observable` enforces this contract.
+ *
+ * Downstream consumers `switch(errorKind)` exhaustively MUST include a
+ * `default:` arm for the open `(string & {})` case — the typed
+ * known-set arms cover the listed kinds. The known set is referenced
+ * here in code only so it surfaces in IDE hovers / type-doc tooling.
+ */
+export const KNOWN_DEVICE_FLOW_ERROR_KINDS = [
+  'expired_token',
+  'access_denied',
+  'invalid_grant',
+  'upstream_error',
+  'persist_failed',
+  'not_found_or_evicted',
+] as const satisfies readonly DaemonAuthDeviceFlowSdkErrorKind[];
+
+function isDeviceFlowErrorKind(
+  value: unknown,
+): value is DaemonAuthDeviceFlowSdkErrorKind {
+  // Lenient pass-through. See `KNOWN_DEVICE_FLOW_ERROR_KINDS` above for
+  // the canonical set; the `(string & {})` arm of the public type
+  // tolerates anything else for forward-compat.
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function normalizeAuthDeviceFlowCancelled(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const deviceFlowId = getString(event.data, 'deviceFlowId');
+  if (!deviceFlowId) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed auth_device_flow_cancelled payload',
+    );
+  }
+  return [{ ...base, type: 'auth.device_flow.cancelled', deviceFlowId }];
+}
+
+function numberField(value: unknown, key: string): number | undefined {
+  if (!isRecord(value)) return undefined;
+  const v = value[key];
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }

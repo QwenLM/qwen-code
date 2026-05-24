@@ -20,7 +20,6 @@ import {
   DaemonSessionClient,
   createDaemonTranscriptStore,
   normalizeDaemonEvent,
-  selectPendingPermissionBlocks,
   type CreateSessionRequest,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
@@ -153,6 +152,19 @@ export function DaemonSessionProvider({
               promptAbortRef.current = undefined;
               promptBusyRef.current = false;
               store.reset();
+            } else if (previousSessionId !== undefined) {
+              store.dispatch({ type: 'assistant.done', reason: 'reconnected' });
+              // wenshao R6 (qwen3.7-max): clear the awaitingResync latch
+              // BEFORE the new SSE event loop starts. Otherwise, if the
+              // prior connection ended after `state_resync_required` set
+              // the latch, every event from the fresh stream gets dropped
+              // by `applyDaemonTranscriptEvent`'s passthrough guard —
+              // transcript stays permanently frozen even though the
+              // connection is healthy. Same-session reconnect IS the
+              // recovery path; signal it to the reducer now.
+              if (store.getSnapshot().awaitingResync) {
+                store.clearAwaitingResync();
+              }
             }
             session = nextSession;
             lastSessionIdRef.current = session.sessionId;
@@ -195,10 +207,16 @@ export function DaemonSessionProvider({
           if (!disposed && !abort.signal.aborted) {
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
+            store.dispatch({ type: 'assistant.done', reason: 'stream_ended' });
             store.dispatch({
               type: 'status',
               text: 'SSE stream ended',
             });
+            setConnection((current) => ({
+              ...current,
+              status: 'disconnected',
+              error: 'SSE stream ended',
+            }));
           }
         } catch (error) {
           if (disposed || abort.signal.aborted) return;
@@ -445,12 +463,29 @@ export function useDaemonTranscriptState(): DaemonTranscriptState {
 }
 
 export function useDaemonTranscriptBlocks(): readonly DaemonTranscriptBlock[] {
-  return useDaemonTranscriptState().blocks;
+  const store = useDaemonTranscriptStore();
+  return useSyncExternalStore(
+    store.subscribe,
+    () => store.getSnapshot().blocks,
+    () => store.getSnapshot().blocks,
+  );
 }
 
 export function useDaemonPendingPermissions() {
-  const state = useDaemonTranscriptState();
-  return useMemo(() => selectPendingPermissionBlocks(state), [state]);
+  // wenshao R5 (qwen3.7-max): subscribe at the blocks level instead of
+  // the full transcript state. `selectPendingPermissionBlocks` reads
+  // only `state.blocks`; subscribing to the full state caused this
+  // hook to re-render on every daemon event (text deltas, tool
+  // updates, sidechannel changes) even when blocks were unchanged.
+  const blocks = useDaemonTranscriptBlocks();
+  return useMemo(
+    () =>
+      blocks.filter(
+        (block): block is Extract<DaemonTranscriptBlock, { kind: 'permission' }> =>
+          block.kind === 'permission' && block.resolved === undefined,
+      ),
+    [blocks],
+  );
 }
 
 export function useDaemonActions(): DaemonUiSessionActions {
