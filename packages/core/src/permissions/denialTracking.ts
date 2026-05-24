@@ -40,6 +40,13 @@ export const AUTO_MODE_DENIAL_LIMITS = {
   maxTotalDenials: 20,
 } as const;
 
+function hasReachedTotalCap(state: AutoModeDenialState): boolean {
+  return (
+    state.totalBlock + state.totalUnavailable >=
+    AUTO_MODE_DENIAL_LIMITS.maxTotalDenials
+  );
+}
+
 /** Freshly-initialised state with all counters zero. */
 export function createDenialState(): AutoModeDenialState {
   return {
@@ -48,6 +55,27 @@ export function createDenialState(): AutoModeDenialState {
     totalBlock: 0,
     totalUnavailable: 0,
   };
+}
+
+/** Format denial counters for AUTO-mode debug logs. */
+export function formatDenialStateLog(state: AutoModeDenialState): string {
+  return (
+    `consecutiveBlock=${state.consecutiveBlock}, ` +
+    `consecutiveUnavailable=${state.consecutiveUnavailable}, ` +
+    `totalBlock=${state.totalBlock}, ` +
+    `totalUnavailable=${state.totalUnavailable}`
+  );
+}
+
+/** True when a fallback reason came from denial tracking. */
+export function isDenialFallbackReason(
+  reason: string,
+): reason is DenialFallbackReason {
+  return (
+    reason === 'consecutive_block' ||
+    reason === 'consecutive_unavailable' ||
+    reason === 'total_denial'
+  );
 }
 
 /** Record a successful (allow) decision. Resets both consecutive counters. */
@@ -100,10 +128,7 @@ export function recordUnavailable(
 export function shouldFallback(
   state: AutoModeDenialState,
 ): { fallback: true; reason: DenialFallbackReason } | { fallback: false } {
-  if (
-    state.totalBlock + state.totalUnavailable >=
-    AUTO_MODE_DENIAL_LIMITS.maxTotalDenials
-  ) {
+  if (hasReachedTotalCap(state)) {
     return { fallback: true, reason: 'total_denial' };
   }
   if (state.consecutiveBlock >= AUTO_MODE_DENIAL_LIMITS.maxConsecutiveBlock) {
@@ -138,10 +163,7 @@ export function shouldFallback(
 export function recordFallbackApprove(
   state: AutoModeDenialState,
 ): AutoModeDenialState {
-  if (
-    state.totalBlock + state.totalUnavailable >=
-    AUTO_MODE_DENIAL_LIMITS.maxTotalDenials
-  ) {
+  if (hasReachedTotalCap(state)) {
     return createDenialState();
   }
   if (state.consecutiveBlock === 0 && state.consecutiveUnavailable === 0) {

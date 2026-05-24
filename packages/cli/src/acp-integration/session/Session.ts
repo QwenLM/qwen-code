@@ -63,7 +63,9 @@ import {
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
   evaluateAutoMode,
+  formatDenialStateLog,
   isApproveOutcome,
+  isDenialFallbackReason,
   MAX_TRANSCRIPT_MESSAGES,
   recordAllow,
   recordFallbackApprove,
@@ -1970,9 +1972,7 @@ export class Session implements SessionContext {
           messages,
           config: this.config,
           signal: abortSignal,
-          skipClassifierReason: fallback.fallback
-            ? fallback.reason
-            : undefined,
+          skipClassifierReason: fallback.fallback ? fallback.reason : undefined,
         });
 
         // Apply decision via shared helper — eliminates ~40 lines of
@@ -1992,10 +1992,7 @@ export class Session implements SessionContext {
           case 'blocked':
             debugLogger.warn(
               `Auto mode blocked (${outcome.reason}): tool=${fc.name}, ` +
-                `consecutiveBlock=${denialState.consecutiveBlock}, ` +
-                `consecutiveUnavailable=${denialState.consecutiveUnavailable}, ` +
-                `totalBlock=${denialState.totalBlock}, ` +
-                `totalUnavailable=${denialState.totalUnavailable}`,
+                formatDenialStateLog(denialState),
             );
             if (!this.config.getDisableAllHooks?.()) {
               const messageBus = this.config.getMessageBus?.();
@@ -2013,17 +2010,11 @@ export class Session implements SessionContext {
             return earlyErrorResponse(new Error(outcome.errorMessage), fc.name);
           case 'fallback':
             // Drop through to the manual-approval flow below.
-            wasAutoModeDenialFallback =
-              outcome.reason === 'consecutive_block' ||
-              outcome.reason === 'consecutive_unavailable' ||
-              outcome.reason === 'total_denial';
+            wasAutoModeDenialFallback = isDenialFallbackReason(outcome.reason);
             if (wasAutoModeDenialFallback) {
               debugLogger.warn(
                 `Auto mode fallback to manual approval (${outcome.reason}): ` +
-                  `consecutiveBlock=${denialState.consecutiveBlock}, ` +
-                  `consecutiveUnavailable=${denialState.consecutiveUnavailable}, ` +
-                  `totalBlock=${denialState.totalBlock}, ` +
-                  `totalUnavailable=${denialState.totalUnavailable}`,
+                  formatDenialStateLog(denialState),
               );
             }
             break;

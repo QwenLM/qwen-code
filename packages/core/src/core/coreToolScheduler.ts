@@ -72,7 +72,9 @@ import {
 } from '../permissions/autoMode.js';
 import { MAX_TRANSCRIPT_MESSAGES } from '../permissions/classifier-transcript.js';
 import {
+  formatDenialStateLog,
   isApproveOutcome,
+  isDenialFallbackReason,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
@@ -1719,10 +1721,7 @@ export class CoreToolScheduler {
               case 'blocked':
                 debugLogger.warn(
                   `Auto mode blocked (${outcome.reason}): tool=${canonicalName}, ` +
-                    `consecutiveBlock=${denialState.consecutiveBlock}, ` +
-                    `consecutiveUnavailable=${denialState.consecutiveUnavailable}, ` +
-                    `totalBlock=${denialState.totalBlock}, ` +
-                    `totalUnavailable=${denialState.totalUnavailable}`,
+                    formatDenialStateLog(denialState),
                 );
                 if (!this.config.getDisableAllHooks()) {
                   const messageBus = this.config.getMessageBus() as
@@ -1755,18 +1754,11 @@ export class CoreToolScheduler {
                 // operators see the cause in the debug log (only when
                 // fallback was specifically armed by denialTracking —
                 // a pmForcedAsk fallback isn't an audit-worthy event).
-                if (
-                  outcome.reason === 'consecutive_block' ||
-                  outcome.reason === 'consecutive_unavailable' ||
-                  outcome.reason === 'total_denial'
-                ) {
+                if (isDenialFallbackReason(outcome.reason)) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
-                      `consecutiveBlock=${denialState.consecutiveBlock}, ` +
-                      `consecutiveUnavailable=${denialState.consecutiveUnavailable}, ` +
-                      `totalBlock=${denialState.totalBlock}, ` +
-                      `totalUnavailable=${denialState.totalUnavailable}`,
+                      formatDenialStateLog(denialState),
                   );
                 }
                 break;

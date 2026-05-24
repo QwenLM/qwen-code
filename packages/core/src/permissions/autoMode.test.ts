@@ -336,6 +336,12 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
       kind: 'blocked',
       reason: 'classifier_blocked',
     });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 1,
+      consecutiveUnavailable: 0,
+      totalBlock: 1,
+      totalUnavailable: 0,
+    });
   });
 
   it('maps classifier infrastructure failures to classifier_unavailable', () => {
@@ -356,6 +362,41 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
     expect(result).toMatchObject({
       kind: 'blocked',
       reason: 'classifier_unavailable',
+    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 1,
+      totalBlock: 0,
+      totalUnavailable: 1,
+    });
+  });
+
+  it('allows classifier approvals and resets consecutive counters', () => {
+    const setAutoModeDenialState = vi.fn();
+    const result = applyAutoModeDecision(
+      {
+        via: 'classifier',
+        shouldBlock: false,
+        reason: 'safe command',
+        unavailable: false,
+        stage: 'fast',
+        durationMs: 10,
+      },
+      { setAutoModeDenialState } as unknown as Config,
+      {
+        consecutiveBlock: 1,
+        consecutiveUnavailable: 2,
+        totalBlock: 3,
+        totalUnavailable: 4,
+      },
+    );
+
+    expect(result).toEqual({ kind: 'approved' });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 3,
+      totalUnavailable: 4,
     });
   });
 

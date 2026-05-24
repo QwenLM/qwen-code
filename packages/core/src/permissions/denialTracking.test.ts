@@ -8,7 +8,9 @@ import { describe, it, expect } from 'vitest';
 import {
   AUTO_MODE_DENIAL_LIMITS,
   createDenialState,
+  formatDenialStateLog,
   isApproveOutcome,
+  isDenialFallbackReason,
   recordAllow,
   recordBlock,
   recordFallbackApprove,
@@ -28,6 +30,35 @@ const FRESH: AutoModeDenialState = {
 describe('createDenialState', () => {
   it('starts with all counters at zero', () => {
     expect(createDenialState()).toEqual(FRESH);
+  });
+});
+
+describe('formatDenialStateLog', () => {
+  it('formats every denial counter in a stable order', () => {
+    expect(
+      formatDenialStateLog({
+        consecutiveBlock: 1,
+        consecutiveUnavailable: 2,
+        totalBlock: 3,
+        totalUnavailable: 4,
+      }),
+    ).toBe(
+      'consecutiveBlock=1, consecutiveUnavailable=2, totalBlock=3, totalUnavailable=4',
+    );
+  });
+});
+
+describe('isDenialFallbackReason', () => {
+  it('accepts denial-tracking fallback reasons', () => {
+    expect(isDenialFallbackReason('consecutive_block')).toBe(true);
+    expect(isDenialFallbackReason('consecutive_unavailable')).toBe(true);
+    expect(isDenialFallbackReason('total_denial')).toBe(true);
+  });
+
+  it('rejects non-denial fallback reasons', () => {
+    expect(isDenialFallbackReason('ask_rule')).toBe(false);
+    expect(isDenialFallbackReason('safety_check')).toBe(false);
+    expect(isDenialFallbackReason('')).toBe(false);
   });
 });
 
@@ -129,6 +160,20 @@ describe('shouldFallback', () => {
       reason: 'total_denial',
     });
   });
+
+  it('gives total-denial fallback precedence over consecutive thresholds', () => {
+    const s: AutoModeDenialState = {
+      consecutiveBlock: AUTO_MODE_DENIAL_LIMITS.maxConsecutiveBlock,
+      consecutiveUnavailable: 0,
+      totalBlock: AUTO_MODE_DENIAL_LIMITS.maxTotalDenials,
+      totalUnavailable: 0,
+    };
+
+    expect(shouldFallback(s)).toEqual({
+      fallback: true,
+      reason: 'total_denial',
+    });
+  });
 });
 
 describe('recordFallbackApprove', () => {
@@ -187,6 +232,17 @@ describe('recordFallbackApprove', () => {
     expect(s.totalBlock).toBe(0);
     expect(s.totalUnavailable).toBe(0);
     expect(shouldFallback(s)).toEqual({ fallback: false });
+  });
+
+  it('resets all counters when total and consecutive caps overlap', () => {
+    const s: AutoModeDenialState = {
+      consecutiveBlock: AUTO_MODE_DENIAL_LIMITS.maxConsecutiveBlock,
+      consecutiveUnavailable: 0,
+      totalBlock: AUTO_MODE_DENIAL_LIMITS.maxTotalDenials,
+      totalUnavailable: 0,
+    };
+
+    expect(recordFallbackApprove(s)).toEqual(FRESH);
   });
 
   it('is a no-op when both consecutive counters are already zero', () => {
