@@ -30,7 +30,8 @@ const client = new DaemonClient({
   // PR 27 (v0.16-alpha): when `token` is omitted, DaemonClient falls
   // back to `process.env.QWEN_SERVER_TOKEN` automatically — same env
   // var the daemon's `--token` CLI flag falls back to. So either:
-  //   export QWEN_SERVER_TOKEN="$(cat ~/.qwen/server-token)"
+  //   export QWEN_SERVER_TOKEN="$(openssl rand -hex 32)"   # one-shot
+  //   export QWEN_SERVER_TOKEN="$(cat ./my-token-file)"    # user-managed file
   //   const client = new DaemonClient({ baseUrl: '...' });
   // OR pass it explicitly when you have a different env-var name:
   //   token: process.env.MY_TOKEN,

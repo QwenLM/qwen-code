@@ -129,9 +129,10 @@ function stripTrailingSlashes(url: string): string {
 /**
  * PR 27 (#4175 v0.16-alpha): SDK env fallback for the daemon bearer
  * token. Mirrors the daemon-side `--token` CLI fallback to
- * `QWEN_SERVER_TOKEN` (`runQwenServe.ts:175`) so a developer with
- * `export QWEN_SERVER_TOKEN=...` in their shell never has to thread
- * the value through every `DaemonClient` construction.
+ * `QWEN_SERVER_TOKEN` (the daemon's own token-resolution path in
+ * `runQwenServe` reads the same env var in the same shape) so a
+ * developer with `export QWEN_SERVER_TOKEN=...` in their shell never
+ * has to thread the value through every `DaemonClient` construction.
  *
  * Defensive on three axes:
  *   1. **Browser-safe**: `globalThis.process` indirection. The SDK is
@@ -140,8 +141,9 @@ function stripTrailingSlashes(url: string): string {
  *      bundles. Browser globals don't expose `process` so this returns
  *      `undefined` cleanly there.
  *   2. **Whitespace stripped**: matches the daemon-side trim behavior
- *      (`docs/users/qwen-serve.md:173` — handy for `$(cat token.txt)`
- *      that produces a trailing newline).
+ *      documented in the `qwen-serve` user guide under the CLI flags
+ *      section — handy for `$(cat token.txt)` that produces a trailing
+ *      newline.
  *   3. **Empty / whitespace-only treated as unset**: a stale
  *      `export QWEN_SERVER_TOKEN=""` would otherwise let the
  *      Authorization header through as `Bearer ` (no token), which
