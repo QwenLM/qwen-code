@@ -2148,9 +2148,8 @@ describe('Settings Loading and Merging', () => {
     });
 
     it('should resolve ${VAR} in settings from home-level .env file (#4466)', () => {
-      // Simulate a token defined only in ~/.qwen/.env, not in process.env
       const homeQwenEnvPath = path.join(
-        getUserSettingsDir(),
+        path.dirname(USER_SETTINGS_PATH),
         '.env',
       );
       const userSettingsContent = {
@@ -2176,7 +2175,6 @@ describe('Settings Loading and Merging', () => {
         },
       );
 
-      // MY_SECRET_TOKEN is NOT in process.env — only in .env file
       delete process.env['MY_SECRET_TOKEN'];
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
@@ -2189,6 +2187,91 @@ describe('Settings Loading and Merging', () => {
       );
 
       delete process.env['MY_SECRET_TOKEN'];
+    });
+
+    it('should not override process.env values with home .env file (#4466)', () => {
+      const homeQwenEnvPath = path.join(
+        path.dirname(USER_SETTINGS_PATH),
+        '.env',
+      );
+      const userSettingsContent = {
+        mcpServers: {
+          myServer: {
+            headers: {
+              Authorization: 'Bearer ${MY_SECRET_TOKEN}',
+            },
+          },
+        },
+      };
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === homeQwenEnvPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === homeQwenEnvPath) return 'MY_SECRET_TOKEN=from_dotenv';
+          return '{}';
+        },
+      );
+
+      process.env['MY_SECRET_TOKEN'] = 'from_process_env';
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mcpServers = settings.merged.mcpServers as Record<
+        string,
+        { headers?: Record<string, string> }
+      >;
+      expect(mcpServers?.['myServer']?.headers?.['Authorization']).toBe(
+        'Bearer from_process_env',
+      );
+
+      delete process.env['MY_SECRET_TOKEN'];
+    });
+
+    it('should not search dirname(qwenDir)/.env when QWEN_HOME is set (#4466)', () => {
+      const customHome = '/custom/qwen/home';
+      process.env['QWEN_HOME'] = customHome;
+      const homeEnvPath = path.join(customHome, '.env');
+      const dirnameEnvPath = path.join(path.dirname(customHome), '.env');
+      const userSettingsContent = {
+        mcpServers: {
+          myServer: {
+            headers: {
+              Authorization: 'Bearer ${MY_TOKEN}',
+            },
+          },
+        },
+      };
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === dirnameEnvPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === dirnameEnvPath) return 'MY_TOKEN=should_not_be_found';
+          return '{}';
+        },
+      );
+
+      delete process.env['MY_TOKEN'];
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mcpServers = settings.merged.mcpServers as Record<
+        string,
+        { headers?: Record<string, string> }
+      >;
+      expect(mcpServers?.['myServer']?.headers?.['Authorization']).toBe(
+        'Bearer ${MY_TOKEN}',
+      );
+
+      delete process.env['MY_TOKEN'];
+      delete process.env['QWEN_HOME'];
     });
 
     it('should correctly merge dnsResolutionOrder with workspace taking precedence', () => {

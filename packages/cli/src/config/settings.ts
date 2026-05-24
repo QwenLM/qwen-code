@@ -596,22 +596,14 @@ export function resetHomeEnvBootstrapForTesting(): void {
   homeEnvBootstrapped = false;
 }
 
-/**
- * Loads all variables from home-level .env files into process.env
- * (no-override mode). Called after preResolveHomeEnvOverrides() but
- * before resolveEnvVarsInObject() so that \${VAR} placeholders in
- * settings.json can reference variables defined in ~/.qwen/.env.
- *
- * Only home-scoped files are loaded here; workspace .env files and
- * settings.env are handled later by loadEnvironment().
- */
-function preLoadHomeEnvVars(): void {
+function getHomeEnvFallbackVars(): Record<string, string> {
   const globalQwenDir = Storage.getGlobalQwenDir();
-  const candidates = [
-    path.join(globalQwenDir, '.env'),
-    path.join(path.dirname(globalQwenDir), '.env'),
-  ];
+  const candidates = [path.join(globalQwenDir, '.env')];
+  if (!process.env['QWEN_HOME']) {
+    candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
+  }
 
+  const result: Record<string, string> = {};
   for (const candidate of candidates) {
     if (!fs.existsSync(candidate)) {
       continue;
@@ -620,13 +612,14 @@ function preLoadHomeEnvVars(): void {
       const parsed = dotenv.parse(fs.readFileSync(candidate, 'utf-8'));
       for (const key in parsed) {
         if (Object.hasOwn(parsed, key) && !Object.hasOwn(process.env, key)) {
-          process.env[key] = parsed[key];
+          result[key] = parsed[key]!;
         }
       }
     } catch (_e) {
       // Match dotenv quiet-mode behavior.
     }
   }
+  return result;
 }
 
 /**
@@ -1065,14 +1058,14 @@ export function loadSettings(
   const userOriginalSettings = structuredClone(userResult.settings);
   const workspaceOriginalSettings = structuredClone(workspaceResult.settings);
 
-  // Environment variables for runtime use
-  // Pre-load home-level .env vars so \${VAR} placeholders in settings.json
-  // can reference them (fixes #4466).
-  preLoadHomeEnvVars();
-  systemSettings = resolveEnvVarsInObject(systemResult.settings);
-  systemDefaultSettings = resolveEnvVarsInObject(systemDefaultsResult.settings);
-  userSettings = resolveEnvVarsInObject(userResult.settings);
-  workspaceSettings = resolveEnvVarsInObject(workspaceResult.settings);
+  // Resolve ${VAR} placeholders in settings using home .env as fallback.
+  // Returned dict excludes keys already in process.env so process.env
+  // takes precedence (customEnv is checked first by the resolver).
+  const homeEnvFallback = getHomeEnvFallbackVars();
+  systemSettings = resolveEnvVarsInObject(systemResult.settings, homeEnvFallback);
+  systemDefaultSettings = resolveEnvVarsInObject(systemDefaultsResult.settings, homeEnvFallback);
+  userSettings = resolveEnvVarsInObject(userResult.settings, homeEnvFallback);
+  workspaceSettings = resolveEnvVarsInObject(workspaceResult.settings, homeEnvFallback);
 
   // Support legacy theme names
   if (userSettings.ui?.theme === 'VS') {
