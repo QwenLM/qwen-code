@@ -2,6 +2,8 @@
 
 Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, CI scripts, custom CLIs) share one agent session over HTTP + Server-Sent Events instead of each spawning their own subprocess.
 
+> **🚧 v0.16-alpha**: `qwen serve` first ships to npm in v0.16-alpha as **text-only chat / coding** with **local-only deployment**. Image / file attachments on the prompt path, containerized deployment (Docker / k8s / nginx reverse-proxy), and remote / multi-daemon hardening land in a follow-up patch when an enterprise pilot is committed. See [v0.16-alpha known limits](#v016-alpha-known-limits) for the full deferred list.
+
 > **Status:** Stage 1 (experimental). The protocol surface is locked at the §04 routes table from issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803). Stage 1.5 (`qwen --serve` flag — TUI co-hosts the same HTTP server) and Stage 2 (in-process refactor + `mDNS`/OpenAPI/WebSocket/Prometheus polish) are immediately downstream.
 >
 > **Scope honesty:** Stage 1 is sized for **developers prototyping clients against the protocol surface** and for **local single-user / small-team collaboration**. Production-grade multi-client / long-running / network-flaky workloads (mobile companions, IM bots reaching 1000+ chats) need Stage 1.5+ guarantees that aren't in this release. See [Stage 1.5+ runtime guarantees](#stage-15-runtime-guarantees) for the full gap list and #3803 for the convergence roadmap.
@@ -13,6 +15,36 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 - **First-responder permissions** — when the agent asks for permission to run a tool, every connected client sees the request; whichever client answers first wins.
 - **One daemon, one workspace** — each `qwen serve` process binds to exactly one workspace at boot (per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02). Multi-workspace deployments run one daemon per workspace on separate ports (or behind an orchestrator).
 - **Remote runtime control** ([#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 17) — change a session's approval mode (`POST /session/:id/approval-mode`), toggle a tool per workspace (`POST /workspace/tools/:name/enable`), scaffold an empty `QWEN.md` (`POST /workspace/init`, mechanical only — does NOT call the model; for AI-fill, follow up with `POST /session/:id/prompt`), or restart a single MCP server with a budget pre-check (`POST /workspace/mcp/:server/restart`). All four are strict-gated — configure `--token` first.
+
+## v0.16-alpha known limits
+
+The first npm release of `qwen serve` (v0.16-alpha) is intentionally narrow — text-only chat / coding for developers running the daemon on their own machine. The list below makes the deferred surface explicit so adopters can plan around it; everything here is on the v0.16.x patch roadmap or a near-term follow-up release.
+
+**Product surface — text-only:**
+
+- ✅ Text prompts and text responses (chat, coding, tool calls, MCP integration)
+- ❌ **Image / file attachments on the prompt path** — `MessageEmitter` currently only renders text; multimodal echo lands when an alpha target with image needs is committed (#4175 chiga0 #27 P0 item)
+- ❌ **Streaming uploads** — same gating as multimodal
+
+**Deployment surface — local-only:**
+
+- ✅ Loopback (`127.0.0.1`, default) — no auth required, suitable for dev workstations
+- ✅ Local launch via `systemd` / `launchd` / `nohup &` / `tmux` (templates land in PR 30a)
+- ✅ Bring-your-own bearer token via `QWEN_SERVER_TOKEN` env var ([Authentication](#authentication) for setup)
+- ❌ **Containerized deployment** — Docker / Compose / Kubernetes / nginx reverse-proxy with TLS termination NOT in v0.16-alpha. Defers to v0.16.x once an enterprise pilot is committed (would otherwise rot from no-one-validating).
+- ❌ **Multi-daemon coordination on one host** — `1 daemon = 1 workspace × N sessions` is enforced. Cross-host federation, instance-path token keying, and stale-token cleanup defer to v0.16.x.
+- ❌ **Auto-generated daemon tokens** — alpha is BYO-token (one `openssl rand -hex 32` away). Auto-gen + token-store infrastructure defers to v0.16.x.
+
+**Hardening — minimum viable for local single-user:**
+
+- ✅ Boot-time security gate (refuses non-loopback bind without a token, [PR 15 / #4236](https://github.com/QwenLM/qwen-code/pull/4236))
+- ✅ Mutation-route auth gate, session-scoped permission routing (Wave 4 PRs)
+- ✅ MCP guardrails + multi-client permission coordination (F2 / F3)
+- ⏸️ **Prompt absolute deadline + SSE writer idle timeout** — current AbortSignal + 15s heartbeat + `res.on('error')` cleanup is sufficient for local dev; explicit application-layer deadlines defer to v0.16.x once a remote / long-running scenario lands.
+- ⏸️ **Rate limiting + observability + load test harness** — defers to v0.17 F4 Phase-1 scale instrumentation when 30-50 active sessions becomes a real target.
+- ⏸️ **`--max-body-size` CLI flag** — daemon enforces `express.json({ limit: '10mb' })` by default which comfortably covers text-only prompts (model context windows are well under 10 MiB of chars). Tunable via flag in v0.16.x.
+
+For the deeper "what we won't fix in Stage 1" enumeration (single-host session-state mutation model + N-parallel-sessions sharing one ACP child), see [Stage 1 scope boundaries](#stage-1-scope-boundaries--what-we-wont-fix-in-stage-15) below.
 
 ## Quickstart
 
