@@ -295,6 +295,14 @@ export function initializeTelemetry(config: Config): void {
           {
             includeSensitiveSpanAttributes:
               config.getTelemetryIncludeSensitiveSpanAttributes(),
+            // In interactive (TUI) mode, route bridge diagnostics to the OTEL
+            // debug log file so they don't break out of the Ink render area
+            // via raw stderr. In non-interactive mode, leave the default sink
+            // alone so CI / scripts can still see export failures on stderr —
+            // the canonical diagnostic channel for batch runs.
+            ...(config.isInteractive() && {
+              diagnosticsSink: (message: string) => debugLogger.warn(message),
+            }),
           },
         );
       }

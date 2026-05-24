@@ -45,10 +45,27 @@ const SENSITIVE_ATTRIBUTE_KEYS = new Set([
   'response_text',
 ]);
 
+/**
+ * Sink for processor-internal diagnostic messages (export failures, buffer
+ * overflows, timeouts). Messages have no trailing newline — the sink decides
+ * how to terminate them.
+ *
+ * Default sink writes to stderr to keep diagnostics visible when the host
+ * environment has no other logging pipeline. Hosts running a TUI should
+ * inject a sink that routes to a file-based logger to avoid the message
+ * landing in the rendered terminal area.
+ */
+export type LogToSpanDiagnosticsSink = (message: string) => void;
+
+const defaultDiagnosticsSink: LogToSpanDiagnosticsSink = (message) => {
+  process.stderr.write(`${message}\n`);
+};
+
 interface LogToSpanProcessorOptions {
   flushIntervalMs?: number;
   includeSensitiveSpanAttributes?: boolean;
   maxBufferSize?: number;
+  diagnosticsSink?: LogToSpanDiagnosticsSink;
 }
 
 /**
@@ -73,6 +90,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
   private cachedTraceId: string | undefined;
   private readonly includeSensitiveSpanAttributes: boolean;
   private readonly maxBufferSize: number;
+  private readonly diagnosticsSink: LogToSpanDiagnosticsSink;
   private lastBufferOverflowWarningMs: number | undefined;
   private droppedSpansSinceLastBufferWarning = 0;
   private totalDroppedSpans = 0;
@@ -94,6 +112,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       this.flushIntervalMs = flushIntervalMsOrOptions;
       this.includeSensitiveSpanAttributes = false;
       this.maxBufferSize = normalizeMaxBufferSize(maxBufferSize);
+      this.diagnosticsSink = defaultDiagnosticsSink;
     } else {
       this.flushIntervalMs = flushIntervalMsOrOptions.flushIntervalMs ?? 5000;
       this.includeSensitiveSpanAttributes =
@@ -101,6 +120,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       this.maxBufferSize = normalizeMaxBufferSize(
         flushIntervalMsOrOptions.maxBufferSize,
       );
+      this.diagnosticsSink =
+        flushIntervalMsOrOptions.diagnosticsSink ?? defaultDiagnosticsSink;
     }
     this.flushTimer = setInterval(() => {
       void this.flush();
@@ -236,12 +257,26 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     const droppedSinceLastWarning = this.droppedSpansSinceLastBufferWarning;
     this.droppedSpansSinceLastBufferWarning = 0;
     this.lastBufferOverflowWarningMs = now;
+    this.emitDiagnostic(
+      `[LogToSpan] buffer exceeded max size (${this.maxBufferSize}); dropped ${droppedSinceLastWarning} oldest span(s) since last warning, ${this.totalDroppedSpans} total`,
+    );
+  }
+
+  /**
+   * Route a diagnostic message to the configured sink, swallowing any sink
+   * error so a misbehaving sink can never interrupt telemetry ingestion.
+   *
+   * Tradeoff: when the sink itself is broken (e.g. file-logger failing on
+   * EACCES), bridge-specific diagnostics go dark. We accept that — the host
+   * surfaces overall logging health via `isDebugLoggingDegraded()`, and
+   * falling back to stderr here would re-introduce the TUI-pollution this
+   * sink injection was added to prevent.
+   */
+  private emitDiagnostic(message: string): void {
     try {
-      process.stderr.write(
-        `[LogToSpan] buffer exceeded max size (${this.maxBufferSize}); dropped ${droppedSinceLastWarning} oldest span(s) since last warning, ${this.totalDroppedSpans} total\n`,
-      );
+      this.diagnosticsSink(message);
     } catch {
-      // Logging diagnostics must not interrupt telemetry ingestion.
+      // Diagnostics must never interrupt telemetry ingestion.
     }
   }
 
@@ -251,8 +286,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     const spans = this.buffer.splice(0);
     const exportPromise = new Promise<void>((resolve) => {
       const timeout = setTimeout(() => {
-        process.stderr.write(
-          `[LogToSpan] export timeout after ${EXPORT_TIMEOUT_MS}ms\n`,
+        this.emitDiagnostic(
+          `[LogToSpan] export timeout after ${EXPORT_TIMEOUT_MS}ms`,
         );
         resolve();
       }, EXPORT_TIMEOUT_MS);
@@ -264,8 +299,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
           (result) => {
             clearTimeout(timeout);
             if (result.code !== 0) {
-              process.stderr.write(
-                `[LogToSpan] export failed: code=${result.code} error=${result.error?.message ?? 'unknown'}\n`,
+              this.emitDiagnostic(
+                `[LogToSpan] export failed: code=${result.code} ${formatExportError(result.error)}`,
               );
             }
             resolve();
@@ -273,8 +308,8 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         );
       } catch (err) {
         clearTimeout(timeout);
-        process.stderr.write(
-          `[LogToSpan] export threw: ${err instanceof Error ? err.message : String(err)}\n`,
+        this.emitDiagnostic(
+          `[LogToSpan] export threw: ${err instanceof Error ? err.message : String(err)}`,
         );
         resolve();
       }
@@ -404,6 +439,30 @@ function deriveSpanStatus(attrs: Record<string, unknown> | undefined): {
     };
   }
   return { code: SpanStatusCode.OK };
+}
+
+// OTLPExporterError carries an HTTP status `code` and response `data`, but its
+// `message` is the HTTP reason-phrase — which is empty on HTTP/2 or when the
+// gateway strips it. Surface name/code/data so the operator has something to
+// act on (e.g. a 403 from ARMS with empty body).
+//
+// Both `message` and `data` can carry embedded newlines or other shell-active
+// bytes when the backend returns a JSON error body. JSON.stringify each field
+// to keep the diagnostic on a single line — otherwise a torn record breaks
+// downstream log greps and corrupts the file-logger format.
+function formatExportError(err: Error | undefined): string {
+  if (!err) return 'error=unknown';
+  const extra = err as { code?: number; data?: string };
+  const msg = err.message || err.name || 'unknown';
+  const parts = [`error=${JSON.stringify(msg)}`];
+  // `code` is only meaningful as an HTTP status. Networking errors surface
+  // string codes like 'ECONNREFUSED' on the same field — labelling those as
+  // `httpCode` would be a lie, so only emit for numeric codes.
+  if (typeof extra.code === 'number') parts.push(`httpCode=${extra.code}`);
+  if (typeof extra.data === 'string' && extra.data.length > 0) {
+    parts.push(`data=${JSON.stringify(extra.data.slice(0, 200))}`);
+  }
+  return parts.join(' ');
 }
 
 function hrTimeDiff(start: HrTime, end: HrTime): HrTime {
