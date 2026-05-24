@@ -59,13 +59,13 @@ describe('appendUserPromptExpansionAdditionalContext', () => {
 });
 
 describe('formatUserPromptExpansionBlockedMessage', () => {
-  it('formats plain-text block reasons and truncates them', () => {
+  it('sanitizes and truncates block reasons', () => {
     const longReason = `<policy>${'x'.repeat(10_000)}</policy>`;
 
     const result = formatUserPromptExpansionBlockedMessage(longReason);
 
     expect(result).toBe(
-      `UserPromptExpansion blocked: <policy>${'x'.repeat(9_992)}`,
+      `UserPromptExpansion blocked: &lt;policy&gt;${'x'.repeat(9_986)}`,
     );
     expect(result.length).toBe('UserPromptExpansion blocked: '.length + 10_000);
   });

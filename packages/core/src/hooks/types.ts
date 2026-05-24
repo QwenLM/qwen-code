@@ -338,19 +338,23 @@ export class DefaultHookOutput implements HookOutput {
     return this.stopReason || this.reason || 'No reason provided';
   }
 
-  /**
-   * Get sanitized additional context for adding to responses.
-   */
-  getAdditionalContext(): string | undefined {
+  protected getRawAdditionalContext(): string | undefined {
     if (
       this.hookSpecificOutput &&
       'additionalContext' in this.hookSpecificOutput
     ) {
       const context = this.hookSpecificOutput['additionalContext'];
-      if (typeof context !== 'string') {
-        return undefined;
-      }
+      return typeof context === 'string' ? context : undefined;
+    }
+    return undefined;
+  }
 
+  /**
+   * Get sanitized additional context for adding to responses.
+   */
+  getAdditionalContext(): string | undefined {
+    const context = this.getRawAdditionalContext();
+    if (context !== undefined) {
       // Sanitize by escaping < and > to prevent tag injection
       return context.replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
@@ -494,19 +498,15 @@ export class PostToolUseFailureHookOutput extends DefaultHookOutput {
  */
 export class UserPromptExpansionHookOutput extends DefaultHookOutput {
   override getAdditionalContext(): string | undefined {
-    const raw =
-      this.hookSpecificOutput &&
-      'additionalContext' in this.hookSpecificOutput &&
-      typeof this.hookSpecificOutput['additionalContext'] === 'string'
-        ? this.hookSpecificOutput['additionalContext']
-        : undefined;
-    if (!raw) {
+    const raw = this.getRawAdditionalContext();
+    if (raw === undefined) {
       return undefined;
     }
     return raw
       .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH)
       .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+      .replace(/>/g, '&gt;')
+      .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH);
   }
 }
 

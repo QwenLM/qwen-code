@@ -632,8 +632,11 @@ describe('HookRunner', () => {
       };
       const chainedContext = secondInput.prompt?.replace('Base prompt\n\n', '');
       expect(chainedContext?.startsWith('&lt;tag&gt;')).toBe(true);
-      expect(chainedContext).toContain('x'.repeat(9_995));
+      expect(chainedContext).toContain('x'.repeat(9_989));
       expect(chainedContext).not.toContain('<tag>');
+      expect(chainedContext).toHaveLength(
+        MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+      );
     });
   });
 

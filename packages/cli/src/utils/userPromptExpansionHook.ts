@@ -47,5 +47,10 @@ export function formatUserPromptExpansionBlockedMessage(
     0,
     MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
   );
-  return `UserPromptExpansion blocked: ${truncatedReason}`;
+  const sanitizedReason = truncatedReason
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH);
+  return `UserPromptExpansion blocked: ${sanitizedReason}`;
 }
