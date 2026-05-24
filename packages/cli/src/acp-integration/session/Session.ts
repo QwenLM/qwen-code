@@ -1988,6 +1988,13 @@ export class Session implements SessionContext {
             autoModeAllowed = true;
             break;
           case 'blocked':
+            debugLogger.warn(
+              `Auto mode blocked (${outcome.reason}): tool=${fc.name}, ` +
+                `consecutiveBlock=${denialState.consecutiveBlock}, ` +
+                `consecutiveUnavailable=${denialState.consecutiveUnavailable}, ` +
+                `totalBlock=${denialState.totalBlock}, ` +
+                `totalUnavailable=${denialState.totalUnavailable}`,
+            );
             if (!this.config.getDisableAllHooks?.()) {
               const messageBus = this.config.getMessageBus?.();
               if (messageBus) {

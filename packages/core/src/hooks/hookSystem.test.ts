@@ -95,6 +95,7 @@ describe('HookSystem', () => {
       firePreCompactEvent: vi.fn(),
       fireNotificationEvent: vi.fn(),
       firePermissionRequestEvent: vi.fn(),
+      firePermissionDeniedEvent: vi.fn(),
       fireSubagentStartEvent: vi.fn(),
       fireSubagentStopEvent: vi.fn(),
       fireTodoCreatedEvent: vi.fn(),
@@ -1421,6 +1422,53 @@ describe('HookSystem', () => {
       );
 
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe('firePermissionDeniedEvent', () => {
+    it('should delegate to hookEventHandler.firePermissionDeniedEvent', async () => {
+      const mockResult = createMockAggregatedResult();
+      vi.mocked(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.firePermissionDeniedEvent(
+        'Bash',
+        { command: 'rm -rf /tmp/example' },
+        'tool-use-1',
+        'classifier_blocked',
+      );
+
+      expect(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).toHaveBeenCalledWith(
+        'Bash',
+        { command: 'rm -rf /tmp/example' },
+        'tool-use-1',
+        'classifier_blocked',
+        undefined,
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it('should return DefaultHookOutput when finalOutput exists', async () => {
+      const mockResult = createMockAggregatedResult(true, {
+        decision: 'block' as HookDecision,
+        reason: 'Observed denial',
+      });
+      vi.mocked(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.firePermissionDeniedEvent(
+        'ReadFile',
+        { path: '/secret.txt' },
+        'tool-use-2',
+        'classifier_unavailable',
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.isBlockingDecision()).toBe(true);
     });
   });
 

@@ -359,6 +359,18 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
       reason: 'classifier_unavailable',
     });
   });
+
+  it('passes through fallback reason without mutating denial state', () => {
+    const setAutoModeDenialState = vi.fn();
+    const result = applyAutoModeDecision(
+      { via: 'fallback', reason: 'denial_cap' },
+      { setAutoModeDenialState } as unknown as Config,
+      denialState,
+    );
+
+    expect(result).toEqual({ kind: 'fallback', reason: 'denial_cap' });
+    expect(setAutoModeDenialState).not.toHaveBeenCalled();
+  });
 });
 
 // ─── formatClassifierBlockMessage ────────────────────────────────────────
