@@ -494,9 +494,19 @@ export class PostToolUseFailureHookOutput extends DefaultHookOutput {
  */
 export class UserPromptExpansionHookOutput extends DefaultHookOutput {
   override getAdditionalContext(): string | undefined {
-    return super
-      .getAdditionalContext()
-      ?.slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH);
+    const raw =
+      this.hookSpecificOutput &&
+      'additionalContext' in this.hookSpecificOutput &&
+      typeof this.hookSpecificOutput['additionalContext'] === 'string'
+        ? this.hookSpecificOutput['additionalContext']
+        : undefined;
+    if (!raw) {
+      return undefined;
+    }
+    return raw
+      .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH)
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
   }
 }
 

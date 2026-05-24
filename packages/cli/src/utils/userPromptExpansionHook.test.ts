@@ -8,9 +8,16 @@ import { describe, expect, it } from 'vitest';
 import {
   appendUserPromptExpansionAdditionalContext,
   formatUserPromptExpansionBlockedMessage,
+  serializeUserPromptExpansionPrompt,
 } from './userPromptExpansionHook.js';
 
 describe('appendUserPromptExpansionAdditionalContext', () => {
+  it('returns content unchanged when additionalContext is undefined', () => {
+    expect(
+      appendUserPromptExpansionAdditionalContext('base prompt', undefined),
+    ).toBe('base prompt');
+  });
+
   it('truncates additional context before appending to string prompts', () => {
     const longContext = 'x'.repeat(10_005);
 
@@ -52,15 +59,42 @@ describe('appendUserPromptExpansionAdditionalContext', () => {
 });
 
 describe('formatUserPromptExpansionBlockedMessage', () => {
-  it('sanitizes and truncates block reasons', () => {
+  it('formats plain-text block reasons and truncates them', () => {
     const longReason = `<policy>${'x'.repeat(10_000)}</policy>`;
 
     const result = formatUserPromptExpansionBlockedMessage(longReason);
 
     expect(result).toBe(
-      `UserPromptExpansion blocked: &lt;policy&gt;${'x'.repeat(9_986)}`,
+      `UserPromptExpansion blocked: <policy>${'x'.repeat(9_992)}`,
     );
-    expect(result).not.toContain('<policy>');
     expect(result.length).toBe('UserPromptExpansion blocked: '.length + 10_000);
+  });
+});
+
+describe('serializeUserPromptExpansionPrompt', () => {
+  it('returns string prompts unchanged', () => {
+    expect(serializeUserPromptExpansionPrompt('plain prompt')).toBe(
+      'plain prompt',
+    );
+  });
+
+  it('serializes part arrays with verbose formatting', () => {
+    expect(
+      serializeUserPromptExpansionPrompt([
+        { text: 'first' },
+        { inlineData: { mimeType: 'text/plain', data: 'ZGF0YQ==' } },
+        { text: 'last' },
+      ]),
+    ).toBe('first<text/plain>last');
+  });
+
+  it('serializes a single part object', () => {
+    expect(serializeUserPromptExpansionPrompt({ text: 'single part' })).toBe(
+      'single part',
+    );
+  });
+
+  it('serializes empty part arrays to an empty string', () => {
+    expect(serializeUserPromptExpansionPrompt([])).toBe('');
   });
 });

@@ -580,7 +580,7 @@ describe('HookRunner', () => {
       );
     });
 
-    it('should sanitize and truncate UserPromptExpansion context before chaining', async () => {
+    it('should truncate UserPromptExpansion context before sanitizing it for chaining', async () => {
       const unsafeContext =
         '<tag>' +
         'x'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH);
@@ -631,10 +631,8 @@ describe('HookRunner', () => {
         prompt?: string;
       };
       const chainedContext = secondInput.prompt?.replace('Base prompt\n\n', '');
-      expect(chainedContext).toHaveLength(
-        MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
-      );
       expect(chainedContext?.startsWith('&lt;tag&gt;')).toBe(true);
+      expect(chainedContext).toContain('x'.repeat(9_995));
       expect(chainedContext).not.toContain('<tag>');
     });
   });

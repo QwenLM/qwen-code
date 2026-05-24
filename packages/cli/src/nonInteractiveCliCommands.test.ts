@@ -416,6 +416,87 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('should not fire UserPromptExpansion hooks when hooks are disabled', async () => {
+    vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(true);
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(mockFireUserPromptExpansionEvent).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'Expanded prompt',
+    });
+  });
+
+  it('should not fire UserPromptExpansion hooks when no hooks are configured', async () => {
+    vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(mockFireUserPromptExpansionEvent).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'Expanded prompt',
+    });
+  });
+
+  it('should not fire UserPromptExpansion hooks when hook system is unavailable', async () => {
+    vi.mocked(mockConfig.getHookSystem).mockReturnValue(undefined);
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(mockFireUserPromptExpansionEvent).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'Expanded prompt',
+    });
+  });
+
   it('should block submit_prompt commands when UserPromptExpansion blocks', async () => {
     mockFireUserPromptExpansionEvent.mockResolvedValue({
       getBlockingError: () => ({
