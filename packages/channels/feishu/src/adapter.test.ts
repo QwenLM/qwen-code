@@ -399,6 +399,13 @@ describe('FeishuChannel', () => {
       );
       sessionToInboundMsg.set('session_abc', 'inbound_1');
 
+      // Simulate msgToSenderId mapping (fail-closed auth check)
+      const msgToSenderId = getPrivateMethod<Map<string, string>>(
+        channel,
+        'msgToSenderId',
+      );
+      msgToSenderId.set('inbound_1', 'user_open_id');
+
       // Call onCardAction with stop
       const onCardAction = getPrivateMethod<
         (data: Record<string, unknown>) => boolean

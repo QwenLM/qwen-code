@@ -54,6 +54,10 @@ interface CardSessionState {
   pendingUpdateTimer?: ReturnType<typeof setTimeout>;
   /** Captured before cleanup so the creating→stopped callback retains the @sender prefix. */
   atPrefix?: string;
+  /** Set by onResponseComplete to prevent concurrent updateCard from pendingUpdateTimer callback. */
+  finalizing?: boolean;
+  /** Set when card creation has permanently failed to prevent retry spiral. */
+  cardCreationFailed?: boolean;
 }
 
 /** Track seen message IDs to deduplicate retried events. */
@@ -141,6 +145,11 @@ export class FeishuChannel extends ChannelBase {
           `Channel "${this.name}" webhook mode requires verificationToken for request authentication.`,
         );
       }
+      if (!encryptKey) {
+        process.stderr.write(
+          `[Feishu:${this.name}] WARNING: webhook mode started without encryptKey. If the Feishu app has event encryption enabled, events will be silently dropped.\n`,
+        );
+      }
       // HTTP Webhook mode
       await this.connectWebhook(webhookPort, verificationToken, encryptKey);
     } else {
@@ -214,7 +223,13 @@ export class FeishuChannel extends ChannelBase {
 
     this.httpServer = createServer((req, res) => {
       if (req.method === 'POST') {
-        let body = '';
+        req.on('error', () => {
+          if (!res.headersSent) {
+            res.writeHead(400);
+            res.end('Bad Request');
+          }
+        });
+        const bodyChunks: Buffer[] = [];
         let bodySize = 0;
         let exceeded = false;
         req.on('data', (chunk: Buffer) => {
@@ -227,14 +242,20 @@ export class FeishuChannel extends ChannelBase {
             req.destroy();
             return;
           }
-          body += chunk.toString();
+          bodyChunks.push(chunk);
         });
         req.on('end', () => {
           if (exceeded) return;
           try {
+            const body = Buffer.concat(bodyChunks).toString('utf-8');
             const parsed = JSON.parse(body);
             // Handle URL verification challenge
             if (parsed.type === 'url_verification') {
+              if (verificationToken && parsed.token !== verificationToken) {
+                res.writeHead(403);
+                res.end('Forbidden');
+                return;
+              }
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ challenge: parsed.challenge }));
               return;
@@ -720,7 +741,7 @@ export class FeishuChannel extends ChannelBase {
     if (cardState.creating) return;
 
     // If card not yet created (fallback path), create now
-    if (!cardState.created) {
+    if (!cardState.created && !cardState.cardCreationFailed) {
       cardState.creating = true;
       const cs = cardState;
       setTimeout(async () => {
@@ -762,8 +783,11 @@ export class FeishuChannel extends ChannelBase {
             cs.messageId = result.messageId;
             cs.created = true;
             cs.lastUpdateAt = Date.now();
+          } else {
+            cs.cardCreationFailed = true;
           }
         } catch (err) {
+          cs.cardCreationFailed = true;
           process.stderr.write(
             `[Feishu:${this.name}] card create error: ${err}\n`,
           );
@@ -781,7 +805,7 @@ export class FeishuChannel extends ChannelBase {
 
       cardState.pendingUpdateTimer = setTimeout(async () => {
         cs.pendingUpdateTimer = undefined;
-        if (cs.stopped) return;
+        if (cs.stopped || cs.finalizing) return;
         cs.lastUpdateAt = Date.now();
         try {
           const MAX_CARD_CHARS = 20_000;
@@ -843,6 +867,9 @@ export class FeishuChannel extends ChannelBase {
     const atSender = this.msgToSenderName.get(inboundMsgId);
     const displayText = atSender ? `${atSender}\n\n${fullText}` : fullText;
 
+    // Mark as finalizing to prevent concurrent updateCard from pendingUpdateTimer
+    if (cardState) cardState.finalizing = true;
+
     if (cardState?.pendingUpdateTimer) {
       clearTimeout(cardState.pendingUpdateTimer);
     }
@@ -859,6 +886,13 @@ export class FeishuChannel extends ChannelBase {
           }
         }, 50);
       });
+    }
+
+    // Re-check stopped state after busy-wait (user may have clicked Stop during wait)
+    if (cardState?.stopped || this.stoppedMessages.has(inboundMsgId)) {
+      this.cleanupCard(inboundMsgId);
+      this.stoppedMessages.delete(inboundMsgId);
+      return;
     }
 
     if (cardState?.created) {
@@ -1030,8 +1064,10 @@ export class FeishuChannel extends ChannelBase {
           reaction_type: { emoji_type: emojiType },
         }),
       });
-    } catch {
-      // best-effort
+    } catch (err) {
+      process.stderr.write(
+        `[Feishu:${this.name}] addReaction failed: ${err instanceof Error ? err.message : err}\n`,
+      );
     }
   }
 
@@ -1074,8 +1110,10 @@ export class FeishuChannel extends ChannelBase {
           break;
         }
       }
-    } catch {
-      // best-effort
+    } catch (err) {
+      process.stderr.write(
+        `[Feishu:${this.name}] removeReaction failed: ${err instanceof Error ? err.message : err}\n`,
+      );
     }
   }
 
@@ -1115,11 +1153,11 @@ export class FeishuChannel extends ChannelBase {
       if (!cardState) return false;
       if (!cardState.created && !cardState.creating) return false;
 
-      // Only the original sender can stop (group chat protection)
+      // Only the original sender can stop (group chat protection) — fail-closed
       const operator = data['operator'] as { open_id?: string } | undefined;
       const operatorId = operator?.open_id;
       const originalSender = this.msgToSenderId.get(targetInboundMsgId);
-      if (originalSender && operatorId && operatorId !== originalSender) {
+      if (!operatorId || !originalSender || operatorId !== originalSender) {
         return false;
       }
 
@@ -1192,6 +1230,12 @@ export class FeishuChannel extends ChannelBase {
       }
     }
     this.cardSessions.clear();
+    this.sessionToInboundMsg.clear();
+    this.msgToQuestion.clear();
+    this.msgToSenderName.clear();
+    this.msgToSenderId.clear();
+    this.stoppedMessages.clear();
+    this.seenMessages.clear();
 
     if (this.wsClient) {
       this.wsClient.close();
@@ -1214,6 +1258,7 @@ export class FeishuChannel extends ChannelBase {
     this.msgToQuestion.delete(inboundMsgId);
     this.msgToSenderName.delete(inboundMsgId);
     this.msgToSenderId.delete(inboundMsgId);
+    this.stoppedMessages.delete(inboundMsgId);
 
     // Clean up sessionToInboundMsg (reverse lookup)
     for (const [sid, mid] of this.sessionToInboundMsg) {
@@ -1481,6 +1526,9 @@ export class FeishuChannel extends ChannelBase {
             fileKey: (content.file_key as string) || undefined,
             fileName: (content.file_name as string) || undefined,
           };
+
+        case 'interactive':
+          return { text: '(card message — not supported)' };
 
         default:
           return { text: '' };
