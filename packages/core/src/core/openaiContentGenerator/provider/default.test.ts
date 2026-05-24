@@ -181,12 +181,14 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(callArg.fetch).not.toBe(globalThis.fetch);
     });
 
-    it('wraps the proxy fetch (not globalThis.fetch) when runtimeOptions provides one', () => {
+    it('wraps the proxy fetch (not globalThis.fetch) when runtimeOptions provides one', async () => {
       // Regression guard for design §4.3: when proxy is configured,
       // buildRuntimeFetchOptions returns { fetch: <bundled undici fetch> }
       // so the proxy dispatcher and fetch share a single undici version.
       // The correlation wrapper must wrap THAT fetch, not globalThis.fetch.
-      const proxyFetch = vi.fn() as unknown as typeof fetch;
+      const proxyFetch = vi.fn(
+        async () => new Response(),
+      ) as unknown as typeof fetch;
       const mockedBuildRuntimeFetchOptions =
         buildRuntimeFetchOptions as unknown as MockedFunction<
           (sdkType: 'openai', proxyUrl?: string) => OpenAIRuntimeFetchOptions
@@ -202,6 +204,13 @@ describe('DefaultOpenAICompatibleProvider', () => {
       // Wrapped, not raw — the wrapper is a different function reference.
       expect(callArg.fetch).not.toBe(proxyFetch);
       expect(callArg.fetch).not.toBe(globalThis.fetch);
+      // Positive assertion (PR #4390 review): the negatives above pass
+      // for ANY wrapper, including a buggy one that wraps globalThis.fetch
+      // instead of proxyFetch. Call the wrapped fetch and verify the
+      // delegation target is actually proxyFetch (telemetry off in
+      // mockCliConfig, so wrapper short-circuits straight to baseFetch).
+      await callArg.fetch!('https://api.example.com/v1');
+      expect(proxyFetch).toHaveBeenCalledTimes(1);
     });
   });
 

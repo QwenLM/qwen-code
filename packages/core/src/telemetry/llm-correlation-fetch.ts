@@ -96,24 +96,43 @@ export function wrapFetchWithCorrelation<TFetch extends FetchLikeLoose>(
   // Operators override via `telemetry.sessionIdHeaderHosts` in
   // settings.json (e.g. `["*.api.openai.com"]` for a specific OpenAI-
   // compatible proxy, or `["*"]` to restore the broadcast behavior the
-  // initial design proposed). Defensive try/catch + optional-chaining
-  // so a Config implementation that pre-dates this getter (or a partial
-  // test mock without the stub) falls back to the default allowlist
-  // rather than crashing at buildClient time.
+  // initial design proposed).
+  //
+  // Defensive normalization (PR #4390 review feedback): qwen-code's
+  // settings loader does not enforce JSON schema at runtime, so the
+  // getter can legitimately return a malformed value — a bare string
+  // ("dashscope.aliyuncs.com" instead of ["dashscope.aliyuncs.com"]),
+  // an array containing non-strings, or whitespace-padded entries
+  // (" * " or " dashscope.aliyuncs.com"). The chain below:
+  //   1. catches a throwing getter (mock without stub, pre-getter Config)
+  //   2. rejects a non-array value (bare string typo) → default allowlist
+  //   3. filters out non-string elements ([null, "..."] typo placeholder)
+  //   4. trims every surviving entry uniformly, so the `*` broadcast
+  //      escape hatch and the host-pattern match path have parity
+  // Violating any of these would let `.includes / .some / matchesTrustedHost`
+  // throw at buildClient time — bricking the LLM session before the first
+  // prompt and violating the "telemetry must never break the LLM request
+  // path" contract that `staticCorrelationHeaders` already honors via its
+  // end-to-end try/catch.
   let trustedHosts: readonly string[];
   try {
-    trustedHosts =
+    const raw =
       config.getTelemetrySessionIdHeaderHosts?.() ??
       DEFAULT_SESSION_ID_HEADER_HOSTS;
+    trustedHosts = Array.isArray(raw)
+      ? raw
+          .filter((p): p is string => typeof p === 'string')
+          .map((p) => p.trim())
+      : DEFAULT_SESSION_ID_HEADER_HOSTS;
   } catch {
     trustedHosts = DEFAULT_SESSION_ID_HEADER_HOSTS;
   }
   // Wildcard escape hatch so operators who want the old broadcast
   // behavior can opt in via `["*"]` without us extending the pattern
   // grammar in `matchesTrustedHost` (which would tempt other globbing).
-  // `.trim()` so `[" * "]` (whitespace from settings.json hand-edit) still
-  // triggers broadcast rather than silently degrading to "no host matches".
-  const broadcastAll = trustedHosts.some((p) => p.trim() === '*');
+  // Pre-trimmed above, so `.includes('*')` covers `["*"]` / `[" * "]` /
+  // `["\t*\n"]` uniformly.
+  const broadcastAll = trustedHosts.includes('*');
 
   const wrapped: FetchLikeLoose = async function correlationFetch(
     input: string | URL | Request,
@@ -193,10 +212,19 @@ export function staticCorrelationHeaders(
   try {
     if (!config.getTelemetryEnabled()) return {};
     if (!destinationUrl) return {};
-    const trustedHosts =
+    // Same defensive normalization as `wrapFetchWithCorrelation`. Bare
+    // string / array-with-nulls / whitespace-padded entries from a
+    // hand-edited settings.json would otherwise crash `.includes` /
+    // `matchesTrustedHost`. See sibling helper for full rationale.
+    const raw =
       config.getTelemetrySessionIdHeaderHosts?.() ??
       DEFAULT_SESSION_ID_HEADER_HOSTS;
-    const broadcastAll = trustedHosts.some((p) => p.trim() === '*');
+    const trustedHosts: readonly string[] = Array.isArray(raw)
+      ? raw
+          .filter((p): p is string => typeof p === 'string')
+          .map((p) => p.trim())
+      : DEFAULT_SESSION_ID_HEADER_HOSTS;
+    const broadcastAll = trustedHosts.includes('*');
     if (!broadcastAll) {
       let host: string;
       try {

@@ -394,6 +394,35 @@ describe('staticCorrelationHeaders', () => {
     expect(snapshot[SESSION_ID_HEADER]).toBe('sess-A');
   });
 
+  it('returns {} (does not throw) when allowlist is a bare string instead of array', () => {
+    // Same defensive normalization as wrapFetchWithCorrelation. Bare
+    // string from a malformed settings.json must not crash construction.
+    const malformedConfig = {
+      getTelemetryEnabled: () => true,
+      getSessionId: () => 'sess-A',
+      getTelemetrySessionIdHeaderHosts: () =>
+        'dashscope.aliyuncs.com' as unknown as readonly string[],
+    } as unknown as Config;
+    // Falls back to DEFAULT — DashScope destination matches.
+    expect(staticCorrelationHeaders(malformedConfig, TRUSTED)).toEqual({
+      [SESSION_ID_HEADER]: 'sess-A',
+    });
+  });
+
+  it('returns {} (does not throw) when allowlist array contains non-string entries', () => {
+    const malformedConfig = {
+      getTelemetryEnabled: () => true,
+      getSessionId: () => 'sess-A',
+      getTelemetrySessionIdHeaderHosts: () =>
+        [null, 'dashscope.aliyuncs.com', 42] as unknown as
+          | readonly string[]
+          | undefined,
+    } as unknown as Config;
+    expect(staticCorrelationHeaders(malformedConfig, TRUSTED)).toEqual({
+      [SESSION_ID_HEADER]: 'sess-A',
+    });
+  });
+
   it('falls through to {} when config getters throw (telemetry must never break LLM path)', () => {
     // Mirror the safety contract of `wrapFetchWithCorrelation`. This helper
     // is called from the Gemini factory at construction time, so a throw
@@ -512,6 +541,72 @@ describe('wrapFetchWithCorrelation — host allowlist gating', () => {
       }),
     );
     await wrapped('https://api.openai.com/v1/chat/completions');
+    expect((m.lastInit()?.headers as Headers).get(SESSION_ID_HEADER)).toBe(
+      'sess-A',
+    );
+  });
+
+  it('tolerates whitespace around host patterns (parity with "*" trim)', async () => {
+    // Same defensive normalization applies to host patterns, not just the
+    // broadcast wildcard. Without it, `" dashscope.aliyuncs.com"` would
+    // silently never match — inconsistent with the `[" * "]` tolerance.
+    const m = makeFetchMock();
+    const wrapped = wrapFetchWithCorrelation(
+      m.fetch,
+      mockConfig({
+        enabled: true,
+        sessionId: 'sess-A',
+        hosts: [' dashscope.aliyuncs.com '],
+      }),
+    );
+    await wrapped('https://dashscope.aliyuncs.com/compatible-mode/v1');
+    expect((m.lastInit()?.headers as Headers).get(SESSION_ID_HEADER)).toBe(
+      'sess-A',
+    );
+  });
+
+  it('does not throw at buildClient when settings returns a bare string instead of array (malformed JSON)', async () => {
+    // Regression: `broadcastAll` computation was outside the safety
+    // try/catch. A typo like `"sessionIdHeaderHosts": "dashscope..."`
+    // (forgot brackets) would let `.some(...)` throw TypeError at
+    // wrap time — bricking buildClient and the LLM session.
+    const m = makeFetchMock();
+    const malformedConfig = {
+      getTelemetryEnabled: () => true,
+      getSessionId: () => 'sess-A',
+      getTelemetrySessionIdHeaderHosts: () =>
+        'dashscope.aliyuncs.com' as unknown as readonly string[],
+    } as unknown as Config;
+    // The wrap itself must not throw — fall back to default allowlist.
+    expect(() =>
+      wrapFetchWithCorrelation(m.fetch, malformedConfig),
+    ).not.toThrow();
+    const wrapped = wrapFetchWithCorrelation(m.fetch, malformedConfig);
+    // Default allowlist applies → header IS attached for DashScope.
+    await wrapped('https://dashscope.aliyuncs.com/v1');
+    expect((m.lastInit()?.headers as Headers).get(SESSION_ID_HEADER)).toBe(
+      'sess-A',
+    );
+  });
+
+  it('does not throw when settings array contains non-string entries (malformed JSON)', async () => {
+    // Regression: `[null, "*.dashscope.aliyuncs.com"]` typo placeholder
+    // would let `null.trim()` throw in the broadcastAll predicate.
+    const m = makeFetchMock();
+    const malformedConfig = {
+      getTelemetryEnabled: () => true,
+      getSessionId: () => 'sess-A',
+      getTelemetrySessionIdHeaderHosts: () =>
+        [null, 'dashscope.aliyuncs.com', undefined, 42] as unknown as
+          | readonly string[]
+          | undefined,
+    } as unknown as Config;
+    expect(() =>
+      wrapFetchWithCorrelation(m.fetch, malformedConfig),
+    ).not.toThrow();
+    const wrapped = wrapFetchWithCorrelation(m.fetch, malformedConfig);
+    // Non-string entries filtered out, surviving string matched.
+    await wrapped('https://dashscope.aliyuncs.com/v1');
     expect((m.lastInit()?.headers as Headers).get(SESSION_ID_HEADER)).toBe(
       'sess-A',
     );
