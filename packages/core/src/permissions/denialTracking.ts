@@ -94,7 +94,8 @@ export function recordUnavailable(
 /**
  * Decide whether the next tool call should bypass the classifier and fall
  * back to DEFAULT-mode confirmation. The fallback applies to a single call
- * only; the session remains in AUTO.
+ * only; the session remains in AUTO. The total denial cap takes precedence
+ * over consecutive caps so alternating denial modes cannot avoid fallback.
  */
 export function shouldFallback(
   state: AutoModeDenialState,

@@ -195,8 +195,7 @@ export type FallbackToAskReason =
  */
 export type PermissionDeniedReason =
   | 'classifier_blocked'
-  | 'classifier_unavailable'
-  | 'classifier_failure';
+  | 'classifier_unavailable';
 
 /**
  * Outcome of {@link applyAutoModeDecision}. Boils the union of
