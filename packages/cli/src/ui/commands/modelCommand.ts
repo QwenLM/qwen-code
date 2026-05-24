@@ -59,24 +59,6 @@ async function switchMainModel(
   return modelArg;
 }
 
-function persistMainModelDefault(
-  settings: LoadedSettings,
-  fallbackAuthType: AuthType,
-  modelArg: string,
-): string {
-  const parsed = parseAcpModelOption(modelArg);
-  if (parsed.authType) {
-    persistSetting(settings, 'security.auth.selectedType', parsed.authType);
-    persistSetting(settings, 'model.name', parsed.modelId);
-    return parsed.modelId;
-  }
-
-  // Unqualified model ids belong to the currently active auth provider.
-  persistSetting(settings, 'security.auth.selectedType', fallbackAuthType);
-  persistSetting(settings, 'model.name', modelArg);
-  return modelArg;
-}
-
 function formatUnavailableModelMessage(
   kind: 'Model' | 'Fast model',
   modelName: string,
@@ -170,7 +152,7 @@ export const modelCommand: SlashCommand = {
       const modelPartial = leadingTrimmedPartialArg
         .slice('--fast '.length)
         .trimStart();
-      return getAvailableModelIds(context)
+      return getAvailableModelIds(context, { excludeRuntimeModels: true })
         .filter((id) => id.startsWith(modelPartial))
         .map((id) => `--fast ${id}`);
     }
@@ -192,9 +174,9 @@ export const modelCommand: SlashCommand = {
       return flagCompletions;
     } else if (trimmedPartialArg) {
       // Include model IDs matching the partial argument
-      return getAvailableModelIds(context).filter((id) =>
-        id.startsWith(trimmedPartialArg),
-      );
+      return getAvailableModelIds(context, {
+        excludeRuntimeModels: true,
+      }).filter((id) => id.startsWith(trimmedPartialArg));
     } else {
       return null;
     }
@@ -267,9 +249,13 @@ export const modelCommand: SlashCommand = {
         };
       }
 
+      const parsedFastModel = parseAcpModelOption(modelName);
+      const normalizedFastModel = parsedFastModel.authType
+        ? `${parsedFastModel.authType}:${parsedFastModel.modelId}`
+        : modelName;
       const selector = (() => {
         try {
-          return resolveModelId(modelName);
+          return resolveModelId(normalizedFastModel);
         } catch {
           return undefined;
         }
@@ -300,14 +286,14 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'fastModel', modelName);
+      persistSetting(settings, 'fastModel', normalizedFastModel);
       // Sync the runtime Config so forked agents pick up the change immediately
       // without requiring a restart.
-      config.setFastModel(modelName);
+      config.setFastModel(normalizedFastModel);
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Fast Model') + ': ' + modelName,
+        content: t('Fast Model') + ': ' + normalizedFastModel,
       };
     }
 
@@ -372,7 +358,23 @@ export const modelCommand: SlashCommand = {
       );
       if (isDefaultModelCommand) {
         try {
-          persistMainModelDefault(settings, authType, modelName);
+          const afterConfig = config.getContentGeneratorConfig?.();
+          const effectiveAfterConfig =
+            afterConfig &&
+            (afterConfig.model !== contentGeneratorConfig.model ||
+              afterConfig.authType !== contentGeneratorConfig.authType)
+              ? afterConfig
+              : undefined;
+          persistSetting(
+            settings,
+            'security.auth.selectedType',
+            effectiveAfterConfig?.authType ?? targetAuthType,
+          );
+          persistSetting(
+            settings,
+            'model.name',
+            effectiveAfterConfig?.model ?? parsed.modelId,
+          );
         } catch (e) {
           const baseErrorMessage = e instanceof Error ? e.message : String(e);
           return {

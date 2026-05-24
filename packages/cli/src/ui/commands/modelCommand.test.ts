@@ -121,6 +121,12 @@ describe('modelCommand', () => {
         modelCommand.completion!(mockContext, 'cla'),
       ).resolves.toEqual(['claude-sonnet-4-5(anthropic)']);
     });
+
+    it('should not complete runtime models for session-only model switches', async () => {
+      await expect(
+        modelCommand.completion!(mockContext, '$runtime'),
+      ).resolves.toEqual([]);
+    });
   });
 
   it('should return error when config is not available', async () => {
@@ -869,6 +875,56 @@ describe('modelCommand', () => {
     const result = await modelCommand.action!(
       mockContext,
       '--fast openai:deepseek-v4-flash',
+    );
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'fastModel',
+      'openai:deepseek-v4-flash',
+    );
+    expect(setFastModel).toHaveBeenCalledWith('openai:deepseek-v4-flash');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Fast Model: openai:deepseek-v4-flash',
+    });
+  });
+
+  it('should accept ACP-qualified fast model selectors from completion', async () => {
+    const setValue = vi.fn();
+    const setFastModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --fast deepseek-v4-flash(openai)',
+        name: 'model',
+        args: '--fast deepseek-v4-flash(openai)',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          }),
+          getAvailableModelsForAuthType: vi.fn((authType: AuthType) =>
+            authType === AuthType.USE_OPENAI
+              ? [
+                  {
+                    id: 'deepseek-v4-flash',
+                    label: 'deepseek-v4-flash',
+                    authType: AuthType.USE_OPENAI,
+                  },
+                ]
+              : [],
+          ),
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--fast deepseek-v4-flash(openai)',
     );
 
     expect(setValue).toHaveBeenCalledWith(
