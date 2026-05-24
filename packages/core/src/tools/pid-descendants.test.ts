@@ -59,13 +59,19 @@ describe('pid-descendants', () => {
 
   // Cross-platform integration test: spawn a wrapper that itself
   // spawns a child, verify listDescendantPids finds both levels.
-  // Gated on POSIX availability of `pgrep` (skipped on Windows + on
-  // CI without pgrep).
+  //
+  // F2 (#4175 commit 6 review fix — wenshao R10 / R23 T7 / PR A):
+  // Pre-fix gate skipped on `CI === '1'` (pgrep not always available
+  // on minimal CI runners). Post-fix the snapshot path uses
+  // `ps -A -o pid=,ppid=` (POSIX standard, available on every
+  // non-distroless Linux/macOS), so we keep only the Windows skip;
+  // the snapshot's per-pid pgrep fallback covers the rare BusyBox
+  // <v1.28 case but isn't tested here.
   describe(
     'integration: spawn-and-enumerate',
-    { skip: process.platform === 'win32' || process.env['CI'] === '1' },
+    { skip: process.platform === 'win32' },
     () => {
-      it('enumerates one level of children via pgrep', async () => {
+      it('enumerates one level of children via process-tree snapshot', async () => {
         // Parent process spawns a node child with `--eval` that sleeps.
         // Use spawn directly so we control the lifecycle.
         const parent = spawn('/bin/sh', [

@@ -112,6 +112,13 @@ export interface SkillConfig {
    * root and matched via picomatch. Parsed from the `paths` frontmatter field.
    */
   paths?: string[];
+
+  /**
+   * Optional display priority for this skill. Higher values sort first in
+   * the skill listing. Parsed from the `priority` frontmatter field in
+   * SKILL.md. When omitted, treated as 0; ties fall back to alphabetical order.
+   */
+  priority?: number;
 }
 
 /**

@@ -12,6 +12,19 @@ export default defineConfig({
   resolve: {
     alias: {
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
+      // #4175 F1 test split — cli's daemonStatusProvider.test.ts imports
+      // `FakeAgent` / `makeChannel` from acp-bridge's package-private
+      // `internal/testUtils` module. The subpath export in acp-bridge's
+      // `package.json` is what TypeScript resolves at compile time
+      // (nodenext won't honor tsconfig `paths` for a subpath the
+      // package's `exports` doesn't list). This alias overrides the
+      // runtime resolution so vitest reads the .ts source directly
+      // instead of the build-then-stale `dist/` copy — see
+      // `internal/testUtils.ts` JSDoc for the dual-channel rationale.
+      '@qwen-code/acp-bridge/internal/testUtils': path.resolve(
+        __dirname,
+        '../acp-bridge/src/internal/testUtils.ts',
+      ),
     },
   },
   test: {

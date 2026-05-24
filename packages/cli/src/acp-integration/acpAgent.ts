@@ -26,6 +26,7 @@ import {
   SessionEndReason,
   restoreWorktreeContext,
   WorkspaceMcpBudget,
+  restoreWorktreeContext,
 } from '@qwen-code/qwen-code-core';
 import type {
   ApprovalMode,

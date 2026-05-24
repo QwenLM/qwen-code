@@ -304,6 +304,37 @@ export interface TelemetrySettings {
   logPrompts?: boolean;
   includeSensitiveSpanAttributes?: boolean;
   outfile?: string;
+  /**
+   * Static resource attributes attached to every span/log/metric the SDK
+   * exports (OTLP or file outfile — they share the same Resource).
+   * Merged with `OTEL_RESOURCE_ATTRIBUTES`; settings win on key conflict.
+   * Reserved keys (`service.version`, `session.id`) are dropped with a
+   * `diag.warn`.
+   */
+  resourceAttributes?: Record<string, string>;
+  /** Per-signal cardinality controls. */
+  metrics?: TelemetryMetricsSettings;
+  /**
+   * Human-readable diagnostics produced while resolving
+   * `resourceAttributes` (drops, coercions, reserved-key strips).
+   * Populated by `resolveTelemetrySettings()`; the SDK emits a one-time
+   * console summary at startup when this is non-empty so users notice
+   * silent drops without scanning the OTel debug log.
+   *
+   * Not a user-settable field — operators should leave it unset.
+   */
+  resourceAttributeWarnings?: string[];
+}
+
+export interface TelemetryMetricsSettings {
+  /**
+   * Include `session.id` on every metric data point. Default: false.
+   *
+   * WARNING: each CLI session creates a new value, causing unbounded
+   * metric time-series fan-out at the backend. Only enable for
+   * short-term debugging — spans and logs still carry session.id.
+   */
+  includeSessionId?: boolean;
 }
 
 export interface OutputSettings {
@@ -1011,6 +1042,9 @@ export class Config {
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
       outfile: params.telemetry?.outfile,
+      resourceAttributes: params.telemetry?.resourceAttributes,
+      metrics: params.telemetry?.metrics,
+      resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
@@ -2903,6 +2937,18 @@ export class Config {
 
   getTelemetryTarget(): TelemetryTarget {
     return this.telemetrySettings.target ?? DEFAULT_TELEMETRY_TARGET;
+  }
+
+  getTelemetryResourceAttributes(): Record<string, string> {
+    return this.telemetrySettings.resourceAttributes ?? {};
+  }
+
+  getTelemetryMetricsIncludeSessionId(): boolean {
+    return this.telemetrySettings.metrics?.includeSessionId ?? false;
+  }
+
+  getTelemetryResourceAttributeWarnings(): readonly string[] {
+    return this.telemetrySettings.resourceAttributeWarnings ?? [];
   }
 
   getTelemetryOutfile(): string | undefined {

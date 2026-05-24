@@ -12,10 +12,21 @@ const debugLogger = createDebugLogger('PidDescendants');
 const execFileAsync = promisify(execFile);
 
 /**
- * Wall-clock budget for each individual `pgrep` / `Get-CimInstance` call.
+ * Wall-clock budget for each individual snapshot / per-pid query call.
  * Bounded so a hung process-table walk can't stall pool shutdown.
  */
 const QUERY_TIMEOUT_MS = 2_000;
+
+/**
+ * F2 (#4175 commit 6 review fix — wenshao R10 / R23 T7 / PR A): cap
+ * for `execFile`'s internal stdout buffer on the snapshot path. Default
+ * is 1MB, which is enough for ~30k-process hosts (~30 bytes/line) but
+ * an 8MB cap covers >250k-process pathological cases without forcing
+ * the truncation-or-fallback branch on real machines. The cap applies
+ * only to the snapshot family of calls; the per-pid `pgrep -P` fallback
+ * has a tiny output (just the children of one pid) and uses the default.
+ */
+const SNAPSHOT_MAXBUFFER_BYTES = 8 * 1024 * 1024;
 
 /**
  * Hard cap on recursion depth + total descendants returned. Defense
@@ -35,15 +46,28 @@ const MAX_DEPTH = 8;
  * `uvx ...`, `pnpm dlx ...`) that would otherwise leak when the
  * pool entry's primary child is killed.
  *
+ * F2 (#4175 commit 6 review fix — wenshao R10 / R23 T7 / PR A):
+ * the implementation switched from per-pid `pgrep -P <pid>` BFS
+ * (Linux/macOS) / per-pid `Get-CimInstance -Filter "ParentProcessId=$p"`
+ * BFS (Windows) — which forked one subprocess per node visited — to
+ * a single process-table snapshot followed by an in-memory tree walk.
+ * Two motivations: (1) ~B^D fork count → 1 fork per call, on the
+ * hot pool-shutdown path; (2) snapshot consistency — pre-fix BFS
+ * could miss descendants that forked between adjacent BFS levels.
+ *
  * Behavior:
- *   - Linux/macOS: `pgrep -P <pid>` walked recursively, BFS order
- *   - Windows: PowerShell `Get-CimInstance Win32_Process` filtered
- *     by `ParentProcessId`, walked recursively
- *   - Either platform: graceful degradation if the tool is missing
- *     or the query times out — returns whatever was collected so far
- *     and logs a warning. Pool shutdown still proceeds; orphan
- *     processes will be reaped by the OS eventually (Linux init,
- *     Windows job objects).
+ *   - Linux/macOS: `ps -A -o pid=,ppid=` snapshot, in-memory BFS walk
+ *     over the parsed `Map<ppid, pid[]>`.
+ *   - Windows: PowerShell `Get-CimInstance Win32_Process` →
+ *     `ConvertTo-Csv` snapshot of all `(ProcessId, ParentProcessId)`
+ *     rows, in-memory walk.
+ *   - Either platform: graceful degradation if the snapshot tool is
+ *     missing / blocked / times out — falls back to per-pid BFS
+ *     (preserves the pre-fix code path so BusyBox `ps` <v1.28 without
+ *     `-o` support, distroless containers without `ps`, etc. still
+ *     behave at-least-as-well as before). If BOTH the snapshot AND
+ *     the fallback fail, returns empty so the caller's SIGTERM step
+ *     skips and the OS reaps orphans (Linux init, Windows job objects).
  *
  * Returns descendants in **breadth-first order** — children before
  * grandchildren. Caller typically iterates back-to-front so deepest
@@ -67,6 +91,61 @@ export async function listDescendantPids(rootPid: number): Promise<number[]> {
 }
 
 async function listDescendantPidsUnix(root: number): Promise<number[]> {
+  let tree: Map<number, number[]> | undefined;
+  try {
+    tree = await snapshotProcessTreeUnix();
+  } catch (err) {
+    debugLogger.warn(
+      `Unix snapshot via 'ps -A' failed (${
+        err instanceof Error ? err.message : String(err)
+      }); falling back to per-pid pgrep BFS`,
+    );
+  }
+  if (tree) {
+    return walkDescendants(tree, root);
+  }
+  return await listDescendantPidsUnixPgrepFallback(root);
+}
+
+async function snapshotProcessTreeUnix(): Promise<Map<number, number[]>> {
+  // `ps -A -o pid=,ppid=`
+  //   -A: all processes (POSIX, equivalent to -e; -A is unambiguous
+  //       across BSD/SysV — BSD historically used -e for env display).
+  //   -o pid=,ppid=: pid + ppid columns; trailing `=` suppresses each
+  //       column header (POSIX standard).
+  // Output is "<pid> <ppid>" per line, no header.
+  const { stdout } = await execFileAsync('ps', ['-A', '-o', 'pid=,ppid='], {
+    timeout: QUERY_TIMEOUT_MS,
+    maxBuffer: SNAPSHOT_MAXBUFFER_BYTES,
+  });
+  const childrenByPpid = new Map<number, number[]>();
+  let parsedRows = 0;
+  for (const line of stdout.split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)$/);
+    if (!m) continue;
+    const pid = Number.parseInt(m[1], 10);
+    const ppid = Number.parseInt(m[2], 10);
+    if (!Number.isFinite(pid) || pid <= 0) continue;
+    if (!Number.isFinite(ppid) || ppid < 0) continue;
+    parsedRows += 1;
+    const arr = childrenByPpid.get(ppid);
+    if (arr) arr.push(pid);
+    else childrenByPpid.set(ppid, [pid]);
+  }
+  if (parsedRows === 0) {
+    // Snapshot tool ran but produced no parseable lines (e.g. BusyBox
+    // `ps` without `-o` support echoing usage). Treat as failure so
+    // the caller's catch falls back to per-pid pgrep.
+    throw new Error(
+      `'ps -A -o pid=,ppid=' returned no parseable rows (stdout length=${stdout.length})`,
+    );
+  }
+  return childrenByPpid;
+}
+
+async function listDescendantPidsUnixPgrepFallback(
+  root: number,
+): Promise<number[]> {
   const all: number[] = [];
   const queue: Array<{ pid: number; depth: number }> = [
     { pid: root, depth: 0 },
@@ -107,6 +186,75 @@ async function listDescendantPidsUnix(root: number): Promise<number[]> {
 }
 
 async function listDescendantPidsWin(root: number): Promise<number[]> {
+  let tree: Map<number, number[]> | undefined;
+  try {
+    tree = await snapshotProcessTreeWin();
+  } catch (err) {
+    debugLogger.warn(
+      `Windows snapshot via Get-CimInstance failed (${
+        err instanceof Error ? err.message : String(err)
+      }); falling back to per-pid filter BFS`,
+    );
+  }
+  if (tree) {
+    return walkDescendants(tree, root);
+  }
+  return await listDescendantPidsWinPerPidFallback(root);
+}
+
+async function snapshotProcessTreeWin(): Promise<Map<number, number[]>> {
+  // Single-shot CIM query for ALL processes' (ProcessId,
+  // ParentProcessId), CSV-formatted for stable parsing.
+  // F2 (#4175 commit 5 review fix — wenshao R5): no integer
+  // interpolation into the script; this query takes no parameters
+  // (we filter in-memory after the snapshot returns).
+  //
+  // F2 (#4175 commit 6 review fix — wenshao PR-A-R3 T3): explicit
+  // `-Delimiter ","` on `ConvertTo-Csv`. Pre-fix PowerShell 5.1
+  // honored the system locale's list separator (semicolon on
+  // German / French / Dutch / etc.), so the regex
+  // `^"(\d+)","(\d+)"$` below never matched on those locales →
+  // snapshot threw → fell back to the slower per-pid CIM path
+  // (~0.5-1s extra PowerShell startup latency per descendant on
+  // every shutdown). Forcing comma normalizes the output across
+  // locales / PS versions.
+  const script =
+    'Get-CimInstance -ClassName Win32_Process ' +
+    '| Select-Object ProcessId,ParentProcessId ' +
+    '| ConvertTo-Csv -NoTypeInformation -Delimiter ","';
+  const { stdout } = await execFileAsync(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', script],
+    { timeout: QUERY_TIMEOUT_MS, maxBuffer: SNAPSHOT_MAXBUFFER_BYTES },
+  );
+  const childrenByPpid = new Map<number, number[]>();
+  let parsedRows = 0;
+  // CSV: first line is header `"ProcessId","ParentProcessId"`,
+  // subsequent lines are `"<pid>","<ppid>"`.
+  const lines = stdout.split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const m = lines[i].match(/^"(\d+)","(\d+)"$/);
+    if (!m) continue;
+    const pid = Number.parseInt(m[1], 10);
+    const ppid = Number.parseInt(m[2], 10);
+    if (!Number.isFinite(pid) || pid <= 0) continue;
+    if (!Number.isFinite(ppid) || ppid < 0) continue;
+    parsedRows += 1;
+    const arr = childrenByPpid.get(ppid);
+    if (arr) arr.push(pid);
+    else childrenByPpid.set(ppid, [pid]);
+  }
+  if (parsedRows === 0) {
+    throw new Error(
+      `Get-CimInstance snapshot returned no parseable rows (stdout length=${stdout.length})`,
+    );
+  }
+  return childrenByPpid;
+}
+
+async function listDescendantPidsWinPerPidFallback(
+  root: number,
+): Promise<number[]> {
   const all: number[] = [];
   const queue: Array<{ pid: number; depth: number }> = [
     { pid: root, depth: 0 },
@@ -153,6 +301,49 @@ async function listDescendantPidsWin(root: number): Promise<number[]> {
       continue;
     }
     for (const child of children) {
+      if (all.length >= MAX_DESCENDANTS) break;
+      all.push(child);
+      queue.push({ pid: child, depth: depth + 1 });
+    }
+  }
+  return all;
+}
+
+/**
+ * F2 (#4175 commit 6 review fix — wenshao R10 / R23 T7 / PR A):
+ * shared in-memory BFS over a snapshot tree. Replaces both
+ * platforms' per-node subprocess forks once the snapshot has been
+ * obtained. Same MAX_DESCENDANTS / MAX_DEPTH caps as the legacy
+ * fallback path. Returns BFS order — children before grandchildren.
+ *
+ * F2 (#4175 commit 6 review fix — wenshao PR-A-R2 #1): `visited`
+ * set prevents BFS revisits when the snapshot captures a PID-reuse
+ * cycle (rare but possible on busy hosts with rapid pid churn
+ * between snapshot start and parse — Linux pid wraparound can make
+ * `ps -A` show a freed pid in a different parent's children list,
+ * producing an A→B / B→A cycle). Pre-fix the cycle would fill the
+ * MAX_DESCENDANTS=256 quota with duplicate entries and starve
+ * legitimate descendants. The per-pid `pgrep` BFS fallback had the
+ * same theoretical issue but was less exposed because each
+ * `pgrep -P pid` call only returns DIRECT children; the snapshot
+ * captures the whole tree at once. `root` is seeded into `visited`
+ * so a malformed snapshot listing root as a descendant of one of
+ * its own children doesn't re-enqueue root.
+ */
+function walkDescendants(tree: Map<number, number[]>, root: number): number[] {
+  const all: number[] = [];
+  const visited = new Set<number>([root]);
+  const queue: Array<{ pid: number; depth: number }> = [
+    { pid: root, depth: 0 },
+  ];
+  while (queue.length && all.length < MAX_DESCENDANTS) {
+    const { pid, depth } = queue.shift()!;
+    if (depth >= MAX_DEPTH) continue;
+    const children = tree.get(pid);
+    if (!children) continue;
+    for (const child of children) {
+      if (visited.has(child)) continue;
+      visited.add(child);
       if (all.length >= MAX_DESCENDANTS) break;
       all.push(child);
       queue.push({ pid: child, depth: depth + 1 });

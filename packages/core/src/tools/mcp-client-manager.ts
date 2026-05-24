@@ -344,6 +344,26 @@ function readBudgetFromEnv(): McpBudgetConfig {
 }
 
 /**
+ * F2 (#4175 commit 6 review fix — wenshao R9 / PR A): options bag for
+ * `McpClientManager` construction, replacing the prior 5 trailing
+ * positional parameters (`eventEmitter`, `sendSdkMcpMessage`,
+ * `healthConfig`, `budgetConfig`, `pool`). Pre-fix every test site
+ * threaded 4 explicit `undefined`s to reach the trailing `pool` arg —
+ * the fixed positions also blocked future option additions without
+ * re-ordering. The options-object form lets each caller name only the
+ * fields it cares about and keeps the constructor signature stable
+ * across future additions (e.g. when the W8 health-monitor wire-up
+ * lands a new `reconnectStrategy` knob).
+ */
+export interface McpClientManagerOptions {
+  eventEmitter?: EventEmitter;
+  sendSdkMcpMessage?: SendSdkMcpMessage;
+  healthConfig?: Partial<MCPHealthMonitorConfig>;
+  budgetConfig?: McpBudgetConfig;
+  pool?: import('./mcp-transport-pool.js').McpTransportPool;
+}
+
+/**
  * Manages the lifecycle of multiple MCP clients, including local child processes.
  * This class is responsible for starting, stopping, and discovering tools from
  * a collection of MCP servers defined in the configuration.
@@ -513,19 +533,16 @@ export class McpClientManager {
   constructor(
     config: Config,
     toolRegistry: ToolRegistry,
-    eventEmitter?: EventEmitter,
-    sendSdkMcpMessage?: SendSdkMcpMessage,
-    healthConfig?: Partial<MCPHealthMonitorConfig>,
-    budgetConfig?: McpBudgetConfig,
-    pool?: import('./mcp-transport-pool.js').McpTransportPool,
+    options: McpClientManagerOptions = {},
   ) {
     this.cliConfig = config;
     this.toolRegistry = toolRegistry;
-    this.pool = pool;
+    this.pool = options.pool;
 
-    this.eventEmitter = eventEmitter;
-    this.sendSdkMcpMessage = sendSdkMcpMessage;
-    this.healthConfig = { ...DEFAULT_HEALTH_CONFIG, ...healthConfig };
+    this.eventEmitter = options.eventEmitter;
+    this.sendSdkMcpMessage = options.sendSdkMcpMessage;
+    this.healthConfig = { ...DEFAULT_HEALTH_CONFIG, ...options.healthConfig };
+    const budgetConfig = options.budgetConfig;
 
     // Tests inject `budgetConfig` directly; production reads env vars
     // set by `qwen serve --mcp-client-budget=N --mcp-budget-mode=X`

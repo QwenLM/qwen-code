@@ -17,9 +17,11 @@ import {
 import type { Config } from '../config/config.js';
 import {
   SERVICE_NAME,
+  SPAN_HOOK,
   SPAN_INTERACTION,
   SPAN_LLM_REQUEST,
   SPAN_TOOL,
+  SPAN_TOOL_BLOCKED_ON_USER,
   SPAN_TOOL_EXECUTION,
 } from './constants.js';
 import { clearDetailedSpanState } from './detailed-span-attributes.js';
@@ -44,9 +46,46 @@ export interface EndInteractionOptions {
 export interface LLMRequestMetadata {
   inputTokens?: number;
   outputTokens?: number;
+  /**
+   * Tokens served from the provider's prompt cache (Anthropic
+   * cache_read_input_tokens, OpenAI prompt_tokens_details.cached_tokens, etc).
+   * Normalized to GenerateContentResponseUsageMetadata.cachedContentTokenCount
+   * by each provider generator before reaching LoggingContentGenerator.
+   */
+  cachedInputTokens?: number;
   success: boolean;
   durationMs?: number;
   error?: string;
+  /**
+   * Time from the successful attempt's request dispatch to the first stream
+   * chunk containing user-visible content (text / functionCall / inlineData /
+   * executableCode / thought). Undefined for non-streaming requests, requests
+   * aborted before the first user-visible chunk, and any path that does not
+   * pass through LoggingContentGenerator's stream wrapper.
+   *
+   * Semantics: diverges from claude-code's ttftMs (which fires on
+   * Anthropic's message_start metadata event). Matches the "time to first
+   * actual token" intent of the industry-standard TTFT name.
+   * See docs/design/telemetry-llm-request-timing-design.md (D1).
+   */
+  ttftMs?: number;
+  /**
+   * Time from generateContent/generateContentStream entry to the start of the
+   * successful attempt (ms). Includes all failed retries + backoff sleeps.
+   * Populated by the retry layer in Phase 4b; undefined in Phase 4a.
+   */
+  requestSetupMs?: number;
+  /**
+   * Final attempt number (1-based). 1 = no retries. Populated by the retry
+   * layer in Phase 4b; undefined in Phase 4a.
+   */
+  attempt?: number;
+  /**
+   * Sum of all backoff delays before the successful attempt (ms). 0 if no
+   * retries occurred. Populated by the retry layer in Phase 4b; undefined
+   * in Phase 4a.
+   */
+  retryTotalDelayMs?: number;
 }
 
 export interface ToolSpanMetadata {
@@ -121,26 +160,75 @@ let lastInteractionCtx: SpanContext | undefined;
 let cleanupIntervalStarted = false;
 const SPAN_TTL_MS = 30 * 60 * 1000;
 
+function sweepStaleSpans(now: number): void {
+  const cutoff = now - SPAN_TTL_MS;
+  for (const [spanId, weakRef] of activeSpans) {
+    const ctx = weakRef.deref();
+    if (ctx === undefined) {
+      activeSpans.delete(spanId);
+      strongSpans.delete(spanId);
+    } else if (ctx.startTime < cutoff) {
+      if (!ctx.ended) {
+        ctx.ended = true;
+        // Mark the span so backends can distinguish "abandoned and
+        // garbage-collected by the TTL safety net" from "deliberately
+        // ended without setting status / attrs" (#4321 review).
+        const ageMs = now - ctx.startTime;
+        const toolName = ctx.attributes['tool.name'];
+        const callId = ctx.attributes['tool.call_id'];
+        // setAttributes and span.end() are wrapped separately so a
+        // setAttributes throw can't prevent the span from being ended
+        // (#4321 review-3 wenshao Suggestion). For blocked_on_user
+        // spans, also stamp the canonical decision/source taxonomy so
+        // dashboards filtering by `decision: 'aborted'` count
+        // walk-aways consistently with explicit user aborts.
+        try {
+          ctx.span.setAttributes({
+            'qwen-code.span.ttl_expired': true,
+            'qwen-code.span.duration_ms': ageMs,
+            ...(ctx.type === 'tool.blocked_on_user'
+              ? {
+                  decision: 'aborted',
+                  source: 'system',
+                }
+              : {}),
+          });
+        } catch (error) {
+          // OTel errors must not prevent span.end() from running, but
+          // they're worth surfacing — dropping the sentinel attrs makes
+          // a TTL-aborted span look identical to a deliberately-UNSET
+          // one in dashboards (#4321 review-7 silent-failure-hunter).
+          debugLogger.warn(
+            `Failed to stamp TTL attrs on stale span ${spanId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        // Include tool name + call_id so the log is actionable in
+        // production without a trace-backend lookup (review-3).
+        const ctxLabel =
+          toolName && callId
+            ? `${ctx.type} (tool.name=${toolName}, tool.call_id=${callId})`
+            : ctx.type;
+        debugLogger.warn(
+          `Stale ${ctxLabel} span ended by TTL safety net (age=${ageMs}ms, spanId=${spanId})`,
+        );
+        try {
+          ctx.span.end();
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to end stale span ${spanId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      activeSpans.delete(spanId);
+      strongSpans.delete(spanId);
+    }
+  }
+}
+
 function ensureCleanupInterval(): void {
   if (cleanupIntervalStarted) return;
   cleanupIntervalStarted = true;
-  const interval = setInterval(() => {
-    const cutoff = Date.now() - SPAN_TTL_MS;
-    for (const [spanId, weakRef] of activeSpans) {
-      const ctx = weakRef.deref();
-      if (ctx === undefined) {
-        activeSpans.delete(spanId);
-        strongSpans.delete(spanId);
-      } else if (ctx.startTime < cutoff) {
-        if (!ctx.ended) {
-          ctx.ended = true;
-          ctx.span.end();
-        }
-        activeSpans.delete(spanId);
-        strongSpans.delete(spanId);
-      }
-    }
-  }, 60_000);
+  const interval = setInterval(() => sweepStaleSpans(Date.now()), 60_000);
   if (typeof interval.unref === 'function') {
     interval.unref();
   }
@@ -148,6 +236,35 @@ function ensureCleanupInterval(): void {
 
 function getSpanId(span: Span): string {
   return span.spanContext().spanId || '';
+}
+
+const SPAN_ERROR_MAX_CHARS = 1024;
+
+/**
+ * Bound the size of error strings written to span attributes / status
+ * messages. Hook server responses, raw exception stacks, or malicious
+ * inputs can be unbounded; some OTel backends drop the entire span when
+ * any field exceeds their limit (#4321 review-3 wenshao Critical).
+ *
+ * Truncates by UTF-16 code units (`String.length`/`String.slice`), not
+ * bytes — for ASCII-heavy text this approximates a 1KB byte limit, but
+ * CJK/emoji-heavy errors can land in the ~2-3KB range after UTF-8
+ * encoding. That's still well under all major OTel backends'
+ * per-attribute limits (Jaeger ~64KB, Honeycomb ~64KB, OTLP default
+ * ~32KB), so we keep the simpler char-count bound rather than paying
+ * the encoder cost on every endXSpan (review-4 follow-up).
+ */
+export function truncateSpanError(s: string): string {
+  if (s.length <= SPAN_ERROR_MAX_CHARS) return s;
+  // Back up one code unit if the cut lands on a high surrogate so we
+  // don't emit a lone surrogate followed by the sentinel — strict
+  // OTLP/gRPC collectors reject span batches with invalid UTF-8
+  // (a lone high surrogate encodes to an invalid byte sequence)
+  // (#4321 review-8 wenshao Suggestion).
+  let end = SPAN_ERROR_MAX_CHARS;
+  const code = s.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end--;
+  return s.slice(0, end) + '…[truncated]';
 }
 
 function getTracer() {
@@ -241,6 +358,10 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
     'qwen-code.model': model,
     'qwen-code.prompt_id': promptId,
     'llm_request.context': parentCtx ? 'interaction' : 'standalone',
+    // Dual-emit OTel GenAI semantic convention (Stable). Private name
+    // (qwen-code.model) remains authoritative; gen_ai.* is a compat layer
+    // for spec-aware backends. See docs/design/telemetry-llm-request-timing-design.md (D8).
+    'gen_ai.request.model': model,
   };
 
   const span = getTracer().startSpan(
@@ -282,12 +403,58 @@ export function endLLMRequestSpan(
     const endAttributes: Attributes = { duration_ms: duration };
 
     if (metadata) {
-      if (metadata.inputTokens !== undefined)
+      if (metadata.inputTokens !== undefined) {
         endAttributes['input_tokens'] = metadata.inputTokens;
-      if (metadata.outputTokens !== undefined)
+        // Dual-emit OTel GenAI semconv (Stable). Private name stays authoritative.
+        endAttributes['gen_ai.usage.input_tokens'] = metadata.inputTokens;
+      }
+      if (metadata.outputTokens !== undefined) {
         endAttributes['output_tokens'] = metadata.outputTokens;
+        endAttributes['gen_ai.usage.output_tokens'] = metadata.outputTokens;
+      }
+      if (metadata.cachedInputTokens !== undefined) {
+        endAttributes['cached_input_tokens'] = metadata.cachedInputTokens;
+        // Dual-emit OTel GenAI semconv (Experimental — may rename before Stable).
+        endAttributes['gen_ai.usage.cached_tokens'] =
+          metadata.cachedInputTokens;
+      }
+      if (metadata.ttftMs !== undefined) {
+        endAttributes['ttft_ms'] = metadata.ttftMs;
+        // Dual-emit OTel GenAI semconv (Experimental). Spec unit is seconds-as-double.
+        endAttributes['gen_ai.server.time_to_first_token'] =
+          metadata.ttftMs / 1000;
+      }
+      if (metadata.requestSetupMs !== undefined) {
+        endAttributes['request_setup_ms'] = metadata.requestSetupMs;
+      }
+      if (metadata.attempt !== undefined) {
+        endAttributes['attempt'] = metadata.attempt;
+      }
+      if (metadata.retryTotalDelayMs !== undefined) {
+        endAttributes['retry_total_delay_ms'] = metadata.retryTotalDelayMs;
+      }
+      // Derived: sampling_ms = time from first user-visible chunk to end
+      // (== output generation time, excluding setup + first-token delay).
+      // Computable only when ttftMs is set. requestSetupMs defaults to 0
+      // when undefined (no retries) — this gives the correct sampling
+      // duration in both Phase 4a (no retry data) and Phase 4b (with).
+      if (metadata.ttftMs !== undefined) {
+        const samplingMs = Math.max(
+          0,
+          duration - metadata.ttftMs - (metadata.requestSetupMs ?? 0),
+        );
+        endAttributes['sampling_ms'] = samplingMs;
+        // Derived: output tokens per second during sampling. Undefined when
+        // sampling_ms is 0 (avoid divide-by-zero) or when outputTokens missing.
+        if (samplingMs > 0 && metadata.outputTokens !== undefined) {
+          endAttributes['output_tokens_per_second'] =
+            Math.round((metadata.outputTokens / (samplingMs / 1000)) * 100) /
+            100;
+        }
+      }
       endAttributes['success'] = metadata.success;
-      if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+      if (metadata.error !== undefined)
+        endAttributes['error'] = truncateSpanError(metadata.error);
     }
 
     spanCtx.span.setAttributes(endAttributes);
@@ -297,7 +464,9 @@ export function endLLMRequestSpan(
     } else {
       spanCtx.span.setStatus({
         code: SpanStatusCode.ERROR,
-        message: metadata.error ?? 'unknown error',
+        message: metadata.error
+          ? truncateSpanError(metadata.error)
+          : 'unknown error',
       });
     }
   } catch (error) {
@@ -394,7 +563,8 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
     if (metadata) {
       if (metadata.success !== undefined)
         endAttributes['success'] = metadata.success;
-      if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+      if (metadata.error !== undefined)
+        endAttributes['error'] = truncateSpanError(metadata.error);
     }
 
     spanCtx.span.setAttributes(endAttributes);
@@ -405,7 +575,9 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
       } else {
         spanCtx.span.setStatus({
           code: SpanStatusCode.ERROR,
-          message: metadata.error ?? 'tool error',
+          message: metadata.error
+            ? truncateSpanError(metadata.error)
+            : 'tool error',
         });
       }
     }
@@ -491,7 +663,8 @@ export function endToolExecutionSpan(
     if (metadata) {
       if (metadata.success !== undefined)
         endAttributes['success'] = metadata.success;
-      if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+      if (metadata.error !== undefined)
+        endAttributes['error'] = truncateSpanError(metadata.error);
     }
 
     spanCtx.span.setAttributes(endAttributes);
@@ -506,7 +679,9 @@ export function endToolExecutionSpan(
       } else {
         spanCtx.span.setStatus({
           code: SpanStatusCode.ERROR,
-          message: metadata.error ?? 'tool execution error',
+          message: metadata.error
+            ? truncateSpanError(metadata.error)
+            : 'tool execution error',
         });
       }
     }
@@ -521,6 +696,243 @@ export function endToolExecutionSpan(
   } catch (error) {
     debugLogger.warn(
       `Failed to end tool execution span: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  activeSpans.delete(spanId);
+  strongSpans.delete(spanId);
+}
+
+// --- Tool Blocked-on-User Spans ---
+
+export type ToolBlockedDecision =
+  | 'proceed_once'
+  | 'proceed_always'
+  | 'cancel'
+  | 'aborted'
+  | 'auto_approved'
+  // System-error close — distinct from user 'cancel' so dashboards counting
+  // user cancels don't double-count thrown exceptions in the approval path.
+  | 'error';
+
+export type ToolBlockedSource = 'cli' | 'ide' | 'hook' | 'auto' | 'system';
+
+/**
+ * Brackets the time a tool spends in `awaiting_approval` waiting on the user.
+ *
+ * The parent is passed explicitly because this span starts BEFORE the tool
+ * body's `runInToolSpanContext` block — so `toolContext.getStore()` is empty.
+ * Passing the span object also avoids the `findLast`-by-type concurrency bug
+ * (claude-code's sessionTracing has it; we deliberately don't).
+ */
+export function startToolBlockedOnUserSpan(
+  toolSpan: Span,
+  attrs?: { tool_name?: string; call_id?: string },
+): Span {
+  if (!isTelemetrySdkInitialized()) {
+    return NOOP_SPAN;
+  }
+  // Idempotent — kick off the 30-min TTL cleanup in case this span is
+  // started in a code path where no interaction span has been created
+  // yet (sub-agent tool calls, side queries, future patterns).
+  ensureCleanupInterval();
+
+  const parentSpanId = getSpanId(toolSpan);
+  const parentSpanCtx = activeSpans.get(parentSpanId)?.deref();
+  // If the tool span was already ended (defensive — shouldn't happen on the
+  // happy path), fall back to the standard parent-resolution chain so we
+  // still produce a span correlated with the session.
+  if (!parentSpanCtx) {
+    debugLogger.debug(
+      'startToolBlockedOnUserSpan: tool span not in activeSpans (already ended?) — using resolveParentContext fallback',
+    );
+  }
+  const ctx = parentSpanCtx
+    ? trace.setSpan(otelContext.active(), parentSpanCtx.span)
+    : resolveParentContext(undefined);
+
+  const attributes: Attributes = {};
+  if (attrs?.tool_name !== undefined) attributes['tool.name'] = attrs.tool_name;
+  if (attrs?.call_id !== undefined) attributes['tool.call_id'] = attrs.call_id;
+
+  const span = getTracer().startSpan(
+    SPAN_TOOL_BLOCKED_ON_USER,
+    { kind: SpanKind.INTERNAL, attributes },
+    ctx,
+  );
+
+  const spanId = getSpanId(span);
+  const spanContextObj: SpanContext = {
+    span,
+    startTime: Date.now(),
+    attributes: attributes as Record<string, string | number | boolean>,
+    type: 'tool.blocked_on_user',
+  };
+  activeSpans.set(spanId, new WeakRef(spanContextObj));
+  strongSpans.set(spanId, spanContextObj);
+
+  return span;
+}
+
+/**
+ * Status stays UNSET — waiting on the user is neither OK nor ERROR.
+ * The decision/source attributes are the canonical signal.
+ */
+export function endToolBlockedOnUserSpan(
+  span: Span,
+  metadata?: {
+    decision?: ToolBlockedDecision;
+    source?: ToolBlockedSource;
+  },
+): void {
+  const spanId = getSpanId(span);
+  const spanCtx = activeSpans.get(spanId)?.deref();
+  if (!spanCtx || spanCtx.ended) return;
+
+  spanCtx.ended = true;
+
+  try {
+    const duration = Date.now() - spanCtx.startTime;
+    const endAttributes: Attributes = { duration_ms: duration };
+    if (metadata?.decision !== undefined)
+      endAttributes['decision'] = metadata.decision;
+    if (metadata?.source !== undefined)
+      endAttributes['source'] = metadata.source;
+    spanCtx.span.setAttributes(endAttributes);
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to update blocked_on_user span attributes: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    spanCtx.span.end();
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to end blocked_on_user span: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  activeSpans.delete(spanId);
+  strongSpans.delete(spanId);
+}
+
+// --- Hook Spans ---
+
+export type HookEvent = 'PreToolUse' | 'PostToolUse' | 'PostToolUseFailure';
+
+export interface StartHookSpanOptions {
+  hookEvent: HookEvent;
+  toolName: string;
+  toolUseId?: string;
+  /** PostToolUseFailure only: true when the failure is a user interrupt. */
+  isInterrupt?: boolean;
+}
+
+export interface HookSpanMetadata {
+  /** Whether the hook fire site completed without throwing. */
+  success?: boolean;
+  /** PreToolUse: false means the hook blocked tool execution. */
+  shouldProceed?: boolean;
+  /** PostToolUse: true means the hook stopped further processing. */
+  shouldStop?: boolean;
+  /** Discriminator for blocking decision when applicable. */
+  blockType?: 'denied' | 'ask' | 'stop';
+  hasAdditionalContext?: boolean;
+  /** Hook threw — span ends as ERROR with this message. */
+  error?: string;
+}
+
+export function startHookSpan(opts: StartHookSpanOptions): Span {
+  if (!isTelemetrySdkInitialized()) {
+    return NOOP_SPAN;
+  }
+  // Same defensive cleanup-interval kick as startToolBlockedOnUserSpan —
+  // hook spans may run before any interaction span has been created.
+  ensureCleanupInterval();
+
+  // Hooks fire from inside `runInToolSpanContext` so toolContext is the
+  // natural parent. resolveParentContext also covers the rare case where a
+  // hook span is started outside any tool (defensive — keeps the trace tree
+  // correlated with the session).
+  const parentCtx =
+    toolContext.getStore() ?? interactionContext.getStore() ?? undefined;
+  const ctx = resolveParentContext(parentCtx);
+
+  const attributes: Attributes = {
+    hook_event: opts.hookEvent,
+    'tool.name': opts.toolName,
+  };
+  if (opts.toolUseId !== undefined) attributes['tool.use_id'] = opts.toolUseId;
+  if (opts.isInterrupt !== undefined)
+    attributes['is_interrupt'] = opts.isInterrupt;
+
+  const span = getTracer().startSpan(
+    SPAN_HOOK,
+    { kind: SpanKind.INTERNAL, attributes },
+    ctx,
+  );
+
+  const spanId = getSpanId(span);
+  const spanContextObj: SpanContext = {
+    span,
+    startTime: Date.now(),
+    attributes: attributes as Record<string, string | number | boolean>,
+    type: 'hook',
+  };
+  activeSpans.set(spanId, new WeakRef(spanContextObj));
+  strongSpans.set(spanId, spanContextObj);
+
+  return span;
+}
+
+/**
+ * Status: UNSET on normal flow (including blocking decisions like
+ * shouldProceed: false or shouldStop: true — those are intentional, not
+ * errors). Only an actual hook-side throw (caught by the safelyFire wrapper
+ * or rethrown) maps to ERROR via the `error` metadata field.
+ */
+export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
+  const spanId = getSpanId(span);
+  const spanCtx = activeSpans.get(spanId)?.deref();
+  if (!spanCtx || spanCtx.ended) return;
+
+  spanCtx.ended = true;
+
+  try {
+    const duration = Date.now() - spanCtx.startTime;
+    const endAttributes: Attributes = { duration_ms: duration };
+
+    if (metadata) {
+      if (metadata.success !== undefined)
+        endAttributes['success'] = metadata.success;
+      if (metadata.shouldProceed !== undefined)
+        endAttributes['should_proceed'] = metadata.shouldProceed;
+      if (metadata.shouldStop !== undefined)
+        endAttributes['should_stop'] = metadata.shouldStop;
+      if (metadata.blockType !== undefined)
+        endAttributes['block_type'] = metadata.blockType;
+      if (metadata.hasAdditionalContext !== undefined)
+        endAttributes['has_additional_context'] = metadata.hasAdditionalContext;
+      if (metadata.error !== undefined)
+        endAttributes['error'] = truncateSpanError(metadata.error);
+    }
+
+    spanCtx.span.setAttributes(endAttributes);
+
+    if (metadata?.error !== undefined) {
+      spanCtx.span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: truncateSpanError(metadata.error),
+      });
+    }
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to update hook span attributes/status: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    spanCtx.span.end();
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to end hook span: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   activeSpans.delete(spanId);
@@ -545,4 +957,13 @@ export function clearSessionTracingForTesting(): void {
   interactionSequence = 0;
   lastInteractionCtx = undefined;
   clearDetailedSpanState();
+}
+
+/**
+ * Test-only: invoke the TTL sweep with a synthetic `now`. Lets tests
+ * exercise the stale-span path without waiting 30 minutes or stubbing
+ * setInterval globally.
+ */
+export function runTTLSweepForTesting(now: number): void {
+  sweepStaleSpans(now);
 }
