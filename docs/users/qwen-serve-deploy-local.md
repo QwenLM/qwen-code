@@ -14,11 +14,15 @@ export QWEN_SERVER_TOKEN="$(cat ~/.qwen-serve-token)"
 
 The path / filename is yours to choose; v0.16-alpha does not auto-generate or auto-locate a token file (deferred to v0.16.x). See the [Authentication](./qwen-serve.md#authentication) section of the user guide for the canonical BYO setup.
 
+> **Scope this `export` to the current shell session only.** Don't add it to `~/.bashrc` / `~/.zshrc` — a profile-level export exposes the bearer token to every process spawned from that shell (IDE subprocesses, browser debuggers, `npm` scripts from unrelated projects). For long-running setups, use the systemd `EnvironmentFile=` / launchd `EnvironmentVariables` mechanisms below — both scope the token to just the daemon process.
+
 The daemon reads the bearer token from either `--token <value>` on the CLI or the `QWEN_SERVER_TOKEN` env var (whitespace stripped from both). The TypeScript SDK's `DaemonClient` constructor falls back to `QWEN_SERVER_TOKEN` when no `token` option is passed (PR 27 fallback — clients with the env var set never need to thread the value through their script).
 
-One shell-level `export` covers both server boot and SDK client construction.
+One shell-level `export` covers both server boot and SDK client construction (just keep it scoped to the session, per the note above).
 
 ## Linux: systemd user unit
+
+> **Find your `qwen` binary first.** The unit file's `ExecStart=` must hold an **absolute path** — service managers don't read your shell's `PATH`. Run `which qwen` to discover it. Common locations: `/usr/local/bin/qwen` (Linuxbrew, manual installs), `~/.nvm/versions/node/vX.Y.Z/bin/qwen` (nvm), `~/.fnm/aliases/default/bin/qwen` (fnm), `~/.volta/bin/qwen` (Volta). Substitute the actual path everywhere the templates below show `/PATH/TO/qwen`.
 
 `~/.config/systemd/user/qwen-serve.service`:
 
@@ -31,7 +35,8 @@ After=network.target
 Type=simple
 # Replace with your project; %h expands to $HOME under user units.
 WorkingDirectory=%h/your-project
-ExecStart=/usr/local/bin/qwen serve --hostname 127.0.0.1 --port 4170
+# Run `which qwen` to find the absolute path. systemd does NOT read $PATH.
+ExecStart=/PATH/TO/qwen serve --hostname 127.0.0.1 --port 4170
 # Read the bearer token from a chmod 600 file rather than inlining it
 # in the unit. `Environment=` would expose the token in the unit file
 # (typically 644 = world-readable). EnvironmentFile keeps the token in
@@ -70,6 +75,8 @@ Without `loginctl enable-linger`, the user-level systemd instance shuts down whe
 
 ## macOS: launchd user agent
 
+> **Find your `qwen` binary first.** Same constraint as systemd — `ProgramArguments` must hold an **absolute path**. Run `which qwen` to discover it. Common locations on macOS: `/opt/homebrew/bin/qwen` (Homebrew on Apple Silicon), `/usr/local/bin/qwen` (Homebrew on Intel, manual installs), `~/.nvm/versions/node/vX.Y.Z/bin/qwen` (nvm), `~/.volta/bin/qwen` (Volta). Substitute below where the template shows `/PATH/TO/qwen`.
+
 `~/Library/LaunchAgents/com.qwenlm.qwen-serve.plist`:
 
 ```xml
@@ -81,7 +88,8 @@ Without `loginctl enable-linger`, the user-level systemd instance shuts down whe
   <string>com.qwenlm.qwen-serve</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/qwen</string>
+    <!-- Run `which qwen` to find the absolute path; launchd does NOT read $PATH. -->
+    <string>/PATH/TO/qwen</string>
     <string>serve</string>
     <string>--hostname</string>
     <string>127.0.0.1</string>
