@@ -220,6 +220,34 @@ export type HistoryItemToolStats = HistoryItemBase & {
   type: 'tool_stats';
 };
 
+export type HistoryItemTokenStats = HistoryItemBase & {
+  type: 'token_stats';
+  tokenStatsMode: 'daily' | 'monthly' | 'model';
+  dailyData?: Array<{
+    date: string;
+    usage: {
+      total: { prompt: number; candidates: number; total: number };
+      sessionCount: number;
+      requestCount: number;
+    };
+  }>;
+  monthlyData?: Array<{
+    month: string;
+    usage: {
+      total: { prompt: number; candidates: number; total: number };
+      sessionCount: number;
+      requestCount: number;
+    };
+  }>;
+  modelData?: Record<
+    string,
+    {
+      tokens: { prompt: number; candidates: number; total: number };
+      requestCount: number;
+    }
+  >;
+};
+
 export type HistoryItemQuit = HistoryItemBase & {
   type: 'quit';
   duration: string;
@@ -557,6 +585,7 @@ export type HistoryItemWithoutId =
   | HistoryItemStats
   | HistoryItemModelStats
   | HistoryItemToolStats
+  | HistoryItemTokenStats
   | HistoryItemQuit
   | HistoryItemCompression
   | HistoryItemSummary
@@ -593,6 +622,7 @@ export enum MessageType {
   STATS = 'stats',
   MODEL_STATS = 'model_stats',
   TOOL_STATS = 'tool_stats',
+  TOKEN_STATS = 'token_stats',
   QUIT = 'quit',
   GEMINI = 'gemini',
   COMPRESSION = 'compression',

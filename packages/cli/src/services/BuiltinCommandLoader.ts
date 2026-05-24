@@ -53,6 +53,7 @@ import { rewindCommand } from '../ui/commands/rewindCommand.js';
 import { settingsCommand } from '../ui/commands/settingsCommand.js';
 import { skillsCommand } from '../ui/commands/skillsCommand.js';
 import { statsCommand } from '../ui/commands/statsCommand.js';
+import { tokenStatsCommand } from '../ui/commands/tokenStatsCommand.js';
 import { summaryCommand } from '../ui/commands/summaryCommand.js';
 import { terminalSetupCommand } from '../ui/commands/terminalSetupCommand.js';
 import { themeCommand } from '../ui/commands/themeCommand.js';
@@ -139,6 +140,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       rewindCommand,
       skillsCommand,
       statsCommand,
+      tokenStatsCommand,
       summaryCommand,
       themeCommand,
       toolsCommand,

@@ -40,6 +40,7 @@ import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
 import { ModelStatsDisplay } from './ModelStatsDisplay.js';
 import { ToolStatsDisplay } from './ToolStatsDisplay.js';
+import { TokenStatsDisplay } from './TokenStatsDisplay.js';
 import { SessionSummaryDisplay } from './SessionSummaryDisplay.js';
 import { Help } from './Help.js';
 import type { SlashCommand } from '../commands/types.js';
@@ -208,6 +209,15 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'tool_stats' && (
         <ToolStatsDisplay width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'token_stats' && (
+        <TokenStatsDisplay
+          width={boxWidth}
+          mode={itemForDisplay.tokenStatsMode}
+          dailyData={itemForDisplay.dailyData}
+          monthlyData={itemForDisplay.monthlyData}
+          modelData={itemForDisplay.modelData}
+        />
       )}
       {itemForDisplay.type === 'quit' && (
         <SessionSummaryDisplay
