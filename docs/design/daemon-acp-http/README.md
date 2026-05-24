@@ -216,10 +216,14 @@ No change to `bridge.ts` / `eventBus.ts` (additive consumer only).
 `AcpConnection` keeps `Map<jsonRpcId, {sessionId, kind, bridgeRequestId, resolve}>`.
 When the client POSTs a JSON-RPC response object, `dispatch` matches `id`, then calls the
 bridge resolution path (e.g. permission `POST /session/:id/permission/:requestId`
-internal equivalent). `fs/*` requests: the daemon already satisfies file reads via its
-own workspace FS for the REST path; for the ACP surface we **forward** `fs/*` to the
-client (true ACP semantics) and only fall back to local FS when the client lacks the
-`fs` capability (declared in `initialize`).
+internal equivalent).
+
+> **v1 status:** only the `session/request_permission` agent→client round-trip is
+> implemented. `fs/*` and `terminal/*` agent→client forwarding is **deferred** (§7) — the
+> daemon does not yet advertise `fs`/`terminal` client-capability negotiation on `/acp`,
+> so ACP clients should not assume filesystem/terminal semantics over this transport in
+> v1. The intended end state (forward `fs/*` to the client; fall back to the daemon's
+> workspace FS when the client lacks the `fs` capability) is the follow-up described in §7.
 
 ---
 
@@ -259,8 +263,10 @@ Standard methods are **never** renamed; extensions are strictly additive and ign
 - Both transports share **one** `HttpAcpBridge` + `EventBus` instance, so there is no
   state duplication — `/acp` and `/session/*` can even drive the same live session
   concurrently (multi-client is already supported by the bridge).
-- Toggle: on by default; `QWEN_SERVE_ACP_HTTP=0` (or `--no-acp-http`) disables mount.
-  Advertised via a `acp_http` tag in `/capabilities`.
+- Toggle (v1, shipped): on by default; **`QWEN_SERVE_ACP_HTTP=0`** disables the mount. A
+  `--no-acp-http` CLI flag and an `acp_http` tag in `/capabilities` for client feature-
+  detection are **deferred** to a follow-up (not in v1) — until then clients detect the
+  transport by probing `POST /acp {initialize}`.
 
 Migration path: once the RFD ratifies and SDKs ship, REST routes can be reframed as a
 thin compat shim over `/acp` (separate, later PR).
@@ -420,3 +426,30 @@ touched here.
 
 **Still deferred** (documented): per-connection secret for `DELETE`/connection ownership (token remains
 the boundary); WebSocket + HTTP/2 (§7); strict prompt-result vs trailing-update barrier (§11).
+
+---
+
+## 13. Review round 4 — PR fold-ins (rebased onto #4469)
+
+Branch rebased onto `daemon_mode_b_main` (#4353 + #4469) — **clean, no conflicts**. Two PR
+reviewers (GPT-5 + qwen3.7-max). Suite now **25 tests**; live re-verified (125 `session/update`
+→ `end_turn`).
+
+| # | Severity | Finding | Fix |
+|---|----------|---------|-----|
+| C1 | **P0** | Round-3 "SSE write-failure handling" was documented but NOT implemented — `SseStream` still left it to discarding callers (zombie streams). | `writeRaw` now owns it: first write rejection logs once + `close()`s; `doWrite` also listens for `'error'` (rejects promptly instead of hanging to `'close'`); `onClose` wrapped in try/catch. |
+| C2 | **P1** | `fromLoopback` captured only at `initialize` + helper narrower than REST → `local-only` votes from a later POST misjudged. | Per-request loopback threaded through `handle`→`sessionCtx`/`resolveClientResponse`; `isLoopbackReq` widened to `127.0.0.0/8` + `::ffff:127.*` + `::1` (matches REST). |
+| C3 | **P1** | Error routing inferred stream from `params.sessionId` → conn-scoped method failures (`session/load`/`resume`/`close`/`heartbeat`) misrouted to a non-existent session stream (silent loss). | `CONN_ROUTED_METHODS` set; errors route the same way as the success path. |
+| C4 | **P1** | `bridge.detachClient` never called on teardown → stale bridge-stamped client ids linger in `knownClientIds()`/voter sets. | Registry takes a `DetachSessionFn`; `closeSessionStream`/`destroy` detach each owned session (best-effort). |
+| C5 | **P1** | `session/close` skipped local cleanup if `bridge.closeSession` threw. | `closeSessionStream` moved into a `finally`. |
+| C6 | **P2** | Windows `cwd` (`C:\…`) rejected by `startsWith('/')`. | `path.isAbsolute` (platform-aware), matching REST. |
+| C7 | **P2** | `protocolVersion` could negotiate `0`/negative. | Clamp `Math.max(1, Math.min(requested, 1))`; tests for 0/neg/huge/invalid. |
+| C8 | **P2** | `session/load`/`resume` accepted empty `sessionId`. | Reject empty with `INVALID_PARAMS`. |
+| C9 | **P2** | Notification-form `session/prompt` errors vanished silently. | Log on the no-id path. |
+| C10 | **P2** | Session SSE flushed buffered frames before headers/`retry:`. | `open()` before `attachSessionStream`. |
+| C11 | **P2** | Duplicate local `logStderr`. | Shared `writeStderrLine` from `utils/stdioHelpers`. |
+| C12 | **P2** | Docs advertised `--no-acp-http` flag, `acp_http` capability tag, and `fs/*` forwarding not in v1. | Doc aligned to shipped surface (env-var toggle only; `fs/*`+`terminal/*` + flag + tag marked deferred). |
+
+Still deferred (unchanged): WebSocket + HTTP/2; per-connection secret for `DELETE`/ownership
+(token + single-workspace remains the boundary); strict prompt-result ordering barrier; the
+`as never` bridge-boundary casts (targeted, noted for an adapter-types follow-up).

@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpConnection } from './connectionRegistry.js';
 import {
   QWEN_METHOD_NS,
@@ -23,13 +25,24 @@ import {
   type JsonRpcResponse,
 } from './jsonRpc.js';
 
-function logStderr(line: string): void {
-  process.stderr.write(`${line}\n`);
-}
-
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+/**
+ * Method names whose responses ride the CONNECTION-scoped stream (the
+ * session stream may not exist yet / ownership not granted on failure).
+ * Error frames must route the same way as their success path.
+ */
+const CONN_ROUTED_METHODS = new Set<string>([
+  'authenticate',
+  'session/new',
+  'session/load',
+  'session/resume',
+  'session/list',
+  'session/close',
+  `${QWEN_METHOD_NS}session/heartbeat`,
+]);
 
 /** Matches the REST surface's `MAX_WORKSPACE_PATH_LENGTH` (PATH_MAX). */
 const MAX_WORKSPACE_PATH_LENGTH = 4096;
@@ -56,7 +69,10 @@ function parseOptionalWorkspaceCwd(
       `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
     );
   }
-  if (!cwd.startsWith('/')) {
+  // `path.isAbsolute` (platform-aware) — same as the REST route. A bare
+  // `startsWith('/')` would reject valid Windows `C:\…`/UNC paths a client
+  // gets back from `/capabilities.workspaceCwd`.
+  if (!path.isAbsolute(cwd)) {
     throw new AcpParamError('`cwd` must be an absolute path when provided');
   }
   return cwd;
@@ -138,6 +154,7 @@ export class AcpDispatcher {
   private sessionCtx(
     conn: AcpConnection,
     sessionId: string,
+    fromLoopback: boolean,
   ): { clientId: string; fromLoopback: boolean } {
     const clientId = conn.sessions.get(sessionId)?.clientId;
     if (!clientId) {
@@ -145,7 +162,7 @@ export class AcpDispatcher {
         `no bridge-stamped clientId for session ${sessionId} (ownership invariant violated)`,
       );
     }
-    return { clientId, fromLoopback: conn.fromLoopback };
+    return { clientId, fromLoopback };
   }
 
   /**
@@ -171,8 +188,10 @@ export class AcpDispatcher {
 
   /**
    * Build the `initialize` result advertising standard + `_qwen` caps.
-   * Negotiates the protocol version down to what we support (ACP stable
-   * = 1): we echo `min(requested, ACP_PROTOCOL_VERSION)`.
+   * Negotiates the protocol version: we only implement stable V1, so we
+   * clamp to `[1, ACP_PROTOCOL_VERSION]` — a client asking for 0/negative
+   * (ACP marks V0 a pre-release fallback) or a future version gets `1`
+   * rather than an echoed version we don't actually implement.
    */
   buildInitializeResult(
     connectionId: string,
@@ -182,7 +201,7 @@ export class AcpDispatcher {
       typeof requestedVersion === 'number' && Number.isFinite(requestedVersion)
         ? requestedVersion
         : ACP_PROTOCOL_VERSION;
-    const negotiated = Math.min(requested, ACP_PROTOCOL_VERSION);
+    const negotiated = Math.max(1, Math.min(requested, ACP_PROTOCOL_VERSION));
     return {
       protocolVersion: negotiated,
       agentCapabilities: {
@@ -244,15 +263,21 @@ export class AcpDispatcher {
     conn: AcpConnection,
     msg: JsonRpcInbound,
     sessionHeader?: string,
+    reqLoopback?: boolean,
   ): Promise<void> {
+    // Loopback is evaluated PER REQUEST (the permission-vote POST may arrive
+    // from a different peer than `initialize`), falling back to the
+    // connection's initialize-time value when the caller didn't supply it.
+    const loopback = reqLoopback ?? conn.fromLoopback;
+
     // A client's JSON-RPC RESPONSE (to an agent→client request) — wrapped
     // so a throwing bridge call can't reject this promise after index.ts
     // already sent `202` (which would surface as an unhandled rejection).
     if (isResponse(msg)) {
       try {
-        this.resolveClientResponse(conn, msg);
+        this.resolveClientResponse(conn, msg, loopback);
       } catch (err) {
-        logStderr(`qwen serve: /acp response handling error: ${errMsg(err)}`);
+        writeStderrLine(`qwen serve: /acp response handling error: ${errMsg(err)}`);
       }
       return;
     }
@@ -311,6 +336,14 @@ export class AcpDispatcher {
         case 'session/load':
         case 'session/resume': {
           const sessionId = String(params['sessionId'] ?? '');
+          if (!sessionId) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`sessionId` is required'),
+              );
+            }
+            return;
+          }
           const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
           const restored =
             method === 'session/load'
@@ -341,11 +374,17 @@ export class AcpDispatcher {
         case 'session/close': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
-          await this.bridge.closeSession(
-            sessionId,
-            this.sessionCtx(conn, sessionId),
-          );
-          conn.closeSessionStream(sessionId);
+          try {
+            await this.bridge.closeSession(
+              sessionId,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+          } finally {
+            // Local teardown must run even if the bridge close throws —
+            // otherwise the SSE stream, abort controller, buffered frames and
+            // pending permissions leak until idle TTL.
+            conn.closeSessionStream(sessionId);
+          }
           this.replyConn(conn, id, {});
           return;
         }
@@ -360,7 +399,7 @@ export class AcpDispatcher {
           await this.bridge.cancelSession(
             sessionId,
             undefined,
-            this.sessionCtx(conn, sessionId),
+            this.sessionCtx(conn, sessionId, loopback),
           );
           // `session/cancel` is normally a notification (no id), but answer
           // the request-form so a client that sent an id isn't left hanging.
@@ -372,7 +411,7 @@ export class AcpDispatcher {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
           validatePrompt(params);
-          await this.handlePrompt(conn, sessionId, id, params);
+          await this.handlePrompt(conn, sessionId, id, params, loopback);
           return;
         }
 
@@ -382,7 +421,7 @@ export class AcpDispatcher {
           const result = await this.bridge.setSessionModel(
             sessionId,
             params as never,
-            this.sessionCtx(conn, sessionId),
+            this.sessionCtx(conn, sessionId, loopback),
           );
           this.replySession(conn, sessionId, id, result as unknown);
           return;
@@ -393,7 +432,7 @@ export class AcpDispatcher {
           if (!this.requireOwned(conn, sessionId, id)) return;
           const result = this.bridge.recordHeartbeat(
             sessionId,
-            this.sessionCtx(conn, sessionId),
+            this.sessionCtx(conn, sessionId, loopback),
           );
           this.replyConn(conn, id, result as unknown);
           return;
@@ -410,16 +449,23 @@ export class AcpDispatcher {
     } catch (err) {
       // Full detail to stderr for the operator; a coded, client-safe shape
       // on the wire (raw bridge messages may carry internal paths/details).
-      logStderr(`qwen serve: /acp dispatch error (${method}): ${errMsg(err)}`);
+      writeStderrLine(`qwen serve: /acp dispatch error (${method}): ${errMsg(err)}`);
       if (id !== undefined) {
         const { code, message } = toRpcError(err);
+        const frame = error(id, code, message);
+        // Route the error the SAME way as the method's success path. Inferring
+        // from `params.sessionId` would misroute conn-scoped method failures
+        // (session/load|resume|close|…) to a session stream that doesn't exist
+        // yet — the client waiting on the connection stream never sees them.
         const sessionId =
           typeof params['sessionId'] === 'string'
             ? (params['sessionId'] as string)
             : undefined;
-        const frame = error(id, code, message);
-        if (sessionId) this.replySession(conn, sessionId, id, undefined, frame);
-        else conn.sendConn(frame);
+        if (sessionId && !CONN_ROUTED_METHODS.has(method)) {
+          this.replySession(conn, sessionId, id, undefined, frame);
+        } else {
+          conn.sendConn(frame);
+        }
       }
     }
   }
@@ -518,8 +564,16 @@ export class AcpDispatcher {
     }
   }
 
-  /** Resolve a client's JSON-RPC response to an agent→client request. */
-  private resolveClientResponse(conn: AcpConnection, msg: JsonRpcResponse): void {
+  /**
+   * Resolve a client's JSON-RPC response to an agent→client request.
+   * `fromLoopback` is the CURRENT request's loopback bit (the vote POST may
+   * arrive from a different peer than `initialize`).
+   */
+  private resolveClientResponse(
+    conn: AcpConnection,
+    msg: JsonRpcResponse,
+    fromLoopback: boolean,
+  ): void {
     // Our outbound request ids are strings (`_qwen_perm_N`); a client echoes
     // the same id verbatim. Anything else can't match a pending entry.
     const id = msg.id;
@@ -534,7 +588,7 @@ export class AcpDispatcher {
         pending.sessionId,
         pending.bridgeRequestId,
         { outcome: { outcome: 'cancelled' } } as never,
-        this.sessionCtx(conn, pending.sessionId),
+        this.sessionCtx(conn, pending.sessionId, fromLoopback),
       );
       return;
     }
@@ -543,7 +597,7 @@ export class AcpDispatcher {
       pending.sessionId,
       pending.bridgeRequestId,
       result as never,
-      this.sessionCtx(conn, pending.sessionId),
+      this.sessionCtx(conn, pending.sessionId, fromLoopback),
     );
   }
 
@@ -552,6 +606,7 @@ export class AcpDispatcher {
     sessionId: string,
     id: JsonRpcId | undefined,
     params: Record<string, unknown>,
+    fromLoopback: boolean,
   ): Promise<void> {
     // Park the controller on the binding so `session/cancel` and
     // session/connection teardown can abort an in-flight prompt — otherwise
@@ -565,7 +620,7 @@ export class AcpDispatcher {
         sessionId,
         params as never,
         abort.signal,
-        this.sessionCtx(conn, sessionId),
+        this.sessionCtx(conn, sessionId, fromLoopback),
       );
       if (id !== undefined) this.replySession(conn, sessionId, id, result);
     } catch (err) {
@@ -577,6 +632,12 @@ export class AcpDispatcher {
           id,
           undefined,
           error(id, code, message),
+        );
+      } else {
+        // Notification-form prompt (no id): no response frame to send, so a
+        // failure would vanish silently — log it for the operator.
+        writeStderrLine(
+          `qwen serve: /acp prompt error (${sessionId}, notification): ${errMsg(err)}`,
         );
       }
     } finally {

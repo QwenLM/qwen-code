@@ -69,14 +69,37 @@ export class SseStream {
     } catch {
       // socket already gone — nothing to flush
     }
-    this.onClose?.();
+    // Guard `onClose`: `close()` can run inside a socket `'error'`/`'close'`
+    // event handler, and a throwing callback there would escape into Node's
+    // emitter stack (potential crash). Swallow + log instead.
+    try {
+      this.onClose?.();
+    } catch (err) {
+      process.stderr.write(
+        `qwen serve: /acp SSE onClose threw: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    }
   }
 
   private writeRaw(chunk: string): Promise<void> {
     const next = this.writeChain.then(() => this.doWrite(chunk));
-    // Tail-swallow so one failed write doesn't poison the chain; the
-    // caller's returned promise still rejects.
-    this.writeChain = next.catch(() => undefined);
+    // The stream OWNS write-failure handling: callers fire-and-forget
+    // (`void stream.send(...)`), so a broken socket would otherwise leave a
+    // zombie stream (heartbeats firing, no events delivered, no log). On the
+    // first failure, log once and close so the subscription tears down.
+    this.writeChain = next.catch((err: unknown) => {
+      if (!this.closed) {
+        process.stderr.write(
+          `qwen serve: /acp SSE write failed, closing stream: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+        this.close();
+      }
+      return undefined;
+    });
     return next;
   }
 
@@ -97,16 +120,26 @@ export class SseStream {
         resolve();
         return;
       }
+      // Await drain, but also bail on close/error so a socket failure during
+      // the drain window rejects promptly instead of hanging until 'close'.
       const onDrain = () => {
         this.res.off('close', onCloseEv);
+        this.res.off('error', onErrorEv);
         resolve();
       };
       const onCloseEv = () => {
         this.res.off('drain', onDrain);
+        this.res.off('error', onErrorEv);
         resolve();
+      };
+      const onErrorEv = (err: Error) => {
+        this.res.off('drain', onDrain);
+        this.res.off('close', onCloseEv);
+        reject(err);
       };
       this.res.once('drain', onDrain);
       this.res.once('close', onCloseEv);
+      this.res.once('error', onErrorEv);
     });
   }
 }

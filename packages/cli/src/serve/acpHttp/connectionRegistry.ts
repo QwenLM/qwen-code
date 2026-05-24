@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { SseStream } from './sseStream.js';
 
 /**
@@ -18,10 +19,6 @@ const MAX_BUFFERED_FRAMES = 256;
 /** Default cap on concurrent live connections (mirrors a bounded resource). */
 const DEFAULT_MAX_CONNECTIONS = 64;
 
-function logStderr(line: string): void {
-  process.stderr.write(`${line}\n`);
-}
-
 /**
  * Invoked when a session/connection tears down while an agent→client
  * request (e.g. a permission prompt) is still outstanding, so the bridge
@@ -29,6 +26,18 @@ function logStderr(line: string): void {
  */
 export type AbandonPendingFn = (
   req: PendingClientRequest,
+  clientId: string | undefined,
+) => void;
+
+/**
+ * Best-effort bridge detach for a session's bridge-stamped clientId on
+ * teardown. Without it, `session/new`/`load`/`resume`-registered client ids
+ * stay visible in `knownClientIds()`/`votersForSession()` after the ACP
+ * connection is gone — skewing permission mediation + origin validation.
+ * ACP clients can't clean this up themselves (the id isn't on the wire).
+ */
+export type DetachSessionFn = (
+  sessionId: string,
   clientId: string | undefined,
 ) => void;
 
@@ -110,6 +119,7 @@ export class AcpConnection {
     connectionId: string | undefined,
     fromLoopback: boolean,
     private readonly onAbandonPending?: AbandonPendingFn,
+    private readonly onDetachSession?: DetachSessionFn,
   ) {
     this.connectionId = connectionId ?? randomUUID();
     this.clientId = randomUUID();
@@ -203,6 +213,7 @@ export class AcpConnection {
     binding.promptAbort?.abort();
     binding.stream?.close();
     this.abandonPendingForSession(sessionId, binding.clientId);
+    this.onDetachSession?.(sessionId, binding.clientId);
     this.sessions.delete(sessionId);
     this.ownedSessions.delete(sessionId);
   }
@@ -213,6 +224,9 @@ export class AcpConnection {
       binding.promptAbort?.abort();
       binding.stream?.close();
       this.abandonPendingForSession(binding.sessionId, binding.clientId);
+      // Release the bridge-stamped clientId so it doesn't linger in the
+      // bridge's voter/known-client sets after this connection is gone.
+      this.onDetachSession?.(binding.sessionId, binding.clientId);
     }
     this.sessions.clear();
     this.ownedSessions.clear();
@@ -249,6 +263,7 @@ export class ConnectionRegistry {
 
   constructor(
     private readonly onAbandonPending?: AbandonPendingFn,
+    private readonly onDetachSession?: DetachSessionFn,
     private readonly maxConnections = DEFAULT_MAX_CONNECTIONS,
     private readonly idleTtlMs = 30 * 60_000,
   ) {
@@ -265,7 +280,12 @@ export class ConnectionRegistry {
     if (this.maxConnections > 0 && this.byId.size >= this.maxConnections) {
       return undefined;
     }
-    const conn = new AcpConnection(undefined, fromLoopback, this.onAbandonPending);
+    const conn = new AcpConnection(
+      undefined,
+      fromLoopback,
+      this.onAbandonPending,
+      this.onDetachSession,
+    );
     this.byId.set(conn.connectionId, conn);
     return conn;
   }
@@ -301,7 +321,7 @@ export class ConnectionRegistry {
       // streams is otherwise invisible to operators chasing "my client
       // froze". Note that `touch()` fires on inbound HTTP AND on event
       // delivery (pumpSessionEvents), so a long quiet prompt isn't reaped.
-      logStderr(
+      writeStderrLine(
         `qwen serve: /acp reaping idle connection ${id} ` +
           `(idle > ${Math.round(this.idleTtlMs / 60_000)}m, ` +
           `${conn.sessions.size} session(s))`,

@@ -81,7 +81,10 @@ class FakeBridge {
     };
   }
 
+  loadShouldThrow = false;
+
   async loadSession(req: { sessionId: string }) {
+    if (this.loadShouldThrow) throw new Error('load failed');
     return {
       sessionId: req.sessionId,
       workspaceCwd: '/ws',
@@ -130,9 +133,14 @@ class FakeBridge {
     return [];
   }
 
+  detached: Array<{ sessionId: string; clientId?: string }> = [];
+
   async cancelSession() {}
   async closeSession(sessionId: string) {
     this.closedSessions.push(sessionId);
+  }
+  async detachClient(sessionId: string, clientId?: string) {
+    this.detached.push({ sessionId, clientId });
   }
 }
 
@@ -468,6 +476,56 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const frames = (await got) as Array<{ id: number }>;
     expect(frames.map((f) => f.id)).toContain(22);
     expect(bridge.closedSessions).toContain('sess-1');
+  });
+
+  it('initialize clamps protocolVersion to [1, 1]', async () => {
+    for (const [requested, expected] of [
+      [0, 1],
+      [-3, 1],
+      [99, 1],
+      ['bad', 1],
+    ] as Array<[unknown, number]>) {
+      const res = await fetch(`${base}/acp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { protocolVersion: requested },
+        }),
+      });
+      const body = (await res.json()) as { result: { protocolVersion: number } };
+      expect(body.result.protocolVersion).toBe(expected);
+    }
+  });
+
+  it('session/load failure routes the error to the connection stream', async () => {
+    bridge.loadShouldThrow = true;
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 30,
+      method: 'session/load',
+      params: { sessionId: 'x' },
+    });
+    const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
+    expect(frame.id).toBe(30);
+    expect(frame.error.code).toBe(-32603);
+  });
+
+  it('connection teardown detaches the session client from the bridge', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    await fetch(`${base}/acp`, {
+      method: 'DELETE',
+      headers: { 'acp-connection-id': connId },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(true);
   });
 
   it('DELETE without a connection id → 400', async () => {

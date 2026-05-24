@@ -57,8 +57,19 @@ export function mountAcpHttp(
   const dispatcher = new AcpDispatcher(bridge, opts.boundWorkspace);
   // When a session/connection tears down with a permission still pending,
   // cancel it on the bridge so the agent's prompt isn't left blocked.
-  const registry = new ConnectionRegistry((req, clientId) =>
-    dispatcher.cancelAbandonedPermission(req, clientId),
+  const registry = new ConnectionRegistry(
+    (req, clientId) => dispatcher.cancelAbandonedPermission(req, clientId),
+    // Best-effort bridge detach so a torn-down connection's bridge-stamped
+    // client ids don't linger in the bridge's voter/known-client sets.
+    (sessionId, clientId) => {
+      void bridge.detachClient(sessionId, clientId).catch((err: unknown) => {
+        process.stderr.write(
+          `qwen serve: /acp detachClient(${sessionId}) failed: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      });
+    },
   );
 
   // ── POST /acp ──────────────────────────────────────────────────────
@@ -126,7 +137,7 @@ export function mountAcpHttp(
     // swallow+log any late rejection rather than let it escape as an
     // unhandled rejection (which could take the daemon down).
     await dispatcher
-      .handle(conn, message, headerOf(req, ACP_SESSION_HEADER))
+      .handle(conn, message, headerOf(req, ACP_SESSION_HEADER), isLoopbackReq(req))
       .catch((err: unknown) => {
         process.stderr.write(
           `qwen serve: /acp handle error: ${
@@ -174,8 +185,10 @@ export function mountAcpHttp(
     // stale stream closing can't cancel a newer subscription.
     const ac = new AbortController();
     const stream = new SseStream(res, () => ac.abort());
-    conn.attachSessionStream(sessionId, stream, ac);
+    // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
+    // handshake precedes any buffered frames the attach flushes.
     stream.open();
+    conn.attachSessionStream(sessionId, stream, ac);
     void dispatcher
       .pumpSessionEvents(conn, sessionId, ac.signal)
       .catch((err: unknown) => {
@@ -220,7 +233,9 @@ function headerOf(req: Request, name: string): string | undefined {
  */
 function isLoopbackReq(req: Request): boolean {
   const addr = req.socket?.remoteAddress;
-  return (
-    addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
-  );
+  if (typeof addr !== 'string') return false;
+  // Match the REST surface's `detectFromLoopback`: the full 127.0.0.0/8
+  // range + the IPv4-mapped block, not just three exact literals (a
+  // container peer on 127.0.0.2 is legal loopback).
+  return addr === '::1' || addr.startsWith('127.') || addr.startsWith('::ffff:127.');
 }
