@@ -184,7 +184,13 @@ export function mountAcpHttp(
     // stream/subscription. onClose aborts THIS stream's controller — a
     // stale stream closing can't cancel a newer subscription.
     const ac = new AbortController();
-    const stream = new SseStream(res, () => ac.abort());
+    const stream = new SseStream(res, () => {
+      // Stream closed (tab close / network drop / crash): stop the event
+      // pump AND abort any in-flight prompt for this session — otherwise the
+      // agent keeps running (burning quota, holding the FIFO) until idle TTL.
+      ac.abort();
+      conn.sessions.get(sessionId)?.promptAbort?.abort();
+    });
     // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
     // handshake precedes any buffered frames the attach flushes.
     stream.open();
@@ -197,6 +203,9 @@ export function mountAcpHttp(
             err instanceof Error ? err.message : String(err)
           }\n`,
         );
+        // Don't leave a zombie SSE stream that heartbeats but delivers
+        // nothing — close it so the client gets a disconnect + reconnects.
+        conn.closeSessionStream(sessionId);
       });
   });
 

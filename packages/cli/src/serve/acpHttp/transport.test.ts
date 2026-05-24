@@ -528,6 +528,47 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(true);
   });
 
+  it('malformed permission response still releases the bridge (cancel fallback)', async () => {
+    const votes: Array<{ outcome?: { outcome?: string } }> = [];
+    // Emulate the real bridge: throw on a vote with no `outcome`.
+    bridge.respondToSessionPermission = ((_s: string, _r: string, resp: unknown) => {
+      const r = resp as { outcome?: { outcome?: string } };
+      if (!r?.outcome?.outcome) throw new Error('invalid permission response');
+      votes.push(r);
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-x',
+          sessionId: 'sess-1',
+          toolCall: {},
+          options: [{ optionId: 'allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 40));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 50,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] },
+    });
+    const [reqFrame] = (await got) as Array<{ id: string }>;
+    // Client answers with a malformed result (no outcome) → bridge throws →
+    // fallback must still cancel so the mediator is released.
+    await post(connId, { jsonrpc: '2.0', id: reqFrame.id, result: {} });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(votes).toContainEqual({ outcome: { outcome: 'cancelled' } });
+  });
+
   it('DELETE without a connection id → 400', async () => {
     const res = await fetch(`${base}/acp`, { method: 'DELETE' });
     expect(res.status).toBe(400);

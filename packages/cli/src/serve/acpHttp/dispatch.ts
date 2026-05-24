@@ -582,23 +582,34 @@ export class AcpDispatcher {
     if (!pending) return;
     conn.pending.delete(id);
 
-    if ('error' in msg) {
-      // Treat a client error response as a cancellation.
+    // A client error response is a cancellation; otherwise pass the result
+    // through. The `as never` defers shape validation to the bridge, so a
+    // MALFORMED result (e.g. `{}` with no `outcome`) makes the mediator
+    // throw — and since we already removed the pending entry, teardown's
+    // `abandonPendingForSession` can no longer cancel it, leaving the
+    // agent's prompt stuck on a vote that never resolves (a token-holder
+    // could stall a session with one bad POST). So on ANY failure, fall back
+    // to an explicit cancel so the mediator is always released.
+    const vote =
+      'error' in msg
+        ? { outcome: { outcome: 'cancelled' } }
+        : (msg as { result: unknown }).result;
+    try {
       this.bridge.respondToSessionPermission(
         pending.sessionId,
         pending.bridgeRequestId,
-        { outcome: { outcome: 'cancelled' } } as never,
+        vote as never,
         this.sessionCtx(conn, pending.sessionId, fromLoopback),
       );
-      return;
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: /acp permission vote failed (${pending.sessionId}): ${errMsg(err)}`,
+      );
+      this.cancelAbandonedPermission(
+        pending,
+        conn.sessions.get(pending.sessionId)?.clientId,
+      );
     }
-    const result = (msg as { result: unknown }).result;
-    this.bridge.respondToSessionPermission(
-      pending.sessionId,
-      pending.bridgeRequestId,
-      result as never,
-      this.sessionCtx(conn, pending.sessionId, fromLoopback),
-    );
   }
 
   private async handlePrompt(

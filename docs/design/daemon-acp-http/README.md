@@ -453,3 +453,15 @@ reviewers (GPT-5 + qwen3.7-max). Suite now **25 tests**; live re-verified (125 `
 Still deferred (unchanged): WebSocket + HTTP/2; per-connection secret for `DELETE`/ownership
 (token + single-workspace remains the boundary); strict prompt-result ordering barrier; the
 `as never` bridge-boundary casts (targeted, noted for an adapter-types follow-up).
+
+---
+
+## 14. Review round 5 — PR fold-ins
+
+One more reviewer pass (qwen3.7-max). Suite **26 tests**, live re-verified.
+
+| # | Severity | Finding | Fix |
+|---|----------|---------|-----|
+| D1 | **P0** | `resolveClientResponse` deleted the pending entry BEFORE calling `respondToSessionPermission`. A malformed vote (`result: {}`) makes the bridge mediator throw — and with the pending entry already gone, teardown's `abandonPendingForSession` can't cancel it, so the agent's prompt hangs on a vote that never resolves (a token-holder could stall a session with one bad POST). | Wrap the vote in try/catch; on any failure fall back to `cancelAbandonedPermission` so the mediator is always released. New test covers the malformed-vote path. |
+| D2 | **P1** | Session-stream `onClose` aborted only the event pump, not `binding.promptAbort` — a client disconnect (tab close / network drop) left the in-flight prompt running (quota + FIFO) until idle TTL. | `onClose` now also aborts the session's `promptAbort`. |
+| D3 | **P1** | When `pumpSessionEvents` rejected, the `.catch` only logged — the SSE stream stayed open heartbeating but delivering nothing (zombie, no reconnect signal). | `.catch` now also `closeSessionStream(sessionId)`. |
