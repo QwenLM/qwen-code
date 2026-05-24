@@ -1,7 +1,8 @@
 name: 'PR Gate'
 
-# Fast deterministic merge-blocking checks. Each job emits an independent
-# named status check that Branch Protection references as Required.
+# Fast deterministic PR gate/status checks. Each job emits an independent
+# named status check. Branch Protection may require the check names, but an
+# individual job can still report a warning-only signal such as PR Size.
 #
 # Sibling workflow `qwen-code-pr-review.yml` provides the (slow, advisory)
 # AI review — it is intentionally NOT required for merge. See
