@@ -48,6 +48,7 @@ import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './ui/contexts/BackgroundTaskViewContext.js';
+import { InlineAgentClaimProvider } from './ui/contexts/InlineAgentClaimContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
 import { themeManager, AUTO_THEME_NAME } from './ui/themes/theme-manager.js';
 import {
@@ -322,13 +323,15 @@ export async function startInteractiveUI(
                 <VimModeProvider settings={settings}>
                   <AgentViewProvider config={config}>
                     <BackgroundTaskViewProvider config={config}>
-                      <AppContainer
-                        config={config}
-                        settings={settings}
-                        startupWarnings={startupWarnings}
-                        version={version}
-                        initializationResult={initializationResult}
-                      />
+                      <InlineAgentClaimProvider>
+                        <AppContainer
+                          config={config}
+                          settings={settings}
+                          startupWarnings={startupWarnings}
+                          version={version}
+                          initializationResult={initializationResult}
+                        />
+                      </InlineAgentClaimProvider>
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
                 </VimModeProvider>

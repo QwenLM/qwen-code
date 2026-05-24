@@ -12,6 +12,7 @@ import { ToolCallStatus } from '../../types.js';
 import { ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
+import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
 import { theme } from '../../semantic-colors.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
@@ -259,6 +260,39 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const keyboardFocusedSubagentCallId =
     focusedSubagentCallId ?? runningSubagentCallId;
 
+  const hasSubagentPendingConfirmation = subagentsAwaitingApproval.length > 0;
+
+  // Dense inline panel for parallel agent fan-out (e.g. `/review`'s
+  // 9-agent launch). When a single tool group is composed entirely of
+  // ≥2 task_execution invocations, the legacy path collapses them into
+  // `Agent × N / <last>` via CompactToolGroupDisplay — almost zero
+  // information for a multi-minute run. Route to a dedicated display
+  // that surfaces every agent's status / activity / elapsed / tokens
+  // on its own row.
+  //
+  // Conditions:
+  //   - Group has ≥2 agent calls and ONLY agent calls (mixed groups
+  //     keep the legacy renderer so sibling tools stay visible).
+  //   - Live phase (`isPending`). Once committed to `<Static>`, the
+  //     expanded path with SubagentScrollbackSummary owns the
+  //     persistent record so each agent gets a permanent line.
+  //   - No pending confirmation: those go through the normal renderer
+  //     so the keyboard-focus surface for approval stays intact.
+  //
+  // InlineParallelAgentsDisplay claims its agentIds in
+  // `InlineAgentClaimContext` so LiveAgentPanel below the composer
+  // suppresses the same rows — no duplication across surfaces.
+  const isPureAgentGroup =
+    toolCalls.length >= 2 && toolCalls.every(isSubagentToolEntry);
+  if (isPending && isPureAgentGroup && !hasSubagentPendingConfirmation) {
+    return (
+      <InlineParallelAgentsDisplay
+        toolCalls={toolCalls}
+        contentWidth={contentWidth}
+      />
+    );
+  }
+
   // Hide the entire group when the live-phase filter leaves nothing
   // inline to render — i.e. a pure-running-subagent batch with no
   // pending approval. LiveAgentPanel below the composer is the
@@ -294,7 +328,6 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   //     of `isPending`) and the preprocessor in
   //     `mergeCompactToolGroups.isForceExpandGroup` (no `isPending`
   //     gate either).
-  const hasSubagentPendingConfirmation = subagentsAwaitingApproval.length > 0;
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
   const showCompact =
     compactMode &&
