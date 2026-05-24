@@ -479,6 +479,109 @@ async function waitForStatus(
 }
 
 describe('CoreToolScheduler', () => {
+  type SchedulerDenialTrackingInternals = {
+    toolCalls: ToolCall[];
+    autoModeFallbackCallIds: Set<string>;
+    _handleConfirmationResponseInner: (
+      callId: string,
+      toolCall: ToolCall,
+      originalOnConfirm: (
+        outcome: ToolConfirmationOutcome,
+        payload?: ToolConfirmationPayload,
+      ) => Promise<void>,
+      outcome: ToolConfirmationOutcome,
+      signal: AbortSignal,
+      payload?: ToolConfirmationPayload,
+    ) => Promise<void>;
+  };
+
+  function createSchedulerForDenialTrackingApprovalTest() {
+    const denialState = {
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 20,
+      totalUnavailable: 0,
+    };
+    const setAutoModeDenialState = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: {
+        getSessionId: () => 'test-session-id',
+        getApprovalMode: () => ApprovalMode.AUTO,
+        getAutoModeDenialState: () => denialState,
+        setAutoModeDenialState,
+        getToolRegistry: () =>
+          ({
+            getTool: () => undefined,
+          }) as unknown as ToolRegistry,
+        getUsageStatisticsEnabled: () => false,
+        getDebugMode: () => false,
+      } as unknown as Config,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Run command',
+      command: 'python',
+      rootCommand: 'python',
+      onConfirm: vi.fn().mockResolvedValue(undefined),
+    };
+    const toolCall = {
+      status: 'awaiting_approval',
+      request: {
+        callId: 'call-1',
+        name: ToolNames.SHELL,
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+      tool: {},
+      confirmationDetails,
+    } as unknown as ToolCall;
+    const internals =
+      scheduler as unknown as SchedulerDenialTrackingInternals;
+    internals.toolCalls = [toolCall];
+    return { internals, toolCall, setAutoModeDenialState };
+  }
+
+  it('does not reset total denial counters for unrelated AUTO approvals', async () => {
+    const { internals, toolCall, setAutoModeDenialState } =
+      createSchedulerForDenialTrackingApprovalTest();
+
+    await internals._handleConfirmationResponseInner(
+      'call-1',
+      toolCall,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.ProceedOnce,
+      new AbortController().signal,
+    );
+
+    expect(setAutoModeDenialState).not.toHaveBeenCalled();
+  });
+
+  it('resets denial counters after approving a denialTracking fallback prompt', async () => {
+    const { internals, toolCall, setAutoModeDenialState } =
+      createSchedulerForDenialTrackingApprovalTest();
+    internals.autoModeFallbackCallIds.add('call-1');
+
+    await internals._handleConfirmationResponseInner(
+      'call-1',
+      toolCall,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.ProceedOnce,
+      new AbortController().signal,
+    );
+
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    });
+  });
+
   function createSchedulerForLegacyToolTests(options: {
     toolsByName: Map<string, MockTool>;
     approvalMode?: ApprovalMode;

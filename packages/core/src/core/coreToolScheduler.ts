@@ -799,6 +799,7 @@ export class CoreToolScheduler {
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private validationRetryCounts = new Map<string, number>();
+  private autoModeFallbackCallIds = new Set<string>();
   // Tool span lifecycle now spans validating → awaiting_approval → executing
   // → terminal, so we hold the span across method boundaries by callId.
   // Decoupling from ToolCall identity is intentional — setStatusInternal
@@ -1746,6 +1747,7 @@ export class CoreToolScheduler {
                 // fallback was specifically armed by denialTracking —
                 // a pmForcedAsk fallback isn't an audit-worthy event).
                 if (fallback.fallback) {
+                  this.autoModeFallbackCallIds.add(reqInfo.callId);
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}, totalBlock=${denialState.totalBlock}, totalUnavailable=${denialState.totalUnavailable}`,
                   );
@@ -2203,15 +2205,17 @@ export class CoreToolScheduler {
 
     this.setToolCallOutcome(callId, outcome);
 
+    const wasAutoModeFallback = this.autoModeFallbackCallIds.delete(callId);
+
     // AUTO-mode denialTracking recovery: when the user manually approves a
-    // call that fell back from AUTO (by denial cap or by an explicit ask
-    // rule), clear the armed counters so subsequent calls return to
-    // classifier flow. Without this, a session that hit a denial threshold
-    // once would stay in fallback even after explicit user approval.
+    // call that fell back because denialTracking was armed, clear the armed
+    // counters so subsequent calls return to classifier flow. Ordinary AUTO
+    // approvals for ask rules must not clear cumulative denial totals.
     // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
     // signal that the classifier was correct to block.
     if (
       this.config.getApprovalMode() === ApprovalMode.AUTO &&
+      wasAutoModeFallback &&
       isApproveOutcome(outcome)
     ) {
       this.config.setAutoModeDenialState(

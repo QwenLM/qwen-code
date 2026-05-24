@@ -1944,6 +1944,7 @@ export class Session implements SessionContext {
           recordAllow(this.config.getAutoModeDenialState()),
         );
       }
+      let wasAutoModeDenialFallback = false;
 
       // ── L5: AUTO mode three-layer filter (duplicated from
       // coreToolScheduler.ts; ACP routes through this Session path).
@@ -1952,6 +1953,7 @@ export class Session implements SessionContext {
       // existing manual-approval flow below.
       if (!autoModeAllowed && shouldRunAutoModeForCall(approvalMode, fc.name)) {
         const denialState = this.config.getAutoModeDenialState();
+        const fallback = shouldFallback(denialState);
         // `buildClassifierContents` retains only the most recent
         // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
         // exactly that tail rather than triggering a `structuredClone`
@@ -1968,7 +1970,7 @@ export class Session implements SessionContext {
           messages,
           config: this.config,
           signal: abortSignal,
-          skipClassifier: shouldFallback(denialState).fallback,
+          skipClassifier: fallback.fallback,
         });
 
         // Apply decision via shared helper — eliminates ~40 lines of
@@ -2002,6 +2004,7 @@ export class Session implements SessionContext {
             return earlyErrorResponse(new Error(outcome.errorMessage), fc.name);
           case 'fallback':
             // Drop through to the manual-approval flow below.
+            wasAutoModeDenialFallback = fallback.fallback;
             break;
           default: {
             const _exhaustive: never = outcome;
@@ -2138,7 +2141,11 @@ export class Session implements SessionContext {
           // Parallels coreToolScheduler.ts.
           // Cancel / abort do NOT reset — treating rejection as a signal
           // the classifier was right to block.
-          if (approvalMode === ApprovalMode.AUTO && isApproveOutcome(outcome)) {
+          if (
+            approvalMode === ApprovalMode.AUTO &&
+            wasAutoModeDenialFallback &&
+            isApproveOutcome(outcome)
+          ) {
             this.config.setAutoModeDenialState(
               recordFallbackApprove(this.config.getAutoModeDenialState()),
             );
