@@ -35,7 +35,7 @@ import {
   ToolNames,
 } from '@qwen-code/qwen-code-core';
 import { useBackgroundTaskViewState } from '../../contexts/BackgroundTaskViewContext.js';
-import { useInlineAgentClaim } from '../../contexts/InlineAgentClaimContext.js';
+import { useIsAgentClaimed } from '../../contexts/InlineAgentClaimContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -190,8 +190,13 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   // Inline displays (`InlineParallelAgentsDisplay`) claim agentIds
   // when they own the live surface for a batch. Suppress those rows
   // here so the same agent never appears in both surfaces at once.
-  // Defaults to a no-op `isClaimed` when no provider is mounted.
-  const { isClaimed } = useInlineAgentClaim();
+  // Subscribes to the read side of the claim context; the returned
+  // predicate's identity changes ONLY when the claimed set changes
+  // (which is the signal we need to add/drop suppressed rows), so the
+  // `liveAgentSnapshots` memo below won't churn on every unrelated
+  // claim/release elsewhere in the tree. Defaults to a no-op when no
+  // provider is mounted.
+  const isClaimed = useIsAgentClaimed();
 
   // Wall-clock tick. Drives elapsed-time refresh, terminal-row eviction,
   // AND the live registry re-pull below. The gate must consider:

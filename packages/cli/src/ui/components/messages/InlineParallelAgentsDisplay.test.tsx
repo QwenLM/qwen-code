@@ -17,8 +17,8 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import {
-  InlineAgentClaimContext,
   InlineAgentClaimProvider,
+  InlineAgentClaimWriteContext,
 } from '../../contexts/InlineAgentClaimContext.js';
 
 interface AgentCallSeed {
@@ -204,16 +204,15 @@ describe('<InlineParallelAgentsDisplay />', () => {
   it('claims agentIds while mounted and releases on unmount', () => {
     const claims: string[] = [];
     const releases: string[] = [];
-    const claimedSet = new Set<string>();
-    const value = {
-      isClaimed: (id: string) => claimedSet.has(id),
+    // Spy provider for the write side only — read side stays at its
+    // default (empty set), which is fine since this test asserts
+    // claim/release calls rather than visibility.
+    const writeApi = {
       claim: (id: string) => {
         claims.push(id);
-        claimedSet.add(id);
       },
       release: (id: string) => {
         releases.push(id);
-        claimedSet.delete(id);
       },
     };
     const toolCalls = [
@@ -232,12 +231,12 @@ describe('<InlineParallelAgentsDisplay />', () => {
     act(() => {
       result = render(
         <ConfigContext.Provider value={undefined}>
-          <InlineAgentClaimContext.Provider value={value}>
+          <InlineAgentClaimWriteContext.Provider value={writeApi}>
             <InlineParallelAgentsDisplay
               toolCalls={toolCalls}
               contentWidth={120}
             />
-          </InlineAgentClaimContext.Provider>
+          </InlineAgentClaimWriteContext.Provider>
         </ConfigContext.Provider>,
       );
     });

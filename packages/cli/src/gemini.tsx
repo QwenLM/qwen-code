@@ -323,6 +323,16 @@ export async function startInteractiveUI(
                 <VimModeProvider settings={settings}>
                   <AgentViewProvider config={config}>
                     <BackgroundTaskViewProvider config={config}>
+                      {/*
+                        InlineAgentClaimProvider wraps AppContainer so the
+                        shared claim-set is visible to both
+                        InlineParallelAgentsDisplay (inside the pending
+                        tool-group above the composer) and LiveAgentPanel
+                        (anchored beneath the composer). Mounted INSIDE
+                        BackgroundTaskViewProvider so claim reads can sit
+                        alongside the same registry data without crossing
+                        a provider boundary.
+                      */}
                       <InlineAgentClaimProvider>
                         <AppContainer
                           config={config}

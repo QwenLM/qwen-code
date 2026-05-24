@@ -79,6 +79,20 @@ function isPanelOwnedSubagentTool(tool: IndividualToolCallDisplay): boolean {
 }
 
 /**
+ * Predicate: this whole group is a parallel fan-out of ≥2 agent
+ * invocations and nothing else. Triggers the dense inline panel
+ * (`InlineParallelAgentsDisplay`) instead of letting the legacy path
+ * collapse the batch into `Agent × N / <last name>`. Mixed groups
+ * (e.g. a sibling shell call landed in the same response) deliberately
+ * fall through so the non-agent tools stay visible.
+ */
+function isPureParallelAgentGroup(
+  toolCalls: readonly IndividualToolCallDisplay[],
+): boolean {
+  return toolCalls.length >= 2 && toolCalls.every(isSubagentToolEntry);
+}
+
+/**
  * Predicate: tool entry whose subagent has reached a terminal state
  * (`completed` / `failed` / `cancelled`). Used to force-expand the
  * group + force the inner ToolMessage to render its result block in
@@ -282,9 +296,11 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // InlineParallelAgentsDisplay claims its agentIds in
   // `InlineAgentClaimContext` so LiveAgentPanel below the composer
   // suppresses the same rows — no duplication across surfaces.
-  const isPureAgentGroup =
-    toolCalls.length >= 2 && toolCalls.every(isSubagentToolEntry);
-  if (isPending && isPureAgentGroup && !hasSubagentPendingConfirmation) {
+  if (
+    isPending &&
+    isPureParallelAgentGroup(toolCalls) &&
+    !hasSubagentPendingConfirmation
+  ) {
     return (
       <InlineParallelAgentsDisplay
         toolCalls={toolCalls}

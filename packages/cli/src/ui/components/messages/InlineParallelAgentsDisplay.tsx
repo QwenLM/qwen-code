@@ -100,6 +100,13 @@ const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
 );
 
 function activityLabel(row: RowData): string {
+  // `row.recentActivity` was snapshotted in the rows useMemo by reading
+  // `registry.get(agentId).recentActivities.at(-1)`. The registry
+  // intentionally mutates that array in place via `appendActivity`,
+  // not by replacing the reference — the rows memo's `now`-keyed
+  // re-read is what surfaces the latest entry on each tick. Treat the
+  // value here as a tick-snapshot only; do NOT close over the
+  // registry's live array.
   const last = row.recentActivity;
   if (!last) return '';
   const display = TOOL_DISPLAY_BY_NAME[last.name] ?? last.name;
@@ -145,6 +152,12 @@ function elapsedLabel(row: RowData, now: number): string {
   });
 }
 
+// Width budget for the agent-name column. Sized to fit /review's
+// labels like `Agent 6c: Maintainer` and `Agent 7: Build & Test` at
+// their full length while leaving room for the activity column on a
+// typical 100-col content width. Names longer than this truncate in
+// the middle (`Agent 1: Corr…tness review`) so both the agent number
+// and the trailing suffix stay readable.
 const NAME_COL_WIDTH = 26;
 
 function truncateMiddle(input: string, max: number): string {
@@ -191,6 +204,13 @@ export const InlineParallelAgentsDisplay: React.FC<
   // any agent in the batch is still live. Gating prevents the
   // interval from firing forever after the batch settles.
   const [now, setNow] = useState(() => Date.now());
+  // `AgentResultDisplay.status` is exhaustively
+  // `'running' | 'completed' | 'failed' | 'cancelled' | 'background'`
+  // (see core/src/tools/tools.ts). The two arms below cover every
+  // non-terminal value; the remaining three are terminal and don't
+  // need a tick. If a new non-terminal status is ever added upstream,
+  // the interval will stop early and elapsed/activity will freeze for
+  // that row — add the new value here to keep the tick alive.
   const hasLiveAgent = useMemo(
     () =>
       agentEntries.some(
