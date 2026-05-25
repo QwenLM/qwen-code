@@ -311,7 +311,7 @@ export class BackgroundShellRegistry {
       xmlParts.push(`<exit-code>${entry.exitCode}</exit-code>`);
     }
     if (entry.error) {
-      xmlParts.push(`<result>Error: ${escapeXml(entry.error)}</result>`);
+      xmlParts.push(`<result>Error: ${escapeXml(this.stripDisplayControlChars(entry.error))}</result>`);
     }
     xmlParts.push('</task-notification>');
 
@@ -335,6 +335,11 @@ export class BackgroundShellRegistry {
       }
       if (code < 0x20) continue;
       if (code >= 0x80 && code <= 0x9f) continue;
+      // Strip Unicode bidirectional override characters (U+202A-U+202E,
+      // U+2066-U+2069) to prevent shell output from reordering surrounding
+      // text in terminals and IDEs that render bidi control chars.
+      if (code >= 0x202a && code <= 0x202e) continue;
+      if (code >= 0x2066 && code <= 0x2069) continue;
       out += text[i];
     }
     return out;
