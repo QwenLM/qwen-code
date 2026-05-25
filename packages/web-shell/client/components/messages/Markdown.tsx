@@ -66,7 +66,9 @@ function sanitizeSvg(svg: string): string {
   if (doc.querySelector('parsererror')) return '';
 
   doc
-    .querySelectorAll('script, foreignObject, iframe, object, embed, link')
+    .querySelectorAll(
+      'script, foreignObject, iframe, object, embed, link, style',
+    )
     .forEach((node) => node.remove());
 
   for (const element of Array.from(doc.querySelectorAll('*'))) {
@@ -84,6 +86,16 @@ function sanitizeSvg(svg: string): string {
   }
 
   return doc.documentElement.outerHTML;
+}
+
+const SAFE_URL_SCHEMES = /^(https?:|mailto:|#|\/)/i;
+
+function isSafeUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('/') || trimmed.startsWith('#')) return true;
+  return SAFE_URL_SCHEMES.test(trimmed);
 }
 
 function MermaidBlock({ code }: { code: string }) {
@@ -249,9 +261,10 @@ const components: Components = {
     return <>{children}</>;
   },
   a({ href, children }: { href?: string; children?: ReactNode }) {
+    const safeHref = isSafeUrl(href) ? href : undefined;
     return (
       <a
-        href={href}
+        href={safeHref}
         target="_blank"
         rel="noopener noreferrer"
         className={styles.link}
@@ -268,7 +281,8 @@ const components: Components = {
     );
   },
   img({ src, alt }: { src?: string; alt?: string }) {
-    return <img src={src} alt={alt || ''} className={styles.image} />;
+    const safeSrc = isSafeUrl(src) ? src : undefined;
+    return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
   },
 };
 

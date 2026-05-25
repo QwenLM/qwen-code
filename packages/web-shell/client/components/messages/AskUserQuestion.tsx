@@ -163,9 +163,9 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
     const claimKey = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      e.stopImmediatePropagation();
     };
     const handler = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         claimKey(e);
         setSelectedIdx((i) => Math.min(i + 1, totalOptions - 1));
@@ -202,8 +202,8 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
         focusCustomInput(e.key);
       }
     };
-    window.addEventListener('keydown', handler, { capture: true });
-    return () => window.removeEventListener('keydown', handler, true);
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
   }, [
     customFocused,
     totalOptions,

@@ -14,6 +14,7 @@ const backtickDeco = Decoration.mark({ class: 'cm-input-code' });
 function buildDecorations(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const doc = view.state.doc;
+  const ranges: Array<{ from: number; to: number; deco: Decoration }> = [];
 
   for (let i = 1; i <= doc.lines; i++) {
     const line = doc.line(i);
@@ -24,25 +25,34 @@ function buildDecorations(view: EditorView): DecorationSet {
     if (text.startsWith('/')) {
       const end = text.indexOf(' ');
       const slashEnd = end === -1 ? text.length : end;
-      builder.add(offset, offset + slashEnd, slashDeco);
+      ranges.push({ from: offset, to: offset + slashEnd, deco: slashDeco });
     }
 
     // @path tokens
     const atRe = /@[^\s]+/g;
     let m: RegExpExecArray | null;
     while ((m = atRe.exec(text)) !== null) {
-      builder.add(offset + m.index, offset + m.index + m[0].length, atDeco);
+      ranges.push({
+        from: offset + m.index,
+        to: offset + m.index + m[0].length,
+        deco: atDeco,
+      });
     }
 
     // `inline code`
     const codeRe = /`[^`]+`/g;
     while ((m = codeRe.exec(text)) !== null) {
-      builder.add(
-        offset + m.index,
-        offset + m.index + m[0].length,
-        backtickDeco,
-      );
+      ranges.push({
+        from: offset + m.index,
+        to: offset + m.index + m[0].length,
+        deco: backtickDeco,
+      });
     }
+  }
+
+  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+  for (const { from, to, deco } of ranges) {
+    builder.add(from, to, deco);
   }
 
   return builder.finish();

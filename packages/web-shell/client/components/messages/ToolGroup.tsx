@@ -181,32 +181,39 @@ function extractDiff(tool: ACPToolCall): string {
 function buildUnifiedDiff(oldText: string, newText: string): string {
   const oldLines = oldText.split('\n');
   const newLines = newText.split('\n');
-  const result: string[] = [];
 
-  let i = 0,
-    j = 0;
-  while (i < oldLines.length || j < newLines.length) {
-    if (
-      i < oldLines.length &&
-      j < newLines.length &&
-      oldLines[i] === newLines[j]
-    ) {
-      result.push(` ${oldLines[i]}`);
-      i++;
-      j++;
-    } else if (
-      j < newLines.length &&
-      (i >= oldLines.length || oldLines[i] !== newLines[j])
-    ) {
-      result.push(`+${newLines[j]}`);
-      j++;
-    } else {
-      result.push(`-${oldLines[i]}`);
-      i++;
+  const n = oldLines.length;
+  const m = newLines.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () =>
+    Array(m + 1).fill(0),
+  );
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      dp[i][j] =
+        oldLines[i - 1] === newLines[j - 1]
+          ? dp[i - 1][j - 1] + 1
+          : Math.max(dp[i - 1][j], dp[i][j - 1]);
     }
   }
 
-  return result.join('\n');
+  const result: string[] = [];
+  let i = n,
+    j = m;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+      result.push(` ${oldLines[i - 1]}`);
+      i--;
+      j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      result.push(`+${newLines[j - 1]}`);
+      j--;
+    } else {
+      result.push(`-${oldLines[i - 1]}`);
+      i--;
+    }
+  }
+
+  return result.reverse().join('\n');
 }
 
 const MAX_BASH_LINES = 20;

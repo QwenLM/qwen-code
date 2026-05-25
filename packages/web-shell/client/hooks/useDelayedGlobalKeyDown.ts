@@ -1,5 +1,12 @@
 import { useEffect, useRef } from 'react';
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!target || !(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  return target.isContentEditable;
+}
+
 export function useDelayedGlobalKeyDown(
   handler: (event: KeyboardEvent) => void,
   deps: readonly unknown[],
@@ -13,6 +20,8 @@ export function useDelayedGlobalKeyDown(
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (isEditableTarget(event.target)) return;
       handlerRef.current(event);
     };
     const timer = setTimeout(() => {

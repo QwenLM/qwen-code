@@ -385,6 +385,10 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               reconnectAttempt = 0;
             }
             try {
+              if (event.type === 'state_resync_required') {
+                store.reset();
+                break;
+              }
               if (handleSilentDaemonEvent(event, setConnection)) {
                 continue;
               }
@@ -429,21 +433,30 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
 
           session = undefined;
           sessionRef.current = undefined;
+          setPromptStatus('idle');
 
-          if (error instanceof DaemonHttpError && error.status === 404) {
+          if (
+            error instanceof DaemonHttpError &&
+            (error.status === 404 ||
+              error.status === 401 ||
+              error.status === 403)
+          ) {
             const missingSessionId = restoreSessionId ?? reconnectSessionId;
             reconnectSessionId = undefined;
             if (restoreSessionId) {
               setRestoreSessionId(undefined);
             }
-            store.dispatch([
-              {
-                type: 'error',
-                text: missingSessionId
+            const reason =
+              error.status === 401 || error.status === 403
+                ? 'Authentication failed. Please refresh with a valid token.'
+                : missingSessionId
                   ? `Session ${missingSessionId} no longer exists. A fresh session will be opened.`
-                  : 'Session no longer exists. A fresh session will be opened.',
-              },
-            ]);
+                  : 'Session no longer exists. A fresh session will be opened.';
+            store.dispatch([{ type: 'error', text: reason }]);
+            if (error.status === 401 || error.status === 403) {
+              setConnection({ status: 'error', error: reason });
+              return;
+            }
           }
 
           if (!opts.autoReconnect) {
@@ -814,8 +827,23 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
 
   useEffect(() => {
     if (!connection.sessionId || !heartbeatSupportedRef.current) return;
+    let consecutiveFailures = 0;
     const timer = setInterval(() => {
-      sessionRef.current?.heartbeat().catch(() => {});
+      sessionRef.current
+        ?.heartbeat()
+        .then(() => {
+          consecutiveFailures = 0;
+        })
+        .catch(() => {
+          consecutiveFailures += 1;
+          if (consecutiveFailures >= 3) {
+            setConnection((cur) => ({
+              ...cur,
+              status: 'disconnected',
+              error: 'Session heartbeat failed — connection may be lost.',
+            }));
+          }
+        });
     }, 30_000);
     return () => clearInterval(timer);
   }, [connection.sessionId]);

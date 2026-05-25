@@ -38,6 +38,7 @@ export default defineConfig({
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
   },
   server: {
+    cors: false,
     port: 5173,
     proxy: {
       '/health': daemonProxy,

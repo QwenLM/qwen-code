@@ -30,7 +30,11 @@ import {
 } from './components/dialogs/ThemeDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { getLocalCommands } from './constants/localCommands';
-import { getDaemonBaseUrl, getDaemonToken } from './config/daemon';
+import {
+  getDaemonBaseUrl,
+  getDaemonToken,
+  removeDaemonTokenFromUrl,
+} from './config/daemon';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import {
@@ -51,6 +55,7 @@ import styles from './App.module.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
 const DAEMON_TOKEN = getDaemonToken();
+removeDaemonTokenFromUrl();
 const WEB_SHELL_VERSION = __WEB_SHELL_VERSION__;
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
