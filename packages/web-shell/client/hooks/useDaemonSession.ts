@@ -386,6 +386,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
             }
             try {
               if (event.type === 'state_resync_required') {
+                setPromptStatus('idle');
                 store.reset();
                 break;
               }

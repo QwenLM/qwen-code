@@ -37,13 +37,20 @@ function getAllowedDaemonOrigin(raw: string): string {
     const parsed = new URL(raw, window.location.origin);
     const isHttp = parsed.protocol === 'http:' || parsed.protocol === 'https:';
     if (!isHttp) return '';
-    const isAllowedHost =
-      parsed.origin === window.location.origin ||
+    if (parsed.origin === window.location.origin) return parsed.origin;
+    const isLocalhost =
       parsed.hostname === 'localhost' ||
       parsed.hostname === '127.0.0.1' ||
       parsed.hostname === '::1' ||
       parsed.hostname === '[::1]';
-    return isAllowedHost ? parsed.origin : '';
+    if (!isLocalhost) return '';
+    const pagePort =
+      window.location.port ||
+      (window.location.protocol === 'https:' ? '443' : '80');
+    const daemonPort =
+      parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+    if (daemonPort !== pagePort) return '';
+    return parsed.origin;
   } catch {
     return '';
   }

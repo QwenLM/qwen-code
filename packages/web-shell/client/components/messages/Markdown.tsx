@@ -67,7 +67,7 @@ function sanitizeSvg(svg: string): string {
 
   doc
     .querySelectorAll(
-      'script, foreignObject, iframe, object, embed, link, style',
+      'script, foreignObject, iframe, object, embed, link, style, animate, set, animateTransform, animateMotion',
     )
     .forEach((node) => node.remove());
 

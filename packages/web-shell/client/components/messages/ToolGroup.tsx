@@ -178,12 +178,21 @@ function extractDiff(tool: ACPToolCall): string {
   return '';
 }
 
+const MAX_DIFF_PRODUCT = 250_000;
+
 function buildUnifiedDiff(oldText: string, newText: string): string {
   const oldLines = oldText.split('\n');
   const newLines = newText.split('\n');
 
   const n = oldLines.length;
   const m = newLines.length;
+
+  if (n * m > MAX_DIFF_PRODUCT) {
+    const removed = oldLines.map((l) => `-${l}`);
+    const added = newLines.map((l) => `+${l}`);
+    return [...removed, ...added].join('\n');
+  }
+
   const dp: number[][] = Array.from({ length: n + 1 }, () =>
     Array(m + 1).fill(0),
   );
