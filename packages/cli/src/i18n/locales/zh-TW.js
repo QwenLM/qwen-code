@@ -125,6 +125,7 @@ export default {
   'Select which context auto-improve should collect before each improvement loop.':
     '選擇 auto-improve 每輪改進前要收集的上下文來源。',
   'Custom sources': '自訂來源',
+  'none configured': '未設定',
   '  No custom sources': '  無自訂來源',
   'Add custom source': '新增自訂來源',
   'Edit custom source': '編輯自訂來源',

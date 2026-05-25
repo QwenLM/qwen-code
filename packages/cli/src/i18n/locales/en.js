@@ -141,6 +141,7 @@ export default {
   'Select which context auto-improve should collect before each improvement loop.':
     'Select which context auto-improve should collect before each improvement loop.',
   'Custom sources': 'Custom sources',
+  'none configured': 'none configured',
   '  No custom sources': '  No custom sources',
   'Add custom source': 'Add custom source',
   'Edit custom source': 'Edit custom source',

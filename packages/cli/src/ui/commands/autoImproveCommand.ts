@@ -219,19 +219,21 @@ async function markRunCompleted(
 
 function describeSources(state: AutoImproveLoopState): string {
   const enabled: string[] = [];
-  if (state.sourceSnapshot.sources.githubIssues) enabled.push('GitHub issues');
+  if (state.sourceSnapshot.sources.githubIssues) {
+    enabled.push(t('GitHub issues'));
+  }
   if (state.sourceSnapshot.sources.githubPrs) {
-    enabled.push('GitHub PRs / CI / review comments');
+    enabled.push(t('GitHub PRs / CI / review comments'));
   }
   if (state.sourceSnapshot.sources.localSignals) {
-    enabled.push('Scan local repository');
+    enabled.push(t('Scan local repository'));
   }
   if (state.sourceSnapshot.customSources.length > 0) {
     enabled.push(
-      `Custom sources (${state.sourceSnapshot.customSources.length})`,
+      `${t('Custom sources')} (${state.sourceSnapshot.customSources.length})`,
     );
   }
-  return enabled.length === 0 ? 'none configured' : enabled.join(', ');
+  return enabled.length === 0 ? t('none configured') : enabled.join(', ');
 }
 
 function formatCustomSources(customSources: string[]): string {
