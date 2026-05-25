@@ -199,6 +199,66 @@ describe('autoImproveState', () => {
     });
   });
 
+  describe('writeAutoImproveLoopState', () => {
+    it('writes atomically via temp file + rename', async () => {
+      const loopId = 'test-atomic-write';
+      const state: AutoImproveLoopState = {
+        version: 1,
+        loopId,
+        status: 'running',
+        sessionScoped: true,
+        createdAt: '2026-05-25T00:00:00.000Z',
+        cadence: '30m',
+        cron: '*/30 * * * *',
+        targetBranch: 'main',
+        repoRoot: tempDir,
+        deliveryPolicy: 'source-aware-local-commit',
+        stopRequested: false,
+        sourceSnapshot: DEFAULT_AUTO_IMPROVE_CONFIG,
+        prompt: '',
+      };
+
+      await writeAutoImproveLoopState(tempDir, state);
+
+      const statePath = getAutoImproveStatePath(tempDir, loopId);
+      const tmpPath = `${statePath}.tmp`;
+
+      // The .tmp file should not remain after a successful write
+      await expect(fs.access(tmpPath)).rejects.toThrow();
+
+      // The state file should be valid and round-trip correctly
+      const result = await readAutoImproveLoopState(tempDir, loopId);
+      expect(result).not.toBeNull();
+      expect(result!.loopId).toBe(loopId);
+    });
+
+    it('overwrites existing state without corruption', async () => {
+      const loopId = 'test-atomic-overwrite';
+      const base: AutoImproveLoopState = {
+        version: 1,
+        loopId,
+        status: 'running',
+        sessionScoped: true,
+        createdAt: '2026-05-25T00:00:00.000Z',
+        cadence: '30m',
+        cron: '*/30 * * * *',
+        targetBranch: 'main',
+        repoRoot: tempDir,
+        deliveryPolicy: 'source-aware-local-commit',
+        stopRequested: false,
+        sourceSnapshot: DEFAULT_AUTO_IMPROVE_CONFIG,
+        prompt: 'first',
+      };
+
+      await writeAutoImproveLoopState(tempDir, base);
+      await writeAutoImproveLoopState(tempDir, { ...base, prompt: 'second' });
+
+      const result = await readAutoImproveLoopState(tempDir, loopId);
+      expect(result).not.toBeNull();
+      expect(result!.prompt).toBe('second');
+    });
+  });
+
   describe('readAutoImproveConfig', () => {
     it('returns default config for missing file', async () => {
       const result = await readAutoImproveConfig(tempDir);

@@ -522,11 +522,10 @@ export async function writeAutoImproveLoopState(
 ): Promise<void> {
   const loopDir = getAutoImproveLoopDir(repoRoot, state.loopId);
   await fs.mkdir(path.join(loopDir, 'runs'), { recursive: true });
-  await fs.writeFile(
-    getAutoImproveStatePath(repoRoot, state.loopId),
-    `${JSON.stringify(state, null, 2)}\n`,
-    'utf8',
-  );
+  const statePath = getAutoImproveStatePath(repoRoot, state.loopId);
+  const tmpPath = `${statePath}.tmp`;
+  await fs.writeFile(tmpPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  await fs.rename(tmpPath, statePath);
 }
 
 export async function initializeAutoImproveLoopFiles(
