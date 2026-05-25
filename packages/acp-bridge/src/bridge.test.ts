@@ -2029,6 +2029,128 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('echoes user_message_chunk to ALL session subscribers (cross-client sync)', async () => {
+      // Cross-client sync fix: a prompt sent by client A must be visible
+      // to every SSE subscriber of the same session — not just the
+      // originator. Before the fix, the interactive prompt path forwarded
+      // straight to the agent without publishing `user_message_chunk` to
+      // the bus, so peer clients (B, C, ...) never saw A's input.
+      const factory: ChannelFactory = async () =>
+        makeChannel({ promptImpl: () => ({ stopReason: 'end_turn' }) }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abortA = new AbortController();
+      const abortB = new AbortController();
+      const iterA = bridge.subscribeEvents(session.sessionId, {
+        signal: abortA.signal,
+      });
+      const iterB = bridge.subscribeEvents(session.sessionId, {
+        signal: abortB.signal,
+      });
+
+      // Collect the first user_message_chunk each subscriber sees.
+      const firstUserChunk = async (
+        iter: AsyncIterable<{ type: string; data: unknown; originatorClientId?: string }>,
+      ): Promise<{ originatorClientId?: string; data: unknown }> => {
+        for await (const e of iter) {
+          if (e.type !== 'session_update') continue;
+          const update = (e.data as { update?: { sessionUpdate?: string } })
+            ?.update;
+          if (update?.sessionUpdate === 'user_message_chunk') {
+            return { originatorClientId: e.originatorClientId, data: e.data };
+          }
+        }
+        throw new Error('no user_message_chunk observed');
+      };
+
+      const aPromise = firstUserChunk(iterA);
+      const bPromise = firstUserChunk(iterB);
+
+      // Client A sends the prompt with its trusted clientId.
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'hello from A' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      const [aChunk, bChunk] = await Promise.all([aPromise, bPromise]);
+
+      // Both subscribers saw the user input echoed to the bus.
+      for (const chunk of [aChunk, bChunk]) {
+        const update = (chunk.data as {
+          update: { sessionUpdate: string; content: unknown; _meta?: unknown };
+        }).update;
+        expect(update.sessionUpdate).toBe('user_message_chunk');
+        expect(update.content).toEqual({ type: 'text', text: 'hello from A' });
+        // Originator stamp present so SDK `suppressOwnUserEcho` can dedup
+        // on the originator's own UI.
+        expect(chunk.originatorClientId).toBe(session.clientId);
+        // Source marker distinguishes the bridge echo from agent content.
+        expect((update._meta as { source?: string })?.source).toBe(
+          'bridge-echo',
+        );
+      }
+
+      abortA.abort();
+      abortB.abort();
+      await bridge.shutdown();
+    });
+
+    it('echoes one user_message_chunk per content block (multi-modal)', async () => {
+      const factory: ChannelFactory = async () =>
+        makeChannel({ promptImpl: () => ({ stopReason: 'end_turn' }) }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      const collected: Array<{ sessionUpdate: string; content: unknown }> = [];
+      const drain = (async () => {
+        for await (const e of iter) {
+          if (e.type !== 'session_update') continue;
+          const update = (e.data as { update?: { sessionUpdate?: string; content?: unknown } })
+            ?.update;
+          if (update?.sessionUpdate === 'user_message_chunk') {
+            collected.push({
+              sessionUpdate: update.sessionUpdate,
+              content: update.content,
+            });
+            if (collected.length === 2) break;
+          }
+        }
+      })();
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [
+            { type: 'text', text: 'describe this' },
+            { type: 'resource_link', uri: 'file:///x.png', name: 'x.png' },
+          ],
+        },
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      await drain;
+      // One echo frame per content block, in order.
+      expect(collected).toHaveLength(2);
+      expect(collected[0]?.content).toEqual({ type: 'text', text: 'describe this' });
+      expect(collected[1]?.content).toMatchObject({ type: 'resource_link' });
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
     it('overrides a stale sessionId in the body with the routing id', async () => {
       const handles: ChannelHandle[] = [];
       const factory: ChannelFactory = async () => {
