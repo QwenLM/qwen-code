@@ -90,6 +90,10 @@ Each tick is prompt-driven. The prompt instructs the agent to:
 - focus on actionable unresolved review comments, requested changes, and
   failing checks instead of already-resolved comments or general comment
   history;
+- for addressed unresolved PR review comments, fix and validate first, then
+  reply to each addressed review thread/comment with a concise summary and
+  validation result, and resolve the thread; if permissions or API limitations
+  prevent replying or resolving, record that in the run doc and final response;
 - skip other users' PRs, CI failures, and review comments unless the user
   explicitly requested them;
 - use the loop default branch for ordinary local/default tasks;

@@ -147,6 +147,9 @@ describe('autoImproveCommand', () => {
       'Do not treat already-resolved comments or mere comment history as work to fix.',
     );
     expect(prompt).toContain(
+      'reply to each addressed review thread/comment with a concise summary and validation result, and resolve the thread.',
+    );
+    expect(prompt).toContain(
       'If local repository scanning is enabled, inspect the current repo for small, locally verifiable improvements',
     );
     expect(scheduler.create).toHaveBeenCalledWith(
