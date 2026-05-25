@@ -57,7 +57,11 @@ describe('SleepInhibitor', () => {
         'sleep',
         'infinity',
       ],
-      expect.objectContaining({ stdio: 'ignore', windowsHide: true }),
+      expect.objectContaining({
+        env: {},
+        stdio: 'ignore',
+        windowsHide: true,
+      }),
     );
     expect(inhibitor.getActiveCount()).toBe(2);
 
@@ -130,17 +134,36 @@ describe('SleepInhibitor', () => {
     expect(inhibitor.getActiveCount()).toBe(0);
   });
 
-  it('clears the child when it exits unexpectedly', () => {
+  it('handles async error events from the spawned child', () => {
     const { children, inhibitor, logger } = createHarness('linux');
 
     const handle = inhibitor.acquire();
+    children[0]!.emit('error', new Error('EPERM'));
+
+    expect(inhibitor.isRunning()).toBe(false);
+    expect(logger.debug).toHaveBeenCalledWith(
+      'Failed to start sleep inhibitor: EPERM',
+    );
+    handle.release();
+  });
+
+  it('restarts after an unexpected exit when acquired again', () => {
+    const { children, inhibitor, logger, spawn } = createHarness('linux');
+
+    const first = inhibitor.acquire('initial work');
     children[0]!.emit('exit', 1, null);
 
     expect(inhibitor.isRunning()).toBe(false);
     expect(logger.debug).toHaveBeenCalledWith(
       'Sleep inhibitor exited while active: code=1 signal=null',
     );
-    handle.release();
+
+    const second = inhibitor.acquire('more work');
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(inhibitor.isRunning()).toBe(true);
+
+    first.release();
+    second.release();
   });
 
   it('returns a no-op handle when config does not explicitly enable it', () => {

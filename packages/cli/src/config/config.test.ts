@@ -2093,7 +2093,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    const mcpServers = config.getMcpServers();
+    const mcpServers = config.getMcpServers()!;
     expect(mcpServers['cli-server']).toEqual({
       command: 'node',
       args: ['server.js'],
@@ -2112,7 +2112,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    expect(config.getMcpServers()['direct-server']).toEqual({
+    expect(config.getMcpServers()!['direct-server']).toEqual({
       url: 'http://localhost:8080',
     });
   });
@@ -2126,7 +2126,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const config = await loadCliConfig(baseSettings, argv);
 
     // CLI config should override settings
-    expect(config.getMcpServers()['settings-server']).toEqual({
+    expect(config.getMcpServers()!['settings-server']).toEqual({
       url: 'http://localhost:8888',
     });
   });

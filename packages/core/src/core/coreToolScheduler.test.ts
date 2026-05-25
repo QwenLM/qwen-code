@@ -3518,6 +3518,31 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
   });
 
+  it('releases the sleep inhibitor when tool execution throws', async () => {
+    mockAcquireSleepInhibitor.mockClear();
+    mockSleepInhibitorRelease.mockClear();
+
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      execute: vi.fn().mockRejectedValue(new Error('tool crash')),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'sleep-call-fails',
+        name: 'mockTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-id',
+      },
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+  });
+
   it('marks pre-hook denial with a sanitized failure kind', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'ok',

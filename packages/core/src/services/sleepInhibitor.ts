@@ -55,6 +55,8 @@ export class SleepInhibitor {
     if (this.activeCount === 1) {
       this.spawnFailedForCurrentRun = false;
       this.start(reason);
+    } else if (!this.child && !this.spawnFailedForCurrentRun) {
+      this.start(reason);
     }
 
     let released = false;
@@ -107,6 +109,7 @@ export class SleepInhibitor {
         stdio: 'ignore',
         detached: false,
         windowsHide: true,
+        env: {},
       });
       this.child = child;
 
