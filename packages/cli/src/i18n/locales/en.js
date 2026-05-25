@@ -115,6 +115,35 @@ export default {
   'List available skills.': 'List available skills.',
   'Open the skills panel (browse, search, toggle, pick).':
     'Open the skills panel (browse, search, toggle, pick).',
+  // SkillsManagerDialog (the panel `/skills` opens)
+  'Manage Skills': 'Manage Skills',
+  'Skills configuration saved.': 'Skills configuration saved.',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.',
+  'SkillManager not available.': 'SkillManager not available.',
+  'Loading skills…': 'Loading skills…',
+  'Failed to load skills: {{error}}': 'Failed to load skills: {{error}}',
+  'Press esc to close.': 'Press esc to close.',
+  '{{count}} skills · ': '{{count}} skills · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} skills · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope',
+  'Search:': 'Search:',
+  'type to filter…': 'type to filter…',
+  'No skills are currently available.': 'No skills are currently available.',
+  'All available skills are locked at a higher scope (see below).':
+    'All available skills are locked at a higher scope (see below).',
+  'No skills match the search.': 'No skills match the search.',
+  'Locked by higher-scope settings (cannot toggle here):':
+    'Locked by higher-scope settings (cannot toggle here):',
+  'higher scope': 'higher scope',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [locked: {{scope}}]',
+  '↑/↓ navigate · backspace edits search':
+    '↑/↓ navigate · backspace edits search',
+  Bundled: 'Bundled',
   'Available Qwen Code CLI tools:': 'Available Qwen Code CLI tools:',
   'No tools available': 'No tools available',
   'View or change the approval mode for tool usage':

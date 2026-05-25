@@ -32,6 +32,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { SettingScope } from '../../../config/settings.js';
+import { t } from '../../../i18n/index.js';
 import type { UseHistoryManagerReturn } from '../../hooks/useHistoryManager.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
@@ -67,12 +68,22 @@ const LEVEL_ORDER: Record<SkillLevel, number> = {
   bundled: 3,
 };
 
-const LEVEL_LABEL: Record<SkillLevel, string> = {
-  project: 'Project',
-  user: 'User',
-  extension: 'Extension',
-  bundled: 'Bundled',
-};
+// Level labels are looked up at render-time (not module-load) so that
+// switching `/language` after startup actually flips the visible label.
+function levelLabel(level: SkillLevel): string {
+  switch (level) {
+    case 'project':
+      return t('Project');
+    case 'user':
+      return t('User');
+    case 'extension':
+      return t('Extension');
+    case 'bundled':
+      return t('Bundled');
+    default:
+      return level;
+  }
+}
 
 const NAME_COLUMN = 24;
 
@@ -152,7 +163,7 @@ export function SkillsManagerDialog({
 
   useEffect(() => {
     if (!skillManager) {
-      setLoadError('SkillManager not available.');
+      setLoadError(t('SkillManager not available.'));
       return;
     }
     let cancelled = false;
@@ -222,7 +233,7 @@ export function SkillsManagerDialog({
         label: `${truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncate(
           s.description,
           80,
-        )}  (${LEVEL_LABEL[s.level]})`,
+        )}  (${levelLabel(s.level)})`,
       })),
     [filteredUnlocked],
   );
@@ -238,11 +249,9 @@ export function SkillsManagerDialog({
       addItem(
         {
           type: MessageType.ERROR,
-          text:
-            'Workspace is untrusted; workspace settings are ignored by the ' +
-            'merged config. Run /trust first to persist skills changes here, ' +
-            'or edit ~/.qwen/settings.json directly to manage skills at user ' +
-            'scope.',
+          text: t(
+            'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.',
+          ),
         },
         Date.now(),
       );
@@ -284,9 +293,10 @@ export function SkillsManagerDialog({
       addItem(
         {
           type: MessageType.WARNING,
-          text: `Skills configuration saved, but refresh failed: ${
-            e instanceof Error ? e.message : String(e)
-          }. Restart to ensure the new state is applied.`,
+          text: t(
+            'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.',
+            { error: e instanceof Error ? e.message : String(e) },
+          ),
         },
         Date.now(),
       );
@@ -309,7 +319,7 @@ export function SkillsManagerDialog({
       addItem(
         {
           type: MessageType.INFO,
-          text: 'Skills configuration saved.',
+          text: t('Skills configuration saved.'),
         },
         Date.now(),
       );
@@ -397,14 +407,14 @@ export function SkillsManagerDialog({
         paddingY={1}
         width="100%"
       >
-        <Text bold>Manage Skills</Text>
+        <Text bold>{t('Manage Skills')}</Text>
         <Box marginTop={1}>
           <Text color={theme.status.error}>
-            Failed to load skills: {loadError}
+            {t('Failed to load skills: {{error}}', { error: loadError ?? '' })}
           </Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={theme.text.secondary}>Press esc to close.</Text>
+          <Text color={theme.text.secondary}>{t('Press esc to close.')}</Text>
         </Box>
       </Box>
     );
@@ -420,9 +430,9 @@ export function SkillsManagerDialog({
         paddingY={1}
         width="100%"
       >
-        <Text bold>Manage Skills</Text>
+        <Text bold>{t('Manage Skills')}</Text>
         <Box marginTop={1}>
-          <Text color={theme.text.secondary}>Loading skills…</Text>
+          <Text color={theme.text.secondary}>{t('Loading skills…')}</Text>
         </Box>
       </Box>
     );
@@ -442,23 +452,27 @@ export function SkillsManagerDialog({
       paddingY={1}
       width="100%"
     >
-      <Text bold>Manage Skills</Text>
+      <Text bold>{t('Manage Skills')}</Text>
       <Text color={theme.text.secondary}>
         {hasQuery
-          ? `${matchedCount} / ${totalCount} skills · `
-          : `${totalCount} skill${totalCount === 1 ? '' : 's'} · `}
-        Space toggle · Enter pick (fill input) · Esc save & exit · workspace
-        scope
+          ? t('{{matched}} / {{total}} skills · ', {
+              matched: matchedCount,
+              total: totalCount,
+            })
+          : t('{{count}} skills · ', { count: totalCount })}
+        {t(
+          'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope',
+        )}
       </Text>
 
       <Box marginTop={1} flexDirection="row">
         <Text color={hasQuery ? theme.text.accent : theme.text.secondary}>
-          Search:{' '}
+          {t('Search:')}{' '}
         </Text>
         <Text>
           {query || (
             <Text color={theme.text.secondary} dimColor>
-              type to filter…
+              {t('type to filter…')}
             </Text>
           )}
         </Text>
@@ -467,7 +481,7 @@ export function SkillsManagerDialog({
       <Box marginTop={1} flexDirection="column">
         {allSkills.length === 0 ? (
           <Text color={theme.text.secondary}>
-            No skills are currently available.
+            {t('No skills are currently available.')}
           </Text>
         ) : items.length > 0 ? (
           <MultiSelect
@@ -493,26 +507,35 @@ export function SkillsManagerDialog({
           />
         ) : unlockedSkills.length === 0 ? (
           <Text color={theme.text.secondary}>
-            All available skills are locked at a higher scope (see below).
+            {t(
+              'All available skills are locked at a higher scope (see below).',
+            )}
           </Text>
         ) : (
-          <Text color={theme.text.secondary}>No skills match the search.</Text>
+          <Text color={theme.text.secondary}>
+            {t('No skills match the search.')}
+          </Text>
         )}
       </Box>
 
       {filteredLocked.length > 0 && (
         <Box marginTop={1} flexDirection="column">
           <Text color={theme.text.secondary}>
-            Locked by higher-scope settings (cannot toggle here):
+            {t('Locked by higher-scope settings (cannot toggle here):')}
           </Text>
           {filteredLocked.map((s) => {
-            const scopeName = higher.scopeOf(s.name) ?? 'higher scope';
+            // Scope identifiers (System / User / SystemDefaults) stay as
+            // untranslated technical labels — they refer to settings file
+            // scopes by name and matching them exactly helps users locate
+            // the offending entry.
+            const scopeName = higher.scopeOf(s.name) ?? t('higher scope');
             return (
               <Text key={s.name} dimColor wrap="truncate">
-                {`  ${truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncate(
-                  s.description,
-                  60,
-                )}  [locked: ${scopeName}]`}
+                {t('  {{name}} {{description}}  [locked: {{scope}}]', {
+                  name: truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN),
+                  description: truncate(s.description, 60),
+                  scope: scopeName,
+                })}
               </Text>
             );
           })}
@@ -521,7 +544,7 @@ export function SkillsManagerDialog({
 
       <Box marginTop={1}>
         <Text color={theme.text.secondary} dimColor>
-          ↑/↓ navigate · backspace edits search
+          {t('↑/↓ navigate · backspace edits search')}
         </Text>
       </Box>
     </Box>
