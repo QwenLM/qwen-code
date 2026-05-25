@@ -363,10 +363,28 @@ function formatStatusText(
   return lines.join('\n');
 }
 
+// Normalize a filesystem path for embedding in the LLM prompt. We render with
+// forward slashes so the prompt text is byte-identical across platforms — the
+// LLM (and the test suite) reasons about these paths as strings, not as
+// host-specific path values.
+function toPosixDisplayPath(value: string): string {
+  return value.split(path.sep).join('/');
+}
+
 // LLM-facing operational prompts stay English-only so the loop behavior is
 // consistent regardless of the user's UI locale.
 function buildTickPrompt(state: AutoImproveLoopState): string {
   const loopDir = getAutoImproveLoopDir(state.repoRoot, state.loopId);
+  const loopDirDisplay = toPosixDisplayPath(loopDir);
+  const repoRootDisplay = toPosixDisplayPath(state.repoRoot);
+  const statePathDisplay = toPosixDisplayPath(path.join(loopDir, 'state.json'));
+  const summaryPathDisplay = toPosixDisplayPath(
+    path.join(loopDir, 'summary.md'),
+  );
+  const runsDirDisplay = toPosixDisplayPath(path.join(loopDir, 'runs'));
+  const runIndexPathDisplay = toPosixDisplayPath(
+    path.join(loopDir, 'runs', 'index.json'),
+  );
   const userDirections = [
     state.prompt ? `Start prompt:\n${state.prompt}` : '',
     state.sourceSnapshot.customSources.length > 0
@@ -380,13 +398,13 @@ function buildTickPrompt(state: AutoImproveLoopState): string {
   return `You are running one tick of the built-in /auto-improve loop.
 
 Loop state:
-- Repo root: ${state.repoRoot}
+- Repo root: ${repoRootDisplay}
 ${AUTO_IMPROVE_LOOP_ID_LINE_PREFIX}${state.loopId}
-- Loop dir: ${loopDir}
-- State file: ${path.join(loopDir, 'state.json')}
-- Summary file: ${path.join(loopDir, 'summary.md')}
-- Runs dir: ${path.join(loopDir, 'runs')}
-- Run index file: ${path.join(loopDir, 'runs', 'index.json')}
+- Loop dir: ${loopDirDisplay}
+- State file: ${statePathDisplay}
+- Summary file: ${summaryPathDisplay}
+- Runs dir: ${runsDirDisplay}
+- Run index file: ${runIndexPathDisplay}
 - Loop default branch: ${state.targetBranch}
 - Delivery policy: source-aware local commit. Do not push unless the user explicitly requested push in the start prompt or selected source.
 - Repair budget: 5 test/repair attempts.
@@ -407,8 +425,8 @@ Hard rules:
 8. Do not push unless the user explicitly requested push in the start prompt or selected source. If push was not requested, report the local commit and branch.
 9. Do not open PRs.
 10. After 5 failed repair attempts, delete the worktree and keep only documentation.
-11. Update ${path.join(loopDir, 'summary.md')}, ${path.join(loopDir, 'runs', 'index.json')}, and one markdown file under ${path.join(loopDir, 'runs')} for every attempted run. In the run index, append or update one record with runId, status, source, task, issueNumber or prNumber when applicable, branch, commit, runDoc, and updatedAt.
-12. Do not edit ${path.join(loopDir, 'state.json')} directly. The loop infrastructure owns state transitions.
+11. Update ${summaryPathDisplay}, ${runIndexPathDisplay}, and one markdown file under ${runsDirDisplay} for every attempted run. In the run index, append or update one record with runId, status, source, task, issueNumber or prNumber when applicable, branch, commit, runDoc, and updatedAt.
+12. Do not edit ${statePathDisplay} directly. The loop infrastructure owns state transitions.
 13. If stopRequested is true when you inspect the state, do not start a new run; report Outcome: cancelled.
 
 Task selection guidance:
