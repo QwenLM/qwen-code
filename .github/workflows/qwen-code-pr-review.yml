@@ -1224,8 +1224,9 @@ jobs:
             printf '## Bundled /review rubric excerpt\n\n'
             printf 'The following rubric is extracted from '
             printf '`packages/core/src/skills/bundled/review/SKILL.md`. '
-            printf 'Use it as review guidance only; do not execute its tool, '
-            printf 'worktree, autofix, or GitHub review-submission steps.\n\n'
+            printf 'Use it as review guidance only; do not execute its worktree, '
+            printf 'autofix, or approval-submission steps. You SHOULD post inline '
+            printf 'review comments via Bash as described in review-rules.md.\n\n'
             cat /tmp/bundled-review-rubric.md
             printf '\n\n## CI-collected PR context\n\n'
             cat /tmp/deep-pr-context.md

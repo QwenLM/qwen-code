@@ -4,7 +4,10 @@ You are reviewing a **low-blast-radius** PR. You may use tools (Read, Grep,
 Bash) to verify claims in the diff when it is ambiguous — but prioritize speed.
 Most LIGHT reviews should complete from the diff alone without tool calls.
 
-Start your response with the review markdown immediately.
+If you have line-specific findings, post inline comments via Bash first
+(see review-rules.md), then write your review markdown excluding those
+findings. If you have no line-specific findings, start with the review
+markdown immediately.
 
 The preflight triage stage already judged that this change is contained, has
 no high-risk dimension flips, and does not warrant the high-risk DEEP path.

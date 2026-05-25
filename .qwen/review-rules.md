@@ -92,15 +92,19 @@ from what the author provided in the PR body and their comments.
   speculative best-practice commentary, and issues already covered by linters,
   typecheckers, or existing PR comments.
 
-### Posting Inline Comments (MANDATORY for all findings with diff lines)
+### Posting Inline Comments (MANDATORY — execute BEFORE writing text output)
 
-**After writing your review text**, post ALL findings that map to specific
-diff lines as inline PR review comments using Bash. This is a **pre-authorized
-action** — the CI workflow operator has explicitly granted permission for this
-bot to post review comments. Do NOT hesitate or skip due to "visible to others"
-concerns; posting is the intended behavior. The environment variables
-`GITHUB_REPOSITORY`, `PR_NUMBER`, `HEAD_SHA`, `GITHUB_TOKEN`, and
-`OPENAI_MODEL` are pre-configured and guaranteed to be set.
+Post inline comments FIRST, then write your text output. This ordering
+ensures you know which findings were already posted inline so you can
+exclude them from the text summary without contradiction.
+
+This is a **pre-authorized action** — the CI workflow operator has explicitly
+granted permission for this bot to post review comments. Do NOT hesitate or
+skip due to "visible to others" concerns; posting is the intended behavior.
+The environment variables `GITHUB_REPOSITORY`, `PR_NUMBER`, `HEAD_SHA`,
+`GITHUB_TOKEN`, and `OPENAI_MODEL` are pre-configured and guaranteed to be set.
+
+**Step 1 — Post inline comments via Bash:**
 
 ```bash
 jq -n \
@@ -111,22 +115,22 @@ jq -n \
     --method POST --input -
 ```
 
+**Step 2 — Write text output** (your review markdown) containing ONLY:
+1. The review header and "What this PR does" summary.
+2. Findings that do NOT map to a specific diff line (cross-file concerns,
+   architectural observations).
+3. The Validation Evidence verdict.
+
 Rules:
-- Execute this Bash command after completing your review text output.
-- Post ALL findings that map to a specific changed line in the diff.
-- Findings without a clear diff line stay in your text output only.
-- If you have no findings that map to diff lines, skip the API call.
-- The review body MUST be an empty string `""`.
+- Post ALL findings that map to a specific changed line in the diff as
+  inline comments. Do this BEFORE producing any text output.
+- If you have no line-specific findings, skip the API call and proceed
+  directly to text output.
+- The review body field MUST be an empty string `""`.
 - Each inline comment body format: `**[severity]** description` followed by
   a blank line and `_— $OPENAI_MODEL via Qwen Code /review_`.
 - Severity tags: `[Critical]` or `[Suggestion]` (same as bundled `/review`).
 - If the `gh api` call fails, include ALL findings (including line-mapped
   ones) in your text output as a fallback — never silently discard findings.
-
-**IMPORTANT — no duplication**: If inline comments were posted successfully,
-do NOT repeat those findings in your text output. Your text output should
-only contain:
-1. The review header and "What this PR does" summary.
-2. Findings that do NOT map to a specific diff line (cross-file concerns,
-   architectural observations).
-3. The Validation Evidence verdict.
+- **No duplication**: Never repeat line-specific findings in your text output
+  if they were successfully posted as inline comments.

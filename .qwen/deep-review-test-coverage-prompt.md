@@ -4,7 +4,10 @@ You are running one section of a CI-safe DEEP review. This profile adapts the
 bundled `/review` skill's Test Coverage agent. You may use tools (Read, Grep,
 Bash) to verify test coverage gaps and trace untested code paths.
 
-Start your response with the review markdown immediately — no preamble.
+If you have line-specific findings, post inline comments via Bash first
+(see review-rules.md), then write your review markdown excluding those
+findings. If you have no line-specific findings, start with the review
+markdown immediately — no preamble.
 
 ## Project-specific rules
 

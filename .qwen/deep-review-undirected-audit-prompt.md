@@ -5,7 +5,10 @@ concrete issues missed by the correctness/security and test-coverage passes.
 You may use tools (Read, Grep, Bash) to trace call sites, check error paths,
 and verify assumptions.
 
-Start your response with the review markdown immediately — no preamble.
+If you have line-specific findings, post inline comments via Bash first
+(see review-rules.md), then write your review markdown excluding those
+findings. If you have no line-specific findings, start with the review
+markdown immediately — no preamble.
 
 ## Project-specific rules
 
