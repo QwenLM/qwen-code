@@ -2027,6 +2027,22 @@ export class Session implements SessionContext {
 
       let didRequestPermission = false;
       let confirmationDetails: ToolCallConfirmationDetails | undefined;
+      const resetAutoModeFallbackAfterApproval = (
+        outcome: ToolConfirmationOutcome,
+      ) => {
+        // Reset AUTO-mode fallback counters when approval resolves a prompt
+        // raised because denialTracking forced fallback. This covers both ACP
+        // requestPermission and PermissionRequest hook approvals.
+        if (
+          approvalMode === ApprovalMode.AUTO &&
+          wasAutoModeDenialFallback &&
+          isApproveOutcome(outcome)
+        ) {
+          this.config.setAutoModeDenialState(
+            recordFallbackApprove(this.config.getAutoModeDenialState()),
+          );
+        }
+      };
 
       if (
         !autoModeAllowed &&
@@ -2077,6 +2093,9 @@ export class Session implements SessionContext {
               }
 
               await confirmationDetails.onConfirm(
+                ToolConfirmationOutcome.ProceedOnce,
+              );
+              resetAutoModeFallbackAfterApproval(
                 ToolConfirmationOutcome.ProceedOnce,
               );
             } else {
@@ -2146,22 +2165,7 @@ export class Session implements SessionContext {
                   .nativeEnum(ToolConfirmationOutcome)
                   .parse(output.outcome.optionId);
 
-          // Reset AUTO-mode fallback counters when the user manually
-          // approves a prompt that was raised because denialTracking forced
-          // fallback. Without this, one denial cap hit would keep the
-          // session in manual approval until the mode is toggled.
-          // Parallels coreToolScheduler.ts.
-          // Cancel / abort do NOT reset — treating rejection as a signal
-          // the classifier was right to block.
-          if (
-            approvalMode === ApprovalMode.AUTO &&
-            wasAutoModeDenialFallback &&
-            isApproveOutcome(outcome)
-          ) {
-            this.config.setAutoModeDenialState(
-              recordFallbackApprove(this.config.getAutoModeDenialState()),
-            );
-          }
+          resetAutoModeFallbackAfterApproval(outcome);
 
           await confirmationDetails.onConfirm(outcome, {
             answers: output.answers,

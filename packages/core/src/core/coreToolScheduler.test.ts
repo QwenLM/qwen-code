@@ -541,8 +541,7 @@ describe('CoreToolScheduler', () => {
       tool: {},
       confirmationDetails,
     } as unknown as ToolCall;
-    const internals =
-      scheduler as unknown as SchedulerDenialTrackingInternals;
+    const internals = scheduler as unknown as SchedulerDenialTrackingInternals;
     internals.toolCalls = [toolCall];
     return { internals, toolCall, setAutoModeDenialState };
   }
@@ -605,6 +604,13 @@ describe('CoreToolScheduler', () => {
     getPermissionsDeny?: () => string[] | undefined;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     disableHooks?: boolean;
+    autoModeDenialState?: {
+      consecutiveBlock: number;
+      consecutiveUnavailable: number;
+      totalBlock: number;
+      totalUnavailable: number;
+    };
+    setAutoModeDenialState?: ReturnType<typeof vi.fn>;
     onAllToolCallsComplete?: ReturnType<typeof vi.fn>;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
   }) {
@@ -660,6 +666,14 @@ describe('CoreToolScheduler', () => {
         getDisableAllHooks: vi
           .fn()
           .mockReturnValue(options.disableHooks ?? true),
+        getAutoModeDenialState: () =>
+          options.autoModeDenialState ?? {
+            consecutiveBlock: 0,
+            consecutiveUnavailable: 0,
+            totalBlock: 0,
+            totalUnavailable: 0,
+          },
+        setAutoModeDenialState: options.setAutoModeDenialState ?? vi.fn(),
         isInteractive: () => true,
         getInputFormat: () => undefined,
         getExperimentalZedIntegration: () => false,
@@ -865,6 +879,96 @@ describe('CoreToolScheduler', () => {
       expect(execute).toHaveBeenCalledOnce();
     },
   );
+
+  it('resets denial counters when PermissionRequest hook approves a denialTracking fallback prompt', async () => {
+    const setAutoModeDenialState = vi.fn();
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'executed',
+      returnDisplay: 'executed',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          kind: Kind.Execute,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'exec',
+            title: 'Run command',
+            command: 'python',
+            rootCommand: 'python',
+            onConfirm: onConfirmSpy,
+          }),
+          execute,
+        }),
+      ],
+    ]);
+    const messageBus = {
+      request: vi.fn().mockImplementation(
+        async (request: {
+          eventName: string;
+        }): Promise<HookExecutionResponse> => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output:
+            request.eventName === 'PermissionRequest'
+              ? {
+                  hookSpecificOutput: {
+                    decision: {
+                      behavior: 'allow',
+                    },
+                  },
+                }
+              : { decision: 'allow' },
+        }),
+      ),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        messageBus,
+        disableHooks: false,
+        autoModeDenialState: {
+          consecutiveBlock: 0,
+          consecutiveUnavailable: 0,
+          totalBlock: 20,
+          totalUnavailable: 0,
+        },
+        setAutoModeDenialState,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'hook-approved-denial-fallback',
+          name: ToolNames.SHELL,
+          args: { command: 'python -c "print(1)"' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-hook-approved-denial-fallback',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(onConfirmSpy).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    });
+    expect(execute).toHaveBeenCalledOnce();
+  });
 
   it('should cancel a tool call if the signal is aborted before confirmation', async () => {
     const mockTool = new MockTool({

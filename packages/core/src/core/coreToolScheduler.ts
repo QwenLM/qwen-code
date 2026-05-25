@@ -1890,6 +1890,10 @@ export class CoreToolScheduler {
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.ProceedOnce,
                   );
+                  this.resetAutoModeFallbackAfterConfirmation(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
                   this.setToolCallOutcome(
                     reqInfo.callId,
                     ToolConfirmationOutcome.ProceedOnce,
@@ -1903,6 +1907,10 @@ export class CoreToolScheduler {
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.Cancel,
                     cancelPayload,
+                  );
+                  this.resetAutoModeFallbackAfterConfirmation(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.Cancel,
                   );
                   this.setToolCallOutcome(
                     reqInfo.callId,
@@ -2214,23 +2222,7 @@ export class CoreToolScheduler {
 
     this.setToolCallOutcome(callId, outcome);
 
-    const wasAutoModeFallback = this.autoModeFallbackCallIds.delete(callId);
-
-    // AUTO-mode denialTracking recovery: when the user manually approves a
-    // call that fell back because denialTracking was armed, clear the armed
-    // counters so subsequent calls return to classifier flow. Ordinary AUTO
-    // approvals for ask rules must not clear cumulative denial totals.
-    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
-    // signal that the classifier was correct to block.
-    if (
-      this.config.getApprovalMode() === ApprovalMode.AUTO &&
-      wasAutoModeFallback &&
-      isApproveOutcome(outcome)
-    ) {
-      this.config.setAutoModeDenialState(
-        recordFallbackApprove(this.config.getAutoModeDenialState()),
-      );
-    }
+    this.resetAutoModeFallbackAfterConfirmation(callId, outcome);
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
       // Use custom cancel message from payload if provided, otherwise use default
@@ -2346,6 +2338,29 @@ export class CoreToolScheduler {
     // (handleConfirmationResponse, outside its catch) so a sister
     // tool's prelude throw can't be mis-attributed to this callId
     // (#4321 review-9 wenshao Critical).
+  }
+
+  private resetAutoModeFallbackAfterConfirmation(
+    callId: string,
+    outcome: ToolConfirmationOutcome,
+  ): void {
+    const wasAutoModeFallback = this.autoModeFallbackCallIds.delete(callId);
+
+    // AUTO-mode denialTracking recovery: when the user manually approves a
+    // call that fell back because denialTracking was armed, clear the armed
+    // counters so subsequent calls return to classifier flow. Ordinary AUTO
+    // approvals for ask rules must not clear cumulative denial totals.
+    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
+    // signal that the classifier was correct to block.
+    if (
+      this.config.getApprovalMode() === ApprovalMode.AUTO &&
+      wasAutoModeFallback &&
+      isApproveOutcome(outcome)
+    ) {
+      this.config.setAutoModeDenialState(
+        recordFallbackApprove(this.config.getAutoModeDenialState()),
+      );
+    }
   }
 
   /**

@@ -2169,6 +2169,99 @@ describe('Session', () => {
       expect(executeSpy).toHaveBeenCalled();
     });
 
+    it('resets AUTO denial counters when a permission-request hook approves a denialTracking fallback prompt', async () => {
+      const hookSpy = vi
+        .spyOn(core, 'firePermissionRequestHook')
+        .mockResolvedValue({
+          hasDecision: true,
+          shouldAllow: true,
+          updatedInput: undefined,
+          denyMessage: undefined,
+        });
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const setAutoModeDenialState = vi.fn();
+      const invocation = {
+        params: { command: 'python -c "print(1)"' },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Need permission',
+          command: 'python',
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue('Run command'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.AUTO);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      mockConfig.getAutoModeDenialState = vi.fn().mockReturnValue({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 20,
+        totalUnavailable: 0,
+      });
+      mockConfig.setAutoModeDenialState = setAutoModeDenialState;
+      (
+        mockGeminiClient as unknown as {
+          getHistoryTail: ReturnType<typeof vi.fn>;
+        }
+      ).getHistoryTail = vi.fn().mockReturnValue([]);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-auto-fallback-hook-approved',
+                  name: core.ToolNames.SHELL,
+                  args: { command: 'python -c "print(1)"' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'run tool' }],
+        });
+      } finally {
+        hookSpy.mockRestore();
+      }
+
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      await vi.waitFor(() => {
+        expect(onConfirmSpy).toHaveBeenCalledWith(
+          core.ToolConfirmationOutcome.ProceedOnce,
+        );
+        expect(setAutoModeDenialState).toHaveBeenCalledWith({
+          consecutiveBlock: 0,
+          consecutiveUnavailable: 0,
+          totalBlock: 0,
+          totalUnavailable: 0,
+        });
+        expect(executeSpy).toHaveBeenCalled();
+      });
+    });
+
     describe('hooks', () => {
       describe('UserPromptSubmit hook', () => {
         it('fires UserPromptSubmit hook before sending prompt', async () => {
