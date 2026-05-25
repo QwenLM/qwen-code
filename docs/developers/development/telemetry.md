@@ -327,6 +327,24 @@ for cross-process trace stitching — e.g. ARMS Tracing serving DashScope.
 For most operators the value is `false`; cross-vendor trace continuation
 is niche.
 
+**Depends on `telemetry.enabled: true`.** The OTel SDK only initializes
+when telemetry is enabled, so `propagateTraceContext` only takes effect
+in that state. Setting it to `true` while telemetry is disabled is a
+silent no-op — no SDK, no propagator, no `traceparent` on the wire.
+Verify both flags when wiring an ARMS+DashScope correlation setup:
+
+```jsonc
+{
+  "telemetry": {
+    "enabled": true,
+    "otlpTracesEndpoint": "http://tracing-analysis-...",
+  },
+  "outboundCorrelation": {
+    "propagateTraceContext": true,
+  },
+}
+```
+
 ### Other outbound correlation headers
 
 `X-Qwen-Code-Session-Id` and `X-Qwen-Code-Request-Id` are **not part of

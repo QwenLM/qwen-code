@@ -677,9 +677,10 @@ describe('Telemetry SDK', () => {
       ).mockReturnValue(true);
       initializeTelemetry(mockConfig);
       // textMapPropagator is omitted from NodeSDK options → SDK installs
-      // its default W3C composite propagator. Test asserts the absence
-      // because the actual W3CTraceContextPropagator instance is created
-      // inside @opentelemetry/sdk-node which is auto-mocked here.
+      // its default `CompositePropagator` (W3CTraceContextPropagator +
+      // W3CBaggagePropagator). Test asserts the absence at the constructor
+      // boundary because the default composite is constructed inside
+      // @opentelemetry/sdk-node, which is auto-mocked here.
       expect(getTextMapPropagator()).toBeUndefined();
     });
   });
