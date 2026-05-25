@@ -1396,9 +1396,13 @@ export class Session implements SessionContext {
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
 
+        let slashOnComplete:
+          | ((opts?: { errored?: boolean }) => Promise<void>)
+          | undefined;
+        let slashOnCompleteErrored = false;
+
         try {
           let promptParts: Part[] = [{ text: prompt }];
-          let slashOnComplete: (() => Promise<void>) | undefined;
           if (isSlashCommand(prompt)) {
             const slashCommandResult = await handleSlashCommand(
               prompt,
@@ -1521,17 +1525,28 @@ export class Session implements SessionContext {
               nextMessage = { role: 'user', parts: toolResponseParts };
             }
           }
-          // Fire onComplete from submit_prompt (e.g. markRunCompleted)
-          // after the model turn finishes.
-          if (slashOnComplete) {
-            await slashOnComplete();
-          }
         } catch (error) {
+          // Mark as errored unless this was a user-initiated cancellation
+          if (!ac.signal.aborted) {
+            slashOnCompleteErrored = true;
+          }
           if (ac.signal.aborted) return;
           debugLogger.error('Error processing cron prompt:', error);
           const msg = error instanceof Error ? error.message : String(error);
           await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
         } finally {
+          // Fire onComplete from submit_prompt (e.g. markRunCompleted)
+          // after the model turn finishes, even on error paths.
+          if (slashOnComplete) {
+            try {
+              await slashOnComplete(
+                slashOnCompleteErrored ? { errored: true } : undefined,
+              );
+            } catch (e) {
+              // swallow — markRunCompleted is idempotent
+              debugLogger.warn('slashOnComplete threw:', e);
+            }
+          }
           if (this.cronAbortController === ac) {
             this.cronAbortController = null;
           }

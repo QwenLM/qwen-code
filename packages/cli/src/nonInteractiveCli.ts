@@ -1006,7 +1006,10 @@ export async function runNonInteractive(
                 void (async () => {
                   const label = job.prompt.slice(0, 40);
                   let modelText = job.prompt;
-                  let slashOnComplete: (() => Promise<void>) | undefined;
+                  let slashOnComplete:
+                    | ((opts?: { errored?: boolean }) => Promise<void>)
+                    | undefined;
+                  let slashOnCompleteErrored = false;
                   if (isSlashCommand(job.prompt)) {
                     const slashCommandResult = await handleSlashCommand(
                       job.prompt,
@@ -1033,16 +1036,31 @@ export async function runNonInteractive(
                       return;
                     }
                   }
-                  localQueue.push({
-                    displayText: `Cron: ${label}`,
-                    modelText,
-                    sendMessageType: SendMessageType.Cron,
-                  });
-                  await drainLocalQueue();
-                  // Fire onComplete from submit_prompt (e.g. markRunCompleted)
-                  // after the model turn finishes.
-                  if (slashOnComplete) {
-                    await slashOnComplete();
+                  try {
+                    localQueue.push({
+                      displayText: `Cron: ${label}`,
+                      modelText,
+                      sendMessageType: SendMessageType.Cron,
+                    });
+                    await drainLocalQueue();
+                  } catch (error) {
+                    slashOnCompleteErrored = true;
+                    throw error;
+                  } finally {
+                    // Fire onComplete from submit_prompt (e.g. markRunCompleted)
+                    // after the model turn finishes, even on error paths.
+                    if (slashOnComplete) {
+                      try {
+                        await slashOnComplete(
+                          slashOnCompleteErrored
+                            ? { errored: true }
+                            : undefined,
+                        );
+                      } catch (e) {
+                        // swallow — markRunCompleted is idempotent
+                        debugLogger.warn('slashOnComplete threw:', e);
+                      }
+                    }
                   }
                   checkCronDone();
                 })().catch(onDrainError);
