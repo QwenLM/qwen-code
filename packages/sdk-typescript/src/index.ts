@@ -116,6 +116,10 @@ export {
   type DaemonStreamErrorData,
   type DaemonStreamErrorEvent,
   type DaemonStreamLifecycleEvent,
+  // Daemon assist push (server-side ghost-text suggestion)
+  type DaemonAssistEvent,
+  type DaemonFollowupSuggestionData,
+  type DaemonFollowupSuggestionEvent,
   type DaemonWorkspaceMcpServerStatus,
   type DaemonWorkspaceMcpStatus,
   type DaemonWorkspaceProviderCurrent,

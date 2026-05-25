@@ -15,6 +15,7 @@ export {
   reduceDaemonTranscriptEvents,
   selectApprovalMode,
   selectCurrentTool,
+  selectLastFollowupSuggestion,
   selectPendingPermissionBlocks,
   selectSubagentChildBlocks,
   selectToolProgress,
@@ -93,6 +94,8 @@ export type {
   DaemonUiStateResyncRequiredEvent,
   DaemonUiReplayCompleteEvent,
   DaemonUiPromptCancelledEvent,
+  // Daemon assist push (server-side ghost-text suggestion)
+  DaemonUiFollowupSuggestionEvent,
   // Workspace events
   DaemonUiWorkspaceMemoryChangedEvent,
   DaemonUiWorkspaceAgentChangedEvent,

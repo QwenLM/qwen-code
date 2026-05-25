@@ -259,6 +259,17 @@ function applyDaemonTranscriptEvent(
       // tool_call_update frames.
       propagateCancellationToInFlightTools(next);
       break;
+    case 'followup.suggestion':
+      // Sidechannel: latest assist hint replaces any prior one for the
+      // session. No transcript block — adapters render the suggestion
+      // as ghost-text in their input placeholder via the sidechannel
+      // selector. Self-invalidated by the adapter on next sendPrompt
+      // (no wire round-trip).
+      next.lastFollowupSuggestion = {
+        suggestion: event.suggestion,
+        promptId: event.promptId,
+      };
+      break;
     case 'session.replay_complete':
       // Sidechannel signal only — consumers read it off the event
       // stream (or `selectors`) to drop a catch-up indicator. No
@@ -791,6 +802,10 @@ function cloneTranscriptState(
       state.lastResyncRequired !== undefined
         ? { ...state.lastResyncRequired }
         : undefined,
+    lastFollowupSuggestion:
+      state.lastFollowupSuggestion !== undefined
+        ? { ...state.lastFollowupSuggestion }
+        : undefined,
   };
 }
 
@@ -1093,6 +1108,19 @@ export function selectApprovalMode(
   state: DaemonTranscriptState,
 ): string | undefined {
   return state.approvalMode;
+}
+
+/**
+ * Most recent follow-up suggestion observed for the session, mirrored
+ * from `followup.suggestion` events. Adapters render the `suggestion`
+ * as ghost-text in their input placeholder. Returns `undefined` until
+ * the daemon emits at least one suggestion, or after the consumer
+ * clears it via `clearFollowupSuggestion` (typically on sendPrompt).
+ */
+export function selectLastFollowupSuggestion(
+  state: DaemonTranscriptState,
+): { suggestion: string; promptId: string } | undefined {
+  return state.lastFollowupSuggestion;
 }
 
 /**

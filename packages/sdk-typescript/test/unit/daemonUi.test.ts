@@ -5181,9 +5181,6 @@ describe('permission_resolved voterClientId (A4)', () => {
   });
 
   it('distinguishes the prompt originator (request) from the voter (resolved) when they differ', () => {
-    // The whole point of A4: client A submits the prompt that triggers the
-    // permission request; a DIFFERENT client B casts the resolving vote.
-    // The request carries A as originator; the resolution carries B as voter.
     const [request] = normalizeDaemonEvent({
       id: 1,
       v: 1,
@@ -5214,9 +5211,153 @@ describe('permission_resolved voterClientId (A4)', () => {
       type: 'permission.resolved',
       voterClientId: 'client_B',
     });
-    // The voter is NOT the prompt originator — the disambiguation A4 enables.
     expect((resolved as { voterClientId?: string }).voterClientId).not.toBe(
       (request as { originatorClientId?: string }).originatorClientId,
     );
+  });
+});
+
+describe('daemon assist push: followup_suggestion', () => {
+  it('normalizes followup_suggestion to followup.suggestion with payload', () => {
+    const events = normalizeDaemonEvent({
+      id: 7,
+      v: 1,
+      type: 'followup_suggestion',
+      originatorClientId: 'client-A',
+      data: {
+        sessionId: 's-1',
+        suggestion: 'Run the build?',
+        promptId: 's-1########3',
+      },
+    } as never);
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'followup.suggestion',
+        sessionId: 's-1',
+        suggestion: 'Run the build?',
+        promptId: 's-1########3',
+        originatorClientId: 'client-A',
+        eventId: 7,
+      }),
+    ]);
+  });
+
+  it('routes malformed followup_suggestion to debug fallback', () => {
+    // Missing `promptId` — the normalizer rejects via fallbackDebug
+    // rather than synthesizing a typed event with partial data.
+    const events = normalizeDaemonEvent({
+      id: 8,
+      v: 1,
+      type: 'followup_suggestion',
+      data: { sessionId: 's-1', suggestion: 'Hi' },
+    } as never);
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        text: expect.stringContaining('malformed followup_suggestion'),
+      }),
+    ]);
+  });
+
+  it('transcript reducer stores lastFollowupSuggestion without appending a block', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    const before = state.blocks.length;
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'followup_suggestion',
+        data: {
+          sessionId: 's-1',
+          suggestion: 'What did you find?',
+          promptId: 's-1########2',
+        },
+      } as never),
+      { now: 2 },
+    );
+    // Sidechannel only — no chat-stream block.
+    expect(state.blocks.length).toBe(before);
+    expect(state.lastFollowupSuggestion).toEqual({
+      suggestion: 'What did you find?',
+      promptId: 's-1########2',
+    });
+    expect(state.lastEventId).toBe(1);
+  });
+
+  it('latest followup_suggestion replaces the prior one for the session', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'followup_suggestion',
+        data: {
+          sessionId: 's-1',
+          suggestion: 'First suggestion',
+          promptId: 's-1########1',
+        },
+      } as never),
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'followup_suggestion',
+        data: {
+          sessionId: 's-1',
+          suggestion: 'Second suggestion',
+          promptId: 's-1########2',
+        },
+      } as never),
+      { now: 3 },
+    );
+    expect(state.lastFollowupSuggestion).toEqual({
+      suggestion: 'Second suggestion',
+      promptId: 's-1########2',
+    });
+  });
+
+  it('store.clearFollowupSuggestion drops the sidechannel suggestion', () => {
+    const store = createDaemonTranscriptStore();
+    store.dispatch(
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'followup_suggestion',
+        data: {
+          sessionId: 's-1',
+          suggestion: 'Care to elaborate?',
+          promptId: 's-1########4',
+        },
+      } as never),
+    );
+    // queueMicrotask flush
+    return Promise.resolve().then(() => {
+      expect(store.getSnapshot().lastFollowupSuggestion).toEqual({
+        suggestion: 'Care to elaborate?',
+        promptId: 's-1########4',
+      });
+      store.clearFollowupSuggestion();
+      return Promise.resolve().then(() => {
+        expect(store.getSnapshot().lastFollowupSuggestion).toBeUndefined();
+        // Idempotent: calling again is a no-op (no throw).
+        store.clearFollowupSuggestion();
+      });
+    });
+  });
+
+  it('terminal renderer surfaces followup suggestion as a debug-style line', () => {
+    const text = daemonUiEventToTerminalText({
+      type: 'followup.suggestion',
+      sessionId: 's-1',
+      suggestion: 'Try running the tests',
+      promptId: 's-1########5',
+    } as DaemonUiEvent);
+    expect(text).toContain('suggestion');
+    expect(text).toContain('Try running the tests');
   });
 });

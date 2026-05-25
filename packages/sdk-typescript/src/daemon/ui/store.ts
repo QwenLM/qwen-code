@@ -98,6 +98,11 @@ export function createDaemonTranscriptStore(
       };
       scheduleNotify();
     },
+    clearFollowupSuggestion() {
+      if (state.lastFollowupSuggestion === undefined) return;
+      state = { ...state, lastFollowupSuggestion: undefined };
+      scheduleNotify();
+    },
   };
 }
 
@@ -140,6 +145,10 @@ function createState(
     lastResyncRequired:
       seed.lastResyncRequired !== undefined
         ? { ...seed.lastResyncRequired }
+        : undefined,
+    lastFollowupSuggestion:
+      seed.lastFollowupSuggestion !== undefined
+        ? { ...seed.lastFollowupSuggestion }
         : undefined,
   };
 }

@@ -36,6 +36,8 @@ export type DaemonUiEventType =
   | 'session.replay_complete'
   // Prompt lifecycle (cross-client)
   | 'prompt.cancelled'
+  // Daemon assist push (server-side ghost-text suggestion)
+  | 'followup.suggestion'
   // Workspace events (Wave 3-4)
   | 'workspace.memory.changed'
   | 'workspace.agent.changed'
@@ -260,6 +262,23 @@ export interface DaemonUiPromptCancelledEvent extends DaemonUiEventBase {
 }
 
 /**
+ * Daemon assist push: a follow-up suggestion the ACP child generated
+ * after the last end_turn. Adapters render it as ghost-text in the
+ * input placeholder. The suggestion is already post-filter
+ * (`getFilterReason()===null`) and non-empty — the wire never
+ * carries rejected suggestions. `promptId` correlates with the
+ * just-completed turn, so consumers can suppress stale events that
+ * race a fresh user prompt (typically by clearing local display
+ * state on sendPrompt).
+ */
+export interface DaemonUiFollowupSuggestionEvent extends DaemonUiEventBase {
+  type: 'followup.suggestion';
+  sessionId: string;
+  suggestion: string;
+  promptId: string;
+}
+
+/**
  * Sentinel signalling that the daemon has finished replaying buffered
  * events after a `Last-Event-ID` resume — consumers can drop a
  * catch-up indicator deterministically. Fires on both the clean-replay
@@ -404,6 +423,8 @@ export type DaemonUiEvent =
   | DaemonUiReplayCompleteEvent
   // Prompt lifecycle (cross-client)
   | DaemonUiPromptCancelledEvent
+  // Daemon assist push (server-side ghost-text suggestion)
+  | DaemonUiFollowupSuggestionEvent
   // Workspace events
   | DaemonUiWorkspaceMemoryChangedEvent
   | DaemonUiWorkspaceAgentChangedEvent
@@ -703,6 +724,19 @@ export interface DaemonTranscriptSidechannelState {
     lastDeliveredId: number;
     earliestAvailableId: number;
   };
+  /**
+   * Daemon assist push: most recent `followup.suggestion` observed.
+   * Adapters render the `suggestion` as ghost-text in the input
+   * placeholder. `promptId` correlates with the turn that produced it
+   * so consumers can correlate / suppress stale suggestions after a
+   * fresh user prompt. Undefined until the daemon emits one for this
+   * session. Self-invalidated by consumers on sendPrompt (no wire
+   * round-trip).
+   */
+  lastFollowupSuggestion?: {
+    suggestion: string;
+    promptId: string;
+  };
 }
 
 export interface DaemonTranscriptState
@@ -754,6 +788,14 @@ export interface DaemonTranscriptStore {
    * Clear FIRST, then stream events.)
    */
   clearAwaitingResync(): void;
+  /**
+   * Clear `lastFollowupSuggestion` from sidechannel state. Adapters call
+   * this on sendPrompt so the prior turn's ghost-text suggestion stops
+   * rendering immediately (no wire round-trip — server-side
+   * invalidation would waste a ring slot per prompt). Idempotent: no-op
+   * when no suggestion is set.
+   */
+  clearFollowupSuggestion(): void;
 }
 
 export interface DaemonUiSessionActions {
