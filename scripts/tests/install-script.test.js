@@ -70,10 +70,8 @@ describe('installation scripts', () => {
     expect(script).toContain('npm_package_spec()');
     expect(script).toContain('@qwen-code/qwen-code@latest');
     expect(script).toContain('Installing Qwen Code version:');
-    expect(script).toContain('QWEN CODE');
-    expect(script).toContain(
-      'Qwen Code ${installed_version} installed successfully.',
-    );
+    expect(script).toContain('print_logo');
+    expect(script).toContain('installed successfully.');
     expect(script).toContain('To start:');
     expect(script).toContain('Installed to:');
     expect(script).toContain('Uninstall:');
@@ -153,7 +151,7 @@ describe('installation scripts', () => {
       'curl -fsL --retry 1 --connect-timeout 10 --max-time "${timeout}"',
     );
     expect(script).toContain('wget_args+=(--read-timeout=30)');
-    expect(script).toContain('echo "Downloading ${archive_name}"');
+    expect(script).toContain('Downloading ${archive_name}');
     expect(script).not.toContain(
       'curl -fsSL --retry 2 "${url}" -o "${destination}"',
     );
@@ -1895,10 +1893,8 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
           .trim();
         expect(version).toBe('0.0.0-smoke');
         expect(output).toContain('Installing Qwen Code version: latest');
-        expect(output).toContain('QWEN CODE');
-        expect(output).toContain(
-          'Qwen Code 0.0.0-smoke installed successfully.',
-        );
+        expect(output).toContain('installed successfully.');
+        expect(output).toContain('0.0.0-smoke');
         expect(output).toContain('To start:\n  cd <project>\n  qwen');
         expect(output).toContain(
           `Installed to:\n  ${path.join(installRoot, 'lib', 'qwen-code')}`,

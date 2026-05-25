@@ -29,6 +29,10 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+BRAND_ROSE='\033[38;5;168m'
+BRAND_PURPLE='\033[38;5;140m'
+BRAND_BLUE='\033[38;5;68m'
+MUTED='\033[0;2m'
 NC='\033[0m'
 
 log_info() {
@@ -752,7 +756,78 @@ standalone_base_url() {
     github_base_url_for_version "${version_path}"
 }
 
-download_file() {
+print_progress() {
+    local bytes="$1"
+    local length="$2"
+    [ "$length" -gt 0 ] 2>/dev/null || return 0
+    local width=50
+    local percent=$(( bytes * 100 / length ))
+    [ "$percent" -gt 100 ] && percent=100
+    local on=$(( percent * width / 100 ))
+    local off=$(( width - on ))
+    local filled=$(printf "%*s" "$on" "")
+    filled=${filled// /■}
+    local empty=$(printf "%*s" "$off" "")
+    empty=${empty// /･}
+    printf "\r${BRAND_PURPLE}%s%s %3d%%${NC}" "$filled" "$empty" "$percent" >&4
+}
+
+download_with_progress() {
+    local url="$1"
+    local output="$2"
+
+    if ! [ -t 2 ] || ! command_exists curl || ! command_exists mkfifo; then
+        download_file_simple "$url" "$output"
+        return $?
+    fi
+
+    exec 4>&2
+    local tmp_dir="${TMPDIR:-/tmp}"
+    local basename="${tmp_dir}/qwen_install_$$"
+    local tracefile="${basename}.trace"
+    rm -f "$tracefile"
+    mkfifo "$tracefile" 2>/dev/null || {
+        download_file_simple "$url" "$output"
+        return $?
+    }
+
+    printf "\033[?25l" >&4
+    trap 'rm -f "$tracefile"; printf "\033[?25h" >&4' RETURN
+
+    ( curl --trace-ascii "$tracefile" -s -L --retry 2 --connect-timeout 15 --max-time 300 -o "$output" "$url" ) &
+    local curl_pid=$!
+
+    local content_length=0
+    local received=0
+
+    while IFS= read -r line; do
+        if [[ "$line" == *"Content-Length:"* ]] && [ "$content_length" -eq 0 ] 2>/dev/null; then
+            content_length=$(echo "$line" | grep -oi 'Content-Length: [0-9]*' | grep -o '[0-9]*' | tail -1)
+            content_length=${content_length:-0}
+        fi
+        if [[ "$line" == *"<= Recv data,"* ]]; then
+            local chunk_size
+            chunk_size=$(echo "$line" | grep -o '[0-9]* bytes' | grep -o '[0-9]*')
+            if [ -n "$chunk_size" ]; then
+                received=$(( received + chunk_size ))
+                print_progress "$received" "$content_length"
+            fi
+        fi
+    done < "$tracefile"
+
+    wait $curl_pid
+    local exit_code=$?
+
+    printf "\r%*s\r" 60 "" >&4
+
+    rm -f "$tracefile"
+    printf "\033[?25h" >&4
+    trap - RETURN
+    exec 4>&-
+    return $exit_code
+}
+
+download_file_simple() {
     local url="$1"
     local destination="$2"
 
@@ -776,6 +851,13 @@ download_file() {
 
     log_error "curl or wget is required to download the standalone archive."
     return 1
+}
+
+download_file() {
+    local url="$1"
+    local destination="$2"
+
+    download_with_progress "${url}" "${destination}"
 }
 
 url_exists() {
@@ -1137,7 +1219,7 @@ install_standalone() {
         register_temp_dir "${temp_dir}"
         archive_path="${temp_dir}/${archive_name}"
 
-        echo "Downloading ${archive_name}"
+        echo -e "${BRAND_PURPLE}[1/3]${NC} Downloading ${archive_name}"
         if ! download_file "${archive_url}" "${archive_path}"; then
             if [[ -n "${github_fallback_base_url}" ]]; then
                 rm -f "${archive_path}"
@@ -1146,7 +1228,7 @@ install_standalone() {
                 MIRROR="github"
                 github_fallback_base_url=""
                 log_warning "Aliyun standalone archive download failed; retrying GitHub mirror."
-                echo "Downloading ${archive_name}"
+                echo -e "${BRAND_PURPLE}[1/3]${NC} Downloading ${archive_name}"
                 if download_file "${archive_url}" "${archive_path}"; then
                     :
                 else
@@ -1174,12 +1256,14 @@ install_standalone() {
     fi
 
     # Verify integrity before extraction or changing the install directory.
+    echo -e "${BRAND_PURPLE}[2/3]${NC} Verifying checksum"
     if ! verify_checksum "${archive_path}" "${checksum_source}" "${archive_name}"; then
         rm -rf "${temp_dir}"
         return 1
     fi
 
     # Extract into a temporary directory, then validate required entry points.
+    echo -e "${BRAND_PURPLE}[3/3]${NC} Installing"
     local extract_dir="${temp_dir}/extract"
     if ! extract_archive "${archive_path}" "${extract_dir}"; then
         rm -rf "${temp_dir}"
@@ -1319,6 +1403,16 @@ install_npm() {
     return 1
 }
 
+print_logo() {
+    # "QWEN CODE" in ╔═╗║╚╝ style matching the CLI header, with brand gradient
+    echo -e "${BRAND_ROSE} ▄▄▄▄▄▄  ▄▄     ▄▄ ▄▄▄▄▄▄▄ ▄▄▄    ▄▄  ${BRAND_BLUE} ▄▄▄▄▄▄  ▄▄▄▄▄▄  ▄▄▄▄▄▄  ▄▄▄▄▄▄▄${NC}"
+    echo -e "${BRAND_ROSE}██╔═══██╗██║    ██║██╔════╝████╗  ██║ ${BRAND_BLUE}██╔════╝██╔═══██╗██╔══██╗██╔════╝${NC}"
+    echo -e "${BRAND_ROSE}██║   ██║██║ █╗ ██║█████╗  ██╔██╗ ██║ ${BRAND_PURPLE}██║     ██║   ██║██║  ██║█████╗${NC}"
+    echo -e "${BRAND_PURPLE}██║▄▄ ██║██║███╗██║██╔══╝  ██║╚██╗██║ ${BRAND_PURPLE}██║     ██║   ██║██║  ██║██╔══╝${NC}"
+    echo -e "${BRAND_PURPLE}╚██████╔╝╚███╔███╔╝███████╗██║ ╚████║ ${BRAND_BLUE}╚██████╗╚██████╔╝██████╔╝███████╗${NC}"
+    echo -e "${BRAND_BLUE} ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝  ${BRAND_BLUE}╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝${NC}"
+}
+
 print_final_instructions() {
     local install_bin_dir="${1:-}"
     local install_dir="${2:-}"
@@ -1364,9 +1458,9 @@ print_final_instructions() {
         installed_version=$(qwen --version 2>/dev/null || echo "unknown")
     fi
 
-    echo "QWEN CODE"
+    print_logo
     echo ""
-    echo "Qwen Code ${installed_version} installed successfully."
+    echo -e "  ${BRAND_PURPLE}Qwen Code ${installed_version}${NC} installed successfully."
     echo ""
     echo "To start:"
     echo "  cd <project>"
