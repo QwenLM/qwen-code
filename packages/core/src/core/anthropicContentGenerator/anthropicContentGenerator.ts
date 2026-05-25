@@ -35,6 +35,7 @@ import {
 } from '../../utils/runtimeFetchOptions.js';
 import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import {
   tokenLimit,
   CAPPED_DEFAULT_MAX_TOKENS,
@@ -226,6 +227,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let response: Message;
     try {
       const anthropicRequest = await this.buildRequest(request);
+      runtimeDiagnostics.recordAnthropicWireRequest(anthropicRequest);
       const headers = this.buildPerRequestHeaders(anthropicRequest);
       response = (await this.client.messages.create(anthropicRequest, {
         signal: request.config?.abortSignal,
@@ -249,6 +251,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       ...anthropicRequest,
       stream: true,
     };
+    runtimeDiagnostics.recordAnthropicWireRequest(streamingRequest);
 
     let stream: AsyncIterable<RawMessageStreamEvent>;
     try {

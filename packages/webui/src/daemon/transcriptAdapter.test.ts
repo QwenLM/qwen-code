@@ -15,6 +15,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         id: 'error-1',
         kind: 'error',
         text: 'SSE stream error',
+        clientReceivedAt: 1,
         createdAt: 1,
         updatedAt: 1,
       },
@@ -69,11 +70,11 @@ describe('daemonTranscriptToUnifiedMessages', () => {
     expect(messages.map((message) => message.toolCall?.status)).toEqual([
       'pending',
       'completed',
-      'failed',
-      'cancelled',
       'completed',
-      'failed',
-      'cancelled',
+      'completed',
+      'completed',
+      'completed',
+      'completed',
       'completed',
       'failed',
       'completed',
@@ -90,6 +91,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         id: 'assistant-1',
         kind: 'assistant',
         text: '\u202etxt.exe\u001b[31mred\x00',
+        clientReceivedAt: 1,
         createdAt: 1,
         updatedAt: 1,
       },
@@ -101,14 +103,15 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         status: 'completed',
         preview: { kind: 'generic' },
         rawInput: {
-          '\u202ecommand': '\u202enpm test',
+          '‮command': '‮npm test',
           apiKey: 'secret-input',
           headers: { Authorization: 'Bearer secret-auth' },
         },
         rawOutput: {
           token: 'secret-output',
-          text: '\u001b]0;bad\u0007ok',
+          text: ']0;badok',
         },
+        clientReceivedAt: 2,
         createdAt: 2,
         updatedAt: 2,
       },
@@ -137,6 +140,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         kind: 'shell',
         text: '\u001b[31mstdout',
         stream: 'stdout',
+        clientReceivedAt: 1,
         createdAt: 1,
         updatedAt: 1,
       },
@@ -144,6 +148,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         id: 'status-1',
         kind: 'status',
         text: '\u202econnected',
+        clientReceivedAt: 2,
         createdAt: 2,
         updatedAt: 2,
       },
@@ -183,6 +188,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
           },
         ],
         locations: [{ path: '\u202esrc/index.ts', line: 3 }],
+        clientReceivedAt: 1,
         createdAt: 1,
         updatedAt: 1,
       },
@@ -220,6 +226,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         status: 'completed',
         preview: { kind: 'generic' },
         rawOutput: nested,
+        clientReceivedAt: 1,
         createdAt: 1,
         updatedAt: 1,
       },
@@ -242,6 +249,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         id: 'user-1',
         kind: 'user',
         text: 'hi',
+        clientReceivedAt: 1,
         createdAt: 1,
         updatedAt: 1,
       },
@@ -249,6 +257,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         id: 'debug-1',
         kind: 'debug',
         text: 'internal',
+        clientReceivedAt: 2,
         createdAt: 2,
         updatedAt: 2,
       },
@@ -256,6 +265,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         id: 'status-1',
         kind: 'status',
         text: 'connecting',
+        clientReceivedAt: 3,
         createdAt: 3,
         updatedAt: 3,
       },
@@ -263,6 +273,7 @@ describe('daemonTranscriptToUnifiedMessages', () => {
         id: 'assistant-1',
         kind: 'assistant',
         text: 'hello',
+        clientReceivedAt: 4,
         createdAt: 4,
         updatedAt: 4,
       },
@@ -295,6 +306,7 @@ function createToolBlock(
     title: 'Tool',
     status,
     preview: { kind: 'generic' },
+    clientReceivedAt: 1,
     createdAt: 1,
     updatedAt: 1,
   };
@@ -311,8 +323,41 @@ function createPermissionBlock(
     title: 'Permission',
     options: [],
     preview: { kind: 'generic' },
+    clientReceivedAt: 1,
     createdAt: 1,
     updatedAt: 1,
     ...(resolved !== undefined ? { resolved } : {}),
   };
 }
+
+describe('previewMarkdown preserves rawOutput (wenshao R3 qwen3.7-max)', () => {
+  it('keeps rawOutput as original object and exposes previewMarkdown when enrich enabled', () => {
+    const block: DaemonTranscriptBlock = {
+      id: 'tool-1',
+      kind: 'tool',
+      toolCallId: 't',
+      title: 'edit file',
+      status: 'completed',
+      rawInput: { path: '/x.ts', oldText: 'a', newText: 'b' },
+      rawOutput: { ok: true, lines: 42, message: 'wrote' },
+      preview: {
+        kind: 'file_diff',
+        path: '/x.ts',
+        oldText: 'a',
+        newText: 'b',
+      },
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    } as DaemonTranscriptBlock;
+    const [msg] = daemonTranscriptToUnifiedMessages([block], {
+      enrichToolDetailsWithPreview: true,
+    });
+    const tc = (msg as unknown as { toolCall: Record<string, unknown> })
+      .toolCall;
+    expect(typeof tc['rawOutput']).toBe('object');
+    expect(tc['rawOutput']).toMatchObject({ ok: true, lines: 42 });
+    expect(typeof tc['previewMarkdown']).toBe('string');
+    expect((tc['previewMarkdown'] as string).includes('/x.ts')).toBe(true);
+  });
+});

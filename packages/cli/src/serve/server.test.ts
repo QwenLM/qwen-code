@@ -2668,6 +2668,7 @@ describe('createServeApp', () => {
         'plan',
         'default',
         'auto-edit',
+        'auto',
         'yolo',
       ]);
       const unknown = await auth(

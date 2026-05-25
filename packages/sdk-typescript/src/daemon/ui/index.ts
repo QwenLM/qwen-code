@@ -9,10 +9,17 @@ export { createDaemonToolPreview } from './toolPreview.js';
 export {
   appendLocalUserTranscriptMessage,
   createDaemonTranscriptState,
+  formatBlockTimestamp,
+  isSubagentChildBlock,
   rebuildDaemonTranscriptBlockIndex,
   reduceDaemonTranscriptEvents,
+  selectApprovalMode,
+  selectCurrentTool,
   selectPendingPermissionBlocks,
+  selectSubagentChildBlocks,
+  selectToolProgress,
   selectTranscriptBlocks,
+  selectTranscriptBlocksOrderedByEventId,
 } from './transcript.js';
 export { createDaemonTranscriptStore } from './store.js';
 export {
@@ -20,6 +27,25 @@ export {
   transcriptBlockToTerminalText,
 } from './terminal.js';
 export {
+  daemonBlockToHtml,
+  daemonBlockToMarkdown,
+  daemonBlockToPlainText,
+  daemonToolPreviewToMarkdown,
+} from './render.js';
+export type { DaemonHtmlRenderOptions, DaemonRenderOptions } from './render.js';
+export {
+  DAEMON_UI_CONFORMANCE_FIXTURES,
+  runAdapterConformanceSuite,
+} from './conformance.js';
+export type {
+  ConformanceFailure,
+  ConformanceSuiteResult,
+  DaemonUiAdapterUnderTest,
+  DaemonUiConformanceFixture,
+  RunConformanceOptions,
+} from './conformance.js';
+export {
+  extractContentPart,
   getOutputText,
   isSensitiveKey as isDaemonUiSensitiveKey,
   redactSensitiveFields as redactDaemonUiSensitiveFields,
@@ -28,6 +54,7 @@ export {
   stripOscSequences,
 } from './utils.js';
 export { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+export type { DaemonUiContentPart } from './utils.js';
 export type {
   DaemonShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
@@ -40,8 +67,10 @@ export type {
   DaemonTranscriptQuestion,
   DaemonTranscriptQuestionOption,
   DaemonTranscriptReducerOptions,
+  DaemonTranscriptSidechannelState,
   DaemonTranscriptState,
   DaemonTranscriptStore,
+  // Chat-stream events
   DaemonUiAssistantDoneEvent,
   DaemonUiErrorEvent,
   DaemonUiEvent,
@@ -56,5 +85,29 @@ export type {
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
   DaemonUiToolUpdateEvent,
+  DaemonUiToolProvenance,
+  // Session-meta events
+  DaemonUiSessionMetadataChangedEvent,
+  DaemonUiSessionApprovalModeChangedEvent,
+  DaemonUiSessionAvailableCommandsEvent,
+  DaemonUiStateResyncRequiredEvent,
+  DaemonUiReplayCompleteEvent,
+  DaemonUiPromptCancelledEvent,
+  // Workspace events
+  DaemonUiWorkspaceMemoryChangedEvent,
+  DaemonUiWorkspaceAgentChangedEvent,
+  DaemonUiWorkspaceToolToggledEvent,
+  DaemonUiWorkspaceInitializedEvent,
+  DaemonUiMcpBudgetWarningEvent,
+  DaemonUiMcpChildRefusedEvent,
+  DaemonUiMcpServerRestartedEvent,
+  DaemonUiMcpServerRestartRefusedEvent,
+  // Auth device-flow events
+  DaemonUiAuthDeviceFlowEvent,
+  DaemonUiAuthDeviceFlowStartedEvent,
+  DaemonUiAuthDeviceFlowThrottledEvent,
+  DaemonUiAuthDeviceFlowAuthorizedEvent,
+  DaemonUiAuthDeviceFlowFailedEvent,
+  DaemonUiAuthDeviceFlowCancelledEvent,
   NormalizeDaemonEventOptions,
 } from './types.js';
