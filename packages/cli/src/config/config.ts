@@ -1710,6 +1710,7 @@ export async function loadCliConfig(
       screenReader,
     },
     telemetry: telemetrySettings,
+    outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
