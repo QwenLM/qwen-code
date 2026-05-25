@@ -13,6 +13,7 @@ import {
   extractSegmentFromEvent,
   accumulateSegments,
   buildOutput,
+  isSubstantiveContent,
 } from '../parse-review-stream.cjs';
 
 function jsonl(...events) {
@@ -151,34 +152,36 @@ describe('accumulateSegments', () => {
     expect(accumulateSegments(raw)).toEqual(['a', 'b']);
   });
 
-  it('strips <tool_call> XML blocks from text segments', () => {
+  it('strips <tool_call> XML blocks and keeps substantive remainder', () => {
     const raw = jsonl({
       type: 'assistant',
       message: {
         content: [
           {
             type: 'text',
-            text: 'Let me check.\n<tool_call>\n{"name":"read","args":{"path":"x"}}\n</tool_call>',
+            text: '## Review\n\n- P1 bug found.\n<tool_call>\n{"name":"read","args":{"path":"x"}}\n</tool_call>',
           },
         ],
       },
     });
-    expect(accumulateSegments(raw)).toEqual(['Let me check.']);
+    expect(accumulateSegments(raw)).toEqual(['## Review\n\n- P1 bug found.']);
   });
 
-  it('strips [tool_call: ...] bracket blocks from text segments', () => {
+  it('strips [tool_call: ...] bracket blocks and keeps substantive remainder', () => {
     const raw = jsonl({
       type: 'assistant',
       message: {
         content: [
           {
             type: 'text',
-            text: 'Review:\n[tool_call: read_file {"path": "src/index.ts"}]',
+            text: '## Review\n\n- Suggestion: rename variable\n[tool_call: read_file {"path": "src/index.ts"}]',
           },
         ],
       },
     });
-    expect(accumulateSegments(raw)).toEqual(['Review:']);
+    expect(accumulateSegments(raw)).toEqual([
+      '## Review\n\n- Suggestion: rename variable',
+    ]);
   });
 
   it('drops segment entirely when only tool_call content remains', () => {
@@ -194,6 +197,115 @@ describe('accumulateSegments', () => {
       },
     });
     expect(accumulateSegments(raw)).toEqual([]);
+  });
+
+  it('drops preamble-only text left after stripping tool_calls', () => {
+    const raw = jsonl({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: 'Let me verify a couple of claims in the diff before producing the review.\n\n<tool_call>\n{"name":"grep_search","args":{}}\n</tool_call>',
+          },
+        ],
+      },
+    });
+    expect(accumulateSegments(raw)).toEqual([]);
+  });
+
+  it('strips <arg_key>/<arg_value> pairs from text segments', () => {
+    const raw = jsonl({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: 'I need to examine the code.\n\n<arg_key>file_path</arg_key>\n<arg_value>/home/runner/work/foo.ts</arg_value>',
+          },
+        ],
+      },
+    });
+    expect(accumulateSegments(raw)).toEqual([]);
+  });
+
+  it('strips truncated <tool_call> at end of stream', () => {
+    const raw = jsonl({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: '## Review\n\n- P1 bug.\n<tool_call>\n{"name":"read_file","args":{"path"',
+          },
+        ],
+      },
+    });
+    const segments = accumulateSegments(raw);
+    expect(segments).toHaveLength(1);
+    expect(segments[0]).toBe('## Review\n\n- P1 bug.');
+  });
+
+  it('keeps segment with markdown heading after stripping tool_calls', () => {
+    const raw = jsonl({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: '## Qwen Code Review (STANDARD)\n\n**What this PR does**: fixes a bug.\n<tool_call>\n{"name":"bash"}\n</tool_call>',
+          },
+        ],
+      },
+    });
+    const segments = accumulateSegments(raw);
+    expect(segments).toHaveLength(1);
+    expect(segments[0]).toContain('## Qwen Code Review');
+  });
+});
+
+describe('isSubstantiveContent', () => {
+  it('rejects short preamble text', () => {
+    expect(
+      isSubstantiveContent(
+        'Let me verify a couple of claims in the diff before producing the review.',
+      ),
+    ).toBe(false);
+    expect(
+      isSubstantiveContent('I need to examine the source files first.'),
+    ).toBe(false);
+  });
+
+  it('accepts text with markdown headings', () => {
+    expect(isSubstantiveContent('## Qwen Code Review (STANDARD)')).toBe(true);
+    expect(isSubstantiveContent('### P1 — High\n\n1. Bug found.')).toBe(true);
+  });
+
+  it('accepts text with severity markers', () => {
+    expect(isSubstantiveContent('P0 — blocks merge')).toBe(true);
+    expect(isSubstantiveContent('[Critical] missing null check')).toBe(true);
+    expect(isSubstantiveContent('Suggestion: rename variable')).toBe(true);
+  });
+
+  it('accepts text with list items', () => {
+    expect(isSubstantiveContent('- No issues found.')).toBe(true);
+    expect(isSubstantiveContent('1. First finding: off-by-one.')).toBe(true);
+  });
+
+  it('accepts text with "What this PR does"', () => {
+    expect(
+      isSubstantiveContent('**What this PR does**: fixes the login bug.'),
+    ).toBe(true);
+  });
+
+  it('accepts long text (>= 200 chars) regardless of markers', () => {
+    const longText = 'a'.repeat(200);
+    expect(isSubstantiveContent(longText)).toBe(true);
+  });
+
+  it('rejects short text without any markers', () => {
+    expect(isSubstantiveContent('Let me check the code.')).toBe(false);
+    expect(isSubstantiveContent('I will read the files now.')).toBe(false);
   });
 });
 

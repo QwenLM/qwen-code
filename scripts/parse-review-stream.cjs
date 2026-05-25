@@ -75,10 +75,33 @@ function extractSegmentFromEvent(event) {
 }
 
 /**
+ * Heuristic: does `text` look like substantive review content rather than
+ * a preamble/planning sentence the model emits before (hallucinated) tool
+ * calls? We require at least ONE of:
+ *   - A markdown heading (## or ###)
+ *   - A severity marker (P0–P3, Critical, High, Medium, Low, Suggestion)
+ *   - A markdown list item starting with `- ` or `1. `
+ *   - The standard review opening phrase ("What this PR does")
+ *   - At least 200 characters (long text is likely content, not preamble)
+ */
+function isSubstantiveContent(text) {
+  if (text.length >= 200) return true;
+  if (/^#{2,4}\s/m.test(text)) return true;
+  if (/\b(P[0-3]|Critical|High|Medium|Low|Suggestion)\b/i.test(text))
+    return true;
+  if (/^[-*]\s/m.test(text) || /^\d+\.\s/m.test(text)) return true;
+  if (/What this PR does/i.test(text)) return true;
+  return false;
+}
+
+/**
  * Accumulate all assistant text segments from a JSONL stream string.
  * Malformed lines are skipped (the final line of a truncated stream
  * is the common case). Whitespace-only segments are rejected so the
  * `segments=N` header doesn't lie.
+ *
+ * After stripping tool_call blocks, segments that lack substantive review
+ * content (e.g. a bare "Let me verify..." preamble) are discarded.
  *
  * Exposed for unit tests.
  */
@@ -96,11 +119,22 @@ function accumulateSegments(raw) {
     }
     const text = extractSegmentFromEvent(event);
     if (text && text.trim()) {
+      const hadToolCalls =
+        /<tool_call/i.test(text) ||
+        /<arg_key>/i.test(text) ||
+        /<parameter[=:]/i.test(text) ||
+        /\[tool_call:/i.test(text);
       const cleaned = text
         .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
+        .replace(/<tool_call[\s\S]*$/g, '')
+        .replace(/<arg_key>[\s\S]*?<\/arg_key>\s*<arg_value>[\s\S]*?<\/arg_value>/g, '')
+        .replace(/<arg_key>[\s\S]*$/g, '')
+        .replace(/<parameter[=:][\s\S]*$/g, '')
         .replace(/\[tool_call:[\s\S]*?\]/g, '')
         .trim();
-      if (cleaned) segments.push(cleaned);
+      if (!cleaned) continue;
+      if (hadToolCalls && !isSubstantiveContent(cleaned)) continue;
+      segments.push(cleaned);
     }
   }
   return segments;
@@ -174,7 +208,12 @@ function main() {
   );
 }
 
-module.exports = { extractSegmentFromEvent, accumulateSegments, buildOutput };
+module.exports = {
+  extractSegmentFromEvent,
+  accumulateSegments,
+  buildOutput,
+  isSubstantiveContent,
+};
 
 if (require.main === module) {
   main();
