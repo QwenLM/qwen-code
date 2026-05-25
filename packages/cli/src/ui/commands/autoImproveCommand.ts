@@ -279,9 +279,6 @@ function formatRunRecord(record: HistoryItemAutoImproveRun): string {
     parts.push(record.source);
   }
   if (record.task) parts.push(record.task);
-  if (record.branch) parts.push(record.branch);
-  if (record.commit) parts.push(record.commit);
-  if (record.runDoc) parts.push(record.runDoc);
   return parts.join(' · ');
 }
 
