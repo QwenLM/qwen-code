@@ -310,6 +310,23 @@ describe('session-tracing', () => {
       const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
       expect(span?.parentContext).toBe(fakeRoot);
     });
+
+    it('falls back to otelContext.active() when no session context is set', () => {
+      // clearSessionTracingForTesting() in beforeEach already left
+      // getSessionContext() === undefined — do NOT call setSessionContext.
+      mockState.activeOtelSpan = { name: 'active-session-span' };
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toEqual(
+        expect.objectContaining({ __activeSpan: expect.anything() }),
+      );
+    });
   });
 
   describe('LLM request spans', () => {
