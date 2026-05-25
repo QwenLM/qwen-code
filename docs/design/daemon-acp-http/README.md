@@ -547,3 +547,15 @@ REST 的 **文件 I/O**（`/file /glob /list /stat /file/write /file/edit`）、
 | G2 | **P2** | `session/cancel` passed `undefined` as the `CancelNotification` body, dropping client-supplied cancel fields (reason/context) that REST forwards. | Forward `{ ...params, sessionId }` (mirrors REST). |
 
 Rebased onto latest `daemon_mode_b_main` (#4473/#4483/#4484/#4500), no conflicts. Suite **33 tests**, live re-verified.
+
+---
+
+## 19. 路线图 / 后续 PR（防遗忘）
+
+本 PR（#4472）= ACP Streamable HTTP transport + **全部 bridge-backed 能力对齐** + 官方扩展方案。已转 **ready**。达到「`/acp` 完全等价 REST+SSE」尚需：
+
+1. **Follow-up PR 1 — acp-bridge 能力补齐（前置 / bridge-first）**：`HttpAcpBridge` 新增 文件 I/O、设备流、agents CRUD、memory CRUD 方法；REST 路由改走 bridge（消除直连 route 级服务的漂移）。
+2. **Follow-up PR 2 — `/acp` 剩余对齐（依赖 PR 1）**：`_qwen.ai/fs/*`、`_qwen.ai/auth/*`、`_qwen.ai/workspace/agent*`、`_qwen.ai/workspace/memory*` → 完全等价 REST。
+
+跟踪：#3803（open decisions）、#4175（Mode B roadmap）均已 comment。
+Deferred 硬化项见 PR 描述「已知 deferred」。
