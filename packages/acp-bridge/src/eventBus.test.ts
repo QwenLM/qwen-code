@@ -509,15 +509,22 @@ describe('EventBus', () => {
     const out: BridgeEvent[] = [];
     for await (const e of iter) {
       out.push(e);
-      // After the state_resync_required frame (synthetic) + 3 replay
-      // frames, we're done.
-      if (out.length === 4) break;
+      // state_resync_required (synthetic) + 3 replay frames +
+      // replay_complete sentinel = 5 frames.
+      if (out.length === 5) break;
     }
     // First frame is the synthetic state_resync_required (no id).
     expect(out[0]?.type).toBe('state_resync_required');
     expect(out[0]?.id).toBeUndefined();
     // Then the 3 surviving ring frames.
-    expect(out.slice(1).map((e) => e.id)).toEqual([3, 4, 5]);
+    expect(out.slice(1, 4).map((e) => e.id)).toEqual([3, 4, 5]);
+    // The replay_complete sentinel fires at the end of replay even on
+    // the resync path — `replayedCount` is the actual frames pushed (3),
+    // NOT `earliestAvailableId - lastEventId` (which would over-count
+    // across the evicted hole).
+    expect(out[4]?.type).toBe('replay_complete');
+    expect(out[4]?.id).toBeUndefined();
+    expect(out[4]?.data).toMatchObject({ replayedCount: 3 });
     abort.abort();
   });
 
@@ -537,7 +544,8 @@ describe('EventBus', () => {
       const out: BridgeEvent[] = [];
       for await (const e of iter) {
         out.push(e);
-        if (out.length === 4) break;
+        // resync + 3 replay frames + replay_complete = 5.
+        if (out.length === 5) break;
       }
       // First frame is the resync terminal (synthetic, no id).
       expect(out[0]?.type).toBe('state_resync_required');
@@ -553,7 +561,12 @@ describe('EventBus', () => {
       // Replay continues after the resync frame (per design — SDK can
       // compute "what you missed" diff later) — so we still get the
       // 3 surviving ring frames.
-      expect(out.slice(1).map((e) => e.id)).toEqual([3, 4, 5]);
+      expect(out.slice(1, 4).map((e) => e.id)).toEqual([3, 4, 5]);
+      // replay_complete sentinel closes the replay even when a resync
+      // gap preceded it; replayedCount counts only the 3 surviving
+      // frames actually delivered (not the evicted hole).
+      expect(out[4]?.type).toBe('replay_complete');
+      expect(out[4]?.data).toMatchObject({ replayedCount: 3 });
       abort.abort();
     });
 

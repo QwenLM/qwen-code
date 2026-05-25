@@ -69,6 +69,14 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `${event.reason}: ${formatMissedRange(event.lastDeliveredId, event.earliestAvailableId)}`,
         '31',
       );
+    case 'session.replay_complete':
+      return terminalLine(
+        'replay-complete',
+        `caught up (${event.replayedCount} replayed)`,
+        '2',
+      );
+    case 'prompt.cancelled':
+      return terminalLine('cancelled', 'prompt cancelled', '33');
     case 'workspace.memory.changed':
       return terminalLine(
         'memory',

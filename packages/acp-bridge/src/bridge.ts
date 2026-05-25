@@ -298,6 +298,16 @@ function writeServeDebugLine(message: string): void {
 const MAX_DISPLAY_NAME_LENGTH = 256;
 
 /**
+ * Upper bound on how many prompt content blocks the bridge echoes per
+ * prompt. A programmatically-generated prompt with thousands of small
+ * blocks would otherwise trigger thousands of synchronous `publish()`
+ * fan-outs (each up to the per-bus subscriber cap) and flood the
+ * replay ring, evicting real history for every SSE subscriber. 256 is
+ * far above any human-authored prompt's block count.
+ */
+const MAX_ECHO_CONTENT_BLOCKS = 256;
+
+/**
  * Echo a user prompt to the session bus so multi-client SSE subscribers
  * see the input alongside the agent response. Iterates content blocks
  * and emits one `user_message_chunk` per block, mirroring the shape the
@@ -320,18 +330,23 @@ function echoPromptToSessionBus(
   req: PromptRequest,
   originatorClientId: string | undefined,
 ): void {
-  const prompt = (req as { prompt?: unknown }).prompt;
-  if (!Array.isArray(prompt) || prompt.length === 0) return;
+  // `PromptRequest.prompt` is a non-optional `ContentBlock[]` per the
+  // ACP type contract — read it directly so a future SDK bump that
+  // makes it optional surfaces as a TypeScript error rather than being
+  // silently swallowed by an `unknown` cast.
+  const prompt = req.prompt;
+  if (prompt.length === 0) return;
   const serverTimestamp = Date.now();
-  for (const part of prompt) {
+  const blockCount = Math.min(prompt.length, MAX_ECHO_CONTENT_BLOCKS);
+  for (let i = 0; i < blockCount; i += 1) {
+    const part = prompt[i];
     if (!part || typeof part !== 'object' || Array.isArray(part)) continue;
-    // Text is the dominant path today; multi-modal blocks (image /
-    // audio / resource) flow through unchanged. The SDK's
-    // `normalizeDaemonEvent` accepts any `content` shape and the
-    // reducer surfaces it through `extractContentPart` (PR #4353
-    // helper). Non-text echo will activate once Core's multimodal
-    // user-content emit (#4353 §D) lands; until then, daemon-side echo
-    // for image/audio is best-effort metadata-only.
+    // Every `ContentBlock` variant (text, image, audio, resource) is
+    // published to the bus verbatim. The SDK's `normalizeDaemonEvent`
+    // accepts any `content` shape; rich rendering of non-text blocks is
+    // the consumer's responsibility. (Core's first-class multimodal
+    // user-content emit is tracked separately in PR #4353 §D — that
+    // affects the agent-side replay path, not this bridge echo.)
     try {
       entry.events.publish({
         type: 'session_update',
@@ -349,6 +364,39 @@ function echoPromptToSessionBus(
       // bus may be closed (session being torn down); ignore — the
       // prompt forward still proceeds.
     }
+  }
+}
+
+/**
+ * Publish a `prompt_cancelled` event to the session bus so peer SSE
+ * subscribers observe the cancel as a first-class event instead of
+ * inferring it from the absence of further `agent_message_chunk`
+ * frames.
+ *
+ * Semantic: this signals **cancel REQUESTED**, not **cancel
+ * confirmed** — it's published before the ACP `cancel` notification is
+ * forwarded/awaited (so peers learn promptly even if the agent is slow
+ * to wind down or the channel is dead). If a consumer needs hard
+ * confirmation it should observe the subsequent terminal
+ * `tool_call_update` / `agent_message_chunk` quiescence.
+ *
+ * `originatorClientId` identifies the cancelling client. Used by both
+ * the explicit `cancelSession` route and the `sendPrompt` abort path
+ * (originator SSE disconnect) so neither cancel route is a silent gap.
+ */
+function broadcastPromptCancelled(
+  entry: SessionEntry,
+  sessionId: string,
+  originatorClientId: string | undefined,
+): void {
+  try {
+    entry.events.publish({
+      type: 'prompt_cancelled',
+      data: { sessionId },
+      ...(originatorClientId ? { originatorClientId } : {}),
+    });
+  } catch {
+    /* bus closed */
   }
 }
 
@@ -2020,6 +2068,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // forever (the agent is stuck waiting on a vote that no SSE
         // subscriber will ever cast).
         const onAbort = () => {
+          // Broadcast the cancel on the abort path too — client
+          // disconnect (SSE drop / tab close / laptop sleep) is the most
+          // common cancel trigger in production, and previously this path
+          // resolved permissions + forwarded ACP cancel WITHOUT telling
+          // peer SSE subscribers, leaving them in the exact
+          // silent-absence-of-chunks state this work set out to fix.
+          // `originatorClientId` here is the prompt's own originator (the
+          // client whose connection dropped).
+          broadcastPromptCancelled(entry, sessionId, originatorClientId);
           cancelPendingForSession(sessionId);
           entry.connection.cancel({ sessionId }).catch(() => {
             // Cancel is fire-and-forget; the agent may already be dead.
@@ -2070,26 +2127,22 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Broadcast `prompt_cancelled` so other SSE-subscribed clients see
       // the cancel as a first-class event rather than inferring it from
       // the absence of further `agent_message_chunk` frames. Mirrors
-      // `session_closed` (line ~2259) — same audit gap (cross-client
-      // sync audit, 2026-05-24). Publish BEFORE the ACP cancel forward
-      // so other clients learn about the cancel even if the agent is
-      // slow to wind down.
+      // `session_closed` — same audit gap (cross-client sync audit,
+      // 2026-05-24). Published before the ACP cancel forward (see the
+      // "cancel requested, not confirmed" semantic in
+      // `broadcastPromptCancelled`).
+      //
+      // Unconditional by design: not gated on `activePromptOriginatorClientId`
+      // because that field is only set when the active prompt carried an
+      // originator — gating on it would drop the broadcast for anonymous
+      // active prompts. A cancel against a genuinely idle session is a
+      // harmless no-op that consumers treat idempotently.
       //
       // The pending-permission resolution below intentionally omits the
       // originator stamp (those resolutions are system-initiated, not
       // user-voted); this top-level `prompt_cancelled` carries the
       // cancelling client so peer UIs can attribute it.
-      try {
-        entry.events.publish({
-          type: 'prompt_cancelled',
-          data: { sessionId },
-          ...(cancelOriginatorClientId
-            ? { originatorClientId: cancelOriginatorClientId }
-            : {}),
-        });
-      } catch {
-        /* bus closed */
-      }
+      broadcastPromptCancelled(entry, sessionId, cancelOriginatorClientId);
       // ACP spec: cancelling a prompt MUST resolve outstanding
       // requestPermission calls with outcome.cancelled. Do this *before*
       // forwarding the notification so the agent's wind-down sees the
