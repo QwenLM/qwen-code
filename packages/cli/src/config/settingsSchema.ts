@@ -1052,7 +1052,7 @@ const SETTINGS_SCHEMA = {
       properties: {
         propagateTraceContext: {
           description:
-            "Inject W3C `traceparent` header on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...). Default: false — trace context stays internal to the operator's OTLP collector and is NOT written onto third-party request streams. Set true only when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope). Note: client HTTP spans are still emitted in either case; this flag only governs the wire `traceparent` header. Depends on `telemetry.enabled: true` — the OTel SDK only initializes when telemetry is enabled, so this flag is a silent no-op without it.",
+            "Requires `telemetry.enabled: true`. Inject W3C `traceparent` header on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...). Default: false — trace context stays internal to the operator's OTLP collector and is NOT written onto third-party request streams. Set true only when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope). Client HTTP spans are still emitted in either case; this flag only governs the wire `traceparent` header.",
           type: 'boolean',
           default: false,
         },

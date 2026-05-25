@@ -1658,38 +1658,32 @@ describe('Server Config (config.ts)', () => {
   describe('OutboundCorrelation Configuration', () => {
     // Default-to-false is security-relevant — controls whether
     // `traceparent` is written onto outbound LLM/fetch request streams.
-    // PR #4390 R4: keep wire-level toggle out of telemetry namespace.
-    it('defaults outboundCorrelation.propagateTraceContext to false when outboundCorrelation is omitted', () => {
-      const config = new Config(baseParams);
-      expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(false);
-    });
-
-    it('defaults to false when outboundCorrelation is provided as empty object', () => {
-      const params: ConfigParameters = {
-        ...baseParams,
-        outboundCorrelation: {},
-      };
-      const config = new Config(params);
-      expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(false);
-    });
-
-    it('honors outboundCorrelation.propagateTraceContext when explicitly set to true', () => {
-      const params: ConfigParameters = {
-        ...baseParams,
+    it.each<{
+      label: string;
+      outboundCorrelation: ConfigParameters['outboundCorrelation'];
+      expected: boolean;
+    }>([
+      { label: 'omitted', outboundCorrelation: undefined, expected: false },
+      { label: 'empty object', outboundCorrelation: {}, expected: false },
+      {
+        label: 'explicit true',
         outboundCorrelation: { propagateTraceContext: true },
-      };
-      const config = new Config(params);
-      expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(true);
-    });
-
-    it('honors outboundCorrelation.propagateTraceContext when explicitly set to false', () => {
-      const params: ConfigParameters = {
-        ...baseParams,
+        expected: true,
+      },
+      {
+        label: 'explicit false',
         outboundCorrelation: { propagateTraceContext: false },
-      };
-      const config = new Config(params);
-      expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(false);
-    });
+        expected: false,
+      },
+    ])(
+      'propagateTraceContext resolves to $expected when $label',
+      ({ outboundCorrelation, expected }) => {
+        const config = new Config({ ...baseParams, outboundCorrelation });
+        expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(
+          expected,
+        );
+      },
+    );
   });
 
   describe('UseRipgrep Configuration', () => {
