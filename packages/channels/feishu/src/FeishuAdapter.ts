@@ -260,9 +260,13 @@ export class FeishuChannel extends ChannelBase {
               res.end(JSON.stringify({ challenge: parsed.challenge }));
               return;
             }
-            // Dispatch event
+            // Dispatch event — wrap body with headers for HMAC signature verification
+            const data = Object.assign(
+              Object.create({ headers: req.headers }),
+              parsed,
+            );
             dispatcher
-              .invoke(parsed)
+              .invoke(data)
               .then((result) => {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(result || {}));
@@ -716,6 +720,11 @@ export class FeishuChannel extends ChannelBase {
     chunk: string,
     sessionId: string,
   ): void {
+    // In blockStreaming mode, the BlockStreamer delivers text as plain messages.
+    // Skip card creation/updates to avoid duplicate content and a misleading
+    // "已取消" card at the end.
+    if (this.config.blockStreaming === 'on') return;
+
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) {
       process.stderr.write(
@@ -962,6 +971,9 @@ export class FeishuChannel extends ChannelBase {
       this.sessionToInboundMsg.set(sessionId, messageId);
       this.addReaction(messageId, 'OnIt').catch(() => {});
 
+      // In blockStreaming mode, skip card creation — BlockStreamer handles delivery
+      if (this.config.blockStreaming === 'on') return;
+
       // Create streaming card now that gating has passed
       if (!this.cardSessions.has(messageId)) {
         const atSender = this.msgToSenderName.get(messageId) || '';
@@ -1049,6 +1061,11 @@ export class FeishuChannel extends ChannelBase {
           );
           this.cleanupCard(inboundMsgId);
         }
+      } else if (cs?.stopped) {
+        // Card was stopped (via button) — onResponseComplete already ran and
+        // cleaned up, or bridge.prompt() threw before it could. Clean up now
+        // to avoid leaking state if onResponseComplete was skipped.
+        this.cleanupCard(inboundMsgId);
       }
     }
   }
@@ -1211,7 +1228,9 @@ export class FeishuChannel extends ChannelBase {
             inboundId,
           );
         }
-        this.cleanupCard(inboundId);
+        // Do NOT cleanupCard here — let onResponseComplete / onPromptEnd handle it.
+        // Early cleanup would delete sessionToInboundMsg, causing onResponseComplete
+        // to fall back to sendMessage and re-send the full response as plain text.
       };
 
       handleStop().catch((err) => {
