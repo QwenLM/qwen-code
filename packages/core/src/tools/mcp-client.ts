@@ -62,6 +62,49 @@ export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 
 const debugLogger = createDebugLogger('MCP');
 
+const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400, 405]);
+
+function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (method !== 'GET') {
+    return false;
+  }
+
+  const accept = new Headers(init?.headers).get('accept') ?? '';
+  return accept
+    .split(',')
+    .some((value) => value.trim().toLowerCase() === 'text/event-stream');
+}
+
+export function createStreamableHttpCompatibilityFetch(
+  mcpServerName: string,
+  fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
+): typeof fetch {
+  return async (input, init) => {
+    const response = await fetchFn(input, init);
+    if (
+      !isStreamableHttpGetSseRequest(init) ||
+      !STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES.has(response.status)
+    ) {
+      return response;
+    }
+
+    await response.body?.cancel().catch(() => {
+      // Best-effort body cleanup before returning a synthetic 405.
+    });
+    debugLogger.warn(
+      `MCP server '${mcpServerName}' rejected the optional Streamable HTTP ` +
+        `GET SSE stream with HTTP ${response.status}; continuing without ` +
+        `the standalone GET stream. POST request streams remain enabled.`,
+    );
+
+    return new Response(null, {
+      status: 405,
+      statusText: 'Method Not Allowed',
+    });
+  };
+}
+
 export type DiscoveredMCPPrompt = Prompt & {
   serverName: string;
   invoke: (params: Record<string, unknown>) => Promise<GetPromptResult>;
@@ -498,6 +541,7 @@ async function createTransportWithOAuth(
     if (mcpServerConfig.httpUrl) {
       // Create HTTP transport with OAuth token
       const oauthTransportOptions: StreamableHTTPClientTransportOptions = {
+        fetch: createStreamableHttpCompatibilityFetch(mcpServerName),
         requestInit: {
           headers: {
             ...mcpServerConfig.headers,
@@ -1332,6 +1376,8 @@ export async function createTransport(
     };
 
     if (mcpServerConfig.httpUrl) {
+      (transportOptions as StreamableHTTPClientTransportOptions).fetch =
+        createStreamableHttpCompatibilityFetch(mcpServerName);
       return new StreamableHTTPClientTransport(
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
@@ -1358,6 +1404,8 @@ export async function createTransport(
       authProvider: provider,
     };
     if (mcpServerConfig.httpUrl) {
+      (transportOptions as StreamableHTTPClientTransportOptions).fetch =
+        createStreamableHttpCompatibilityFetch(mcpServerName);
       return new StreamableHTTPClientTransport(
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
@@ -1414,7 +1462,9 @@ export async function createTransport(
   }
 
   if (mcpServerConfig.httpUrl) {
-    const transportOptions: StreamableHTTPClientTransportOptions = {};
+    const transportOptions: StreamableHTTPClientTransportOptions = {
+      fetch: createStreamableHttpCompatibilityFetch(mcpServerName),
+    };
 
     // Set up headers with OAuth token if available
     if (hasOAuthConfig && accessToken) {

@@ -16,6 +16,7 @@ import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   addMCPStatusChangeListener,
+  createStreamableHttpCompatibilityFetch,
   createTransport,
   getAllMCPServerStatuses,
   getMCPServerStatus,
@@ -273,6 +274,8 @@ describe('mcp-client', () => {
         expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         expect((transport as any)._url).toEqual(new URL('http://test-server'));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._fetch).toEqual(expect.any(Function));
       });
 
       it('with headers', async () => {
@@ -292,6 +295,60 @@ describe('mcp-client', () => {
         expect((transport as any)._requestInit?.headers).toEqual({
           Authorization: 'derp',
         });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._fetch).toEqual(expect.any(Function));
+      });
+
+      it('treats 400 from optional GET SSE stream as unsupported', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('bad method', { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'spring-ai',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(fetchFn).toHaveBeenCalledTimes(1);
+        expect(response.status).toBe(405);
+      });
+
+      it('does not hide Streamable HTTP GET SSE server errors', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('server exploded', { status: 502 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'server-error',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(response.status).toBe(502);
+      });
+
+      it('does not rewrite non-SSE GET responses', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('bad request', { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'plain-get',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+        });
+
+        expect(response.status).toBe(400);
       });
     });
 
