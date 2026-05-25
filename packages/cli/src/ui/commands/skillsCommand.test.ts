@@ -74,6 +74,23 @@ describe('skillsCommand bare entry', () => {
     expect(context.ui.addItem).not.toHaveBeenCalled();
   });
 
+  it('opens the dialog even when args are passed in interactive mode', async () => {
+    // `/skills` is dialog-only — any trailing args are ignored. The legacy
+    // `/skills <name>` invocation path was removed; users invoke skills
+    // via `/<skill-name>` directly (loaded by SkillCommandLoader) or by
+    // picking inside the dialog.
+    if (!skillsCommand.action) throw new Error('action missing');
+    const context = makeContext({
+      skills: [{ name: 'beta' }],
+      executionMode: 'interactive',
+    });
+
+    const result = await skillsCommand.action(context, 'beta');
+
+    expect(result).toEqual({ type: 'dialog', dialog: 'skills_manage' });
+    expect(context.ui.addItem).not.toHaveBeenCalled();
+  });
+
   it('falls back to listing in non-interactive mode (no dialog UI to render)', async () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
@@ -116,31 +133,6 @@ describe('skillsCommand bare entry', () => {
     );
   });
 
-  it('emits the disabled-specific error for /skills <disabled-name>', async () => {
-    if (!skillsCommand.action) throw new Error('action missing');
-    const context = makeContext({
-      skills: [{ name: 'beta', description: 'b' }],
-      workspaceDisabled: ['beta'],
-      mergedDisabled: ['beta'],
-    });
-
-    await skillsCommand.action(context, 'beta');
-
-    expect(context.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.ERROR,
-        text: expect.stringMatching(/is disabled/),
-      },
-      expect.any(Number),
-    );
-    const errorCall = vi
-      .mocked(context.ui.addItem)
-      .mock.calls.find((c) => c[0].type === MessageType.ERROR);
-    expect((errorCall?.[0] as { text: string }).text).not.toMatch(
-      /Unknown skill/,
-    );
-  });
-
   it('shows a clarifying message when all skills are disabled in non-interactive mode', async () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
@@ -164,64 +156,17 @@ describe('skillsCommand bare entry', () => {
   });
 });
 
-describe('skillsCommand has no subcommands', () => {
-  it('exposes no subCommands (single-entry dialog UX)', () => {
+describe('skillsCommand surface', () => {
+  it('exposes no subCommands and no completion (single-entry, no args)', () => {
     expect(skillsCommand.subCommands ?? []).toEqual([]);
-  });
-});
-
-describe('skillsCommand completion', () => {
-  it('returns skill-name suggestions only (no enable/disable/manage)', async () => {
-    if (!skillsCommand.completion) throw new Error('completion missing');
-    const context = makeContext({
-      skills: [
-        { name: 'alpha', description: 'a' },
-        { name: 'beta', description: 'b' },
-      ],
-    });
-
-    const out = await skillsCommand.completion(context, '');
-    const values = out.map((c) => c.value);
-
-    // Subcommand suggestions are gone — bare `/skills` is dialog-only and
-    // toggling happens inside the dialog. The popup at `/skills <space>`
-    // should only suggest skill names for the legacy invocation path.
-    expect(values).not.toContain('manage');
-    expect(values).not.toContain('enable');
-    expect(values).not.toContain('disable');
-    expect(values).toEqual(['alpha', 'beta']);
+    expect(skillsCommand.completion).toBeUndefined();
   });
 
-  it('omits disabled skills from completion', async () => {
-    if (!skillsCommand.completion) throw new Error('completion missing');
-    const context = makeContext({
-      skills: [
-        { name: 'alpha', description: 'a' },
-        { name: 'beta', description: 'b' },
-      ],
-      workspaceDisabled: ['beta'],
-      mergedDisabled: ['beta'],
-    });
-
-    const out = await skillsCommand.completion(context, '');
-    expect(out.map((c) => c.value)).toEqual(['alpha']);
-  });
-
-  it('fuzzy-matches the partial against skill names', async () => {
-    if (!skillsCommand.completion) throw new Error('completion missing');
-    const context = makeContext({
-      skills: [
-        { name: 'alpha', description: 'a' },
-        { name: 'apple', description: 'fruit' },
-        { name: 'beta', description: 'b' },
-      ],
-    });
-
-    const out = await skillsCommand.completion(context, 'al');
-    // alpha matches "al" prefix; apple doesn't but fzf may include it.
-    // The key invariant: alpha is in the result and beta isn't.
-    const values = out.map((c) => c.value);
-    expect(values).toContain('alpha');
-    expect(values).not.toContain('beta');
+  it('opts into submit-on-accept so /skil<Enter> opens the dialog in one keystroke', () => {
+    // Without this flag, accepting the `skills` suggestion from the
+    // auto-completion popup would only fill the buffer with `/skills `
+    // and force a second Enter to submit. See `Suggestion.submitOnAccept`
+    // and the InputPrompt accept-suggestion branch.
+    expect(skillsCommand.submitOnAccept).toBe(true);
   });
 });

@@ -30,6 +30,16 @@ export interface Suggestion {
   modelInvocable?: boolean;
   /** Whether the suggestion represents a directory path. When true, handleAutocomplete should NOT append a trailing space so the user can continue tab-completing deeper into the directory tree. */
   isDirectory?: boolean;
+  /**
+   * When true, the input layer should submit `/<value>` immediately on
+   * Enter-accept rather than just inserting the suggestion text and
+   * waiting for a second Enter. Mirrors the `submitOnAccept` flag on the
+   * underlying SlashCommand (see `commands/types.ts`). Used for parent
+   * commands like `/skills` whose bare action just opens a dialog and
+   * takes no further argument — typing `/skil<Enter>` should land in the
+   * dialog in one keystroke.
+   */
+  submitOnAccept?: boolean;
 }
 interface SuggestionsDisplayProps {
   suggestions: Suggestion[];

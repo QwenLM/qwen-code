@@ -46,11 +46,11 @@ interface SkillsManagerDialogProps {
   reloadCommands: () => void | Promise<void>;
   /**
    * Called when the user picks a skill via Enter — the dialog closes and
-   * the supplied text (e.g. `/skill-name`) is submitted as a prompt, the
-   * same way it would be if typed directly into the input. Pending
-   * enable/disable toggles are saved first.
+   * the supplied text (e.g. `/skill-name`) is dropped into the chat input
+   * buffer WITHOUT submitting. The user can review/edit and press Enter
+   * themselves to send. Pending enable/disable toggles are saved first.
    */
-  submitPrompt: (value: string) => void;
+  setInputBuffer: (text: string) => void;
   availableTerminalHeight?: number;
 }
 
@@ -126,7 +126,7 @@ export function SkillsManagerDialog({
   addItem,
   onClose,
   reloadCommands,
-  submitPrompt,
+  setInputBuffer,
   availableTerminalHeight,
 }: SkillsManagerDialogProps): React.JSX.Element {
   const [skills, setSkills] = useState<SkillConfig[] | null>(null);
@@ -317,22 +317,23 @@ export function SkillsManagerDialog({
     onClose();
   }, [addItem, onClose, persistChanges]);
 
-  // Enter handler: save pending toggles, close, and submit `/<skill-name>`
-  // as if the user had typed it directly. Lets the dialog double as a
-  // launcher — pick a skill, hit Enter, and the prompt goes out.
-  const handleInvoke = useCallback(
+  // Enter handler: save pending toggles, close, and DROP `/<skill-name>`
+  // into the input buffer WITHOUT submitting. The user reviews and hits
+  // Enter themselves to send. This is "select" semantic — the dialog
+  // points at a skill, the user decides whether/when to invoke.
+  const handlePick = useCallback(
     async (skill: SkillItemValue) => {
       const ok = await persistChanges();
       if (!ok) {
         // Untrusted workspace — error already surfaced by persistChanges.
-        // Don't proceed to submit the skill.
+        // Still close the dialog; don't fill the input either.
         onClose();
         return;
       }
       onClose();
-      submitPrompt(`/${skill.name}`);
+      setInputBuffer(`/${skill.name}`);
     },
-    [onClose, persistChanges, submitPrompt],
+    [onClose, persistChanges, setInputBuffer],
   );
 
   useKeypress(
@@ -446,7 +447,8 @@ export function SkillsManagerDialog({
         {hasQuery
           ? `${matchedCount} / ${totalCount} skills · `
           : `${totalCount} skill${totalCount === 1 ? '' : 's'} · `}
-        Space toggle · Enter invoke · Esc save & exit · workspace scope
+        Space toggle · Enter pick (fill input) · Esc save & exit · workspace
+        scope
       </Text>
 
       <Box marginTop={1} flexDirection="row">
@@ -472,17 +474,16 @@ export function SkillsManagerDialog({
             items={items}
             selectedKeys={selectedKeys ?? []}
             onSelectedKeysChange={setSelectedKeys}
-            // Enter == invoke the highlighted skill (NOT save). MultiSelect's
-            // `onConfirm` fires on Enter; we read the row tracked via
-            // `onHighlight` so we know which one to launch. Saving lives
+            // Enter == "pick" the highlighted skill: close the dialog and
+            // drop `/<name>` into the input buffer (no auto-submit).
+            // MultiSelect's `onConfirm` fires on Enter; we read the row
+            // tracked via `onHighlight` so we know which one. Saving lives
             // entirely on Esc — see `handleSaveAndClose`.
             onConfirm={() => {
               if (activeValue) {
-                void handleInvoke(activeValue);
-              } else {
-                // Empty list (search filtered everything out) — Enter is
-                // a no-op; let Esc be the way out.
+                void handlePick(activeValue);
               }
+              // Empty list (search filtered everything out): no-op; Esc to exit.
             }}
             onHighlight={(v) => setActiveValue(v)}
             showNumbers={false}

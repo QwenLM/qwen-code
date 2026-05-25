@@ -3486,6 +3486,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openSkillsManagerDialog,
       closeSkillsManagerDialog,
       reloadCommands,
+      setInputBuffer: buffer.setText,
       // Extensions manager dialog
       closeExtensionsManagerDialog,
       // MCP dialog
@@ -3566,6 +3567,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openSkillsManagerDialog,
       closeSkillsManagerDialog,
       reloadCommands,
+      buffer,
       // Extensions manager dialog
       closeExtensionsManagerDialog,
       // MCP dialog

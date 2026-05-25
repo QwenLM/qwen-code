@@ -431,7 +431,7 @@ export const DialogManager = ({
         addItem={addItem}
         onClose={uiActions.closeSkillsManagerDialog}
         reloadCommands={uiActions.reloadCommands}
-        submitPrompt={uiActions.handleFinalSubmit}
+        setInputBuffer={uiActions.setInputBuffer}
         availableTerminalHeight={
           constrainHeight ? terminalHeight - staticExtraHeight : undefined
         }

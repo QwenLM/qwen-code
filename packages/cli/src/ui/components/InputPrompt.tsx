@@ -909,7 +909,25 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
+          // Capture the suggestion BEFORE acceptActiveCompletionSuggestion
+          // mutates the buffer/index. When the suggestion's command opted
+          // into `submitOnAccept` (a leaf command whose bare action takes
+          // no further arg, e.g. `/skills`), submit `/<value>` directly
+          // instead of just filling the buffer and waiting for a second
+          // Enter. This makes `/skil<Enter>` land in the dialog in one
+          // keystroke.
+          const targetIndex =
+            completion.activeSuggestionIndex === -1
+              ? 0
+              : completion.activeSuggestionIndex;
+          const accepted =
+            targetIndex >= 0 && targetIndex < completion.suggestions.length
+              ? completion.suggestions[targetIndex]
+              : undefined;
           acceptActiveCompletionSuggestion();
+          if (accepted?.submitOnAccept) {
+            handleSubmitAndClear(`/${accepted.value}`);
+          }
           return true;
         }
       }
