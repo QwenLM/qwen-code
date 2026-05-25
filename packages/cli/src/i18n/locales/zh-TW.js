@@ -160,6 +160,56 @@ export default {
   failed: '失敗',
   blocked: '受阻',
   cancelled: '已取消',
+  'Auto-improve loop stopped.': '自動改善循環已停止。',
+  'No active auto-improve loop.': '沒有活躍的自動改善循環。',
+  'Auto-improve start requires Cron/Loop Tools. Enable experimental.cron or QWEN_CODE_ENABLE_CRON=1, then try again.':
+    '自動改善需要 Cron/Loop 工具。請啟用 experimental.cron 或設定 QWEN_CODE_ENABLE_CRON=1，然後重試。',
+  'Auto-improve must be started from a git repository on a branch: {{error}}':
+    '自動改善必須在 git 儲存庫的某個分支上啟動：{{error}}',
+  'An auto-improve loop is already active: {{loopId}}':
+    '已有一個活躍的自動改善循環：{{loopId}}',
+  'Failed to create auto-improve cron job: {{error}}':
+    '建立自動改善排程任務失敗：{{error}}',
+  'Unable to read auto-improve status: {{error}}':
+    '無法讀取自動改善狀態：{{error}}',
+  'Active auto-improve loop state is missing: {{loopId}}':
+    '活躍的自動改善循環狀態遺失：{{loopId}}',
+  'Unable to stop auto-improve: {{error}}': '無法停止自動改善：{{error}}',
+  'Cleared missing auto-improve loop pointer: {{loopId}}':
+    '已清除遺失的自動改善循環指標：{{loopId}}',
+  'Stop requested and future ticks disabled. The current auto-improve run may finish naturally.':
+    '已請求停止並停用後續執行。目前的自動改善執行可能會自然完成。',
+  'Auto-improve tick skipped: unable to resolve repo root: {{error}}':
+    '自動改善執行已跳過：無法解析儲存庫根目錄：{{error}}',
+  'Auto-improve tick skipped: loop is not active.':
+    '自動改善執行已跳過：循環未啟動。',
+  'Auto-improve tick skipped: state is missing.':
+    '自動改善執行已跳過：狀態遺失。',
+  'Auto-improve tick skipped: stop was requested.':
+    '自動改善執行已跳過：已請求停止。',
+  'Auto-improve tick skipped: loop is not running.':
+    '自動改善執行已跳過：循環未執行。',
+  'Auto-improve tick skipped: previous run is still active.':
+    '自動改善執行已跳過：上一次執行仍在進行中。',
+  'Use intervals like 30m, 2h, 24h, 30 minutes, or 2小时.':
+    '請使用類似 30m、2h、24h、30 minutes 或 2小時 的間隔。',
+  'Interval must be greater than zero.': '間隔必須大於零。',
+  'Second intervals must be at least 60 seconds.':
+    '以秒為單位的間隔必須至少 60 秒。',
+  'Second intervals must resolve to whole minutes.':
+    '以秒為單位的間隔必須為整分鐘。',
+  'Minute intervals must be 30 or less. Use hours instead.':
+    '以分鐘為單位的間隔必須不超過 30。請改用小時。',
+  'Hour intervals must be 24 or less.': '以小時為單位的間隔必須不超過 24。',
+  'Day intervals are not supported yet. Use 24h for daily runs.':
+    '尚不支援以天為單位。請使用 24h 來每日執行。',
+  'Missing auto-improve loop id.': '缺少自動改善循環 ID。',
+  '/auto-improve source is available only in interactive mode.':
+    '/auto-improve source 僅在互動模式下可用。',
+  'Usage: /auto-improve start --every <interval> [prompt]':
+    '用法：/auto-improve start --every <間隔> [提示]',
+  'Usage:': '用法：',
+  '(none)': '(無)',
   'Delete a previous session': '刪除先前的會話',
   'Run installation and environment diagnostics': '執行安裝與環境診斷',
   'Browse dynamic model catalogs and choose which models stay enabled locally':

@@ -177,6 +177,57 @@ export default {
   failed: 'failed',
   blocked: 'blocked',
   cancelled: 'cancelled',
+  'Auto-improve loop stopped.': 'Auto-improve loop stopped.',
+  'No active auto-improve loop.': 'No active auto-improve loop.',
+  'Auto-improve start requires Cron/Loop Tools. Enable experimental.cron or QWEN_CODE_ENABLE_CRON=1, then try again.':
+    'Auto-improve start requires Cron/Loop Tools. Enable experimental.cron or QWEN_CODE_ENABLE_CRON=1, then try again.',
+  'Auto-improve must be started from a git repository on a branch: {{error}}':
+    'Auto-improve must be started from a git repository on a branch: {{error}}',
+  'An auto-improve loop is already active: {{loopId}}':
+    'An auto-improve loop is already active: {{loopId}}',
+  'Failed to create auto-improve cron job: {{error}}':
+    'Failed to create auto-improve cron job: {{error}}',
+  'Unable to read auto-improve status: {{error}}':
+    'Unable to read auto-improve status: {{error}}',
+  'Active auto-improve loop state is missing: {{loopId}}':
+    'Active auto-improve loop state is missing: {{loopId}}',
+  'Unable to stop auto-improve: {{error}}':
+    'Unable to stop auto-improve: {{error}}',
+  'Cleared missing auto-improve loop pointer: {{loopId}}':
+    'Cleared missing auto-improve loop pointer: {{loopId}}',
+  'Stop requested and future ticks disabled. The current auto-improve run may finish naturally.':
+    'Stop requested and future ticks disabled. The current auto-improve run may finish naturally.',
+  'Auto-improve tick skipped: unable to resolve repo root: {{error}}':
+    'Auto-improve tick skipped: unable to resolve repo root: {{error}}',
+  'Auto-improve tick skipped: loop is not active.':
+    'Auto-improve tick skipped: loop is not active.',
+  'Auto-improve tick skipped: state is missing.':
+    'Auto-improve tick skipped: state is missing.',
+  'Auto-improve tick skipped: stop was requested.':
+    'Auto-improve tick skipped: stop was requested.',
+  'Auto-improve tick skipped: loop is not running.':
+    'Auto-improve tick skipped: loop is not running.',
+  'Auto-improve tick skipped: previous run is still active.':
+    'Auto-improve tick skipped: previous run is still active.',
+  'Use intervals like 30m, 2h, 24h, 30 minutes, or 2小时.':
+    'Use intervals like 30m, 2h, 24h, 30 minutes, or 2小时.',
+  'Interval must be greater than zero.': 'Interval must be greater than zero.',
+  'Second intervals must be at least 60 seconds.':
+    'Second intervals must be at least 60 seconds.',
+  'Second intervals must resolve to whole minutes.':
+    'Second intervals must resolve to whole minutes.',
+  'Minute intervals must be 30 or less. Use hours instead.':
+    'Minute intervals must be 30 or less. Use hours instead.',
+  'Hour intervals must be 24 or less.': 'Hour intervals must be 24 or less.',
+  'Day intervals are not supported yet. Use 24h for daily runs.':
+    'Day intervals are not supported yet. Use 24h for daily runs.',
+  'Missing auto-improve loop id.': 'Missing auto-improve loop id.',
+  '/auto-improve source is available only in interactive mode.':
+    '/auto-improve source is available only in interactive mode.',
+  'Usage: /auto-improve start --every <interval> [prompt]':
+    'Usage: /auto-improve start --every <interval> [prompt]',
+  'Usage:': 'Usage:',
+  '(none)': '(none)',
   'Delete a previous session': 'Delete a previous session',
   'Run installation and environment diagnostics':
     'Run installation and environment diagnostics',
