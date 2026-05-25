@@ -410,7 +410,7 @@ describe('BackgroundShellRegistry', () => {
 
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).not.toContain('secret credentials');
-      expect(modelText).not.toContain('<output-tail');
+      expect(modelText).toContain('<output-tail error="unreadable"');
     });
 
     it('skips output-tail when the output file does not exist', () => {
@@ -431,7 +431,7 @@ describe('BackgroundShellRegistry', () => {
 
       expect(callback).toHaveBeenCalledTimes(1);
       const [, modelText] = callback.mock.calls[0];
-      expect(modelText).not.toContain('<output-tail');
+      expect(modelText).toContain('<output-tail error="unreadable"');
       expect(reg.get('a')!.status).toBe('completed');
     });
 

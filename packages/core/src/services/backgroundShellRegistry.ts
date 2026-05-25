@@ -65,9 +65,12 @@ function stripOutputControlChars(text: string): string {
   return out;
 }
 
-function readOutputTail(
-  outputFile: string,
-): { text: string; truncated: boolean } | undefined {
+type OutputTailResult =
+  | { text: string; truncated: boolean }
+  | { error: string }
+  | undefined;
+
+function readOutputTail(outputFile: string): OutputTailResult {
   let fd: number | undefined;
   try {
     fd = fs.openSync(outputFile, getReadOutputOpenFlags());
@@ -101,8 +104,10 @@ function readOutputTail(
       truncated: start > 0,
     };
   } catch (error) {
-    debugLogger.debug(`Failed to read shell output tail:`, error);
-    return undefined;
+    debugLogger.warn(`Failed to read shell output tail:`, error);
+    return {
+      error: error instanceof Error ? error.message : String(error),
+    };
   } finally {
     if (fd !== undefined) {
       try {
@@ -417,7 +422,12 @@ export class BackgroundShellRegistry {
     if (entry.notified) return;
     entry.notified = true;
 
-    if (!this.notificationCallback) return;
+    if (!this.notificationCallback) {
+      debugLogger.debug(
+        `Notification dropped for shell ${entry.shellId}: no callback registered`,
+      );
+      return;
+    }
 
     const statusText =
       entry.status === 'completed'
@@ -453,9 +463,13 @@ export class BackgroundShellRegistry {
     }
     const outputTail = readOutputTail(entry.outputFile);
     if (outputTail) {
-      xmlParts.push(
-        `<output-tail truncated="${outputTail.truncated ? 'true' : 'false'}">${escapeXml(outputTail.text)}</output-tail>`,
-      );
+      if ('error' in outputTail) {
+        xmlParts.push(`<output-tail error="unreadable" />`);
+      } else {
+        xmlParts.push(
+          `<output-tail truncated="${outputTail.truncated ? 'true' : 'false'}">${escapeXml(outputTail.text)}</output-tail>`,
+        );
+      }
     }
     xmlParts.push(
       `<output-file>${escapeXml(stripDisplayControlChars(entry.outputFile))}</output-file>`,
