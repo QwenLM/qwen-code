@@ -345,6 +345,54 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).not.toContain('prefix-');
     });
 
+    it('skips leading UTF-8 continuation bytes at the truncation boundary', () => {
+      // When the byte budget cuts a multi-byte UTF-8 codepoint in half,
+      // the raw read would produce a U+FFFD replacement character.
+      // Place a 3-byte '€' (U+20AC → 0xE2 0x82 0xAC) so that the
+      // truncation offset lands on its second byte.
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-shell-utf8-'));
+      tmpDirs.push(dir);
+      const file = join(dir, 'shell.output');
+      const padding = 'a'.repeat(MAX_NOTIFICATION_OUTPUT_TAIL_BYTES - 1);
+      // 1 byte of 'a' + 2 continuation bytes = 3 bytes before the clean text
+      const content = padding + '\u20AC' + '\nfinal output\n';
+      writeFileSync(file, content);
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a', outputPath: file }));
+
+      reg.complete('a', 0, 2000);
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain('<output-tail truncated="true">');
+      expect(modelText).toContain('final output</output-tail>');
+      // Must not contain the UTF-8 replacement character
+      expect(modelText).not.toContain('\uFFFD');
+    });
+
+    it('strips control characters from cwd and output-file XML fields', () => {
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      reg.register(
+        makeEntry({
+          shellId: 'a',
+          cwd: '/repo\x01\x02/work',
+          outputPath: '/tmp/out\x03.log',
+        }),
+      );
+
+      reg.complete('a', 0, 2000);
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain('<cwd>/repo/work</cwd>');
+      expect(modelText).toContain('<output-file>/tmp/out.log</output-file>');
+      expect(modelText).not.toContain('\x01');
+      expect(modelText).not.toContain('\x02');
+      expect(modelText).not.toContain('\x03');
+    });
+
     const itNoFollow = fsConstants.O_NOFOLLOW === undefined ? it.skip : it;
 
     itNoFollow('does not follow symlinked output files', () => {

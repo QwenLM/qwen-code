@@ -78,8 +78,21 @@ function readOutputTail(
     const start = stat.size - length;
     const buffer = Buffer.allocUnsafe(length);
     const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+
+    // When the read offset lands mid-codepoint (truncated read), skip
+    // leading UTF-8 continuation bytes to avoid U+FFFD replacement chars.
+    let sliceOffset = 0;
+    if (start > 0) {
+      while (
+        sliceOffset < bytesRead &&
+        (buffer[sliceOffset]! & 0xc0) === 0x80
+      ) {
+        sliceOffset++;
+      }
+    }
+
     const text = stripOutputControlChars(
-      buffer.subarray(0, bytesRead).toString('utf8'),
+      buffer.subarray(sliceOffset, bytesRead).toString('utf8'),
     ).trimEnd();
 
     if (!text) return undefined;
@@ -425,7 +438,7 @@ export class BackgroundShellRegistry {
       commandForModel.truncated
         ? `<command truncated="true">${escapeXml(commandForModel.text)}</command>`
         : `<command>${escapeXml(commandForModel.text)}</command>`,
-      `<cwd>${escapeXml(entry.cwd)}</cwd>`,
+      `<cwd>${escapeXml(stripDisplayControlChars(entry.cwd))}</cwd>`,
     ];
     if (entry.pid !== undefined) {
       xmlParts.push(`<pid>${entry.pid}</pid>`);
@@ -445,7 +458,7 @@ export class BackgroundShellRegistry {
       );
     }
     xmlParts.push(
-      `<output-file>${escapeXml(entry.outputFile)}</output-file>`,
+      `<output-file>${escapeXml(stripDisplayControlChars(entry.outputFile))}</output-file>`,
       '</task-notification>',
     );
 
