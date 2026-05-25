@@ -1816,7 +1816,7 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('ALIYUN_OSS_ACCESS_KEY_SECRET');
     expect(guide).toContain('ALIYUN_OSS_BUCKET');
     expect(guide).toContain('ALIYUN_OSS_ENDPOINT');
-    expect(guide).toContain('Public installation documentation');
+    expect(guide).toContain('hosted entrypoint');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
   });
