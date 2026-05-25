@@ -20,6 +20,7 @@ import {
   writeAutoImproveConfig,
   writeAutoImproveLoopState,
 } from './autoImproveState.js';
+import * as autoImproveState from './autoImproveState.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { CommandContext } from './types.js';
 
@@ -608,6 +609,67 @@ describe('autoImproveCommand', () => {
       messageType: 'info',
       content: expect.stringContaining('previous run is still active'),
     });
+  });
+
+  it('uses fresh state for the tick write to avoid overwriting concurrent changes', async () => {
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+    const activeRaw = await fs.readFile(
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
+      'utf8',
+    );
+    const active = JSON.parse(activeRaw) as { activeLoopId: string };
+
+    // Clear currentRun so the tick proceeds.
+    const statePath = path.join(
+      tempDir,
+      '.qwen',
+      'auto-improve',
+      'loops',
+      active.activeLoopId,
+      'state.json',
+    );
+    const cleanState = JSON.parse(
+      await fs.readFile(statePath, 'utf8'),
+    ) as Record<string, unknown>;
+    delete cleanState['currentRun'];
+    await fs.writeFile(statePath, `${JSON.stringify(cleanState, null, 2)}\n`);
+
+    // Read the base state that tickAutoImprove's initial read will return.
+    const baseState = await readAutoImproveLoopState(
+      tempDir,
+      active.activeLoopId,
+    );
+    expect(baseState).not.toBeNull();
+
+    // Simulate a concurrent modification that lands between the initial read
+    // and the TOCTOU re-read: the fresh state has a different prompt.
+    const concurrentPrompt = 'concurrent-prompt-set-by-another-process';
+    const modifiedState = { ...baseState!, prompt: concurrentPrompt };
+
+    const readSpy = vi.spyOn(autoImproveState, 'readAutoImproveLoopState');
+    readSpy
+      .mockResolvedValueOnce(baseState!) // initial read (stale)
+      .mockResolvedValueOnce(modifiedState); // TOCTOU re-read (fresh)
+
+    const result = await autoImproveCommand.action?.(
+      context,
+      `tick ${active.activeLoopId}`,
+    );
+
+    readSpy.mockRestore();
+
+    expect(result).toMatchObject({ type: 'submit_prompt' });
+
+    // The prompt text should be built from freshState, not the stale state.
+    const text = (result as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain(concurrentPrompt);
+
+    // The persisted state should carry the concurrent modification.
+    const written = JSON.parse(await fs.readFile(statePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(written['prompt']).toBe(concurrentPrompt);
   });
 
   it('normalizes malformed legacy state without printing undefined', async () => {

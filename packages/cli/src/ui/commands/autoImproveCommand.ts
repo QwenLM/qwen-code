@@ -758,12 +758,15 @@ async function tickAutoImprove(
     );
   }
 
-  state.currentRun = makePendingRunRef();
-  await writeAutoImproveLoopState(repoRoot, state);
+  // Use freshState (if available) as the write base to avoid overwriting any
+  // concurrent changes that landed between the initial read and the re-read.
+  const baseState = freshState ?? state;
+  baseState.currentRun = makePendingRunRef();
+  await writeAutoImproveLoopState(repoRoot, baseState);
 
   return {
     type: 'submit_prompt',
-    content: [{ text: buildTickPrompt(state) }],
+    content: [{ text: buildTickPrompt(baseState) }],
     onComplete: () => markRunCompleted(config, repoRoot, loopId),
   };
 }
