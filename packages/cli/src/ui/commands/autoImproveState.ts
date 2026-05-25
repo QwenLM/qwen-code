@@ -155,10 +155,10 @@ function readBoolean(value: unknown): boolean {
   return typeof value === 'boolean' ? value : false;
 }
 
-const MAX_CUSTOM_SOURCE_LENGTH = 200;
-const MAX_CUSTOM_SOURCES = 10;
+export const MAX_CUSTOM_SOURCE_LENGTH = 200;
+export const MAX_CUSTOM_SOURCES = 10;
 
-function normalizeStringList(value: unknown): string[] {
+export function normalizeStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
   const result: string[] = [];

@@ -9,6 +9,10 @@ import {
   applyDraftSource,
   normalizeCustomSources,
 } from './AutoImproveSourceDialog.js';
+import {
+  MAX_CUSTOM_SOURCE_LENGTH,
+  MAX_CUSTOM_SOURCES,
+} from '../commands/autoImproveState.js';
 
 describe('AutoImproveSourceDialog helpers', () => {
   it('normalizes and deduplicates custom sources', () => {
@@ -34,5 +38,22 @@ describe('AutoImproveSourceDialog helpers', () => {
     expect(
       applyDraftSource(['check CI', 'review comments'], 'scan docs', 1),
     ).toEqual(['check CI', 'scan docs']);
+  });
+
+  it('truncates sources exceeding MAX_CUSTOM_SOURCE_LENGTH', () => {
+    const longSource = 'a'.repeat(MAX_CUSTOM_SOURCE_LENGTH + 50);
+    const result = normalizeCustomSources([longSource]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toHaveLength(MAX_CUSTOM_SOURCE_LENGTH);
+  });
+
+  it('limits output to MAX_CUSTOM_SOURCES entries', () => {
+    const sources = Array.from(
+      { length: MAX_CUSTOM_SOURCES + 5 },
+      (_, i) => `source-${i}`,
+    );
+    const result = normalizeCustomSources(sources);
+    expect(result).toHaveLength(MAX_CUSTOM_SOURCES);
+    expect(result).toEqual(sources.slice(0, MAX_CUSTOM_SOURCES));
   });
 });

@@ -15,6 +15,8 @@ import { t } from '../../i18n/index.js';
 import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  MAX_CUSTOM_SOURCE_LENGTH,
+  MAX_CUSTOM_SOURCES,
   readAutoImproveConfig,
   writeAutoImproveConfig,
   type AutoImproveConfig,
@@ -66,13 +68,15 @@ async function resolveRepoRoot(
 
 export function normalizeCustomSources(sources: string[]): string[] {
   const seen = new Set<string>();
-  return sources
-    .map((source) => source.trim())
-    .filter((source) => {
-      if (!source || seen.has(source)) return false;
-      seen.add(source);
-      return true;
-    });
+  const result: string[] = [];
+  for (const source of sources) {
+    const trimmed = source.trim().slice(0, MAX_CUSTOM_SOURCE_LENGTH);
+    if (!trimmed || seen.has(trimmed)) continue;
+    if (result.length >= MAX_CUSTOM_SOURCES) break;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
 }
 
 export function applyDraftSource(
