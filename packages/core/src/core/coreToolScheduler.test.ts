@@ -83,6 +83,21 @@ type ToolSpanRecord = {
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
 const shouldThrowToolSpanSetAttribute = vi.hoisted(() => ({ value: false }));
 const shouldThrowToolSpanSetStatus = vi.hoisted(() => ({ value: false }));
+const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: debugLoggerWarnSpy,
+      error: vi.fn(),
+    }),
+  };
+});
 
 vi.mock('../telemetry/tracer.js', () => ({
   safeSetStatus: (
@@ -565,6 +580,7 @@ describe('CoreToolScheduler', () => {
     const { internals, toolCall, setAutoModeDenialState } =
       createSchedulerForDenialTrackingApprovalTest();
     internals.autoModeFallbackCallIds.add('call-1');
+    debugLoggerWarnSpy.mockClear();
 
     await internals._handleConfirmationResponseInner(
       'call-1',
@@ -580,6 +596,11 @@ describe('CoreToolScheduler', () => {
       totalBlock: 0,
       totalUnavailable: 0,
     });
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Auto mode denial counters reset after fallback approval',
+      ),
+    );
   });
 
   it('does not reset denial counters after cancelling a denialTracking fallback prompt', async () => {

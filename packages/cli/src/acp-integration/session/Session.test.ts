@@ -22,6 +22,22 @@ import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 
+const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: debugLoggerWarnSpy,
+      error: vi.fn(),
+    }),
+  };
+});
+
 vi.mock('../../nonInteractiveCliCommands.js', () => ({
   ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE: [
     'init',
@@ -2237,29 +2253,35 @@ describe('Session', () => {
           },
         ]),
       );
+      debugLoggerWarnSpy.mockClear();
 
       try {
         await session.prompt({
           sessionId: 'test-session-id',
           prompt: [{ type: 'text', text: 'run tool' }],
         });
+
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
+        await vi.waitFor(() => {
+          expect(onConfirmSpy).toHaveBeenCalledWith(
+            core.ToolConfirmationOutcome.ProceedOnce,
+          );
+          expect(setAutoModeDenialState).toHaveBeenCalledWith({
+            consecutiveBlock: 0,
+            consecutiveUnavailable: 0,
+            totalBlock: 0,
+            totalUnavailable: 0,
+          });
+          expect(executeSpy).toHaveBeenCalled();
+        });
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Auto mode denial counters reset after fallback approval',
+          ),
+        );
       } finally {
         hookSpy.mockRestore();
       }
-
-      expect(mockClient.requestPermission).not.toHaveBeenCalled();
-      await vi.waitFor(() => {
-        expect(onConfirmSpy).toHaveBeenCalledWith(
-          core.ToolConfirmationOutcome.ProceedOnce,
-        );
-        expect(setAutoModeDenialState).toHaveBeenCalledWith({
-          consecutiveBlock: 0,
-          consecutiveUnavailable: 0,
-          totalBlock: 0,
-          totalUnavailable: 0,
-        });
-        expect(executeSpy).toHaveBeenCalled();
-      });
     });
 
     describe('hooks', () => {
