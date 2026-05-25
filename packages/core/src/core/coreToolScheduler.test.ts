@@ -28,12 +28,18 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   ToolErrorType,
 } from '../index.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
-import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
+import type {
+  CompletedToolCall,
+  ToolCall,
+  WaitingToolCall,
+} from './coreToolScheduler.js';
 import {
   CoreToolScheduler,
   convertToFunctionResponse,
@@ -7239,6 +7245,151 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     const msg = getLastErrorMessage(onToolCallsUpdate);
     expect(msg).toBeDefined();
     expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+});
+
+describe('CoreToolScheduler tool output truncation', () => {
+  class LargeOutputTool extends BaseDeclarativeTool<
+    Record<string, never>,
+    ToolResult
+  > {
+    static readonly Name = 'largeOutputTool';
+
+    constructor(private readonly output: string) {
+      super(
+        LargeOutputTool.Name,
+        'LargeOutputTool',
+        'Returns a large model-facing output.',
+        Kind.Other,
+        { type: 'object', properties: {} },
+      );
+    }
+
+    protected createInvocation(
+      params: Record<string, never>,
+    ): ToolInvocation<Record<string, never>, ToolResult> {
+      const output = this.output;
+      return new (class extends BaseToolInvocation<
+        Record<string, never>,
+        ToolResult
+      > {
+        constructor(p: Record<string, never>) {
+          super(p);
+        }
+
+        getDescription(): string {
+          return 'largeOutputTool invocation';
+        }
+
+        async execute(): Promise<ToolResult> {
+          return {
+            llmContent: output,
+            returnDisplay: 'large output completed',
+          };
+        }
+      })(params);
+    }
+  }
+
+  function createLargeOutputScheduler(output: string) {
+    const tool = new LargeOutputTool(output);
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-tool-output-'));
+    const mockToolRegistry = {
+      ensureTool: async (name: string) =>
+        name === LargeOutputTool.Name ? tool : undefined,
+      getTool: (name: string) =>
+        name === LargeOutputTool.Name ? tool : undefined,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: (name: string) =>
+        name === LargeOutputTool.Name ? tool : undefined,
+      getToolByDisplayName: (name: string) =>
+        name === 'LargeOutputTool' ? tool : undefined,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getAllToolNames: () => [LargeOutputTool.Name],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => tempDir },
+      getTruncateToolOutputThreshold: () => 100,
+      getTruncateToolOutputLines: () => 10,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    return { scheduler, onAllToolCallsComplete };
+  }
+
+  function extractFunctionResponseOutput(responseParts: Part[]): string {
+    const response = responseParts[0]?.functionResponse?.response as
+      | { output?: string }
+      | undefined;
+    return response?.output ?? '';
+  }
+
+  it('truncates large model-facing tool output before it enters history', async () => {
+    const largeOutput = 'A'.repeat(5000);
+    const { scheduler, onAllToolCallsComplete } =
+      createLargeOutputScheduler(largeOutput);
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'large-1',
+          name: LargeOutputTool.Name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-large-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    const output = extractFunctionResponseOutput(
+      completedCalls[0].response.responseParts,
+    );
+
+    expect(output).toContain('[CONTENT TRUNCATED]');
+    expect(output).not.toContain('A'.repeat(500));
+    expect(output.length).toBeLessThan(largeOutput.length);
   });
 });
 

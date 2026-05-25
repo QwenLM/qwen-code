@@ -108,6 +108,7 @@ import {
   type HookSpanMetadata,
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
@@ -2791,7 +2792,7 @@ export class CoreToolScheduler {
 
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
-        const contentLength =
+        let contentLength =
           typeof content === 'string' ? content.length : undefined;
 
         // PostToolUse Hook
@@ -2944,6 +2945,16 @@ export class CoreToolScheduler {
               `<system-reminder>\n${body}\n</system-reminder>`,
             );
           }
+        }
+
+        if (typeof content === 'string') {
+          const truncated = await truncateToolOutput(
+            this.config,
+            toolName,
+            content,
+          );
+          content = truncated.content;
+          contentLength = content.length;
         }
 
         // Guard the JSON serialization for non-string content. Tool
