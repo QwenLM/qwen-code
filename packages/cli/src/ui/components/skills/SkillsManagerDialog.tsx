@@ -44,6 +44,13 @@ interface SkillsManagerDialogProps {
   addItem: UseHistoryManagerReturn['addItem'];
   onClose: () => void;
   reloadCommands: () => void | Promise<void>;
+  /**
+   * Called when the user picks a skill via Enter — the dialog closes and
+   * the supplied text (e.g. `/skill-name`) is submitted as a prompt, the
+   * same way it would be if typed directly into the input. Pending
+   * enable/disable toggles are saved first.
+   */
+  submitPrompt: (value: string) => void;
   availableTerminalHeight?: number;
 }
 
@@ -119,11 +126,16 @@ export function SkillsManagerDialog({
   addItem,
   onClose,
   reloadCommands,
+  submitPrompt,
   availableTerminalHeight,
 }: SkillsManagerDialogProps): React.JSX.Element {
   const [skills, setSkills] = useState<SkillConfig[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  // Track which row the MultiSelect is currently highlighting so Enter
+  // (which the dialog interprets as "invoke the highlighted skill") knows
+  // what to launch. Updated via the `onHighlight` callback on every up/down.
+  const [activeValue, setActiveValue] = useState<SkillItemValue | null>(null);
 
   // Capture the workspace and higher-scope disabled lists once at mount.
   // The dialog is short-lived and these are derived from the *current*
@@ -215,7 +227,13 @@ export function SkillsManagerDialog({
     [filteredUnlocked],
   );
 
-  const handleConfirm = useCallback(async () => {
+  // Persist any pending toggle changes. Returns true on success, false if
+  // the workspace is untrusted (caller should NOT proceed with follow-up
+  // actions like submitting a prompt). When there is nothing to persist
+  // (selection unchanged from initial) the call is a cheap no-op write
+  // plus refresh — kept simple over diffing because the dialog is
+  // short-lived.
+  const persistChanges = useCallback(async (): Promise<boolean> => {
     if (!settings.isTrusted) {
       addItem(
         {
@@ -228,8 +246,7 @@ export function SkillsManagerDialog({
         },
         Date.now(),
       );
-      onClose();
-      return;
+      return false;
     }
 
     const selected = new Set(selectedKeys ?? []);
@@ -241,8 +258,6 @@ export function SkillsManagerDialog({
     const nextDisabled: string[] = [];
     for (const s of unlockedSkills) {
       if (selected.has(s.name)) continue;
-      // Preserve original casing if the entry already existed; otherwise
-      // store the canonical skill name (loader-supplied).
       const existing = previousMap.get(lower(s.name));
       nextDisabled.push(existing ?? s.name);
     }
@@ -254,14 +269,13 @@ export function SkillsManagerDialog({
     );
 
     try {
-      // ORDER MATTERS — must NOT be Promise.all. See `refreshAfterChange`
-      // in `skillsCommand.ts` for the full rationale: `reloadCommands`
-      // rebuilds CommandService AND re-registers the
-      // `modelInvocableCommandsProvider` closure over the new instance;
-      // `notifyConfigChanged` triggers `SkillTool.refreshSkills` which
-      // calls that provider. Running them in parallel can let the model
-      // description pick up the OLD provider, leaking the just-disabled
-      // skill back into `<available_skills>` as a command-form entry.
+      // ORDER MATTERS — must NOT be Promise.all. `reloadCommands` rebuilds
+      // CommandService AND re-registers the `modelInvocableCommandsProvider`
+      // closure over the new instance; `notifyConfigChanged` triggers
+      // `SkillTool.refreshSkills`, which calls that provider. Running them
+      // in parallel can let the model description pick up the OLD provider,
+      // leaking the just-disabled skill back into `<available_skills>` as
+      // a command-form entry.
       await reloadCommands();
       if (skillManager) {
         await skillManager.notifyConfigChanged();
@@ -276,24 +290,10 @@ export function SkillsManagerDialog({
         },
         Date.now(),
       );
-      onClose();
-      return;
     }
-
-    addItem(
-      {
-        type: MessageType.INFO,
-        text:
-          nextDisabled.length === 0
-            ? 'All skills are enabled at workspace scope.'
-            : `Disabled at workspace scope: ${nextDisabled.join(', ')}`,
-      },
-      Date.now(),
-    );
-    onClose();
+    return true;
   }, [
     addItem,
-    onClose,
     reloadCommands,
     selectedKeys,
     settings,
@@ -301,14 +301,52 @@ export function SkillsManagerDialog({
     unlockedSkills,
   ]);
 
+  // Esc handler: auto-save current toggle state and close. Replaces the
+  // earlier "save = Enter, Esc = cancel" model with auto-save on exit.
+  const handleSaveAndClose = useCallback(async () => {
+    const ok = await persistChanges();
+    if (ok) {
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: 'Skills configuration saved.',
+        },
+        Date.now(),
+      );
+    }
+    onClose();
+  }, [addItem, onClose, persistChanges]);
+
+  // Enter handler: save pending toggles, close, and submit `/<skill-name>`
+  // as if the user had typed it directly. Lets the dialog double as a
+  // launcher — pick a skill, hit Enter, and the prompt goes out.
+  const handleInvoke = useCallback(
+    async (skill: SkillItemValue) => {
+      const ok = await persistChanges();
+      if (!ok) {
+        // Untrusted workspace — error already surfaced by persistChanges.
+        // Don't proceed to submit the skill.
+        onClose();
+        return;
+      }
+      onClose();
+      submitPrompt(`/${skill.name}`);
+    },
+    [onClose, persistChanges, submitPrompt],
+  );
+
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
+        // Esc with active search: just clear the query (refining without
+        // exiting is intuitive). Esc on an empty search: auto-save and
+        // close — there is no longer a "cancel without saving" path,
+        // matching the user-requested keymap (Esc = exit, changes stick).
         if (query) {
           setQuery('');
           return;
         }
-        onClose();
+        void handleSaveAndClose();
         return;
       }
 
@@ -408,7 +446,7 @@ export function SkillsManagerDialog({
         {hasQuery
           ? `${matchedCount} / ${totalCount} skills · `
           : `${totalCount} skill${totalCount === 1 ? '' : 's'} · `}
-        Space to toggle, Enter to save, Esc to cancel · workspace scope
+        Space toggle · Enter invoke · Esc save & exit · workspace scope
       </Text>
 
       <Box marginTop={1} flexDirection="row">
@@ -434,7 +472,19 @@ export function SkillsManagerDialog({
             items={items}
             selectedKeys={selectedKeys ?? []}
             onSelectedKeysChange={setSelectedKeys}
-            onConfirm={handleConfirm}
+            // Enter == invoke the highlighted skill (NOT save). MultiSelect's
+            // `onConfirm` fires on Enter; we read the row tracked via
+            // `onHighlight` so we know which one to launch. Saving lives
+            // entirely on Esc — see `handleSaveAndClose`.
+            onConfirm={() => {
+              if (activeValue) {
+                void handleInvoke(activeValue);
+              } else {
+                // Empty list (search filtered everything out) — Enter is
+                // a no-op; let Esc be the way out.
+              }
+            }}
+            onHighlight={(v) => setActiveValue(v)}
             showNumbers={false}
             checkedText="[x]"
             showActiveMarker
