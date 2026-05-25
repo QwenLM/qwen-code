@@ -20,6 +20,7 @@ import {
   assertRealProjectSkillPath,
   getProjectSkillsRoot,
   isProjectSkillPath,
+  SKILL_FILE_NAME,
 } from '../skills/skill-paths.js';
 
 export const SKILL_REVIEW_AGENT_NAME = 'managed-skill-extractor' as const;
@@ -131,15 +132,24 @@ async function evaluateScopedDecision(
       return sourceFlag ? 'allow' : 'deny';
     }
     case ToolNames.WRITE_FILE: {
-      // `write_file` is reserved for CREATING new skills. Updates to
-      // existing auto-skills must go through `edit`. Denying any write
-      // that targets an existing file is the safety net for #4437:
-      // without it, an agent that picks a name collision (with another
-      // auto-skill OR a user-authored skill) silently clobbers the
-      // prior SKILL.md. The system prompt + task prompt are the soft
-      // guard (enumerate existing skill names so the agent picks fresh);
-      // this deny is the hard guard.
+      // Invariant for the auto-skill flow:
+      //   write_file can ONLY create a brand-new SKILL.md slot
+      //   (edit is what updates an existing auto-skill).
+      // Together with the EDIT case above, this gives:
+      //   create new skill   → write_file at fresh <name>/SKILL.md
+      //   update auto-skill  → edit on existing SKILL.md (source: auto-skill)
+      // Denying writes to existing paths is the hard guard for #4437 —
+      // it's what prevents an agent that picks a colliding name from
+      // clobbering either another auto-skill or a user-authored skill.
+      // The prompt enumeration is the soft guard above it.
       if (!ctx.filePath || !isProjectSkillPath(ctx.filePath, projectRoot)) {
+        return 'deny';
+      }
+      // Restrict to the canonical `<name>/SKILL.md` slot. Without this,
+      // the agent could write auxiliary files (notes, README, attachments)
+      // anywhere under `.qwen/skills/**` — SkillManager would ignore them
+      // but they still pollute the directory.
+      if (path.basename(ctx.filePath) !== SKILL_FILE_NAME) {
         return 'deny';
       }
       try {
@@ -278,9 +288,13 @@ export async function listExistingSkillDirNames(
   }
   const names: string[] = [];
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    // Skill dirs can be symlinked — `skill-load.ts` and `skill-manager.ts`
+    // both treat `isDirectory() || isSymbolicLink()` as "consider this a
+    // skill candidate". Mirror that here so symlinked skills appear in
+    // the enumeration and the agent steers clear of their names.
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
     try {
-      await fs.stat(path.join(skillsRoot, entry.name, 'SKILL.md'));
+      await fs.stat(path.join(skillsRoot, entry.name, SKILL_FILE_NAME));
       names.push(entry.name);
     } catch {
       // No SKILL.md (or unreadable) — skip; half-built directories
@@ -295,11 +309,13 @@ export async function listExistingSkillDirNames(
  * Exported for tests. The "(do not reuse these names)" line is the soft
  * guard for #4437 — the hard guard is `evaluateScopedDecision`'s WRITE_FILE
  * branch denying any write to an existing path.
+ *
+ * Takes `projectRoot` (not `skillsRoot`) so the displayed path and the
+ * enumeration both derive from the same source — keeps them from drifting
+ * if a future caller passes a non-standard root.
  */
-export async function buildTaskPrompt(
-  skillsRoot: string,
-  projectRoot: string,
-): Promise<string> {
+export async function buildTaskPrompt(projectRoot: string): Promise<string> {
+  const skillsRoot = getProjectSkillsRoot(projectRoot);
   const existing = await listExistingSkillDirNames(projectRoot);
   const existingLine =
     existing.length === 0
@@ -332,7 +348,6 @@ export async function runSkillReviewByAgent(params: {
   maxTurns?: number;
   timeoutMs?: number;
 }): Promise<SkillReviewExecutionResult> {
-  const skillsRoot = getProjectSkillsRoot(params.projectRoot);
   const scopedConfig = createSkillScopedAgentConfig(
     params.config,
     params.projectRoot,
@@ -340,7 +355,7 @@ export async function runSkillReviewByAgent(params: {
   const result = await runForkedAgent({
     name: SKILL_REVIEW_AGENT_NAME,
     config: scopedConfig,
-    taskPrompt: await buildTaskPrompt(skillsRoot, params.projectRoot),
+    taskPrompt: await buildTaskPrompt(params.projectRoot),
     systemPrompt: SKILL_REVIEW_SYSTEM_PROMPT,
     maxTurns: params.maxTurns ?? DEFAULT_AUTO_SKILL_MAX_TURNS,
     maxTimeMinutes:

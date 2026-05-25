@@ -24,7 +24,6 @@ import {
   listExistingSkillDirNames,
 } from './skillReviewAgentPlanner.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { getProjectSkillsRoot } from '../skills/skill-paths.js';
 
 function makeMinimalConfig(projectRoot: string): Config {
   return {
@@ -168,6 +167,83 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
     expect(rule).toMatch(/<name>-2/);
     expect(rule).toMatch(/edit/);
   });
+
+  it('denies write_file to a path outside the project skills root', async () => {
+    // Security-boundary regression guard for the `isProjectSkillPath`
+    // false branch — without it the agent could escape to anywhere
+    // reachable from CWD.
+    const escape = path.join(projectRoot, 'NOT-SKILLS', 'evil.md');
+    const pm = scopedPm(projectRoot);
+    expect(
+      await pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: escape,
+      }),
+    ).toBe('deny');
+  });
+
+  it('denies write_file to a non-SKILL.md path inside the skills root', async () => {
+    // Auxiliary files (NOTES.md, attachments) must not land in the
+    // skills dir — SkillManager would ignore them but they'd still
+    // pollute the layout. Tightening the basename invariant is the
+    // hard guard for that.
+    const aux = path.join(
+      projectRoot,
+      '.qwen',
+      'skills',
+      'my-skill',
+      'NOTES.md',
+    );
+    await fs.mkdir(path.dirname(aux), { recursive: true });
+    const pm = scopedPm(projectRoot);
+    expect(
+      await pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: aux,
+      }),
+    ).toBe('deny');
+  });
+
+  it('denies write_file when the target traverses a symlink outside the skills root', async () => {
+    // Symlink-escape regression guard for the `assertRealProjectSkillPath`
+    // catch. A skill dir that's actually a symlink to /tmp would let the
+    // agent write outside the project; the realpath check stops it.
+    const outside = path.join(tempDir, 'outside');
+    await fs.mkdir(outside, { recursive: true });
+    const skillsRoot = path.join(projectRoot, '.qwen', 'skills');
+    await fs.mkdir(skillsRoot, { recursive: true });
+    await fs.symlink(outside, path.join(skillsRoot, 'escape'));
+    const target = path.join(skillsRoot, 'escape', 'SKILL.md');
+    const pm = scopedPm(projectRoot);
+    expect(
+      await pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: target,
+      }),
+    ).toBe('deny');
+  });
+
+  it('denies write_file when fs.stat fails with a non-ENOENT error (EISDIR)', async () => {
+    // The catch in evaluateScopedDecision deliberately defaults to
+    // 'deny' for any non-ENOENT error so we never overwrite something
+    // we cannot prove is safe. Easiest reproducible failure mode is
+    // EISDIR — the target path is a directory, not a file.
+    const dirAsFile = path.join(
+      projectRoot,
+      '.qwen',
+      'skills',
+      'is-a-directory',
+      'SKILL.md',
+    );
+    await fs.mkdir(dirAsFile, { recursive: true });
+    const pm = scopedPm(projectRoot);
+    expect(
+      await pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: dirAsFile,
+      }),
+    ).toBe('deny');
+  });
 });
 
 describe('listExistingSkillDirNames', () => {
@@ -204,6 +280,24 @@ describe('listExistingSkillDirNames', () => {
   it('returns [] when the skills directory does not exist', async () => {
     expect(await listExistingSkillDirNames(projectRoot)).toEqual([]);
   });
+
+  it('includes skills whose directory is a symlink (matches skill-load.ts convention)', async () => {
+    // Build a real skill outside the skills root, then symlink it in.
+    // `skill-load.ts:31-34` and `skill-manager.ts:994-997` both treat
+    // `isDirectory() || isSymbolicLink()` as a skill candidate; the
+    // enumeration here mirrors that.
+    const external = path.join(tempDir, 'external-skills', 'linked');
+    await fs.mkdir(external, { recursive: true });
+    await fs.writeFile(path.join(external, 'SKILL.md'), AUTO_SKILL, 'utf-8');
+    const skillsRoot = path.join(projectRoot, '.qwen', 'skills');
+    await fs.mkdir(skillsRoot, { recursive: true });
+    await fs.symlink(external, path.join(skillsRoot, 'linked'));
+    await writeSkillFile(projectRoot, 'regular', AUTO_SKILL);
+    expect(await listExistingSkillDirNames(projectRoot)).toEqual([
+      'linked',
+      'regular',
+    ]);
+  });
 });
 
 describe('buildTaskPrompt', () => {
@@ -223,20 +317,23 @@ describe('buildTaskPrompt', () => {
   it('lists existing skill names so the agent picks a non-colliding name', async () => {
     await writeSkillFile(projectRoot, 'alpha', AUTO_SKILL);
     await writeSkillFile(projectRoot, 'beta', AUTO_SKILL);
-    const prompt = await buildTaskPrompt(
-      getProjectSkillsRoot(projectRoot),
-      projectRoot,
-    );
+    const prompt = await buildTaskPrompt(projectRoot);
     expect(prompt).toContain('alpha');
     expect(prompt).toContain('beta');
     expect(prompt).toMatch(/do NOT reuse/i);
   });
 
   it('falls back to a placeholder line when no skills exist yet', async () => {
-    const prompt = await buildTaskPrompt(
-      getProjectSkillsRoot(projectRoot),
-      projectRoot,
-    );
+    const prompt = await buildTaskPrompt(projectRoot);
     expect(prompt).toMatch(/no skills exist yet/i);
+  });
+
+  it('displays the project skills root derived from the same projectRoot used for enumeration', async () => {
+    // Regression guard for the param collapse — the displayed root and
+    // the enumerated names always come from the same source.
+    await writeSkillFile(projectRoot, 'real', AUTO_SKILL);
+    const prompt = await buildTaskPrompt(projectRoot);
+    expect(prompt).toContain(path.join(projectRoot, '.qwen', 'skills'));
+    expect(prompt).toContain('real');
   });
 });
