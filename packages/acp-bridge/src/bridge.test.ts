@@ -2200,6 +2200,74 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('broadcasts prompt_cancelled to peers when the originator SSE aborts mid-prompt', async () => {
+      // Cross-client sync: client disconnect (tab close / network drop /
+      // laptop sleep) is the most common cancel trigger in production.
+      // The `sendPrompt` `onAbort` path must publish `prompt_cancelled`
+      // to peer subscribers — not just the explicit `cancelSession`
+      // route. A regression here would silently re-open the gap.
+      let releasePrompt: (() => void) | undefined;
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          // Hang the prompt so it stays in-flight while we abort.
+          promptImpl: async () => {
+            await new Promise<void>((res) => {
+              releasePrompt = res;
+            });
+            return { stopReason: 'cancelled' };
+          },
+        }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // Peer subscriber (a DIFFERENT client watching the same session).
+      const peerAbort = new AbortController();
+      const peerIter = bridge.subscribeEvents(session.sessionId, {
+        signal: peerAbort.signal,
+      });
+      const peerCancel = (async () => {
+        for await (const e of peerIter) {
+          if (e.type === 'prompt_cancelled') return e;
+        }
+        throw new Error('peer never saw prompt_cancelled');
+      })();
+
+      // Originator sends the (hanging) prompt, then its SSE/HTTP signal
+      // aborts mid-flight (connection dropped).
+      const promptAbort = new AbortController();
+      const promptPromise = bridge
+        .sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'long running' }],
+          },
+          promptAbort.signal,
+          { clientId: session.clientId },
+        )
+        .catch(() => {
+          // AbortError is expected — the originator's connection dropped.
+        });
+
+      // Give the queue worker a tick to start the prompt, then abort.
+      await new Promise((r) => setTimeout(r, 10));
+      promptAbort.abort();
+
+      const evt = await peerCancel;
+      expect(evt.type).toBe('prompt_cancelled');
+      expect((evt.data as { sessionId: string }).sessionId).toBe(
+        session.sessionId,
+      );
+      // Attributed to the prompt's originator (whose connection dropped).
+      expect(evt.originatorClientId).toBe(session.clientId);
+
+      // Let the hung promptImpl settle so shutdown doesn't wait on it.
+      releasePrompt?.();
+      await promptPromise;
+      peerAbort.abort();
+      await bridge.shutdown();
+    });
+
     it('stamps envelope originatorClientId on session_closed', async () => {
       const factory: ChannelFactory = async () => makeChannel().channel;
       const bridge = makeBridge({ channelFactory: factory });
