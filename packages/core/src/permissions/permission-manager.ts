@@ -413,16 +413,26 @@ export class PermissionManager {
   private async resolveDefaultPermission(
     command: string,
   ): Promise<'allow' | 'ask'> {
-    // AST-based read-only detection. Commands containing command substitution
-    // are never read-only (the AST walker marks any node with a substitution
-    // expansion as non-read-only), so they fall through to 'ask'.
+    // AST-based read-only detection. Commands containing command
+    // substitution are never read-only — `evaluateStatementReadOnly`
+    // (shellAstParser.ts) guards on `containsCommandSubstitutionAST` at
+    // the top so every node type inherits the check, including
+    // `variable_assignment` (`FOO=$(curl ...)`) and `redirected_statement`
+    // (`cat < $(curl ...)`) where earlier versions had blind spots. See
+    // PR #4386 round 4. So substitution-bearing commands fall through
+    // to 'ask' on the line below.
     try {
       const isReadOnly = await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {
         return 'allow';
       }
-    } catch {
-      // AST check failed, fall back to 'ask'
+    } catch (e) {
+      // Mirror the equivalent logging in `ShellToolInvocation.getDefaultPermission`
+      // (shell.ts) and `MonitorToolInvocation.getDefaultPermission` (monitor.ts).
+      // Pre-#4386 we had a regex `detectCommandSubstitution` safety net here;
+      // with that gone, the AST check is the sole gatekeeper, so a silent
+      // catch makes parser regressions invisible.
+      debugLogger.warn('AST read-only check failed, falling back to ask:', e);
     }
 
     return 'ask';
