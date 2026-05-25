@@ -2337,9 +2337,18 @@ class QwenAgent implements Agent {
             updates.push(update);
           },
         };
-        await new HistoryReplayer(replayContext).replay(
-          sessionData.conversation.messages,
-        );
+        try {
+          await new HistoryReplayer(replayContext).replay(
+            sessionData.conversation.messages,
+          );
+        } catch (error) {
+          debugLogger.warn(
+            '[loadUpdates] History replay failed for session %s (partial updates: %d):',
+            sessionId,
+            updates.length,
+            error,
+          );
+        }
         const updatesWithTopLevelTimestamps = updates.map((update) => {
           const record = update as Record<string, unknown>;
           const meta = record['_meta'];
