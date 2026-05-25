@@ -234,4 +234,193 @@ describe('RuntimeDiagnosticsCollector', () => {
     });
     expect(JSON.stringify(snapshot)).not.toContain('/private/path.txt');
   });
+
+  it('summarizes OpenAI tool cache stability without retaining schema bodies', () => {
+    const summary = summarizeOpenAIWireRequest(
+      {
+        model: 'wire-model',
+        stream: false,
+        messages: [{ role: 'user', content: 'secret user prompt' }],
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'read_file',
+              description: 'secret tool description',
+              parameters: {
+                type: 'object',
+                properties: {
+                  secretPathProperty: { type: 'string' },
+                },
+              },
+            },
+          },
+          {
+            type: 'function',
+            function: {
+              name: 'run_shell_command',
+              description: 'another secret description',
+              parameters: {
+                type: 'object',
+                properties: {
+                  secretCommandProperty: { type: 'string' },
+                },
+              },
+            },
+          },
+        ],
+      },
+      { provider: 'deepseek' },
+    );
+
+    expect(summary.cacheStability).toMatchObject({
+      provider: 'deepseek',
+      toolNames: ['read_file', 'run_shell_command'],
+      toolNameSequenceHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      toolNameSetHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      toolSchemaHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      canonicalToolManifestHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(JSON.stringify(summary)).not.toContain('secret user prompt');
+    expect(JSON.stringify(summary)).not.toContain('secret tool description');
+    expect(JSON.stringify(summary)).not.toContain('secretPathProperty');
+    expect(JSON.stringify(summary)).not.toContain('secretCommandProperty');
+  });
+
+  it('distinguishes OpenAI tool order drift from tool set drift', () => {
+    const alphaFirst = summarizeOpenAIWireRequest({
+      model: 'wire-model',
+      stream: false,
+      messages: [],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'alpha', description: 'A', parameters: {} },
+        },
+        {
+          type: 'function',
+          function: { name: 'bravo', description: 'B', parameters: {} },
+        },
+      ],
+    });
+    const bravoFirst = summarizeOpenAIWireRequest({
+      model: 'wire-model',
+      stream: false,
+      messages: [],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'bravo', description: 'B', parameters: {} },
+        },
+        {
+          type: 'function',
+          function: { name: 'alpha', description: 'A', parameters: {} },
+        },
+      ],
+    });
+
+    expect(alphaFirst.cacheStability?.toolNames).toEqual(['alpha', 'bravo']);
+    expect(bravoFirst.cacheStability?.toolNames).toEqual(['bravo', 'alpha']);
+    expect(alphaFirst.cacheStability?.toolNameSetHash).toBe(
+      bravoFirst.cacheStability?.toolNameSetHash,
+    );
+    expect(alphaFirst.cacheStability?.canonicalToolManifestHash).toBe(
+      bravoFirst.cacheStability?.canonicalToolManifestHash,
+    );
+    expect(alphaFirst.cacheStability?.toolNameSequenceHash).not.toBe(
+      bravoFirst.cacheStability?.toolNameSequenceHash,
+    );
+  });
+
+  it('uses canonical manifest hashes for equivalent schema key order', () => {
+    const first = summarizeOpenAIWireRequest({
+      model: 'wire-model',
+      stream: false,
+      messages: [],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'inspect',
+            description: 'Inspect',
+            parameters: {
+              type: 'object',
+              properties: {
+                path: { type: 'string', description: 'Path' },
+                limit: { type: 'number', description: 'Limit' },
+              },
+            },
+          },
+        },
+      ],
+    });
+    const second = summarizeOpenAIWireRequest({
+      model: 'wire-model',
+      stream: false,
+      messages: [],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            parameters: {
+              properties: {
+                limit: { description: 'Limit', type: 'number' },
+                path: { description: 'Path', type: 'string' },
+              },
+              type: 'object',
+            },
+            description: 'Inspect',
+            name: 'inspect',
+          },
+        },
+      ],
+    });
+
+    expect(first.cacheStability?.canonicalToolManifestHash).toBe(
+      second.cacheStability?.canonicalToolManifestHash,
+    );
+    expect(first.cacheStability?.toolSchemaHash).not.toBe(
+      second.cacheStability?.toolSchemaHash,
+    );
+  });
+
+  it('changes canonical manifest hash when schema content changes', () => {
+    const before = summarizeOpenAIWireRequest({
+      model: 'wire-model',
+      stream: false,
+      messages: [],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'inspect',
+            description: 'Inspect',
+            parameters: { type: 'object', properties: {} },
+          },
+        },
+      ],
+    });
+    const after = summarizeOpenAIWireRequest({
+      model: 'wire-model',
+      stream: false,
+      messages: [],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'inspect',
+            description: 'Inspect',
+            parameters: {
+              type: 'object',
+              properties: { path: { type: 'string' } },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(before.cacheStability?.canonicalToolManifestHash).not.toBe(
+      after.cacheStability?.canonicalToolManifestHash,
+    );
+  });
 });
