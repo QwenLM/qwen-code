@@ -155,6 +155,22 @@ export function normalizeDaemonEvent(
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
 
+    case 'prompt_cancelled':
+      return [{ ...base, type: 'prompt.cancelled' }];
+
+    case 'replay_complete': {
+      const replayedCount = numberField(event.data, 'replayedCount') ?? 0;
+      const lastReplayedEventId = numberField(event.data, 'lastEventId');
+      return [
+        {
+          ...base,
+          type: 'session.replay_complete',
+          replayedCount,
+          ...(lastReplayedEventId !== undefined ? { lastReplayedEventId } : {}),
+        },
+      ];
+    }
+
     // ── Session-meta events ──────────────────────────────────────────────
     case 'session_metadata_updated':
       return normalizeSessionMetadataUpdated(event, base);
