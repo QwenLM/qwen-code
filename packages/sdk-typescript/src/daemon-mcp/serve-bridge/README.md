@@ -86,7 +86,7 @@ npm install -g @qwen-code/sdk
     "qwen-serve-bridge": {
       "type": "stdio",
       "command": "node",
-      "args": ["/path/to/qwen-code/packages/sdk-typescript/dist/mcp/serve-bridge/bin.js"],
+      "args": ["/path/to/qwen-code/packages/sdk-typescript/dist/daemon-mcp/serve-bridge/bin.js"],
       "env": {
         "QWEN_DAEMON_URL": "http://127.0.0.1:4170",
         "QWEN_DAEMON_TOKEN": "<your-token>",
@@ -188,11 +188,11 @@ MCP 协议是无状态的，但大部分工具需要 `session_id`。本 MCP Serv
 ```bash
 # 发送 MCP initialize + tools/list 请求
 printf '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}},"id":1}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n{"jsonrpc":"2.0","method":"tools/list","id":2}\n' \
-  | node dist/mcp/serve-bridge/bin.js
+  | node dist/daemon-mcp/serve-bridge/bin.js
 
 # 调用 health 工具
 printf '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}},"id":1}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n{"jsonrpc":"2.0","method":"tools/call","params":{"name":"health","arguments":{}},"id":3}\n' \
-  | node dist/mcp/serve-bridge/bin.js
+  | node dist/daemon-mcp/serve-bridge/bin.js
 ```
 
 预期输出：
