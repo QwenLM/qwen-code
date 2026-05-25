@@ -405,10 +405,6 @@ const LiveAgentPanelBody: React.FC<{
   const totalItems = 1 + visible.length;
   const clampedIndex = Math.min(selectedIndex, totalItems - 1);
 
-  const activeCount = visibleAgents.filter(
-    (e) => e.status === 'running' || e.status === 'paused',
-  ).length;
-
   return (
     <Box flexDirection="column" marginTop={1} width={width} paddingX={2}>
       <Box>
@@ -418,7 +414,6 @@ const LiveAgentPanelBody: React.FC<{
         <Text bold color={theme.text.accent}>
           main
         </Text>
-        <Text color={theme.text.secondary}>{`  Active agents (${activeCount})`}</Text>
       </Box>
       {overflow > 0 && (
         <Box>
