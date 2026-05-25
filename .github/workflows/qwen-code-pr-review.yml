@@ -114,6 +114,9 @@ jobs:
       # so the model uses proper tool_use protocol instead of text-simulating
       # tool calls (which pollutes review output).
       QWEN_REVIEW_DENY_TOOLS: 'agent,skill,tool_search,ask_user_question,task_stop,send_message,enter_worktree,exit_worktree,exit_plan_mode,enter_plan_mode'
+      # Explicitly allow tools that non-interactive mode auto-denies under
+      # approval-mode=default. Shell is needed for `gh api` inline comments.
+      QWEN_REVIEW_ALLOWED_TOOLS: 'run_shell_command'
     steps:
       # Security (R4): this job runs on pull_request_target with model
       # secrets. Tools are available (matching local qwen-code behavior) but
@@ -621,6 +624,7 @@ jobs:
           raw_out="$(timeout --kill-after=15s 3m qwen \
             --approval-mode default \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+            --allowed-tools "$QWEN_REVIEW_ALLOWED_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
             -p "Triage the PR below." \
             < /tmp/preflight-prompt-rendered.md 2>/tmp/preflight-stderr.log)"
@@ -892,6 +896,7 @@ jobs:
           timeout --kill-after=15s 3m qwen \
             --approval-mode default \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+            --allowed-tools "$QWEN_REVIEW_ALLOWED_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
             --output-format stream-json --include-partial-messages \
             -p "Review the PR below." \
@@ -1031,6 +1036,7 @@ jobs:
           timeout --kill-after=30s 8m qwen \
             --approval-mode default \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+            --allowed-tools "$QWEN_REVIEW_ALLOWED_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
             --output-format stream-json --include-partial-messages \
             -p "Review the PR below." \
@@ -1255,6 +1261,7 @@ jobs:
             timeout --kill-after=20s 4m qwen \
               --approval-mode default \
               --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+              --allowed-tools "$QWEN_REVIEW_ALLOWED_TOOLS" \
               --allowed-mcp-server-names __qwen_review_no_mcp__ \
               --output-format stream-json --include-partial-messages \
               -p "Review the PR below." \
