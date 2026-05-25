@@ -99,15 +99,20 @@ export const SERVE_STATUS_EXT_METHODS = {
   // totalTokens, files touched, context window utilization. The ACP
   // child reads the persisted JSONL via `SessionService.loadSession`
   // and feeds it through `collectSessionData` + `normalizeSessionData`
-  // (same SSOT as the `/stats` and `/export` slash commands), then
-  // returns only the `metadata` slice.
+  // (same SSOT as the `/export` slash command), then returns only the
+  // `metadata` slice. Note that the TUI's `/stats` slash command draws
+  // from a different source — the in-memory `uiTelemetryService`
+  // singleton populated as events fire — so the two surfaces can
+  // disagree on token / call counts until the live session's writes
+  // have flushed to disk.
   sessionStats: 'qwen/status/session/stats',
   // Issue #4514 T2.6. Per-session conversation export rendered in one
-  // of `md` / `html` / `json` / `jsonl`. Same SSOT as `/stats`; the
-  // child runs the matching formatter and returns the serialized body
-  // plus a suggested filename + content-type. The HTTP route streams
-  // `body` back with the matching `Content-Type` /
-  // `Content-Disposition` headers.
+  // of `md` / `html` / `json` / `jsonl`. Same `collectSessionData` +
+  // `normalizeSessionData` pipeline as `sessionStats`; the child runs
+  // the matching formatter and returns the serialized body plus a
+  // suggested filename + content-type. The HTTP route streams `body`
+  // back with the matching `Content-Type` / `Content-Disposition`
+  // headers.
   sessionExport: 'qwen/status/session/export',
 } as const;
 
@@ -347,9 +352,15 @@ export interface ServeSessionSupportedCommandsStatus {
 
 /**
  * Issue #4514 T2.5. Wire shape for `GET /session/:id/stats`. Field set
- * mirrors `ExportMetadata` in `packages/cli/src/ui/utils/export/types.ts`
- * (which the `/stats` and `/export` slash commands already populate) so
- * the daemon route and the TUI surfaces share a single source of truth.
+ * mirrors a subset of `ExportMetadata`
+ * (`packages/cli/src/ui/utils/export/types.ts`) — `exportTime` and
+ * `channel` are intentionally omitted — so the daemon route and the
+ * `/export` slash command's metadata derive from the same builder
+ * (`extractMetadata` inside `collectSessionData`). The TUI's `/stats`
+ * slash command surfaces the same field names but draws from a
+ * different source (in-memory `uiTelemetryService` counters), so the
+ * two views can disagree until the live session's writes have flushed
+ * to disk — daemon callers see only post-flush state by construction.
  *
  * Optional fields are `undefined` when the session JSONL did not carry
  * the corresponding telemetry. `uniqueFiles` is always present
@@ -419,7 +430,7 @@ export interface ServeSessionExport {
   body: string;
   /** MIME type matching `format` (already includes the `charset=utf-8`). */
   contentType: string;
-  /** Suggested file name (`qwen-session-<id>-<ts>.<ext>`). */
+  /** Suggested file name. Today: `qwen-code-export-<ts>.<ext>` (shared with the TUI `/export` slash command). */
   filename: string;
 }
 

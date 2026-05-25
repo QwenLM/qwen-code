@@ -852,7 +852,7 @@ names only; clients must not expect skill bodies or paths over this route.
 
 Capability tag: `session_stats`. Bridge → ACP extMethod `qwen/status/session/stats`.
 
-Per-session aggregate metrics (issue #4514 T2.5). The ACP child loads the session's persisted JSONL through `SessionService.loadSession` and runs `collectSessionData` + `normalizeSessionData` — the same SSOT the `/stats` and `/export` slash commands use, so daemon stats and TUI stats agree for any state flushed to disk (`chatRecordingService` appends synchronously).
+Per-session aggregate metrics (issue #4514 T2.5). The ACP child loads the session's persisted JSONL through `SessionService.loadSession` and runs `collectSessionData` + `normalizeSessionData` — the same SSOT the `/export` slash command uses, so a daemon `/stats` call and a daemon `/export` call see consistent numbers for any state already on disk. The TUI `/stats` slash command surfaces the same field names but reads in-memory `uiTelemetryService` counters, so it can disagree with this route until `chatRecordingService.appendRecord`'s serialized async write chain has drained.
 
 Read-only; no mutation gate. Requires a live session (the ACP child must hold a `Config` for the session id so context window size is available). For archived sessions, call `POST /session/:id/load` first.
 
@@ -882,7 +882,7 @@ Optional fields are `undefined` when the session JSONL did not carry the corresp
 
 Errors:
 
-- `400 invalid_params` — sessionId is missing, or the session has not written any records yet (brand-new attach before the first user turn).
+- `400 invalid_params` — sessionId is missing, or the session has not written any records yet (brand-new attach before the first user turn). The agent-side `RequestError.invalidParams` is mapped to HTTP 400 by `sendBridgeError`'s JSON-RPC code translator (`-32602 → 400`).
 - `404` — session unknown to the daemon.
 
 ### `GET /session/:id/export`
@@ -900,7 +900,7 @@ Query parameters:
 Response (200) — the raw formatter body (not JSON), with:
 
 - `Content-Type: text/markdown; charset=utf-8` / `text/html; charset=utf-8` / `application/json; charset=utf-8` / `application/jsonl; charset=utf-8`
-- `Content-Disposition: attachment; filename="qwen-session-<id>-<ts>.<ext>"`
+- `Content-Disposition: attachment; filename="qwen-code-export-<ts>.<ext>"` (same naming convention the TUI `/export` slash command writes via `generateExportFilename` — `<ts>` is `new Date().toISOString().replace(/[:.]/g, '-')`)
 - `X-Qwen-Export-Format: <md|html|json|jsonl>` (echo so telemetry-only proxies can branch without re-parsing disposition)
 
 Errors:

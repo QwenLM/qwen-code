@@ -691,12 +691,15 @@ export interface DaemonSessionSupportedCommandsStatus {
 /**
  * Issue #4514 T2.5. Response body of `GET /session/:id/stats` — a
  * per-session aggregate of metrics the TUI's `/stats` slash command
- * already surfaces (promptCount, totalTokens, files touched, context
- * window utilization). The daemon and TUI share the same
- * `collectSessionData` + `normalizeSessionData` pipeline on the
- * persisted JSONL, so both surfaces agree for any state flushed to
- * disk. Pre-flight `caps.features.session_stats` before calling —
- * older daemons reject with 404.
+ * also surfaces by field name (promptCount, totalTokens, files
+ * touched, context window utilization). The numbers come from a
+ * different source from the TUI command, though: this route runs
+ * `collectSessionData` + `normalizeSessionData` on the persisted
+ * JSONL (same SSOT as the `/export` slash command), while the TUI
+ * `/stats` reads in-memory `uiTelemetryService` counters. Daemon and
+ * TUI can therefore disagree on a live session until the agent's
+ * async write chain has drained. Pre-flight `caps.features.session_stats`
+ * before calling — older daemons reject with 404.
  *
  * Optional fields are `undefined` when the session JSONL did not carry
  * the corresponding telemetry. `uniqueFiles` is always present
@@ -748,9 +751,13 @@ export type DaemonSessionExportFormat =
  *
  * `contentType` mirrors the `Content-Type` header (`text/markdown;
  * charset=utf-8` etc.) and `filename` mirrors the parsed
- * `Content-Disposition` header (`qwen-session-<id>-<ts>.<ext>`). Both
- * are pre-decoded for the caller so a webui can pass them straight to
- * `Blob`/`a.download`.
+ * `Content-Disposition` header (today the daemon emits
+ * `qwen-code-export-<ts>.<ext>` — the same pattern the TUI `/export`
+ * slash command writes). When the header is missing or
+ * unparseable, the SDK falls back to a derived `qwen-session-<id>.<format>`
+ * so callers always have *some* filename to use. Both are pre-decoded
+ * (RFC 5987 `filename*=utf-8''…` is percent-decoded for you) so a
+ * webui can hand them straight to `Blob` / `a.download`.
  */
 export interface DaemonSessionExport {
   sessionId: string;

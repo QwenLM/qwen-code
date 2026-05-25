@@ -938,9 +938,12 @@ export class DaemonClient {
    * Issue #4514 T2.5. Per-session aggregate metrics — promptCount,
    * totalTokens, files touched, context window utilization. Wraps the
    * same `collectSessionData` / `normalizeSessionData` pipeline the
-   * TUI's `/stats` slash command runs on the persisted JSONL, so the
-   * daemon surface and the local CLI agree for any state flushed to
-   * disk. Pre-flight `caps.features.session_stats` before calling.
+   * TUI's `/export` slash command runs on the persisted JSONL, so the
+   * daemon's `/stats` and `/export` routes agree for any state flushed
+   * to disk. The TUI's `/stats` slash command surfaces the same field
+   * names but reads in-memory telemetry counters instead, so it can
+   * diverge from this route until the live session's writes drain.
+   * Pre-flight `caps.features.session_stats` before calling.
    */
   async sessionStats(
     sessionId: string,

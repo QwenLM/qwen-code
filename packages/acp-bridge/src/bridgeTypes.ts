@@ -308,14 +308,19 @@ export interface HttpAcpBridge {
    * child loads the session's persisted JSONL through
    * `SessionService.loadSession` and feeds it into
    * `collectSessionData` + `normalizeSessionData` — the same SSOT the
-   * `/stats` and `/export` slash commands use, so daemon stats and
-   * TUI stats agree for any session state that has been flushed to
-   * disk (every `chatRecordingService` append is synchronous).
+   * `/export` slash command uses, so a daemon stats call and a daemon
+   * export call see the same numbers for any session state already
+   * flushed to disk. (The TUI's `/stats` slash command surfaces the
+   * same field names but reads in-memory `uiTelemetryService`
+   * counters, so it can diverge from these JSONL-derived numbers until
+   * `chatRecordingService.appendRecord`'s serialized async write
+   * chain has drained.)
    *
    * Requires a live ACP session: the bridge throws
    * `SessionNotFoundError` for unknown ids and the child throws
    * invalid-params for sessions that have not written any records yet
-   * (a brand-new attach before the first user turn).
+   * (a brand-new attach before the first user turn) — which surfaces
+   * as HTTP 400 via the JSON-RPC code mapping in `sendBridgeError`.
    */
   getSessionStats(sessionId: string): Promise<ServeSessionStats>;
 

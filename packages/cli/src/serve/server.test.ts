@@ -1631,6 +1631,134 @@ describe('createServeApp', () => {
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
     });
+
+    // Issue #4514 follow-up to first-round review. The agent throws
+    // `RequestError.invalidParams` for "session has no persisted
+    // records yet" — the ACP SDK forwards that as a plain
+    // `{code: -32602, message, data?}` object (not an `Error`
+    // instance), so the `instanceof` chain in `sendBridgeError` would
+    // otherwise miss it and fall to 500. `jsonRpcCodeToHttpStatus`
+    // pulls it back to 400 so the route surfaces the documented
+    // `400 invalid_params` shape.
+    it('GET /session/:id/stats maps JSON-RPC -32602 from the agent to HTTP 400', async () => {
+      const bridge = fakeBridge({
+        sessionStatsImpl: async () => {
+          throw {
+            code: -32602,
+            message:
+              'Session sess-empty has no persisted records yet — wait for the first user turn to flush.',
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/sess-empty/stats')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_params');
+      expect(res.body.error).toContain('no persisted records yet');
+    });
+
+    it('GET /session/:id/export maps JSON-RPC -32601 from the agent to HTTP 404', async () => {
+      // `RequestError.methodNotFound` from the ACP child — happens if a
+      // future daemon dropped the ext-method but the registry still
+      // advertises the capability. 404 mirrors `SessionNotFoundError`'s
+      // mapping so clients have one branch for "route absent."
+      const bridge = fakeBridge({
+        sessionExportImpl: async () => {
+          throw {
+            code: -32601,
+            message: 'Method not found: qwen/status/session/export',
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/sess/export')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(404);
+    });
+
+    // Issue #4514 review fold-in. The bridge casts the child's
+    // ext-method response to `ServeSessionExport` without a runtime
+    // shape check. If the agent returned a malformed envelope
+    // (missing contentType / filename / body, or `format` disagreeing
+    // with the requested value), the old code would `setHeader('
+    // Content-Type', undefined)` → TypeError → 500 with a stack body.
+    // The route now validates and emits a deliberate 500 + operator
+    // stderr breadcrumb via `sendBridgeError`.
+    it('GET /session/:id/export 500s on a malformed bridge response', async () => {
+      const bridge = fakeBridge({
+        sessionExportImpl: async (sessionId, format) =>
+          ({
+            v: 1 as const,
+            sessionId,
+            format, // matches requested
+            // body intentionally missing (cast through to bypass type check)
+            contentType: 'text/markdown; charset=utf-8',
+            filename: 'qwen-code-export-broken.md',
+          }) as unknown as ServeSessionExport,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-e/export')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(500);
+    });
+
+    it('GET /session/:id/export sanitizes CRLF out of the bridge-supplied filename', async () => {
+      // Defense-in-depth: today the daemon's filename is server-
+      // generated (`qwen-code-export-<ts>.<ext>`) and contains no
+      // user input, but a future change that derives the filename
+      // from session metadata or user prompts must not let
+      // `\r\n` / `"` characters split the `Content-Disposition`
+      // header. The route replaces them with `_` so an injected
+      // filename cannot append extra headers.
+      const bridge = fakeBridge({
+        sessionExportImpl: async (sessionId, format) => ({
+          v: 1 as const,
+          sessionId,
+          format,
+          body: '# safe',
+          contentType: 'text/markdown; charset=utf-8',
+          filename: 'evil"\r\nX-Injected: yes.md',
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-e/export')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-disposition']).toBe(
+        'attachment; filename="evil___X-Injected: yes.md"',
+      );
+      // No injected response header survives.
+      expect(res.headers['x-injected']).toBeUndefined();
+    });
   });
 
   describe('host allowlist (loopback bind)', () => {
@@ -3780,6 +3908,33 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret');
       expect(res.status).toBe(200);
+    });
+
+    // Issue #4514 T2.5+T2.6. The two new read-only session routes
+    // must inherit the bearer-auth middleware — without this pin,
+    // a regression that registers either route BEFORE
+    // `app.use(bearerAuth(...))` would let unauthenticated remote
+    // callers read the full session conversation (`/export`) or
+    // metrics (`/stats`). The existing "rejects missing
+    // Authorization" test only covers `/capabilities`; this one
+    // covers the new endpoints specifically.
+    it('rejects /session/:id/stats + /export without bearer when token is set', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        bridge,
+      });
+      const statsRes = await request(app)
+        .get('/session/s-1/stats')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const exportRes = await request(app)
+        .get('/session/s-1/export')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(statsRes.status).toBe(401);
+      expect(exportRes.status).toBe(401);
+      // The bridge should never have been called — the 401 short-
+      // circuits before the route handler runs.
+      expect(bridge.sessionStatsCalls).toEqual([]);
+      expect(bridge.sessionExportCalls).toEqual([]);
     });
 
     it('exempts /health from bearer auth so liveness probes work without credentials', async () => {

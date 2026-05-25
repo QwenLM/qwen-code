@@ -1233,8 +1233,11 @@ export function createServeApp(
   // Issue #4514 T2.6. Per-session conversation export. The route
   // streams the formatter's output verbatim (with `Content-Type` and
   // `Content-Disposition` set from the bridge response) so browser
-  // `<a download>` works out of the box. Format defaults to `md` for
-  // parity with the `/export` slash command.
+  // `<a download>` works out of the box. Format defaults to `md`
+  // because that's the smallest viable export for an SDK probe; the
+  // TUI's `/export` slash command defaults to `html` (its primary UX
+  // is a renderable file) — the daemon's default is intentionally
+  // different.
   app.get('/session/:id/export', async (req, res) => {
     const sessionId = req.params['id'];
     if (!sessionId) {
@@ -1265,10 +1268,44 @@ export function createServeApp(
         sessionId,
         format as ServeSessionExportFormat,
       );
+      // Validate the bridge response before stamping headers. The
+      // bridge casts the child's JSON-RPC response without a runtime
+      // shape check, so a malformed agent (or a future child handler
+      // regression) could otherwise land us with `setHeader('Content-
+      // Type', undefined)` → TypeError → 500 with a stack-trace body,
+      // a CRLF-injected filename, or an echoed `X-Qwen-Export-Format`
+      // header that disagrees with the body. Each of those is worth
+      // a deliberate 500 + operator stderr breadcrumb rather than a
+      // silent shape mismatch downstream. The filename is also
+      // CRLF-stripped before being stuck inside the
+      // `Content-Disposition` quoted-string so a future filename
+      // builder that incorporates user-controllable input cannot
+      // inject extra headers.
+      if (
+        typeof exported.contentType !== 'string' ||
+        typeof exported.filename !== 'string' ||
+        typeof exported.body !== 'string' ||
+        exported.format !== format
+      ) {
+        sendBridgeError(
+          res,
+          new Error(
+            `bridge returned malformed export envelope: ` +
+              `format=${JSON.stringify(exported.format)} ` +
+              `requested=${JSON.stringify(format)} ` +
+              `contentType=${typeof exported.contentType} ` +
+              `filename=${typeof exported.filename} ` +
+              `body=${typeof exported.body}`,
+          ),
+          { route: 'GET /session/:id/export', sessionId },
+        );
+        return;
+      }
+      const safeFilename = exported.filename.replace(/[\r\n"\\]/g, '_');
       res.setHeader('Content-Type', exported.contentType);
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="${exported.filename}"`,
+        `attachment; filename="${safeFilename}"`,
       );
       // Stamp the format echo too — clients that intercept the response
       // for telemetry can branch on it without re-parsing the
@@ -2974,6 +3011,31 @@ function sendBridgeError(
     });
     return;
   }
+  // ACP SDK forwards agent-side `RequestError` as a plain
+  // `{code, message, data}` object (not an `Error` instance — see
+  // `node_modules/@agentclientprotocol/sdk/dist/acp.js:850`), so the
+  // `instanceof` chain above misses it and routes meant to surface a
+  // 400 / 404 via `RequestError.invalidParams` / `methodNotFound` would
+  // otherwise fall through to 500. Map the standard JSON-RPC error
+  // codes to the matching HTTP status before logging — only the
+  // unmapped tail (server-defined codes, malformed throws, plain
+  // `Error`s) reaches the 5xx operator-log path below.
+  if (err && typeof err === 'object' && 'code' in err && 'message' in err) {
+    const code = (err as { code: unknown }).code;
+    const message = (err as { message: unknown }).message;
+    if (typeof code === 'number' && typeof message === 'string') {
+      const httpStatus = jsonRpcCodeToHttpStatus(code);
+      if (httpStatus !== undefined) {
+        const data = (err as { data?: unknown }).data;
+        res.status(httpStatus).json({
+          error: message,
+          code: 'invalid_params',
+          ...(data !== undefined ? { data } : {}),
+        });
+        return;
+      }
+    }
+  }
   // 5xx is the kind of error operators need to see in their daemon log
   // — bridge ENOMEM, agent stack trace, unexpected throw, etc. Without
   // logging here every 500 disappears once the caller consumes the
@@ -2990,6 +3052,32 @@ function sendBridgeError(
     `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
   );
   res.status(500).json(errorPayload(err));
+}
+
+/**
+ * Standard JSON-RPC 2.0 error codes → HTTP status mapping. Returns
+ * `undefined` for unmapped codes (server-defined `-32000..-32099` or
+ * anything outside the documented set) so the caller falls through to
+ * the 500 operator-log path. Keep this narrow — every code we map
+ * silently bypasses the stderr breadcrumb, so over-mapping would
+ * conceal real daemon failures.
+ *
+ * See https://www.jsonrpc.org/specification#error_object for the
+ * canonical code definitions.
+ */
+function jsonRpcCodeToHttpStatus(code: number): number | undefined {
+  if (code === -32700 || code === -32600 || code === -32602) {
+    // Parse error / Invalid Request / Invalid Params — caller fault.
+    return 400;
+  }
+  if (code === -32601) {
+    // Method not found — route unknown to the agent (closest HTTP
+    // equivalent is 404, mirroring how `SessionNotFoundError` maps).
+    return 404;
+  }
+  // -32603 (Internal Error) and server-defined -32000..-32099 fall
+  // through to the 500 path so operators still see them in stderr.
+  return undefined;
 }
 
 /**

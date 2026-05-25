@@ -135,4 +135,20 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       'jsonl',
     ]);
   });
+
+  it('keeps SDK + bridge export formats in lockstep (#4514 drift fence)', async () => {
+    // The SDK side declares its own `DAEMON_SESSION_EXPORT_FORMATS`
+    // so consumers don't transitively depend on `@qwen-code/acp-bridge`.
+    // The cost of that decoupling is that the two arrays can drift
+    // silently — a daemon advertising a fifth format would ship and
+    // SDK clients would reject it at compile time. This test imports
+    // the bridge constant directly (test-only, doesn't surface in the
+    // public SDK) and asserts the two arrays are identical.
+    const { SERVE_SESSION_EXPORT_FORMATS } = (await import(
+      '@qwen-code/acp-bridge/status'
+    )) as { SERVE_SESSION_EXPORT_FORMATS: readonly string[] };
+    expect([...Public.DAEMON_SESSION_EXPORT_FORMATS]).toEqual([
+      ...SERVE_SESSION_EXPORT_FORMATS,
+    ]);
+  });
 });

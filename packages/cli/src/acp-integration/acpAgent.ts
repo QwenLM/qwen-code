@@ -1918,12 +1918,20 @@ class QwenAgent implements Agent {
 
   // Issue #4514 T2.5+T2.6. Loads the session's persisted JSONL from
   // disk and runs the same `collectSessionData` + `normalizeSessionData`
-  // pipeline the `/stats` and `/export` slash commands use, so daemon
-  // surfaces and TUI surfaces stay in lockstep. The session must be
-  // live (so we can read `Config` for cwd + context window size) AND
-  // must have written at least one record (otherwise the JSONL does
-  // not exist yet and we surface a `400 invalid_params` instead of
-  // fabricating zeroes).
+  // pipeline the `/export` slash command uses, so the daemon's
+  // `/stats` + `/export` routes and the TUI `/export` slash command
+  // agree byte-for-byte for any session state already on disk. (The
+  // TUI's `/stats` slash command reads in-memory `uiTelemetryService`
+  // counters instead — it can disagree with this route until
+  // `chatRecordingService.appendRecord`'s serialized async write
+  // chain has drained.)
+  //
+  // The session must be live (so we can read `Config` for cwd +
+  // context window size) AND must have written at least one record.
+  // The "no records yet" case throws `RequestError.invalidParams`,
+  // which the bridge forwards as a JSON-RPC -32602 and `sendBridgeError`
+  // maps to HTTP 400 (`jsonRpcCodeToHttpStatus` in server.ts) so
+  // callers can branch deterministically rather than fabricate zeros.
   private async loadNormalizedSessionData(sessionId: string): Promise<{
     config: Config;
     cwd: string;

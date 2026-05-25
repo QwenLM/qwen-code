@@ -86,10 +86,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Issue #4514 T2.5. Daemon hosts `GET /session/:id/stats` —
   // per-session aggregate metrics (promptCount, totalTokens, files
   // touched, context window utilization). Wraps `collectSessionData`
-  // + `normalizeSessionData` on the session's persisted JSONL, so
-  // daemon stats and the `/stats` slash command agree for any state
-  // flushed to disk (every `chatRecordingService` append is sync).
-  // Read-only; no mutation gate.
+  // + `normalizeSessionData` on the session's persisted JSONL —
+  // shares its SSOT with the `/export` slash command, *not* with the
+  // TUI `/stats` slash command (which reads in-memory
+  // `uiTelemetryService` counters and can therefore disagree until
+  // the async write chain has drained to disk). Read-only; no
+  // mutation gate.
   session_stats: { since: 'v1' },
   // Issue #4514 T2.6. Daemon hosts `GET /session/:id/export?format=...`
   // — conversation export in markdown / html / json / jsonl, same SSOT
