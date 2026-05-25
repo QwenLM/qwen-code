@@ -473,9 +473,14 @@ Risk: <short note>`;
 }
 
 async function startAutoImprove(
-  config: Config,
+  context: CommandContext,
   args: string,
 ): Promise<SlashCommandActionReturn> {
+  const config = context.services.config;
+  if (!config) {
+    return message('error', t('Config not loaded.'));
+  }
+
   if (!config.isCronEnabled()) {
     return message(
       'error',
@@ -564,6 +569,9 @@ async function startAutoImprove(
     stopRequested: false,
     sourceSnapshot,
     prompt: parsed.prompt,
+    ...(context.session.stats.sessionId
+      ? { sessionId: context.session.stats.sessionId }
+      : {}),
   };
 
   const scheduler = config.getCronScheduler();
@@ -824,7 +832,7 @@ export const autoImproveCommand: SlashCommand = {
         if (!config) {
           return message('error', t('Config not loaded.'));
         }
-        return startAutoImprove(config, `start ${args.trim()}`.trim());
+        return startAutoImprove(context, `start ${args.trim()}`.trim());
       },
     },
     {
@@ -892,7 +900,7 @@ export const autoImproveCommand: SlashCommand = {
     }
 
     if (trimmed === 'start' || trimmed.startsWith('start ')) {
-      return startAutoImprove(config, trimmed);
+      return startAutoImprove(context, trimmed);
     }
 
     if (trimmed === 'status') {

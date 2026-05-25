@@ -59,6 +59,7 @@ export interface AutoImproveLoopState {
   loopId: string;
   status: 'running' | 'stopping' | 'stopped' | 'stale';
   sessionScoped: true;
+  sessionId?: string;
   createdAt: string;
   cadence: string;
   cron: string;
@@ -410,6 +411,10 @@ function normalizeLoopState(value: unknown): AutoImproveLoopState | null {
   const cronJobId = value['cronJobId'];
   if (typeof cronJobId === 'string' && cronJobId.trim()) {
     state.cronJobId = cronJobId;
+  }
+  const sessionId = value['sessionId'];
+  if (typeof sessionId === 'string' && sessionId.trim()) {
+    state.sessionId = sessionId.trim();
   }
   const currentRun = normalizeRunRef(value['currentRun']);
   if (currentRun) state.currentRun = currentRun;

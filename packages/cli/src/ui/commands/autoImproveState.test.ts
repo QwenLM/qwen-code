@@ -124,6 +124,7 @@ describe('autoImproveState', () => {
         loopId,
         status: 'running',
         sessionScoped: true,
+        sessionId: 'session-123',
         createdAt: '2026-05-25T00:00:00.000Z',
         cadence: '30m',
         cron: '*/30 * * * *',
@@ -140,6 +141,7 @@ describe('autoImproveState', () => {
       expect(result).not.toBeNull();
       expect(result!.loopId).toBe(loopId);
       expect(result!.status).toBe('running');
+      expect(result!.sessionId).toBe('session-123');
       expect(result!.prompt).toBe('test prompt');
     });
 

@@ -52,6 +52,7 @@ describe('autoImproveCommand', () => {
         } as never,
       },
     });
+    context.session.stats.sessionId = 'session-123';
   });
 
   afterEach(async () => {
@@ -213,10 +214,12 @@ describe('autoImproveCommand', () => {
       prompt: string;
       cronJobId: string;
       deliveryPolicy: string;
+      sessionId: string;
     };
     expect(state.prompt).toBe('prefer small fixes');
     expect(state.cronJobId).toBe('job-1');
     expect(state.deliveryPolicy).toBe('source-aware-local-commit');
+    expect(state.sessionId).toBe('session-123');
     expect(state).toHaveProperty('currentRun');
     const summaryContent = await fs.readFile(
       path.join(
