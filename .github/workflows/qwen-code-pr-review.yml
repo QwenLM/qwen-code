@@ -820,7 +820,7 @@ jobs:
           steps.size.outputs.should_review == 'true' &&
           steps.tier.outputs.tier == 'LIGHT'
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || secrets.GITHUB_TOKEN }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
@@ -965,7 +965,7 @@ jobs:
           steps.size.outputs.should_review == 'true' &&
           steps.tier.outputs.tier == 'STANDARD'
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || secrets.GITHUB_TOKEN }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
@@ -1096,7 +1096,7 @@ jobs:
           steps.size.outputs.should_review == 'true' &&
           steps.tier.outputs.tier == 'DEEP'
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || secrets.GITHUB_TOKEN }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
@@ -1340,9 +1340,6 @@ jobs:
           if [ "$section_count" -gt 0 ]; then
             {
               printf '## Qwen Code Review (DEEP)\n\n'
-              printf '_CI-safe profile adapted from bundled `/review`; '
-              printf 'focused passes: correctness/security, test coverage, '
-              printf 'maintainability/performance, and undirected audit._\n'
               cat /tmp/deep-combined-body.md
             } > qwen-review-summary.md
           else
@@ -1423,18 +1420,19 @@ jobs:
 
           summary_bytes=$(wc -c < qwen-review-summary.md)
           {
-            if [ "$EXCEEDS_REVIEW_THRESHOLD" = "true" ]; then
-              printf '> [!NOTE]\n'
-              printf '> Large PR (%s lines, threshold %s). Findings may be less complete.\n\n' \
-                "$CHANGED_LINES" "$REVIEW_SIZE_THRESHOLD"
-            fi
             head -c 60000 qwen-review-summary.md
             if [ "$summary_bytes" -gt 60000 ]; then
               printf '\n\n_Review summary was truncated at 60KB. See the workflow logs for the full output._\n'
             fi
             # shellcheck disable=SC2016
-            printf '\n\n---\n_Qwen Code `/review` · `%s` · tier `%s`_\n' \
-              "${OPENAI_MODEL:-unknown}" "${EFFECTIVE_TIER:-unknown}"
+            if [ "$EXCEEDS_REVIEW_THRESHOLD" = "true" ]; then
+              printf '\n\n---\n_Qwen Code `/review` · `%s` · tier `%s` · %s lines (%s threshold)_\n' \
+                "${OPENAI_MODEL:-unknown}" "${EFFECTIVE_TIER:-unknown}" \
+                "$CHANGED_LINES" "$REVIEW_SIZE_THRESHOLD"
+            else
+              printf '\n\n---\n_Qwen Code `/review` · `%s` · tier `%s`_\n' \
+                "${OPENAI_MODEL:-unknown}" "${EFFECTIVE_TIER:-unknown}"
+            fi
           } > qwen-pr-review-summary-comment.md
 
           gh pr comment "$PR_NUMBER" \
@@ -1487,16 +1485,16 @@ jobs:
           if [ -f qwen-review-summary.md ] && [ -s qwen-review-summary.md ] && ! grep -qF 'no assistant text parsed' qwen-review-summary.md; then
             summary_bytes=$(wc -c < qwen-review-summary.md)
             {
-              if [ "$EXCEEDS_REVIEW_THRESHOLD" = "true" ]; then
-                printf '> [!WARNING]\n'
-                printf '> Large PR warning: this PR has %s reviewable lines, above the configured %s-line AI-review guidance. The automated review still ran, but findings may be less complete on oversized diffs.\n\n' \
-                  "$CHANGED_LINES" "$REVIEW_SIZE_THRESHOLD"
-              fi
               head -c 60000 qwen-review-summary.md
               if [ "$summary_bytes" -gt 60000 ]; then
                 printf '\n\n_Review summary was truncated at 60KB. See the workflow logs for the full output._\n'
               fi
-              printf '\n\n---\n_Qwen Code automated review — the first comment delivery attempt failed; this is an automatic retry. Workflow run: %s_\n' "$RUN_URL"
+              if [ "$EXCEEDS_REVIEW_THRESHOLD" = "true" ]; then
+                printf '\n\n---\n_Qwen Code automated review (retry) · %s lines (%s threshold) · %s_\n' \
+                  "$CHANGED_LINES" "$REVIEW_SIZE_THRESHOLD" "$RUN_URL"
+              else
+                printf '\n\n---\n_Qwen Code automated review — the first comment delivery attempt failed; this is an automatic retry. Workflow run: %s_\n' "$RUN_URL"
+              fi
             } > qwen-pr-review-failure-comment.md
           else
             {

@@ -123,16 +123,18 @@ title/body):
 
 ## Validation Evidence
 
-Apply the requirement defined in `.qwen/review-rules.md` (section
-'Validation And Dogfooding') exactly as written there. Pick one verdict:
+Check the PR body and the PR author's own comments for reviewer-facing
+evidence that the change works as intended. Look for: screenshots, GIFs,
+videos, command transcripts, terminal/tmux output, logs, JSON traces,
+before/after comparisons, or test reports. Bot comments, reviewer
+suggestions, and CI output do NOT count.
 
-- `PRESENT` — name the concrete evidence found (commands / logs / JSON
-  trace / before-after / screenshot / GIF / recording / test report).
+Pick one verdict:
+
+- `PRESENT` — name the concrete evidence the author provided.
 - `MISSING` — state what reviewer-facing evidence is absent and what
-  the author should add.
-
-End that section with this line verbatim:
-`> This is an automated, advisory, comment-only review — it never approves or requests changes.`
+  the author should add (e.g., "no screenshot of the new UI state" or
+  "no command output showing the fix in action").
 ```
 
 ---

@@ -83,9 +83,6 @@ evidence, NOT whether you (the reviewer) ran commands yourself. Do NOT
 execute tests or commands to generate your own validation — judge solely
 from what the author provided in the PR body and their comments.
 
-End that section with this line verbatim:
-`> This is an automated, advisory, comment-only review — it never approves or requests changes.`
-
 ### Functional Review
 
 - Once the gates pass, focus detailed code review on correctness, security,
@@ -105,6 +102,18 @@ comments. Do NOT hesitate or skip due to "visible to others" concerns;
 posting is the intended behavior. The environment variables
 `GITHUB_REPOSITORY`, `PR_NUMBER`, `HEAD_SHA`, and `GITHUB_TOKEN` are
 pre-configured and guaranteed to be set — use them directly without checking.
+
+**IMPORTANT — no duplication**: If you post a finding as an inline comment,
+do NOT repeat that same finding in your text output. Your text output should
+only contain:
+1. The review header and "What this PR does" summary.
+2. Findings that do NOT map to a specific diff line (cross-file concerns,
+   architectural observations, missing-test-coverage notes without a
+   specific line).
+3. The Validation Evidence verdict.
+
+Findings posted inline are already visible on the PR — repeating them in
+the summary comment is redundant noise.
 
 ```bash
 jq -n \
