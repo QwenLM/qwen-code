@@ -232,8 +232,14 @@ describe('installation scripts', () => {
     expect(script).toContain(
       '[IO.File]::WriteAllText($env:QWEN_NORMALIZED_VERSION_FILE',
     );
-    expect(script).not.toContain(
+    expect(script).toContain(
       'findstr /R /C:"^[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*$"',
+    );
+    expect(script).toContain(
+      'findstr /R /C:"^[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*[.-][A-Za-z0-9.-]*$"',
+    );
+    expect(script).not.toContain(
+      'findstr /R /C:"^[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*[A-Za-z0-9.-]*$"',
     );
     expect(script).not.toContain('rmdir /S /Q "!SUMMARY_INSTALL_DIR!"');
     expect(script).not.toContain('del /F /Q "!INSTALLED_BIN!"');
@@ -1857,6 +1863,107 @@ describe('standalone release packaging', () => {
     expect(uninstallPowerShellSource).not.toMatch(
       /\$installWasManaged = Test-QwenStandaloneInstallDir[^\n]*\n\nRemove-CurrentCmdPathShim\n\nif \(\$installWasManaged\)/,
     );
+  });
+});
+
+describe('isPrivateOrReservedHost', () => {
+  it('rejects empty hostname', async () => {
+    const { isPrivateOrReservedHost } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(isPrivateOrReservedHost('')).toBe(true);
+  });
+
+  it('rejects localhost variants', async () => {
+    const { isPrivateOrReservedHost } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(isPrivateOrReservedHost('localhost')).toBe(true);
+    expect(isPrivateOrReservedHost('sub.localhost')).toBe(true);
+    expect(isPrivateOrReservedHost('LOCALHOST')).toBe(true);
+  });
+
+  it('rejects private IPv4 addresses', async () => {
+    const { isPrivateOrReservedHost } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(isPrivateOrReservedHost('127.0.0.1')).toBe(true);
+    expect(isPrivateOrReservedHost('10.0.0.1')).toBe(true);
+    expect(isPrivateOrReservedHost('192.168.1.1')).toBe(true);
+    expect(isPrivateOrReservedHost('172.16.0.1')).toBe(true);
+    expect(isPrivateOrReservedHost('169.254.1.1')).toBe(true);
+  });
+
+  it('rejects IPv6 loopback and link-local', async () => {
+    const { isPrivateOrReservedHost } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(isPrivateOrReservedHost('::1')).toBe(true);
+    expect(isPrivateOrReservedHost('[::1]')).toBe(true);
+    expect(isPrivateOrReservedHost('fe80::1')).toBe(true);
+  });
+
+  it('rejects IPv4-mapped IPv6 addresses (2-part hex)', async () => {
+    const { isPrivateOrReservedHost } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(isPrivateOrReservedHost('::ffff:7f00:1')).toBe(true);
+    expect(isPrivateOrReservedHost('::ffff:a00:1')).toBe(true);
+  });
+
+  it('rejects IPv4-mapped IPv6 addresses (3-part hex from Node normalization)', async () => {
+    const { isPrivateOrReservedHost } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(isPrivateOrReservedHost('::ffff:0:7f00:1')).toBe(true);
+    expect(isPrivateOrReservedHost('::ffff:0:a00:1')).toBe(true);
+    expect(isPrivateOrReservedHost('::ffff:0:c0a8:101')).toBe(true);
+  });
+
+  it('allows public IP addresses', async () => {
+    const { isPrivateOrReservedHost } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(isPrivateOrReservedHost('8.8.8.8')).toBe(false);
+    expect(isPrivateOrReservedHost('142.250.80.46')).toBe(false);
+    expect(isPrivateOrReservedHost('example.com')).toBe(false);
+  });
+});
+
+describe('redactUrlForLog', () => {
+  it('strips username and password from URLs', async () => {
+    const { redactUrlForLog } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(redactUrlForLog('https://user:pass@example.com/path')).toBe(
+      'https://example.com/path',
+    );
+  });
+
+  it('strips query parameters to prevent credential leakage', async () => {
+    const { redactUrlForLog } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(
+      redactUrlForLog(
+        'https://example.com/path?X-Amz-Signature=secret&token=abc',
+      ),
+    ).toBe('https://example.com/path');
+  });
+
+  it('redacts malformed URLs containing @ or ?', async () => {
+    const { redactUrlForLog } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(redactUrlForLog('not-a-url@with-creds')).toBe('<redacted URL>');
+    expect(redactUrlForLog('not-a-url?with-query')).toBe('<redacted URL>');
+  });
+
+  it('passes through safe non-URL strings', async () => {
+    const { redactUrlForLog } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(redactUrlForLog('just-a-string')).toBe('just-a-string');
   });
 });
 

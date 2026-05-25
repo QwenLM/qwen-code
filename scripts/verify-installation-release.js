@@ -307,10 +307,13 @@ function redactUrlForLog(url) {
     const parsed = new URL(url);
     parsed.username = '';
     parsed.password = '';
+    parsed.search = '';
     return parsed.toString();
   } catch {
     const value = String(url);
-    return value.includes('@') ? '<redacted URL>' : value;
+    return value.includes('@') || value.includes('?')
+      ? '<redacted URL>'
+      : value;
   }
 }
 
@@ -324,6 +327,9 @@ function standaloneArchiveName(qwenTarget) {
 
 function isPrivateOrReservedHost(hostname) {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!normalized) {
+    return true;
+  }
   if (normalized === 'localhost' || normalized.endsWith('.localhost')) {
     return true;
   }
@@ -382,7 +388,7 @@ function isPrivateOrReservedIpv4(value) {
 }
 
 function ipv4FromMappedIpv6(value) {
-  const match = value.match(/^(?:::ffff:|0:0:0:0:0:ffff:)(.+)$/);
+  const match = value.match(/^(?:::ffff:|0:0:0:0:0:ffff:)(.+)$/i);
   if (!match) {
     return null;
   }
@@ -392,16 +398,21 @@ function ipv4FromMappedIpv6(value) {
     return suffix;
   }
 
+  // Node.js normalizes IPv4-mapped IPv6 to hex form. Handle both 2-part
+  // (::ffff:7f00:1) and 3-part (::ffff:0:7f00:1) representations.
   const hexParts = suffix.split(':');
   if (
-    hexParts.length !== 2 ||
-    !hexParts.every((part) => /^[0-9a-f]{1,4}$/.test(part))
+    (hexParts.length !== 2 && hexParts.length !== 3) ||
+    !hexParts.every((part) => /^[0-9a-f]{1,4}$/i.test(part))
   ) {
     return null;
   }
 
-  const high = Number.parseInt(hexParts[0], 16);
-  const low = Number.parseInt(hexParts[1], 16);
+  // For 3 parts like "0:7f00:1", skip the leading zero segment
+  const relevantParts =
+    hexParts.length === 3 ? hexParts.slice(-2) : hexParts;
+  const high = Number.parseInt(relevantParts[0], 16);
+  const low = Number.parseInt(relevantParts[1], 16);
   return `${(high >> 8) & 255}.${high & 255}.${(low >> 8) & 255}.${low & 255}`;
 }
 
@@ -424,6 +435,8 @@ function isPrivateOrReservedIpv6(value) {
 export {
   EXPECTED_STANDALONE_ARCHIVE_NAMES,
   EXPECTED_RELEASE_ASSET_NAMES,
+  isPrivateOrReservedHost,
+  redactUrlForLog,
   releaseAssetPaths,
   verifyReleaseBaseUrl,
   verifyReleaseDirectory,

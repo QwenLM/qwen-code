@@ -84,8 +84,8 @@ display_install_version() {
 }
 
 trap cleanup_temp_dirs EXIT
-trap 'cleanup_temp_dirs; exit 130' INT
-trap 'cleanup_temp_dirs; exit 143' TERM
+trap 'printf "\033[?25h" 2>/dev/null; cleanup_temp_dirs; exit 130' INT
+trap 'printf "\033[?25h" 2>/dev/null; cleanup_temp_dirs; exit 143' TERM
 
 print_usage() {
     cat <<EOF
@@ -793,7 +793,7 @@ download_with_progress() {
     printf "\033[?25l" >&4
     trap 'rm -f "$tracefile"; printf "\033[?25h" >&4' RETURN
 
-    ( curl --trace-ascii "$tracefile" -s -L --retry 2 --connect-timeout 15 --max-time 300 -o "$output" "$url" ) &
+    ( curl --trace-ascii "$tracefile" -f -s -L --retry 2 --connect-timeout 15 --max-time 300 -o "$output" "$url" ) &
     local curl_pid=$!
 
     local content_length=0
