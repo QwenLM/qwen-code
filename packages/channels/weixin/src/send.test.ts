@@ -240,6 +240,45 @@ describe('validateImagePath', () => {
     );
   });
 
+  it('allows Windows paths inside the workspace directory', () => {
+    const imagePath = 'D:\\WorkGroup\\QwenCode\\002\\hello.png';
+    const workspaceDir = 'D:\\WorkGroup\\QwenCode\\002';
+    mockRealpathSync.mockImplementation((p: string) => {
+      if (p.includes('hello.png')) return imagePath;
+      if (p.includes('QwenCode\\002')) return workspaceDir;
+      return p;
+    });
+
+    expect(validateImagePath(imagePath, [workspaceDir])).toBe(imagePath);
+  });
+
+  it('rejects Windows paths in a sibling directory with the same prefix', () => {
+    const imagePath = 'D:\\WorkGroup\\QwenCode\\0022\\hello.png';
+    const workspaceDir = 'D:\\WorkGroup\\QwenCode\\002';
+    mockRealpathSync.mockImplementation((p: string) => {
+      if (p.includes('hello.png')) return imagePath;
+      if (p.includes('QwenCode\\002')) return workspaceDir;
+      return p;
+    });
+
+    expect(() => validateImagePath(imagePath, [workspaceDir])).toThrow(
+      'Image path outside allowed directories',
+    );
+  });
+
+  it('does not treat POSIX backslashes as directory separators', () => {
+    const imagePath = '/home/user/project\\escape.png';
+    mockRealpathSync.mockImplementation((p: string) => {
+      if (p.includes('escape.png')) return imagePath;
+      if (p === '/home/user/project') return '/home/user/project';
+      return p;
+    });
+
+    expect(() => validateImagePath(imagePath, workspaceDirs)).toThrow(
+      'Image path outside allowed directories',
+    );
+  });
+
   it('rejects image with magic bytes that do not match extension', () => {
     // readSync returns JPEG magic, but file extension is .png
     vi.mocked(fs.readSync).mockImplementation((_fd: number, buf: Buffer) => {

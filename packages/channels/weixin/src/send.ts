@@ -12,7 +12,7 @@ import {
   closeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { resolve, extname } from 'node:path';
+import { resolve, extname, win32, posix } from 'node:path';
 import { sendMessage, getUploadUrl, uploadToCdn } from './api.js';
 import { MessageType, MessageState, MessageItemType } from './types.js';
 import { encryptAesEcb, computeMd5 } from './media.js';
@@ -44,6 +44,28 @@ export function markdownToPlainText(text: string): string {
 
 const ALLOWED_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024; // 20 MB
+
+function looksLikeWindowsPath(pathValue: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(pathValue) || pathValue.startsWith('\\\\');
+}
+
+function normalizeWindowsPath(pathValue: string): string {
+  return pathValue.replace(/\//g, '\\');
+}
+
+function isInsideAllowedDir(realPath: string, allowedDir: string): boolean {
+  const windowsStyle =
+    looksLikeWindowsPath(realPath) || looksLikeWindowsPath(allowedDir);
+  const pathImpl = windowsStyle ? win32 : posix;
+  const from = windowsStyle ? normalizeWindowsPath(allowedDir) : allowedDir;
+  const to = windowsStyle ? normalizeWindowsPath(realPath) : realPath;
+  const relative = pathImpl.relative(from, to);
+
+  return (
+    relative === '' ||
+    (!relative.startsWith('..') && !pathImpl.isAbsolute(relative))
+  );
+}
 
 /** Image magic bytes → MIME type mapping. */
 export function detectImageMime(data: Buffer): string {
@@ -125,7 +147,7 @@ export function validateImagePath(
     ...workspaceDirs.map((d) => realpathSync(resolve(d)) + '/'),
   ];
 
-  if (!ALLOWED_DIRS.some((dir) => real.startsWith(dir))) {
+  if (!ALLOWED_DIRS.some((dir) => isInsideAllowedDir(real, dir))) {
     throw new Error(`Image path outside allowed directories: ${real}`);
   }
 
