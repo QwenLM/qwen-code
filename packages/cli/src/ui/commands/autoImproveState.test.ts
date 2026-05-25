@@ -309,6 +309,33 @@ describe('autoImproveState', () => {
       const result = await readAutoImproveConfig(tempDir);
       expect(result.customSources).toEqual(['dup', 'unique']);
     });
+
+    it('truncates long entries to 200 characters', async () => {
+      const longEntry = 'a'.repeat(300);
+      await writeAutoImproveConfig(tempDir, {
+        version: 1,
+        sources: { githubIssues: false, githubPrs: false, localSignals: false },
+        customSources: [longEntry],
+      });
+
+      const result = await readAutoImproveConfig(tempDir);
+      expect(result.customSources).toHaveLength(1);
+      expect(result.customSources[0]!.length).toBe(200);
+    });
+
+    it('limits custom sources to 10 entries', async () => {
+      const sources = Array.from({ length: 20 }, (_, i) => `source-${i}`);
+      await writeAutoImproveConfig(tempDir, {
+        version: 1,
+        sources: { githubIssues: false, githubPrs: false, localSignals: false },
+        customSources: sources,
+      });
+
+      const result = await readAutoImproveConfig(tempDir);
+      expect(result.customSources).toHaveLength(10);
+      expect(result.customSources[0]).toBe('source-0');
+      expect(result.customSources[9]).toBe('source-9');
+    });
   });
 
   describe('readActiveAutoImproveLoop', () => {

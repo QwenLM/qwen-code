@@ -155,14 +155,18 @@ function readBoolean(value: unknown): boolean {
   return typeof value === 'boolean' ? value : false;
 }
 
+const MAX_CUSTOM_SOURCE_LENGTH = 200;
+const MAX_CUSTOM_SOURCES = 10;
+
 function normalizeStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
   const result: string[] = [];
   for (const item of value) {
     if (typeof item !== 'string') continue;
-    const trimmed = item.trim();
+    const trimmed = item.trim().slice(0, MAX_CUSTOM_SOURCE_LENGTH);
     if (!trimmed || seen.has(trimmed)) continue;
+    if (result.length >= MAX_CUSTOM_SOURCES) break;
     seen.add(trimmed);
     result.push(trimmed);
   }
