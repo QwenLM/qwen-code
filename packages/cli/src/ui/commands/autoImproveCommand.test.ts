@@ -160,10 +160,29 @@ describe('autoImproveCommand', () => {
       'continue scanning other open PRs until you find an actionable task',
     );
     expect(prompt).toContain(
-      'Do not treat already-resolved comments or mere comment history as work to fix.',
+      'Use GitHub review thread state, not comment heuristics',
+    );
+    expect(prompt).toContain('inspect isResolved and isOutdated');
+    expect(prompt).toContain(
+      'Do not treat already-resolved threads, ordinary comment history, or replies alone as work to fix.',
     );
     expect(prompt).toContain(
-      'reply to each addressed review thread/comment with a concise summary and validation result, and resolve the thread.',
+      'For each unresolved PR review thread, triage before editing.',
+    );
+    expect(prompt).toContain(
+      '(b) explain-and-resolve: the concern is outdated, already addressed, not applicable, a false positive, outside this PR',
+    );
+    expect(prompt).toContain(
+      'If a thread should not be changed, reply with a concise, evidence-based explanation',
+    );
+    expect(prompt).toContain(
+      'Treat outdated unresolved review threads as triage candidates, not as automatically resolved.',
+    );
+    expect(prompt).toContain(
+      'Resolve only threads you have actually addressed by either a validated fix or a clear explanation.',
+    );
+    expect(prompt).toContain(
+      'either fix and validate the issue, or explain why no code change is appropriate.',
     );
     expect(prompt).toContain(
       'If local repository scanning is enabled, inspect the current repo for bounded, locally verifiable improvements',
