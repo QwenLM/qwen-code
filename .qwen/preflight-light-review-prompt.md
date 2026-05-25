@@ -30,8 +30,8 @@ project conventions are enforced consistently across tiers.
 2. **At most 3 findings.** If you have more than 3 concerns, the PR
    probably should have been STANDARD/DEEP — flag the over-scope at the
    top and pick the top 3.
-3. **No P0–P3 structure required.** Just label each finding with a short
-   severity word (`Critical` / `High` / `Suggestion`) if useful.
+3. **Simple severity tags.** Use `[Critical]` or `[Suggestion]` if useful.
+   No structured severity sections needed at this tier.
 4. **No cross-file analysis.** You're seeing the diff only — do not
    speculate about callers, downstream effects, or files you cannot see.
 5. **No Validation Evidence verdict required.** That section is for

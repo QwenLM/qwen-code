@@ -17,7 +17,8 @@ Return markdown only, with this shape:
 ```markdown
 ### Test Coverage
 
-- **P0/P1/P2/P3 `file:line`** - uncovered scenario, impact, suggested test.
+- **[Critical] `file:line`** — uncovered scenario, impact, suggested test.
+- **[Suggestion] `file:line`** — uncovered scenario, impact, suggested test.
 
 ### Needs Verification
 

@@ -95,30 +95,17 @@ from what the author provided in the PR body and their comments.
 ### Posting Inline Comments (MANDATORY for all findings with diff lines)
 
 **After writing your review text**, post ALL findings that map to specific
-diff lines as inline PR review comments using Bash — regardless of severity
-(P0 through P3). This is a **pre-authorized action** — the CI workflow
-operator has explicitly granted permission for this bot to post review
-comments. Do NOT hesitate or skip due to "visible to others" concerns;
-posting is the intended behavior. The environment variables
-`GITHUB_REPOSITORY`, `PR_NUMBER`, `HEAD_SHA`, and `GITHUB_TOKEN` are
-pre-configured and guaranteed to be set — use them directly without checking.
-
-**IMPORTANT — no duplication**: If you post a finding as an inline comment,
-do NOT repeat that same finding in your text output. Your text output should
-only contain:
-1. The review header and "What this PR does" summary.
-2. Findings that do NOT map to a specific diff line (cross-file concerns,
-   architectural observations, missing-test-coverage notes without a
-   specific line).
-3. The Validation Evidence verdict.
-
-Findings posted inline are already visible on the PR — repeating them in
-the summary comment is redundant noise.
+diff lines as inline PR review comments using Bash. This is a **pre-authorized
+action** — the CI workflow operator has explicitly granted permission for this
+bot to post review comments. Do NOT hesitate or skip due to "visible to others"
+concerns; posting is the intended behavior. The environment variables
+`GITHUB_REPOSITORY`, `PR_NUMBER`, `HEAD_SHA`, `GITHUB_TOKEN`, and
+`OPENAI_MODEL` are pre-configured and guaranteed to be set.
 
 ```bash
 jq -n \
   --arg sha "$HEAD_SHA" \
-  --argjson comments '[{"path":"src/file.ts","line":42,"body":"**[P2]** description"}]' \
+  --argjson comments '[{"path":"src/file.ts","line":42,"body":"**[Critical]** description\n\n_— '"$OPENAI_MODEL"' via Qwen Code /review_"}]' \
   '{commit_id: $sha, event: "COMMENT", body: "", comments: $comments}' \
 | gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
     --method POST --input -
@@ -126,8 +113,20 @@ jq -n \
 
 Rules:
 - Execute this Bash command after completing your review text output.
-- Post ALL findings (P0–P3) that map to a specific changed line in the diff.
+- Post ALL findings that map to a specific changed line in the diff.
 - Findings without a clear diff line stay in your text output only.
 - If you have no findings that map to diff lines, skip the API call.
-- The review body MUST be an empty string `""` — do not add any text there.
-- Keep each inline comment body concise: severity tag + description only.
+- The review body MUST be an empty string `""`.
+- Each inline comment body format: `**[severity]** description` followed by
+  a blank line and `_— $OPENAI_MODEL via Qwen Code /review_`.
+- Severity tags: `[Critical]` or `[Suggestion]` (same as bundled `/review`).
+- If the `gh api` call fails, include ALL findings (including line-mapped
+  ones) in your text output as a fallback — never silently discard findings.
+
+**IMPORTANT — no duplication**: If inline comments were posted successfully,
+do NOT repeat those findings in your text output. Your text output should
+only contain:
+1. The review header and "What this PR does" summary.
+2. Findings that do NOT map to a specific diff line (cross-file concerns,
+   architectural observations).
+3. The Validation Evidence verdict.

@@ -658,7 +658,7 @@ Deep review verdict: APPROVE
 - **R1**：preflight 模型本身的可靠性 —— 便宜模型可能 JSON 结构不稳。需要在实现期 sample 试若干 PR 观察输出质量；不稳就回退到 deep review 模型 SKU。
 - **R2**：preflight 漏档 —— 模型可能把高风险 PR 误判为 LIGHT。**缓解**：calibration 示例里强化 high-blast-radius case；校准 loop 数据驱动 prompt 迭代；maintainer 可用 `@qwen-code /review --tier=deep` 显式补救。
 - **R3**：tier 升档的"棘轮效应" —— 用户感知 preflight 永远只升档不降档，长期可能不再信任。**缓解**：校准 loop 数据驱动 ablation，定期 review 是否过度保守。
-- **R4（安全 — 残留风险）**：review step 会把**不可信的 PR diff / title / body**放进 prompt。当前实现不使用 `--yolo`，并在执行 qwen 时移除 `GITHUB_TOKEN` / `GH_TOKEN`、限制 core tools、禁用 MCP server；评论发布使用独立后置 step。**现有缓解**：① 自动触发与 `@qwen-code /review` 评论触发都限定 OWNER/MEMBER/COLLABORATOR；② workflow 全程 checkout 可信的 `main`，从不 checkout PR head 代码；③ 所有不可信数据由可信 shell/`gh`/`jq` 收集后渲染进 prompt，杜绝 shell 层注入；④ 第三方 action 全部 SHA pin；⑤ qwen 进程拿不到评论用 token。**未消除的部分**：LLM 语义层注入无法靠上述手段根除，模型仍可能输出误导性 review；因此 AI review 保持 advisory-only，不作为 merge gate。
+- **R4（安全 — 残留风险）**：review step 会把**不可信的 PR diff / title / body**放进 prompt。当前实现不使用 `--yolo`，并通过 `--exclude-tools` 屏蔽编排类工具、禁用 MCP server。`GITHUB_TOKEN`（用于 inline comments 发布）在 qwen 进程环境中可见。**现有缓解**：① 自动触发与 `@qwen-code /review` 评论触发都限定 OWNER/MEMBER/COLLABORATOR；② workflow 全程 checkout 可信的 `main`，从不 checkout PR head 代码；③ 所有不可信数据由可信 shell/`gh`/`jq` 收集后渲染进 prompt，杜绝 shell 层注入；④ 第三方 action 全部 SHA pin；⑤ harden-runner egress audit 记录所有出站请求。**未消除的部分**：LLM 语义层注入无法靠上述手段根除，模型仍可能输出误导性 review 或尝试通过 Bash 工具泄漏环境变量；harden-runner 后续切 block 模式可阻断未知出站。AI review 保持 advisory-only，不作为 merge gate。
 
 ## Rollback / Emergency Disable
 

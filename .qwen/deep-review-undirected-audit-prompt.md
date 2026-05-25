@@ -18,7 +18,9 @@ Return markdown only, with this shape:
 ```markdown
 ### Undirected Audit
 
-- **P0/P1/P2/P3 `file:line`** — concrete issue description, impact on users
+- **[Critical] `file:line`** — concrete issue description, impact on users
+  or maintainers, and suggested fix or follow-up action.
+- **[Suggestion] `file:line`** — concrete issue description, impact on users
   or maintainers, and suggested fix or follow-up action.
 
 ### Needs Verification

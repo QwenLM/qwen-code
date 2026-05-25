@@ -33,8 +33,8 @@ the generic guidance below when they conflict.
 1. **One pass, single LLM call.** No iterative reverse audit; no multi-
    persona retries; no shell-driven re-prompts. Make your first pass
    count.
-2. **Structured output with P0–P3 severity.** Group findings by severity.
-   Empty severity sections are OK to omit.
+2. **Structured output with severity tags.** Use `[Critical]` or
+   `[Suggestion]`. Empty severity sections are OK to omit.
 3. **Validation Evidence verdict is required** (per `.qwen/review-rules.md`,
    section 'Validation And Dogfooding'). Include the section even if the
    answer is `MISSING`.
@@ -77,12 +77,10 @@ find a real issue here, escalate as `Critical`):
 
 ## Severity scale
 
-| Tag    | Meaning                                                                                                              |
-| ------ | -------------------------------------------------------------------------------------------------------------------- |
-| **P0** | Critical — blocks merge. Security regression, data loss, broken core functionality, evidence preflight under-tiered. |
-| **P1** | High — should fix before merge. Logic bug, regression, significant maintainability hit.                              |
-| **P2** | Medium — should fix this PR or open a follow-up. Code smell, missing test, minor inconsistency.                      |
-| **P3** | Low — optional. Naming, style, suggestion.                                                                           |
+| Tag              | Meaning                                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------------------ |
+| **[Critical]**   | Blocks merge. Security regression, data loss, broken core functionality, preflight under-tiered.       |
+| **[Suggestion]** | Everything else: logic bugs, missing tests, code smells, naming, style, improvement ideas.             |
 
 ---
 
@@ -95,20 +93,12 @@ find a real issue here, escalate as `Critical`):
 title/body):
 …
 
-### 🔴 P0 — Critical
+### Critical
 
 1. **`file:line`** — concern + suggested fix.
-   (omit this entire section if no P0 findings)
+   (omit this section if no Critical findings)
 
-### 🟠 P1 — High
-
-1. **`file:line`** — concern + suggested fix.
-
-### 🟡 P2 — Medium
-
-1. **`file:line`** — concern + suggested fix.
-
-### 🟢 P3 — Low
+### Suggestion
 
 1. **`file:line`** — concern + suggested fix.
 

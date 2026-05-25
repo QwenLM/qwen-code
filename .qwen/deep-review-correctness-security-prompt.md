@@ -18,7 +18,8 @@ Return markdown only, with this shape:
 ```markdown
 ### Correctness / Security
 
-- **P0/P1/P2/P3 `file:line`** - issue, impact, suggested fix.
+- **[Critical] `file:line`** — issue, impact, suggested fix.
+- **[Suggestion] `file:line`** — issue, impact, suggested fix.
 
 ### Needs Verification
 

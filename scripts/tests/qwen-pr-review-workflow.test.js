@@ -251,7 +251,7 @@ describe('Qwen PR review workflow safety rails', () => {
       expect(workflow).toContain(template);
     }
     expect(workflow).toContain(
-      'CI-safe profile adapted from bundled `/review`',
+      "printf '## Qwen Code Review (DEEP)",
     );
   });
 
@@ -360,9 +360,8 @@ describe('Qwen PR review workflow safety rails', () => {
 
   it('keeps the project-required Validation Evidence section in split DEEP reviews', () => {
     expect(deepTestCoveragePrompt).toContain('## Validation Evidence');
-    expect(deepTestCoveragePrompt).toContain(
-      'This is an automated, advisory, comment-only review',
-    );
+    expect(deepTestCoveragePrompt).toContain('PRESENT');
+    expect(deepTestCoveragePrompt).toContain('MISSING');
   });
 
   it('keeps preflight agent hints aligned with actual DEEP focused pass names', () => {
