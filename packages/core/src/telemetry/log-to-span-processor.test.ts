@@ -860,7 +860,7 @@ describe('LogToSpanProcessor', () => {
       }
     });
 
-    it('reports error=unknown when result.error is missing', async () => {
+    it('reports error="unknown" when result.error is missing', async () => {
       await processor.shutdown();
       processor = makeFailingProcessor(undefined);
       const stderrWrite = vi
@@ -870,8 +870,29 @@ describe('LogToSpanProcessor', () => {
       try {
         await flushOne(processor);
         expect(stderrWrite).toHaveBeenCalledWith(
-          '[LogToSpan] export failed: code=1 error=unknown\n',
+          '[LogToSpan] export failed: code=1 error="unknown"\n',
         );
+      } finally {
+        stderrWrite.mockRestore();
+      }
+    });
+
+    it('omits data field when err.data is a non-string truthy value (e.g. Buffer)', async () => {
+      await processor.shutdown();
+      const err = Object.assign(new Error('fail'), {
+        code: 500,
+        data: Buffer.from('binary'),
+      });
+      processor = makeFailingProcessor(err as unknown as Error);
+      const stderrWrite = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      try {
+        await flushOne(processor);
+        const msg = stderrWrite.mock.calls[0][0] as string;
+        expect(msg).toContain('httpCode=500');
+        expect(msg).not.toContain('data=');
       } finally {
         stderrWrite.mockRestore();
       }
@@ -993,7 +1014,9 @@ describe('LogToSpanProcessor', () => {
         await flushPromise;
 
         expect(sink).toHaveBeenCalledWith(
-          expect.stringMatching(/^\[LogToSpan] export timeout after \d+ms$/),
+          expect.stringMatching(
+            /^\[LogToSpan] export timeout after \d+ms \(\d+ span\(s\)\)$/,
+          ),
         );
       } finally {
         vi.useRealTimers();
@@ -1016,7 +1039,32 @@ describe('LogToSpanProcessor', () => {
 
       await flushOne(processor);
       expect(sink).toHaveBeenCalledWith(
-        '[LogToSpan] export threw: "exporter exploded synchronously"',
+        '[LogToSpan] export threw: error="exporter exploded synchronously"',
+      );
+    });
+
+    it('surfaces httpCode/data when a sync-thrown error carries OTLPExporterError fields', async () => {
+      await processor.shutdown();
+      const sink = vi.fn();
+      const err = Object.assign(new Error('Bad Request'), {
+        name: 'OTLPExporterError',
+        code: 400,
+        data: 'malformed payload',
+      });
+      processor = new LogToSpanProcessor(
+        {
+          export: vi.fn(() => {
+            throw err;
+          }),
+          shutdown: vi.fn().mockResolvedValue(undefined),
+          forceFlush: vi.fn().mockResolvedValue(undefined),
+        } as unknown as SpanExporter,
+        { flushIntervalMs: 60000, diagnosticsSink: sink },
+      );
+
+      await flushOne(processor);
+      expect(sink).toHaveBeenCalledWith(
+        '[LogToSpan] export threw: error="Bad Request" httpCode=400 data="malformed payload"',
       );
     });
 
@@ -1037,7 +1085,7 @@ describe('LogToSpanProcessor', () => {
       await flushOne(processor);
       const msg = sink.mock.calls[0][0] as string;
       expect(msg).not.toContain('\n');
-      expect(msg).toBe('[LogToSpan] export threw: "line1\\nline2"');
+      expect(msg).toBe('[LogToSpan] export threw: error="line1\\nline2"');
     });
 
     it('handles non-Error throws (e.g. throw "string") in the export-threw path', async () => {
@@ -1058,7 +1106,7 @@ describe('LogToSpanProcessor', () => {
 
       await flushOne(processor);
       expect(sink).toHaveBeenCalledWith(
-        '[LogToSpan] export threw: "raw string thrown"',
+        '[LogToSpan] export threw: error="raw string thrown"',
       );
     });
 

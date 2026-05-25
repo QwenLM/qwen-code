@@ -291,7 +291,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     const exportPromise = new Promise<void>((resolve) => {
       const timeout = setTimeout(() => {
         this.emitDiagnostic(
-          `[LogToSpan] export timeout after ${EXPORT_TIMEOUT_MS}ms`,
+          `[LogToSpan] export timeout after ${EXPORT_TIMEOUT_MS}ms (${spans.length} span(s))`,
         );
         resolve();
       }, EXPORT_TIMEOUT_MS);
@@ -312,12 +312,15 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         );
       } catch (err) {
         clearTimeout(timeout);
-        // JSON.stringify so embedded newlines in the thrown message stay on
-        // one line — same single-line invariant enforced by formatExportError.
-        const detail = err instanceof Error ? err.message : String(err);
-        this.emitDiagnostic(
-          `[LogToSpan] export threw: ${JSON.stringify(detail)}`,
-        );
+        // Reuse formatExportError for Error instances so a sync-thrown
+        // OTLPExporterError surfaces httpCode/data the same way callback
+        // failures do. Non-Error throws fall back to JSON.stringify to
+        // preserve the single-line invariant.
+        const detail =
+          err instanceof Error
+            ? formatExportError(err)
+            : `error=${JSON.stringify(String(err))}`;
+        this.emitDiagnostic(`[LogToSpan] export threw: ${detail}`);
         resolve();
       }
     });
@@ -461,8 +464,12 @@ function deriveSpanStatus(attrs: Record<string, unknown> | undefined): {
 // units), not bytes — non-ASCII payloads may stringify to more bytes; this
 // is fine because the cap is a leak/noise budget, not a hard byte limit.
 function formatExportError(err: Error | undefined): string {
-  if (!err) return 'error=unknown';
-  const extra = err as { code?: number; data?: string };
+  if (!err) return 'error="unknown"';
+  // `code` is typed as `number | string` because Node networking errors (e.g.
+  // ECONNREFUSED) surface a string here, while OTLPExporterError uses number.
+  // The `typeof === 'number'` guard below is load-bearing — don't relax it to
+  // a truthy check or string codes get mislabelled as HTTP statuses.
+  const extra = err as { code?: number | string; data?: string };
   const msg = err.message || err.name || 'unknown';
   const parts = [`error=${JSON.stringify(msg)}`];
   // `code` is only meaningful as an HTTP status. Networking errors surface

@@ -300,6 +300,12 @@ export function initializeTelemetry(config: Config): void {
             // via raw stderr. In non-interactive mode, leave the default sink
             // alone so CI / scripts can still see export failures on stderr —
             // the canonical diagnostic channel for batch runs.
+            //
+            // Caveat for interactive mode: when the user has explicitly
+            // disabled file logging via QWEN_DEBUG_LOG_FILE=0, debugLogger.warn
+            // silently no-ops and bridge diagnostics are fully lost — accepted
+            // trade-off, since falling back to stderr would re-introduce the
+            // TUI pollution this injection was added to prevent.
             ...(config.isInteractive() && {
               diagnosticsSink: (message: string) => debugLogger.warn(message),
             }),
