@@ -164,6 +164,18 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
+    it('should return true for Token Plan URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
     it('should return true for internal alibaba-inc.com subdomain', () => {
       const config = {
         authType: AuthType.USE_OPENAI,
@@ -239,6 +251,8 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://notaliyun-inc.com/v1',
         'https://alibaba-inc.com.evil.com/v1',
         'https://aliyun-inc.com.evil.com/v1',
+        'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
+        'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
       ];
 
       configs.forEach((baseUrl) => {
