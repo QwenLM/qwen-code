@@ -254,7 +254,7 @@ Qwen Code can abort an unattended run when it crosses one of the following thres
 
 | Flag                  | Settings key               | What it bounds                                                                                                                                                                                                |
 | --------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--max-wall-time`     | `model.maxWallTimeSeconds` | Wall-clock duration of the whole run. Flag accepts `90` (s), `30s`, `5m`, `1h`, `500ms`. Settings is seconds.                                                                                                 |
+| `--max-wall-time`     | `model.maxWallTimeSeconds` | Wall-clock duration of the whole run. Flag accepts `90` (s), `30s`, `5m`, `1h`, `1.5h` (fractional units supported). Minimum 1s — sub-second values are rejected as typos. Settings is seconds.               |
 | `--max-tool-calls`    | `model.maxToolCalls`       | Cumulative top-level tool calls dispatched by the main run loop (counts successes _and_ failures — the model still consumes tokens on errors). See "Scope" below for subagent / structured-output exemptions. |
 | `--max-session-turns` | `model.maxSessionTurns`    | Number of user/model/tool turns; pre-existing. Exits with code 53 on overrun (distinct from budget exit 55).                                                                                                  |
 
