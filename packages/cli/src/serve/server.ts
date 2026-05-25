@@ -1474,11 +1474,24 @@ export function createServeApp(
     // #4175 follow-up. Wraps `generateSessionRecap` (core/services/
     // sessionRecap.ts) so daemon clients can fetch a one-sentence
     // "where did I leave off" summary without driving the agent through
-    // a full prompt turn. Posture mirrors `/session/:id/prompt`:
-    // non-strict gate (token cost, not state mutation), and disconnect
-    // is detected via `res.once('close')` for the bridge-side
-    // cancellation. Best-effort — `recap: null` on short history or
-    // transient model failure is a normal 200, not an error.
+    // a full prompt turn. Non-strict gate (token cost, not state
+    // mutation), matching `/session/:id/prompt`'s posture.
+    //
+    // v1 cancellation: NONE on the route side. There is intentionally no
+    // `res.once('close')` listener and no `AbortSignal` plumbed into
+    // `bridge.generateSessionRecap`. The only ceilings are the bridge's
+    // 60s `SESSION_RECAP_TIMEOUT_MS` backstop and the
+    // `getTransportClosedReject` race against ACP transport death. This
+    // matches the ACP child's `acpAgent.ts` handler, which also passes
+    // a never-aborting `AbortController().signal` to the core helper
+    // because there is no cross-process abort plumbing yet. Wiring an
+    // HTTP-side AbortController would be cosmetic — the child-side LLM
+    // call would still run to completion, so e2e cancel is not
+    // achievable in v1. Recap is short (single-attempt side-query,
+    // ~1–5s typical, `maxOutputTokens: 300`), so this is acceptable.
+    //
+    // Best-effort — `recap: null` on short history or transient model
+    // failure is a normal 200, not an error.
     const sessionId = req.params['id'];
     if (!sessionId) {
       res

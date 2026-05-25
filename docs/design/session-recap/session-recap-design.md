@@ -44,11 +44,19 @@ helpers: `DaemonClient.recapSession(sessionId, opts)` and
 `docs/developers/qwen-serve-protocol.md` § `POST /session/:id/recap`
 for the wire contract and error envelope.
 
-Cancellation is best-effort at v1: client disconnect aborts the
-bridge-side wait, but the LLM call in the ACP child runs to completion
-(recap is short — single-attempt, ~1–5s typical). A 60s backstop
-timeout guards a wedged ACP channel. A future request-id-based cancel
-ext-method can plumb full end-to-end cancellation if needed.
+Cancellation is **absent in v1**. The route does not listen for HTTP
+client disconnect, no `AbortSignal` is threaded into
+`bridge.generateSessionRecap`, and the ACP child handler passes a
+never-aborting `AbortController().signal` to the core helper (no
+cross-process abort plumbing yet). The only ceilings are the bridge's
+60s `SESSION_RECAP_TIMEOUT_MS` backstop and the transport-closed race
+against ACP channel death. Wiring an HTTP-side AbortController in
+isolation would be cosmetic — the child-side LLM call would still run
+to completion, so e2e cancel is not achievable without the cross-
+process abort piece. This is acceptable for v1 because recap is short
+(single-attempt side-query, `maxOutputTokens: 300`, ~1–5s typical).
+A future request-id-based cancel ext-method can plumb full end-to-end
+cancellation if/when the bandwidth cost justifies it.
 
 ## Architecture
 

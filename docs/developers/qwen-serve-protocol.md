@@ -1135,7 +1135,7 @@ Errors:
 - `400 {code: 'invalid_client_id'}` — malformed `X-Qwen-Client-Id` header.
 - `404` — session unknown.
 
-Cancellation: client disconnect aborts the bridge-side wait, but the LLM call in the ACP child runs to completion (recap is short — single-attempt, ~1–5s typical). A 60s backstop timeout guards against a wedged ACP channel.
+Cancellation: **none in v1**. The route does not listen for HTTP client disconnect, no `AbortSignal` is plumbed into the bridge, and the ACP child runs the side-query to completion regardless of whether the caller has disconnected. The only ceilings are the bridge's 60s backstop timeout (`SESSION_RECAP_TIMEOUT_MS`) and the transport-closed race against ACP channel death. This is acceptable because recap is short (single-attempt, `maxOutputTokens: 300`, ~1–5s typical); a request-id-based cancel ext-method can plumb full end-to-end cancellation in a future release if the bandwidth cost ever justifies it.
 
 ### Mutation: approval, tools, init, MCP restart
 
