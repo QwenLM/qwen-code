@@ -188,7 +188,6 @@ export async function resolveTelemetrySettings(options: {
     outfile,
     resourceAttributes,
     metrics: { includeSessionId: metricsIncludeSessionId },
-    sessionIdHeaderHosts: settings.sessionIdHeaderHosts,
     resourceAttributeWarnings: resourceAttributeWarnings.length
       ? resourceAttributeWarnings
       : undefined,

@@ -147,6 +147,7 @@ describe('Telemetry SDK', () => {
       getDebugMode: () => false,
       getSessionId: () => 'test-session',
       getCliVersion: () => '1.0.0-test',
+      getOutboundCorrelationPropagateTraceContext: () => false,
     } as unknown as Config;
   });
 
@@ -640,6 +641,49 @@ describe('Telemetry SDK', () => {
     });
   });
 
+  describe('Outbound trace-context propagation gate', () => {
+    function getTextMapPropagator(): unknown {
+      const constructorCall = vi.mocked(NodeSDK).mock.calls[0]![0]!;
+      return (constructorCall as { textMapPropagator?: unknown })
+        .textMapPropagator;
+    }
+
+    it('installs a no-op TextMapPropagator by default (propagateTraceContext=false)', () => {
+      // Default behavior per PR #4390 R4 split: traceparent is NOT written
+      // onto outbound wire. The propagator's inject() must be a no-op so
+      // UndiciInstrumentation's `propagation.inject(carrier)` call writes
+      // nothing into the outgoing request's headers.
+      initializeTelemetry(mockConfig);
+      const propagator = getTextMapPropagator() as
+        | { inject: (...args: unknown[]) => void; fields: () => string[] }
+        | undefined;
+      expect(propagator).toBeDefined();
+      expect(typeof propagator!.inject).toBe('function');
+      // Sanity: fields() returns empty array → instrumentation knows there
+      // are no headers to clear / no propagator state.
+      expect(propagator!.fields()).toEqual([]);
+      // inject is a no-op — does not throw, does not mutate the carrier.
+      const carrier: Record<string, string> = { existing: 'h' };
+      expect(() =>
+        propagator!.inject({} as never, carrier, {} as never),
+      ).not.toThrow();
+      expect(carrier).toEqual({ existing: 'h' });
+    });
+
+    it('uses the SDK default propagator when propagateTraceContext=true (operator opt-in)', () => {
+      vi.spyOn(
+        mockConfig,
+        'getOutboundCorrelationPropagateTraceContext',
+      ).mockReturnValue(true);
+      initializeTelemetry(mockConfig);
+      // textMapPropagator is omitted from NodeSDK options → SDK installs
+      // its default W3C composite propagator. Test asserts the absence
+      // because the actual W3CTraceContextPropagator instance is created
+      // inside @opentelemetry/sdk-node which is auto-mocked here.
+      expect(getTextMapPropagator()).toBeUndefined();
+    });
+  });
+
   describe('Instrumentations', () => {
     function getInstrumentations(): unknown[] {
       const constructorCall = vi.mocked(NodeSDK).mock.calls[0]![0]!;
@@ -1115,6 +1159,7 @@ describe('refreshSessionContext', () => {
       getDebugMode: () => false,
       getSessionId: () => 'test-session',
       getCliVersion: () => '1.0.0-test',
+      getOutboundCorrelationPropagateTraceContext: () => false,
     } as unknown as Config;
   });
 

@@ -262,25 +262,23 @@ and logs still carry `session.id`, and trace / log backends (Jaeger, Tempo,
 Loki, Aliyun SLS / ARMS Tracing) handle per-session slicing natively without
 cardinality pressure.
 
-### Trace context propagation
+### Client-side HTTP span on outbound fetch
 
-When telemetry is enabled, Qwen Code instruments outgoing `fetch()` requests
-(used by `openai`, `@google/genai`, and `@anthropic-ai/sdk`) and automatically
-injects the standard W3C `traceparent` header on every LLM service call:
+When telemetry is enabled, Qwen Code registers `UndiciInstrumentation`
+which creates a client-side HTTP span for every outbound `fetch()`
+request originated by the process — including the LLM SDKs (`openai`,
+`@google/genai`, `@anthropic-ai/sdk`), the MCP StreamableHTTP client, the
+`WebFetch` tool, and any IDE-extension out-of-process calls. The span
+lets you see network latency (TTFB / response body transfer) separately
+from upstream model processing time, which the existing
+`api.generateContent` span alone can't distinguish.
 
-```
-traceparent: 00-<32-hex traceId>-<16-hex parentSpanId>-<01-sampled | 00-not-sampled>
-```
-
-The traceId is the qwen-code interaction trace id; the parent span is the
-active `api.generateContent` span. Any OTel-instrumented LLM service (e.g.
-DashScope serving from an ARMS Tracing backend) that reads this header will
-make its server-side spans children of qwen-code's trace, giving you a single
-end-to-end trace tree across the process boundary.
-
-You also get a free client-side HTTP span per LLM call — useful for separating
-network latency (TTFB / response body transfer) from upstream model processing
-time, which the existing `api.generateContent` span alone can't distinguish.
+These spans go to your **own** OTLP collector (or file outfile) just like
+the rest of the telemetry — they do not affect what is written onto the
+outbound HTTP request itself. Whether the W3C `traceparent` header is
+also written into the outgoing request stream is controlled by a
+**separate, security-relevant setting** documented in
+[outbound correlation](#outbound-correlation-security-relevant) below.
 
 **Feedback-loop avoidance.** OTel SDK uses `fetch` internally to upload OTLP
 data. Without protection, instrumenting `fetch` would trace those uploads,
@@ -291,98 +289,53 @@ URLs matching the configured `telemetry.otlpEndpoint` /
 `telemetry.otlpMetricsEndpoint` prefixes. In file-outfile mode there are no
 outbound HTTP uploads, so the hook is a no-op.
 
-**Scope: all `fetch()` calls, not just LLM.** The undici instrumentation
-patches `globalThis.fetch` for the entire process, so a client span +
-`traceparent` injection happens on every outbound `fetch` — including the
-`WebFetch` tool, MCP StreamableHTTP clients, and any IDE-extension
-out-of-process calls — not only LLM SDK traffic. Two consequences worth
-knowing:
+## Outbound correlation (SECURITY-RELEVANT)
 
-- **Trace ID leakage.** The W3C `traceparent` header carries the trace ID
-  to every destination, including third-party URLs supplied at runtime
-  (e.g. a `WebFetch` to an arbitrary domain). The trace ID is not a
-  secret per the W3C spec — the value is `sha256(sessionId).slice(0, 32)`
-  (a one-way hash, not the session id itself). Operators with stricter
-  requirements who don't want even the hashed trace ID reaching
-  third-party endpoints can disable telemetry entirely
-  (`telemetry.enabled: false`); a per-destination scoping toggle for
-  trace propagation specifically is tracked as a follow-up.
-- **Span volume.** Non-LLM `fetch` calls show up as client HTTP spans in
-  your OTLP backend. Filter on `http.url` or `peer.service` if you want
-  to isolate the LLM-only subset.
+These settings live in a **separate top-level namespace** from `telemetry.*`
+on purpose: telemetry controls data flow into the operator's own
+observability backend, while `outboundCorrelation.*` controls what
+client-side correlation data qwen-code writes **into outbound LLM API
+request streams** that reach third-party LLM provider endpoints
+(DashScope, OpenAI, Anthropic, etc.). Different recipients, different
+consent decision. **All values default to off.** See PR #4390 review
+discussion for the framing rationale.
 
-### Session correlation header
-
-Alongside `traceparent`, Qwen Code can inject a custom HTTP header on
-outbound LLM requests when telemetry is enabled:
-
-```
-X-Qwen-Code-Session-Id: <session id>
-```
-
-Pattern matched from Claude Code's `X-Claude-Code-Session-Id` (see
-`src/services/api/client.ts:108` in the claude-code repo). The header is
-product-namespaced to avoid collision with generic `X-Session-Id` headers
-other tools may inject. Server-side ingestion (e.g. a DashScope
-gateway or an OTLP-aware API gateway) can use this header to stitch its
-observation of an LLM request back to the originating Qwen Code session
-without having to parse trace context.
-
-**Default scope: first-party Alibaba/DashScope endpoints only.** The
-header is sent only to destinations whose hostname matches the
-`telemetry.sessionIdHeaderHosts` allowlist. The default allowlist is:
-
-```
-dashscope.aliyuncs.com
-dashscope-intl.aliyuncs.com
-*.dashscope.aliyuncs.com
-*.dashscope-intl.aliyuncs.com
-*.alibaba-inc.com
-*.aliyun-inc.com
-```
-
-Requests to third-party LLM providers (OpenAI, Anthropic, OpenRouter,
-MiniMax, ModelScope, Mistral, DeepSeek, vanilla Gemini, ...) **do not
-receive this header by default** — avoids broadcasting a stable
-client-side session identifier to providers who don't need it for the
-API call itself. See [PR #4390 review discussion](https://github.com/QwenLM/qwen-code/pull/4390)
-for the full rationale.
-
-Operators with broader correlation requirements can override the scope
-in `settings.json`:
+### `outboundCorrelation.propagateTraceContext`
 
 ```jsonc
-"telemetry": {
-  "sessionIdHeaderHosts": ["*"]                          // restore broadcast
-  "sessionIdHeaderHosts": []                              // fully disable header
-  "sessionIdHeaderHosts": ["api.mycompany.com",
-                           "*.gateway.mycompany.internal"] // custom allowlist
+"outboundCorrelation": {
+  "propagateTraceContext": false // default
 }
 ```
 
-The header value comes from `Config.getSessionId()`, read fresh on every
-outbound request (not captured at SDK construction time) on the OpenAI/
-Anthropic providers. After a session reset triggered by `/clear`,
-subsequent requests carry the new session id automatically — see the
-"Known limitation" note below for the one exception.
+When `false` (default), Qwen Code installs a no-op `TextMapPropagator` on
+the OTel SDK. UndiciInstrumentation still creates client HTTP spans for
+your OTLP collector, but `propagation.inject()` is a no-op so **no
+`traceparent` is written onto outbound requests**. Trace IDs stay
+internal to the operator's collector.
 
-Empty session ids are not emitted (some HTTP middleware rejects empty
-header values). The header is omitted entirely when telemetry is disabled
-or the destination host is outside the allowlist.
+When `true`, the SDK's default W3C composite propagator
+(`tracecontext` + `baggage`) is installed and the standard `traceparent`
+header is written on every outbound `fetch`:
 
-**Known limitation: Gemini provider.** `@google/genai`'s `HttpOptions`
-interface does not expose a `fetch` hook (only static `headers`), so the
-Gemini provider can only inject the session-id header at SDK construction
-time. The host-allowlist check happens once against the SDK's
-`baseUrl` (defaults to `generativelanguage.googleapis.com` — not on the
-default allowlist, so no header by default). When operators do put the
-Gemini SDK on a first-party endpoint via `baseUrl` and the allowlist
-matches, the header IS attached but goes stale on `/clear` until the
-content generator is recreated. All other providers (`openai`-family,
-`anthropic`) use a fetch wrapper and are immune to this. Tracked as a
-follow-up; in the meantime, spans and logs still carry the live session
-id, so trace/log backends can correctly attribute requests to the new
-session.
+```
+traceparent: 00-<32-hex traceId>-<16-hex parentSpanId>-<01-sampled | 00-not-sampled>
+```
+
+Opt in only when the LLM provider also reports into your OTel collector
+for cross-process trace stitching — e.g. ARMS Tracing serving DashScope.
+For most operators the value is `false`; cross-vendor trace continuation
+is niche.
+
+### Other outbound correlation headers
+
+`X-Qwen-Code-Session-Id` and `X-Qwen-Code-Request-Id` are **not part of
+this PR**. They will be designed and proposed in their own follow-up
+PR(s) under the same `outboundCorrelation.*` namespace, each with its
+own threat model and operator-consent flow. PR #4390 review (LaZzyMan)
+established the principle: "telemetry's scope of work doesn't include
+sending identifiers to LLM providers"; correlation-header work moves to
+its own design discussion rather than landing under telemetry.
 
 ## Aliyun Telemetry
 

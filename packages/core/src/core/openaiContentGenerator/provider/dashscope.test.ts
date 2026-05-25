@@ -492,17 +492,6 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         }),
       );
     });
-
-    it('installs the correlation fetch wrapper on the OpenAI client', () => {
-      provider.buildClient();
-      const callArg = vi.mocked(OpenAI).mock.calls[0]![0] as {
-        fetch?: typeof fetch;
-      };
-      // Wrapper is always installed; per-request behavior depends on
-      // telemetry-enabled (verified end-to-end in llm-correlation-fetch.test.ts).
-      expect(typeof callArg.fetch).toBe('function');
-      expect(callArg.fetch).not.toBe(globalThis.fetch);
-    });
   });
 
   describe('buildMetadata', () => {

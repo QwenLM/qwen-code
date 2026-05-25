@@ -16,7 +16,6 @@ import type {
   ChatCompletionToolWithCache,
 } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
-import { wrapFetchWithCorrelation } from '../../../telemetry/llm-correlation-fetch.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
@@ -139,9 +138,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       'openai',
       this.cliConfig.getProxy(),
     );
-    const baseFetch =
-      (runtimeOptions as { fetch?: typeof fetch } | undefined)?.fetch ??
-      globalThis.fetch;
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
@@ -149,7 +145,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
-      fetch: wrapFetchWithCorrelation(baseFetch, this.cliConfig),
     });
   }
 

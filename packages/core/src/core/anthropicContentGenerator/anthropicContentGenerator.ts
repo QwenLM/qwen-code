@@ -33,7 +33,6 @@ import {
   buildRuntimeFetchOptions,
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
-import { wrapFetchWithCorrelation } from '../../telemetry/llm-correlation-fetch.js';
 import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
@@ -204,13 +203,6 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // key as `X-Api-Key` to the IdeaLab proxy — leaking the credential to
     // a third-party endpoint. Explicit `null` suppresses the back-fill
     // and forces the intended auth path.
-    // Wrap fetch with per-request correlation header injection. Read the
-    // base fetch from runtimeOptions (proxy-aware) when present, else
-    // globalThis. See design doc §4.3 — fetch wrapper (not defaultHeaders)
-    // is required so the header tracks live session id across /clear resets.
-    const baseFetch =
-      (runtimeOptions as { fetch?: typeof fetch } | undefined)?.fetch ??
-      globalThis.fetch;
     this.client = new Anthropic({
       ...(useProxyIdentity
         ? { authToken: contentGeneratorConfig.apiKey, apiKey: null }
@@ -220,17 +212,6 @@ export class AnthropicContentGenerator implements ContentGenerator {
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
-      // Cast through unknown: Anthropic SDK's `Fetch` type uses the older
-      // DOM-style `RequestInfo` (no URL) which `typeof fetch` (Node WHATWG
-      // overloads) is not structurally assignable to, even though they're
-      // call-compatible at runtime. The cast is safe because the wrapper
-      // delegates to baseFetch (= runtimeOptions.fetch ?? globalThis.fetch)
-      // without altering its call shape.
-      fetch: wrapFetchWithCorrelation(
-        baseFetch,
-        this.cliConfig,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ) as unknown as any,
     });
 
     this.converter = new AnthropicContentConverter(

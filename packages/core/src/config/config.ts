@@ -315,23 +315,6 @@ export interface TelemetrySettings {
   /** Per-signal cardinality controls. */
   metrics?: TelemetryMetricsSettings;
   /**
-   * Hostnames (or `*.suffix` patterns) that receive the
-   * `X-Qwen-Code-Session-Id` outbound correlation header.
-   *
-   * Default (when unset): Alibaba/DashScope first-party endpoints only —
-   * see `DEFAULT_SESSION_ID_HEADER_HOSTS` in `telemetry/trusted-llm-hosts.ts`.
-   * The default is deliberately narrow so the stable session identifier
-   * does not get broadcast to arbitrary third-party LLM providers
-   * (OpenAI, Anthropic, OpenRouter, ...) configured under the
-   * OpenAI-compatible provider. PR #4390 review (LaZzyMan) for rationale.
-   *
-   * Overrides:
-   *   - `[]`     fully disables the header (no destinations)
-   *   - `["*"]`  restores the broadcast behavior across all destinations
-   *   - `["api.mycompany.com", "*.internal.mycompany.com"]` custom allowlist
-   */
-  sessionIdHeaderHosts?: string[];
-  /**
    * Human-readable diagnostics produced while resolving
    * `resourceAttributes` (drops, coercions, reserved-key strips).
    * Populated by `resolveTelemetrySettings()`; the SDK emits a one-time
@@ -352,6 +335,42 @@ export interface TelemetryMetricsSettings {
    * short-term debugging — spans and logs still carry session.id.
    */
   includeSessionId?: boolean;
+}
+
+/**
+ * Security-relevant settings controlling what client-side correlation
+ * data qwen-code writes into outbound LLM API requests.
+ *
+ * **Why this is a separate namespace from `telemetry.*`:** telemetry
+ * controls data flow into the user's OWN observability backend (OTLP
+ * collector / file outfile). The settings here control data flow OUT of
+ * the qwen-code process and INTO third-party LLM provider request
+ * streams (DashScope, OpenAI, Anthropic, etc.). Different recipients =
+ * different consent decision, so a different settings tree. See PR
+ * #4390 review (LaZzyMan) for the framing rationale.
+ *
+ * All values default to off / no propagation. Operators who want to
+ * propagate trace context for server-side trace stitching (e.g. ARMS
+ * Tracing + DashScope) opt in explicitly.
+ */
+export interface OutboundCorrelationSettings {
+  /**
+   * Inject W3C `traceparent` header on outbound HTTP requests
+   * originated by undici / global `fetch` (LLM SDK calls, MCP
+   * StreamableHTTP clients, WebFetch tool, etc.). Default: `false`.
+   *
+   * When `false`, the SDK is configured with a no-op
+   * `TextMapPropagator` so trace context stays internal to the user's
+   * OTLP collector (operator still gets client HTTP spans, but the
+   * trace id is not written onto third-party request streams).
+   *
+   * When `true`, the OTel default W3C composite propagator
+   * (`tracecontext` + `baggage`) is installed and `traceparent` is
+   * written on every outbound `fetch`. Useful when the LLM provider
+   * also reports into the operator's OTel collector — e.g. ARMS
+   * Tracing + DashScope — for cross-process trace stitching.
+   */
+  propagateTraceContext?: boolean;
 }
 
 export interface OutputSettings {
@@ -582,6 +601,7 @@ export interface ConfigParameters {
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
+  outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
   /**
@@ -871,6 +891,7 @@ export class Config {
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
+  private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
@@ -1037,8 +1058,11 @@ export class Config {
       outfile: params.telemetry?.outfile,
       resourceAttributes: params.telemetry?.resourceAttributes,
       metrics: params.telemetry?.metrics,
-      sessionIdHeaderHosts: params.telemetry?.sessionIdHeaderHosts,
       resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
+    };
+    this.outboundCorrelationSettings = {
+      propagateTraceContext:
+        params.outboundCorrelation?.propagateTraceContext ?? false,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
@@ -2867,19 +2891,17 @@ export class Config {
     return this.telemetrySettings.metrics?.includeSessionId ?? false;
   }
 
-  /**
-   * Returns the configured host allowlist for the
-   * `X-Qwen-Code-Session-Id` outbound header, or `undefined` to indicate
-   * "use `DEFAULT_SESSION_ID_HEADER_HOSTS`". The caller (`llm-correlation-fetch`)
-   * resolves the default — keeping it out of Config avoids importing the
-   * telemetry helper from here.
-   */
-  getTelemetrySessionIdHeaderHosts(): readonly string[] | undefined {
-    return this.telemetrySettings.sessionIdHeaderHosts;
-  }
-
   getTelemetryResourceAttributeWarnings(): readonly string[] {
     return this.telemetrySettings.resourceAttributeWarnings ?? [];
+  }
+
+  /**
+   * Whether to inject W3C `traceparent` on outbound `fetch` requests
+   * (LLM SDKs, MCP, WebFetch, etc.). Default false — see
+   * `OutboundCorrelationSettings` for rationale.
+   */
+  getOutboundCorrelationPropagateTraceContext(): boolean {
+    return this.outboundCorrelationSettings.propagateTraceContext ?? false;
   }
 
   getTelemetryOutfile(): string | undefined {

@@ -5,7 +5,6 @@ import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
 import type { OpenAICompatibleProvider } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
-import { wrapFetchWithCorrelation } from '../../../telemetry/llm-correlation-fetch.js';
 import {
   tokenLimit,
   CAPPED_DEFAULT_MAX_TOKENS,
@@ -89,13 +88,6 @@ export class DefaultOpenAICompatibleProvider
       'openai',
       this.cliConfig.getProxy(),
     );
-    // Wrap fetch with per-request correlation header injection. Read the base
-    // fetch from runtimeOptions (proxy-aware) when present, else globalThis.
-    // Spread runtimeOptions FIRST, then override `fetch:` so our wrapper wraps
-    // the proxy fetch instead of being replaced by it. See design doc §4.3.
-    const baseFetch =
-      (runtimeOptions as { fetch?: typeof fetch } | undefined)?.fetch ??
-      globalThis.fetch;
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
@@ -103,7 +95,6 @@ export class DefaultOpenAICompatibleProvider
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
-      fetch: wrapFetchWithCorrelation(baseFetch, this.cliConfig),
     });
   }
 

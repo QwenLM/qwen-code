@@ -8,6 +8,7 @@ import type {
   MCPServerConfig,
   BugCommandSettings,
   TelemetrySettings,
+  OutboundCorrelationSettings,
   AuthType,
   ChatCompressionSettings,
   ModelProvidersConfig,
@@ -1032,14 +1033,31 @@ const SETTINGS_SCHEMA = {
             },
           },
         },
-        sessionIdHeaderHosts: {
-          description:
-            'Destination hostnames (or "*.suffix" patterns) that receive the X-Qwen-Code-Session-Id outbound correlation header. Defaults to Alibaba/DashScope first-party endpoints (dashscope.aliyuncs.com, dashscope-intl.aliyuncs.com, *.dashscope.aliyuncs.com, *.dashscope-intl.aliyuncs.com, *.alibaba-inc.com, *.aliyun-inc.com) so the stable session identifier is not broadcast to third-party LLM providers like OpenAI or Anthropic. Set to ["*"] to restore the broadcast-to-everywhere behavior, or [] to fully disable the header.',
-          type: 'array',
-          items: { type: 'string' },
-        },
       },
       additionalProperties: true,
+    },
+  },
+
+  outboundCorrelation: {
+    type: 'object',
+    label: 'Outbound Correlation',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: undefined as OutboundCorrelationSettings | undefined,
+    description:
+      "SECURITY-RELEVANT. Controls what client-side correlation data qwen-code writes into outbound LLM API requests (DashScope, OpenAI, Anthropic, etc.) — separate from `telemetry.*` which governs data flow into the operator's OWN OTLP collector. All values default to off. Opt in only when the LLM provider also reports into your OTel collector for cross-process trace stitching (e.g. ARMS Tracing + DashScope).",
+    showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'object',
+      properties: {
+        propagateTraceContext: {
+          description:
+            "Inject W3C `traceparent` header on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...). Default: false — trace context stays internal to the operator's OTLP collector and is NOT written onto third-party request streams. Set true only when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope). Note: client HTTP spans are still emitted in either case; this flag only governs the wire `traceparent` header.",
+          type: 'boolean',
+          default: false,
+        },
+      },
+      additionalProperties: false,
     },
   },
 

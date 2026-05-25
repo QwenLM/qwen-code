@@ -7,13 +7,14 @@
 
 ## 修订历史
 
-| 修订 | 日期       | 触发                     | 摘要                                                                                                              |
-| ---- | ---------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| R1   | 2026-05-21 | 初稿                     | 全广播：所有出站 LLM 请求都带 `X-Qwen-Code-Session-Id` + `traceparent`                                            |
-| R2   | 2026-05-22 | wenshao R2/R3 review     | 边界安全：URL normalize、port matching、quote 对齐、staticCorrelationHeaders try/catch、host:port fallback strip  |
-| R3   | 2026-05-23 | LaZzyMan REQUEST_CHANGES | **重大语义改动**：`X-Qwen-Code-Session-Id` 默认作用域收窄到 first-party（Alibaba/DashScope）host 白名单。详见 §11 |
+| 修订 | 日期       | 触发                                          | 摘要                                                                                                                                                                                                                                                                              |
+| ---- | ---------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1   | 2026-05-21 | 初稿                                          | 全广播：所有出站 LLM 请求都带 `X-Qwen-Code-Session-Id` + `traceparent`                                                                                                                                                                                                            |
+| R2   | 2026-05-22 | wenshao R2/R3 review                          | 边界安全：URL normalize、port matching、quote 对齐、staticCorrelationHeaders try/catch、host:port fallback strip                                                                                                                                                                  |
+| R3   | 2026-05-23 | LaZzyMan REQUEST_CHANGES                      | **重大语义改动**：`X-Qwen-Code-Session-Id` 默认作用域收窄到 first-party（Alibaba/DashScope）host 白名单。详见 §11                                                                                                                                                                 |
+| R4   | 2026-05-25 | LaZzyMan round-8 follow-up (scope conflation) | **PR scope 大幅收窄**：本 PR 仅保留 client HTTP span + OTLP loop guard；`traceparent` 默认 off（NoopTextMapPropagator）；新增 `outboundCorrelation.*` 顶级 namespace 放安全相关 toggle；R3 落地的整套 `X-Qwen-Code-Session-Id` 机器**移除本 PR**，搬到独立 follow-up PR。详见 §12 |
 
-**特别提示**：阅读 §3.1（目标）/ §3.2（非目标）/ §4.3（Part B 设计）/ §4.4（配置 schema 影响）/ §5（文件改动清单）/ §9（与 claude-code 对比）/ §10（未来工作）时，请同时参考 §11 —— **R3 修订让上述章节中关于"统一向所有 LLM provider 发送 session id 不区分第一方/第三方"的论断不再成立**。原文保留作为决策路径记录。
+**特别提示**：阅读 §3.1（目标）/ §3.2（非目标）/ §4.3（Part B 设计）/ §4.4（配置 schema 影响）/ §5（文件改动清单）/ §9（与 claude-code 对比）/ §10（未来工作）/ §11（R3 host-allowlist scoping）时，请同时参考 §12 —— **R4 修订让 R1-R3 关于"本 PR 同时落地 traceparent + session id header"的论断不再成立**：本 PR 现仅为 telemetry observability + 独立的 outbound trace-context toggle，所有 outbound correlation header 工作（包括 R3 的 host allowlist）整体搬到独立 follow-up PR。R3 工作代码本身没浪费，挪到 follow-up PR 即可复用。
 
 ## 1. 背景
 
@@ -764,3 +765,102 @@ Gemini SDK 有两个不可见 default endpoint（`generativelanguage.googleapis.
 - **Per-request random UUID** (`X-Qwen-Code-Request-Id`) — LazzyMan 提的替代方案，列入 §10
 - **Gemini staleness lazy-invalidate** (§8.6 选项 A) — 与 R3 解耦，独立 sub-issue
 - **`matchesTrustedHost` IPv6 支持** — 当前 IPv6 destination 永不在 allowlist 上（`URL.hostname` 返回 `[::1]` 带方括号，pattern 语法无对应形式）。当前满足"命名 first-party endpoint"用例。若将来有 raw IP allowlist 需求再扩展。
+
+## 12. R4 修订 — Scope Conflation Split
+
+> 触发：[LaZzyMan round-8 follow-up review on PR #4390](https://github.com/QwenLM/qwen-code/pull/4390)
+> 落地：本 PR 收窄；R3 落地的 session-id 整套挪到独立 follow-up PR
+
+### 12.1 触发与论证
+
+R3 化解了 LaZzyMan 第一轮 review 的「广播稳定指纹给第三方 provider」担忧（severity: high）。但在 round-8 follow-up 中他升级到更深的架构原则反对：
+
+> "Telemetry is not a container for adjacent features. The `traceparent` cross-process propagation and the `X-Qwen-Code-Session-Id` header injection are **not telemetry**. They are outbound-identity / outbound-correlation work that uses some OTel APIs internally as an implementation detail."
+
+他的核心元论点：
+
+- **"telemetry" namespace 暗示 recipient = 用户自己的 OTLP collector**
+- 但 `traceparent` 和 `X-Qwen-Code-Session-Id` 的 recipient = **第三方 LLM provider**
+- 两类不同 recipient 应该有两类不同的同意决策树
+- 即使默认行为安全（R3 已实现），把 wire-level 行为放在 `telemetry.*` 下**设了坏先例**：未来 telemetry PR 可以继续偷渡 wire 行为给第三方
+- "If we accept that principle, the split is mechanical. If we don't, this PR is the wrong place to debate it because the technical fixes are already in."
+
+### 12.2 解法概要（"方案 C" hybrid split）
+
+经过几轮内部讨论（含 yiliang 提出的 customHeader 模板替代方案，最终判定 customHeader 不能携带 runtime-dynamic 值），决定走 **方案 C**：
+
+**本 PR 留下**：
+
+- `UndiciInstrumentation` 注册（产 client HTTP span → 用户自家 OTLP collector）
+- OTLP feedback-loop guard（前者的必要副作用）
+- **`NoopTextMapPropagator` 默认安装** → `propagation.inject()` 是 no-op → outbound `fetch` 上**不再有 `traceparent`**
+- **新增 `outboundCorrelation.propagateTraceContext: bool` (默认 false)** 作为独立 namespace 顶级设置；设 true 时安装默认 W3C composite propagator
+- 整套 `R3 session-id` 代码（`llm-correlation-fetch.ts` / `trusted-llm-hosts.ts` / `telemetry.sessionIdHeaderHosts` setting / 4 个 provider 集成点 / 所有相关测试）**全部移除**
+
+**搬到 follow-up PR**：
+
+- `X-Qwen-Code-Session-Id` header 整套机器（R3 实现复用）
+- 进入新 `outboundCorrelation.*` namespace（具体 setting key TBD，但**不会**叫 `telemetry.*`）
+- Follow-up PR 自带：threat model section、独立 review、security-relevant 标注的 docs
+- `X-Qwen-Code-Request-Id` per-request UUID（LazzyMan 在 R3 round 提出的替代设计）也归入此 follow-up 的考虑范围
+
+### 12.3 与 R3 R1 论点的映射
+
+| R1/R3 论点                                          | R4 后状态                                                                                                           |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| §3.1 "所有出站 LLM 请求带 traceparent"              | ❌ **R4 默认 off**；需 `outboundCorrelation.propagateTraceContext: true` 才开                                       |
+| §3.1 "所有出站 LLM 请求带 `X-Qwen-Code-Session-Id`" | ❌ **R4 整套移出本 PR**，搬到 follow-up PR                                                                          |
+| §4.3 fetch wrapper 注入 session id                  | ❌ 整段代码不在本 PR；复用到 follow-up PR                                                                           |
+| §11 host allowlist (R3 设计)                        | ❌ 同上；整体迁移 follow-up PR                                                                                      |
+| §4.4 不引入新 setting                               | ❌ **本 PR 新增 `outboundCorrelation.propagateTraceContext`** 一个 boolean；session id 相关 setting 在 follow-up PR |
+| §10 future work "`X-Qwen-Code-Request-Id`"          | ✅ 仍是 future work；与 session-id follow-up 一起设计                                                               |
+
+### 12.4 新 namespace 设计意图
+
+`outboundCorrelation.*` 顶级 namespace 在本 PR 只有一个 boolean (`propagateTraceContext`)，看起来过度结构化。但这是**精心选择的**：
+
+- **建立命名空间作为承诺**：让后续 session-id / request-id / etc. 自然进入这个 namespace
+- **标注为 security-relevant**：`settingsSchema.ts` description 显式写 "SECURITY-RELEVANT"，文档化为"安全设置"而非"observability 设置"
+- **defaults 全部 off**：符合 LazzyMan 提出的"open-source 客户端不应未经显式同意向第三方发稳定 id"原则
+- **与 telemetry.\* 解耦**：用户读 settings.json 看到 `outboundCorrelation.*` 立刻能识别这是出站 wire 行为，不是 observability
+
+### 12.5 实施
+
+| 文件                                                                            | 改动                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core/src/telemetry/llm-correlation-fetch.ts`                          | **删除**                                                                                                                                                                                                                   |
+| `packages/core/src/telemetry/llm-correlation-fetch.test.ts`                     | **删除**                                                                                                                                                                                                                   |
+| `packages/core/src/telemetry/trusted-llm-hosts.ts`                              | **删除**                                                                                                                                                                                                                   |
+| `packages/core/src/telemetry/trusted-llm-hosts.test.ts`                         | **删除**                                                                                                                                                                                                                   |
+| `packages/core/src/telemetry/sdk.ts`                                            | + `NoopTextMapPropagator`；按 `getOutboundCorrelationPropagateTraceContext()` 决定 SDK textMapPropagator                                                                                                                   |
+| `packages/core/src/core/openaiContentGenerator/provider/default.ts`             | 移除 `wrapFetchWithCorrelation` 引用                                                                                                                                                                                       |
+| `packages/core/src/core/openaiContentGenerator/provider/dashscope.ts`           | 同上                                                                                                                                                                                                                       |
+| `packages/core/src/core/anthropicContentGenerator/anthropicContentGenerator.ts` | 同上                                                                                                                                                                                                                       |
+| `packages/core/src/core/geminiContentGenerator/index.ts`                        | 移除 `staticCorrelationHeaders` 引用                                                                                                                                                                                       |
+| 上述 4 个 provider 的 `*.test.ts`                                               | 删 session-id 相关测试 case                                                                                                                                                                                                |
+| `packages/core/src/config/config.ts`                                            | 删 `TelemetrySettings.sessionIdHeaderHosts`、`getTelemetrySessionIdHeaderHosts`；**新增 `OutboundCorrelationSettings` 接口 + `outboundCorrelationSettings` 字段 + `getOutboundCorrelationPropagateTraceContext()` getter** |
+| `packages/core/src/telemetry/config.ts`                                         | 删 `resolveTelemetrySettings` 中 sessionIdHeaderHosts 透传                                                                                                                                                                 |
+| `packages/cli/src/config/settingsSchema.ts`                                     | 删 `sessionIdHeaderHosts` schema；**新增 `outboundCorrelation` 顶级 schema 项**                                                                                                                                            |
+| `packages/cli/src/config/config.ts`                                             | 透传 `outboundCorrelation: settings.outboundCorrelation` 进 `ConfigParameters`                                                                                                                                             |
+| `packages/vscode-ide-companion/schemas/settings.schema.json`                    | `npm run generate:settings-schema` 重新生成                                                                                                                                                                                |
+| `docs/developers/development/telemetry.md`                                      | 重写 "Trace context propagation" → "Client-side HTTP span on outbound fetch"；删 "Session correlation header" 整节；新增 "Outbound correlation (SECURITY-RELEVANT)" 顶级 section                                           |
+| `docs/design/telemetry-outbound-propagation-design.md`                          | 本节 + R4 表头 + 修订指针                                                                                                                                                                                                  |
+
+### 12.6 对 LazzyMan 元论点的回应
+
+| 论点                                            | R4 后状态                                                                                             |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| "Telemetry namespace 暗示自家 collector 接收方" | ✅ wire 行为已搬出 `telemetry.*`；新 `outboundCorrelation.*` namespace 显式标识"出站第三方"语义       |
+| "默认行为不应未经显式同意向第三方发标识符"      | ✅ `propagateTraceContext` 默认 false；session-id 整套 follow-up PR 也将默认 off                      |
+| "telemetry PR 不应偷渡 wire-level 行为"         | ✅ 本 PR 不再添加任何"telemetry 控制 wire 行为"的代码路径；wire 行为统一由 `outboundCorrelation.*` 管 |
+| "split is mechanical, work isn't wasted"        | ✅ R3 落地代码物理删除自本 branch，留在 git history 里给 follow-up PR 复用（或 cherry-pick）          |
+
+### 12.7 follow-up PR 大纲（信息性，不在本 PR 范围）
+
+未来 follow-up PR 应包含：
+
+- `outboundCorrelation.sessionIdHeader: { enabled, trustedHosts }` 或类似 setting
+- 复用 R3 已实现的 `wrapFetchWithCorrelation` / `matchesTrustedHost` / `DEFAULT_SESSION_ID_HEADER_HOSTS` 代码骨架
+- threat model 一节，明确：recipient 集合、稳定 id 的去匿名化窗口、可选 per-request UUID 配套
+- **默认 off**（无 default allowlist —— 比 R3 更严，符合 LazzyMan 的开源 CLI 原则）
+- security-relevant 标注 + docs/users/configuration/settings.md 收录

@@ -5,7 +5,11 @@
  */
 
 import { DiagLogLevel, diag } from '@opentelemetry/api';
-import type { DiagLogger } from '@opentelemetry/api';
+import type {
+  Context,
+  DiagLogger,
+  TextMapPropagator,
+} from '@opentelemetry/api';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-grpc';
@@ -89,6 +93,29 @@ export function resolveHttpOtlpUrl(
 // In interactive mode, runExitCleanup() imposes its own tighter per-function
 // (2s) and overall (5s) timeouts, so this value is effectively unreachable there.
 const SHUTDOWN_TIMEOUT_MS = 10_000;
+
+/**
+ * `TextMapPropagator` that emits nothing. Installed when
+ * `outboundCorrelation.propagateTraceContext` is false (the default), so
+ * trace context stays internal to the user's OTLP collector and is not
+ * written into outbound `fetch` requests to third-party LLM providers.
+ *
+ * UndiciInstrumentation still creates client HTTP spans — the propagator
+ * only governs whether `propagation.inject()` writes `traceparent` into
+ * the outgoing request's header carrier. With this propagator installed,
+ * inject is a no-op and outbound requests carry no trace headers. PR
+ * #4390 review (LaZzyMan): split outbound-wire behavior out of telemetry
+ * default-on.
+ */
+const NOOP_PROPAGATOR: TextMapPropagator = {
+  inject() {},
+  extract(context: Context): Context {
+    return context;
+  },
+  fields(): string[] {
+    return [];
+  },
+};
 
 let sdk: NodeSDK | undefined;
 let telemetryInitialized = false;
@@ -397,12 +424,26 @@ export function initializeTelemetry(config: Config): void {
     return path.slice(0, cut);
   };
 
+  // Outbound trace-context propagation gate (PR #4390 review, LaZzyMan):
+  // by default, install a no-op propagator so `traceparent` does NOT get
+  // written onto outbound `fetch` requests to LLM providers. Operators
+  // who want server-side trace stitching (e.g. ARMS+DashScope) opt in via
+  // `outboundCorrelation.propagateTraceContext: true`, which leaves the
+  // SDK's default W3C composite propagator in place. UndiciInstrumentation
+  // still creates client HTTP spans either way — the propagator only
+  // governs whether trace ids leak onto third-party request streams.
+  const textMapPropagator: TextMapPropagator | undefined =
+    config.getOutboundCorrelationPropagateTraceContext()
+      ? undefined // undefined → NodeSDK keeps its default W3C propagator
+      : NOOP_PROPAGATOR;
+
   sdk = new NodeSDK({
     resource,
     // Disable async host/process/env resource detectors: they leave attributes
     // pending and trigger an OTel diag.error on any resource attribute read
     // before the detectors settle (e.g. during HttpInstrumentation span creation).
     autoDetectResources: false,
+    ...(textMapPropagator && { textMapPropagator }),
     spanProcessors: spanExporter ? [new BatchSpanProcessor(spanExporter)] : [],
     logRecordProcessors: logExporter
       ? [new BatchLogRecordProcessor(logExporter)]
