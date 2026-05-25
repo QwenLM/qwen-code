@@ -117,13 +117,18 @@ commands without backgrounding instead.
 ## Important notes
 
 - **Auto-stop behavior:** Monitors stop automatically when they reach
-  `max_events` or when `idle_timeout_ms` elapses without output. Commands
-  cannot be interactive because stdin is closed. When a monitor stops, Qwen Code
-  sends `SIGTERM` to the command's process group and escalates to `SIGKILL`
-  after about 200 ms. On Windows, it uses `taskkill /f /t`. If the Qwen Code
-  process itself is hard-killed, crashes, or runs out of memory, the detached
-  process group is not cleaned up automatically; recover by stopping the monitor
-  with `task_stop` before exit or by terminating the process group manually.
+  `max_events`, when `idle_timeout_ms` elapses without output, or when the
+  underlying command exits on its own. A monitor's status reflects the
+  command's outcome, not a tool error: a clean exit (`code 0`) becomes
+  `completed`, a non-zero exit code becomes `failed` with message
+  `Exit code N`, and termination by signal becomes `failed` with message
+  `Killed by signal SIG`. Commands cannot be interactive because stdin is
+  closed. When a monitor stops, Qwen Code sends `SIGTERM` to the command's
+  process group and escalates to `SIGKILL` after about 200 ms. On Windows, it
+  uses `taskkill /f /t`. If the Qwen Code process itself is hard-killed,
+  crashes, or runs out of memory, the detached process group is not cleaned up
+  automatically; recover by stopping the monitor with `task_stop` before exit
+  or by terminating the process group manually.
 - **Concurrency limit:** Qwen Code allows up to 16 running monitors per CLI
   session as a single shared pool. Monitors started by subagents count against
   the same cap as monitors started by the main agent. Stop an existing monitor
