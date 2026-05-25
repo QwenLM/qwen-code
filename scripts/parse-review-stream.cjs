@@ -96,7 +96,10 @@ function accumulateSegments(raw) {
     }
     const text = extractSegmentFromEvent(event);
     if (text && text.trim()) {
-      const cleaned = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim();
+      const cleaned = text
+        .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
+        .replace(/\[tool_call:[\s\S]*?\]/g, '')
+        .trim();
       if (cleaned) segments.push(cleaned);
     }
   }
