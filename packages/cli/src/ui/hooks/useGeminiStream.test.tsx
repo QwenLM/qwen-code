@@ -286,14 +286,18 @@ describe('useGeminiStream', () => {
       ),
     ).toBe('loop-123');
     expect(
-      parseAutoImproveTickLoopId(SendMessageType.UserQuery, [
-        {
-          text: [
-            'You are running one tick.',
-            `${AUTO_IMPROVE_LOOP_ID_LINE_PREFIX}loop-456`,
-          ].join('\n'),
-        },
-      ]),
+      parseAutoImproveTickLoopId(
+        SendMessageType.UserQuery,
+        [
+          {
+            text: [
+              'You are running one tick.',
+              `${AUTO_IMPROVE_LOOP_ID_LINE_PREFIX}loop-456`,
+            ].join('\n'),
+          },
+        ],
+        true,
+      ),
     ).toBe('loop-456');
     expect(
       parseAutoImproveTickLoopId(
