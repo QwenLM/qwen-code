@@ -210,9 +210,7 @@ async function markRunCompleted(
   // Preserve terminal statuses set during the tick (e.g. by the tick
   // itself or cancellation). Only default to 'success' when the run is
   // still in a transient state like 'implementing'.
-  const finalStatus = isTerminalAutoImproveRunStatus(
-    state.currentRun.status,
-  )
+  const finalStatus = isTerminalAutoImproveRunStatus(state.currentRun.status)
     ? state.currentRun.status
     : 'success';
   state.lastRun = {
@@ -441,7 +439,7 @@ Hard rules:
 Task selection guidance:
 - If GitHub issues are enabled, use gh to inspect open issues and prefer clear, unassigned issues with no assignees that are locally verifiable bugs or bounded enhancements.
 - If GitHub PRs are enabled, identify the authenticated GitHub user with gh, then inspect current-repo PRs authored by that user and prefer their open, non-draft PRs. Draft PRs are lower priority unless the user explicitly asked for them.
-- For GitHub PR work, focus on actionable unresolved review comments, requested changes, and failing checks on the user's own PRs. Unless the user explicitly requested a specific other user's PR, do not inspect or modify other users' PRs, CI failures, or review comments. Do not treat already-resolved comments or mere comment history as work to fix.
+- For GitHub PR work, focus on actionable unresolved review comments, requested changes, and failing checks on the user's own PRs. If the current PR has no actionable work, continue scanning other open PRs until you find an actionable task or confirm that all candidate PRs have no actionable work. Unless the user explicitly requested a specific other user's PR, do not inspect or modify other users' PRs, CI failures, or review comments. Do not treat already-resolved comments or mere comment history as work to fix.
 - For addressed unresolved PR review comments, fix and validate the issue first, then reply to each addressed review thread/comment with a concise summary and validation result, and resolve the thread. If permissions or API limitations prevent replying or resolving, record that in the run doc and final response.
 - If local repository scanning is enabled, inspect the current repo for bounded, locally verifiable improvements: TODO/FIXME comments, skipped or failing tests, missing tests around changed code, stale docs, and open project notes under .qwen/design and .qwen/e2e-tests.
 - If custom sources are configured, treat each item as a user-provided source hint, then inspect or follow it where applicable.

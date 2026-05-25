@@ -144,6 +144,9 @@ describe('autoImproveCommand', () => {
       "do not inspect or modify other users' PRs, CI failures, or review comments",
     );
     expect(prompt).toContain(
+      'continue scanning other open PRs until you find an actionable task',
+    );
+    expect(prompt).toContain(
       'Do not treat already-resolved comments or mere comment history as work to fix.',
     );
     expect(prompt).toContain(
