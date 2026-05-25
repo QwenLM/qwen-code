@@ -1368,12 +1368,20 @@ class QwenAgent implements Agent {
     >;
     const mergedSettings = settings.merged as Record<string, unknown>;
 
-    const extensionManager = new ExtensionManager({
-      workspaceDir: cwd,
-      isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
-    });
-    await extensionManager.refreshCache();
-    const extensions = extensionManager.getLoadedExtensions();
+    let extensions: ReturnType<ExtensionManager['getLoadedExtensions']> = [];
+    try {
+      const extensionManager = new ExtensionManager({
+        workspaceDir: cwd,
+        isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+      });
+      await extensionManager.refreshCache();
+      extensions = extensionManager.getLoadedExtensions();
+    } catch (error) {
+      debugLogger.warn(
+        'Extension loading failed, continuing without extensions:',
+        error,
+      );
+    }
 
     const extensionEntries = await Promise.all(
       extensions.map(async (extension) => {
