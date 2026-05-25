@@ -750,6 +750,13 @@ describe('useSlashCommandProcessor', () => {
         content: [{ text: 'The actual prompt from the mcp command.' }],
       });
 
+      expect(mockFireUserPromptExpansionEvent).toHaveBeenCalledWith(
+        'mcpcmd',
+        '',
+        'The actual prompt from the mcp command.',
+        expect.any(AbortSignal),
+      );
+
       expect(mockAddItem).toHaveBeenCalledWith(
         { type: MessageType.USER, text: '/mcpcmd' },
         expect.any(Number),
