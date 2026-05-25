@@ -73,6 +73,13 @@ function extractSegmentFromEvent(event) {
   if (!Array.isArray(content)) return null;
   const hasToolUse = content.some((part) => part?.type === 'tool_use');
   if (hasToolUse) return null;
+  // Partial/intermediate messages emitted between tool calls have
+  // usage.input_tokens === 0. These are transition narration ("Now I
+  // have a thorough understanding...", "Inline comment posted...") not
+  // final review content. Skip them structurally rather than relying
+  // solely on regex heuristics.
+  const usage = event?.message?.usage;
+  if (usage && usage.input_tokens === 0 && usage.output_tokens === 0) return null;
   const text = content
     .filter((part) => part?.type === 'text' && typeof part.text === 'string')
     .map((part) => part.text)

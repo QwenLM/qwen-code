@@ -483,6 +483,7 @@ jobs:
           {
             "security": { "folderTrust": { "enabled": false } },
             "tools": { "approvalMode": "default" },
+            "permissions": { "allow": ["Bash(*)"] },
             "sandbox": false
           }
           EOF

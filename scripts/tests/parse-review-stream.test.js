@@ -88,6 +88,36 @@ describe('extractSegmentFromEvent', () => {
     expect(extractSegmentFromEvent(ev)).toBeNull();
   });
 
+  it('returns null for partial/intermediate messages (usage.input_tokens === 0)', () => {
+    const ev = {
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: 'Now I have a thorough understanding...' }],
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    };
+    expect(extractSegmentFromEvent(ev)).toBeNull();
+  });
+
+  it('keeps messages with real usage stats', () => {
+    const ev = {
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: '## Review' }],
+        usage: { input_tokens: 5000, output_tokens: 300 },
+      },
+    };
+    expect(extractSegmentFromEvent(ev)).toBe('## Review');
+  });
+
+  it('keeps messages without usage field (backwards compat)', () => {
+    const ev = {
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'content' }] },
+    };
+    expect(extractSegmentFromEvent(ev)).toBe('content');
+  });
+
   it('survives null / undefined / non-object input', () => {
     expect(extractSegmentFromEvent(null)).toBeNull();
     expect(extractSegmentFromEvent(undefined)).toBeNull();
@@ -164,6 +194,33 @@ describe('accumulateSegments', () => {
         message: { content: [{ type: 'text', text: 'b' }] },
       });
     expect(accumulateSegments(raw)).toEqual(['a', 'b']);
+  });
+
+  it('filters intermediate narration (usage zero) and keeps real review', () => {
+    const raw = jsonl(
+      {
+        type: 'assistant',
+        message: {
+          content: [{ type: 'text', text: 'Now I have a thorough understanding...' }],
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      },
+      {
+        type: 'assistant',
+        message: {
+          content: [{ type: 'text', text: 'Inline comment posted successfully.' }],
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      },
+      {
+        type: 'assistant',
+        message: {
+          content: [{ type: 'text', text: '## Review\n\nReal content.' }],
+          usage: { input_tokens: 5000, output_tokens: 300 },
+        },
+      },
+    );
+    expect(accumulateSegments(raw)).toEqual(['## Review\n\nReal content.']);
   });
 
 });
