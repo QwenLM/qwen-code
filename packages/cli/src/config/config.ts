@@ -36,7 +36,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
-import type { Settings } from './settings.js';
+import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import {
   resolveCliGenerationConfig,
@@ -1203,6 +1203,31 @@ function parseMcpConfig(
   }
 }
 
+/**
+ * Builds the live-read closure for `Config.getDisabledSkillNames()`.
+ *
+ * The returned function reads through `loadedSettings.merged` on every
+ * call, so `LoadedSettings.setValue('skills.disabled', ...)` invocations
+ * are reflected without rebuilding `Config`. The closure is over the
+ * `LoadedSettings` instance, NOT over its `.merged` snapshot — that
+ * distinction matters because `LoadedSettings.setValue` replaces the
+ * internal `_merged` object on every call. A closure over `.merged` would
+ * stay frozen at construction time.
+ *
+ * Use this from every `loadCliConfig` call site (interactive entry, ACP
+ * session start, etc.) so all surfaces — `<available_skills>` in the
+ * model description, `/skill-name` slash commands, `/skills` listing and
+ * completion — agree on which skills are currently disabled.
+ */
+export function buildDisabledSkillNamesProvider(
+  loadedSettings: LoadedSettings,
+): () => ReadonlySet<string> {
+  return () => {
+    const list = loadedSettings.merged.skills?.disabled ?? [];
+    return new Set(list.map((n) => n.trim().toLowerCase()).filter(Boolean));
+  };
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1216,6 +1241,21 @@ export async function loadCliConfig(
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
   },
+  /**
+   * Live-read provider for the set of disabled skill names. Forwarded to
+   * `ConfigParameters` so that `Config.getDisabledSkillNames()` reflects
+   * `LoadedSettings.merged.skills?.disabled` even after `setValue`
+   * mutations within the same process.
+   *
+   * Callers MUST close over the live `LoadedSettings` instance, NOT over
+   * the `settings: Settings` snapshot passed as the first argument here —
+   * `LoadedSettings.setValue` replaces `_merged`, so any closure over a
+   * snapshot would only see cold data and the dialog/subcommand toggles
+   * would not take effect on the model side. Use
+   * `buildDisabledSkillNamesProvider(loadedSettings)` to construct it
+   * correctly.
+   */
+  disabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
@@ -1664,6 +1704,7 @@ export async function loadCliConfig(
     excludeTools: mergedDeny,
     disabledSlashCommands:
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
+    disabledSkillNamesProvider,
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {

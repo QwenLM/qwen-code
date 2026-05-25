@@ -113,6 +113,22 @@ export class SkillManager {
   }
 
   /**
+   * Public re-entry into the change-listener pipeline for non-disk events,
+   * specifically when the user toggles `skills.disabled` via `/skills
+   * manage`, `/skills enable`, or `/skills disable`. The underlying
+   * `SKILL.md` files have not changed, so `refreshCache` is unnecessary —
+   * we just need every consumer (`SkillTool.refreshSkills`, the slash
+   * command list reload bridged in `slashCommandProcessor`) to re-read its
+   * derived state with the updated disabled set.
+   *
+   * Returns when every listener has either resolved or hit its 30s
+   * timeout, matching the disk-change path's semantics.
+   */
+  async notifyConfigChanged(): Promise<void> {
+    await this.notifyChangeListeners();
+  }
+
+  /**
    * Notifies all registered change listeners and awaits any returned
    * promises. Sync listeners resolve immediately; async listeners (e.g.
    * `SkillTool.refreshSkills`) hold the activation pipeline until their

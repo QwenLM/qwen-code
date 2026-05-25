@@ -179,6 +179,7 @@ export interface OpenDialogActionReturn {
     | 'fast-model'
     | 'subagent_create'
     | 'subagent_list'
+    | 'skills_manage'
     | 'trust'
     | 'permissions'
     | 'approval-mode'

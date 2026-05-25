@@ -73,6 +73,14 @@ export interface UIActions {
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
+  // Skills manager dialog (`/skills manage`)
+  openSkillsManagerDialog: () => void;
+  closeSkillsManagerDialog: () => void;
+  // Trigger a CommandService rebuild — dialogs that mutate settings
+  // affecting the slash-command surface (e.g. SkillsManagerDialog)
+  // call this after `setValue` so `/<skill-name>` and the skills
+  // listing reflect the new state without restarting the CLI.
+  reloadCommands: () => void | Promise<void>;
   // Extensions manager dialog
   closeExtensionsManagerDialog: () => void;
   // MCP dialog

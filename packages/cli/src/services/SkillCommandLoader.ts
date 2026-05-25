@@ -56,11 +56,22 @@ export class SkillCommandLoader implements ICommandLoader {
 
       const allSkills = [...userSkills, ...projectSkills, ...extensionSkills];
 
-      debugLogger.debug(
-        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands`,
+      // Apply user-controlled `skills.disabled` filter HERE (inside the
+      // skill loader) rather than via `CommandService`'s global denylist —
+      // a global filter would also hide a same-named built-in command or
+      // MCP prompt. See `Config.getDisabledSkillNames` for why this is a
+      // live-read provider rather than a frozen field.
+      const disabled =
+        this.config?.getDisabledSkillNames() ?? new Set<string>();
+      const visibleSkills = allSkills.filter(
+        (skill) => !disabled.has(skill.name.toLowerCase()),
       );
 
-      return allSkills.map((skill) => {
+      debugLogger.debug(
+        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands; ${allSkills.length - visibleSkills.length} hidden by skills.disabled`,
+      );
+
+      return visibleSkills.map((skill) => {
         const isExtension = skill.level === 'extension';
 
         // Extension skills need explicit description or whenToUse to be
