@@ -6,11 +6,32 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  BACKGROUND_AGENT_CONCURRENCY_ENV,
   BackgroundTaskRegistry,
+  DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS,
+  MAX_CONCURRENT_BACKGROUND_AGENTS,
   MAX_RETAINED_TERMINAL_AGENTS,
+  resolveMaxConcurrentBackgroundAgents,
+  type AgentTaskRegistration,
   type BackgroundTaskEntry,
 } from './background-tasks.js';
 import * as transcript from './agent-transcript.js';
+
+function makeRegistration(
+  agentId: string,
+  overrides: Partial<AgentTaskRegistration> = {},
+): AgentTaskRegistration {
+  return {
+    agentId,
+    description: agentId,
+    status: 'running',
+    startTime: Date.now(),
+    abortController: new AbortController(),
+    isBackgrounded: true,
+    outputFile: `/tmp/${agentId}.jsonl`,
+    ...overrides,
+  };
+}
 
 describe('BackgroundTaskRegistry', () => {
   let registry: BackgroundTaskRegistry;
@@ -341,6 +362,86 @@ describe('BackgroundTaskRegistry', () => {
     const running = registry.getAll().filter((e) => e.status === 'running');
     expect(running).toHaveLength(1);
     expect(running[0].agentId).toBe('b');
+  });
+
+  describe('background concurrency limit', () => {
+    it('resolves the default and env override for the background agent cap', () => {
+      expect(resolveMaxConcurrentBackgroundAgents({})).toBe(
+        DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS,
+      );
+      expect(
+        resolveMaxConcurrentBackgroundAgents({
+          [BACKGROUND_AGENT_CONCURRENCY_ENV]: '3',
+        }),
+      ).toBe(3);
+      expect(
+        resolveMaxConcurrentBackgroundAgents({
+          [BACKGROUND_AGENT_CONCURRENCY_ENV]: '0',
+        }),
+      ).toBe(DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS);
+      expect(MAX_CONCURRENT_BACKGROUND_AGENTS).toBeGreaterThanOrEqual(1);
+    });
+
+    it('rejects new running background agents once the cap is reached', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+      });
+
+      registry.register(makeRegistration('bg-1'));
+      registry.register(makeRegistration('bg-2'));
+
+      expect(() => registry.register(makeRegistration('bg-3'))).toThrow(
+        'Cannot start background agent: maximum concurrent background agents ' +
+          '(2) reached. Stop an existing agent first.',
+      );
+      expect(registry.get('bg-3')).toBeUndefined();
+    });
+
+    it('allows replacing the same running background agent at the cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      registry.register(makeRegistration('bg-1'));
+
+      expect(() =>
+        registry.register(
+          makeRegistration('bg-1', {
+            prompt: 'resumed continuation',
+          }),
+        ),
+      ).not.toThrow();
+      expect(registry.get('bg-1')?.prompt).toBe('resumed continuation');
+    });
+
+    it('does not count foreground, paused, or terminal entries toward the cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      registry.register(
+        makeRegistration('fg-1', {
+          isBackgrounded: false,
+        }),
+      );
+      registry.register(
+        makeRegistration('paused-1', {
+          status: 'paused',
+        }),
+      );
+
+      registry.register(makeRegistration('bg-1'));
+      expect(() => registry.register(makeRegistration('bg-2'))).toThrow(
+        'maximum concurrent background agents (1) reached',
+      );
+
+      registry.complete('bg-1', 'done');
+      registry.register(makeRegistration('bg-2'));
+
+      expect(registry.get('fg-1')).toBeDefined();
+      expect(registry.get('paused-1')).toBeDefined();
+      expect(registry.get('bg-2')?.status).toBe('running');
+    });
   });
 
   it('aborts all running agents and emits fallback notifications', () => {
