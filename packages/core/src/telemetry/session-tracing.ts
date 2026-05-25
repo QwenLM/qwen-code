@@ -26,7 +26,7 @@ import {
 } from './constants.js';
 import { clearDetailedSpanState } from './detailed-span-attributes.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
-import { getSessionContext } from './session-context.js';
+import { getSessionContext, setSessionContext } from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
@@ -291,10 +291,20 @@ export function startInteractionSpan(
     'interaction.sequence': interactionSequence,
   };
 
-  const span = getTracer().startSpan(SPAN_INTERACTION, {
-    kind: SpanKind.INTERNAL,
-    attributes,
-  });
+  // Anchor at the session root so the interaction span shares the
+  // sessionId-derived trace id with its children (llm_request / tool /
+  // tool.execution). Without ctx, OTel mints a fresh random trace id and
+  // the interaction span ends up isolated in its own one-span trace,
+  // splitting the hierarchy across two trace ids (#4486). Not via
+  // resolveParentContext() — that prefers any active OTel span over the
+  // session root, but interaction is a turn boundary that must always
+  // anchor at the session root regardless of an unrelated wrapping span.
+  const sessionCtx = getSessionContext() ?? otelContext.active();
+  const span = getTracer().startSpan(
+    SPAN_INTERACTION,
+    { kind: SpanKind.INTERNAL, attributes },
+    sessionCtx,
+  );
 
   const spanId = getSpanId(span);
   const spanContextObj: SpanContext = {
@@ -957,6 +967,9 @@ export function clearSessionTracingForTesting(): void {
   interactionSequence = 0;
   lastInteractionCtx = undefined;
   clearDetailedSpanState();
+  // Also reset session-context module state so a test that sets a fake
+  // session root cannot leak into the next test (#4486).
+  setSessionContext(undefined);
 }
 
 /**

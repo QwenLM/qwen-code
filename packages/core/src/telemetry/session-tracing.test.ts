@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpanStatusCode } from '@opentelemetry/api';
+import { SpanStatusCode, type Context } from '@opentelemetry/api';
 
 const mockState = vi.hoisted(() => ({
   sdkInitialized: true,
@@ -141,6 +141,7 @@ import {
   runTTLSweepForTesting,
   truncateSpanError,
 } from './session-tracing.js';
+import { setSessionContext } from './session-context.js';
 
 function createMockConfig(
   overrides: Partial<{
@@ -277,6 +278,46 @@ describe('session-tracing', () => {
       const setAttrs = mockSpans[0]!.setAttributesCalls[0]!;
       expect(setAttrs).toHaveProperty('interaction.duration_ms');
       expect(setAttrs['qwen-code.turn_status']).toBe('ok');
+    });
+  });
+
+  // Regression coverage for #4486: startInteractionSpan was the only
+  // startSpan call site missing the parent ctx, so OTel minted a fresh
+  // random trace id and the interaction span split off from its
+  // sessionId-derived children. Tests below pin the parent context so a
+  // re-introduced bug fails fast instead of surviving until prod.
+  describe('interaction span — trace context', () => {
+    it('attaches to the session root context returned by getSessionContext', () => {
+      const fakeRoot = { __sessionRoot: true } as unknown as Context;
+      setSessionContext(fakeRoot, 'test-session');
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toBe(fakeRoot);
+    });
+
+    it('anchors at session root even when an unrelated OTel span is active', () => {
+      // resolveParentContext() would prefer the active span over the
+      // session root; interaction must bypass that and pin to session
+      // root so turn boundaries stay anchored regardless of any
+      // wrapping span (e.g. user code wrapping the run in tracing).
+      const fakeRoot = { __sessionRoot: true } as unknown as Context;
+      setSessionContext(fakeRoot, 'test-session');
+      mockState.activeOtelSpan = { name: 'unrelated-wrapper-span' };
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toBe(fakeRoot);
     });
   });
 
