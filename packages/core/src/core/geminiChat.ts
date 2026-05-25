@@ -106,12 +106,10 @@ function isCompressionFailureStatus(status: CompressionStatus): boolean {
  *
  * Hostile providers (broken upstream, OpenAI-compat proxy returning
  * `null`/`NaN`, misconfigured override) can yield non-finite or negative
- * token counts on `usageMetadata`. This PR coerces the three fields that
- * feed the compaction gate or its cache-hit telemetry — `promptTokenCount`,
- * `totalTokenCount`, and `cachedContentTokenCount`. `candidatesTokenCount`
- * is intentionally left raw here because it does not feed the gate; it
- * still flows unguarded into OTel spans via `loggingContentGenerator`, and
- * tightening that surface is tracked separately. Letting hostile values
+ * token counts on `usageMetadata`. This function coerces the four fields that
+ * feed the compaction gate, its cache-hit telemetry, or OTel spans —
+ * `promptTokenCount`, `totalTokenCount`, `candidatesTokenCount`, and
+ * `cachedContentTokenCount`. Letting hostile values
  * flow into the compaction gate arithmetic is catastrophic:
  *
  * - `lastPromptTokenCount + NaN >= hard` is always false → hard-rescue is
@@ -124,10 +122,16 @@ function isCompressionFailureStatus(status: CompressionStatus): boolean {
  * `Number.isFinite(-1)` is `true`, so the explicit `>= 0` check is required
  * in addition to `isFinite`.
  */
-function coerceUsageCount(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? value
-    : 0;
+function coerceUsageCount(value: unknown, field?: string): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return value;
+  }
+  if (value != null && field) {
+    debugLogger.warn(
+      `coerceUsageCount: hostile ${field}=${String(value)}, coercing to 0`,
+    );
+  }
+  return 0;
 }
 
 export enum StreamEventType {
@@ -2416,9 +2420,15 @@ export class GeminiChat {
           // `coerceUsageCount` for the failure modes this guards against.
           const promptTokenCount = coerceUsageCount(
             usageMetadata.promptTokenCount,
+            'promptTokenCount',
           );
           const totalTokenCount = coerceUsageCount(
             usageMetadata.totalTokenCount,
+            'totalTokenCount',
+          );
+          const candidatesTokenCount = coerceUsageCount(
+            usageMetadata.candidatesTokenCount,
+            'candidatesTokenCount',
           );
           const lastPromptTokenCount = promptTokenCount || totalTokenCount;
           if (lastPromptTokenCount) {
@@ -2434,6 +2444,7 @@ export class GeminiChat {
           }
           const cachedContentTokenCount = coerceUsageCount(
             usageMetadata.cachedContentTokenCount,
+            'cachedContentTokenCount',
           );
           if (cachedContentTokenCount && this.telemetryService) {
             this.telemetryService.setLastCachedContentTokenCount(
@@ -2525,7 +2536,27 @@ export class GeminiChat {
                 )
             : []),
         ],
-        tokens: usageMetadata,
+        tokens: usageMetadata
+          ? {
+              ...usageMetadata,
+              promptTokenCount: coerceUsageCount(
+                usageMetadata.promptTokenCount,
+                'promptTokenCount',
+              ),
+              totalTokenCount: coerceUsageCount(
+                usageMetadata.totalTokenCount,
+                'totalTokenCount',
+              ),
+              candidatesTokenCount: coerceUsageCount(
+                usageMetadata.candidatesTokenCount,
+                'candidatesTokenCount',
+              ),
+              cachedContentTokenCount: coerceUsageCount(
+                usageMetadata.cachedContentTokenCount,
+                'cachedContentTokenCount',
+              ),
+            }
+          : usageMetadata,
         contextWindowSize,
       };
       if (streamError !== null) {
