@@ -199,7 +199,12 @@ export function mountAcpHttp(
         // pump AND abort any in-flight prompt for this session — otherwise
         // the agent keeps running (quota, FIFO) until idle TTL.
         ac.abort();
-        conn.sessions.get(sessionId)?.promptAbort?.abort();
+        // BUT only abort the prompt when THIS is still the session's live
+        // stream. A reconnect already installed a newer stream — the prompt
+        // must survive the old stream's close.
+        if (conn.sessions.get(sessionId)?.stream === stream) {
+          conn.sessions.get(sessionId)?.promptAbort?.abort();
+        }
       },
       () => conn.touch(),
     );

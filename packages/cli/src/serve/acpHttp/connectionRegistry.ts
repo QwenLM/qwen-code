@@ -206,10 +206,15 @@ export class AcpConnection {
     abort: AbortController,
   ): SessionBinding {
     const binding = this.getOrCreateSession(sessionId);
-    if (binding.stream && binding.stream !== stream) binding.stream.close();
+    const prevStream = binding.stream;
     binding.abort.abort();
     binding.abort = abort;
+    // Install the NEW stream BEFORE closing the old one. The old stream's
+    // `onClose` is identity-guarded on `binding.stream`, so installing first
+    // means a reconnect's close can't abort the in-flight prompt (the client
+    // is reconnecting, not leaving — the prompt must survive).
     binding.stream = stream;
+    if (prevStream && prevStream !== stream) prevStream.close();
     for (const frame of binding.buffer.splice(0)) void stream.send(frame);
     return binding;
   }

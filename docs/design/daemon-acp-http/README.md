@@ -536,3 +536,14 @@ REST 的 **文件 I/O**（`/file /glob /list /stat /file/write /file/edit`）、
 **决策（采纳评审/owner 意见）**：不让 `/acp` transport 再去直连这些 route 级服务（那会复制 REST 的架构漂移、并使 transport 耦合翻倍）。**正确做法是先在 `@qwen-code/acp-bridge` 的 `HttpAcpBridge` 上补齐这些能力**（如 `readWorkspaceFile`/`writeWorkspaceFile`/`globWorkspace`、`startDeviceFlow`/`pollDeviceFlow`、`listAgents`/`upsertAgent`/`deleteAgent`、`readMemory`/`writeMemory`），让 REST 与 `/acp` 都经由 bridge。届时 `/acp` 再加 `_qwen.ai/fs/*`、`_qwen.ai/auth/*`、`_qwen.ai/workspace/agent*`、`_qwen.ai/workspace/memory*`（文件读因无标准 ACP client→agent 方法，属合法厂商扩展）。
 
 **完整等价 = 本批（bridge 已有能力）+ acp-bridge 补齐缺口后的后续批**。
+
+---
+
+## 18. Review round 9 — PR fold-ins
+
+| # | Severity | Finding | Fix |
+|---|----------|---------|-----|
+| G1 | **P1 (regression)** | Session-stream reconnect aborted the in-flight prompt: `attachSessionStream` closed the OLD stream before installing the new one, and the old stream's `onClose` unconditionally aborted `promptAbort` — so a reconnecting client (network glitch/roaming) lost its running prompt. | Install the new stream BEFORE closing the old; identity-guard `onClose`'s prompt-abort (only abort if THIS is still the session's live stream). Test added (prompt survives reconnect). |
+| G2 | **P2** | `session/cancel` passed `undefined` as the `CancelNotification` body, dropping client-supplied cancel fields (reason/context) that REST forwards. | Forward `{ ...params, sessionId }` (mirrors REST). |
+
+Rebased onto latest `daemon_mode_b_main` (#4473/#4483/#4484/#4500), no conflicts. Suite **33 tests**, live re-verified.

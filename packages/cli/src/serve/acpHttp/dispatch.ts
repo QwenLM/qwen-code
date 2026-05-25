@@ -453,7 +453,11 @@ export class AcpDispatcher {
           conn.sessions.get(sessionId)?.promptAbort?.abort();
           await this.bridge.cancelSession(
             sessionId,
-            undefined,
+            // Forward client-supplied cancel fields (reason/context) while
+            // force-stamping sessionId — mirrors the REST surface.
+            { ...params, sessionId } as Parameters<
+              HttpAcpBridge['cancelSession']
+            >[1],
             this.sessionCtx(conn, sessionId, loopback),
           );
           // `session/cancel` is normally a notification (no id), but answer

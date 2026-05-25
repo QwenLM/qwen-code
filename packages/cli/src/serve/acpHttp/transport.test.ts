@@ -742,6 +742,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(Date.now() - start).toBeLessThan(1500);
   });
 
+  it('session-stream reconnect does NOT abort the in-flight prompt', async () => {
+    let promptSignal: AbortSignal | undefined;
+    bridge.promptBehavior = async (_s, q, signal) => {
+      promptSignal = signal;
+      q.push({ type: 'session_update', data: { sessionId: 'sess-1', update: {} } });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const s1 = await openStream(connId, 'sess-1');
+    await new Promise((r) => setTimeout(r, 40));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 80,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    await new Promise((r) => setTimeout(r, 40));
+    // Client reconnects the session stream (drop s1, open s2).
+    await s1.body?.cancel();
+    const s2 = await openStream(connId, 'sess-1');
+    await new Promise((r) => setTimeout(r, 60));
+    // The prompt must survive the reconnect.
+    expect(promptSignal?.aborted).toBe(false);
+    await s2.body?.cancel();
+  });
+
   it('DELETE without a connection id → 400', async () => {
     const res = await fetch(`${base}/acp`, { method: 'DELETE' });
     expect(res.status).toBe(400);
