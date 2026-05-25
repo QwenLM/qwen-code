@@ -782,8 +782,11 @@ function readHooks(
           hook: normalizeHookDefinition(hookValue),
           extensionName,
         });
-      } catch {
-        // Ignore malformed hook entries in the settings UI snapshot.
+      } catch (error) {
+        debugLogger.warn(
+          `Skipping malformed hook entry [${scope}:${event}:${index}]:`,
+          error,
+        );
       }
     });
   }
