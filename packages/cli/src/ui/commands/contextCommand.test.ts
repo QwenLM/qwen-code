@@ -77,20 +77,60 @@ describe('collectContextData (contextCommand)', () => {
     } as unknown as Config;
   });
 
-  it('passes includeDeferred: true to getFunctionDeclarations', async () => {
-    // Pin the token-accounting invariant: the "all tools" total must
-    // line up with the per-tool breakdown (which iterates getAllTools
-    // unfiltered). Without `includeDeferred: true`, the total would
-    // exclude deferred tools while the per-tool sum still includes
-    // them — `displayBuiltinTools` (clamped Math.max(0, …)) would then
-    // collapse to 0 instead of reporting the real cost. A user-visible
-    // regression caught only by visual inspection of `/context detail`.
+  it('queries getFunctionDeclarations with no args, matching the actual API request', async () => {
+    // /context should reflect what's actually sent to the model. Deferred
+    // tools (MCP tools default to shouldDefer=true) are excluded from the
+    // prompt unless ToolSearch has revealed them this session — see
+    // client.ts which calls getFunctionDeclarations() with no options.
+    // Pinning the call here keeps the /context token estimate aligned with
+    // the real request, instead of overcounting by the full MCP tool pool.
     await collectContextData(mockConfig, false);
 
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledTimes(1);
-    expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith({
-      includeDeferred: true,
-    });
+    expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith();
+  });
+
+  it('excludes deferred-but-not-revealed tools from the per-tool breakdown (#4508)', async () => {
+    // Regression: /context used to surface every deferred tool (MCP tools,
+    // plus low-frequency built-ins like web_fetch / monitor / cron_*) even
+    // when ToolSearch had not loaded any of them, inflating the displayed
+    // token count for the common default-on case.
+    const isDeferredToolRevealed = vi.fn().mockReturnValue(false);
+    const hiddenBuiltin = {
+      name: 'web_fetch',
+      schema: { name: 'web_fetch', description: 'large schema' },
+      shouldDefer: true,
+      alwaysLoad: false,
+    };
+    const hiddenMcp = {
+      name: 'mcp__server__tool',
+      schema: { name: 'mcp__server__tool', description: 'large schema' },
+      shouldDefer: true,
+      alwaysLoad: false,
+    };
+    const config = {
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        contextWindowSize: 32_000,
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: vi.fn().mockReturnValue([hiddenBuiltin, hiddenMcp]),
+        getFunctionDeclarations: vi.fn().mockReturnValue([]),
+        isDeferredToolRevealed,
+      }),
+      getUserMemory: vi.fn().mockReturnValue(''),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+      }),
+      getChatCompression: vi.fn().mockReturnValue(undefined),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools).toHaveLength(0);
+    expect(data.mcpTools).toHaveLength(0);
+    expect(isDeferredToolRevealed).toHaveBeenCalledWith('web_fetch');
+    expect(isDeferredToolRevealed).toHaveBeenCalledWith('mcp__server__tool');
   });
 });
 
