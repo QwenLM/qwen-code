@@ -714,6 +714,7 @@ export const useGeminiStream = (
     const autoImproveLoopId = currentAutoImproveLoopIdRef.current;
     if (autoImproveLoopId) {
       currentAutoImproveLoopIdRef.current = null;
+      submitPromptOnCompleteRef.current = null;
       const cwd = config.getWorkingDir() || config.getProjectRoot();
       void markActiveAutoImproveRunCancelled(cwd, autoImproveLoopId).catch(
         (error: unknown) => {
