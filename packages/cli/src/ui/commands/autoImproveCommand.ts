@@ -295,6 +295,7 @@ function toHistoryRunRecord(
   record: AutoImproveRunRecord,
 ): HistoryItemAutoImproveRun {
   return {
+    runId: record.runId,
     status: record.status,
     ...(record.source ? { source: record.source } : {}),
     ...(record.task ? { task: record.task } : {}),

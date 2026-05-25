@@ -185,6 +185,7 @@ export type HistoryItemAutoImproveStatus = HistoryItemBase & {
 };
 
 export type HistoryItemAutoImproveRun = {
+  runId: string;
   status: string;
   source?: string;
   task?: string;
