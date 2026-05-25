@@ -210,8 +210,8 @@ export interface LoadHistoryActionReturn {
 export interface SubmitPromptActionReturn {
   type: 'submit_prompt';
   content: PartListUnion;
-  /** Optional callback invoked after the agent turn completes successfully. */
-  onComplete?: () => Promise<void>;
+  /** Optional callback invoked after the agent turn completes. */
+  onComplete?: (opts?: { errored?: boolean }) => Promise<void>;
 }
 
 /**

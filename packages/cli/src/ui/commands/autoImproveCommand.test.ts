@@ -542,6 +542,33 @@ describe('autoImproveCommand', () => {
     });
   });
 
+  it('records errored runs as failed instead of success', async () => {
+    const result = await autoImproveCommand.action?.(
+      context,
+      'start --every 30m',
+    );
+    const activeRaw = await fs.readFile(
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
+      'utf8',
+    );
+    const active = JSON.parse(activeRaw) as { activeLoopId: string };
+
+    // Simulate an error during the run by calling onComplete with errored: true
+    // The currentRun status is still 'implementing' (not terminal)
+    await (
+      result as { onComplete?: (opts?: { errored?: boolean }) => Promise<void> }
+    ).onComplete?.({ errored: true });
+
+    const updated = await readAutoImproveLoopState(
+      tempDir,
+      active.activeLoopId,
+    );
+    expect(updated?.currentRun).toBeUndefined();
+    expect(updated?.lastRun).toMatchObject({
+      status: 'failed',
+    });
+  });
+
   it('runs a tick only for the active loop', async () => {
     await autoImproveCommand.action?.(context, 'start --every 30m');
     const activeRaw = await fs.readFile(

@@ -204,15 +204,19 @@ async function markRunCompleted(
   _config: Config,
   repoRoot: string,
   loopId: string,
+  opts?: { errored?: boolean },
 ): Promise<void> {
   const state = await readAutoImproveLoopState(repoRoot, loopId);
   if (!state || !state.currentRun) return;
   // Preserve terminal statuses set during the tick (e.g. by the tick
-  // itself or cancellation). Only default to 'success' when the run is
-  // still in a transient state like 'implementing'.
+  // itself or cancellation). Default to 'failed' when the run is still in
+  // a transient state like 'implementing' and an error occurred, otherwise
+  // default to 'success'.
   const finalStatus = isTerminalAutoImproveRunStatus(state.currentRun.status)
     ? state.currentRun.status
-    : 'success';
+    : opts?.errored
+      ? 'failed'
+      : 'success';
   state.lastRun = {
     ...state.currentRun,
     status: finalStatus,
@@ -585,7 +589,8 @@ async function startAutoImprove(
   return {
     type: 'submit_prompt',
     content: [{ text: buildTickPrompt(state) }],
-    onComplete: () => markRunCompleted(config, repoRoot, loopId),
+    onComplete: (opts?: { errored?: boolean }) =>
+      markRunCompleted(config, repoRoot, loopId, opts),
   };
 }
 
@@ -767,7 +772,8 @@ async function tickAutoImprove(
   return {
     type: 'submit_prompt',
     content: [{ text: buildTickPrompt(baseState) }],
-    onComplete: () => markRunCompleted(config, repoRoot, loopId),
+    onComplete: (opts?: { errored?: boolean }) =>
+      markRunCompleted(config, repoRoot, loopId, opts),
   };
 }
 

@@ -416,7 +416,9 @@ export const useGeminiStream = (
     null,
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
-  const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
+  const submitPromptOnCompleteRef = useRef<
+    ((opts?: { errored?: boolean }) => Promise<void>) | null
+  >(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
   // --- Real-time token display ---
   // Accumulates output character count across the whole turn (not per API call).
@@ -1981,7 +1983,7 @@ export const useGeminiStream = (
           submitPromptOnCompleteRef.current = null;
           currentAutoImproveLoopIdRef.current = null;
           if (onComplete) {
-            void onComplete();
+            void onComplete({ errored: true });
           }
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
