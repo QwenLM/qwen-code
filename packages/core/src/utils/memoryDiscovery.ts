@@ -8,12 +8,16 @@ import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
-import { getAllGeminiMdFilenames } from '../memory/const.js';
+import {
+  getAllGeminiMdFilenames,
+  LOCAL_CONTEXT_FILENAME,
+} from '../memory/const.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { processImports } from './memoryImportProcessor.js';
 import { QWEN_DIR } from './paths.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from './debugLogger.js';
+import { findProjectRoot } from './projectRoot.js';
 import { loadRules, type RuleFile } from './rulesDiscovery.js';
 
 const logger = createDebugLogger('MEMORY_DISCOVERY');
@@ -21,50 +25,6 @@ const logger = createDebugLogger('MEMORY_DISCOVERY');
 interface GeminiFileContent {
   filePath: string;
   content: string | null;
-}
-
-async function findProjectRoot(startDir: string): Promise<string | null> {
-  let currentDir = path.resolve(startDir);
-  while (true) {
-    const gitPath = path.join(currentDir, '.git');
-    try {
-      const stats = await fs.lstat(gitPath);
-      if (stats.isDirectory()) {
-        return currentDir;
-      }
-    } catch (error: unknown) {
-      // Don't log ENOENT errors as they're expected when .git doesn't exist
-      // Also don't log errors in test environments, which often have mocked fs
-      const isENOENT =
-        typeof error === 'object' &&
-        error !== null &&
-        'code' in error &&
-        (error as { code: string }).code === 'ENOENT';
-
-      // Only log unexpected errors in non-test environments
-      // process.env['NODE_ENV'] === 'test' or VITEST are common test indicators
-      const isTestEnv =
-        process.env['NODE_ENV'] === 'test' || process.env['VITEST'];
-
-      if (!isENOENT && !isTestEnv) {
-        if (typeof error === 'object' && error !== null && 'code' in error) {
-          const fsError = error as { code: string; message: string };
-          logger.warn(
-            `Error checking for .git directory at ${gitPath}: ${fsError.message}`,
-          );
-        } else {
-          logger.warn(
-            `Non-standard error checking for .git directory at ${gitPath}: ${String(error)}`,
-          );
-        }
-      }
-    }
-    const parentDir = path.dirname(currentDir);
-    if (parentDir === currentDir) {
-      return null;
-    }
-    currentDir = parentDir;
-  }
 }
 
 async function getGeminiMdFilePathsInternal(
@@ -373,6 +333,43 @@ export async function loadServerHierarchicalMemory(
     implicitDiscoveryEnabled,
   );
 
+  // Resolve project root once — needed both for the QWEN.local.md slot
+  // (below) and for rules discovery (further down).
+  const resolvedCwd = path.resolve(currentWorkingDirectory);
+  const foundRoot = await findProjectRoot(resolvedCwd);
+  const effectiveRoot = foundRoot ?? resolvedCwd;
+
+  // Append the per-developer local context file slot:
+  // `<projectRoot>/.qwen/QWEN.local.md`. Loaded after all hierarchical
+  // QWEN.md / AGENTS.md files so local instructions can supplement or
+  // override shared ones. Same trust + explicit-only gating as the rest
+  // of the project-level discovery.
+  //
+  // Requires a real project root (`foundRoot`, not the `resolvedCwd`
+  // fallback). Without that gate, two failure modes appear:
+  //   * Deep cwd in a non-git workspace turns the slot into a per-cwd
+  //     file, breaking the "single fixed slot" invariant.
+  //   * `cwd === homedir` resolves the slot path to `~/.qwen/QWEN.local.md`,
+  //     colliding with the global Qwen directory.
+  if (implicitDiscoveryEnabled && folderTrust && foundRoot) {
+    const localContextPath = path.join(
+      foundRoot,
+      QWEN_DIR,
+      LOCAL_CONTEXT_FILENAME,
+    );
+    try {
+      await fs.access(localContextPath, fsSync.constants.R_OK);
+      if (!filePaths.includes(localContextPath)) {
+        filePaths.push(localContextPath);
+        logger.debug(
+          `Found readable local ${LOCAL_CONTEXT_FILENAME}: ${localContextPath}`,
+        );
+      }
+    } catch {
+      // Not found, which is the common case — silently skip.
+    }
+  }
+
   let combinedInstructions = '';
   let fileCount = 0;
 
@@ -386,17 +383,16 @@ export async function loadServerHierarchicalMemory(
 
     // Only count files that match configured memory filenames (e.g., QWEN.md),
     // excluding system context files like output-language.md
-    const memoryFilenames = new Set(getAllGeminiMdFilenames());
+    const memoryFilenames = new Set([
+      ...getAllGeminiMdFilenames(),
+      LOCAL_CONTEXT_FILENAME,
+    ]);
     fileCount = contentsWithPaths.filter((item) =>
       memoryFilenames.has(path.basename(item.filePath)),
     ).length;
   }
 
-  // Load path-based context rules from .qwen/rules/ directories
-  const resolvedCwd = path.resolve(currentWorkingDirectory);
-  const foundRoot = await findProjectRoot(resolvedCwd);
-  const effectiveRoot = foundRoot ?? resolvedCwd;
-
+  // Load path-based context rules from .qwen/rules/ directories.
   const {
     content: rulesContent,
     ruleCount,

@@ -1,0 +1,238 @@
+name: 'Sync Release to Aliyun OSS'
+
+on:
+  release:
+    types: ['published']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The release tag to sync (e.g., v0.1.11).'
+        required: true
+        type: 'string'
+
+concurrency:
+  group: 'sync-release-to-oss'
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: 'Sync Release Assets to Aliyun OSS'
+    runs-on: 'ubuntu-latest'
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    environment:
+      name: 'production-release'
+    permissions:
+      contents: 'read'
+
+    env:
+      RELEASE_TAG: '${{ github.event.release.tag_name || inputs.tag }}'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: '${{ env.RELEASE_TAG }}'
+
+      - name: 'Determine release type'
+        id: 'meta'
+        env:
+          TAG: '${{ env.RELEASE_TAG }}'
+        run: |-
+          is_nightly="false"
+          is_preview="false"
+          if [[ "${TAG}" == *"nightly"* ]]; then
+            is_nightly="true"
+          elif [[ "${TAG}" == *"preview"* ]]; then
+            is_preview="true"
+          fi
+          echo "is_nightly=${is_nightly}" >> "${GITHUB_OUTPUT}"
+          echo "is_preview=${is_preview}" >> "${GITHUB_OUTPUT}"
+          echo "is_stable=$([[ ${is_nightly} == 'false' && ${is_preview} == 'false' ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          npm ci --no-audit --progress=false
+
+      - name: 'Download Release Assets from GitHub'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+        run: |-
+          set -euo pipefail
+
+          mkdir -p dist/standalone
+          gh release download "${RELEASE_TAG}" --dir dist/standalone --pattern '*.tar.gz' --pattern '*.zip' --pattern 'SHA256SUMS'
+
+      - name: 'Verify Downloaded Release Assets'
+        run: |-
+          npm run verify:installation-release -- --dir dist/standalone
+
+      - name: 'Package Hosted Installation Assets'
+        if: |-
+          ${{ steps.meta.outputs.is_stable == 'true' }}
+        env:
+          RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+        run: |-
+          RELEASE_VERSION="${RELEASE_TAG#v}"
+          npm run package:hosted-installation -- --out-dir dist/installation --version "${RELEASE_VERSION}"
+
+      - name: 'Install ossutil'
+        env:
+          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
+          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
+        run: |-
+          set -euo pipefail
+
+          tmp_dir="$(mktemp -d)"
+          curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}" -o "${tmp_dir}/ossutil.zip"
+          echo "${OSSUTIL_SHA256}  ${tmp_dir}/ossutil.zip" | sha256sum -c -
+          unzip -q "${tmp_dir}/ossutil.zip" -d "${tmp_dir}"
+
+          ossutil_path="$(find "${tmp_dir}" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
+          if [[ -z "${ossutil_path}" ]]; then
+            echo "::error::ossutil binary not found in downloaded archive"
+            exit 1
+          fi
+
+          chmod +x "${ossutil_path}"
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 "${ossutil_path}" "${HOME}/.local/bin/ossutil"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          rm -rf "${tmp_dir}"
+          "${HOME}/.local/bin/ossutil" >/dev/null
+
+      - name: 'Configure Aliyun OSS Credentials'
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |-
+          set -euo pipefail
+
+          if [[ -z "${ALIYUN_OSS_ACCESS_KEY_ID}" || -z "${ALIYUN_OSS_ACCESS_KEY_SECRET}" ]]; then
+            echo "::error::Missing Aliyun OSS credentials. Set ALIYUN_OSS_ACCESS_KEY_ID and ALIYUN_OSS_ACCESS_KEY_SECRET in the production-release environment secrets."
+            exit 1
+          fi
+
+          ossutil config \
+            -e "${ALIYUN_OSS_ENDPOINT}" \
+            -i "${ALIYUN_OSS_ACCESS_KEY_ID}" \
+            -k "${ALIYUN_OSS_ACCESS_KEY_SECRET}" \
+            -L EN \
+            -c "${RUNNER_TEMP}/.ossutilconfig"
+
+      - name: 'Sync Release Assets to Aliyun OSS'
+        env:
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+        run: |-
+          set -euo pipefail
+
+          mapfile -t release_assets < <(node scripts/verify-installation-release.js --dir dist/standalone --list-release-asset-paths)
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "${ALIYUN_OSS_BUCKET}" \
+            --config "${RUNNER_TEMP}/.ossutilconfig" \
+            --prefix "releases/qwen-code/${RELEASE_TAG}" \
+            "${release_assets[@]}"
+
+      - name: 'Verify Aliyun OSS Release Assets'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+        run: |-
+          set -euo pipefail
+
+          npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"
+
+      - name: 'Sync Hosted Installation Assets to Aliyun OSS'
+        if: |-
+          ${{ steps.meta.outputs.is_stable == 'true' }}
+        env:
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+        run: |-
+          set -euo pipefail
+
+          hosted_assets=(
+            dist/installation/install-qwen-standalone.sh
+            dist/installation/install-qwen-standalone.ps1
+            dist/installation/install-qwen-standalone.bat
+            dist/installation/uninstall-qwen-standalone.sh
+            dist/installation/uninstall-qwen-standalone.ps1
+            dist/installation/SHA256SUMS
+          )
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "${ALIYUN_OSS_BUCKET}" \
+            --config "${RUNNER_TEMP}/.ossutilconfig" \
+            --prefix "installation/${RELEASE_TAG}" \
+            "${hosted_assets[@]}"
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "${ALIYUN_OSS_BUCKET}" \
+            --config "${RUNNER_TEMP}/.ossutilconfig" \
+            --prefix "installation" \
+            "${hosted_assets[@]}"
+
+      - name: 'Verify Aliyun OSS Hosted Installation Assets'
+        if: |-
+          ${{ steps.meta.outputs.is_stable == 'true' }}
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+        run: |-
+          set -euo pipefail
+
+          hosted_tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "${hosted_tmp_dir}"' EXIT
+          mkdir -p "${hosted_tmp_dir}/versioned" "${hosted_tmp_dir}/global"
+          for asset in install-qwen-standalone.sh install-qwen-standalone.ps1 install-qwen-standalone.bat uninstall-qwen-standalone.sh uninstall-qwen-standalone.ps1 SHA256SUMS; do
+            url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${RELEASE_TAG}/${asset}"
+            global_url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${asset}"
+            curl -fsSL --connect-timeout 15 --max-time 300 "${url}" -o "${hosted_tmp_dir}/versioned/${asset}"
+            curl -fsSL --connect-timeout 15 --max-time 300 "${global_url}" -o "${hosted_tmp_dir}/global/${asset}"
+          done
+          cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/versioned/SHA256SUMS" || {
+            echo "::error::Hosted installation SHA256SUMS does not match local dist/installation/SHA256SUMS"
+            diff -u "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/versioned/SHA256SUMS" || true
+            exit 1
+          }
+          cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/global/SHA256SUMS" || {
+            echo "::error::Global hosted installation SHA256SUMS does not match local dist/installation/SHA256SUMS"
+            diff -u "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/global/SHA256SUMS" || true
+            exit 1
+          }
+          (cd "${hosted_tmp_dir}/versioned" && sha256sum -c SHA256SUMS)
+          (cd "${hosted_tmp_dir}/global" && sha256sum -c SHA256SUMS)
+
+      - name: 'Publish Aliyun OSS Latest VERSION'
+        if: |-
+          ${{ steps.meta.outputs.is_stable == 'true' }}
+        env:
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+        run: |-
+          set -euo pipefail
+
+          printf '%s\n' "${RELEASE_TAG}" > "${RUNNER_TEMP}/qwen-code-latest-version"
+          ossutil cp "${RUNNER_TEMP}/qwen-code-latest-version" "oss://${ALIYUN_OSS_BUCKET}/releases/qwen-code/latest/VERSION" -c "${RUNNER_TEMP}/.ossutilconfig" -f --acl public-read
+
+          latest_version="$(curl -fsSL --connect-timeout 15 --max-time 300 "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest/VERSION" | tr -d '[:space:]')"
+          if [[ "${latest_version}" != "${RELEASE_TAG}" ]]; then
+            echo "::error::Aliyun latest VERSION points to ${latest_version}, expected ${RELEASE_TAG}"
+            exit 1
+          fi
+
+      - name: 'Cleanup Aliyun OSS Credentials'
+        if: '${{ always() }}'
+        run: |-
+          rm -f "${RUNNER_TEMP}/.ossutilconfig"

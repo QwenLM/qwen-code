@@ -23,15 +23,10 @@ Create a well-structured pull request with proper description and title.
 
 3.  **Write PR description**
 
-- Use PR Template below
-- Summarize changes clearly
-- Include context and motivation
-- List any breaking changes
-- Link related issues if provided, or use "No linked issues"
-- Leave the "Screenshots / Video Demo" section empty for the author to fill in
-  manually
-- Add this line at the end of PR body: "🤖 Generated with [Qwen
-  Code](https://github.com/QwenLM/qwen-code)", with a line separator
+- Fill in the PR template below — each section's HTML comment explains what
+  to write. PR title stays in English.
+- Append at the end of the PR body, with a line separator: "🤖 Generated
+  with [Qwen Code](https://github.com/QwenLM/qwen-code)"
 
 4.  **Set up PR**
 
