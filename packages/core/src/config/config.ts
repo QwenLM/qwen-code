@@ -629,6 +629,19 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  /**
+   * Wall-clock budget for an unattended run, in seconds. `-1` (default)
+   * means no limit. Enforced by the CLI's non-interactive run loop —
+   * see `RunBudgetEnforcer` in `packages/cli/src/utils/runBudget.ts`.
+   * Issue: QwenLM/qwen-code#4103.
+   */
+  maxWallTimeSeconds?: number;
+  /**
+   * Cumulative tool-call budget across the entire run. `-1` means no
+   * limit. Counts every `executeToolCall` invocation (incl. failed
+   * tools, since the model is still consuming tokens reading the error).
+   */
+  maxToolCalls?: number;
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
@@ -921,6 +934,8 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly maxWallTimeSeconds: number;
+  private readonly maxToolCalls: number;
   private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
@@ -1088,6 +1103,8 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
+    this.maxToolCalls = params.maxToolCalls ?? -1;
     this.clearContextOnIdle = {
       toolResultsThresholdMinutes:
         params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
@@ -2221,6 +2238,14 @@ export class Config {
 
   getMaxSessionTurns(): number {
     return this.maxSessionTurns;
+  }
+
+  getMaxWallTimeSeconds(): number {
+    return this.maxWallTimeSeconds;
+  }
+
+  getMaxToolCalls(): number {
+    return this.maxToolCalls;
   }
 
   getClearContextOnIdle(): ClearContextOnIdleSettings {
