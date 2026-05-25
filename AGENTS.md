@@ -3,6 +3,24 @@
 This file provides guidance to Qwen Code when working with code in this
 repository.
 
+## Working Principles
+
+### Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+**(This is the principle we care about most.)**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes,
+simplify.
+
+_Adapted from Andrej Karpathy's CLAUDE.md._
+
 ## Common Commands
 
 ### Building
@@ -101,6 +119,13 @@ npm run preflight  # Full check: clean → install → format → lint → build
   between packages
 - **Tests**: Collocated with source (`file.test.ts` next to `file.ts`),
   vitest framework
+- **File naming**: React components use `PascalCase.tsx`. New non-component
+  files prefer `kebab-case.ts`. Existing `camelCase` files stay as-is —
+  don't opportunistically rename, it breaks `git blame` and import paths.
+- **Comments**: Default to none. Only add when the _why_ is non-obvious —
+  a hidden constraint, a subtle invariant, a workaround for a specific bug.
+  Don't narrate _what_ the code does (names carry that), and don't reference
+  the current task/PR/issue (that belongs in git history, not the source).
 - **Commits**: Conventional Commits (e.g., `feat(cli): Add --json flag`)
 - **Node.js**: Development and production both require `>=22` (Ink 7 + React 19.2 requirement)
 
