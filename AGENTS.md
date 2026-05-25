@@ -119,15 +119,9 @@ npm run preflight  # Full check: clean → install → format → lint → build
   between packages
 - **Tests**: Collocated with source (`file.test.ts` next to `file.ts`),
   vitest framework
-- **File naming**: React components use `PascalCase.tsx`. New non-component
-  files prefer `kebab-case.ts`. Existing `camelCase` files stay as-is —
-  don't opportunistically rename, it breaks `git blame` and import paths.
-- **Comments**: Default to none. Only add when the _why_ is non-obvious —
-  a hidden constraint, a subtle invariant, a workaround for a specific bug.
-  Don't narrate _what_ the code does (names carry that), and don't reference
-  the current task/PR/issue (that belongs in git history, not the source).
-  When editing existing code, preserve comments that explain non-obvious
-  constraints or workarounds — don't remove them as cleanup.
+- **File naming**: `PascalCase.tsx` for React components, `kebab-case.ts` for
+  new non-component files. Leave existing `camelCase` files alone — renaming breaks `git blame` and imports.
+- **Comments**: Default to none. Add only when _why_ is non-obvious; don't delete existing ones as cleanup.
 - **Commits**: Conventional Commits (e.g., `feat(cli): Add --json flag`)
 - **Node.js**: Development and production both require `>=22` (Ink 7 + React 19.2 requirement)
 
@@ -185,8 +179,10 @@ applicable.
 
 - **PR description**: explain the motivation and changes in prose. Avoid
   referencing file names or function names.
-- **Reviewer Test Plan**: describe behaviors a reviewer should verify and what
-  to expect, not scripted test commands.
+- **Reviewer Test Plan** (template section): describe behaviors a reviewer
+  should verify and what to expect, not scripted test commands. Use **How to
+  verify** for reproduction steps; Before/After for TUI evidence when
+  applicable.
 - **Line wrapping**: do not hard-wrap the PR body at a fixed column width.
   GitHub renders single newlines as `<br>`, so a wrapped description displays
   as a narrow column. Write each paragraph or list item as one long line.
