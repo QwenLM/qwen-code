@@ -604,6 +604,9 @@ export async function markActiveAutoImproveRunCancelled(
   };
   state.lastRun = cancelledRun;
   delete state.currentRun;
+  if (state.stopRequested || state.status === 'stopping') {
+    state.status = 'stopped';
+  }
   await writeAutoImproveLoopState(repoRoot, state);
   return true;
 }

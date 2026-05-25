@@ -329,9 +329,11 @@ describe('autoImproveCommand', () => {
     ).resolves.toBe(true);
 
     const updated = JSON.parse(await fs.readFile(statePath, 'utf8')) as {
+      status: string;
       currentRun?: unknown;
       lastRun?: { status: string };
     };
+    expect(updated.status).toBe('stopped');
     expect(updated.currentRun).toBeUndefined();
     expect(updated.lastRun).toMatchObject({ status: 'cancelled' });
   });
