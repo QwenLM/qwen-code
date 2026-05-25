@@ -31,6 +31,14 @@ import {
 
 const debugLogger = createDebugLogger('SYSTEM_CONTROLLER');
 
+/**
+ * Maximum allowed timeout for canUseTool requests (10 minutes).
+ * Node.js setTimeout coerces delays > 2^31-1 to 32-bit signed integers,
+ * which can cause timeouts to fire immediately or never. This cap prevents
+ * such edge cases while still allowing reasonable timeout values.
+ */
+const MAX_CAN_USE_TOOL_TIMEOUT_MS = 600_000;
+
 export class SystemController extends BaseController {
   /**
    * Handle system control requests
@@ -136,7 +144,8 @@ export class SystemController extends BaseController {
     if (
       typeof canUseToolTimeout === 'number' &&
       Number.isFinite(canUseToolTimeout) &&
-      canUseToolTimeout > 0
+      canUseToolTimeout > 0 &&
+      canUseToolTimeout <= MAX_CAN_USE_TOOL_TIMEOUT_MS
     ) {
       this.context.sdkCanUseToolTimeoutMs = canUseToolTimeout;
     }
