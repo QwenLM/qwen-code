@@ -29,7 +29,7 @@ The first npm release of `qwen serve` (v0.16-alpha) is intentionally narrow — 
 **Deployment surface — local-only:**
 
 - ✅ Loopback (`127.0.0.1`, default) — no auth required, suitable for dev workstations
-- ✅ Local launch via `systemd` / `launchd` / `nohup &` / `tmux` (templates land in PR 30a)
+- ✅ Local launch via `systemd` / `launchd` / `nohup &` / `tmux` — see [Local launch templates](./qwen-serve-deploy-local.md)
 - ✅ Bring-your-own bearer token via `QWEN_SERVER_TOKEN` env var ([Authentication](#authentication) for setup)
 - ❌ **Containerized deployment** — Docker / Compose / Kubernetes / nginx reverse-proxy with TLS termination NOT in v0.16-alpha. Defers to v0.16.x once an enterprise pilot is committed (would otherwise rot from no-one-validating).
 - ❌ **Multi-daemon coordination on one host** — `1 daemon = 1 workspace × N sessions` is enforced. Cross-host federation, instance-path token keying, and stale-token cleanup defer to v0.16.x.
@@ -458,6 +458,7 @@ const result = await flow.awaitCompletion({ signal: abortCtrl.signal });
 
 ## What's next
 
+- **Setting up a long-running daemon?** [Local launch templates (systemd / launchd / nohup / tmux)](./qwen-serve-deploy-local.md) for v0.16-alpha (local-only).
 - **Build a client?** See the [DaemonClient TypeScript quickstart](../developers/examples/daemon-client-quickstart.md) and the [HTTP protocol reference](../developers/qwen-serve-protocol.md).
 - **Reading the source?** Bridge code lives at `packages/cli/src/serve/`; SDK client at `packages/sdk-typescript/src/daemon/`.
 - **Tracking the roadmap?** Stage 1.5 / Stage 2 progress is tracked on issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803).
