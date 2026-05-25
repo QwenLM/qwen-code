@@ -29,7 +29,7 @@ const debugLogger = createDebugLogger('BG_TASK_VIEW');
 
 // ─── Types ──────────────────────────────────────────────────
 
-export type BackgroundDialogMode = 'closed' | 'list' | 'detail';
+export type BackgroundDialogMode = 'closed' | 'list' | 'detail' | 'detail-from-panel';
 
 export interface BackgroundTaskViewState {
   /**
@@ -67,6 +67,7 @@ export interface BackgroundTaskViewActions {
   cancelSelected(): void;
   /** Resume the currently selected paused entry. */
   resumeSelected(): Promise<void>;
+  enterDetailFromPanel(): void;
   setPillFocused(focused: boolean): void;
   setLivePanelFocused(focused: boolean): void;
   setLivePanelSelectedIndex(index: number): void;
@@ -103,6 +104,7 @@ const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   closeDialog: noop,
   enterDetail: noop,
   exitDetail: noop,
+  enterDetailFromPanel: noop,
   cancelSelected: noop,
   resumeSelected: async () => {},
   setPillFocused: noop,
@@ -154,6 +156,11 @@ export function BackgroundTaskViewProvider({
     if (pillFocused && !hasEntries) setPillFocused(false);
   }, [pillFocused, hasEntries]);
 
+  const hasAgentEntries = entries.some((e) => e.kind === 'agent');
+  useEffect(() => {
+    if (livePanelFocused && !hasAgentEntries) setLivePanelFocusedRaw(false);
+  }, [livePanelFocused, hasAgentEntries]);
+
   // rawSelectedIndex can fall out of range when entries shrink; clamp on read.
   const selectedIndex =
     entries.length === 0
@@ -187,9 +194,19 @@ export function BackgroundTaskViewProvider({
     setDialogMode('detail');
   }, [entries.length]);
 
+  const enterDetailFromPanel = useCallback(() => {
+    if (entries.length === 0) return;
+    setDialogMode('detail-from-panel');
+  }, [entries.length]);
+
   const exitDetail = useCallback(() => {
-    setDialogMode('list');
-  }, []);
+    if (dialogMode === 'detail-from-panel') {
+      setDialogMode('closed');
+      setLivePanelFocusedRaw(true);
+    } else {
+      setDialogMode('list');
+    }
+  }, [dialogMode]);
 
   const cancelSelected = useCallback(() => {
     if (!config) return;
@@ -281,6 +298,7 @@ export function BackgroundTaskViewProvider({
       openDialog,
       closeDialog,
       enterDetail,
+      enterDetailFromPanel,
       exitDetail,
       cancelSelected,
       resumeSelected,
@@ -295,6 +313,7 @@ export function BackgroundTaskViewProvider({
       openDialog,
       closeDialog,
       enterDetail,
+      enterDetailFromPanel,
       exitDetail,
       cancelSelected,
       resumeSelected,

@@ -166,6 +166,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // Includes terminal entries — the pill stays open so users can reopen
   // the dialog to inspect final state after the last agent finishes.
   const hasBgAgents = bgEntries.length > 0;
+  const bgAgentCount = useMemo(
+    () => bgEntries.filter((e) => e.kind === 'agent').length,
+    [bgEntries],
+  );
   const hasActiveToolConfirmation = useMemo(
     () =>
       Boolean(uiState.confirmationRequest) ||
@@ -510,7 +514,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // focus to composer. Printable chars type through (auto-unfocus).
       if (livePanelFocused) {
         if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
-          const maxIdx = bgEntries.length; // 0=main, 1..N=agents
+          const maxIdx = bgAgentCount; // 0=main, 1..N=agents
           if (livePanelSelectedIndex < maxIdx) {
             setLivePanelSelectedIndex(livePanelSelectedIndex + 1);
           }
@@ -529,7 +533,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             setLivePanelFocused(false);
           } else {
             const agentIdx = livePanelSelectedIndex - 1;
-            if (agentIdx < bgEntries.length) {
+            if (agentIdx < bgAgentCount) {
               setBgSelectedIndex(agentIdx);
               enterBgDetailFromPanel();
             }
@@ -1344,7 +1348,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       setLivePanelSelectedIndex,
       livePanelFocused,
       livePanelSelectedIndex,
-      bgEntries.length,
+      bgAgentCount,
       enterBgDetailFromPanel,
       setBgSelectedIndex,
       followup,
