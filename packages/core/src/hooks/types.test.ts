@@ -7,8 +7,19 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+  createHookOutput,
   UserPromptExpansionHookOutput,
 } from './types.js';
+
+describe('UserPromptSubmitHookOutput.getAdditionalContext', () => {
+  it('preserves raw additionalContext', () => {
+    const output = createHookOutput('UserPromptSubmit', {
+      hookSpecificOutput: { additionalContext: '<xml>value</xml>' },
+    });
+
+    expect(output.getAdditionalContext()).toBe('<xml>value</xml>');
+  });
+});
 
 describe('UserPromptExpansionHookOutput.getAdditionalContext', () => {
   it('returns undefined when hookSpecificOutput is absent', () => {

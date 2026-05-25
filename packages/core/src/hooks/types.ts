@@ -283,6 +283,8 @@ export function createHookOutput(
       return new PostToolUseHookOutput(data);
     case HookEventName.PostToolUseFailure:
       return new PostToolUseFailureHookOutput(data);
+    case HookEventName.UserPromptSubmit:
+      return new UserPromptSubmitHookOutput(data);
     case HookEventName.UserPromptExpansion:
       return new UserPromptExpansionHookOutput(data);
     case HookEventName.Stop:
@@ -490,6 +492,15 @@ export class PostToolUseFailureHookOutput extends DefaultHookOutput {
    */
   override getAdditionalContext(): string | undefined {
     return super.getAdditionalContext();
+  }
+}
+
+/**
+ * Specific hook output class for UserPromptSubmit events.
+ */
+export class UserPromptSubmitHookOutput extends DefaultHookOutput {
+  override getAdditionalContext(): string | undefined {
+    return this.getRawAdditionalContext();
   }
 }
 
