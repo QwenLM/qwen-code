@@ -551,6 +551,38 @@ You can pin an exact thinking-token budget by including `budget_tokens` alongsid
 
 For Anthropic this becomes `thinking.budget_tokens`. For OpenAI/DeepSeek the field is preserved but currently ignored by the server — `reasoning_effort` is the load-bearing knob.
 
+### DeepSeek cache-stability diagnostics
+
+DeepSeek-hosted OpenAI-compatible requests rely heavily on exact prefix reuse.
+When `QWEN_CODE_PROFILE_RUNTIME=1` is enabled, Qwen Code records
+privacy-preserving OpenAI wire diagnostics that help identify tool-prefix drift
+without storing prompts, tool descriptions, schema bodies, arguments, or tool
+outputs.
+
+For OpenAI-compatible requests, the runtime diagnostics snapshot includes a
+`cacheStability` object:
+
+- `provider`: `deepseek` for `api.deepseek.com` hostnames, otherwise
+  `openai-compatible`.
+- `toolNames`: function names in the exact wire order sent to the provider.
+- `toolNameSequenceHash`: changes when the ordered tool sequence changes.
+- `toolNameSetHash`: remains stable when the same tools are only reordered.
+- `toolSchemaHash`: hashes the exact `tools` JSON shape sent on the wire.
+- `canonicalToolManifestHash`: hashes a name-sorted manifest of function names
+  plus hashed descriptions and recursively sorted parameter schemas, so it
+  stays stable across equivalent JSON key ordering.
+
+Useful comparisons:
+
+- Same `toolNameSetHash`, different `toolNameSequenceHash`: tool order drift.
+- Same `toolNameSequenceHash`, different `canonicalToolManifestHash`: tool
+  manifest drift, such as description or parameter-schema changes.
+- Same `canonicalToolManifestHash`, different `toolSchemaHash`: JSON
+  serialization or key-order drift.
+
+These hashes only identify client-side drift clues. Actual cache hit rates still
+need to be confirmed from DeepSeek/provider usage metrics or logs.
+
 ## Provider Models vs Runtime Models
 
 Qwen Code distinguishes between two types of model configurations:
