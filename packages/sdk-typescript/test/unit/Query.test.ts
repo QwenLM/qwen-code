@@ -16,6 +16,7 @@ import type {
   CLIControlRequest,
   CLIControlResponse,
   ControlCancelRequest,
+  CLIControlInitializeRequest,
 } from '../../src/types/protocol.js';
 import { ControlRequestType } from '../../src/types/protocol.js';
 import { AbortError } from '../../src/types/errors.js';
@@ -328,7 +329,9 @@ describe('Query', () => {
       const initRequest =
         transport.getLastWrittenMessage() as CLIControlRequest;
       expect(initRequest.request.subtype).toBe('initialize');
-      expect(initRequest.request.timeout).toEqual({ canUseTool: 120_000 });
+      expect(
+        (initRequest.request as CLIControlInitializeRequest).timeout,
+      ).toEqual({ canUseTool: 120_000 });
 
       await respondToInitialize(transport, query);
       await query.close();
