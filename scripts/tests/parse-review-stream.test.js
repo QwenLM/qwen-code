@@ -150,6 +150,51 @@ describe('accumulateSegments', () => {
       });
     expect(accumulateSegments(raw)).toEqual(['a', 'b']);
   });
+
+  it('strips <tool_call> XML blocks from text segments', () => {
+    const raw = jsonl({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: 'Let me check.\n<tool_call>\n{"name":"read","args":{"path":"x"}}\n</tool_call>',
+          },
+        ],
+      },
+    });
+    expect(accumulateSegments(raw)).toEqual(['Let me check.']);
+  });
+
+  it('strips [tool_call: ...] bracket blocks from text segments', () => {
+    const raw = jsonl({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: 'Review:\n[tool_call: read_file {"path": "src/index.ts"}]',
+          },
+        ],
+      },
+    });
+    expect(accumulateSegments(raw)).toEqual(['Review:']);
+  });
+
+  it('drops segment entirely when only tool_call content remains', () => {
+    const raw = jsonl({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: '<tool_call>\n{"name":"bash"}\n</tool_call>',
+          },
+        ],
+      },
+    });
+    expect(accumulateSegments(raw)).toEqual([]);
+  });
 });
 
 describe('buildOutput', () => {
