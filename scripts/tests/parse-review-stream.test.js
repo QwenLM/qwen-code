@@ -248,13 +248,13 @@ describe('isPreambleFragment', () => {
     expect(isPreambleFragment('Checking for potential issues.')).toBe(true);
   });
 
-  it('rejects text longer than 300 chars', () => {
-    const long = 'Let me ' + 'x'.repeat(300);
+  it('rejects text longer than 400 chars', () => {
+    const long = 'Let me ' + 'x'.repeat(400);
     expect(isPreambleFragment(long)).toBe(false);
   });
 
-  it('rejects multi-line text with more than 4 lines', () => {
-    const text = Array(5).fill('Let me check.').join('\n');
+  it('rejects multi-line text with more than 5 lines', () => {
+    const text = Array(6).fill('Let me check.').join('\n');
     expect(isPreambleFragment(text)).toBe(false);
   });
 

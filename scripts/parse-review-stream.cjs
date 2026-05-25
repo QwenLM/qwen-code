@@ -142,10 +142,10 @@ function stripPreamble(text) {
  * typically start with filler phrases.
  */
 function isPreambleFragment(text) {
-  if (text.length > 300) return false;
+  if (text.length > 400) return false;
   const lines = text.split('\n').filter((l) => l.trim());
-  if (lines.length > 4) return false;
-  return /^(Let me|I'll |I need to|I should|I want to|I'm going to|Looking at|Reviewing|Checking|Examining)/i.test(
+  if (lines.length > 5) return false;
+  return /^(Let me|I'll |I need to|I should|I want to|I'm going to|Looking at|Reviewing|Checking|Examining|Now I have|Now let me|I now have|I've now|Based on my)/i.test(
     text.trim(),
   );
 }

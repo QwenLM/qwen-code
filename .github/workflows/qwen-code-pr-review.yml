@@ -624,7 +624,6 @@ jobs:
           raw_out="$(timeout --kill-after=15s 3m qwen \
             --approval-mode default \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
-            --allowed-tools "$QWEN_REVIEW_ALLOWED_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
             -p "Triage the PR below." \
             < /tmp/preflight-prompt-rendered.md 2>/tmp/preflight-stderr.log)"

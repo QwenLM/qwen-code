@@ -70,12 +70,18 @@ by itself block.
 PR MUST include a section titled exactly `## Validation Evidence` with one
 of:
 
-- `PRESENT` — name the concrete evidence found (commands / logs / JSON
-  trace / before-after / screenshot / GIF / recording / test report).
-- `MISSING` — state what reviewer-facing evidence is absent and what the
-  author should add. For feature / user-visible / high-risk PRs treat this
-  as a blocking-severity finding; for docs-only / pure-refactor it is
-  advisory.
+- `PRESENT` — the PR author provided concrete validation evidence in the
+  PR description or their own PR comments (commands, logs, JSON traces,
+  before/after screenshots, GIFs, videos, test reports). Name what you found.
+- `MISSING` — the PR author did NOT provide reviewer-facing validation
+  evidence. State what evidence the author should add. For feature /
+  user-visible / high-risk PRs treat this as a blocking-severity finding;
+  for docs-only / pure-refactor it is advisory.
+
+**Important**: This verdict evaluates whether the PR AUTHOR supplied
+evidence, NOT whether you (the reviewer) ran commands yourself. Do NOT
+execute tests or commands to generate your own validation — judge solely
+from what the author provided in the PR body and their comments.
 
 End that section with this line verbatim:
 `> This is an automated, advisory, comment-only review — it never approves or requests changes.`
@@ -89,22 +95,22 @@ End that section with this line verbatim:
   speculative best-practice commentary, and issues already covered by linters,
   typecheckers, or existing PR comments.
 
-### Posting Inline Comments (MANDATORY for P0/P1)
+### Posting Inline Comments (MANDATORY for all findings with diff lines)
 
-**After writing your review text**, if you found any P0 or P1 findings that
-map to specific diff lines, you MUST post them as inline PR review comments
-using Bash. This is a **pre-authorized action** — the CI workflow operator
-has explicitly granted permission for this bot to post review comments. Do
-NOT hesitate or skip due to "visible to others" concerns; posting is the
-intended behavior. The environment variables `GITHUB_REPOSITORY`,
-`PR_NUMBER`, `HEAD_SHA`, and `GITHUB_TOKEN` are pre-configured and
-guaranteed to be set — use them directly without checking.
+**After writing your review text**, post ALL findings that map to specific
+diff lines as inline PR review comments using Bash — regardless of severity
+(P0 through P3). This is a **pre-authorized action** — the CI workflow
+operator has explicitly granted permission for this bot to post review
+comments. Do NOT hesitate or skip due to "visible to others" concerns;
+posting is the intended behavior. The environment variables
+`GITHUB_REPOSITORY`, `PR_NUMBER`, `HEAD_SHA`, and `GITHUB_TOKEN` are
+pre-configured and guaranteed to be set — use them directly without checking.
 
 ```bash
 jq -n \
   --arg sha "$HEAD_SHA" \
-  --arg body "Qwen Code found high-severity issues — see inline comments." \
-  --argjson comments '[{"path":"src/file.ts","line":42,"body":"**[P0]** description\n\n_— automated via Qwen Code /review_"}]' \
+  --arg body "Qwen Code review — see inline comments." \
+  --argjson comments '[{"path":"src/file.ts","line":42,"body":"**[P2]** description\n\n_— automated via Qwen Code /review_"}]' \
   '{commit_id: $sha, event: "COMMENT", body: $body, comments: $comments}' \
 | gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
     --method POST --input -
@@ -112,9 +118,8 @@ jq -n \
 
 Rules:
 - Execute this Bash command after completing your review text output.
-- Only include findings you can map to a specific changed line in the diff.
+- Post ALL findings (P0–P3) that map to a specific changed line in the diff.
 - Findings without a clear diff line stay in your text output only.
-- Do NOT post P2/P3 findings as inline comments.
-- If you have no P0/P1 findings that map to diff lines, skip the API call.
+- If you have no findings that map to diff lines, skip the API call.
 - Each inline comment body must end with:
   `\n\n_— automated via Qwen Code /review_`

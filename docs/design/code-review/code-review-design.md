@@ -4,10 +4,11 @@
 > `codex/preflight-triage` 分支的当前实现。当前 PR 的实际实现以
 > [`preflight-triage.md`](./preflight-triage.md) 和
 > `.github/workflows/qwen-code-pr-review.yml` 为准：review workflow 已改为
-> preflight tier 路由，LIGHT / STANDARD 是 tool-free 单发 qwen review；
-> DEEP 会抽取 bundled `/review` skill 的 rubric，并拆成四个 CI-safe、
-> tool-free focused pass。早期 cross-run review-cache / 直接运行 bundled
-> multi-agent skill 的方案没有在当前 PR 中继续落地。
+> preflight tier 路由，LIGHT / STANDARD / DEEP 使用 qwen 调用（模型可用
+> Read/Grep/Bash 工具验证代码并通过 `gh api` 发 inline comments）；DEEP
+> 额外抽取 bundled `/review` skill 的 rubric 拆成四个 CI-safe focused pass。
+> 早期 cross-run review-cache / 直接运行 bundled multi-agent skill 的方案
+> 没有在当前 PR 中继续落地。
 
 ## 问题陈述
 

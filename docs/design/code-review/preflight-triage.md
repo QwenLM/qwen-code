@@ -1,10 +1,12 @@
 # Preflight Triage（评审前预筛）
 
-> 本文档定义 PR review 的 preflight tier 路由机制。LIGHT / STANDARD 由可信
-> workflow shell 收集 PR 数据后发起 tool-free 单发 qwen review；DEEP 则抽取
-> bundled `/review` skill 的评审 rubric，并拆成 4 个 CI-safe、tool-free
-> focus pass（correctness/security、test coverage、maintainability/performance、
-> undirected audit）。`code-review-design.md` 只保留早期 Phase 1-3 历史背景，本文档与
+> 本文档定义 PR review 的 preflight tier 路由机制。LIGHT / STANDARD / DEEP
+> 由可信 workflow shell 收集 PR 数据后发起 qwen review，模型可使用
+> Read/Grep/Bash 工具验证代码并通过 `gh api` 发 inline comments；preflight
+> triage 阶段仍为 tool-free 单发调用。DEEP 抽取 bundled `/review` skill 的
+> 评审 rubric，拆成 4 个 CI-safe focus pass（correctness/security、test
+> coverage、maintainability/performance、undirected audit）。
+> `code-review-design.md` 只保留早期 Phase 1-3 历史背景，本文档与
 > `.github/workflows/qwen-code-pr-review.yml` 是当前实现来源。
 
 ## 与 PR 合规门禁的关系（重要）
@@ -52,7 +54,7 @@
 
 ## 设计原则
 
-继承早期 `code-review-design.md` 的 P1 / P5，但按当前 tool-free 实现调整：
+继承早期 `code-review-design.md` 的 P1 / P5，按当前实现调整：
 
 - **P1**：review 工具无状态，状态在外部控制流。preflight 也无状态，输入即所有 context；review step 不 checkout PR head，不把 GitHub token 交给模型进程。
 - **P5**：复用现有 design 文档与历史决策，不写新的"团队红线"清单。
@@ -78,7 +80,7 @@ flowchart TD
     W --> C
     C --> D["对 5 个 blast-radius 维度打布尔分"]
     D --> E{"任一 high-risk 维度为 true?<br/>security_sensitive / public_api<br/>/ build_or_release / data_path"}
-    E -->|"是"| DEEP["DEEP<br/>tool-free high-risk review"]
+    E -->|"是"| DEEP["DEEP<br/>high-risk review (4 focused passes)"]
     E -->|"否"| F{"跨 package / 跨文件 ripple?"}
     F -->|"是"| STD["STANDARD<br/>单发, 结构化 P0-P3"]
     F -->|"否"| G{"是真实运行时代码?"}
@@ -120,13 +122,13 @@ preflight LLM 看 PR diff，对以下维度打布尔分：
 
 ### 执行路径要点
 
-- **ULTRA_LIGHT / LIGHT / STANDARD / DEEP** 都不直接执行 bundled skill 的工具流程。除 ULTRA_LIGHT 外，其余档位都由 CI shell 收集可信 PR context 后调用 qwen；DEEP 额外抽取 bundled `/review` rubric，并拆成多个 focused pass。
+- **ULTRA_LIGHT / LIGHT / STANDARD / DEEP** 都不直接执行 bundled skill 的完整工具流程（不使用 worktree、autofix、GitHub review submission）。除 ULTRA_LIGHT 外，其余档位都由 CI shell 收集可信 PR context 后调用 qwen，模型可使用 Read/Grep/Bash（通过 `--allowed-tools run_shell_command` 放行）验证代码并通过 `gh api` 发 inline comments。DEEP 额外抽取 bundled `/review` rubric，并拆成多个 focused pass。
 - 单发调用的 prompt 复杂度按 tier 递增：LIGHT 简洁 markdown、STANDARD 带 P0–P3 结构化清单 + cross-file 提示
-- DEEP 保留高风险审查强度，通过更大的 diff window、项目规则、preflight hints、专用 prompt 和 bundled `/review` rubric 实现，而不是通过可调用工具、worktree checkout、autofix 或 GitHub review submission 实现。
+- DEEP 保留高风险审查强度，通过更大的 diff window、项目规则、preflight hints、专用 prompt 和 bundled `/review` rubric 实现。Orchestration 类工具（agent/skill/worktree/plan）在 deny list 中。
 
 ## Tier 实现机制
 
-每个 tier 有**明确的执行路径、硬耗时上限、always-emit 兜底**。ULTRA_LIGHT 由 shell 直接 compose 评论；LIGHT / STANDARD 走 tool-free 单发 qwen 调用；DEEP 走 4 个 tool-free focused qwen pass，并通过流式累加器在 timeout / error 时保留 partial review。
+每个 tier 有**明确的执行路径、硬耗时上限、always-emit 兜底**。ULTRA_LIGHT 由 shell 直接 compose 评论；LIGHT / STANDARD / DEEP 走 qwen 调用，模型可使用 Read/Grep/Bash 工具（通过 `--allowed-tools run_shell_command` 放行）验证代码并执行 `gh api` 发 inline comments。DEEP 拆为 4 个 focused pass，通过流式累加器在 timeout / error 时保留 partial review。
 
 ### ULTRA_LIGHT
 
@@ -309,7 +311,7 @@ shell-only   单发 qwen   单发 qwen   4 个 focused qwen pass
 | **DEEP**：正常完成                                                 | 合并 4 个 focused pass 的 review → 发出                                   | 完整 review markdown        |
 
 > **DEEP 与 STANDARD/LIGHT 的关键差异**：
-> STANDARD/LIGHT 是单发 tool-free qwen 调用；DEEP 是 4 个 focused tool-free qwen pass。每个 pass 的模型输出仍在顶层 assistant text 流里，所以 timeout 时 accumulator flush 出来的 partial **就是**该 focus 维度下写到一半的真 review。DEEP 的差异在于输入窗口更大、prompt 更严格、审查维度拆分，并复用了 bundled `/review` rubric；它仍不执行 bundled skill 的工具、worktree、autofix 或 GitHub review-submission 步骤。
+> STANDARD/LIGHT 是单发 qwen 调用；DEEP 是 4 个 focused qwen pass。所有 tier 都可使用 Read/Grep/Bash 工具验证代码并通过 `gh api` 发 inline comments（通过 `--allowed-tools run_shell_command` 放行 shell）。DEEP 的差异在于输入窗口更大、prompt 更严格、审查维度拆分，并复用了 bundled `/review` rubric；它仍不执行 bundled skill 的 worktree、autofix 或 GitHub review-submission 步骤（orchestration 工具在 deny list 中）。
 
 **Always-emit 不变量**：每次 review 执行阶段的退出路径只有三种 —— "正常 review 评论"、"partial warning 评论"、"fallback 评论"，前两者覆盖 ≥ 95% 的失败 case，fallback 只在累加器都空或评论发布失败时触发。
 
@@ -426,10 +428,10 @@ Deep review verdict: APPROVE
     set +e
     stop_token="qwen-light-stream-$(date +%s%N)"
     echo "::stop-commands::${stop_token}"
-    timeout --kill-after=15s 3m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
+    timeout --kill-after=15s 3m qwen \
       --approval-mode default \
-      --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
       --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+      --allowed-tools "$QWEN_REVIEW_ALLOWED_TOOLS" \
       --allowed-mcp-server-names __qwen_review_no_mcp__ \
       --output-format stream-json --include-partial-messages \
       --prompt "$prompt" 2>&1 | tee qwen-review-stream.jsonl
@@ -453,10 +455,10 @@ Deep review verdict: APPROVE
     set +e
     stop_token="qwen-standard-stream-$(date +%s%N)"
     echo "::stop-commands::${stop_token}"
-    timeout --kill-after=30s 8m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
+    timeout --kill-after=30s 8m qwen \
       --approval-mode default \
-      --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
       --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
+      --allowed-tools "$QWEN_REVIEW_ALLOWED_TOOLS" \
       --allowed-mcp-server-names __qwen_review_no_mcp__ \
       --output-format stream-json --include-partial-messages \
       --prompt "$prompt" 2>&1 | tee "$out"
@@ -682,7 +684,7 @@ Deep review verdict: APPROVE
 - **手动**：每个 PR 由 maintainer 评论 `@qwen-code /review --tier=deep` 覆盖（对外部贡献者 PR 体验差）
 - **dispatch**：用 `workflow_dispatch` + `tier_override=deep` 触发（仅 maintainer，不影响自动 PR）
 
-代价：所有 PR 都走 tool-free DEEP 深审，成本高于按 tier 路由，但仍受 15m/20m 双层 timeout 和 always-emit 保护。
+代价：所有 PR 都走 DEEP 深审，成本高于按 tier 路由，但仍受 15m/20m 双层 timeout 和 always-emit 保护。
 
 ### L3 — 彻底关掉 AI review（最重的杀招）
 
