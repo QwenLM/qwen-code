@@ -821,7 +821,7 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
-          HEAD_SHA: '${{ steps.pr.outputs.head_sha }}'
+          HEAD_SHA: '${{ steps.size.outputs.head_sha }}'
           ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
           DIFF_AVAILABLE: '${{ steps.size.outputs.diff_available }}'
         timeout-minutes: 5
@@ -965,7 +965,7 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
-          HEAD_SHA: '${{ steps.pr.outputs.head_sha }}'
+          HEAD_SHA: '${{ steps.size.outputs.head_sha }}'
           ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
           DIFF_AVAILABLE: '${{ steps.size.outputs.diff_available }}'
         timeout-minutes: 10
@@ -1095,7 +1095,7 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
-          HEAD_SHA: '${{ steps.pr.outputs.head_sha }}'
+          HEAD_SHA: '${{ steps.size.outputs.head_sha }}'
           ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
           DIFF_AVAILABLE: '${{ steps.size.outputs.diff_available }}'
         timeout-minutes: 20
