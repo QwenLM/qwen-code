@@ -49,6 +49,11 @@ export interface BackgroundTaskViewState {
    * Enter to open the dialog). Mirrors the Arena tab-bar focus pattern.
    */
   pillFocused: boolean;
+  /**
+   * True when LiveAgentPanel owns keyboard focus for row navigation.
+   */
+  livePanelFocused: boolean;
+  livePanelSelectedIndex: number;
 }
 
 export interface BackgroundTaskViewActions {
@@ -63,6 +68,10 @@ export interface BackgroundTaskViewActions {
   /** Resume the currently selected paused entry. */
   resumeSelected(): Promise<void>;
   setPillFocused(focused: boolean): void;
+  setLivePanelFocused(focused: boolean): void;
+  setLivePanelSelectedIndex(index: number): void;
+  /** Pre-select a specific entry index before opening the dialog. */
+  setSelectedIndex(index: number): void;
 }
 
 // ─── Context ────────────────────────────────────────────────
@@ -80,6 +89,8 @@ const DEFAULT_STATE: BackgroundTaskViewState = {
   dialogMode: 'closed',
   dialogOpen: false,
   pillFocused: false,
+  livePanelFocused: false,
+  livePanelSelectedIndex: 0,
 };
 
 const noop = () => {};
@@ -95,6 +106,9 @@ const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   cancelSelected: noop,
   resumeSelected: async () => {},
   setPillFocused: noop,
+  setLivePanelFocused: noop,
+  setLivePanelSelectedIndex: noop,
+  setSelectedIndex: noop,
 };
 
 // ─── Hooks ──────────────────────────────────────────────────
@@ -123,6 +137,12 @@ export function BackgroundTaskViewProvider({
   const [rawSelectedIndex, setRawSelectedIndex] = useState(0);
   const [dialogMode, setDialogMode] = useState<BackgroundDialogMode>('closed');
   const [pillFocused, setPillFocused] = useState(false);
+  const [livePanelFocused, setLivePanelFocusedRaw] = useState(false);
+  const [livePanelSelectedIndex, setLivePanelSelectedIndex] = useState(0);
+  const setLivePanelFocused = useCallback((focused: boolean) => {
+    setLivePanelFocusedRaw(focused);
+    if (focused) setLivePanelSelectedIndex(0);
+  }, []);
   const dialogOpen = dialogMode !== 'closed';
   const hasEntries = entries.length > 0;
 
@@ -248,8 +268,10 @@ export function BackgroundTaskViewProvider({
       dialogMode,
       dialogOpen,
       pillFocused,
+      livePanelFocused,
+      livePanelSelectedIndex,
     }),
-    [entries, selectedIndex, dialogMode, dialogOpen, pillFocused],
+    [entries, selectedIndex, dialogMode, dialogOpen, pillFocused, livePanelFocused, livePanelSelectedIndex],
   );
 
   const actions: BackgroundTaskViewActions = useMemo(
@@ -263,6 +285,9 @@ export function BackgroundTaskViewProvider({
       cancelSelected,
       resumeSelected,
       setPillFocused,
+      setLivePanelFocused,
+      setLivePanelSelectedIndex,
+      setSelectedIndex: setRawSelectedIndex,
     }),
     [
       moveSelectionUp,
@@ -274,6 +299,9 @@ export function BackgroundTaskViewProvider({
       cancelSelected,
       resumeSelected,
       setPillFocused,
+      setLivePanelFocused,
+      setLivePanelSelectedIndex,
+      setRawSelectedIndex,
     ],
   );
 
