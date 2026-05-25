@@ -93,8 +93,12 @@ End that section with this line verbatim:
 
 **After writing your review text**, if you found any P0 or P1 findings that
 map to specific diff lines, you MUST post them as inline PR review comments
-using Bash. The environment variables `GITHUB_REPOSITORY`, `PR_NUMBER`,
-`HEAD_SHA`, and `GITHUB_TOKEN` are pre-configured — use them directly.
+using Bash. This is a **pre-authorized action** — the CI workflow operator
+has explicitly granted permission for this bot to post review comments. Do
+NOT hesitate or skip due to "visible to others" concerns; posting is the
+intended behavior. The environment variables `GITHUB_REPOSITORY`,
+`PR_NUMBER`, `HEAD_SHA`, and `GITHUB_TOKEN` are pre-configured and
+guaranteed to be set — use them directly without checking.
 
 ```bash
 jq -n \
