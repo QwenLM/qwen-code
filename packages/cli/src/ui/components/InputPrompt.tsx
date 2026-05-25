@@ -157,10 +157,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     livePanelSelectedIndex,
   } = useBackgroundTaskViewState();
   const {
-    setPillFocused: setBgPillFocused,
     setLivePanelFocused,
     setLivePanelSelectedIndex,
-    enterDetail: enterBgDetail,
+    enterDetailFromPanel: enterBgDetailFromPanel,
     setSelectedIndex: setBgSelectedIndex,
   } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
@@ -532,7 +531,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             const agentIdx = livePanelSelectedIndex - 1;
             if (agentIdx < bgEntries.length) {
               setBgSelectedIndex(agentIdx);
-              enterBgDetail();
+              enterBgDetailFromPanel();
             }
             setLivePanelFocused(false);
           }
@@ -1341,7 +1340,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       hasBgAgents,
       hasActiveToolConfirmation,
       setAgentTabBarFocused,
-      setBgPillFocused,
+      setLivePanelFocused,
+      setLivePanelSelectedIndex,
+      livePanelFocused,
+      livePanelSelectedIndex,
+      bgEntries.length,
+      enterBgDetailFromPanel,
+      setBgSelectedIndex,
       followup,
       onPromptSuggestionDismiss,
       exportCompletion,
