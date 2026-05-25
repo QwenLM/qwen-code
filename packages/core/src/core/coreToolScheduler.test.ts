@@ -40,7 +40,6 @@ import {
   extractToolFilePaths,
   shouldAuditSubstitutionBypass,
 } from './coreToolScheduler.js';
-import { ToolNames } from '../tools/tool-names.js';
 import type { Part, PartListUnion } from '@google/genai';
 import {
   MockModifiableTool,
