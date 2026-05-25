@@ -332,6 +332,47 @@ describe('RuntimeDiagnosticsCollector', () => {
     );
   });
 
+  it('deduplicates OpenAI tool names for set drift diagnostics', () => {
+    const uniqueNames = summarizeOpenAIWireRequest({
+      model: 'wire-model',
+      stream: false,
+      messages: [],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'alpha', description: 'A', parameters: {} },
+        },
+        {
+          type: 'function',
+          function: { name: 'bravo', description: 'B', parameters: {} },
+        },
+      ],
+    });
+    const duplicateName = summarizeOpenAIWireRequest({
+      model: 'wire-model',
+      stream: false,
+      messages: [],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'alpha', description: 'A', parameters: {} },
+        },
+        {
+          type: 'function',
+          function: { name: 'bravo', description: 'B', parameters: {} },
+        },
+        {
+          type: 'function',
+          function: { name: 'alpha', description: 'A', parameters: {} },
+        },
+      ],
+    });
+
+    expect(uniqueNames.cacheStability?.toolNameSetHash).toBe(
+      duplicateName.cacheStability?.toolNameSetHash,
+    );
+  });
+
   it('uses canonical manifest hashes for equivalent schema key order', () => {
     const first = summarizeOpenAIWireRequest({
       model: 'wire-model',
@@ -381,6 +422,56 @@ describe('RuntimeDiagnosticsCollector', () => {
     );
     expect(first.cacheStability?.toolSchemaHash).not.toBe(
       second.cacheStability?.toolSchemaHash,
+    );
+  });
+
+  it('canonicalizes shared schema references like duplicated schema objects', () => {
+    const sharedStringSchema = { type: 'string', description: 'Value' };
+    const sharedSchema = summarizeOpenAIWireRequest({
+      model: 'wire-model',
+      stream: false,
+      messages: [],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'inspect',
+            description: 'Inspect',
+            parameters: {
+              type: 'object',
+              properties: {
+                a: sharedStringSchema,
+                b: sharedStringSchema,
+              },
+            },
+          },
+        },
+      ],
+    });
+    const duplicatedSchema = summarizeOpenAIWireRequest({
+      model: 'wire-model',
+      stream: false,
+      messages: [],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'inspect',
+            description: 'Inspect',
+            parameters: {
+              type: 'object',
+              properties: {
+                a: { description: 'Value', type: 'string' },
+                b: { description: 'Value', type: 'string' },
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(sharedSchema.cacheStability?.canonicalToolManifestHash).toBe(
+      duplicatedSchema.cacheStability?.canonicalToolManifestHash,
     );
   });
 
