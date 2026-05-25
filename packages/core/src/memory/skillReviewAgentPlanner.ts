@@ -112,8 +112,7 @@ async function evaluateScopedDecision(
       }
       return 'deny';
     }
-    case ToolNames.EDIT:
-    case ToolNames.WRITE_FILE: {
+    case ToolNames.EDIT: {
       if (!ctx.filePath || !isProjectSkillPath(ctx.filePath, projectRoot)) {
         return 'deny';
       }
@@ -131,6 +130,34 @@ async function evaluateScopedDecision(
       }
       return sourceFlag ? 'allow' : 'deny';
     }
+    case ToolNames.WRITE_FILE: {
+      // `write_file` is reserved for CREATING new skills. Updates to
+      // existing auto-skills must go through `edit`. Denying any write
+      // that targets an existing file is the safety net for #4437:
+      // without it, an agent that picks a name collision (with another
+      // auto-skill OR a user-authored skill) silently clobbers the
+      // prior SKILL.md. The system prompt + task prompt are the soft
+      // guard (enumerate existing skill names so the agent picks fresh);
+      // this deny is the hard guard.
+      if (!ctx.filePath || !isProjectSkillPath(ctx.filePath, projectRoot)) {
+        return 'deny';
+      }
+      try {
+        await assertRealProjectSkillPath(ctx.filePath, projectRoot);
+      } catch {
+        return 'deny';
+      }
+      // ENOENT → file does not exist → allow creation.
+      // Anything else (file present, EACCES, EISDIR, ...) → deny so we
+      // never overwrite something we cannot prove is safe to clobber.
+      try {
+        await fs.stat(ctx.filePath);
+        return 'deny';
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'allow';
+        return 'deny';
+      }
+    }
     default:
       return 'default';
   }
@@ -147,7 +174,7 @@ function getScopedDenyRule(
     case ToolNames.EDIT:
       return `ManagedSkillReview(edit: only within ${getProjectSkillsRoot(projectRoot)} and only on skills with 'source: auto-skill' in frontmatter)`;
     case ToolNames.WRITE_FILE:
-      return `ManagedSkillReview(write_file: only within ${getProjectSkillsRoot(projectRoot)}; existing files must have 'source: auto-skill' in frontmatter)`;
+      return `ManagedSkillReview(write_file: only within ${getProjectSkillsRoot(projectRoot)} and only to a path that does not yet exist — use a different skill name like \`<name>-2\`, or use \`edit\` to update an existing auto-skill)`;
     default:
       return undefined;
   }
@@ -230,9 +257,58 @@ function buildAgentHistory(history: Content[]): Content[] {
   ];
 }
 
-function buildTaskPrompt(skillsRoot: string): string {
+/**
+ * Enumerate directories under the project skills root that contain a
+ * SKILL.md. Returned names are the directory basenames (the same identifier
+ * the agent uses when picking `.qwen/skills/<name>/SKILL.md`).
+ *
+ * Best-effort: any read error (ENOENT, EACCES, ...) returns `[]` so a
+ * temporarily-unreadable skills dir downgrades to "no enumeration" rather
+ * than aborting the task. Exported for tests.
+ */
+export async function listExistingSkillDirNames(
+  projectRoot: string,
+): Promise<string[]> {
+  const skillsRoot = getProjectSkillsRoot(projectRoot);
+  let entries: Array<import('node:fs').Dirent>;
+  try {
+    entries = await fs.readdir(skillsRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    try {
+      await fs.stat(path.join(skillsRoot, entry.name, 'SKILL.md'));
+      names.push(entry.name);
+    } catch {
+      // No SKILL.md (or unreadable) — skip; half-built directories
+      // shouldn't reserve a name.
+    }
+  }
+  names.sort();
+  return names;
+}
+
+/**
+ * Exported for tests. The "(do not reuse these names)" line is the soft
+ * guard for #4437 — the hard guard is `evaluateScopedDecision`'s WRITE_FILE
+ * branch denying any write to an existing path.
+ */
+export async function buildTaskPrompt(
+  skillsRoot: string,
+  projectRoot: string,
+): Promise<string> {
+  const existing = await listExistingSkillDirNames(projectRoot);
+  const existingLine =
+    existing.length === 0
+      ? '(no skills exist yet — any name is available)'
+      : `Existing skill names (do NOT reuse for write_file; use \`edit\` if you want to update one of these): ${existing.join(', ')}`;
   return [
     `Project skills directory: \`${skillsRoot}\``,
+    '',
+    existingLine,
     '',
     'Use `ls` and `read_file` to inspect existing skills before writing.',
     'Use `write_file` to create a new skill, `edit` to update an existing auto-skill.',
@@ -264,7 +340,7 @@ export async function runSkillReviewByAgent(params: {
   const result = await runForkedAgent({
     name: SKILL_REVIEW_AGENT_NAME,
     config: scopedConfig,
-    taskPrompt: buildTaskPrompt(skillsRoot),
+    taskPrompt: await buildTaskPrompt(skillsRoot, params.projectRoot),
     systemPrompt: SKILL_REVIEW_SYSTEM_PROMPT,
     maxTurns: params.maxTurns ?? DEFAULT_AUTO_SKILL_MAX_TURNS,
     maxTimeMinutes:
