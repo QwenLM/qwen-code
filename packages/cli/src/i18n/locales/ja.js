@@ -74,6 +74,8 @@ export default {
   'List available Qwen Code tools. Usage: /tools [desc]':
     '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
   'List available skills.': '利用可能なスキルを一覧表示する。',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'スキルパネルを開く（一覧・検索・有効化/無効化・選択）。',
   'Available Qwen Code CLI tools:': '利用可能な Qwen Code CLI ツール:',
   'No tools available': '利用可能なツールはありません',
   'View or change the approval mode for tool usage':

@@ -29,6 +29,7 @@ export const MUST_TRANSLATE_KEYS = [
   'To request additional UI language packs, please open an issue on GitHub.',
   'Open MCP management dialog',
   'Manage MCP servers',
+  'Open the skills panel (browse, search, toggle, pick).',
   'Tools',
   'prompts',
   'tools',

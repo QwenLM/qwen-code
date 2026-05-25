@@ -98,6 +98,8 @@ export default {
   'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
   'List available skills.': '列出可用技能。',
+  'Open the skills panel (browse, search, toggle, pick).':
+    '開啟技能面板（瀏覽、搜尋、啟停、選擇）。',
   'Available Qwen Code CLI tools:': '可用的 Qwen Code CLI 工具：',
   'No tools available': '沒有可用工具',
   'View or change the approval mode for tool usage':

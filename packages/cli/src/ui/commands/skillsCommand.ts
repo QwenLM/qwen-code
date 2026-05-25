@@ -22,7 +22,7 @@ function getDisabledSet(context: CommandContext): ReadonlySet<string> {
 export const skillsCommand: SlashCommand = {
   name: 'skills',
   get description() {
-    return t('Manage skills (open enable/disable dialog).');
+    return t('Open the skills panel (browse, search, toggle, pick).');
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'acp'] as const,

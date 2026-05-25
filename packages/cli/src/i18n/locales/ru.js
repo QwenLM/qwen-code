@@ -111,6 +111,8 @@ export default {
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Просмотр доступных инструментов Qwen Code. Использование: /tools [desc]',
   'List available skills.': 'Показать доступные навыки.',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'Открыть панель навыков (обзор, поиск, вкл/выкл, выбор).',
   'Available Qwen Code CLI tools:': 'Доступные инструменты Qwen Code CLI:',
   'No tools available': 'Нет доступных инструментов',
   'View or change the approval mode for tool usage':
