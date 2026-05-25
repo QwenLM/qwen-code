@@ -44,7 +44,7 @@ export interface ToolInvocation<
    *
    * - `'allow'` — inherently safe (e.g., read-only commands, `cat`, `ls`).
    * - `'ask'`   — may have side effects, needs user or PM confirmation.
-   * - `'deny'`  — security violation (e.g., command substitution in shell).
+   * - `'deny'`  — explicit security or policy violation.
    *
    * The coreToolScheduler uses this as the *default* permission which may be
    * overridden by PermissionManager rules at L4.
@@ -692,6 +692,8 @@ export interface ToolExecuteConfirmationDetails {
   rootCommand: string;
   /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
   permissionRules?: string[];
+  /** Warnings surfaced to the confirmation UI before the user approves execution. */
+  securityWarnings?: string[];
 }
 
 export interface ToolMcpConfirmationDetails {

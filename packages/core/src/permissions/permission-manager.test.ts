@@ -1256,6 +1256,22 @@ describe('PermissionManager', () => {
       ).toBe('ask');
     });
 
+    it('one sub-command has command substitution → ask with user confirmation', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo hello && python3 -c "print($(echo hello))"',
+        }),
+      ).toBe('ask');
+    });
+
     it('one sub-command denied → deny', async () => {
       pm = new PermissionManager(
         makeConfig({

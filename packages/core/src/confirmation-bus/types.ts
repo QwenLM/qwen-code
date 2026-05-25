@@ -78,6 +78,7 @@ export type SerializableConfirmationDetails =
       rootCommand: string;
       rootCommands: string[];
       commands?: string[];
+      securityWarnings?: string[];
     }
   | {
       type: 'mcp';

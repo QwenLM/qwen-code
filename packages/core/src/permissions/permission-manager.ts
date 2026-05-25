@@ -348,7 +348,7 @@ export class PermissionManager {
    *
    * When a sub-command returns 'default' (no rule matches), it is resolved to
    * the actual default permission using AST analysis:
-   *   - Command substitution detected → 'deny'
+   *   - Command substitution detected → 'ask'
    *   - Read-only command (cd, ls, git status, etc.) → 'allow'
    *   - Otherwise → 'ask'
    *
@@ -403,14 +403,14 @@ export class PermissionManager {
    * This mirrors the logic in ShellToolInvocation.getDefaultPermission().
    *
    * @param command - The shell command to analyze.
-   * @returns 'deny' for command substitution, 'allow' for read-only, 'ask' otherwise.
+   * @returns 'ask' for command substitution, 'allow' for read-only, 'ask' otherwise.
    */
   private async resolveDefaultPermission(
     command: string,
   ): Promise<'allow' | 'ask' | 'deny'> {
-    // Security: command substitution ($(), ``, <(), >()) → deny
+    // Security: command substitution ($(), ``, <(), >()) needs explicit user confirmation.
     if (detectCommandSubstitution(command)) {
-      return 'deny';
+      return 'ask';
     }
 
     // AST-based read-only detection

@@ -282,6 +282,29 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).not.toContain('Always allow for this user');
     });
 
+    it('renders exec security warnings', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: 'python3 -c "print($(echo hello))"',
+        rootCommand: 'python3',
+        securityWarnings: ['Contains command_substitution'],
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      expect(lastFrame()).toContain('Contains command_substitution');
+    });
+
     it('renders MCP server and tool name for mcp confirmations', () => {
       const confirmationDetails: ToolCallConfirmationDetails = {
         type: 'mcp',

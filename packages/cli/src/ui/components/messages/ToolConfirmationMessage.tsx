@@ -273,6 +273,11 @@ export const ToolConfirmationMessage: React.FC<
             </Box>
           </MaxSizedBox>
         </Box>
+        {executionProps.securityWarnings?.map((warning) => (
+          <Box key={warning} paddingX={1} marginLeft={1} marginTop={1}>
+            <Text color={theme.status.warning}>{warning}</Text>
+          </Box>
+        ))}
       </Box>
     );
   } else if (confirmationDetails.type === 'plan') {

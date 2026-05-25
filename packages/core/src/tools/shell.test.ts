@@ -4873,6 +4873,22 @@ describe('ShellTool', () => {
       expect(details.type).toBe('exec');
     });
 
+    it('should warn when a shell confirmation contains command substitution', async () => {
+      const invocation = shellTool.build({
+        command: 'python3 -c "print($(echo hello))"',
+        is_background: false,
+      });
+
+      const details = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      expect(details).toMatchObject({
+        type: 'exec',
+        securityWarnings: ['Contains command_substitution'],
+      });
+    });
+
     it('should exclude read-only sub-commands from confirmation details in compound commands', async () => {
       // "cd" is read-only, "npm run build" is not
       const params = {

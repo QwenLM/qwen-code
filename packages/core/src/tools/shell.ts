@@ -47,6 +47,7 @@ import {
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
+  detectCommandSubstitution,
   type ShellConfiguration,
   type ShellType,
   splitCommands,
@@ -1464,12 +1465,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
       debugLogger.warn('Failed to extract command rules:', e);
     }
 
+    const securityWarnings = detectCommandSubstitution(command)
+      ? ['Contains command_substitution']
+      : undefined;
+
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Confirm Shell Command',
       command: this.params.command,
       rootCommand: rootCommands.join(', '),
       permissionRules,
+      securityWarnings,
       onConfirm: async (
         _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
