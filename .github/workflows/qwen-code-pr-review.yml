@@ -1418,20 +1418,16 @@ jobs:
           summary_bytes=$(wc -c < qwen-review-summary.md)
           {
             if [ "$EXCEEDS_REVIEW_THRESHOLD" = "true" ]; then
-              printf '> [!WARNING]\n'
-              printf '> Large PR warning: this PR has %s reviewable lines, above the configured %s-line AI-review guidance. The automated review still ran, but findings may be less complete on oversized diffs.\n\n' \
+              printf '> [!NOTE]\n'
+              printf '> Large PR (%s lines, threshold %s). Findings may be less complete.\n\n' \
                 "$CHANGED_LINES" "$REVIEW_SIZE_THRESHOLD"
             fi
             head -c 60000 qwen-review-summary.md
             if [ "$summary_bytes" -gt 60000 ]; then
               printf '\n\n_Review summary was truncated at 60KB. See the workflow logs for the full output._\n'
             fi
-            # The single-quoted format string keeps literal backticks
-            # around %s and /review for the rendered Markdown; %s is a
-            # printf placeholder filled by the positional arg, so the
-            # single quotes are correct here.
             # shellcheck disable=SC2016
-            printf '\n\n---\n_Reviewed by `%s` via Qwen Code `/review` (tier=`%s`). Reply `@qwen-code /review` to re-run; add `--tier=light|standard|deep` to force a tier._\n' \
+            printf '\n\n---\n_Qwen Code `/review` · `%s` · tier `%s`_\n' \
               "${OPENAI_MODEL:-unknown}" "${EFFECTIVE_TIER:-unknown}"
           } > qwen-pr-review-summary-comment.md
 

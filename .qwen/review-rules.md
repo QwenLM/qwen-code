@@ -78,7 +78,7 @@ of:
   advisory.
 
 End that section with this line verbatim:
-`> This is an automated, advisory, comment-only review — it never approves or requests changes. After adding validation evidence, comment \`@qwen-code /review\` to re-run; editing the PR description alone does NOT re-trigger this review in the current phase.`
+`> This is an automated, advisory, comment-only review — it never approves or requests changes.`
 
 ### Functional Review
 

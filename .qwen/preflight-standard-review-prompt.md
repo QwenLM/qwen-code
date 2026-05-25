@@ -127,11 +127,7 @@ Apply the requirement defined in `.qwen/review-rules.md` (section
   the author should add.
 
 End that section with this line verbatim:
-`> This is an automated, advisory, comment-only review — it never approves or requests changes. After adding validation evidence, comment \`@qwen-code /review\` to re-run; editing the PR description alone does NOT re-trigger this review in the current phase.`
-
----
-
-_Tier: STANDARD. Reply `@qwen-code /review --tier=deep` to request a high-risk structured review with a larger diff window._
+`> This is an automated, advisory, comment-only review — it never approves or requests changes.`
 ```
 
 ---

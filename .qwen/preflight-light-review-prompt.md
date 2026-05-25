@@ -78,10 +78,6 @@ What **not** to check at this tier:
 (or, if no concerns:)
 
 No issues found in the visible diff at this tier.
-
----
-
-_Tier: LIGHT. Reply `@qwen-code /review --tier=deep` to request a high-risk structured review with a larger diff window._
 ```
 
 ---

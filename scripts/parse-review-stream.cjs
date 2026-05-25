@@ -95,7 +95,10 @@ function accumulateSegments(raw) {
       continue;
     }
     const text = extractSegmentFromEvent(event);
-    if (text && text.trim()) segments.push(text);
+    if (text && text.trim()) {
+      const cleaned = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim();
+      if (cleaned) segments.push(cleaned);
+    }
   }
   return segments;
 }
