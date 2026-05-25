@@ -877,6 +877,42 @@ describe('LogToSpanProcessor', () => {
       }
     });
 
+    it('falls back to "unknown" when both message and name are empty (e.g. minified Error)', async () => {
+      await processor.shutdown();
+      const err = Object.assign(new Error(''), { name: '' });
+      processor = makeFailingProcessor(err);
+      const stderrWrite = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      try {
+        await flushOne(processor);
+        expect(stderrWrite).toHaveBeenCalledWith(
+          '[LogToSpan] export failed: code=1 error="unknown"\n',
+        );
+      } finally {
+        stderrWrite.mockRestore();
+      }
+    });
+
+    it('omits data field when err.data is an empty string (guards against length>0 loosening)', async () => {
+      await processor.shutdown();
+      const err = Object.assign(new Error('fail'), { code: 500, data: '' });
+      processor = makeFailingProcessor(err);
+      const stderrWrite = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      try {
+        await flushOne(processor);
+        const msg = stderrWrite.mock.calls[0][0] as string;
+        expect(msg).toContain('httpCode=500');
+        expect(msg).not.toContain('data=');
+      } finally {
+        stderrWrite.mockRestore();
+      }
+    });
+
     it('routes diagnostics to an injected sink without touching stderr', async () => {
       await processor.shutdown();
       const sink = vi.fn();
