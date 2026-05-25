@@ -36,6 +36,8 @@ const debugLogger = createDebugLogger('CONVERTER');
  */
 interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   cached_tokens?: number;
+  prompt_cache_hit_tokens?: number;
+  prompt_cache_miss_tokens?: number;
 }
 
 export interface ExtendedChatCompletionAssistantMessageParam
@@ -68,6 +70,16 @@ export interface ExtendedCompletionChunkDelta
 // lengths while remaining far below any practical cumulative-buffer replay,
 // so it preserves catch-rate without silently suppressing legitimate chunks.
 const CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH = 64;
+
+function getCachedPromptTokens(usage: OpenAI.CompletionUsage): number {
+  const extendedUsage = usage as ExtendedCompletionUsage;
+  return (
+    usage.prompt_tokens_details?.cached_tokens ??
+    extendedUsage.cached_tokens ??
+    extendedUsage.prompt_cache_hit_tokens ??
+    0
+  );
+}
 
 // Once this many bytes have been emitted without entering cumulative mode the
 // stream is almost certainly a standard incremental provider. Stop growing
@@ -1121,13 +1133,8 @@ export function convertOpenAIResponseToGemini(
     const promptTokens = usage.prompt_tokens || 0;
     const completionTokens = usage.completion_tokens || 0;
     const totalTokens = usage.total_tokens || 0;
-    // Support both formats: prompt_tokens_details.cached_tokens (OpenAI standard)
-    // and cached_tokens (some models return it at top level)
-    const extendedUsage = usage as ExtendedCompletionUsage;
-    const cachedTokens =
-      usage.prompt_tokens_details?.cached_tokens ??
-      extendedUsage.cached_tokens ??
-      0;
+    // Support OpenAI and provider-specific cache usage fields.
+    const cachedTokens = getCachedPromptTokens(usage);
     const thinkingTokens =
       usage.completion_tokens_details?.reasoning_tokens || 0;
 
@@ -1320,13 +1327,8 @@ export function convertOpenAIChunkToGemini(
     const totalTokens = usage.total_tokens || 0;
     const thinkingTokens =
       usage.completion_tokens_details?.reasoning_tokens || 0;
-    // Support both formats: prompt_tokens_details.cached_tokens (OpenAI standard)
-    // and cached_tokens (some models return it at top level)
-    const extendedUsage = usage as ExtendedCompletionUsage;
-    const cachedTokens =
-      usage.prompt_tokens_details?.cached_tokens ??
-      extendedUsage.cached_tokens ??
-      0;
+    // Support OpenAI and provider-specific cache usage fields.
+    const cachedTokens = getCachedPromptTokens(usage);
 
     // If we only have total tokens but no breakdown, estimate the split
     // Typically input is ~70% and output is ~30% for most conversations

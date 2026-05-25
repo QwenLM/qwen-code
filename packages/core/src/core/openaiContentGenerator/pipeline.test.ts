@@ -512,6 +512,113 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('sorts DeepSeek tools by function name before sending the wire request', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.deepseek.com/v1';
+      const request: GenerateContentParameters = {
+        model: 'deepseek-v4-pro',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: 'placeholder',
+                  description: 'Placeholder function',
+                  parameters: { type: Type.OBJECT, properties: {} },
+                },
+              ],
+            },
+          ],
+        },
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockTools = [
+        { type: 'function', function: { name: 'zeta' } },
+        { type: 'function', function: { name: 'alpha' } },
+        { type: 'function', function: { name: 'bravo' } },
+      ] as OpenAI.Chat.ChatCompletionTool[];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue(
+        mockTools,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'response-id',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'test-prompt-id');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(
+        apiCall.tools.map(
+          (tool: OpenAI.Chat.ChatCompletionTool) => tool.function.name,
+        ),
+      ).toEqual(['alpha', 'bravo', 'zeta']);
+    });
+
+    it('preserves tool order for non-DeepSeek hostnames', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://example.test/v1';
+      const request: GenerateContentParameters = {
+        model: 'deepseek-v4-pro',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: 'placeholder',
+                  description: 'Placeholder function',
+                  parameters: { type: Type.OBJECT, properties: {} },
+                },
+              ],
+            },
+          ],
+        },
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockTools = [
+        { type: 'function', function: { name: 'zeta' } },
+        { type: 'function', function: { name: 'alpha' } },
+      ] as OpenAI.Chat.ChatCompletionTool[];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue(
+        mockTools,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'response-id',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'test-prompt-id');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(
+        apiCall.tools.map(
+          (tool: OpenAI.Chat.ChatCompletionTool) => tool.function.name,
+        ),
+      ).toEqual(['zeta', 'alpha']);
+    });
+
     it('should skip empty tools array in request', async () => {
       // Arrange — tools: [] should NOT be included in the API request
       const request: GenerateContentParameters = {

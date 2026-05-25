@@ -37,6 +37,26 @@ function raiseAbortListenerCap(signal: AbortSignal | undefined): void {
   if (signal) setMaxListeners(0, signal);
 }
 
+function compareStableStrings(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+function getToolSortKey(tool: OpenAI.Chat.ChatCompletionTool): string {
+  return [tool.function.name, tool.type, JSON.stringify(tool)].join('\u0000');
+}
+
+function sortToolsForCacheStableRequest(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+): void {
+  if (!request.tools || request.tools.length < 2) return;
+
+  request.tools = [...request.tools].sort((left, right) =>
+    compareStableStrings(getToolSortKey(left), getToolSortKey(right)),
+  );
+}
+
 /**
  * Error thrown when the API returns an error embedded as stream content
  * instead of a proper HTTP error. Some providers (e.g., certain OpenAI-compatible
@@ -385,6 +405,14 @@ export class ContentGenerationPipeline {
       if (isDeepSeekHostname(this.contentGeneratorConfig)) {
         typed['thinking'] = { type: 'disabled' };
       }
+    }
+
+    // DeepSeek's KV cache is prefix-exact: a different tool order changes the
+    // serialized prompt prefix even when the tool set and schemas are identical.
+    // Sort only for official DeepSeek endpoints to avoid surprising other
+    // OpenAI-compatible providers with changed tool presentation order.
+    if (isDeepSeekHostname(this.contentGeneratorConfig)) {
+      sortToolsForCacheStableRequest(providerRequest);
     }
 
     return providerRequest;
