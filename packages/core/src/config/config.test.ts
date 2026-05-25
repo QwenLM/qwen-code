@@ -1655,6 +1655,43 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('OutboundCorrelation Configuration', () => {
+    // Default-to-false is security-relevant — controls whether
+    // `traceparent` is written onto outbound LLM/fetch request streams.
+    // PR #4390 R4: keep wire-level toggle out of telemetry namespace.
+    it('defaults outboundCorrelation.propagateTraceContext to false when outboundCorrelation is omitted', () => {
+      const config = new Config(baseParams);
+      expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(false);
+    });
+
+    it('defaults to false when outboundCorrelation is provided as empty object', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        outboundCorrelation: {},
+      };
+      const config = new Config(params);
+      expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(false);
+    });
+
+    it('honors outboundCorrelation.propagateTraceContext when explicitly set to true', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        outboundCorrelation: { propagateTraceContext: true },
+      };
+      const config = new Config(params);
+      expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(true);
+    });
+
+    it('honors outboundCorrelation.propagateTraceContext when explicitly set to false', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        outboundCorrelation: { propagateTraceContext: false },
+      };
+      const config = new Config(params);
+      expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(false);
+    });
+  });
+
   describe('UseRipgrep Configuration', () => {
     it('should default useRipgrep to true when not provided', () => {
       const config = new Config(baseParams);
