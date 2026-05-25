@@ -5035,6 +5035,26 @@ describe('ShellTool', () => {
         // `warnings` should be omitted entirely when there's nothing to flag.
         expect(details.warnings).toBeUndefined();
       });
+
+      // Regression coverage for PR #4386 R4 (cid 3293075622): the
+      // `|| detectCommandSubstitution(rawCommand)` branch of
+      // `buildShellExecWarnings` only fires for shapes where
+      // `stripShellWrapper` yields a substitution-free inner command
+      // (here `echo ok`) but the raw command has substitution in the
+      // env-prefix. Without this case, removing the `||` clause would
+      // not regress any test in this describe block.
+      it('surfaces a warning for substitution in the env-prefix of a shell wrapper', async () => {
+        const invocation = shellTool.build({
+          command: `FOO=$(cat secret.txt) bash -c 'echo ok'`,
+          is_background: false,
+        });
+        const details = (await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        )) as { warnings?: string[] };
+
+        expect(details.warnings).toBeDefined();
+        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+      });
     });
   });
 
