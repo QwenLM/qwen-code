@@ -19,7 +19,7 @@ repository.
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes,
 simplify.
 
-_Adapted from Andrej Karpathy's CLAUDE.md._
+_Adapted from Andrej Karpathy's [CLAUDE.md](https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md)._
 
 ## Common Commands
 
