@@ -762,6 +762,57 @@ describe('DataProcessor', () => {
       );
     });
 
+    it('should normalize case-variant LLM facet fields to canonical values', async () => {
+      mockGenerateJson.mockResolvedValue({
+        underlying_goal: 'Test goal',
+        goal_categories: { coding: 1 },
+        outcome: 'FULLY_ACHIEVED',
+        user_satisfaction_counts: null,
+        Qwen_helpfulness: 'Very_Helpful',
+        session_type: 'Multi_Task',
+        friction_counts: null,
+        friction_detail: null,
+        primary_success: null,
+        brief_summary: 'Test summary',
+      });
+
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Help me with code' }],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      const result = await (
+        dataProcessor as unknown as {
+          analyzeSession(records: ChatRecord[]): Promise<SessionFacets | null>;
+        }
+      ).analyzeSession(records);
+
+      expect(result).toEqual({
+        session_id: 'test-session',
+        underlying_goal: 'Test goal',
+        goal_categories: { coding: 1 },
+        outcome: 'fully_achieved',
+        user_satisfaction_counts: {},
+        Qwen_helpfulness: 'very_helpful',
+        session_type: 'multi_task',
+        friction_counts: {},
+        friction_detail: '',
+        primary_success: 'none',
+        brief_summary: 'Test summary',
+      });
+    });
+
     it('should return null when LLM returns empty result', async () => {
       mockGenerateJson.mockResolvedValue({});
 

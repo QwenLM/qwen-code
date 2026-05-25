@@ -126,8 +126,11 @@ function normalizeInsightEnum<T extends string>(
   fallback: T,
 ): T {
   const trimmed = typeof value === 'string' ? value.trim() : '';
-  if (trimmed && allowed.some((item) => item === trimmed)) {
-    return trimmed as T;
+  if (trimmed) {
+    const match = allowed.find(
+      (item) => String(item).toLowerCase() === trimmed.toLowerCase(),
+    );
+    if (match) return match;
   }
 
   logger.debug(
