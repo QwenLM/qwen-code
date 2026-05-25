@@ -1359,11 +1359,15 @@ export class Session implements SessionContext {
         text: `\n[User message received during tool execution]: ${message}`,
       }));
     } catch (error) {
-      this.midTurnDrainUnavailable = true;
-      debugLogger.debug(
-        `Mid-turn queue drain unavailable: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const isPermanentError = /method not found/i.test(errorMessage);
+      
+      if (isPermanentError) {
+        this.midTurnDrainUnavailable = true;
+      }
+      
+      debugLogger.warn(
+        `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable: ${errorMessage}`,
       );
       return [];
     }
