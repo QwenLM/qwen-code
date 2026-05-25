@@ -7,6 +7,11 @@ You may use Bash only for `gh api` calls to post inline PR comments as described
 in the review rules — do not use it for file reading, code exploration, or
 network access.
 
+IMPORTANT: You MUST produce your review based solely on the diff and context
+provided below. Do NOT attempt to read files, grep code, or call any tool other
+than `gh api` for posting inline comments. Start your response with the review
+markdown immediately — no preamble, no "let me check" statements.
+
 ## Project-specific rules
 
 <<<REVIEW_RULES_MD>>>

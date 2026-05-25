@@ -5,6 +5,10 @@ and project rules below. You may use Bash only for `gh api` calls to post
 inline PR comments as described in the review rules — do not use it for file
 reading, code exploration, or network access.
 
+IMPORTANT: Produce your review based solely on the diff provided below. Do NOT
+attempt to read files, grep code, or call any tool other than `gh api`. Start
+your response with the review markdown immediately.
+
 The preflight triage stage already judged that this change is contained, has
 no high-risk dimension flips, and does not warrant the high-risk DEEP path.
 

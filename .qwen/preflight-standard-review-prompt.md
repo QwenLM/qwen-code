@@ -6,6 +6,10 @@ Bash only for `gh api` calls to post inline PR comments as described in the
 review rules — do not use it for file reading, code exploration, or network
 access.
 
+IMPORTANT: Produce your review based solely on the diff provided below. Do NOT
+attempt to read files, grep code, or call any tool other than `gh api`. Start
+your response with the review markdown immediately.
+
 The preflight triage stage judged this change to be cross-module / cross-file
 or involve internal API changes, but it does **not** flip any of the five
 high-risk blast-radius dimensions (`user_facing`, `security_sensitive`,
