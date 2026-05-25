@@ -107,18 +107,20 @@ jobs:
     env:
       OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
       QWEN_PR_REVIEW_MAX_CHANGED_LINES: "${{ vars.QWEN_PR_REVIEW_MAX_CHANGED_LINES || '1500' }}"
-      # Core-tool allowlist for all LLM calls in this workflow.
-      # Bash is available so the model can post inline PR comments via `gh`.
-      # The explicit deny list blocks orchestration tools (agent loops, skills,
-      # worktrees) that are unnecessary and increase attack surface.
-      QWEN_REVIEW_CORE_TOOLS: 'structured_output,Bash'
-      QWEN_REVIEW_DENY_TOOLS: 'agent,skill,tool_search,ask_user_question,task_stop,send_message,enter_worktree,exit_worktree,exit_plan_mode'
+      # Deny list blocks orchestration tools (agent loops, skills, worktrees,
+      # plan mode) that are unnecessary for review and increase attack surface.
+      # All other tools are available — matching the local qwen-code experience
+      # so the model uses proper tool_use protocol instead of text-simulating
+      # tool calls (which pollutes review output).
+      QWEN_REVIEW_DENY_TOOLS: 'agent,skill,tool_search,ask_user_question,task_stop,send_message,enter_worktree,exit_worktree,exit_plan_mode,enter_plan_mode'
     steps:
       # Security (R4): this job runs on pull_request_target with model
-      # secrets. qwen has Bash (for `gh` inline comments) scoped to the
-      # bot token. harden-runner remains in audit mode to observe outbound
-      # domains before a later block-mode allowlist. Must be first so
-      # monitoring starts before anything else.
+      # secrets. Tools are available (matching local qwen-code behavior) but
+      # scoped: code checkout is base branch only, Bash uses the bot token,
+      # orchestration tools are deny-listed, and MCP servers are blocked.
+      # harden-runner remains in audit mode to observe outbound domains
+      # before a later block-mode allowlist. Must be first so monitoring
+      # starts before anything else.
       - name: 'Harden runner (egress audit)'
         uses: 'step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5' # v2.19.3
         with:
@@ -617,7 +619,6 @@ jobs:
           # stderr line (node warnings, telemetry) would break the parse.
           raw_out="$(timeout --kill-after=15s 3m qwen \
             --approval-mode default \
-            --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
             -p "Triage the PR below." \
@@ -889,7 +890,6 @@ jobs:
           echo "::stop-commands::${stop_token}"
           timeout --kill-after=15s 3m qwen \
             --approval-mode default \
-            --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
             --output-format stream-json --include-partial-messages \
@@ -1029,7 +1029,6 @@ jobs:
           echo "::stop-commands::${stop_token}"
           timeout --kill-after=30s 8m qwen \
             --approval-mode default \
-            --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
             --output-format stream-json --include-partial-messages \
@@ -1254,7 +1253,6 @@ jobs:
             echo "::stop-commands::${stop_token}"
             timeout --kill-after=20s 4m qwen \
               --approval-mode default \
-              --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
               --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
               --allowed-mcp-server-names __qwen_review_no_mcp__ \
               --output-format stream-json --include-partial-messages \

@@ -75,33 +75,10 @@ function extractSegmentFromEvent(event) {
 }
 
 /**
- * Heuristic: does `text` look like substantive review content rather than
- * a preamble/planning sentence the model emits before (hallucinated) tool
- * calls? We require at least ONE of:
- *   - A markdown heading (## or ###)
- *   - A severity marker (P0–P3, Critical, High, Medium, Low, Suggestion)
- *   - A markdown list item starting with `- ` or `1. `
- *   - The standard review opening phrase ("What this PR does")
- *   - At least 200 characters (long text is likely content, not preamble)
- */
-function isSubstantiveContent(text) {
-  if (text.length >= 200) return true;
-  if (/^#{2,4}\s/m.test(text)) return true;
-  if (/\b(P[0-3]|Critical|High|Medium|Low|Suggestion)\b/i.test(text))
-    return true;
-  if (/^[-*]\s/m.test(text) || /^\d+\.\s/m.test(text)) return true;
-  if (/What this PR does/i.test(text)) return true;
-  return false;
-}
-
-/**
  * Accumulate all assistant text segments from a JSONL stream string.
  * Malformed lines are skipped (the final line of a truncated stream
  * is the common case). Whitespace-only segments are rejected so the
  * `segments=N` header doesn't lie.
- *
- * After stripping tool_call blocks, segments that lack substantive review
- * content (e.g. a bare "Let me verify..." preamble) are discarded.
  *
  * Exposed for unit tests.
  */
@@ -119,22 +96,7 @@ function accumulateSegments(raw) {
     }
     const text = extractSegmentFromEvent(event);
     if (text && text.trim()) {
-      const hadToolCalls =
-        /<tool_call/i.test(text) ||
-        /<arg_key>/i.test(text) ||
-        /<parameter[=:]/i.test(text) ||
-        /\[tool_call:/i.test(text);
-      const cleaned = text
-        .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
-        .replace(/<tool_call[\s\S]*$/g, '')
-        .replace(/<arg_key>[\s\S]*?<\/arg_key>\s*<arg_value>[\s\S]*?<\/arg_value>/g, '')
-        .replace(/<arg_key>[\s\S]*$/g, '')
-        .replace(/<parameter[=:][\s\S]*$/g, '')
-        .replace(/\[tool_call:[\s\S]*?\]/g, '')
-        .trim();
-      if (!cleaned) continue;
-      if (hadToolCalls && !isSubstantiveContent(cleaned)) continue;
-      segments.push(cleaned);
+      segments.push(text);
     }
   }
   return segments;
@@ -146,6 +108,10 @@ function accumulateSegments(raw) {
  * before starting the real review (marked by a `## ` heading or a
  * severity/findings line). If we find such a marker, drop everything
  * before it.
+ *
+ * If no review marker is found at all and the text looks like
+ * repetitive stalling (the model stuck in a "let me read" loop),
+ * return empty string so the segment gets discarded upstream.
  */
 function stripPreamble(text) {
   const marker = text.match(
@@ -154,17 +120,34 @@ function stripPreamble(text) {
   if (marker && marker.index > 0) {
     return text.slice(marker.index);
   }
+  if (!marker && isRepetitiveStalling(text)) {
+    return '';
+  }
   return text;
+}
+
+/**
+ * Detect repetitive model stalling — the model gets stuck in a loop
+ * requesting to read files but unable to, producing the same sentence
+ * dozens of times.
+ */
+function isRepetitiveStalling(text) {
+  const lines = text.split('\n').filter((l) => l.trim());
+  if (lines.length < 5) return false;
+  const seen = new Map();
+  for (const line of lines) {
+    const normalized = line.trim().toLowerCase();
+    seen.set(normalized, (seen.get(normalized) || 0) + 1);
+  }
+  const maxRepeat = Math.max(...seen.values());
+  return maxRepeat >= 3 && maxRepeat / lines.length > 0.3;
 }
 
 /**
  * Build the final on-disk markdown body from accumulated segments.
  *
- * LIGHT and STANDARD are single-shot, tool-free qwen calls. DEEP is split
- * into focused tool-free passes, but each pass still writes ordinary
- * assistant text to its own stream. Every assistant segment is review
- * content, including partial text captured before a timeout, so segments
- * are joined in stream order.
+ * Every assistant text segment is review content (including partial text
+ * captured before a timeout), so segments are joined in stream order.
  *
  * Empty input gets a placeholder so downstream `gh pr comment
  * --body-file` always has a non-empty body to post.
@@ -174,9 +157,10 @@ function stripPreamble(text) {
 function buildOutput(segments, tier, status) {
   let body;
   let emitted;
-  if (segments.length > 0) {
-    body = segments.map(stripPreamble).join('\n\n');
-    emitted = segments.length;
+  const cleaned = segments.map(stripPreamble).filter((s) => s.trim());
+  if (cleaned.length > 0) {
+    body = cleaned.join('\n\n');
+    emitted = cleaned.length;
   } else {
     body = '(no assistant text parsed; see the raw stream in the job log)';
     emitted = 0;
@@ -229,8 +213,8 @@ module.exports = {
   extractSegmentFromEvent,
   accumulateSegments,
   buildOutput,
-  isSubstantiveContent,
   stripPreamble,
+  isRepetitiveStalling,
 };
 
 if (require.main === module) {
