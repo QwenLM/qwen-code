@@ -8,7 +8,6 @@ import {
   CommandKind,
   type CommandCompletionItem,
   type CommandContext,
-  type OpenDialogActionReturn,
   type SlashCommand,
   type SlashCommandActionReturn,
 } from './types.js';
@@ -24,7 +23,7 @@ import { SettingScope } from '../../config/settings.js';
 
 const debugLogger = createDebugLogger('SKILLS_COMMAND');
 
-const SUBCOMMAND_NAMES = ['manage', 'enable', 'disable'] as const;
+const SUBCOMMAND_NAMES = ['enable', 'disable'] as const;
 
 function getDisabledSet(context: CommandContext): ReadonlySet<string> {
   const list = context.services.settings?.merged.skills?.disabled ?? [];
@@ -99,19 +98,6 @@ async function refreshAfterChange(context: CommandContext): Promise<void> {
     await skillManager.notifyConfigChanged();
   }
 }
-
-const manageSubCommand: SlashCommand = {
-  name: 'manage',
-  get description() {
-    return t('Open the skills enable/disable dialog.');
-  },
-  kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive'] as const,
-  action: (): OpenDialogActionReturn => ({
-    type: 'dialog',
-    dialog: 'skills_manage',
-  }),
-};
 
 const disableSubCommand: SlashCommand = {
   name: 'disable',
@@ -360,12 +346,15 @@ const enableSubCommand: SlashCommand = {
 export const skillsCommand: SlashCommand = {
   name: 'skills',
   get description() {
-    return t('List available skills.');
+    return t('Manage skills (enable / disable, search).');
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'acp'] as const,
-  subCommands: [manageSubCommand, enableSubCommand, disableSubCommand],
-  action: async (context: CommandContext, args?: string) => {
+  subCommands: [enableSubCommand, disableSubCommand],
+  action: async (
+    context: CommandContext,
+    args?: string,
+  ): Promise<void | SlashCommandActionReturn> => {
     const rawArgs = args?.trim() ?? '';
     const [skillName = ''] = rawArgs.split(/\s+/);
 
@@ -381,13 +370,20 @@ export const skillsCommand: SlashCommand = {
       return;
     }
 
-    const skills = await skillManager.listSkills();
-    const disabled = getDisabledSet(context);
-    const visibleSkills = skills.filter(
-      (s) => !disabled.has(s.name.toLowerCase()),
-    );
-
+    // Bare `/skills` opens the manage dialog directly — single entry,
+    // search/sort/toggle all live there. In ACP / non-interactive mode the
+    // dialog never renders (DialogManager is part of the interactive UI),
+    // so we fall back to the original list behavior so users in those
+    // contexts still get something useful from the bare command.
     if (!skillName) {
+      if (context.executionMode === 'interactive') {
+        return { type: 'dialog', dialog: 'skills_manage' };
+      }
+      const skills = await skillManager.listSkills();
+      const disabled = getDisabledSet(context);
+      const visibleSkills = skills.filter(
+        (s) => !disabled.has(s.name.toLowerCase()),
+      );
       if (visibleSkills.length === 0) {
         context.ui.addItem(
           {
@@ -396,16 +392,13 @@ export const skillsCommand: SlashCommand = {
               skills.length === 0
                 ? t('No skills are currently available.')
                 : t(
-                    'All available skills are disabled. Use /skills manage to re-enable.',
+                    'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.',
                   ),
           },
           Date.now(),
         );
         return;
       }
-      // listSkills() returns a stable name-asc order. `priority:` only
-      // reorders the `/skills` listing, so apply the priority-desc,
-      // name-asc sort here at the display layer (unset/invalid → 0).
       const sortedSkills = [...visibleSkills].sort(
         (a, b) =>
           normalizeSkillPriority(b.priority) -
@@ -419,6 +412,9 @@ export const skillsCommand: SlashCommand = {
       return;
     }
 
+    // `/skills <name>` invocation path — works in any mode.
+    const skills = await skillManager.listSkills();
+    const disabled = getDisabledSet(context);
     const normalizedName = skillName.toLowerCase();
     const matched = skills.find(
       (skill) => skill.name.toLowerCase() === normalizedName,
@@ -440,7 +436,7 @@ export const skillsCommand: SlashCommand = {
         {
           type: MessageType.ERROR,
           text: t(
-            'Skill "{{name}}" is disabled. Re-enable it via /skills manage or remove it from skills.disabled.',
+            'Skill "{{name}}" is disabled. Re-enable it via /skills (manage dialog) or remove it from skills.disabled.',
             { name: matched.name },
           ),
         },
@@ -464,14 +460,12 @@ export const skillsCommand: SlashCommand = {
 
     const partial = partialArg.trim().toLowerCase();
     // Prepend the subcommand suggestions so `/skills <tab>` can discover
-    // `manage`, `enable`, `disable`. Without this the parent's `completion`
-    // fully shadows subCommands in `useSlashCompletion`'s argument-completion
-    // path. Filter by prefix so a partial like "en" still narrows correctly.
+    // `enable` / `disable`. Without this the parent's `completion` fully
+    // shadows subCommands in `useSlashCompletion`'s argument-completion
+    // path. The `manage` subcommand was removed — bare `/skills` now
+    // opens the dialog directly. Filter by prefix so `/skills en<tab>`
+    // narrows to `enable`.
     const subCommandSuggestions: CommandCompletionItem[] = [
-      {
-        value: 'manage',
-        description: t('Open the skills enable/disable dialog'),
-      },
       {
         value: 'enable',
         description: t('Re-enable a previously disabled skill'),

@@ -389,6 +389,11 @@ export function SkillsManagerDialog({
     );
   }
 
+  // Counts shown in the header so users can see filter effect at a glance.
+  const totalCount = allSkills.length;
+  const matchedCount = filteredUnlocked.length + filteredLocked.length;
+  const hasQuery = query.trim().length > 0;
+
   return (
     <Box
       borderStyle="round"
@@ -400,12 +405,23 @@ export function SkillsManagerDialog({
     >
       <Text bold>Manage Skills</Text>
       <Text color={theme.text.secondary}>
-        Toggle skills on or off. Saves to .qwen/settings.json (workspace).
+        {hasQuery
+          ? `${matchedCount} / ${totalCount} skills · `
+          : `${totalCount} skill${totalCount === 1 ? '' : 's'} · `}
+        Space to toggle, Enter to save, Esc to cancel · workspace scope
       </Text>
 
-      <Box marginTop={1} flexDirection="column">
-        <Text color={theme.text.secondary}>Type to search</Text>
-        <Text>{query ? `> ${query}` : '>'}</Text>
+      <Box marginTop={1} flexDirection="row">
+        <Text color={hasQuery ? theme.text.accent : theme.text.secondary}>
+          Search:{' '}
+        </Text>
+        <Text>
+          {query || (
+            <Text color={theme.text.secondary} dimColor>
+              type to filter…
+            </Text>
+          )}
+        </Text>
       </Box>
 
       <Box marginTop={1} flexDirection="column">
@@ -453,8 +469,8 @@ export function SkillsManagerDialog({
       )}
 
       <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          Use up/down to navigate, space to toggle, enter to save, esc to cancel
+        <Text color={theme.text.secondary} dimColor>
+          ↑/↓ navigate · backspace edits search
         </Text>
       </Box>
     </Box>

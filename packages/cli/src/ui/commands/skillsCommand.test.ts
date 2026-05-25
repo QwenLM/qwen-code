@@ -70,21 +70,34 @@ function makeContext(opts: {
   });
 }
 
-describe('skillsCommand display ordering', () => {
-  it('sorts the /skills listing by priority desc, then name asc (unset/invalid treated as 0)', async () => {
+describe('skillsCommand bare entry', () => {
+  it('opens the manage dialog directly in interactive mode', async () => {
     if (!skillsCommand.action) {
       throw new Error('skillsCommand must have an action.');
     }
+    const context = makeContext({
+      skills: [{ name: 'alpha' }, { name: 'beta' }],
+      executionMode: 'interactive',
+    });
 
+    const result = await skillsCommand.action(context, '');
+
+    // Single-entry UX: bare `/skills` (no args) goes straight to the
+    // dialog rather than emitting a SKILLS_LIST. The list view has been
+    // collapsed into the dialog (which has search, sort, toggle).
+    expect(result).toEqual({ type: 'dialog', dialog: 'skills_manage' });
+    expect(context.ui.addItem).not.toHaveBeenCalled();
+  });
+
+  it('falls back to listing in non-interactive mode (no dialog UI to render)', async () => {
+    if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
       skills: [
-        { name: 'alpha-unset' },
-        { name: 'beta-unset' },
         { name: 'high', priority: 100 },
-        { name: 'invalid', priority: 'nope' as unknown as number },
         { name: 'low', priority: -5 },
         { name: 'mid', priority: 10 },
       ],
+      executionMode: 'acp',
     });
 
     await skillsCommand.action(context, '');
@@ -92,27 +105,19 @@ describe('skillsCommand display ordering', () => {
     expect(context.ui.addItem).toHaveBeenCalledWith(
       {
         type: MessageType.SKILLS_LIST,
-        skills: [
-          { name: 'high' },
-          { name: 'mid' },
-          { name: 'alpha-unset' },
-          { name: 'beta-unset' },
-          { name: 'invalid' },
-          { name: 'low' },
-        ],
+        skills: [{ name: 'high' }, { name: 'mid' }, { name: 'low' }],
       },
       expect.any(Number),
     );
   });
-});
 
-describe('skillsCommand disabled-skills filter', () => {
-  it('omits disabled skills from the bare /skills listing', async () => {
+  it('omits disabled skills from the non-interactive listing', async () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
       skills: [{ name: 'alpha' }, { name: 'beta' }, { name: 'gamma' }],
       workspaceDisabled: ['beta'],
       mergedDisabled: ['beta'],
+      executionMode: 'non_interactive',
     });
 
     await skillsCommand.action(context, '');
@@ -143,7 +148,6 @@ describe('skillsCommand disabled-skills filter', () => {
       },
       expect.any(Number),
     );
-    // Sanity: must NOT be the generic "Unknown skill" message.
     const errorCall = vi
       .mocked(context.ui.addItem)
       .mock.calls.find((c) => c[0].type === MessageType.ERROR);
@@ -152,12 +156,13 @@ describe('skillsCommand disabled-skills filter', () => {
     );
   });
 
-  it('shows a clarifying message when all skills are disabled', async () => {
+  it('shows a clarifying message when all skills are disabled in non-interactive mode', async () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
       skills: [{ name: 'a' }, { name: 'b' }],
       workspaceDisabled: ['a', 'b'],
       mergedDisabled: ['a', 'b'],
+      executionMode: 'acp',
     });
 
     await skillsCommand.action(context, '');
@@ -165,7 +170,9 @@ describe('skillsCommand disabled-skills filter', () => {
     expect(context.ui.addItem).toHaveBeenCalledWith(
       {
         type: MessageType.INFO,
-        text: expect.stringMatching(/disabled.*\/skills manage/i),
+        text: expect.stringMatching(
+          /disabled.*settings\.json|skills\.disabled/i,
+        ),
       },
       expect.any(Number),
     );
@@ -173,7 +180,7 @@ describe('skillsCommand disabled-skills filter', () => {
 });
 
 describe('skillsCommand completion', () => {
-  it('prepends manage/enable/disable subcommand suggestions on empty partial', async () => {
+  it('prepends enable/disable subcommand suggestions on empty partial', async () => {
     if (!skillsCommand.completion) throw new Error('completion missing');
     const context = makeContext({
       skills: [{ name: 'alpha', description: 'a' }],
@@ -182,9 +189,9 @@ describe('skillsCommand completion', () => {
     const out = await skillsCommand.completion(context, '');
 
     // Subcommand suggestions appear FIRST so users can discover them.
-    expect(out[0].value).toBe('manage');
-    expect(out[1].value).toBe('enable');
-    expect(out[2].value).toBe('disable');
+    // `manage` was removed — bare `/skills` opens the dialog directly.
+    expect(out[0].value).toBe('enable');
+    expect(out[1].value).toBe('disable');
     // Followed by skills.
     expect(out.some((s) => s.value === 'alpha')).toBe(true);
   });
@@ -196,9 +203,17 @@ describe('skillsCommand completion', () => {
     const out = await skillsCommand.completion(context, 'en');
     const subValues = out
       .map((c) => c.value)
-      .filter((v) => ['manage', 'enable', 'disable'].includes(v));
+      .filter((v) => ['enable', 'disable'].includes(v));
 
     expect(subValues).toEqual(['enable']);
+  });
+
+  it('does not surface a removed `manage` subcommand in completion', async () => {
+    if (!skillsCommand.completion) throw new Error('completion missing');
+    const context = makeContext({ skills: [] });
+
+    const out = await skillsCommand.completion(context, '');
+    expect(out.some((s) => s.value === 'manage')).toBe(false);
   });
 
   it('omits disabled skills from completion', async () => {
@@ -215,7 +230,7 @@ describe('skillsCommand completion', () => {
     const out = await skillsCommand.completion(context, '');
     const skillNames = out
       .map((c) => c.value)
-      .filter((v) => !['manage', 'enable', 'disable'].includes(v));
+      .filter((v) => !['enable', 'disable'].includes(v));
 
     expect(skillNames).toEqual(['alpha']);
   });
@@ -466,12 +481,9 @@ describe('skillsCommand: /skills enable <name>', () => {
   });
 });
 
-describe('skillsCommand: /skills manage', () => {
-  it('returns a dialog action for skills_manage', () => {
-    const manage = findSubCommand('manage');
-    if (!manage.action) throw new Error('manage action missing');
-    const context = makeContext({});
-    const result = manage.action(context, '');
-    expect(result).toEqual({ type: 'dialog', dialog: 'skills_manage' });
+describe('skillsCommand: subcommand surface', () => {
+  it('exposes only enable + disable as subcommands (manage was removed)', () => {
+    const names = (skillsCommand.subCommands ?? []).map((c) => c.name).sort();
+    expect(names).toEqual(['disable', 'enable']);
   });
 });
