@@ -10,7 +10,6 @@ import type { GeminiChat } from '../core/geminiChat.js';
 import { type ChatCompressionInfo, CompressionStatus } from '../core/turn.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
-import { createAbortController } from '../utils/abortController.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
@@ -385,7 +384,7 @@ export class ChatCompressionService {
       config: {
         thinkingConfig: { includeThoughts: true },
       },
-      abortSignal: signal ?? createAbortController().signal,
+      abortSignal: signal ?? new AbortController().signal,
       promptId,
     });
     const summary = summaryResult.text;

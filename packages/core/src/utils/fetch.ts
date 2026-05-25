@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createAbortController } from './abortController.js';
 import { getErrorMessage, isNodeError } from './errors.js';
 import { URL } from 'node:url';
 
@@ -62,7 +61,7 @@ export async function fetchWithTimeout(
   timeout: number,
   headers?: Record<string, string>,
 ): Promise<Response> {
-  const controller = createAbortController();
+  const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {

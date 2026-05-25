@@ -21,7 +21,6 @@ import {
   type ActiveGoal,
 } from './activeGoalStore.js';
 import { judgeGoal } from './goalJudge.js';
-import { createAbortController } from '../utils/abortController.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('GOAL_HOOK');
@@ -68,7 +67,7 @@ async function judgeGoalWithTimeout(
   // without this `judgeGoal`'s `generateContent` keeps running in the
   // background — leaking one request per timeout that accumulates across
   // goal-loop iterations.
-  const judgeController = createAbortController();
+  const judgeController = new AbortController();
   const linkedSignal = AbortSignal.any([args.signal, judgeController.signal]);
   try {
     return await Promise.race([
@@ -167,7 +166,7 @@ export function createGoalStopHookCallback(args: {
       return { continue: true };
     }
 
-    const signal = context?.signal ?? createAbortController().signal;
+    const signal = context?.signal ?? new AbortController().signal;
     const verdict = await judgeGoalWithTimeout(config, {
       condition,
       lastAssistantText,

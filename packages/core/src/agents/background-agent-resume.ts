@@ -9,7 +9,6 @@ import * as path from 'node:path';
 import type { Content, FunctionDeclaration, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import { createAbortController } from '../utils/abortController.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   AgentEventEmitter,
@@ -419,7 +418,7 @@ export class BackgroundAgentResumeService {
           startTime: Number.isFinite(parsedStartTime)
             ? parsedStartTime
             : Date.now(),
-          abortController: createAbortController(),
+          abortController: new AbortController(),
           prompt: recovery.initialPrompt,
           outputFile,
           metaPath,
@@ -491,7 +490,7 @@ export class BackgroundAgentResumeService {
       return undefined;
     }
 
-    const bgAbortController = createAbortController();
+    const bgAbortController = new AbortController();
 
     registry.register({
       ...existing,
@@ -920,7 +919,7 @@ export class BackgroundAgentResumeService {
       ...latest,
       isBackgrounded: true,
       status: 'paused',
-      abortController: createAbortController(),
+      abortController: new AbortController(),
       endTime: undefined,
       result: undefined,
       error: options.error,

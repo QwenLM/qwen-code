@@ -25,18 +25,31 @@ pattern (`createChildAbortController` from `packages/core/src/utils/abortControl
 keeps the parent listener count at 0 across 2000 rounds because each child's
 reverse-cleanup listener removes the parent listener when the child aborts.
 
-## 2. Migration completeness
+## 2. Migration scope (intentional)
 
-```sh
-$ grep -rn "new AbortController" packages/core/src --include="*.ts" \
-    | grep -v test | grep -v abortController.ts
-(no output)
-```
+Only the agent-runtime parent→child chain that actually accumulates listeners
+on a long-lived parent signal is migrated to the helper:
 
-Every production `new AbortController()` call in `packages/core/src` (outside
-the helper module itself and outside test files) has been migrated to use
-`createAbortController` / `createChildAbortController`. See
-`migration-completeness.txt` for the captured grep.
+- `packages/core/src/agents/runtime/agent-interactive.ts` (master + per-message round)
+- `packages/core/src/agents/runtime/agent-core.ts` (per-iteration round + waitForExternalInputs + processFunctionCalls try/finally)
+- `packages/core/src/agents/runtime/agent-headless.ts` (external → execution)
+- `packages/core/src/hooks/promptHookRunner.ts` (had a real cleanup leak: manual addEventListener without `{once:true}` and never removed)
+
+Plus three `{once:true}`-only fixes (no helper switch, just defensive
+correctness):
+
+- `packages/core/src/hooks/hookRunner.ts`
+- `packages/core/src/hooks/functionHookRunner.ts`
+- `packages/core/src/confirmation-bus/message-bus.ts`
+
+Independent short-lived controllers (per-shell-command in `tools/shell.ts`,
+per-monitor in `tools/monitor.ts`, per-arena-session in
+`agents/arena/ArenaManager.ts`, per-recall in `core/client.ts`,
+per-fetch in `utils/fetch.ts`, per-dream / per-title / per-judge / per-resume,
+etc.) stay on raw `new AbortController()` — they're GC'd at end of use and
+do not accumulate on a long-lived parent.
+
+See `migration-completeness.txt` for the actual grep + rationale.
 
 ## 3. Affected test suites
 

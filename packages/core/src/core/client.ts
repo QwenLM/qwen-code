@@ -15,7 +15,6 @@ import type {
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
-import { createChildAbortController } from '../utils/abortController.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
@@ -1197,12 +1196,19 @@ export class GeminiClient {
           // turn arrived before it settled). Abort it before installing the
           // new handle so the orphan doesn't keep running indefinitely.
           this.cancelPendingMemoryPrefetch();
-          // Child controller bridges the caller's signal into the prefetch
-          // controller (so a user abort on the parent turn also kills the
-          // recall side-query) AND auto-detaches its parent-listener via
-          // reverse cleanup once this controller aborts — preventing long
-          // sessions from accumulating listeners on the parent signal.
-          const controller = createChildAbortController(signal);
+          const controller = new AbortController();
+          // Bridge the caller's signal into the prefetch controller so a user
+          // abort (Ctrl-C / Esc) on the parent turn also terminates the
+          // recall side-query. `{ once: true }` lets the listener clean itself
+          // up after firing; we still call removeEventListener on the promise's
+          // finally to cover the normal-completion case so a long-lived parent
+          // signal doesn't accumulate listeners across many turns.
+          const onParentAbort = () => controller.abort();
+          if (signal.aborted) {
+            controller.abort();
+          } else {
+            signal.addEventListener('abort', onParentAbort, { once: true });
+          }
           const promise = this.config
             .getMemoryManager()
             .recall(this.config.getProjectRoot(), partToString(request), {
@@ -1238,11 +1244,7 @@ export class GeminiClient {
           };
           void promise.finally(() => {
             handle.settledAt = Date.now();
-            // Aborting the (already-resolved) child controller triggers its
-            // reverse-cleanup listener, which detaches the parent-signal
-            // listener registered by createChildAbortController. No-op if the
-            // controller already aborted (e.g. parent fired first).
-            controller.abort();
+            signal.removeEventListener('abort', onParentAbort);
           });
           this.pendingMemoryPrefetch = handle;
         }

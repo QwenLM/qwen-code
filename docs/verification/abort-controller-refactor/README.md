@@ -106,8 +106,8 @@ The automated checks below were run during development and recorded in
 - All abortController unit tests pass (`abortController.test.ts`, 26 tests; 1 GC test skipped under non-`--expose-gc`).
 - All warningHandler tests pass (`warningHandler.test.ts`, 13 tests including a spawned-child stderr integration test).
 - All `combineAbortSignals` consumer tests pass (`httpHookRunner.test.ts`); the deprecated `createCombinedAbortSignal` shim plus its own test file were removed once the lone caller migrated.
-- All agent runtime / followup / openaiContentGenerator / hooks tests pass — including new pinning tests for the master→agent abort cascade (`ArenaManager.test.ts`) and `startSpeculation` parent-signal wiring (`speculation.test.ts`).
-- Migration completeness: `grep -rn "new AbortController" packages/core/src --include="*.ts" | grep -v test | grep -v abortController.ts` returns **empty**.
+- All agent runtime / followup / openaiContentGenerator / hooks tests pass.
+- Migration scope (intentional): only the agent-runtime parent→child chain (`agent-interactive.ts`, `agent-core.ts`, `agent-headless.ts`) plus `promptHookRunner.ts` (real cleanup leak) was switched to the helper. Independent short-lived controllers (per-shell-command, per-fetch, per-recall, etc.) stay on raw `new AbortController()` — they're GC'd quickly and don't accumulate listeners on a long-lived parent. See `migration-completeness.txt` for the captured grep + rationale.
 - TypeScript strict-mode typecheck passes for both `packages/core` and `packages/cli`.
 - Prettier check passes on all modified files.
 

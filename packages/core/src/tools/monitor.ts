@@ -41,7 +41,6 @@ import {
   normalizeMonitorCommand as normalizeMonitorShellCommand,
   splitCommands,
 } from '../utils/shell-utils.js';
-import { createAbortController } from '../utils/abortController.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isSubpaths } from '../utils/paths.js';
 import {
@@ -304,7 +303,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     // Independent AbortController — pressing Ctrl+C on the current turn
     // should NOT kill a long-running monitor the user intentionally started.
-    const entryAc = createAbortController();
+    const entryAc = new AbortController();
 
     const registration: MonitorTaskRegistration = {
       monitorId,
