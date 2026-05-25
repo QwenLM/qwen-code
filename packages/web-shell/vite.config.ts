@@ -30,6 +30,10 @@ const daemonProxy: ProxyOptions = {
 export default defineConfig({
   root: 'client',
   plugins: [react()],
+  build: {
+    outDir: '../dist',
+    emptyOutDir: true,
+  },
   define: {
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
   },

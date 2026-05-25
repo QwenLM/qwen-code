@@ -1421,6 +1421,27 @@ export function createServeApp(
     }
   });
 
+  app.post('/session/:id/detach', mutate(), async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      await bridge.detachClient(sessionId, clientId);
+      res.status(204).end();
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/detach',
+        sessionId,
+      });
+    }
+  });
+
   app.post('/session/:id/cancel', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
@@ -1462,7 +1483,7 @@ export function createServeApp(
     }
   });
 
-  app.patch('/session/:id/metadata', (req, res) => {
+  app.patch('/session/:id/metadata', async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
     const clientId = parseClientIdHeader(req, res);
@@ -1482,6 +1503,18 @@ export function createServeApp(
         { displayName },
         clientId !== undefined ? { clientId } : undefined,
       );
+      if (displayName !== undefined) {
+        try {
+          await new SessionService(boundWorkspace).renameSession(
+            sessionId,
+            displayName,
+          );
+        } catch {
+          // Best-effort: session file may not exist yet (fresh session
+          // with no turns written). The in-memory update still applies
+          // for the lifetime of this daemon process.
+        }
+      }
       res.status(200).json({ sessionId, ...effective });
     } catch (err) {
       sendBridgeError(res, err, {

@@ -10,7 +10,7 @@
   display: flex;
   gap: 8px;
   padding: 3px 8px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--subtle-bg);
   border-bottom: 1px solid var(--border-color);
   font-size: 11px;
 }
@@ -36,15 +36,15 @@
 }
 
 .lineAdd {
-  background: rgba(72, 187, 120, 0.12);
+  background: var(--success-bg);
 }
 
 .lineDel {
-  background: rgba(252, 129, 129, 0.12);
+  background: var(--error-bg);
 }
 
 .lineHeader {
-  background: rgba(74, 158, 255, 0.08);
+  background: var(--info-bg);
   color: var(--text-dimmed);
   font-style: italic;
 }

@@ -6,13 +6,17 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
+import { dp } from './dialogStyles';
 import type {
   DaemonContextFileScope,
+  DaemonWorkspaceFile,
+  DaemonWorkspaceMemoryFile,
   DaemonWorkspaceMemoryStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
 } from '@qwen-code/sdk/daemon';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+import { useI18n } from '../../i18n';
 import styles from './MemoryDialog.module.css';
 
 export type MemoryDialogInitialMode =
@@ -26,13 +30,15 @@ export type MemoryDialogInitialMode =
 interface MemoryDialogProps {
   initialMode?: MemoryDialogInitialMode;
   loadStatus: () => Promise<DaemonWorkspaceMemoryStatus>;
+  readFile: (filePath: string) => Promise<DaemonWorkspaceFile>;
   writeMemory: (
     req: DaemonWriteMemoryRequest,
   ) => Promise<DaemonWriteMemoryResult>;
+  onMessage?: (message: string, type?: 'status' | 'error') => void;
   onClose: () => void;
 }
 
-type MemoryView = 'menu' | 'show' | 'scope' | 'edit';
+type MemoryView = 'menu' | 'show' | 'detail' | 'scope' | 'edit';
 
 interface MenuItem {
   label: string;
@@ -46,19 +52,6 @@ interface ScopeItem {
   scope: DaemonContextFileScope;
 }
 
-const SCOPES: ScopeItem[] = [
-  {
-    label: 'User memory',
-    description: 'Saved to the global user memory file',
-    scope: 'global',
-  },
-  {
-    label: 'Project memory',
-    description: 'Saved to this workspace memory file',
-    scope: 'workspace',
-  },
-];
-
 function initialView(mode: MemoryDialogInitialMode): MemoryView {
   if (mode === 'show' || mode === 'refresh') return 'show';
   if (mode === 'add-user' || mode === 'add-project') return 'edit';
@@ -71,21 +64,47 @@ function initialScope(mode: MemoryDialogInitialMode): DaemonContextFileScope {
   return 'workspace';
 }
 
-function scopeLabel(scope: DaemonContextFileScope): string {
-  return scope === 'global' ? 'User memory' : 'Project memory';
+function scopeLabel(
+  scope: DaemonContextFileScope,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  return scope === 'global' ? t('memory.global') : t('memory.project');
 }
 
 export function MemoryDialog({
   initialMode = 'menu',
   loadStatus,
+  readFile,
   writeMemory,
+  onMessage,
   onClose,
 }: MemoryDialogProps) {
+  const { t } = useI18n();
+  const scopes: ScopeItem[] = useMemo(
+    () => [
+      {
+        label: t('memory.global'),
+        description: t('memory.global.desc'),
+        scope: 'global',
+      },
+      {
+        label: t('memory.project'),
+        description: t('memory.project.desc'),
+        scope: 'workspace',
+      },
+    ],
+    [t],
+  );
   const [view, setView] = useState<MemoryView>(() => initialView(initialMode));
   const [status, setStatus] = useState<DaemonWorkspaceMemoryStatus | null>(
     null,
   );
   const [selectedIdx, setSelectedIdx] = useState(0);
+  const [fileIdx, setFileIdx] = useState(0);
+  const [selectedFile, setSelectedFile] =
+    useState<DaemonWorkspaceMemoryFile | null>(null);
+  const [fileContent, setFileContent] = useState('');
+  const [fileLoading, setFileLoading] = useState(false);
   const [scopeIdx, setScopeIdx] = useState(
     initialScope(initialMode) === 'global' ? 0 : 1,
   );
@@ -100,6 +119,7 @@ export function MemoryDialog({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const directEditMode =
     initialMode === 'add-user' || initialMode === 'add-project';
+  const directMode = initialMode !== 'menu';
 
   const reload = useCallback(
     (successMessage?: string) => {
@@ -107,6 +127,9 @@ export function MemoryDialog({
       loadStatus()
         .then((next) => {
           setStatus(next);
+          setFileIdx((idx) =>
+            Math.min(idx, Math.max(next.files.length - 1, 0)),
+          );
           setMessage(successMessage ?? null);
         })
         .catch((error: unknown) => {
@@ -118,8 +141,8 @@ export function MemoryDialog({
   );
 
   useEffect(() => {
-    reload(initialMode === 'refresh' ? 'Memory refreshed.' : undefined);
-  }, [initialMode, reload]);
+    reload(initialMode === 'refresh' ? t('memory.refreshed') : undefined);
+  }, [initialMode, reload, t]);
 
   useEffect(() => {
     if (view === 'edit') {
@@ -140,37 +163,69 @@ export function MemoryDialog({
 
   const refreshAndShow = useCallback(() => {
     setView('show');
-    reload('Memory refreshed.');
-  }, [reload]);
+    reload(t('memory.refreshed'));
+  }, [reload, t]);
+
+  const openFile = useCallback(
+    (file: DaemonWorkspaceMemoryFile) => {
+      setSelectedFile(file);
+      setFileContent('');
+      setMessage(null);
+      setView('detail');
+      if (file.scope === 'global') {
+        setFileLoading(false);
+        setFileContent(t('memory.globalReadUnsupported'));
+        setMessage(t('memory.globalReadUnsupported'));
+        return;
+      }
+      setFileLoading(true);
+      readFile(file.path)
+        .then((result) => {
+          setFileContent(result.content);
+          setMessage(
+            result.truncated ? t('memory.fileTruncated') : t('memory.fileOpen'),
+          );
+        })
+        .catch((error: unknown) => {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          setFileContent(errorMessage);
+          setMessage(errorMessage);
+        })
+        .finally(() => setFileLoading(false));
+    },
+    [readFile, t],
+  );
 
   const menuItems = useMemo<MenuItem[]>(
     () => [
       {
-        label: 'Add',
-        description: 'Write a durable memory',
+        label: t('memory.add'),
+        description: t('memory.add.desc'),
         onSelect: openScopePicker,
       },
       {
-        label: 'Show',
-        description: 'Show configured memory files',
+        label: t('memory.show'),
+        description: t('memory.show.desc'),
         onSelect: openShow,
       },
       {
-        label: 'Refresh',
-        description: 'Reload memory file information',
+        label: t('memory.refresh'),
+        description: t('memory.refresh.desc'),
         onSelect: refreshAndShow,
       },
     ],
-    [openScopePicker, openShow, refreshAndShow],
+    [openScopePicker, openShow, refreshAndShow, t],
   );
 
   useEffect(() => {
-    const activeIndex = view === 'scope' ? scopeIdx : selectedIdx;
+    const activeIndex =
+      view === 'scope' ? scopeIdx : view === 'show' ? fileIdx : selectedIdx;
     const el = listRef.current?.children[activeIndex] as
       | HTMLElement
       | undefined;
     el?.scrollIntoView({ block: 'nearest' });
-  }, [scopeIdx, selectedIdx, view]);
+  }, [fileIdx, scopeIdx, selectedIdx, view]);
 
   useDelayedGlobalKeyDown(
     (e: KeyboardEvent) => {
@@ -179,7 +234,14 @@ export function MemoryDialog({
         target?.tagName === 'TEXTAREA' || target?.tagName === 'INPUT';
       if (e.key === 'Escape') {
         e.preventDefault();
-        if (view === 'menu' || (view === 'edit' && directEditMode)) {
+        if (view === 'detail') {
+          setView('show');
+          setMessage(null);
+        } else if (
+          view === 'menu' ||
+          directMode ||
+          (view === 'edit' && directEditMode)
+        ) {
           onClose();
         } else {
           setView('menu');
@@ -196,7 +258,11 @@ export function MemoryDialog({
           );
         } else if (view === 'scope') {
           setScopeIdx((idx) =>
-            Math.min(idx + 1, Math.max(SCOPES.length - 1, 0)),
+            Math.min(idx + 1, Math.max(scopes.length - 1, 0)),
+          );
+        } else if (view === 'show') {
+          setFileIdx((idx) =>
+            Math.min(idx + 1, Math.max((status?.files.length ?? 0) - 1, 0)),
           );
         }
         return;
@@ -205,6 +271,7 @@ export function MemoryDialog({
         e.preventDefault();
         if (view === 'menu') setSelectedIdx((idx) => Math.max(idx - 1, 0));
         else if (view === 'scope') setScopeIdx((idx) => Math.max(idx - 1, 0));
+        else if (view === 'show') setFileIdx((idx) => Math.max(idx - 1, 0));
         return;
       }
       if (e.key === 'Enter') {
@@ -212,44 +279,75 @@ export function MemoryDialog({
         if (view === 'menu') {
           menuItems[selectedIdx]?.onSelect?.();
         } else if (view === 'scope') {
-          const nextScope = SCOPES[scopeIdx]?.scope ?? 'workspace';
+          const nextScope = scopes[scopeIdx]?.scope ?? 'workspace';
           setScope(nextScope);
           setView('edit');
           setMessage(null);
+        } else if (view === 'show') {
+          const file = status?.files[fileIdx];
+          if (file) openFile(file);
         }
       }
     },
-    [directEditMode, menuItems, onClose, scopeIdx, selectedIdx, view],
+    [
+      directEditMode,
+      directMode,
+      fileIdx,
+      menuItems,
+      onClose,
+      openFile,
+      scopeIdx,
+      scopes,
+      selectedIdx,
+      status?.files,
+      view,
+    ],
   );
 
   const handleSubmit = useCallback(() => {
     const text = content.trim();
     if (!text) {
-      setMessage('Memory content is empty.');
+      setMessage(t('memory.contentEmpty'));
       return;
     }
     setSaving(true);
     setMessage(null);
     writeMemory({ scope, mode: 'append', content: text })
       .then((result) => {
+        const savedMessage = t('memory.saved', {
+          scope: scopeLabel(scope, t),
+          bytes: result.bytesWritten,
+          path: result.filePath,
+        });
         setContent('');
+        onMessage?.(savedMessage);
         if (directEditMode) {
           onClose();
           return;
         }
-        setMessage(
-          `${scopeLabel(scope)} saved: ${result.bytesWritten} bytes -> ${result.filePath}`,
-        );
+        setMessage(savedMessage);
         setView('show');
-        reload(
-          `${scopeLabel(scope)} saved: ${result.bytesWritten} bytes -> ${result.filePath}`,
-        );
+        reload(savedMessage);
       })
       .catch((error: unknown) => {
-        setMessage(error instanceof Error ? error.message : String(error));
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        setMessage(errorMessage);
+        if (directEditMode) {
+          onMessage?.(errorMessage, 'error');
+        }
       })
       .finally(() => setSaving(false));
-  }, [content, directEditMode, onClose, reload, scope, writeMemory]);
+  }, [
+    content,
+    directEditMode,
+    onClose,
+    onMessage,
+    reload,
+    scope,
+    t,
+    writeMemory,
+  ]);
 
   const handleEditKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -263,143 +361,201 @@ export function MemoryDialog({
 
   const title =
     view === 'show'
-      ? 'Memory Files'
-      : view === 'scope'
-        ? 'Add Memory'
-        : view === 'edit'
-          ? scopeLabel(scope)
-          : 'Memory';
+      ? t('memory.files')
+      : view === 'detail'
+        ? selectedFile
+          ? scopeLabel(selectedFile.scope, t)
+          : t('memory.file')
+        : view === 'scope'
+          ? t('memory.add')
+          : view === 'edit'
+            ? scopeLabel(scope, t)
+            : t('memory.menu');
 
   return (
-    <div className="resume-picker">
-      <div className="resume-picker-header">
-        <span className="resume-picker-title">{title}</span>
-        <span className="resume-picker-count">
+    <div className={dp('resume-picker')}>
+      <div className={dp('resume-picker-header')}>
+        <span className={dp('resume-picker-title')}>{title}</span>
+        <span className={dp('resume-picker-count')}>
           {status
             ? `${status.fileCount} files · ${status.totalBytes} bytes`
             : ''}
         </span>
       </div>
 
-      <div className="resume-picker-search">
-        <span className="resume-picker-search-hint">
+      <div className={dp('resume-picker-search')}>
+        <span className={dp('resume-picker-search-hint')}>
           {message ||
             (loading
-              ? 'Loading memory...'
+              ? t('memory.loading')
               : view === 'menu'
-                ? 'Select an action'
+                ? t('agent.selectAction')
                 : view === 'scope'
-                  ? 'Choose where to save the memory'
-                  : view === 'edit'
-                    ? 'Write memory content'
-                    : 'Workspace and user memory files')}
+                  ? t('memory.chooseScope')
+                  : view === 'detail'
+                    ? fileLoading
+                      ? t('memory.loadingFile')
+                      : t('memory.fileOpen')
+                    : view === 'edit'
+                      ? t('memory.write')
+                      : t('memory.status'))}
         </span>
       </div>
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
       {view === 'menu' && (
-        <div className="resume-picker-list" ref={listRef}>
+        <div className={dp('resume-picker-list')} ref={listRef}>
           {menuItems.map((item, index) => (
             <div
               key={item.label}
-              className={`resume-picker-item ${index === selectedIdx ? 'selected' : ''}`}
+              className={dp(
+                'resume-picker-item',
+                index === selectedIdx ? 'selected' : undefined,
+              )}
               onClick={() => item.onSelect?.()}
               onMouseEnter={() => setSelectedIdx(index)}
             >
-              <div className="resume-picker-item-row">
-                <span className="resume-picker-item-prefix">
+              <div className={dp('resume-picker-item-row')}>
+                <span className={dp('resume-picker-item-prefix')}>
                   {index === selectedIdx ? '›' : ' '}
                 </span>
-                <span className="resume-picker-item-title">{item.label}</span>
+                <span className={dp('resume-picker-item-title')}>
+                  {item.label}
+                </span>
               </div>
-              <div className="resume-picker-item-meta">{item.description}</div>
+              <div className={dp('resume-picker-item-meta')}>
+                {item.description}
+              </div>
             </div>
           ))}
         </div>
       )}
 
       {view === 'scope' && (
-        <div className="resume-picker-list" ref={listRef}>
-          {SCOPES.map((item, index) => (
+        <div className={dp('resume-picker-list')} ref={listRef}>
+          {scopes.map((item, index) => (
             <div
               key={item.scope}
-              className={`resume-picker-item ${index === scopeIdx ? 'selected' : ''}`}
+              className={dp(
+                'resume-picker-item',
+                index === scopeIdx ? 'selected' : undefined,
+              )}
               onClick={() => {
                 setScope(item.scope);
                 setView('edit');
               }}
               onMouseEnter={() => setScopeIdx(index)}
             >
-              <div className="resume-picker-item-row">
-                <span className="resume-picker-item-prefix">
+              <div className={dp('resume-picker-item-row')}>
+                <span className={dp('resume-picker-item-prefix')}>
                   {index === scopeIdx ? '›' : ' '}
                 </span>
-                <span className="resume-picker-item-title">{item.label}</span>
+                <span className={dp('resume-picker-item-title')}>
+                  {item.label}
+                </span>
               </div>
-              <div className="resume-picker-item-meta">{item.description}</div>
+              <div className={dp('resume-picker-item-meta')}>
+                {item.description}
+              </div>
             </div>
           ))}
         </div>
       )}
 
       {view === 'show' && (
-        <div className="resume-picker-list">
+        <div className={dp('resume-picker-list')} ref={listRef}>
           {!loading && status?.files.length === 0 && (
-            <div className="resume-picker-empty">No memory files found.</div>
+            <div className={dp('resume-picker-empty')}>
+              {t('memory.noFiles')}
+            </div>
           )}
-          {status?.files.map((file) => (
+          {status?.files.map((file, index) => (
             <div
               key={`${file.scope}:${file.path}`}
-              className="resume-picker-item"
+              className={dp(
+                'resume-picker-item',
+                index === fileIdx ? 'selected' : undefined,
+              )}
+              onClick={() => openFile(file)}
+              onMouseEnter={() => setFileIdx(index)}
             >
-              <div className="resume-picker-item-row">
-                <span className="resume-picker-item-prefix"> </span>
-                <span className="resume-picker-item-title">
-                  {file.scope === 'global' ? 'User memory' : 'Project memory'}
+              <div className={dp('resume-picker-item-row')}>
+                <span className={dp('resume-picker-item-prefix')}>
+                  {index === fileIdx ? '›' : ' '}
                 </span>
-                <span className="resume-picker-item-badge">
+                <span className={dp('resume-picker-item-title')}>
+                  {scopeLabel(file.scope, t)}
+                </span>
+                <span className={dp('resume-picker-item-badge')}>
                   {file.bytes} bytes
                 </span>
               </div>
-              <div className="resume-picker-item-meta">{file.path}</div>
+              <div className={dp('resume-picker-item-meta')}>{file.path}</div>
             </div>
           ))}
         </div>
       )}
 
+      {view === 'detail' && (
+        <div className={`${dp('resume-picker-list')} ${styles.filePreview}`}>
+          <div className={dp('resume-picker-item', 'selected')}>
+            <div className={dp('resume-picker-item-row')}>
+              <span className={dp('resume-picker-item-prefix')}>›</span>
+              <span className={dp('resume-picker-item-title')}>
+                {selectedFile?.path ?? t('memory.file')}
+              </span>
+              {selectedFile && (
+                <span className={dp('resume-picker-item-badge')}>
+                  {selectedFile.bytes} bytes
+                </span>
+              )}
+            </div>
+          </div>
+          <pre className={styles.fileContent}>
+            {fileLoading ? t('memory.loadingFile') : fileContent}
+          </pre>
+        </div>
+      )}
+
       {view === 'edit' && (
         <div
-          className={`dialog-form ${styles.editorForm}`}
+          className={`${dp('dialog-form')} ${styles.editorForm}`}
           onKeyDown={handleEditKeyDown}
         >
           <textarea
             ref={textareaRef}
-            className={`dialog-textarea ${styles.editorTextarea}`}
+            className={`${dp('dialog-textarea')} ${styles.editorTextarea}`}
             value={content}
             onChange={(e) => setContent(e.target.value)}
-            placeholder={`Write ${scopeLabel(scope)} content...`}
+            placeholder={t('memory.placeholder', {
+              scope: scopeLabel(scope, t),
+            })}
           />
           <button
-            className="dialog-primary-button"
+            className={dp('dialog-primary-button')}
             disabled={saving}
             onClick={handleSubmit}
           >
-            {saving ? 'Saving...' : 'Save Memory'}
+            {saving ? t('memory.saving') : t('memory.save')}
           </button>
         </div>
       )}
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
-      <div className="resume-picker-footer">
+      <div className={dp('resume-picker-footer')}>
         {view === 'edit' && directEditMode
-          ? '⌘/Ctrl+Enter to save · Esc to close'
+          ? t('dialog.footer.saveClose')
           : view === 'edit'
-            ? '⌘/Ctrl+Enter to save · Esc to menu'
-            : view === 'menu' || view === 'scope'
-              ? '↑↓ to navigate · Enter to select · Esc to close'
-              : 'Esc to menu'}
+            ? t('dialog.footer.saveMenu')
+            : view === 'detail'
+              ? t('dialog.footer.back')
+              : view === 'menu' || view === 'scope'
+                ? t('dialog.footer.navSelectClose')
+                : directMode
+                  ? t('dialog.footer.navOpenClose')
+                  : t('dialog.footer.navOpenMenu')}
       </div>
     </div>
   );

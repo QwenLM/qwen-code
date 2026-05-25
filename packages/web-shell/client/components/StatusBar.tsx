@@ -1,3 +1,4 @@
+import { useI18n } from '../i18n';
 import styles from './StatusBar.module.css';
 
 interface StatusBarProps {
@@ -11,14 +12,15 @@ interface StatusBarProps {
 
 function getModeIndicator(
   mode: string,
+  t: ReturnType<typeof useI18n>['t'],
 ): { label: string; className: string } | null {
   switch (mode) {
     case 'plan':
-      return { label: 'plan mode', className: styles.modePlan };
+      return { label: t('mode.plan'), className: styles.modePlan };
     case 'auto-edit':
-      return { label: 'auto-accept edits', className: styles.modeAutoEdit };
+      return { label: t('mode.auto-edit'), className: styles.modeAutoEdit };
     case 'yolo':
-      return { label: 'YOLO mode', className: styles.modeYolo };
+      return { label: t('mode.yolo'), className: styles.modeYolo };
     default:
       return null;
   }
@@ -31,9 +33,10 @@ export function StatusBar({
   tokenCount,
   contextWindow,
 }: StatusBarProps) {
+  const { t } = useI18n();
   const pct = contextWindow > 0 ? (tokenCount / contextWindow) * 100 : 0;
   const pctDisplay = pct.toFixed(1);
-  const modeIndicator = getModeIndicator(currentMode);
+  const modeIndicator = getModeIndicator(currentMode, t);
 
   return (
     <div className={styles.bar}>
@@ -43,18 +46,24 @@ export function StatusBar({
             <span className={`${styles.modeLabel} ${modeIndicator.className}`}>
               {modeIndicator.label}
             </span>
-            <span className={styles.modeHint}>(shift + tab to cycle)</span>
+            <span className={styles.modeHint}>{t('status.modeHint')}</span>
           </>
         ) : (
-          <span>? for shortcuts</span>
+          <span>{t('status.shortcuts')}</span>
         )}
       </div>
 
       <div className={styles.right}>
-        {!connected && <span className={styles.disconnected}>断开连接</span>}
+        {!connected && (
+          <span className={styles.disconnected}>
+            {t('status.disconnected')}
+          </span>
+        )}
         {currentModel && <span className={styles.model}>{currentModel}</span>}
         {contextWindow > 0 && tokenCount > 0 && (
-          <span className={styles.context}>{pctDisplay}% 上下文已用</span>
+          <span className={styles.context}>
+            {t('status.contextUsed', { pct: pctDisplay })}
+          </span>
         )}
       </div>
     </div>

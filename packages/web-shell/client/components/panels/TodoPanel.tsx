@@ -1,4 +1,5 @@
 import type { TodoItem } from '../../adapters/types';
+import { useI18n } from '../../i18n';
 import styles from './TodoPanel.module.css';
 
 interface TodoPanelProps {
@@ -19,7 +20,8 @@ function getStatusClass(status: TodoItem['status']): string {
   }
 }
 
-export function TodoPanel({ todos, title = '当前任务' }: TodoPanelProps) {
+export function TodoPanel({ todos, title }: TodoPanelProps) {
+  const { t } = useI18n();
   if (todos.length === 0) return null;
 
   // Rotate list so the current in_progress item is first
@@ -47,7 +49,7 @@ export function TodoPanel({ todos, title = '当前任务' }: TodoPanelProps) {
   return (
     <div className={styles.panel}>
       <div className={styles.header}>
-        <span className={styles.title}>{title}</span>
+        <span className={styles.title}>{title ?? t('todo.title')}</span>
       </div>
       <div className={styles.list}>
         {visible.map((todo, i) => (
@@ -70,7 +72,7 @@ export function TodoPanel({ todos, title = '当前任务' }: TodoPanelProps) {
           <div className={`${styles.item} ${styles.more}`}>
             <span className={styles.num}></span>
             <span className={styles.content}>
-              ... 以及其他 {remaining} 个
+              {t('todo.more', { count: remaining })}
             </span>
           </div>
         )}

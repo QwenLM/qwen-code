@@ -1,18 +1,35 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { dp } from './dialogStyles';
 import type {
   DaemonMcpRestartResult,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpStatus,
-  DaemonWorkspaceMcpToolStatus,
-  DaemonWorkspaceMcpToolsStatus,
 } from '@qwen-code/sdk/daemon';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+import { useI18n } from '../../i18n';
 
 interface McpDialogProps {
   loadStatus: () => Promise<DaemonWorkspaceMcpStatus>;
-  loadTools: (serverName: string) => Promise<DaemonWorkspaceMcpToolsStatus>;
+  loadTools: (serverName: string) => Promise<WebShellMcpToolsStatus>;
   restartServer: (serverName: string) => Promise<DaemonMcpRestartResult>;
   onClose: () => void;
+}
+
+export interface WebShellMcpToolStatus {
+  name: string;
+  serverToolName?: string;
+  description?: string;
+  isValid: boolean;
+  invalidReason?: string;
+  schema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+}
+
+export interface WebShellMcpToolsStatus {
+  v: 1;
+  serverName: string;
+  tools: WebShellMcpToolStatus[];
+  errors?: Array<{ error?: string }>;
 }
 
 type McpView = 'servers' | 'server' | 'tools' | 'tool';
@@ -33,14 +50,20 @@ function statusLabel(server: DaemonWorkspaceMcpServerStatus): string {
   return server.mcpStatus || 'unknown';
 }
 
-function sourceLabel(server: DaemonWorkspaceMcpServerStatus): string {
+function sourceLabel(
+  server: DaemonWorkspaceMcpServerStatus,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
   return server.extensionName
-    ? `Extension: ${server.extensionName}`
-    : 'Settings';
+    ? t('mcp.extension', { name: server.extensionName })
+    : t('mcp.settings');
 }
 
-function schemaSummary(schema: Record<string, unknown> | undefined): string[] {
-  if (!schema) return ['No input schema.'];
+function schemaSummary(
+  schema: Record<string, unknown> | undefined,
+  t: ReturnType<typeof useI18n>['t'],
+): string[] {
+  if (!schema) return [t('mcp.noSchema')];
   const lines: string[] = [];
   const properties =
     schema.properties &&
@@ -81,9 +104,10 @@ export function McpDialog({
   restartServer,
   onClose,
 }: McpDialogProps) {
+  const { t } = useI18n();
   const [status, setStatus] = useState<DaemonWorkspaceMcpStatus | null>(null);
   const [toolsByServer, setToolsByServer] = useState<
-    Record<string, DaemonWorkspaceMcpToolsStatus>
+    Record<string, WebShellMcpToolsStatus>
   >({});
   const [view, setView] = useState<McpView>('servers');
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -153,9 +177,13 @@ export function McpDialog({
   const budgetText = useMemo(() => {
     if (!status) return '';
     if (status.clientBudget === undefined)
-      return `${status.clientCount ?? 0} clients`;
-    return `${status.clientCount ?? 0}/${status.clientBudget} clients · ${status.budgetMode ?? 'off'}`;
-  }, [status]);
+      return t('common.clients', { count: status.clientCount ?? 0 });
+    return t('mcp.clientBudget', {
+      count: status.clientCount ?? 0,
+      budget: status.clientBudget,
+      mode: status.budgetMode ?? 'off',
+    });
+  }, [status, t]);
 
   const handleRestart = useCallback(
     (serverName: string) => {
@@ -165,10 +193,18 @@ export function McpDialog({
         .then((result) => {
           if (result.restarted) {
             setMessage(
-              `Restarted ${result.serverName} in ${result.durationMs}ms`,
+              t('mcp.restarted', {
+                name: result.serverName,
+                duration: result.durationMs,
+              }),
             );
           } else {
-            setMessage(`Skipped ${result.serverName}: ${result.reason}`);
+            setMessage(
+              t('mcp.restartSkipped', {
+                name: result.serverName,
+                reason: result.reason ?? '',
+              }),
+            );
           }
           reload();
           loadServerTools(serverName);
@@ -178,7 +214,7 @@ export function McpDialog({
         })
         .finally(() => setBusyServer(null));
     },
-    [loadServerTools, reload, restartServer],
+    [loadServerTools, reload, restartServer, t],
   );
 
   const openServer = useCallback(
@@ -198,13 +234,13 @@ export function McpDialog({
     const toolCount = toolStatus?.tools.length ?? 0;
     return [
       {
-        label: 'View tools',
+        label: t('mcp.action.tools'),
         hint:
           loadingTools === selected.name
-            ? 'Loading...'
+            ? t('common.loading')
             : toolStatus
-              ? `${toolCount} tools`
-              : 'Load tool list',
+              ? `${toolCount} ${t('mcp.tools')}`
+              : t('mcp.action.toolsHint'),
         run: () => {
           setView('tools');
           setToolIdx(0);
@@ -212,22 +248,24 @@ export function McpDialog({
         },
       },
       {
-        label: selected.disabled ? 'Enable' : 'Disable',
-        hint: 'Not exposed by daemon yet',
+        label: selected.disabled
+          ? t('tools.update.enable')
+          : t('tools.update.disable'),
+        hint: t('mcp.action.authHint'),
         disabled: true,
-        run: () =>
-          setMessage('Daemon serve does not expose MCP enable/disable yet.'),
+        run: () => setMessage(t('mcp.action.enableMessage')),
       },
       {
-        label: 'Authenticate',
-        hint: 'Not exposed by daemon yet',
+        label: t('mcp.action.auth'),
+        hint: t('mcp.action.authHint'),
         disabled: true,
-        run: () =>
-          setMessage('Daemon serve does not expose MCP authentication yet.'),
+        run: () => setMessage(t('mcp.action.authMessage')),
       },
       {
-        label: selected.disabled ? 'Reconnect' : 'Restart',
-        hint: selected.disabled ? 'Disabled server' : undefined,
+        label: selected.disabled
+          ? t('mcp.action.reconnect')
+          : t('mcp.action.restart'),
+        hint: selected.disabled ? t('mcp.action.authHint') : undefined,
         disabled: selected.disabled || busyServer === selected.name,
         run: () => handleRestart(selected.name),
       },
@@ -239,6 +277,7 @@ export function McpDialog({
     loadingTools,
     selected,
     toolsByServer,
+    t,
   ]);
 
   useEffect(() => {
@@ -318,59 +357,62 @@ export function McpDialog({
   );
 
   return (
-    <div className="resume-picker">
-      <div className="resume-picker-header">
-        <span className="resume-picker-title">
+    <div className={dp('resume-picker')}>
+      <div className={dp('resume-picker-header')}>
+        <span className={dp('resume-picker-title')}>
           {view === 'servers'
-            ? 'MCP Servers'
+            ? t('mcp.title')
             : view === 'tools'
-              ? `${selected?.name ?? 'MCP'} Tools`
+              ? `${selected?.name ?? 'MCP'} ${t('mcp.tools')}`
               : view === 'tool'
                 ? selectedTool?.name
                 : selected?.name}
         </span>
-        <span className="resume-picker-count">{budgetText}</span>
+        <span className={dp('resume-picker-count')}>{budgetText}</span>
       </div>
 
-      <div className="resume-picker-search">
-        <span className="resume-picker-search-hint">
+      <div className={dp('resume-picker-search')}>
+        <span className={dp('resume-picker-search-hint')}>
           {message ||
             (loading
-              ? 'Loading MCP status...'
+              ? t('mcp.loadingStatus')
               : view === 'servers'
-                ? `${servers.length} servers`
+                ? t('mcp.servers', { count: servers.length })
                 : loadingTools === selected?.name
-                  ? 'Loading tools...'
-                  : 'Enter to select')}
+                  ? t('mcp.loadingTools')
+                  : t('common.enterSelect'))}
         </span>
       </div>
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
       {view === 'servers' && (
-        <div className="resume-picker-list" ref={listRef}>
+        <div className={dp('resume-picker-list')} ref={listRef}>
           {!loading && servers.length === 0 && (
-            <div className="resume-picker-empty">
-              No MCP servers configured.
-            </div>
+            <div className={dp('resume-picker-empty')}>{t('mcp.empty')}</div>
           )}
           {servers.map((server, i) => (
             <div
               key={server.name}
-              className={`resume-picker-item ${i === selectedIdx ? 'selected' : ''}`}
+              className={dp(
+                'resume-picker-item',
+                i === selectedIdx ? 'selected' : undefined,
+              )}
               onClick={() => openServer(server)}
               onMouseEnter={() => setSelectedIdx(i)}
             >
-              <div className="resume-picker-item-row">
-                <span className="resume-picker-item-prefix">
+              <div className={dp('resume-picker-item-row')}>
+                <span className={dp('resume-picker-item-prefix')}>
                   {i === selectedIdx ? '›' : ' '}
                 </span>
-                <span className="resume-picker-item-title">{server.name}</span>
-                <span className="resume-picker-item-badge">
+                <span className={dp('resume-picker-item-title')}>
+                  {server.name}
+                </span>
+                <span className={dp('resume-picker-item-badge')}>
                   {statusLabel(server)}
                 </span>
               </div>
-              <div className="resume-picker-item-meta">
+              <div className={dp('resume-picker-item-meta')}>
                 {server.transport}
                 {server.extensionName ? ` · ${server.extensionName}` : ''}
                 {server.description ? ` · ${server.description}` : ''}
@@ -381,34 +423,48 @@ export function McpDialog({
       )}
 
       {view === 'server' && selected && (
-        <div className="resume-picker-list" ref={listRef}>
-          <div className="dialog-detail">
-            <div>Status: {statusLabel(selected)}</div>
-            <div>Source: {sourceLabel(selected)}</div>
-            <div>Transport: {selected.transport}</div>
+        <div className={dp('resume-picker-list')} ref={listRef}>
+          <div className={dp('dialog-detail')}>
             <div>
-              Tools:{' '}
+              {t('mcp.status')}: {statusLabel(selected)}
+            </div>
+            <div>
+              {t('mcp.source')}: {sourceLabel(selected, t)}
+            </div>
+            <div>
+              {t('mcp.transport')}: {selected.transport}
+            </div>
+            <div>
+              {t('mcp.tools')}:{' '}
               {loadingTools === selected.name
-                ? 'loading'
-                : `${toolsByServer[selected.name]?.tools.length ?? 0} tools`}
+                ? t('common.loading')
+                : `${toolsByServer[selected.name]?.tools.length ?? 0} ${t('mcp.tools')}`}
             </div>
             {selected.description && <div>{selected.description}</div>}
           </div>
           {actions.map((action, i) => (
             <div
               key={action.label}
-              className={`resume-picker-item ${i === actionIdx ? 'selected' : ''} ${action.disabled ? 'disabled' : ''}`}
+              className={dp(
+                'resume-picker-item',
+                i === actionIdx ? 'selected' : undefined,
+                action.disabled ? 'disabled' : undefined,
+              )}
               onClick={() => {
                 if (!action.disabled) action.run();
               }}
               onMouseEnter={() => setActionIdx(i)}
             >
-              <span className="resume-picker-item-prefix">
+              <span className={dp('resume-picker-item-prefix')}>
                 {i === actionIdx ? '›' : ' '}
               </span>
-              <span className="resume-picker-item-title">{action.label}</span>
+              <span className={dp('resume-picker-item-title')}>
+                {action.label}
+              </span>
               {action.hint && (
-                <span className="resume-picker-item-badge">{action.hint}</span>
+                <span className={dp('resume-picker-item-badge')}>
+                  {action.hint}
+                </span>
               )}
             </div>
           ))}
@@ -416,28 +472,37 @@ export function McpDialog({
       )}
 
       {view === 'tools' && selected && (
-        <div className="resume-picker-list" ref={listRef}>
+        <div className={dp('resume-picker-list')} ref={listRef}>
           {!loadingTools && selectedTools.length === 0 && (
-            <div className="resume-picker-empty">No tools discovered.</div>
+            <div className={dp('resume-picker-empty')}>
+              {t('mcp.emptyTools')}
+            </div>
           )}
           {selectedTools.map((tool, i) => (
             <div
               key={tool.name}
-              className={`resume-picker-item ${i === toolIdx ? 'selected' : ''}`}
+              className={dp(
+                'resume-picker-item',
+                i === toolIdx ? 'selected' : undefined,
+              )}
               onClick={() => setView('tool')}
               onMouseEnter={() => setToolIdx(i)}
             >
-              <div className="resume-picker-item-row">
-                <span className="resume-picker-item-prefix">
+              <div className={dp('resume-picker-item-row')}>
+                <span className={dp('resume-picker-item-prefix')}>
                   {i === toolIdx ? '›' : ' '}
                 </span>
-                <span className="resume-picker-item-title">{tool.name}</span>
-                <span className="resume-picker-item-badge">
-                  {tool.isValid ? 'valid' : 'invalid'}
+                <span className={dp('resume-picker-item-title')}>
+                  {tool.name}
+                </span>
+                <span className={dp('resume-picker-item-badge')}>
+                  {tool.isValid ? t('common.valid') : t('common.invalid')}
                 </span>
               </div>
-              <div className="resume-picker-item-meta">
-                {tool.description || tool.invalidReason || 'No description'}
+              <div className={dp('resume-picker-item-meta')}>
+                {tool.description ||
+                  tool.invalidReason ||
+                  t('mcp.noDescription')}
               </div>
             </div>
           ))}
@@ -446,37 +511,51 @@ export function McpDialog({
 
       {view === 'tool' && selectedTool && <ToolDetail tool={selectedTool} />}
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
-      <div className="resume-picker-footer">
+      <div className={dp('resume-picker-footer')}>
         {view === 'servers'
-          ? '↑↓ navigate · Enter details · r refresh · Esc close'
-          : '↑↓ navigate · Enter select · Esc back'}
+          ? t('dialog.footer.mcpServers')
+          : t('dialog.footer.mcpSelect')}
       </div>
     </div>
   );
 }
 
-function ToolDetail({ tool }: { tool: DaemonWorkspaceMcpToolStatus }) {
+function ToolDetail({ tool }: { tool: WebShellMcpToolStatus }) {
+  const { t } = useI18n();
   return (
-    <div className="resume-picker-list">
-      <div className="dialog-detail">
-        <div>Name: {tool.name}</div>
-        {tool.serverToolName && <div>Server tool: {tool.serverToolName}</div>}
+    <div className={dp('resume-picker-list')}>
+      <div className={dp('dialog-detail')}>
         <div>
-          Status: {tool.isValid ? 'valid' : tool.invalidReason || 'invalid'}
+          {t('mcp.name')}: {tool.name}
         </div>
-        {tool.description && <div>Description: {tool.description}</div>}
+        {tool.serverToolName && (
+          <div>
+            {t('mcp.serverTool')}: {tool.serverToolName}
+          </div>
+        )}
+        <div>
+          {t('mcp.status')}:{' '}
+          {tool.isValid
+            ? t('common.valid')
+            : tool.invalidReason || t('common.invalid')}
+        </div>
+        {tool.description && (
+          <div>
+            {t('mcp.description')}: {tool.description}
+          </div>
+        )}
       </div>
-      <div className="dialog-detail">
-        <div>Input schema</div>
-        {schemaSummary(tool.schema).map((line, i) => (
+      <div className={dp('dialog-detail')}>
+        <div>{t('mcp.inputSchema')}</div>
+        {schemaSummary(tool.schema, t).map((line, i) => (
           <div key={`${tool.name}-schema-${i}`}>{line}</div>
         ))}
       </div>
       {tool.annotations && (
-        <div className="dialog-detail">
-          <div>Annotations</div>
+        <div className={dp('dialog-detail')}>
+          <div>{t('mcp.annotations')}</div>
           <pre>{JSON.stringify(tool.annotations, null, 2)}</pre>
         </div>
       )}

@@ -65,7 +65,7 @@ export function mapSupportedCommands(
 
   const skillCommands = status.availableSkills.map((skill) => ({
     name: skill,
-    description: '运行 skill',
+    description: '',
   }));
 
   return {

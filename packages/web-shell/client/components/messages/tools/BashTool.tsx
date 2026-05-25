@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
 import { ToolStatus } from './ToolStatus';
 import { parseAnsi, hasAnsi } from '../../../utils/ansi';
+import { useI18n } from '../../../i18n';
 import chromeStyles from './ToolChrome.module.css';
 import styles from './LegacyTool.module.css';
 
@@ -12,6 +13,7 @@ interface BashToolProps {
 const MAX_LINES_COLLAPSED = 15;
 
 export function BashTool({ tool }: BashToolProps) {
+  const { t } = useI18n();
   const command = (tool.args?.command as string) || '';
   const description = (tool.args?.description as string) || '';
   const output = extractOutput(tool);
@@ -59,7 +61,9 @@ export function BashTool({ tool }: BashToolProps) {
               className={chromeStyles.expandBtn}
               onClick={() => setExpanded(!expanded)}
             >
-              {expanded ? '▲ Collapse' : `▼ Show all (${lines.length} lines)`}
+              {expanded
+                ? t('tool.collapse')
+                : t('tool.showAll', { count: lines.length })}
             </button>
           )}
         </div>

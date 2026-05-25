@@ -7,19 +7,19 @@
 }
 
 .info {
-  background: rgba(74, 158, 255, 0.08);
-  border: 1px solid rgba(74, 158, 255, 0.2);
+  background: var(--info-bg);
+  border: 1px solid var(--info-border);
   color: var(--accent-color);
 }
 
 .error {
-  background: rgba(252, 129, 129, 0.08);
-  border: 1px solid rgba(252, 129, 129, 0.2);
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
   color: var(--error-color);
 }
 
 .warning {
-  background: rgba(236, 201, 75, 0.08);
-  border: 1px solid rgba(236, 201, 75, 0.2);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
   color: var(--warning-color);
 }

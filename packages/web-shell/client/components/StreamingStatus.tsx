@@ -3,6 +3,7 @@ import {
   PHRASE_CHANGE_INTERVAL_MS,
   getLoadingPhrases,
 } from '../constants/loadingPhrases';
+import { useI18n } from '../i18n';
 import styles from './StreamingStatus.module.css';
 
 interface StreamingStatusProps {
@@ -14,11 +15,12 @@ export function StreamingStatus({
   streamingState,
   tokenCount,
 }: StreamingStatusProps) {
+  const { language, t } = useI18n();
   const [elapsed, setElapsed] = useState(0);
   const startTime = useRef(Date.now());
   const [dotFrame, setDotFrame] = useState(0);
   const [loadingPhrase, setLoadingPhrase] = useState(() => {
-    const phrases = getLoadingPhrases();
+    const phrases = getLoadingPhrases(language);
     return phrases[0] ?? '';
   });
 
@@ -32,7 +34,7 @@ export function StreamingStatus({
   }, [streamingState]);
 
   useEffect(() => {
-    const phrases = getLoadingPhrases();
+    const phrases = getLoadingPhrases(language);
     if (streamingState === 'idle' || phrases.length === 0) {
       setLoadingPhrase(phrases[0] ?? '');
       return;
@@ -46,7 +48,7 @@ export function StreamingStatus({
     pickPhrase();
     const interval = setInterval(pickPhrase, PHRASE_CHANGE_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [streamingState]);
+  }, [language, streamingState]);
 
   useEffect(() => {
     if (streamingState === 'idle') return;
@@ -61,16 +63,17 @@ export function StreamingStatus({
   const dots = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   const spinnerChar = dots[dotFrame % dots.length];
   const arrow = streamingState === 'responding' ? '↓' : '↑';
-  const tokenStr = tokenCount > 0 ? ` · ${arrow} ${tokenCount} tokens` : '';
+  const tokenStr =
+    tokenCount > 0
+      ? ` · ${arrow} ${t('stream.tokens', { count: tokenCount })}`
+      : '';
 
   return (
     <div className={styles.status}>
       <span className={styles.spinner}>{spinnerChar}</span>
-      {loadingPhrase && (
-        <span className={styles.label}>{loadingPhrase}</span>
-      )}
+      {loadingPhrase && <span className={styles.label}>{loadingPhrase}</span>}
       <span className={styles.meta}>
-        ({elapsed}s{tokenStr} · esc to cancel)
+        ({elapsed}s{tokenStr} · {t('stream.cancel')})
       </span>
     </div>
   );

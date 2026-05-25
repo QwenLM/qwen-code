@@ -1,7 +1,4 @@
-/* Shared dialog and picker primitives.
-   Keep this file global for now: resume-picker-* and dialog-* are reused by
-   multiple dialogs. Migrate only after extracting common Picker/Form
-   components, otherwise CSS Modules would duplicate these primitives. */
+/* Shared dialog and picker primitives reused by dialog components. */
 /* ===== Dialog Overlay & Panel ===== */
 /* ===== CLI-style Picker (Model, Mode, Resume) ===== */
 .resume-picker {
@@ -125,9 +122,22 @@
 }
 
 .resume-picker-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding-left: 16px;
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.resume-picker-item-detail {
+  color: var(--text-dimmed);
+}
+
+.resume-picker-item-detail::before {
+  content: '·';
+  margin-right: 8px;
+  color: var(--text-dimmed);
 }
 
 .resume-picker-item-check {
@@ -177,6 +187,12 @@
 .dialog-danger-button:disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+.dialog-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .dialog-primary-button {

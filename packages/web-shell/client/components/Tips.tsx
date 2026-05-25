@@ -1,25 +1,19 @@
 import { useMemo } from 'react';
+import { useI18n } from '../i18n';
 import styles from './Tips.module.css';
 
-const TIPS = [
-  '试试 /insight, 从聊天记录中生成个性化洞察。',
-  '输入 / 查看所有可用命令。',
-  '使用 @ 引用文件路径。',
-  '按 Esc 取消正在进行的请求。',
-  '使用 Shift+Enter 换行。',
-  '按 ↑↓ 浏览历史消息。',
-];
-
-function pickTip(): string {
-  return TIPS[Math.floor(Math.random() * TIPS.length)];
+function pickTip(tips: string[]): string {
+  return tips[Math.floor(Math.random() * tips.length)] ?? '';
 }
 
 export function Tips() {
-  const tip = useMemo(() => pickTip(), []);
+  const { t } = useI18n();
+  const tips = useMemo(() => t('tips.items').split('|'), [t]);
+  const tip = useMemo(() => pickTip(tips), [tips]);
 
   return (
     <div className={styles.line}>
-      <span className={styles.label}>提示：</span>
+      <span className={styles.label}>{t('welcome.tipLabel')}</span>
       <span className={styles.text}>{tip}</span>
     </div>
   );

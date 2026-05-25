@@ -14,16 +14,19 @@
 
 .thinking {
   display: flex;
-  align-items: flex-start;
+  align-items: baseline;
   gap: 0;
   margin-bottom: 4px;
 }
 
 .thinking .prefix {
   color: var(--text-dimmed);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .thinking pre {
+  margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--font-mono);

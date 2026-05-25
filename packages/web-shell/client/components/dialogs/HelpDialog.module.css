@@ -1,0 +1,177 @@
+.dialog {
+  min-height: 0;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  gap: 10px;
+}
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.brand {
+  color: var(--accent-color);
+  font-weight: 700;
+}
+
+.tab {
+  color: var(--text-primary);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 1px 7px;
+}
+
+.tabActive {
+  color: var(--bg-primary);
+  background: var(--accent-color);
+}
+
+.general {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.intro {
+  color: var(--text-primary);
+  max-width: 780px;
+}
+
+.sectionTitle {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.shortcuts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 18px;
+}
+
+.shortcut {
+  display: grid;
+  grid-template-columns: minmax(92px, 140px) minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.shortcutKey {
+  color: var(--accent-color);
+  white-space: nowrap;
+}
+
+.shortcutDesc {
+  color: var(--text-primary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.commandList {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.commandListIntro {
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.commandGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.commandGroupTitle {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.commandGroupTitle span {
+  color: var(--text-secondary);
+  font-weight: 400;
+  margin-left: 6px;
+}
+
+.command {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 12px;
+}
+
+.commandRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.commandName {
+  color: var(--accent-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 48%;
+}
+
+.commandMeta {
+  color: var(--text-secondary);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commandDescription {
+  color: var(--text-primary);
+  font-size: 12px;
+  padding-left: 12px;
+  overflow-wrap: anywhere;
+}
+
+.commandSubcommands {
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding-left: 12px;
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  color: var(--text-dimmed);
+  padding: 16px 0;
+}
+
+@media (max-width: 720px) {
+  .shortcuts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .shortcut {
+    grid-template-columns: minmax(82px, 110px) minmax(0, 1fr);
+  }
+
+  .commandRow {
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .commandName {
+    max-width: 100%;
+  }
+}

@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { dp } from './dialogStyles';
 import type { ModelInfo } from '../../adapters/types';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+import { useI18n } from '../../i18n';
 
 interface ModelDialogProps {
   mode?: 'main' | 'fast';
@@ -17,6 +19,7 @@ export function ModelDialog({
   onSelect,
   onClose,
 }: ModelDialogProps) {
+  const { t } = useI18n();
   const isFastMode = mode === 'fast';
   const [selectedIdx, setSelectedIdx] = useState(() => {
     const idx = availableModels.findIndex((m) => m.id === currentModel);
@@ -169,36 +172,42 @@ export function ModelDialog({
   );
 
   return (
-    <div className="resume-picker">
-      <div className="resume-picker-header">
-        <span className="resume-picker-title">
-          {isFastMode ? 'Set Fast Model' : 'Switch Model'}
+    <div className={dp('resume-picker')}>
+      <div className={dp('resume-picker-header')}>
+        <span className={dp('resume-picker-title')}>
+          {isFastMode ? t('model.setFast') : t('model.switch')}
         </span>
-        <span className="resume-picker-count">
+        <span className={dp('resume-picker-count')}>
           {isFastMode
-            ? 'for suggestions and side tasks'
-            : `current: ${currentModel || 'unknown'}`}
+            ? t('model.fastHint')
+            : t('model.current', {
+                model: currentModel || t('model.unknown'),
+              })}
         </span>
       </div>
 
-      <div className="resume-picker-search">
+      <div className={dp('resume-picker-search')}>
         {customMode ? (
           <>
-            <span className="resume-picker-search-label">Custom: </span>
+            <span className={dp('resume-picker-search-label')}>
+              {t('model.custom')}:{' '}
+            </span>
             <input
               ref={customInputRef}
-              className="resume-picker-search-input"
+              className={dp('resume-picker-search-input')}
               value={customInput}
               onChange={(e) => setCustomInput(e.target.value)}
               autoFocus
-              placeholder="输入模型 ID..."
+              placeholder={t('model.placeholder')}
             />
           </>
         ) : searchMode ? (
           <>
-            <span className="resume-picker-search-label">Search: </span>
+            <span className={dp('resume-picker-search-label')}>
+              {t('common.search')}:{' '}
+            </span>
             <input
-              className="resume-picker-search-input"
+              className={dp('resume-picker-search-input')}
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value);
@@ -210,60 +219,71 @@ export function ModelDialog({
           </>
         ) : searchQuery ? (
           <>
-            <span className="resume-picker-search-label">Filter: </span>
-            <span className="resume-picker-search-value">{searchQuery}</span>
+            <span className={dp('resume-picker-search-label')}>
+              {t('resume.filter')}:{' '}
+            </span>
+            <span className={dp('resume-picker-search-value')}>
+              {searchQuery}
+            </span>
           </>
         ) : (
-          <span className="resume-picker-search-hint">
-            Press / to search, c for custom model
+          <span className={dp('resume-picker-search-hint')}>
+            {t('model.customHint')}
           </span>
         )}
       </div>
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
-      <div className="resume-picker-list" ref={listRef}>
+      <div className={dp('resume-picker-list')} ref={listRef}>
         {filtered.length === 0 && (
-          <div className="resume-picker-empty">
-            {searchQuery ? `没有匹配 "${searchQuery}" 的模型` : '没有可用模型'}
+          <div className={dp('resume-picker-empty')}>
+            {searchQuery
+              ? t('model.noMatch', { query: searchQuery })
+              : t('model.none')}
           </div>
         )}
         {filtered.map((m, i) => (
           <div
             key={m.id}
-            className={`resume-picker-item ${i === selectedIdx && !searchMode && !customMode ? 'selected' : ''}`}
+            className={dp(
+              'resume-picker-item',
+              i === selectedIdx && !searchMode && !customMode
+                ? 'selected'
+                : undefined,
+            )}
             onClick={() => {
               onSelect(m.id);
               onClose();
             }}
             onMouseEnter={() => setSelectedIdx(i)}
           >
-            <div className="resume-picker-item-row">
-              <span className="resume-picker-item-prefix">
+            <div className={dp('resume-picker-item-row')}>
+              <span className={dp('resume-picker-item-prefix')}>
                 {i === selectedIdx && !searchMode && !customMode ? '›' : ' '}
               </span>
-              <span className="resume-picker-item-title">
+              <span className={dp('resume-picker-item-title')}>
                 {m.label || m.id}
               </span>
               {!isFastMode && m.id === currentModel && (
-                <span className="resume-picker-item-check"> ✓</span>
+                <span className={dp('resume-picker-item-check')}> ✓</span>
               )}
             </div>
-            <div className="resume-picker-item-meta">{m.id}</div>
+            <div className={dp('resume-picker-item-meta')}>{m.id}</div>
           </div>
         ))}
       </div>
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
-      <div className="resume-picker-footer">
+      <div className={dp('resume-picker-footer')}>
         {customMode
-          ? 'Enter to confirm · Esc to cancel'
+          ? t('dialog.footer.confirmCancel')
           : searchMode
-            ? 'Type to search · Enter to commit · Esc to clear'
+            ? t('dialog.footer.search')
             : isFastMode
-              ? '↑↓ to navigate · / to search · c for custom · Enter to set fast model · Esc to cancel'
-              : '↑↓ to navigate · / to search · c for custom · Enter to select · Esc to cancel'}
+              ? t('dialog.footer.modelFast')
+              : t('dialog.footer.navSelectCancel')}
       </div>
     </div>
   );

@@ -23,10 +23,24 @@ import { AgentsDialog } from './components/dialogs/AgentsDialog';
 import type { AgentsDialogInitialMode } from './components/dialogs/AgentsDialog';
 import { SkillsDialog } from './components/dialogs/SkillsDialog';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
-import { LOCAL_COMMANDS } from './constants/localCommands';
+import { HelpDialog } from './components/dialogs/HelpDialog';
+import {
+  ThemeDialog,
+  type WebShellTheme,
+} from './components/dialogs/ThemeDialog';
+import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
+import { getLocalCommands } from './constants/localCommands';
 import { getDaemonBaseUrl, getDaemonToken } from './config/daemon';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
+import {
+  I18nProvider,
+  getTranslator,
+  languageLabel,
+  normalizeLanguage,
+  type WebShellLanguage,
+} from './i18n';
+import { copyFromLastAssistantMessage } from './utils/copyCommand';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
@@ -39,6 +53,35 @@ const DAEMON_BASE_URL = getDaemonBaseUrl();
 const DAEMON_TOKEN = getDaemonToken();
 const WEB_SHELL_VERSION = __WEB_SHELL_VERSION__;
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
+const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
+
+interface QueuedPrompt {
+  id: number;
+  text: string;
+  images?: PromptImage[];
+}
+
+export interface WebShellProps {
+  /**
+   * Daemon API base URL. When omitted, the standalone app reads the `daemon`
+   * query parameter and otherwise uses same-origin API paths.
+   */
+  baseUrl?: string;
+  /** Bearer token for daemon API calls. Standalone mode falls back to `?token=`. */
+  token?: string;
+  /** Existing daemon session to attach to. Standalone mode falls back to `/session/:id`. */
+  initialSessionId?: string;
+  /** Called whenever the attached daemon session id changes. */
+  onSessionIdChange?: (sessionId: string) => void;
+  /** Visual theme for the embedded shell. Defaults to the dark terminal skin. */
+  theme?: 'dark' | 'light';
+  /** Called when `/theme` changes the web-shell theme. */
+  onThemeChange?: (theme: WebShellTheme) => void;
+  /** UI language for the Web terminal. Defaults to `?language=` or browser language. */
+  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
+  /** Called when `/language ui` changes the web-shell UI language. */
+  onLanguageChange?: (language: WebShellLanguage) => void;
+}
 
 function getSessionIdFromUrl(): string | undefined {
   if (typeof window === 'undefined') return undefined;
@@ -56,6 +99,14 @@ function replaceSessionUrl(sessionId: string): void {
   const url = new URL(window.location.href);
   url.pathname = `/session/${encodeURIComponent(sessionId)}`;
   window.history.replaceState(null, '', url);
+}
+
+function getInitialLanguage(): WebShellLanguage {
+  if (typeof window === 'undefined') return 'en';
+  const params = new URLSearchParams(window.location.search);
+  return normalizeLanguage(
+    params.get('language') ?? params.get('lang') ?? navigator.language,
+  );
 }
 
 function formatError(error: unknown, fallback: string): string {
@@ -101,12 +152,108 @@ function getFloatingTodos(messages: readonly Message[]): TodoItem[] {
   return [];
 }
 
-export function App() {
-  const initialSessionId = useMemo(() => getSessionIdFromUrl(), []);
+function translateCopyMessage(
+  message: string,
+  t: ReturnType<typeof getTranslator>,
+): string {
+  if (message === 'No output in history') return t('copy.noOutput');
+  if (message === 'Last AI output contains no text to copy.') {
+    return t('copy.noText');
+  }
+  if (message === 'No matching code block found in the last AI output.') {
+    return t('copy.codeMissing');
+  }
+  if (message === 'No matching LaTeX block found in the last AI output.') {
+    return t('copy.latexMissing');
+  }
+  if (
+    message ===
+    'No matching inline LaTeX expression found in the last AI output.'
+  ) {
+    return t('copy.inlineLatexMissing');
+  }
+  if (message === 'Last output copied to the clipboard') {
+    return t('copy.outputCopied');
+  }
+  if (message.startsWith('Failed to copy to the clipboard. ')) {
+    return `${t('copy.failedFallback')}. ${message.slice(
+      'Failed to copy to the clipboard. '.length,
+    )}`;
+  }
+  const copiedSuffix = ' copied to the clipboard';
+  if (message.endsWith(copiedSuffix)) {
+    return t('copy.toClipboard', {
+      label: message.slice(0, -copiedSuffix.length),
+    });
+  }
+  return message;
+}
+
+function QueuedPromptDisplay({
+  prompts,
+  t,
+}: {
+  prompts: readonly QueuedPrompt[];
+  t: ReturnType<typeof getTranslator>;
+}) {
+  if (prompts.length === 0) return null;
+
+  return (
+    <div className={styles.queuedPrompts}>
+      {prompts.slice(0, MAX_DISPLAYED_QUEUED_PROMPTS).map((prompt) => {
+        const preview = prompt.text.replace(/\s+/g, ' ');
+        const imageCount = prompt.images?.length ?? 0;
+        return (
+          <div key={prompt.id} className={styles.queuedPrompt}>
+            {preview}
+            {imageCount > 0
+              ? ` ${t('queue.imageCount', { count: imageCount })}`
+              : ''}
+          </div>
+        );
+      })}
+      {prompts.length > MAX_DISPLAYED_QUEUED_PROMPTS && (
+        <div className={styles.queuedPrompt}>
+          {t('queue.more', {
+            count: prompts.length - MAX_DISPLAYED_QUEUED_PROMPTS,
+          })}
+        </div>
+      )}
+      <div className={styles.queuedHint}>{t('queue.footer')}</div>
+    </div>
+  );
+}
+
+export function App({
+  baseUrl,
+  token,
+  initialSessionId: providedInitialSessionId,
+  onSessionIdChange,
+  theme: providedTheme = 'dark',
+  onThemeChange,
+  language: providedLanguage,
+  onLanguageChange,
+}: WebShellProps = {}) {
+  const initialSessionId = useMemo(
+    () => providedInitialSessionId ?? getSessionIdFromUrl(),
+    [providedInitialSessionId],
+  );
+  const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
+    () =>
+      providedLanguage === undefined
+        ? getInitialLanguage()
+        : normalizeLanguage(providedLanguage),
+  );
+  const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
   const { store, state, connection, actions, promptStatus } = useDaemonSession({
-    baseUrl: DAEMON_BASE_URL,
-    token: DAEMON_TOKEN,
+    baseUrl: baseUrl ?? DAEMON_BASE_URL,
+    token: token ?? DAEMON_TOKEN,
     initialSessionId,
+    loadWarnings: {
+      models: t('loadWarning.models'),
+      commands: t('loadWarning.commands'),
+      context: t('loadWarning.context'),
+    },
   });
 
   const messageBlocks = useAnimationFrameValue(state.blocks);
@@ -118,6 +265,7 @@ export function App() {
     () => extractPendingPermission(state.blocks),
     [state.blocks],
   );
+  const shouldHideComposer = pendingApproval !== null;
   const floatingTodos = useMemo(() => getFloatingTodos(messages), [messages]);
   const transcriptStreamingState = useMemo(
     () => extractStreamingState(state),
@@ -140,22 +288,33 @@ export function App() {
   >(null);
   const [showModeDialog, setShowModeDialog] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
+  const [showReleaseDialog, setShowReleaseDialog] = useState(false);
   const [showMcpDialog, setShowMcpDialog] = useState(false);
+  const [showHelpDialog, setShowHelpDialog] = useState(false);
+  const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showSkillsDialog, setShowSkillsDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
-  const [toolsDialogDescriptions, setToolsDialogDescriptions] = useState(false);
   const [memoryDialogMode, setMemoryDialogMode] =
     useState<MemoryDialogInitialMode | null>(null);
   const [agentsDialogMode, setAgentsDialogMode] =
     useState<AgentsDialogInitialMode | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [selectedTheme, setSelectedTheme] =
+    useState<WebShellTheme>(providedTheme);
   const [currentModel, setCurrentModel] = useState('');
   const [currentMode, setCurrentMode] = useState('default');
+  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
+  const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
+  const nextQueuedPromptIdRef = useRef(1);
+  const drainingQueueRef = useRef(false);
   const dialogOpen =
     !!modelDialogMode ||
     showModeDialog ||
     showResumeDialog ||
+    showReleaseDialog ||
     showMcpDialog ||
+    showHelpDialog ||
+    showThemeDialog ||
     showSkillsDialog ||
     showToolsDialog ||
     !!memoryDialogMode ||
@@ -168,6 +327,65 @@ export function App() {
     [store],
   );
 
+  useEffect(() => {
+    queuedPromptsRef.current = queuedPrompts;
+  }, [queuedPrompts]);
+
+  const enqueuePrompt = useCallback((text: string, images?: PromptImage[]) => {
+    const trimmed = text.trim();
+    if (!trimmed) return true;
+    const nextPrompt: QueuedPrompt = {
+      id: nextQueuedPromptIdRef.current++,
+      text: trimmed,
+      images: images ? [...images] : undefined,
+    };
+    queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
+    setQueuedPrompts(queuedPromptsRef.current);
+    return true;
+  }, []);
+
+  const popNextQueuedPrompt = useCallback((): QueuedPrompt | null => {
+    const [nextPrompt, ...rest] = queuedPromptsRef.current;
+    if (!nextPrompt) return null;
+    queuedPromptsRef.current = rest;
+    setQueuedPrompts(rest);
+    return nextPrompt;
+  }, []);
+
+  const popQueuedPromptsForEdit = useCallback((): string | null => {
+    const current = queuedPromptsRef.current;
+    if (current.length === 0) return null;
+    queuedPromptsRef.current = [];
+    setQueuedPrompts([]);
+    return current.map((prompt) => prompt.text).join('\n\n');
+  }, []);
+
+  const clearQueuedPrompts = useCallback((): boolean => {
+    if (queuedPromptsRef.current.length === 0) return false;
+    queuedPromptsRef.current = [];
+    setQueuedPrompts([]);
+    store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
+    return true;
+  }, [store, t]);
+
+  useEffect(() => {
+    setSelectedTheme(providedTheme);
+  }, [providedTheme]);
+
+  const handleThemeChange = useCallback(
+    (nextTheme: WebShellTheme) => {
+      setSelectedTheme(nextTheme);
+      onThemeChange?.(nextTheme);
+    },
+    [onThemeChange],
+  );
+
+  useEffect(() => {
+    if (providedLanguage !== undefined) {
+      setSelectedLanguage(normalizeLanguage(providedLanguage));
+    }
+  }, [providedLanguage]);
+
   const handleToggleShortcuts = useCallback(() => {
     setShowShortcuts((prev) => !prev);
   }, []);
@@ -177,7 +395,7 @@ export function App() {
       if (!isDaemonApprovalMode(modeId)) {
         reportError(
           new Error(`Unsupported approval mode: ${modeId}`),
-          '切换审批模式失败',
+          t('local.approvalMode'),
         );
         return;
       }
@@ -187,10 +405,10 @@ export function App() {
           setCurrentMode(result.mode || modeId);
         })
         .catch((error: unknown) => {
-          reportError(error, '切换审批模式失败');
+          reportError(error, t('local.approvalMode'));
         });
     },
-    [actions, reportError],
+    [actions, reportError, t],
   );
 
   useEffect(() => {
@@ -211,9 +429,12 @@ export function App() {
 
   useEffect(() => {
     if (connection.sessionId) {
-      replaceSessionUrl(connection.sessionId);
+      onSessionIdChange?.(connection.sessionId);
+      if (!onSessionIdChange) {
+        replaceSessionUrl(connection.sessionId);
+      }
     }
-  }, [connection.sessionId]);
+  }, [connection.sessionId, onSessionIdChange]);
 
   const handleCycleMode = useCallback(() => {
     const idx = isDaemonApprovalMode(currentMode)
@@ -230,6 +451,110 @@ export function App() {
         const match = text.match(/^\/([\w-]+)/);
         if (match) {
           const cmd = match[1];
+          if (cmd === 'help') {
+            setShowHelpDialog(true);
+            return true;
+          }
+          if (cmd === 'theme') {
+            const themeArg = text.slice(match[0].length).trim().toLowerCase();
+            if (themeArg === 'dark' || themeArg === 'light') {
+              handleThemeChange(themeArg);
+            } else if (!themeArg) {
+              setShowThemeDialog(true);
+            } else {
+              store.dispatch([
+                {
+                  type: 'error',
+                  text: t('error.unsupportedTheme'),
+                },
+              ]);
+            }
+            return true;
+          }
+          if (cmd === 'language') {
+            const args = text.slice(match[0].length).trim();
+            const [subCommand, languageArg] = args.split(/\s+/);
+            if (!args) {
+              store.dispatch([
+                {
+                  type: 'status',
+                  text: [
+                    t('language.current', {
+                      language: languageLabel(selectedLanguage),
+                    }),
+                    t('language.usage'),
+                    t('language.options'),
+                    '  - en: English',
+                    '  - zh-CN: 中文',
+                  ].join('\n'),
+                },
+              ]);
+              return true;
+            }
+            if (subCommand?.toLowerCase() === 'ui') {
+              if (!languageArg) {
+                store.dispatch([
+                  {
+                    type: 'status',
+                    text: [
+                      t('language.set'),
+                      '',
+                      t('language.usage'),
+                      '',
+                      t('language.options'),
+                      '  - en: English',
+                      '  - zh-CN: 中文',
+                    ].join('\n'),
+                  },
+                ]);
+                return true;
+              }
+              const normalizedArg = languageArg.toLowerCase();
+              const valid = ['en', 'zh', 'zh-cn', 'zh_cn'].includes(
+                normalizedArg,
+              );
+              if (!valid) {
+                store.dispatch([
+                  { type: 'error', text: t('language.invalid') },
+                ]);
+                return true;
+              }
+              const nextLanguage = normalizeLanguage(languageArg);
+              setSelectedLanguage(nextLanguage);
+              onLanguageChange?.(nextLanguage);
+              if (!promptBlocked) {
+                actions
+                  .sendPrompt(`/language ui ${nextLanguage}`, undefined, {
+                    optimisticUserMessage: false,
+                  })
+                  .then(() => actions.refreshCommands())
+                  .catch((error: unknown) => {
+                    reportError(error, 'Failed to sync /language command');
+                  });
+              }
+              return true;
+            }
+          }
+          if (cmd === 'copy') {
+            const copyArg = text.slice(match[0].length).trim();
+            copyFromLastAssistantMessage(messages, copyArg)
+              .then((result) => {
+                store.dispatch([
+                  {
+                    type: result.status === 'error' ? 'error' : 'status',
+                    text: translateCopyMessage(result.message, t),
+                  },
+                ]);
+              })
+              .catch((error: unknown) => {
+                reportError(error, t('copy.failedFallback'));
+              });
+            return true;
+          }
+          if (cmd === 'release') {
+            setShowReleaseDialog(true);
+            return true;
+          }
           if (cmd === 'model') {
             const modelArg = text.slice(match[0].length).trim();
             if (modelArg === '--fast') {
@@ -238,11 +563,11 @@ export function App() {
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
-              if (promptBlocked) return false;
+              if (promptBlocked) return enqueuePrompt(text, images);
               actions
                 .sendPrompt(text, images)
                 .catch((error: unknown) =>
-                  reportError(error, '发送 /model --fast 失败'),
+                  reportError(error, 'Failed to send /model --fast'),
                 );
               return true;
             }
@@ -253,7 +578,7 @@ export function App() {
                   setCurrentModel(modelArg);
                 })
                 .catch((error: unknown) => {
-                  reportError(error, '切换模型失败');
+                  reportError(error, t('model.switch'));
                 });
             } else {
               setModelDialogMode('main');
@@ -261,7 +586,7 @@ export function App() {
             return true;
           }
           if (cmd === 'plan') {
-            if (promptBlocked) return false;
+            if (promptBlocked) return enqueuePrompt(text, images);
             const prompt = text.slice(match[0].length).trim();
             actions
               .setApprovalMode('plan')
@@ -271,12 +596,12 @@ export function App() {
                   actions
                     .sendPrompt(prompt, images)
                     .catch((error: unknown) =>
-                      reportError(error, '发送 plan prompt 失败'),
+                      reportError(error, 'Failed to send plan prompt'),
                     );
                 }
               })
               .catch((error: unknown) => {
-                reportError(error, '切换 plan 模式失败');
+                reportError(error, t('mode.plan'));
               });
             return true;
           }
@@ -296,11 +621,11 @@ export function App() {
           if (cmd === 'skills') {
             const skillArg = text.slice(match[0].length).trim();
             if (skillArg) {
-              if (promptBlocked) return false;
+              if (promptBlocked) return enqueuePrompt(text, images);
               actions
                 .sendPrompt(text, images)
                 .catch((error: unknown) =>
-                  reportError(error, '发送 /skills 命令失败'),
+                  reportError(error, 'Failed to send /skills command'),
                 );
             } else {
               setShowSkillsDialog(true);
@@ -308,10 +633,6 @@ export function App() {
             return true;
           }
           if (cmd === 'tools') {
-            const toolsArg = text.slice(match[0].length).trim();
-            setToolsDialogDescriptions(
-              toolsArg === 'desc' || toolsArg === 'descriptions',
-            );
             setShowToolsDialog(true);
             return true;
           }
@@ -362,18 +683,18 @@ export function App() {
           }
           if (cmd === 'new' || cmd === 'reset') {
             actions.newSession().catch((error: unknown) => {
-              reportError(error, '创建新会话失败');
+              reportError(error, 'Failed to create a new session');
             });
             return true;
           }
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
-              if (promptBlocked) return false;
+              if (promptBlocked) return enqueuePrompt(text, images);
               actions
                 .sendPrompt(text, images)
                 .catch((error: unknown) =>
-                  reportError(error, '发送 /rename 命令失败'),
+                  reportError(error, 'Failed to send /rename command'),
                 );
               return true;
             }
@@ -382,7 +703,7 @@ export function App() {
               store.dispatch([
                 {
                   type: 'error',
-                  text: '请输入新的会话名称，例如 /rename 项目排查，或使用 /rename --auto 自动生成',
+                  text: 'Please enter a session name, for example /rename project debugging, or use /rename --auto.',
                 },
               ]);
               return true;
@@ -393,7 +714,7 @@ export function App() {
                 store.dispatch([
                   {
                     type: 'status',
-                    text: `会话已重命名为 ${displayName}`,
+                    text: `Session renamed to ${displayName}`,
                   },
                 ]);
               })
@@ -402,7 +723,9 @@ export function App() {
                   {
                     type: 'error',
                     text:
-                      error instanceof Error ? error.message : '会话重命名失败',
+                      error instanceof Error
+                        ? error.message
+                        : 'Failed to rename session',
                   },
                 ]);
               });
@@ -412,7 +735,7 @@ export function App() {
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
               actions.loadSession(sessionId).catch((error: unknown) => {
-                reportError(error, '加载会话失败');
+                reportError(error, 'Failed to load session');
               });
             } else {
               setShowResumeDialog(true);
@@ -421,38 +744,82 @@ export function App() {
           }
         }
         // Forward slash commands as prompts
-        if (promptBlocked) return false;
+        if (promptBlocked) return enqueuePrompt(text, images);
         actions
           .sendPrompt(text, images)
-          .catch((error: unknown) => reportError(error, '发送命令失败'));
+          .catch((error: unknown) =>
+            reportError(error, 'Failed to send command'),
+          );
         return true;
       } else if (text.startsWith('!')) {
-        if (promptBlocked) return false;
+        if (promptBlocked) return enqueuePrompt(text, images);
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
         actions
           .sendPrompt(formatShellCommandPrompt(cmd))
           .catch((error: unknown) => {
-            reportError(error, '发送 shell 命令失败');
+            reportError(error, 'Failed to send shell command');
           });
         return true;
       } else {
-        if (promptBlocked) return false;
+        if (promptBlocked) return enqueuePrompt(text, images);
         actions
           .sendPrompt(text, images)
-          .catch((error: unknown) => reportError(error, '发送消息失败'));
+          .catch((error: unknown) =>
+            reportError(error, 'Failed to send message'),
+          );
         return true;
       }
     },
-    [actions, store, handleSetMode, reportError],
+    [
+      actions,
+      store,
+      enqueuePrompt,
+      handleThemeChange,
+      handleSetMode,
+      messages,
+      onLanguageChange,
+      reportError,
+      selectedLanguage,
+      t,
+    ],
   );
+
+  useEffect(() => {
+    if (drainingQueueRef.current) return;
+    if (!connected) return;
+    if (streamingState !== 'idle') return;
+    if (dialogOpen) return;
+    if (pendingApproval) return;
+    if (queuedPrompts.length === 0) return;
+
+    const nextPrompt = popNextQueuedPrompt();
+    if (!nextPrompt) return;
+
+    drainingQueueRef.current = true;
+    window.setTimeout(() => {
+      try {
+        handleSubmit(nextPrompt.text, nextPrompt.images);
+      } finally {
+        drainingQueueRef.current = false;
+      }
+    }, 0);
+  }, [
+    connected,
+    dialogOpen,
+    handleSubmit,
+    pendingApproval,
+    popNextQueuedPrompt,
+    queuedPrompts,
+    streamingState,
+  ]);
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
       actions
         .respondToPermission(id, selectedOption, answers)
         .catch((error: unknown) => {
-          reportError(error, '提交权限选择失败');
+          reportError(error, 'Failed to submit permission choice');
         });
     },
     [actions, reportError],
@@ -460,12 +827,22 @@ export function App() {
 
   const handleCancel = useCallback(() => {
     actions.cancel().catch((error: unknown) => {
-      reportError(error, '取消生成失败');
+      reportError(error, 'Failed to cancel request');
     });
   }, [actions, reportError]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (
+        e.key === 'Escape' &&
+        !pendingApproval &&
+        !dialogOpen &&
+        clearQueuedPrompts()
+      ) {
+        e.preventDefault();
+        return;
+      }
       if (
         e.key === 'Escape' &&
         streamingState !== 'idle' &&
@@ -477,7 +854,13 @@ export function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [streamingState, handleCancel, pendingApproval, dialogOpen]);
+  }, [
+    streamingState,
+    handleCancel,
+    pendingApproval,
+    dialogOpen,
+    clearQueuedPrompts,
+  ]);
 
   const isDisabled = !connected;
 
@@ -489,159 +872,216 @@ export function App() {
           setCurrentModel(modelId);
         })
         .catch((error: unknown) => {
-          reportError(error, '切换模型失败');
+          reportError(error, t('model.switch'));
         });
     },
-    [actions, reportError],
+    [actions, reportError, t],
   );
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') return;
       actions.sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
-        reportError(error, '切换 fast model 失败');
+        reportError(error, 'Failed to switch fast model');
       });
     },
     [actions, streamingState, reportError],
   );
 
-  const commands = useMemo(
-    () => mergeCommands(LOCAL_COMMANDS, connection.commands ?? []),
-    [connection.commands],
-  );
+  const commands = useMemo(() => {
+    const skillNames = new Set(connection.skills ?? []);
+    return mergeCommands(connection.commands ?? [], getLocalCommands(t)).map(
+      (command) =>
+        skillNames.has(command.name)
+          ? { ...command, description: t('skills.run') }
+          : command,
+    );
+  }, [connection.commands, connection.skills, t]);
+
+  const appClassName = `${styles.app} ${
+    selectedTheme === 'light' ? styles.themeLight : styles.themeDark
+  }`;
 
   return (
-    <div className={styles.app}>
-      {modelDialogMode ? (
-        <ModelDialog
-          mode={modelDialogMode}
-          currentModel={currentModel}
-          availableModels={connection.models ?? []}
-          onSelect={
-            modelDialogMode === 'fast'
-              ? handleFastModelSelect
-              : handleModelSelect
-          }
-          onClose={() => setModelDialogMode(null)}
-        />
-      ) : showResumeDialog ? (
-        <ResumeDialog
-          currentSessionId={connection.sessionId}
-          loadSessions={actions.listSessions}
-          onSelect={(sessionId) => {
-            actions.loadSession(sessionId).catch((error: unknown) => {
-              reportError(error, '加载会话失败');
-            });
-          }}
-          onClose={() => setShowResumeDialog(false)}
-        />
-      ) : showModeDialog ? (
-        <ApprovalModeDialog
-          currentMode={currentMode}
-          onSelect={handleSetMode}
-          onClose={() => setShowModeDialog(false)}
-        />
-      ) : showMcpDialog ? (
-        <McpDialog
-          loadStatus={actions.loadMcpStatus}
-          loadTools={actions.loadMcpTools}
-          restartServer={actions.restartMcpServer}
-          onClose={() => setShowMcpDialog(false)}
-        />
-      ) : showSkillsDialog ? (
-        <SkillsDialog
-          loadStatus={actions.loadSkillsStatus}
-          onClose={() => setShowSkillsDialog(false)}
-        />
-      ) : showToolsDialog ? (
-        <ToolsDialog
-          showDescriptions={toolsDialogDescriptions}
-          loadStatus={actions.loadToolsStatus}
-          setToolEnabled={actions.setWorkspaceToolEnabled}
-          onClose={() => setShowToolsDialog(false)}
-        />
-      ) : memoryDialogMode ? (
-        <MemoryDialog
-          initialMode={memoryDialogMode}
-          loadStatus={actions.loadMemoryStatus}
-          writeMemory={actions.writeMemory}
-          onClose={() => setMemoryDialogMode(null)}
-        />
-      ) : agentsDialogMode ? (
-        <AgentsDialog
-          initialMode={agentsDialogMode}
-          listAgents={actions.listAgents}
-          getAgent={actions.getAgent}
-          createAgent={actions.createAgent}
-          deleteAgent={actions.deleteAgent}
-          onClose={() => setAgentsDialogMode(null)}
-        />
-      ) : (
-        <>
-          <div
-            className={
-              messages.length > 0 || streamingState !== 'idle'
-                ? `${styles.content} ${styles.contentHasMessages}`
-                : styles.content
+    <I18nProvider language={selectedLanguage}>
+      <div className={appClassName}>
+        {modelDialogMode ? (
+          <ModelDialog
+            mode={modelDialogMode}
+            currentModel={currentModel}
+            availableModels={connection.models ?? []}
+            onSelect={
+              modelDialogMode === 'fast'
+                ? handleFastModelSelect
+                : handleModelSelect
             }
-          >
-            <MessageList
-              messages={messages}
-              pendingApproval={pendingApproval}
-              onConfirm={handleConfirm}
-              welcomeHeader={
-                <WelcomeHeader
-                  version={WEB_SHELL_VERSION}
-                  cwd={connection.workspaceCwd || ''}
-                  currentModel={currentModel}
-                  currentMode={currentMode}
-                />
+            onClose={() => setModelDialogMode(null)}
+          />
+        ) : showResumeDialog ? (
+          <ResumeDialog
+            currentSessionId={connection.sessionId}
+            loadSessions={actions.listSessions}
+            onSelect={(sessionId) => {
+              actions.loadSession(sessionId).catch((error: unknown) => {
+                reportError(error, 'Failed to load session');
+              });
+            }}
+            onClose={() => setShowResumeDialog(false)}
+          />
+        ) : showReleaseDialog ? (
+          <ReleaseSessionDialog
+            currentSessionId={connection.sessionId}
+            loadSessions={actions.listSessions}
+            releaseSession={actions.releaseSession}
+            onReleased={(sessionId) => {
+              store.dispatch([
+                {
+                  type: 'status',
+                  text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
+                },
+              ]);
+            }}
+            onError={(error) => {
+              const reason =
+                error instanceof Error ? error.message : String(error);
+              store.dispatch([
+                {
+                  type: 'error',
+                  text: t('release.failed', { reason }),
+                },
+              ]);
+            }}
+            onClose={() => setShowReleaseDialog(false)}
+          />
+        ) : showModeDialog ? (
+          <ApprovalModeDialog
+            currentMode={currentMode}
+            onSelect={handleSetMode}
+            onClose={() => setShowModeDialog(false)}
+          />
+        ) : showMcpDialog ? (
+          <McpDialog
+            loadStatus={actions.loadMcpStatus}
+            loadTools={actions.loadMcpTools}
+            restartServer={actions.restartMcpServer}
+            onClose={() => setShowMcpDialog(false)}
+          />
+        ) : showHelpDialog ? (
+          <HelpDialog
+            commands={commands}
+            onClose={() => setShowHelpDialog(false)}
+          />
+        ) : showThemeDialog ? (
+          <ThemeDialog
+            currentTheme={selectedTheme}
+            onSelect={handleThemeChange}
+            onClose={() => setShowThemeDialog(false)}
+          />
+        ) : showSkillsDialog ? (
+          <SkillsDialog
+            loadStatus={actions.loadSkillsStatus}
+            onClose={() => setShowSkillsDialog(false)}
+          />
+        ) : showToolsDialog ? (
+          <ToolsDialog
+            loadStatus={actions.loadToolsStatus}
+            setToolEnabled={actions.setWorkspaceToolEnabled}
+            onClose={() => setShowToolsDialog(false)}
+          />
+        ) : memoryDialogMode ? (
+          <MemoryDialog
+            initialMode={memoryDialogMode}
+            loadStatus={actions.loadMemoryStatus}
+            readFile={actions.readWorkspaceFile}
+            writeMemory={actions.writeMemory}
+            onMessage={(text, type = 'status') => {
+              store.dispatch([{ type, text }]);
+            }}
+            onClose={() => setMemoryDialogMode(null)}
+          />
+        ) : agentsDialogMode ? (
+          <AgentsDialog
+            initialMode={agentsDialogMode}
+            listAgents={actions.listAgents}
+            getAgent={actions.getAgent}
+            createAgent={actions.createAgent}
+            deleteAgent={actions.deleteAgent}
+            onClose={() => setAgentsDialogMode(null)}
+          />
+        ) : (
+          <>
+            <div
+              className={
+                messages.length > 0 || streamingState !== 'idle'
+                  ? `${styles.content} ${styles.contentHasMessages}`
+                  : styles.content
               }
-            />
-
-            <StreamingStatus
-              streamingState={streamingState}
-              tokenCount={connection.tokenCount ?? 0}
-            />
-          </div>
-
-          <div className={styles.footer}>
-            {floatingTodos.length > 0 && <TodoPanel todos={floatingTodos} />}
-            <div className={styles.composer}>
-              <Editor
-                onSubmit={handleSubmit}
-                onCycleMode={handleCycleMode}
-                onToggleShortcuts={handleToggleShortcuts}
-                disabled={isDisabled}
-                commands={commands}
-                skills={connection.skills ?? []}
-                currentMode={currentMode}
-                placeholderText={
-                  !connected
-                    ? '连接中...'
-                    : streamingState !== 'idle'
-                      ? '正在处理中，可输入 /resume 切换会话'
-                      : '输入您的消息或 @ 文件路径'
+            >
+              <MessageList
+                messages={messages}
+                pendingApproval={pendingApproval}
+                onConfirm={handleConfirm}
+                welcomeHeader={
+                  <WelcomeHeader
+                    version={WEB_SHELL_VERSION}
+                    cwd={connection.workspaceCwd || ''}
+                    currentModel={currentModel}
+                    currentMode={currentMode}
+                  />
                 }
+              />
+
+              <StreamingStatus
+                streamingState={streamingState}
+                tokenCount={connection.tokenCount ?? 0}
               />
             </div>
 
-            {showShortcuts ? (
-              <ShortcutsPanel />
-            ) : (
-              <StatusBar
-                connected={connected}
-                streamingState={streamingState}
-                currentModel={currentModel}
-                currentMode={currentMode}
-                tokenCount={connection.tokenCount ?? 0}
-                contextWindow={connection.contextWindow ?? 0}
-              />
-            )}
-          </div>
-        </>
-      )}
-    </div>
+            <div className={styles.footer}>
+              {floatingTodos.length > 0 && <TodoPanel todos={floatingTodos} />}
+              {!shouldHideComposer && (
+                <div className={styles.composer}>
+                  <QueuedPromptDisplay prompts={queuedPrompts} t={t} />
+                  <Editor
+                    onSubmit={handleSubmit}
+                    onCycleMode={handleCycleMode}
+                    onToggleShortcuts={handleToggleShortcuts}
+                    disabled={isDisabled}
+                    commands={commands}
+                    skills={connection.skills ?? []}
+                    queuedMessages={queuedPrompts.map((prompt) => prompt.text)}
+                    onPopQueuedMessages={popQueuedPromptsForEdit}
+                    onClearQueuedMessages={clearQueuedPrompts}
+                    currentMode={currentMode}
+                    placeholderText={
+                      !connected
+                        ? t('common.loading')
+                        : streamingState !== 'idle'
+                          ? t('editor.processing')
+                          : t('editor.placeholder')
+                    }
+                  />
+                </div>
+              )}
+
+              {!shouldHideComposer &&
+                (showShortcuts ? (
+                  <ShortcutsPanel />
+                ) : (
+                  <StatusBar
+                    connected={connected}
+                    streamingState={streamingState}
+                    currentModel={currentModel}
+                    currentMode={currentMode}
+                    tokenCount={connection.tokenCount ?? 0}
+                    contextWindow={connection.contextWindow ?? 0}
+                  />
+                ))}
+            </div>
+          </>
+        )}
+      </div>
+    </I18nProvider>
   );
 }
 

@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { dp } from './dialogStyles';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+import { useI18n } from '../../i18n';
 
 interface ApprovalModeDialogProps {
   currentMode: string;
@@ -8,28 +10,19 @@ interface ApprovalModeDialogProps {
   onClose: () => void;
 }
 
-const APPROVAL_MODE_COPY: Record<
-  (typeof DAEMON_APPROVAL_MODES)[number],
-  { label: string; description: string }
-> = {
-  plan: { label: 'Plan 模式', description: '仅分析和规划，不执行工具' },
-  default: { label: '默认模式', description: '每次工具调用都需要确认' },
-  'auto-edit': { label: '自动编辑', description: '自动批准文件读写操作' },
-  yolo: { label: 'YOLO 模式', description: '自动批准所有操作' },
-};
-
-const APPROVAL_MODES = DAEMON_APPROVAL_MODES.map((id) => ({
-  id,
-  ...APPROVAL_MODE_COPY[id],
-}));
-
 export function ApprovalModeDialog({
   currentMode,
   onSelect,
   onClose,
 }: ApprovalModeDialogProps) {
+  const { t } = useI18n();
+  const approvalModes = DAEMON_APPROVAL_MODES.map((id) => ({
+    id,
+    label: t(`mode.${id}`),
+    description: t(`mode.${id}.desc`),
+  }));
   const [selectedIdx, setSelectedIdx] = useState(() => {
-    const idx = APPROVAL_MODES.findIndex((m) => m.id === currentMode);
+    const idx = approvalModes.findIndex((m) => m.id === currentMode);
     return idx >= 0 ? idx : 0;
   });
   const listRef = useRef<HTMLDivElement>(null);
@@ -42,12 +35,12 @@ export function ApprovalModeDialog({
   }, [selectedIdx]);
 
   const handleSelect = useCallback(() => {
-    const mode = APPROVAL_MODES[selectedIdx];
+    const mode = approvalModes[selectedIdx];
     if (mode) {
       onSelect(mode.id);
       onClose();
     }
-  }, [selectedIdx, onSelect, onClose]);
+  }, [approvalModes, selectedIdx, onSelect, onClose]);
 
   useDelayedGlobalKeyDown(
     (e: KeyboardEvent) => {
@@ -58,7 +51,7 @@ export function ApprovalModeDialog({
       }
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
-        setSelectedIdx((i) => Math.min(i + 1, APPROVAL_MODES.length - 1));
+        setSelectedIdx((i) => Math.min(i + 1, approvalModes.length - 1));
         return;
       }
       if (e.key === 'ArrowUp' || e.key === 'k') {
@@ -72,51 +65,56 @@ export function ApprovalModeDialog({
         return;
       }
     },
-    [selectedIdx, onClose, handleSelect],
+    [approvalModes.length, selectedIdx, onClose, handleSelect],
   );
 
   return (
-    <div className="resume-picker">
-      <div className="resume-picker-header">
-        <span className="resume-picker-title">Approval Mode</span>
-        <span className="resume-picker-count">
-          current:{' '}
-          {APPROVAL_MODES.find((m) => m.id === currentMode)?.label ||
+    <div className={dp('resume-picker')}>
+      <div className={dp('resume-picker-header')}>
+        <span className={dp('resume-picker-title')}>
+          {t('local.approvalMode')}
+        </span>
+        <span className={dp('resume-picker-count')}>
+          {t('common.current')}:{' '}
+          {approvalModes.find((m) => m.id === currentMode)?.label ||
             currentMode}
         </span>
       </div>
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
-      <div className="resume-picker-list" ref={listRef}>
-        {APPROVAL_MODES.map((m, i) => (
+      <div className={dp('resume-picker-list')} ref={listRef}>
+        {approvalModes.map((m, i) => (
           <div
             key={m.id}
-            className={`resume-picker-item ${i === selectedIdx ? 'selected' : ''}`}
+            className={dp(
+              'resume-picker-item',
+              i === selectedIdx ? 'selected' : undefined,
+            )}
             onClick={() => {
               onSelect(m.id);
               onClose();
             }}
             onMouseEnter={() => setSelectedIdx(i)}
           >
-            <div className="resume-picker-item-row">
-              <span className="resume-picker-item-prefix">
+            <div className={dp('resume-picker-item-row')}>
+              <span className={dp('resume-picker-item-prefix')}>
                 {i === selectedIdx ? '›' : ' '}
               </span>
-              <span className="resume-picker-item-title">{m.label}</span>
+              <span className={dp('resume-picker-item-title')}>{m.label}</span>
               {m.id === currentMode && (
-                <span className="resume-picker-item-check"> ✓</span>
+                <span className={dp('resume-picker-item-check')}> ✓</span>
               )}
             </div>
-            <div className="resume-picker-item-meta">{m.description}</div>
+            <div className={dp('resume-picker-item-meta')}>{m.description}</div>
           </div>
         ))}
       </div>
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
-      <div className="resume-picker-footer">
-        ↑↓ to navigate · Enter to select · Esc to cancel
+      <div className={dp('resume-picker-footer')}>
+        {t('dialog.footer.navSelectCancel')}
       </div>
     </div>
   );

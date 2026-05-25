@@ -20,6 +20,7 @@ import type { PromptImage } from '../adapters/promptTypes';
 import { slashCompletionSource } from '../completions/slashCompletion';
 import { atCompletionSource } from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
+import { useI18n } from '../i18n';
 import {
   inputHighlight,
   inputHighlightTheme,
@@ -35,6 +36,9 @@ interface EditorProps {
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: string[];
+  queuedMessages?: string[];
+  onPopQueuedMessages?: () => string | null;
+  onClearQueuedMessages?: () => boolean;
   prefix?: string;
   currentMode?: string;
   draftText?: string;
@@ -66,11 +70,15 @@ export function Editor({
   placeholderText = 'Type a message...',
   commands,
   skills = [],
+  queuedMessages = [],
+  onPopQueuedMessages,
+  onClearQueuedMessages,
   prefix = '>',
   currentMode = 'default',
   draftText,
   draftVersion,
 }: EditorProps) {
+  const { language, t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onSubmitRef = useRef(onSubmit);
@@ -85,6 +93,14 @@ export function Editor({
   commandsRef.current = commands;
   const skillsRef = useRef(skills);
   skillsRef.current = skills;
+  const queuedMessagesRef = useRef(queuedMessages);
+  queuedMessagesRef.current = queuedMessages;
+  const onPopQueuedMessagesRef = useRef(onPopQueuedMessages);
+  onPopQueuedMessagesRef.current = onPopQueuedMessages;
+  const onClearQueuedMessagesRef = useRef(onClearQueuedMessages);
+  onClearQueuedMessagesRef.current = onClearQueuedMessages;
+  const languageRef = useRef(language);
+  languageRef.current = language;
   const [shellMode, setShellMode] = useState(false);
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -147,6 +163,7 @@ export function Editor({
         () => commandsRef.current,
         () => skillsRef.current,
         submitText,
+        () => languageRef.current,
       ),
       atCompletionSource,
     ];
@@ -164,6 +181,13 @@ export function Editor({
         run: () => false,
       },
       {
+        key: 'Escape',
+        run: () => {
+          if (queuedMessagesRef.current.length === 0) return false;
+          return onClearQueuedMessagesRef.current?.() ?? false;
+        },
+      },
+      {
         key: 'Ctrl-o',
         run: () => true,
       },
@@ -172,6 +196,20 @@ export function Editor({
         run: (view) => {
           if (completionStatus(view.state) === 'active') return false;
           if (view.state.doc.lines > 1) return false;
+          if (queuedMessagesRef.current.length > 0) {
+            const queuedText = onPopQueuedMessagesRef.current?.();
+            if (queuedText) {
+              const current = view.state.doc.toString();
+              const next = current.trim()
+                ? `${queuedText}\n${current}`
+                : queuedText;
+              view.dispatch({
+                changes: { from: 0, to: view.state.doc.length, insert: next },
+                selection: { anchor: next.length },
+              });
+              return true;
+            }
+          }
           const current = view.state.doc.toString();
           const prev = historyActionsRef.current.navigateUp(current);
           if (prev === null) return false;
@@ -241,8 +279,7 @@ export function Editor({
       const shouldCompleteSlash =
         line.from === 0 &&
         textBefore.startsWith('/') &&
-        !textBefore.includes('\n') &&
-        !/\s$/.test(textBefore);
+        !textBefore.includes('\n');
       if (!shouldCompleteSlash) return;
       window.setTimeout(() => {
         const view = viewRef.current;
@@ -254,11 +291,7 @@ export function Editor({
           0,
           nextSelection.head - nextLine.from,
         );
-        if (
-          nextLine.from === 0 &&
-          nextTextBefore.startsWith('/') &&
-          !/\s$/.test(nextTextBefore)
-        ) {
+        if (nextLine.from === 0 && nextTextBefore.startsWith('/')) {
           startCompletion(view);
         }
       }, 0);
@@ -361,8 +394,12 @@ export function Editor({
             fontSize: '13px',
           },
           '.cm-tooltip-autocomplete ul li': {
+            display: 'flex',
+            alignItems: 'baseline',
+            minWidth: '0',
             padding: '4px 10px',
             color: 'var(--text-primary, #e4e4e4)',
+            overflow: 'hidden',
           },
           '.cm-tooltip-autocomplete ul li[aria-selected]': {
             background: 'var(--bg-tertiary, #1e1e1e)',
@@ -370,11 +407,22 @@ export function Editor({
           },
           '.cm-completionLabel': {
             fontFamily: 'var(--font-mono, monospace)',
+            flexShrink: '0',
+            minWidth: '14ch',
+            maxWidth: '28ch',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
           },
           '.cm-completionDetail': {
+            flex: '1 1 auto',
+            minWidth: '0',
             fontStyle: 'normal',
             color: 'var(--text-dimmed, #666)',
             marginLeft: '8px',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
           },
         }),
       ],
@@ -623,7 +671,7 @@ export function Editor({
         </div>
       )}
       {searchMode && searchMatches.length === 0 && (
-        <div className={styles.searchEmpty}>No matching history</div>
+        <div className={styles.searchEmpty}>{t('editor.noHistory')}</div>
       )}
       {pastedImages.length > 0 && (
         <div className={styles.images}>
@@ -644,7 +692,9 @@ export function Editor({
         </div>
       )}
       <div className={styles.line}>
-        <span className={`${styles.prefix} ${shellMode ? styles.prefixShell : ''}`}>
+        <span
+          className={`${styles.prefix} ${shellMode ? styles.prefixShell : ''}`}
+        >
           {shellMode ? '!' : prefix}
         </span>
         <div ref={containerRef} className={styles.wrapper} />

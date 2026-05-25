@@ -112,6 +112,7 @@ export interface FakeAgentOpts {
     p: PromptRequest,
     self: FakeAgent,
   ) => Promise<PromptResponse> | PromptResponse;
+  cancelImpl?: (p: CancelNotification, self: FakeAgent) => Promise<void> | void;
   /**
    * Custom `newSession` handler. Default returns a synthesized id (see
    * `newSession` below). Used by tests that need to exercise the
@@ -203,6 +204,9 @@ export class FakeAgent implements Agent {
   }
   async cancel(p: CancelNotification): Promise<void> {
     this.cancelCalls.push(p);
+    if (this.opts.cancelImpl) {
+      await this.opts.cancelImpl(p, this);
+    }
   }
   async setSessionMode(
     _p: SetSessionModeRequest,

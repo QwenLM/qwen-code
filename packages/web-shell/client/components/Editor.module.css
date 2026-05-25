@@ -193,17 +193,28 @@
 :global(.cm-tooltip-autocomplete ul li) {
   display: flex !important;
   align-items: baseline;
+  min-width: 0;
   padding: 4px 8px !important;
+  overflow: hidden;
 }
 
 :global(.cm-tooltip-autocomplete .cm-completionLabel) {
   flex-shrink: 0;
   min-width: 14ch;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 :global(.cm-tooltip-autocomplete .cm-completionDetail) {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-secondary);
   font-size: 13px;
   margin-left: 2ch;
   opacity: 0.8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

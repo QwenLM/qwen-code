@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
@@ -28,34 +28,42 @@ interface SessionInfo {
   hasActivePrompt?: boolean;
 }
 
-interface ResumeDialogProps {
+interface ReleaseSessionDialogProps {
   currentSessionId?: string | null;
   loadSessions: () => Promise<SessionInfo[]>;
-  onSelect: (sessionId: string) => void;
+  releaseSession: (sessionId: string) => Promise<void>;
+  onReleased: (sessionId: string) => void;
+  onError: (error: unknown) => void;
   onClose: () => void;
 }
 
-export function ResumeDialog({
+export function ReleaseSessionDialog({
   currentSessionId,
   loadSessions,
-  onSelect,
+  releaseSession,
+  onReleased,
+  onError,
   onClose,
-}: ResumeDialogProps) {
+}: ReleaseSessionDialogProps) {
   const { language, t } = useI18n();
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [message, setMessage] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadSessions()
       .then((loadedSessions) => {
         setSessions(loadedSessions);
-        setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((error: unknown) => {
+        setMessage(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setLoading(false));
   }, [loadSessions]);
 
   const filtered = searchQuery
@@ -68,14 +76,12 @@ export function ResumeDialog({
       })
     : sessions;
 
-  // Keep selection in bounds
   useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {
       setSelectedIdx(filtered.length - 1);
     }
   }, [filtered.length, selectedIdx]);
 
-  // Scroll selected item into view
   useEffect(() => {
     const el = listRef.current?.children[selectedIdx] as
       | HTMLElement
@@ -83,16 +89,47 @@ export function ResumeDialog({
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
-  const handleSelect = useCallback(() => {
-    const session = filtered[selectedIdx];
-    if (session) {
-      onSelect(session.sessionId);
-      onClose();
-    }
-  }, [filtered, selectedIdx, onSelect, onClose]);
+  const handleRelease = useCallback(
+    (targetSession?: SessionInfo) => {
+      const session = targetSession ?? filtered[selectedIdx];
+      if (!session || deleting) return;
+      const releasable =
+        (session.clientCount ?? 0) > 0 || session.hasActivePrompt === true;
+      if (!releasable) {
+        setMessage(t('release.inactive'));
+        return;
+      }
+      if (session.sessionId === currentSessionId) {
+        setMessage(t('release.cannotCurrent'));
+        return;
+      }
+      setDeleting(true);
+      releaseSession(session.sessionId)
+        .then(() => {
+          onReleased(session.sessionId);
+          onClose();
+        })
+        .catch((error: unknown) => {
+          onError(error);
+          setDeleting(false);
+        });
+    },
+    [
+      currentSessionId,
+      deleting,
+      filtered,
+      onClose,
+      onError,
+      onReleased,
+      releaseSession,
+      selectedIdx,
+      t,
+    ],
+  );
 
   useDelayedGlobalKeyDown(
     (e: KeyboardEvent) => {
+      if (deleting) return;
       if (searchMode) {
         if (e.key === 'Escape') {
           e.preventDefault();
@@ -116,13 +153,10 @@ export function ResumeDialog({
           if (e.key === 'ArrowDown') {
             setSelectedIdx((i) => Math.min(i + 1, filtered.length - 1));
           }
-          return;
         }
-        // Let the input handle other keys
         return;
       }
 
-      // List mode
       if (e.key === 'Escape') {
         e.preventDefault();
         if (searchQuery) {
@@ -149,23 +183,29 @@ export function ResumeDialog({
       }
       if (e.key === 'Enter') {
         e.preventDefault();
-        handleSelect();
+        handleRelease();
         return;
       }
       if (e.key === '/') {
         e.preventDefault();
         setSearchMode(true);
-        return;
       }
     },
-    [searchMode, searchQuery, filtered, selectedIdx, onClose, handleSelect],
+    [
+      deleting,
+      filtered.length,
+      handleRelease,
+      onClose,
+      searchMode,
+      searchQuery,
+      selectedIdx,
+    ],
   );
 
   return (
     <div className={dp('resume-picker')}>
-      {/* Header */}
       <div className={dp('resume-picker-header')}>
-        <span className={dp('resume-picker-title')}>{t('resume.title')}</span>
+        <span className={dp('resume-picker-title')}>{t('release.title')}</span>
         {searchQuery && (
           <span className={dp('resume-picker-count')}>
             ({filtered.length} matches)
@@ -173,7 +213,6 @@ export function ResumeDialog({
         )}
       </div>
 
-      {/* Search row */}
       <div className={dp('resume-picker-search')}>
         {searchMode ? (
           <>
@@ -202,15 +241,18 @@ export function ResumeDialog({
           </>
         ) : (
           <span className={dp('resume-picker-search-hint')}>
-            {t('resume.pressSearch')}
+            {message ||
+              (deleting
+                ? t('release.releasing')
+                : loading
+                  ? t('common.loading')
+                  : t('release.pressSearch'))}
           </span>
         )}
       </div>
 
-      {/* Separator */}
       <div className={dp('resume-picker-sep')} />
 
-      {/* Session list */}
       <div className={dp('resume-picker-list')} ref={listRef}>
         {loading && (
           <div className={dp('resume-picker-empty')}>{t('common.loading')}</div>
@@ -218,24 +260,28 @@ export function ResumeDialog({
         {!loading && filtered.length === 0 && (
           <div className={dp('resume-picker-empty')}>
             {searchQuery
-              ? t('resume.noMatch', { query: searchQuery })
-              : t('resume.none')}
+              ? t('release.noMatch', { query: searchQuery })
+              : t('release.none')}
           </div>
         )}
         {!loading &&
           filtered.map((s, i) => {
             const isCurrent = s.sessionId === currentSessionId;
+            const isReleasable =
+              (s.clientCount ?? 0) > 0 || s.hasActivePrompt === true;
+            const isDisabled = isCurrent || !isReleasable;
             return (
               <div
                 key={s.sessionId}
                 className={dp(
                   'resume-picker-item',
                   i === selectedIdx && !searchMode ? 'selected' : undefined,
-                  isCurrent ? 'resume-picker-item-current' : undefined,
+                  isDisabled ? 'resume-picker-item-current' : undefined,
+                  isDisabled ? 'disabled' : undefined,
                 )}
                 onClick={() => {
-                  onSelect(s.sessionId);
-                  onClose();
+                  setSelectedIdx(i);
+                  if (!isDisabled) handleRelease(s);
                 }}
                 onMouseEnter={() => setSelectedIdx(i)}
               >
@@ -249,6 +295,11 @@ export function ResumeDialog({
                   {isCurrent && (
                     <span className={dp('resume-picker-item-badge')}>
                       {t('resume.current')}
+                    </span>
+                  )}
+                  {!isCurrent && !isReleasable && (
+                    <span className={dp('resume-picker-item-badge')}>
+                      {t('release.inactiveBadge')}
                     </span>
                   )}
                 </div>
@@ -274,14 +325,10 @@ export function ResumeDialog({
           })}
       </div>
 
-      {/* Separator */}
       <div className={dp('resume-picker-sep')} />
 
-      {/* Footer */}
       <div className={dp('resume-picker-footer')}>
-        {searchMode
-          ? t('dialog.footer.search')
-          : t('dialog.footer.navSelectCancel')}
+        {searchMode ? t('dialog.footer.search') : t('release.footer')}
       </div>
     </div>
   );

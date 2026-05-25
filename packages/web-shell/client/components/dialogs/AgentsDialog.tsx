@@ -6,6 +6,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
+import { dp } from './dialogStyles';
 import type {
   DaemonAgentMutationResult,
   DaemonCreateAgentRequest,
@@ -14,6 +15,7 @@ import type {
   DaemonWorkspaceAgentsStatus,
 } from '@qwen-code/sdk/daemon';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+import { useI18n } from '../../i18n';
 
 export type AgentsDialogInitialMode =
   | 'menu'
@@ -62,6 +64,7 @@ export function AgentsDialog({
   deleteAgent,
   onClose,
 }: AgentsDialogProps) {
+  const { t } = useI18n();
   const [mode, setMode] = useState<
     'menu' | 'create-scope' | 'create' | 'manage'
   >(() => initialDialogMode(initialMode));
@@ -87,38 +90,38 @@ export function AgentsDialog({
   const scopeItems = useMemo(
     () => [
       {
-        label: 'User',
-        description: 'Create a user-level subagent',
+        label: t('agent.create.user'),
+        description: t('agent.create.user.desc'),
         scope: 'global' as const,
       },
       {
-        label: 'Project',
-        description: 'Create a project-level subagent',
+        label: t('agent.create.project'),
+        description: t('agent.create.project.desc'),
         scope: 'workspace' as const,
       },
     ],
-    [],
+    [t],
   );
   const menuItems = useMemo(
     () => [
       {
-        label: 'Manage',
-        description: 'Manage existing subagents',
+        label: t('agent.manage'),
+        description: t('agent.manage.desc'),
         onSelect: () => {
           setSelectedIdx(0);
           setMode('manage' as const);
         },
       },
       {
-        label: 'Create',
-        description: 'Create a new subagent',
+        label: t('agent.create'),
+        description: t('agent.create'),
         onSelect: () => {
           setSelectedIdx(scope === 'global' ? 0 : 1);
           setMode('create-scope' as const);
         },
       },
     ],
-    [scope],
+    [scope, t],
   );
 
   const reload = useCallback(() => {
@@ -175,7 +178,7 @@ export function AgentsDialog({
     const trimmedDescription = description.trim();
     const trimmedPrompt = systemPrompt.trim();
     if (!trimmedName || !trimmedDescription || !trimmedPrompt) {
-      setMessage('Name, description, and system prompt are required.');
+      setMessage(t('agent.create.required'));
       return;
     }
     setBusy(true);
@@ -190,7 +193,7 @@ export function AgentsDialog({
           onClose();
           return;
         }
-        setMessage(`Created ${result.agent.name}`);
+        setMessage(t('agent.created', { name: result.agent.name }));
         setName('');
         setDescription('');
         setSystemPrompt('');
@@ -210,19 +213,20 @@ export function AgentsDialog({
     reload,
     scope,
     systemPrompt,
+    t,
   ]);
 
   const handleDelete = useCallback(
     (agent: DaemonWorkspaceAgentSummary) => {
       const deleteScope = scopeForLevel(agent.level);
       if (!deleteScope || agent.isBuiltin || agent.level === 'extension') {
-        setMessage('This agent is read-only.');
+        setMessage(t('agent.readonly'));
         return;
       }
       setBusy(true);
       deleteAgent(agent.name, deleteScope)
         .then(() => {
-          setMessage(`Deleted ${agent.name}`);
+          setMessage(t('agent.deleted', { name: agent.name }));
           setDetail(null);
           reload();
         })
@@ -231,7 +235,7 @@ export function AgentsDialog({
         })
         .finally(() => setBusy(false));
     },
-    [deleteAgent, reload],
+    [deleteAgent, reload, t],
   );
 
   const handleCreateKeyDown = useCallback(
@@ -302,173 +306,203 @@ export function AgentsDialog({
   );
 
   return (
-    <div className="resume-picker">
-      <div className="resume-picker-header">
-        <span className="resume-picker-title">Agents</span>
-        <span className="resume-picker-count">{agents.length} agents</span>
+    <div className={dp('resume-picker')}>
+      <div className={dp('resume-picker-header')}>
+        <span className={dp('resume-picker-title')}>{t('agents.title')}</span>
+        <span className={dp('resume-picker-count')}>
+          {t('agent.count', { count: agents.length })}
+        </span>
       </div>
 
-      <div className="resume-picker-search">
-        <span className="resume-picker-search-hint">
+      <div className={dp('resume-picker-search')}>
+        <span className={dp('resume-picker-search-hint')}>
           {message ||
             (loading
-              ? 'Loading agents...'
+              ? t('common.loading')
               : mode === 'menu'
-                ? 'Select an action'
+                ? t('agent.selectAction')
                 : mode === 'create-scope'
-                  ? 'Choose where to save the subagent'
+                  ? t('agent.create.scope')
                   : '')}
         </span>
       </div>
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
       {mode === 'menu' ? (
-        <div className="resume-picker-list" ref={listRef}>
+        <div className={dp('resume-picker-list')} ref={listRef}>
           {menuItems.map((item, index) => (
             <div
               key={item.label}
-              className={`resume-picker-item ${index === selectedIdx ? 'selected' : ''}`}
+              className={dp(
+                'resume-picker-item',
+                index === selectedIdx ? 'selected' : undefined,
+              )}
               onClick={() => item.onSelect()}
               onMouseEnter={() => setSelectedIdx(index)}
             >
-              <div className="resume-picker-item-row">
-                <span className="resume-picker-item-prefix">
+              <div className={dp('resume-picker-item-row')}>
+                <span className={dp('resume-picker-item-prefix')}>
                   {index === selectedIdx ? '›' : ' '}
                 </span>
-                <span className="resume-picker-item-title">{item.label}</span>
+                <span className={dp('resume-picker-item-title')}>
+                  {item.label}
+                </span>
               </div>
-              <div className="resume-picker-item-meta">{item.description}</div>
+              <div className={dp('resume-picker-item-meta')}>
+                {item.description}
+              </div>
             </div>
           ))}
         </div>
       ) : mode === 'create-scope' ? (
-        <div className="resume-picker-list" ref={listRef}>
+        <div className={dp('resume-picker-list')} ref={listRef}>
           {scopeItems.map((item, index) => (
             <div
               key={item.scope}
-              className={`resume-picker-item ${index === selectedIdx ? 'selected' : ''}`}
+              className={dp(
+                'resume-picker-item',
+                index === selectedIdx ? 'selected' : undefined,
+              )}
               onClick={() => {
                 setScope(item.scope);
                 setMode('create');
               }}
               onMouseEnter={() => setSelectedIdx(index)}
             >
-              <div className="resume-picker-item-row">
-                <span className="resume-picker-item-prefix">
+              <div className={dp('resume-picker-item-row')}>
+                <span className={dp('resume-picker-item-prefix')}>
                   {index === selectedIdx ? '›' : ' '}
                 </span>
-                <span className="resume-picker-item-title">{item.label}</span>
+                <span className={dp('resume-picker-item-title')}>
+                  {item.label}
+                </span>
               </div>
-              <div className="resume-picker-item-meta">{item.description}</div>
+              <div className={dp('resume-picker-item-meta')}>
+                {item.description}
+              </div>
             </div>
           ))}
         </div>
       ) : mode === 'create' ? (
-        <div className="dialog-form" onKeyDown={handleCreateKeyDown}>
+        <div className={dp('dialog-form')} onKeyDown={handleCreateKeyDown}>
           <label>
-            Name
+            {t('agent.create.name')}
             <input value={name} onChange={(e) => setName(e.target.value)} />
           </label>
           <label>
-            Description
+            {t('agent.create.description')}
             <input
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
           </label>
           <label>
-            System prompt
+            {t('agent.create.prompt')}
             <textarea
-              className="dialog-textarea"
+              className={dp('dialog-textarea')}
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
             />
           </label>
           <button
-            className="dialog-primary-button"
+            className={dp('dialog-primary-button')}
             disabled={busy}
             onClick={handleCreate}
           >
-            {busy ? 'Creating...' : 'Create Agent'}
+            {busy ? t('agent.create.loading') : t('agent.create.button')}
           </button>
         </div>
       ) : (
-        <div className="dialog-split">
-          <div className="resume-picker-list dialog-split-list" ref={listRef}>
+        <div className={dp('dialog-split')}>
+          <div
+            className={dp('resume-picker-list', 'dialog-split-list')}
+            ref={listRef}
+          >
             {!loading && agents.length === 0 && (
-              <div className="resume-picker-empty">No subagents found.</div>
+              <div className={dp('resume-picker-empty')}>
+                {t('agent.empty')}
+              </div>
             )}
             {agents.map((agent, i) => (
               <div
                 key={`${agent.level}:${agent.name}`}
-                className={`resume-picker-item ${i === selectedIdx ? 'selected' : ''}`}
+                className={dp(
+                  'resume-picker-item',
+                  i === selectedIdx ? 'selected' : undefined,
+                )}
                 onMouseEnter={() => setSelectedIdx(i)}
                 onClick={() => loadDetail(agent)}
               >
-                <div className="resume-picker-item-row">
-                  <span className="resume-picker-item-prefix">
+                <div className={dp('resume-picker-item-row')}>
+                  <span className={dp('resume-picker-item-prefix')}>
                     {i === selectedIdx ? '›' : ' '}
                   </span>
-                  <span className="resume-picker-item-title">{agent.name}</span>
-                  <span className="resume-picker-item-badge">
+                  <span className={dp('resume-picker-item-title')}>
+                    {agent.name}
+                  </span>
+                  <span className={dp('resume-picker-item-badge')}>
                     {agent.level}
                   </span>
                 </div>
-                <div className="resume-picker-item-meta">
+                <div className={dp('resume-picker-item-meta')}>
                   {agent.description}
                 </div>
               </div>
             ))}
           </div>
 
-          <div className="dialog-detail">
+          <div className={dp('dialog-detail')}>
             {detail ? (
               <>
-                <div className="dialog-detail-title">{detail.name}</div>
-                <div className="dialog-detail-meta">
+                <div className={dp('dialog-detail-title')}>{detail.name}</div>
+                <div className={dp('dialog-detail-meta')}>
                   {detail.level}
                   {detail.model ? ` · ${detail.model}` : ''}
                 </div>
-                <div className="dialog-detail-body">{detail.systemPrompt}</div>
+                <div className={dp('dialog-detail-body')}>
+                  {detail.systemPrompt}
+                </div>
                 {detail.tools && detail.tools.length > 0 && (
-                  <div className="dialog-detail-meta">
-                    tools: {detail.tools.join(', ')}
+                  <div className={dp('dialog-detail-meta')}>
+                    {t('agent.tools')}: {detail.tools.join(', ')}
                   </div>
                 )}
                 <button
-                  className="dialog-danger-button"
+                  className={dp('dialog-danger-button')}
                   disabled={
                     busy || detail.isBuiltin || detail.level === 'extension'
                   }
                   onClick={() => handleDelete(detail)}
                 >
-                  {busy ? 'Deleting...' : 'Delete'}
+                  {busy ? t('agent.delete.loading') : t('agent.delete')}
                 </button>
               </>
             ) : (
-              <div className="resume-picker-empty">Select an agent.</div>
+              <div className={dp('resume-picker-empty')}>
+                {t('agent.select')}
+              </div>
             )}
           </div>
         </div>
       )}
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
-      <div className="resume-picker-footer">
+      <div className={dp('resume-picker-footer')}>
         {mode === 'menu'
-          ? '↑↓ to navigate · Enter to select · Esc to close'
+          ? t('dialog.footer.navSelectClose')
           : mode === 'create-scope'
             ? initialMode === 'menu'
-              ? '↑↓ to navigate · Enter to select · Esc to menu'
-              : '↑↓ to navigate · Enter to select · Esc to close'
+              ? t('dialog.footer.navSelectMenu')
+              : t('dialog.footer.navSelectClose')
             : mode === 'manage'
               ? initialMode === 'menu'
-                ? '↑↓ to navigate · Esc to menu'
-                : '↑↓ to navigate · Esc to close'
+                ? `${t('common.navigate')} · ${t('dialog.footer.menu')}`
+                : `${t('common.navigate')} · ${t('dialog.footer.close')}`
               : initialMode === 'menu'
-                ? '⌘/Ctrl+Enter to save · Esc to menu'
-                : '⌘/Ctrl+Enter to save · Esc to close'}
+                ? t('dialog.footer.saveMenu')
+                : t('dialog.footer.saveClose')}
       </div>
     </div>
   );

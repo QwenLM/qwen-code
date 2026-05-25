@@ -5,7 +5,6 @@ import type {
   DaemonToolTranscriptBlock,
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
-  DaemonPermissionTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import type {
   Message,
@@ -23,6 +22,11 @@ interface ActiveSubAgent {
   tool: ACPToolCall;
   closeAt?: number;
 }
+
+type PermissionTranscriptBlock = Extract<
+  DaemonTranscriptBlock,
+  { kind: 'permission' }
+>;
 
 export function transcriptBlocksToMessages(
   blocks: readonly DaemonTranscriptBlock[],
@@ -291,7 +295,7 @@ export function extractPendingPermission(
 
 function isPermissionBlock(
   block: DaemonTranscriptBlock,
-): block is DaemonPermissionTranscriptBlock {
+): block is PermissionTranscriptBlock {
   return block.kind === 'permission';
 }
 
@@ -338,14 +342,6 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
     return undefined;
   }
   return value as Record<string, unknown>;
-}
-
-function getString(
-  record: Record<string, unknown> | undefined,
-  key: string,
-): string | undefined {
-  const value = record?.[key];
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function getPermissionOptionKind(

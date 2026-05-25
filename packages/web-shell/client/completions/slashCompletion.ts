@@ -5,6 +5,7 @@ import type {
 } from '@codemirror/autocomplete';
 import type { EditorView } from '@codemirror/view';
 import type { CommandInfo } from '../adapters/types';
+import type { WebShellLanguage } from '../i18n';
 
 interface SubcommandNode {
   name: string;
@@ -14,7 +15,7 @@ interface SubcommandNode {
 
 type SubmitCompletionCommand = (view: EditorView, command: string) => void;
 
-const SUBCOMMAND_TREE: Record<string, SubcommandNode[]> = {
+const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
   agents: [
     { name: 'manage', description: '管理现有 subagents' },
     {
@@ -25,6 +26,10 @@ const SUBCOMMAND_TREE: Record<string, SubcommandNode[]> = {
         { name: 'project', description: '创建 Project subagent' },
       ],
     },
+  ],
+  theme: [
+    { name: 'light', description: '切换到浅色主题' },
+    { name: 'dark', description: '切换到深色主题' },
   ],
   memory: [
     {
@@ -53,35 +58,62 @@ const SUBCOMMAND_TREE: Record<string, SubcommandNode[]> = {
       name: 'ui',
       description: '设置 UI 语言',
       children: [
-        { name: 'en-US', description: 'English' },
-        { name: 'zh-TW', description: '繁體中文' },
+        { name: 'en', description: 'English' },
         { name: 'zh-CN', description: '中文' },
-        { name: 'ru-RU', description: 'Русский' },
-        { name: 'de-DE', description: 'Deutsch' },
-        { name: 'ja-JP', description: '日本語' },
-        { name: 'pt-BR', description: 'Português' },
-        { name: 'fr-FR', description: 'Français' },
-        { name: 'ca-ES', description: 'Català' },
       ],
     },
     { name: 'output', description: '设置 LLM 输出语言' },
+  ],
+};
+
+const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
+  agents: [
+    { name: 'manage', description: 'Manage existing subagents' },
     {
-      name: 'translate',
-      description: '管理动态命令翻译',
+      name: 'create',
+      description: 'Create a new subagent',
       children: [
-        { name: 'on', description: '启用动态命令翻译' },
-        { name: 'off', description: '禁用动态命令翻译' },
-        { name: 'status', description: '查看翻译状态' },
-        {
-          name: 'cache',
-          description: '管理翻译缓存',
-          children: [
-            { name: 'refresh', description: '重新翻译当前已加载的动态描述' },
-            { name: 'clear', description: '清除当前语言的翻译缓存' },
-          ],
-        },
+        { name: 'user', description: 'Create a user subagent' },
+        { name: 'project', description: 'Create a project subagent' },
       ],
     },
+  ],
+  theme: [
+    { name: 'light', description: 'Switch to light theme' },
+    { name: 'dark', description: 'Switch to dark theme' },
+  ],
+  memory: [
+    {
+      name: 'add',
+      description: 'Add memory',
+      children: [
+        { name: 'user', description: 'Write user memory' },
+        { name: 'project', description: 'Write project memory' },
+      ],
+    },
+    { name: 'show', description: 'Show memory files' },
+    { name: 'refresh', description: 'Refresh memory files' },
+  ],
+  export: [
+    { name: 'md', description: 'Export as Markdown' },
+    { name: 'html', description: 'Export as HTML' },
+    { name: 'json', description: 'Export as JSON' },
+    { name: 'jsonl', description: 'Export as JSONL' },
+  ],
+  stats: [
+    { name: 'model', description: 'Show model usage stats' },
+    { name: 'tools', description: 'Show tool call stats' },
+  ],
+  language: [
+    {
+      name: 'ui',
+      description: 'Set UI language',
+      children: [
+        { name: 'en', description: 'English' },
+        { name: 'zh-CN', description: '中文' },
+      ],
+    },
+    { name: 'output', description: 'Set LLM output language' },
   ],
 };
 
@@ -89,13 +121,15 @@ function resolveSubcommands(
   cmdName: string,
   parts: string[],
   dynamicSkills: string[] | undefined,
+  language: WebShellLanguage,
 ): SubcommandNode[] | null {
   if (cmdName === 'skills' && parts.length === 0) {
     if (!dynamicSkills || dynamicSkills.length === 0) return null;
     return dynamicSkills.map((s) => ({ name: s, description: '' }));
   }
 
-  let nodes = SUBCOMMAND_TREE[cmdName];
+  const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+  let nodes = tree[cmdName];
   if (!nodes) return null;
 
   for (const part of parts) {
@@ -106,12 +140,25 @@ function resolveSubcommands(
   return nodes;
 }
 
-function commandHasSubcommands(command: CommandInfo): boolean {
-  return !!SUBCOMMAND_TREE[command.name] || !!command.subcommands?.length;
+function commandHasSubcommands(
+  command: CommandInfo,
+  language: WebShellLanguage,
+): boolean {
+  const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+  return !!tree[command.name] || !!command.subcommands?.length;
 }
 
 function shouldSubmitSubcommand(node: SubcommandNode): boolean {
   return !node.children;
+}
+
+function comparePrefixFirst(a: string, b: string, query: string): number {
+  const aLower = a.toLowerCase();
+  const bLower = b.toLowerCase();
+  const aStarts = aLower.startsWith(query);
+  const bStarts = bLower.startsWith(query);
+  if (aStarts !== bStarts) return aStarts ? -1 : 1;
+  return a.localeCompare(b);
 }
 
 function applyAndSubmitCommand(
@@ -136,6 +183,7 @@ export function slashCompletionSource(
   getCommands: () => CommandInfo[],
   getSkills: () => string[] = () => [],
   submitCompletionCommand?: SubmitCompletionCommand,
+  getLanguage: () => WebShellLanguage = () => 'en',
 ) {
   return (context: CompletionContext): CompletionResult | null => {
     const line = context.state.doc.lineAt(context.pos);
@@ -147,7 +195,10 @@ export function slashCompletionSource(
       const [, cmdName, rest] = subMatch;
       const commands = getCommands();
       const cmd = commands.find((c) => c.name === cmdName);
-      const hasTree = !!SUBCOMMAND_TREE[cmdName] || cmdName === 'skills';
+      const language = getLanguage();
+      const tree =
+        language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+      const hasTree = !!tree[cmdName] || cmdName === 'skills';
       if (!cmd?.subcommands?.length && !hasTree) return null;
 
       // Split rest into completed parts and current typing
@@ -155,13 +206,21 @@ export function slashCompletionSource(
       const currentTyping = tokens.pop() || '';
       const completedParts = tokens;
 
-      const nodes = resolveSubcommands(cmdName, completedParts, getSkills());
+      const nodes = resolveSubcommands(
+        cmdName,
+        completedParts,
+        getSkills(),
+        language,
+      );
       if (!nodes) return null;
 
       const lp = currentTyping.toLowerCase();
       const prefix = `/${cmdName} ${completedParts.length > 0 ? completedParts.join(' ') + ' ' : ''}`;
       const options = nodes
         .filter((n) => !currentTyping || n.name.toLowerCase().includes(lp))
+        .sort((a, b) =>
+          currentTyping ? comparePrefixFirst(a.name, b.name, lp) : 0,
+        )
         .map((n): Completion => {
           const command = `${prefix}${n.name}`;
           const submitOnApply = shouldSubmitSubcommand(n);
@@ -195,14 +254,12 @@ export function slashCompletionSource(
     const options = commands
       .filter((c) => {
         if (!prefix) return true;
-        return (
-          c.name.toLowerCase().includes(lp) ||
-          c.description.toLowerCase().includes(lp)
-        );
+        return c.name.toLowerCase().includes(lp);
       })
+      .sort((a, b) => (prefix ? comparePrefixFirst(a.name, b.name, lp) : 0))
       .map((c): Completion => {
         const command = `/${c.name}`;
-        const hasSubcommands = commandHasSubcommands(c);
+        const hasSubcommands = commandHasSubcommands(c, getLanguage());
         return {
           label: command,
           detail: c.description || undefined,

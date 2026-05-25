@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { codeToHtml, type BundledLanguage } from 'shiki';
+import { useI18n } from '../../i18n';
 import styles from './Markdown.module.css';
 
 interface MarkdownProps {
@@ -161,6 +162,7 @@ function CodeBlock({
   className?: string;
   children: string;
 }) {
+  const { t } = useI18n();
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -211,7 +213,7 @@ function CodeBlock({
       <div className={styles.codeBlockHeader}>
         <span className={styles.codeBlockLang}>{lang || 'text'}</span>
         <button className={styles.codeBlockCopy} onClick={handleCopy}>
-          {copied ? 'Copied!' : 'Copy'}
+          {copied ? t('code.copied') : t('code.copy')}
         </button>
       </div>
       {html ? (

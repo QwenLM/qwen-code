@@ -1,7 +1,17 @@
 import { useMemo } from 'react';
+import { useI18n } from '../i18n';
 import styles from './WelcomeHeader.module.css';
 
-const TIPS = [
+const TIPS_EN = [
+  'Type / to open commands; Tab completes slash commands and saved prompts.',
+  'Add a QWEN.md file to give Qwen Code durable project context.',
+  'Use ! to run shell commands through Qwen Code, for example !ls.',
+  'When a chat gets long, use /compress to free context.',
+  'Use Shift+Tab or /approval-mode to switch approval modes quickly.',
+  'Use /clear or /new to start fresh; previous sessions stay resumable.',
+];
+
+const TIPS_ZH = [
   '输入 / 打开命令弹窗；Tab 可以补全斜杠命令和已保存的 prompt。',
   '添加 QWEN.md 文件，为 Qwen Code 提供持久的项目上下文。',
   '可以使用 ! 从 Qwen Code 运行 shell 命令，例如 !ls。',
@@ -19,8 +29,9 @@ const ASCII_LOGO = `
  ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝
 `.trim();
 
-function pickTip(): string {
-  return TIPS[Math.floor(Math.random() * TIPS.length)];
+function pickTip(language: string): string {
+  const tips = language === 'zh-CN' ? TIPS_ZH : TIPS_EN;
+  return tips[Math.floor(Math.random() * tips.length)];
 }
 
 function shortenPath(path: string, maxLength = 72): string {
@@ -32,18 +43,18 @@ function shortenPath(path: string, maxLength = 72): string {
   return `${path.slice(0, headLength)}...${path.slice(-tailLength)}`;
 }
 
-function formatMode(mode: string): string {
+function formatMode(mode: string, t: ReturnType<typeof useI18n>['t']): string {
   switch (mode) {
     case 'plan':
-      return 'plan mode';
+      return t('mode.plan');
     case 'auto-edit':
-      return 'auto-accept edits';
+      return t('mode.auto-edit');
     case 'yolo':
-      return 'YOLO mode';
+      return t('mode.yolo');
     case 'default':
-      return 'default mode';
+      return t('mode.default');
     default:
-      return mode || 'unknown mode';
+      return mode || t('mode.unknown');
   }
 }
 
@@ -60,10 +71,11 @@ export function WelcomeHeader({
   currentModel,
   currentMode,
 }: WelcomeHeaderProps) {
-  const tip = useMemo(() => pickTip(), []);
+  const { language, t } = useI18n();
+  const tip = useMemo(() => pickTip(language), [language]);
   const displayPath = useMemo(() => shortenPath(cwd), [cwd]);
-  const model = currentModel || 'unknown model';
-  const mode = formatMode(currentMode);
+  const model = currentModel || t('welcome.defaultModel');
+  const mode = formatMode(currentMode, t);
 
   return (
     <div className={styles.header}>
@@ -83,17 +95,15 @@ export function WelcomeHeader({
           </div>
 
           <div className={styles.metaLine}>
-            <span>Web Shell</span>
+            <span>Web terminal</span>
             <span className={styles.sep}>|</span>
             <span className={styles.model}>{model}</span>
-            <span className={styles.modelHint}>(/model to change)</span>
+            <span className={styles.modelHint}>{t('welcome.changeModel')}</span>
           </div>
 
           <div className={styles.metaLine}>
             <span>{mode}</span>
-            <span className={styles.modelHint}>
-              Shift+Tab or /approval-mode
-            </span>
+            <span className={styles.modelHint}>{t('welcome.modeHint')}</span>
           </div>
 
           {displayPath && (
@@ -105,7 +115,7 @@ export function WelcomeHeader({
       </div>
 
       <div className={styles.tip}>
-        <span className={styles.tipLabel}>Tips:</span>
+        <span className={styles.tipLabel}>{t('welcome.tipLabel')}</span>
         <span className={styles.tipText}>{tip}</span>
       </div>
     </div>

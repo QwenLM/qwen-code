@@ -63,7 +63,7 @@
   font-family: var(--font-mono);
   font-size: 0.9em;
   padding: 1px 5px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--subtle-bg-strong);
   border-radius: 3px;
   color: var(--accent-color);
 }
@@ -96,7 +96,7 @@
 }
 
 .table th {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--subtle-bg);
   font-weight: 600;
 }
 
@@ -120,7 +120,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 3px 10px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--subtle-bg);
   border-bottom: 1px solid var(--border-color);
 }
 
@@ -142,7 +142,7 @@
 }
 
 .codeBlockCopy:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--subtle-bg-strong);
   color: var(--text-primary);
 }
 

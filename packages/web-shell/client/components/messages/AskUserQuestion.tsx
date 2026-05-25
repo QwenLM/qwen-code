@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
+import { useI18n } from '../../i18n';
 import styles from './AskUserQuestion.module.css';
 
 interface Question {
@@ -19,6 +20,7 @@ interface AskUserQuestionProps {
 }
 
 export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
+  const { t } = useI18n();
   const questions = useMemo(
     () =>
       Array.isArray(request.rawInput?.questions)
@@ -108,12 +110,15 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
     [questions],
   );
 
-  const focusCustomInput = useCallback((initialValue?: string) => {
-    if (initialValue !== undefined) {
-      setCustomInputs((prev) => ({ ...prev, [currentIdx]: initialValue }));
-    }
-    setCustomFocused(true);
-  }, [currentIdx]);
+  const focusCustomInput = useCallback(
+    (initialValue?: string) => {
+      if (initialValue !== undefined) {
+        setCustomInputs((prev) => ({ ...prev, [currentIdx]: initialValue }));
+      }
+      setCustomFocused(true);
+    },
+    [currentIdx],
+  );
 
   const handleSelectOption = useCallback(
     (idx: number) => {
@@ -246,8 +251,7 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
         <span className={styles.icon}>?</span>
         <span className={styles.toolName}>AskUserQuestion</span>
         <span className={styles.toolDesc}>
-          Ask user {questions.length} question{questions.length > 1 ? 's' : ''}{' '}
-          ←
+          {t('askUser.title', { count: questions.length })}
         </span>
       </div>
 
@@ -363,15 +367,13 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
             className={`${styles.button} ${styles.submitButton}`}
             onClick={handleSubmit}
           >
-            Submit
+            {t('askUser.submit')}
           </button>
         </div>
       )}
 
       {/* Footer hint */}
-      <div className={styles.footer}>
-        ↑/↓: Navigate | ←/→: Questions | Enter: Select | Esc: Cancel
-      </div>
+      <div className={styles.footer}>{t('askUser.footer')}</div>
     </div>
   );
 }

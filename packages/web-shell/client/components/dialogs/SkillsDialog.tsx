@@ -1,17 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { dp } from './dialogStyles';
 import type {
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+import { useI18n } from '../../i18n';
 
 interface SkillsDialogProps {
   loadStatus: () => Promise<DaemonWorkspaceSkillsStatus>;
   onClose: () => void;
 }
 
-function statusLabel(skill: DaemonWorkspaceSkillStatus): string {
-  if (!skill.modelInvocable) return 'disabled';
+function statusLabel(
+  skill: DaemonWorkspaceSkillStatus,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  if (!skill.modelInvocable) return t('skills.status.disabled');
   return skill.status || 'ok';
 }
 
@@ -27,6 +32,7 @@ function metaText(skill: DaemonWorkspaceSkillStatus): string {
 }
 
 export function SkillsDialog({ loadStatus, onClose }: SkillsDialogProps) {
+  const { t } = useI18n();
   const [status, setStatus] = useState<DaemonWorkspaceSkillsStatus | null>(
     null,
   );
@@ -96,60 +102,69 @@ export function SkillsDialog({ loadStatus, onClose }: SkillsDialogProps) {
   const summary = useMemo(() => {
     if (!status) return '';
     const enabled = skills.filter((skill) => skill.modelInvocable).length;
-    return `${enabled}/${skills.length} invocable`;
-  }, [skills, status]);
+    return t('skills.invocable', { enabled, total: skills.length });
+  }, [skills, status, t]);
 
   return (
-    <div className="resume-picker">
-      <div className="resume-picker-header">
-        <span className="resume-picker-title">Skills</span>
-        <span className="resume-picker-count">{summary}</span>
+    <div className={dp('resume-picker')}>
+      <div className={dp('resume-picker-header')}>
+        <span className={dp('resume-picker-title')}>{t('skills.title')}</span>
+        <span className={dp('resume-picker-count')}>{summary}</span>
       </div>
 
-      <div className="resume-picker-search">
-        <span className="resume-picker-search-hint">
+      <div className={dp('resume-picker-search')}>
+        <span className={dp('resume-picker-search-hint')}>
           {message ||
-            (loading ? 'Loading skills...' : `${skills.length} skills`)}
+            (loading ? t('skills.loading') : `${skills.length} skills`)}
         </span>
       </div>
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
-      <div className="resume-picker-list" ref={listRef}>
+      <div className={dp('resume-picker-list')} ref={listRef}>
         {!loading && skills.length === 0 && (
-          <div className="resume-picker-empty">No skills available.</div>
+          <div className={dp('resume-picker-empty')}>{t('skills.empty')}</div>
         )}
         {skills.map((skill, i) => (
           <div
             key={`${skill.level}:${skill.name}`}
-            className={`resume-picker-item ${i === selectedIdx ? 'selected' : ''}`}
+            className={dp(
+              'resume-picker-item',
+              i === selectedIdx ? 'selected' : undefined,
+            )}
             onMouseEnter={() => setSelectedIdx(i)}
           >
-            <div className="resume-picker-item-row">
-              <span className="resume-picker-item-prefix">
+            <div className={dp('resume-picker-item-row')}>
+              <span className={dp('resume-picker-item-prefix')}>
                 {i === selectedIdx ? '›' : ' '}
               </span>
-              <span className="resume-picker-item-title">{skill.name}</span>
-              <span className="resume-picker-item-badge">
-                {statusLabel(skill)}
+              <span className={dp('resume-picker-item-title')}>
+                {skill.name}
+              </span>
+              <span className={dp('resume-picker-item-badge')}>
+                {statusLabel(skill, t)}
               </span>
             </div>
-            <div className="resume-picker-item-meta">{metaText(skill)}</div>
+            <div className={dp('resume-picker-item-meta')}>
+              {metaText(skill)}
+            </div>
             {skill.description && (
-              <div className="dialog-detail">
-                <div className="dialog-detail-body">{skill.description}</div>
+              <div className={dp('dialog-detail')}>
+                <div className={dp('dialog-detail-body')}>
+                  {skill.description}
+                </div>
               </div>
             )}
           </div>
         ))}
       </div>
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
-      <div className="resume-picker-footer">
+      <div className={dp('resume-picker-footer')}>
         {selected
-          ? `Use /skills ${selected.name} to invoke · r to refresh · Esc to close`
-          : 'r to refresh · Esc to close'}
+          ? t('skills.footer', { name: selected.name })
+          : t('skills.footer')}
       </div>
     </div>
   );

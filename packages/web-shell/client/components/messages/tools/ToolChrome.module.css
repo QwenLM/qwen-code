@@ -146,7 +146,7 @@
   padding: 3px 10px;
   font-size: 11px;
   font-family: var(--font-mono);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--subtle-bg);
   border: none;
   border-top: 1px solid var(--border-color);
   color: var(--text-dimmed);
@@ -156,7 +156,7 @@
 
 .expandBtn:hover {
   color: var(--accent-color);
-  background: rgba(74, 158, 255, 0.05);
+  background: var(--info-bg);
 }
 
 .todoList {

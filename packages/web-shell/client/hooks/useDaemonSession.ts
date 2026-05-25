@@ -15,18 +15,17 @@ import {
   type DaemonApprovalMode,
   type DaemonApprovalModeResult,
   type DaemonWorkspaceMcpStatus,
-  type DaemonWorkspaceMcpToolsStatus,
   type DaemonMcpRestartResult,
   type DaemonWorkspaceSkillsStatus,
   type DaemonWorkspaceToolsStatus,
   type DaemonWorkspaceMemoryStatus,
   type DaemonWriteMemoryRequest,
   type DaemonWriteMemoryResult,
+  type DaemonWorkspaceFile,
   type DaemonWorkspaceAgentsStatus,
   type DaemonWorkspaceAgentDetail,
   type DaemonCreateAgentRequest,
   type DaemonAgentMutationResult,
-  type DaemonWorkspaceProvidersStatus,
   type SessionMetadataResult,
   type PermissionResponse,
   type PromptResult,
@@ -44,6 +43,7 @@ import {
   hasAssistantDelta,
 } from './daemonSessionEvents';
 import { toPromptContent } from './daemonPromptContent';
+import { getRecord, getString } from './daemonSessionUtils';
 import {
   clearPassiveAssistantDoneTimer,
   getReconnectDelay,
@@ -78,13 +78,30 @@ export interface DaemonSessionConfig {
   token?: string;
   workspaceCwd?: string;
   initialSessionId?: string;
+  clientId?: string;
   autoReconnect?: boolean;
   reconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
+  loadWarnings?: {
+    models: string;
+    commands: string;
+    context: string;
+  };
+}
+
+export interface WebShellMcpToolsStatus {
+  v: 1;
+  serverName: string;
+  tools: [];
+  errors?: Array<{ error?: string }>;
 }
 
 export interface DaemonActions {
-  sendPrompt(text: string, images?: PromptImage[]): Promise<PromptResult>;
+  sendPrompt(
+    text: string,
+    images?: PromptImage[],
+    options?: SendPromptOptions,
+  ): Promise<PromptResult>;
   heartbeat(): Promise<HeartbeatResult | undefined>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<unknown>;
@@ -96,15 +113,18 @@ export interface DaemonActions {
   ): Promise<boolean>;
   listSessions(): Promise<DaemonSessionSummary[]>;
   loadSession(sessionId: string): Promise<void>;
+  releaseSession(sessionId: string): Promise<void>;
   newSession(): Promise<void>;
   closeSession(): Promise<void>;
+  refreshCommands(): Promise<void>;
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
-  loadMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus>;
+  loadMcpTools(serverName: string): Promise<WebShellMcpToolsStatus>;
   restartMcpServer(serverName: string): Promise<DaemonMcpRestartResult>;
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;
   loadToolsStatus(): Promise<DaemonWorkspaceToolsStatus>;
   setWorkspaceToolEnabled(toolName: string, enabled: boolean): Promise<unknown>;
   loadMemoryStatus(): Promise<DaemonWorkspaceMemoryStatus>;
+  readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile>;
   writeMemory(req: DaemonWriteMemoryRequest): Promise<DaemonWriteMemoryResult>;
   listAgents(): Promise<DaemonWorkspaceAgentsStatus>;
   getAgent(agentType: string): Promise<DaemonWorkspaceAgentDetail>;
@@ -119,6 +139,10 @@ interface ActivePrompt {
   controller: AbortController;
 }
 
+export interface SendPromptOptions {
+  optimisticUserMessage?: boolean;
+}
+
 const DEFAULT_CONFIG: DaemonSessionConfig = {
   baseUrl: '',
   autoReconnect: true,
@@ -126,11 +150,79 @@ const DEFAULT_CONFIG: DaemonSessionConfig = {
   maxReconnectDelayMs: 10_000,
 };
 
+const WEB_SHELL_CLIENT_ID_KEY = 'qwen-code-web-shell-client-id';
+
+function createWebShellClientId(): string {
+  const random =
+    globalThis.crypto?.randomUUID?.() ??
+    Math.random().toString(36).slice(2) + Date.now().toString(36);
+  return `web-shell-${random}`;
+}
+
+function getStableClientId(providedClientId?: string): string {
+  if (providedClientId) return providedClientId;
+  if (typeof window === 'undefined') return createWebShellClientId();
+  try {
+    const existing = window.sessionStorage.getItem(WEB_SHELL_CLIENT_ID_KEY);
+    if (existing) return existing;
+    const next = createWebShellClientId();
+    window.sessionStorage.setItem(WEB_SHELL_CLIENT_ID_KEY, next);
+    return next;
+  } catch {
+    return createWebShellClientId();
+  }
+}
+
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === value.length ? value : value.slice(0, end);
+}
+
+function detachDaemonClient(input: {
+  baseUrl: string;
+  token?: string;
+  sessionId: string;
+  clientId: string;
+}) {
+  const headers: Record<string, string> = {
+    'X-Qwen-Client-Id': input.clientId,
+  };
+  if (input.token) {
+    headers['Authorization'] = `Bearer ${input.token}`;
+  }
+  void fetch(
+    `${stripTrailingSlashes(input.baseUrl)}/session/${encodeURIComponent(
+      input.sessionId,
+    )}/detach`,
+    {
+      method: 'POST',
+      headers,
+      keepalive: true,
+    },
+  ).catch(() => {});
+}
+
+function isOwnUserMessageChunk(event: unknown, clientId?: string): boolean {
+  if (!clientId) return false;
+  const record = getRecord(event);
+  if (!record || record['originatorClientId'] !== clientId) return false;
+  const update = getRecord(getRecord(record['data'])?.['update']);
+  return getString(update, 'sessionUpdate') === 'user_message_chunk';
+}
+
 export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
   const opts = { ...DEFAULT_CONFIG, ...config };
   const store = useMemo(() => createDaemonTranscriptStore(), []);
+  const clientIdRef = useRef<string | undefined>(undefined);
+  if (!clientIdRef.current || opts.clientId) {
+    clientIdRef.current = getStableClientId(opts.clientId);
+  }
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
+  const suppressedOwnUserEchoCountRef = useRef(0);
   const heartbeatSupportedRef = useRef(false);
   const passiveAssistantDoneTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
@@ -175,23 +267,50 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               error: undefined,
             }));
             const caps = await client.capabilities();
+            if (disposed || abort.signal.aborted) return;
             heartbeatSupportedRef.current =
               caps.features.includes('client_heartbeat');
             const workspaceCwd = opts.workspaceCwd ?? caps.workspaceCwd;
-            session = restoreSessionId
-              ? await DaemonSessionClient.load(client, restoreSessionId, {
-                  workspaceCwd,
-                })
+            const nextSession = restoreSessionId
+              ? await DaemonSessionClient.load(
+                  client,
+                  restoreSessionId,
+                  {
+                    workspaceCwd,
+                  },
+                  clientIdRef.current,
+                )
               : reconnectSessionId
-                ? await DaemonSessionClient.load(client, reconnectSessionId, {
-                    workspaceCwd,
-                  })
-                : await DaemonSessionClient.createOrAttach(client, {
-                    workspaceCwd,
-                    ...(shouldCreateFreshSession
-                      ? { sessionScope: 'thread' as const }
-                      : {}),
-                  });
+                ? await DaemonSessionClient.load(
+                    client,
+                    reconnectSessionId,
+                    {
+                      workspaceCwd,
+                    },
+                    clientIdRef.current,
+                  )
+                : await DaemonSessionClient.createOrAttach(
+                    client,
+                    {
+                      workspaceCwd,
+                      ...(shouldCreateFreshSession
+                        ? { sessionScope: 'thread' as const }
+                        : {}),
+                    },
+                    clientIdRef.current,
+                  );
+            if (disposed || abort.signal.aborted) {
+              if (nextSession.clientId) {
+                detachDaemonClient({
+                  baseUrl: opts.baseUrl,
+                  token: opts.token,
+                  sessionId: nextSession.sessionId,
+                  clientId: nextSession.clientId,
+                });
+              }
+              return;
+            }
+            session = nextSession;
             reconnectSessionId = session.sessionId;
             shouldCreateFreshSession = false;
             sessionRef.current = session;
@@ -218,13 +337,13 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               : undefined;
           const loadWarnings = [
             providerResult.status === 'rejected'
-              ? '模型列表加载失败，部分模型信息可能不可用'
+              ? config.loadWarnings?.models
               : undefined,
             commandResult.status === 'rejected'
-              ? '命令列表加载失败，斜杠命令可能不完整'
+              ? config.loadWarnings?.commands
               : undefined,
             contextResult.status === 'rejected'
-              ? '会话上下文加载失败，当前模式可能显示不准确'
+              ? config.loadWarnings?.context
               : undefined,
           ].filter((warning): warning is string => Boolean(warning));
           const { models, currentModel, contextWindow } =
@@ -269,10 +388,16 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               if (handleSilentDaemonEvent(event, setConnection)) {
                 continue;
               }
+              const suppressOwnUserEcho =
+                suppressedOwnUserEchoCountRef.current > 0 &&
+                isOwnUserMessageChunk(event, activeSession.clientId);
               const uiEvents = normalizeDaemonEvent(event, {
                 clientId: activeSession.clientId,
-                suppressOwnUserEcho: true,
+                suppressOwnUserEcho,
               });
+              if (suppressOwnUserEcho) {
+                suppressedOwnUserEchoCountRef.current -= 1;
+              }
               if (uiEvents.length > 0) {
                 setPromptStatus((cur) =>
                   cur === 'waiting' ? 'streaming' : cur,
@@ -347,16 +472,26 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
 
     void run();
     return () => {
+      const session = sessionRef.current;
       disposed = true;
       abort.abort();
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       setPromptStatus('idle');
+      if (session?.clientId) {
+        detachDaemonClient({
+          baseUrl: opts.baseUrl,
+          token: opts.token,
+          sessionId: session.sessionId,
+          clientId: session.clientId,
+        });
+      }
       sessionRef.current = undefined;
     };
   }, [
     opts.baseUrl,
     opts.token,
     opts.workspaceCwd,
+    opts.clientId,
     opts.autoReconnect,
     opts.reconnectDelayMs,
     opts.maxReconnectDelayMs,
@@ -364,6 +499,9 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
     restoreSessionId,
     restoreSessionNonce,
     newSessionNonce,
+    config.loadWarnings?.models,
+    config.loadWarnings?.commands,
+    config.loadWarnings?.context,
   ]);
 
   const actions = useMemo<DaemonActions>(
@@ -371,6 +509,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
       async sendPrompt(
         text: string,
         images?: PromptImage[],
+        options?: SendPromptOptions,
       ): Promise<PromptResult> {
         const session = sessionRef.current;
         if (!session) throw new Error('Not connected');
@@ -387,7 +526,9 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         });
 
         try {
-          store.appendLocalUserMessage(text);
+          if (options?.optimisticUserMessage === false) {
+            suppressedOwnUserEchoCountRef.current += 1;
+          }
           const prompt = toPromptContent(text, images);
           const result = await session.prompt({ prompt }, ctrl.signal);
           if (sessionRef.current?.sessionId === sessionId) {
@@ -488,15 +629,26 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
       async loadSession(sessionId: string): Promise<void> {
         const currentSession = sessionRef.current;
         if (currentSession) {
-          await DaemonSessionClient.load(currentSession.client, sessionId, {
-            workspaceCwd: currentSession.workspaceCwd,
-          });
+          await DaemonSessionClient.load(
+            currentSession.client,
+            sessionId,
+            {
+              workspaceCwd: currentSession.workspaceCwd,
+            },
+            clientIdRef.current,
+          );
         }
         setPromptStatus('idle');
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
         store.reset();
         setRestoreSessionId(sessionId);
         setRestoreSessionNonce((nonce) => nonce + 1);
+      },
+
+      async releaseSession(sessionId: string): Promise<void> {
+        const session = sessionRef.current;
+        if (!session) throw new Error('Not connected');
+        await session.client.closeSession(sessionId);
       },
 
       async newSession(): Promise<void> {
@@ -513,18 +665,31 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         await session.close();
       },
 
+      async refreshCommands(): Promise<void> {
+        const session = sessionRef.current;
+        if (!session) throw new Error('Not connected');
+        const commandStatus = await session.supportedCommands();
+        const { commands, skills } = mapSupportedCommands(commandStatus);
+        setConnection((cur) => ({ ...cur, commands, skills }));
+      },
+
       async loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus> {
         const session = sessionRef.current;
         if (!session) throw new Error('Not connected');
         return session.client.workspaceMcp();
       },
 
-      async loadMcpTools(
-        serverName: string,
-      ): Promise<DaemonWorkspaceMcpToolsStatus> {
-        const session = sessionRef.current;
-        if (!session) throw new Error('Not connected');
-        return session.client.workspaceMcpTools(serverName);
+      async loadMcpTools(serverName: string): Promise<WebShellMcpToolsStatus> {
+        return {
+          v: 1,
+          serverName,
+          tools: [],
+          errors: [
+            {
+              error: 'The connected daemon does not expose MCP tool details.',
+            },
+          ],
+        };
       },
 
       async restartMcpServer(
@@ -564,6 +729,37 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         const session = sessionRef.current;
         if (!session) throw new Error('Not connected');
         return session.client.workspaceMemory();
+      },
+
+      async readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile> {
+        const session = sessionRef.current;
+        if (!session) throw new Error('Not connected');
+        const query = new URLSearchParams({ path: filePath });
+        const headers: Record<string, string> = {};
+        if (opts.token) headers['Authorization'] = `Bearer ${opts.token}`;
+        if (session.clientId) headers['X-Qwen-Client-Id'] = session.clientId;
+        const response = await fetch(
+          `${stripTrailingSlashes(opts.baseUrl)}/file?${query.toString()}`,
+          { headers },
+        );
+        if (!response.ok) {
+          let message = `GET /file failed (${response.status})`;
+          try {
+            const body = (await response.json()) as {
+              error?: unknown;
+              hint?: unknown;
+            };
+            if (typeof body.error === 'string') {
+              message = body.hint
+                ? `${body.error} ${String(body.hint)}`
+                : body.error;
+            }
+          } catch {
+            /* keep fallback */
+          }
+          throw new Error(message);
+        }
+        return (await response.json()) as DaemonWorkspaceFile;
       },
 
       async writeMemory(
@@ -613,7 +809,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         return session.updateMetadata({ displayName });
       },
     }),
-    [store],
+    [opts.baseUrl, opts.token, store],
   );
 
   useEffect(() => {

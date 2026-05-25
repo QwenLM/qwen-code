@@ -1,36 +1,54 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type {
-  DaemonWorkspaceToolStatus,
-  DaemonWorkspaceToolsStatus,
-} from '@qwen-code/sdk/daemon';
+import { dp } from './dialogStyles';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+import { useI18n } from '../../i18n';
+
+export interface WebShellWorkspaceToolStatus {
+  name: string;
+  displayName?: string;
+  description?: string;
+  enabled: boolean;
+}
+
+export interface WebShellWorkspaceToolsStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: boolean;
+  tools: WebShellWorkspaceToolStatus[];
+  errors?: Array<{ error?: string }>;
+}
 
 interface ToolsDialogProps {
-  showDescriptions: boolean;
-  loadStatus: () => Promise<DaemonWorkspaceToolsStatus>;
+  loadStatus: () => Promise<WebShellWorkspaceToolsStatus>;
   setToolEnabled: (toolName: string, enabled: boolean) => Promise<unknown>;
   onClose: () => void;
 }
 
-function toolLabel(tool: DaemonWorkspaceToolStatus): string {
+function toolLabel(tool: WebShellWorkspaceToolStatus): string {
   return tool.displayName || tool.name;
 }
 
 export function ToolsDialog({
-  showDescriptions,
   loadStatus,
   setToolEnabled,
   onClose,
 }: ToolsDialogProps) {
-  const [status, setStatus] = useState<DaemonWorkspaceToolsStatus | null>(null);
+  const { t } = useI18n();
+  const [status, setStatus] = useState<WebShellWorkspaceToolsStatus | null>(
+    null,
+  );
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [loading, setLoading] = useState(true);
   const [busyTool, setBusyTool] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const listRef = useRef<HTMLDivElement>(null);
 
   const tools = useMemo(() => status?.tools ?? [], [status?.tools]);
   const selected = tools[selectedIdx];
+  const selectedExpanded = selected ? expandedTools.has(selected.name) : false;
 
   const reload = useCallback(() => {
     setLoading(true);
@@ -46,7 +64,7 @@ export function ToolsDialog({
   }, [loadStatus]);
 
   const handleToggle = useCallback(
-    (tool: DaemonWorkspaceToolStatus) => {
+    (tool: WebShellWorkspaceToolStatus) => {
       setBusyTool(tool.name);
       setMessage(null);
       setToolEnabled(tool.name, !tool.enabled)
@@ -58,6 +76,18 @@ export function ToolsDialog({
     },
     [reload, setToolEnabled],
   );
+
+  const toggleDetails = useCallback((tool: WebShellWorkspaceToolStatus) => {
+    setExpandedTools((current) => {
+      const next = new Set(current);
+      if (next.has(tool.name)) {
+        next.delete(tool.name);
+      } else {
+        next.add(tool.name);
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     reload();
@@ -98,89 +128,118 @@ export function ToolsDialog({
         reload();
         return;
       }
+      if ((e.key === 'Enter' || e.key === ' ') && selected?.description) {
+        e.preventDefault();
+        toggleDetails(selected);
+        return;
+      }
       if (e.key === 't' && selected) {
         e.preventDefault();
         handleToggle(selected);
       }
     },
-    [handleToggle, onClose, reload, selected, tools.length],
+    [handleToggle, onClose, reload, selected, toggleDetails, tools.length],
   );
 
   const summary = useMemo(() => {
     if (!status) return '';
     const enabled = tools.filter((tool) => tool.enabled).length;
-    return `${enabled}/${tools.length} enabled`;
-  }, [status, tools]);
+    return t('tools.summary', { enabled, total: tools.length });
+  }, [status, tools, t]);
 
   return (
-    <div className="resume-picker">
-      <div className="resume-picker-header">
-        <span className="resume-picker-title">Tools</span>
-        <span className="resume-picker-count">{summary}</span>
+    <div className={dp('resume-picker')}>
+      <div className={dp('resume-picker-header')}>
+        <span className={dp('resume-picker-title')}>{t('tools.title')}</span>
+        <span className={dp('resume-picker-count')}>{summary}</span>
       </div>
 
-      <div className="resume-picker-search">
-        <span className="resume-picker-search-hint">
-          {message || (loading ? 'Loading tools...' : `${tools.length} tools`)}
+      <div className={dp('resume-picker-search')}>
+        <span className={dp('resume-picker-search-hint')}>
+          {message || (loading ? t('tools.loading') : `${tools.length} tools`)}
         </span>
       </div>
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
-      <div className="resume-picker-list" ref={listRef}>
+      <div className={dp('resume-picker-list')} ref={listRef}>
         {!loading && tools.length === 0 && (
-          <div className="resume-picker-empty">
-            No built-in tools available. Open a session first.
-          </div>
+          <div className={dp('resume-picker-empty')}>{t('tools.empty')}</div>
         )}
         {tools.map((tool, i) => (
           <div
             key={tool.name}
-            className={`resume-picker-item ${i === selectedIdx ? 'selected' : ''}`}
+            className={dp(
+              'resume-picker-item',
+              i === selectedIdx ? 'selected' : undefined,
+            )}
             onMouseEnter={() => setSelectedIdx(i)}
           >
-            <div className="resume-picker-item-row">
-              <span className="resume-picker-item-prefix">
+            <div className={dp('resume-picker-item-row')}>
+              <span className={dp('resume-picker-item-prefix')}>
                 {i === selectedIdx ? '›' : ' '}
               </span>
-              <span className="resume-picker-item-title">
+              <span className={dp('resume-picker-item-title')}>
                 {toolLabel(tool)}
               </span>
-              <span className="resume-picker-item-badge">
-                {tool.enabled ? 'enabled' : 'disabled'}
+              <span className={dp('resume-picker-item-badge')}>
+                {tool.enabled
+                  ? t('tools.status.enabled')
+                  : t('tools.status.disabled')}
               </span>
             </div>
             {tool.displayName && tool.displayName !== tool.name && (
-              <div className="resume-picker-item-meta">{tool.name}</div>
+              <div className={dp('resume-picker-item-meta')}>{tool.name}</div>
             )}
-            {showDescriptions && tool.description && (
-              <div className="dialog-detail">
-                <div className="dialog-detail-body">{tool.description}</div>
+            {tool.description && expandedTools.has(tool.name) && (
+              <div className={dp('dialog-detail')}>
+                <div className={dp('dialog-detail-body')}>
+                  {tool.description}
+                </div>
               </div>
             )}
             {i === selectedIdx && (
-              <button
-                className="dialog-inline-button"
-                disabled={busyTool === tool.name}
-                onClick={() => handleToggle(tool)}
-              >
-                {busyTool === tool.name
-                  ? 'Updating...'
-                  : tool.enabled
-                    ? 'Disable'
-                    : 'Enable'}
-              </button>
+              <div className={dp('dialog-inline-actions')}>
+                {tool.description && (
+                  <button
+                    className={dp('dialog-inline-button')}
+                    onClick={() => toggleDetails(tool)}
+                  >
+                    {expandedTools.has(tool.name)
+                      ? t('tools.details.hide')
+                      : t('tools.details.show')}
+                  </button>
+                )}
+                <button
+                  className={dp('dialog-inline-button')}
+                  disabled={busyTool === tool.name}
+                  onClick={() => handleToggle(tool)}
+                >
+                  {busyTool === tool.name
+                    ? t('tools.updating')
+                    : tool.enabled
+                      ? t('tools.update.disable')
+                      : t('tools.update.enable')}
+                </button>
+              </div>
             )}
           </div>
         ))}
       </div>
 
-      <div className="resume-picker-sep" />
+      <div className={dp('resume-picker-sep')} />
 
-      <div className="resume-picker-footer">
+      <div className={dp('resume-picker-footer')}>
         {selected
-          ? `t to toggle ${toolLabel(selected)} · r to refresh · Esc to close`
-          : 'r to refresh · Esc to close'}
+          ? t('tools.footer', {
+              name: toolLabel(selected),
+              details: selected?.description
+                ? selectedExpanded
+                  ? t('tools.details.hide')
+                  : t('tools.details.show')
+                : '',
+            })
+          : t('tools.footer')}
       </div>
     </div>
   );

@@ -103,7 +103,7 @@ function mapAvailableCommandsUpdate(
     : [];
   const skillCommands = skills.map((skill) => ({
     name: skill,
-    description: '运行 skill',
+    description: '',
   }));
   return {
     commands: mergeCommands(commands, skillCommands),

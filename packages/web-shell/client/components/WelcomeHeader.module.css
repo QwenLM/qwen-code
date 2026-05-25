@@ -101,7 +101,6 @@
 }
 
 .tip {
-  margin: 0 2ch;
   font-size: 13px;
   color: var(--text-dimmed);
   display: flex;

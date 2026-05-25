@@ -1,23 +1,25 @@
+import { useI18n } from '../i18n';
 import styles from './ShortcutsPanel.module.css';
 
 interface Shortcut {
   key: string;
-  description: string;
+  descriptionKey: string;
 }
 
 const SHORTCUTS: Shortcut[] = [
-  { key: '/', description: 'for commands' },
-  { key: '@', description: 'for file paths' },
-  { key: 'shift+tab', description: 'to cycle approvals' },
-  { key: 'esc', description: 'to cancel request' },
-  { key: 'shift+enter', description: 'for newline' },
-  { key: 'ctrl+r', description: 'to search history' },
-  { key: '↑ / ↓', description: 'to navigate history' },
-  { key: 'cmd+v', description: 'to paste images' },
-  { key: '?', description: 'to toggle this panel' },
+  { key: '/', descriptionKey: 'help.shortcut.commandMenu' },
+  { key: '@', descriptionKey: 'help.shortcut.addContext' },
+  { key: 'shift+tab', descriptionKey: 'help.shortcut.approvals' },
+  { key: 'esc', descriptionKey: 'help.shortcut.cancel' },
+  { key: 'shift+enter', descriptionKey: 'help.shortcut.newline' },
+  { key: 'ctrl+r', descriptionKey: 'help.shortcut.history' },
+  { key: '↑ / ↓', descriptionKey: 'help.shortcut.history' },
+  { key: 'cmd+v', descriptionKey: 'help.shortcut.pasteImages' },
+  { key: '?', descriptionKey: 'help.shortcut.togglePanel' },
 ];
 
 export function ShortcutsPanel() {
+  const { t } = useI18n();
   const mid = Math.ceil(SHORTCUTS.length / 2);
   const col1 = SHORTCUTS.slice(0, mid);
   const col2 = SHORTCUTS.slice(mid);
@@ -28,7 +30,7 @@ export function ShortcutsPanel() {
         {col1.map((s) => (
           <div key={s.key} className={styles.item}>
             <span className={styles.key}>{s.key}</span>
-            <span className={styles.desc}>{s.description}</span>
+            <span className={styles.desc}>{t(s.descriptionKey)}</span>
           </div>
         ))}
       </div>
@@ -36,7 +38,7 @@ export function ShortcutsPanel() {
         {col2.map((s) => (
           <div key={s.key} className={styles.item}>
             <span className={styles.key}>{s.key}</span>
-            <span className={styles.desc}>{s.description}</span>
+            <span className={styles.desc}>{t(s.descriptionKey)}</span>
           </div>
         ))}
       </div>

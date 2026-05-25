@@ -1,6 +1,0 @@
-/* Global foundation. Keep tokens first because modules and remaining global
-   integrations depend on these custom properties. */
-@import './tokens.css';
-
-/* Shared dialog primitives remain global until wrapped behind component APIs. */
-@import './dialogs.css';

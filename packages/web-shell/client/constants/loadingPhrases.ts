@@ -79,10 +79,11 @@ export const WITTY_LOADING_PHRASES_ZH = [
   '加载的是字节，承载的是对技术的热爱...',
 ];
 
-export function getLoadingPhrases(): string[] {
-  const language =
-    typeof navigator !== 'undefined' ? navigator.language.toLowerCase() : '';
-  return language.startsWith('zh')
+export function getLoadingPhrases(language?: string): string[] {
+  const resolvedLanguage =
+    language ??
+    (typeof navigator !== 'undefined' ? navigator.language.toLowerCase() : '');
+  return resolvedLanguage.toLowerCase().startsWith('zh')
     ? WITTY_LOADING_PHRASES_ZH
     : WITTY_LOADING_PHRASES_EN;
 }

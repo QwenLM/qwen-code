@@ -11,6 +11,7 @@ import { ToolApproval } from './ToolApproval';
 import { parseAnsi, hasAnsi } from '../../utils/ansi';
 import { extractTodosFromToolCall } from '../../utils/todos';
 import { formatElapsed, StatusIcon, truncateText } from './tools/toolDisplay';
+import { useI18n } from '../../i18n';
 import styles from './tools/ToolChrome.module.css';
 
 interface ToolGroupProps {
@@ -212,6 +213,7 @@ const MAX_BASH_LINES = 20;
 const MAX_READ_LINES = 25;
 
 function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
+  const { t } = useI18n();
   const [showAll, setShowAll] = useState(false);
   const output = extractText(tool) || '';
   const lines = output.split('\n');
@@ -242,7 +244,9 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
           className={styles.expandBtn}
           onClick={() => setShowAll(!showAll)}
         >
-          {showAll ? `▲ Show less` : `▼ ${lines.length} lines total`}
+          {showAll
+            ? t('tool.showLess')
+            : t('tool.linesTotal', { count: lines.length })}
         </button>
       )}
     </div>
@@ -250,6 +254,7 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
 }
 
 function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
+  const { t } = useI18n();
   const [showAll, setShowAll] = useState(false);
   const content = extractText(tool) || '';
   const lines = content.split('\n');
@@ -265,7 +270,9 @@ function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
           className={styles.expandBtn}
           onClick={() => setShowAll(!showAll)}
         >
-          {showAll ? `▲ Show less` : `▼ ${lines.length} lines total`}
+          {showAll
+            ? t('tool.showLess')
+            : t('tool.linesTotal', { count: lines.length })}
         </button>
       )}
     </div>
@@ -298,6 +305,7 @@ function getWriteContent(tool: ACPToolCall): string {
 }
 
 function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
+  const { t } = useI18n();
   const [showAll, setShowAll] = useState(false);
   const content = getWriteContent(tool);
   const lines = content.split('\n');
@@ -319,7 +327,9 @@ function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
           className={styles.expandBtn}
           onClick={() => setShowAll(!showAll)}
         >
-          {showAll ? `▲ Show less` : `▼ ${lines.length} lines total`}
+          {showAll
+            ? t('tool.showLess')
+            : t('tool.linesTotal', { count: lines.length })}
         </button>
       )}
     </div>
