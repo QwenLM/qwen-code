@@ -47,8 +47,8 @@ const SENSITIVE_ATTRIBUTE_KEYS = new Set([
 
 /**
  * Sink for processor-internal diagnostic messages (export failures, buffer
- * overflows, timeouts). Messages have no trailing newline — the sink decides
- * how to terminate them.
+ * overflows, timeouts). Messages are passed without a trailing newline — the
+ * sink implementation decides how to terminate them.
  *
  * Default sink writes to stderr to keep diagnostics visible when the host
  * environment has no other logging pipeline. Hosts running a TUI should
@@ -77,6 +77,10 @@ interface LogToSpanProcessorOptions {
  * the global TracerProvider (which can break in bundled environments),
  * this processor directly constructs ReadableSpan objects and feeds
  * them to the exporter.
+ *
+ * Internal diagnostics (export failures, buffer overflows, timeouts) are
+ * routed through {@link LogToSpanDiagnosticsSink} so TUI hosts can keep
+ * them off the rendered terminal area; see the `diagnosticsSink` option.
  *
  * When a log record has a `duration_ms` attribute, the resulting span
  * will have a matching duration. Otherwise, the span is instantaneous.
@@ -308,8 +312,11 @@ export class LogToSpanProcessor implements LogRecordProcessor {
         );
       } catch (err) {
         clearTimeout(timeout);
+        // JSON.stringify so embedded newlines in the thrown message stay on
+        // one line — same single-line invariant enforced by formatExportError.
+        const detail = err instanceof Error ? err.message : String(err);
         this.emitDiagnostic(
-          `[LogToSpan] export threw: ${err instanceof Error ? err.message : String(err)}`,
+          `[LogToSpan] export threw: ${JSON.stringify(detail)}`,
         );
         resolve();
       }
@@ -446,10 +453,13 @@ function deriveSpanStatus(attrs: Record<string, unknown> | undefined): {
 // gateway strips it. Surface name/code/data so the operator has something to
 // act on (e.g. a 403 from ARMS with empty body).
 //
-// Both `message` and `data` can carry embedded newlines or other shell-active
-// bytes when the backend returns a JSON error body. JSON.stringify each field
-// to keep the diagnostic on a single line — otherwise a torn record breaks
-// downstream log greps and corrupts the file-logger format.
+// Both `message` and `data` can carry embedded newlines or other characters
+// that would break log parsing when the backend returns a JSON error body.
+// JSON.stringify each field to keep the diagnostic on a single line —
+// otherwise a torn record breaks downstream log greps and corrupts the
+// file-logger format. The 200 figure is JS string length (UTF-16 code
+// units), not bytes — non-ASCII payloads may stringify to more bytes; this
+// is fine because the cap is a leak/noise budget, not a hard byte limit.
 function formatExportError(err: Error | undefined): string {
   if (!err) return 'error=unknown';
   const extra = err as { code?: number; data?: string };

@@ -800,7 +800,6 @@ describe('LogToSpanProcessor', () => {
         code: 500,
         data: '{\n  "error": "boom"\n}',
       });
-      processor = makeFailingProcessor(err);
       const sink = vi.fn();
       processor = new LogToSpanProcessor(
         {
@@ -818,7 +817,7 @@ describe('LogToSpanProcessor', () => {
       expect(msg).toContain('data="{\\n  \\"error\\": \\"boom\\"\\n}"');
     });
 
-    it('truncates response data snippets to 200 bytes before stringifying', async () => {
+    it('truncates response data snippets to 200 characters before stringifying', async () => {
       await processor.shutdown();
       const err = Object.assign(new Error(''), {
         name: 'OTLPExporterError',
@@ -981,7 +980,49 @@ describe('LogToSpanProcessor', () => {
 
       await flushOne(processor);
       expect(sink).toHaveBeenCalledWith(
-        '[LogToSpan] export threw: exporter exploded synchronously',
+        '[LogToSpan] export threw: "exporter exploded synchronously"',
+      );
+    });
+
+    it('JSON-escapes export-threw payloads with embedded newlines (single-line invariant)', async () => {
+      await processor.shutdown();
+      const sink = vi.fn();
+      processor = new LogToSpanProcessor(
+        {
+          export: vi.fn(() => {
+            throw new Error('line1\nline2');
+          }),
+          shutdown: vi.fn().mockResolvedValue(undefined),
+          forceFlush: vi.fn().mockResolvedValue(undefined),
+        } as unknown as SpanExporter,
+        { flushIntervalMs: 60000, diagnosticsSink: sink },
+      );
+
+      await flushOne(processor);
+      const msg = sink.mock.calls[0][0] as string;
+      expect(msg).not.toContain('\n');
+      expect(msg).toBe('[LogToSpan] export threw: "line1\\nline2"');
+    });
+
+    it('handles non-Error throws (e.g. throw "string") in the export-threw path', async () => {
+      await processor.shutdown();
+      const sink = vi.fn();
+      processor = new LogToSpanProcessor(
+        {
+          export: vi.fn(() => {
+            // Deliberate non-Error throw to exercise the String(err) branch.
+            // eslint-disable-next-line no-restricted-syntax
+            throw 'raw string thrown';
+          }),
+          shutdown: vi.fn().mockResolvedValue(undefined),
+          forceFlush: vi.fn().mockResolvedValue(undefined),
+        } as unknown as SpanExporter,
+        { flushIntervalMs: 60000, diagnosticsSink: sink },
+      );
+
+      await flushOne(processor);
+      expect(sink).toHaveBeenCalledWith(
+        '[LogToSpan] export threw: "raw string thrown"',
       );
     });
 
@@ -990,8 +1031,9 @@ describe('LogToSpanProcessor', () => {
       const sink = vi.fn(() => {
         throw new Error('sink exploded');
       });
-      const exportFn = vi.fn((_spans, cb: (r: { code: number }) => void) =>
-        cb({ code: 1, error: new Error('boom') }),
+      const exportFn = vi.fn(
+        (_spans, cb: (r: { code: number; error?: Error }) => void) =>
+          cb({ code: 1, error: new Error('boom') }),
       );
       processor = new LogToSpanProcessor(
         {

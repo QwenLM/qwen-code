@@ -415,7 +415,7 @@ describe('Telemetry SDK', () => {
     }
   });
 
-  it('in non-interactive mode, leaves diagnostics on the default stderr sink so CI/scripts see export failures', () => {
+  it('in non-interactive mode, leaves diagnostics on the default stderr sink so CI/scripts see export failures', async () => {
     vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
     vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
@@ -426,8 +426,46 @@ describe('Telemetry SDK', () => {
     initializeTelemetry(mockConfig);
 
     const call = vi.mocked(LogToSpanProcessor).mock.calls.at(-1);
-    const opts = call?.[1] as { diagnosticsSink?: unknown };
+    const opts = call?.[1] as { diagnosticsSink?: (m: string) => void };
+    // No explicit sink → processor falls back to its default (stderr).
     expect(opts.diagnosticsSink).toBeUndefined();
+
+    // End-to-end check: the real default sink must hit stderr, not silently
+    // drop. Construct a processor with no sink and trigger a failed export.
+    const { LogToSpanProcessor: RealProcessor } = await vi.importActual<
+      typeof import('./log-to-span-processor.js')
+    >('./log-to-span-processor.js');
+    const failingExporter = {
+      export: (
+        _spans: unknown,
+        cb: (r: { code: number; error?: Error }) => void,
+      ) => cb({ code: 1, error: new Error('boom') }),
+      shutdown: () => Promise.resolve(),
+      forceFlush: () => Promise.resolve(),
+    };
+    const realProcessor = new RealProcessor(
+      failingExporter as unknown as ConstructorParameters<
+        typeof RealProcessor
+      >[0],
+      { flushIntervalMs: 60000 },
+    );
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      realProcessor.onEmit({
+        body: 'event',
+        hrTime: [1000, 0] as [number, number],
+        attributes: { 'event.name': 'event' },
+      } as unknown as Parameters<typeof realProcessor.onEmit>[0]);
+      await realProcessor.forceFlush();
+      expect(stderrWrite).toHaveBeenCalledWith(
+        '[LogToSpan] export failed: code=1 error="boom"\n',
+      );
+    } finally {
+      stderrWrite.mockRestore();
+      await realProcessor.shutdown();
+    }
   });
 
   it('should warn and skip startup for gRPC per-signal endpoints without base endpoint', () => {
