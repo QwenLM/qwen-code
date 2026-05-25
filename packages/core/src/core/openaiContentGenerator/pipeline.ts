@@ -12,6 +12,7 @@ import {
 } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
+import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -361,7 +362,24 @@ export class ContentGenerationPipeline {
       this.contentGeneratorConfig.reasoning === false;
     if (reasoningDisabled) {
       const typed = providerRequest as unknown as Record<string, unknown>;
-      if ('enable_thinking' in typed) {
+      // qwen3 hybrid-thinking models (e.g. qwen3.5-flash) default to
+      // thinking-on at the server. Provider buildRequest never auto-
+      // injects `enable_thinking`, so a vanilla wire body lacks the
+      // field and the disable signal would not reach the server.
+      // Hostname-gated unconditional set mirrors the DeepSeek branch
+      // below. Overrides any user-supplied `extra_body.enable_thinking:
+      // true` because per-request `includeThoughts: false` is the
+      // stronger intent (set by every side-query via sideQuery.ts).
+      //
+      // Scope: targets qwen3 hybrid via DashScope's compatible-mode
+      // contract. GLM (extra_body.thinking.enabled) and DeepSeek-on-
+      // DashScope (thinking: { type: 'disabled' }) need different
+      // disable shapes — pre-existing gap, not closed here.
+      if (
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+          this.contentGeneratorConfig,
+        )
+      ) {
         typed['enable_thinking'] = false;
       }
       // Strip reasoning config — extra_body could inject it, overriding
@@ -471,7 +489,11 @@ export class ContentGenerationPipeline {
     //   - glm-4.7             — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
     //   - kimi-k2-thinking    — thinking is enabled by default and cannot be disabled
     //   - gpt-5.x series      — thinking is enabled by default; can be disabled via `reasoning.effort`
-    //   - qwen3 series        — model-dependent; can be manually disabled via `extra_body.enable_thinking`
+    //   - qwen3 series        — model-dependent; emitted as `enable_thinking: false`
+    //                           by buildRequest above when reasoning is disabled
+    //                           on DashScope endpoints (provider never auto-
+    //                           injects this field, so the wire body would
+    //                           otherwise lack the disable signal)
     //
     // Given this inconsistency, we avoid mapping values and only pass through the
     // configured reasoning object when explicitly enabled. This keeps provider- and
