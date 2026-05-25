@@ -5840,6 +5840,37 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('keeps a shared ACP channel alive while closing one of several sessions', async () => {
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({ sessionIdPrefix: `s${handles.length}` });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'thread',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const c = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(handles).toHaveLength(1);
+
+      await bridge.closeSession(b.sessionId);
+      expect(bridge.sessionCount).toBe(2);
+      expect(handles[0]?.killed).toBe(false);
+
+      await bridge.closeSession(a.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+      expect(handles[0]?.killed).toBe(false);
+
+      await bridge.closeSession(c.sessionId);
+      expect(bridge.sessionCount).toBe(0);
+      expect(handles[0]?.killed).toBe(true);
+
+      await bridge.shutdown();
+    });
+
     it('throws SessionNotFoundError for unknown session', async () => {
       const bridge = makeBridge();
       await expect(bridge.closeSession('nonexistent')).rejects.toThrow(

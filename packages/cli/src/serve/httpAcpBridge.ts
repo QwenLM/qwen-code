@@ -2887,7 +2887,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             : ''),
       );
       if (defaultEntry === entry) defaultEntry = undefined;
-      const ci = channelInfo;
+      const ci = channelInfoForEntry(entry);
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
@@ -3717,7 +3717,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Detach from the channel. The channel dies only when its LAST
       // session leaves — other sessions on the same channel keep
       // running.
-      const ci = channelInfo;
+      const ci = channelInfoForEntry(entry);
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
