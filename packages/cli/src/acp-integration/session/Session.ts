@@ -2027,7 +2027,7 @@ export class Session implements SessionContext {
 
       let didRequestPermission = false;
       let confirmationDetails: ToolCallConfirmationDetails | undefined;
-      const resetAutoModeFallbackAfterApproval = (
+      const recordAutoModeFallbackResolution = (
         outcome: ToolConfirmationOutcome,
       ) => {
         // Reset AUTO-mode fallback counters when approval resolves a prompt
@@ -2040,7 +2040,14 @@ export class Session implements SessionContext {
         ) {
           const before = this.config.getAutoModeDenialState();
           const after = recordFallbackApprove(before);
-          debugLogger.debug(
+          if (after === before) {
+            debugLogger.warn(
+              `Auto mode denial counters already clear after fallback approval: ` +
+                formatDenialStateLog(before),
+            );
+            return;
+          }
+          debugLogger.warn(
             `Auto mode denial counters reset after fallback approval: ` +
               `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
           );
@@ -2099,7 +2106,7 @@ export class Session implements SessionContext {
               await confirmationDetails.onConfirm(
                 ToolConfirmationOutcome.ProceedOnce,
               );
-              resetAutoModeFallbackAfterApproval(
+              recordAutoModeFallbackResolution(
                 ToolConfirmationOutcome.ProceedOnce,
               );
             } else {
@@ -2169,7 +2176,7 @@ export class Session implements SessionContext {
                   .nativeEnum(ToolConfirmationOutcome)
                   .parse(output.outcome.optionId);
 
-          resetAutoModeFallbackAfterApproval(outcome);
+          recordAutoModeFallbackResolution(outcome);
 
           await confirmationDetails.onConfirm(outcome, {
             answers: output.answers,

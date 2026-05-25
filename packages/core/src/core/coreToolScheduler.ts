@@ -2359,7 +2359,14 @@ export class CoreToolScheduler {
     ) {
       const before = this.config.getAutoModeDenialState();
       const after = recordFallbackApprove(before);
-      debugLogger.debug(
+      if (after === before) {
+        debugLogger.warn(
+          `Auto mode denial counters already clear after fallback approval: ` +
+            formatDenialStateLog(before),
+        );
+        return;
+      }
+      debugLogger.warn(
         `Auto mode denial counters reset after fallback approval: ` +
           `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
       );
