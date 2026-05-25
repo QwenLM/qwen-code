@@ -381,11 +381,11 @@ jobs:
             local diff_status=0
             local head_status=0
 
-            set +e
+            set +eu
             gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch | head -c "$byte_limit" > "$output_path"
             diff_status=${PIPESTATUS[0]}
             head_status=${PIPESTATUS[1]}
-            set -e
+            set -eu
 
             # `head` may close the pipe once the byte cap is reached, causing
             # gh to report SIGPIPE (141). That is expected. Any other gh
