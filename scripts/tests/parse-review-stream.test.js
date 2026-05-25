@@ -61,18 +61,30 @@ describe('extractSegmentFromEvent', () => {
     ).toBeNull();
   });
 
-  it('filters out non-text parts', () => {
+  it('filters out non-text parts (thinking)', () => {
     const ev = {
       type: 'assistant',
       message: {
         content: [
           { type: 'thinking', thinking: 'hmm' },
           { type: 'text', text: 'visible' },
-          { type: 'tool_use', name: 'x' },
         ],
       },
     };
     expect(extractSegmentFromEvent(ev)).toBe('visible');
+  });
+
+  it('returns null when content contains tool_use (pre-tool preamble)', () => {
+    const ev = {
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: 'Let me verify this...' },
+          { type: 'tool_use', id: 'x', name: 'Read', input: {} },
+        ],
+      },
+    };
+    expect(extractSegmentFromEvent(ev)).toBeNull();
   });
 
   it('survives null / undefined / non-object input', () => {

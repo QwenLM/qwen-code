@@ -60,6 +60,10 @@ const fs = require('fs');
  * Returns the joined text (possibly empty string) or null if the
  * event doesn't carry an assistant message.
  *
+ * Messages whose content[] includes a tool_use part are pre-tool
+ * preamble ("Let me verify…") — skip them entirely since the real
+ * review text comes in subsequent tool-free messages.
+ *
  * Exposed for unit tests.
  */
 function extractSegmentFromEvent(event) {
@@ -67,6 +71,8 @@ function extractSegmentFromEvent(event) {
   if (event.type !== 'assistant' && event.type !== 'message') return null;
   const content = event?.message?.content;
   if (!Array.isArray(content)) return null;
+  const hasToolUse = content.some((part) => part?.type === 'tool_use');
+  if (hasToolUse) return null;
   const text = content
     .filter((part) => part?.type === 'text' && typeof part.text === 'string')
     .map((part) => part.text)

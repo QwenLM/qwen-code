@@ -99,9 +99,10 @@ jobs:
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'read'
-      # Needed only by trusted shell steps that post the final comment. Every
-      # qwen invocation below unsets GITHUB_TOKEN/GH_TOKEN before the model
-      # process starts, so the token is not available to model-controlled code.
+      # Needed by trusted shell steps that post comments, and by the model's
+      # Bash tool for `gh api` inline review comments. Tools are scoped via
+      # deny list and MCP block — the model has Read/Grep/Bash for code
+      # verification but cannot orchestrate agents or access external servers.
       pull-requests: 'write'
       issues: 'read'
     env:

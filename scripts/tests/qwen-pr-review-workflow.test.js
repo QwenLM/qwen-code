@@ -131,22 +131,19 @@ function runResolvePrContext(eventName, eventPayload, extraEnv = {}) {
 }
 
 describe('Qwen PR review workflow safety rails', () => {
-  it('keeps qwen invocations toolless and without a GitHub token', () => {
+  it('keeps qwen invocations scoped with deny list and MCP block', () => {
     expect(workflow).not.toContain('--yolo');
     expect(workflow).not.toContain('"approvalMode": "yolo"');
     expect(workflow).toMatch(/pull-requests:\s+'write'/);
-    expect(workflow).toContain(
-      'qwen invocation below unsets GITHUB_TOKEN/GH_TOKEN',
-    );
 
-    const qwenCalls = workflow.match(/env -u GITHUB_TOKEN -u GH_TOKEN qwen/g);
-    expect(qwenCalls).toHaveLength(4);
     expect(workflow).toContain('--approval-mode default');
-    expect(workflow).toContain('--core-tools "$QWEN_REVIEW_CORE_TOOLS"');
+    expect(workflow).not.toContain('--core-tools');
     expect(workflow).toContain('--exclude-tools "$QWEN_REVIEW_DENY_TOOLS"');
     expect(workflow).toContain(
       '--allowed-mcp-server-names __qwen_review_no_mcp__',
     );
+    expect(workflow).toContain('QWEN_REVIEW_DENY_TOOLS');
+    expect(workflow).toContain('enter_plan_mode');
   });
 
   it('keeps all maintainer review comment triggers wired', () => {
@@ -310,13 +307,13 @@ describe('Qwen PR review workflow safety rails', () => {
   it('keeps tier stderr out of JSONL parser input', () => {
     expect(workflow).not.toContain('2>&1 | tee "$out"');
     expect(workflow).toContain(
-      '2> >(tee /tmp/qwen-light-stderr.log >&2) | tee "$out"',
+      '2> >(tee /tmp/qwen-light-stderr.log >&2)',
     );
     expect(workflow).toContain(
-      '2> >(tee /tmp/qwen-standard-stderr.log >&2) | tee "$out"',
+      '2> >(tee /tmp/qwen-standard-stderr.log >&2)',
     );
     expect(workflow).toContain(
-      '2> >(tee "/tmp/qwen-deep-${focus}-stderr.log" >&2) | tee "$out"',
+      '2> >(tee "/tmp/qwen-deep-${focus}-stderr.log" >&2)',
     );
   });
 

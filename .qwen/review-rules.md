@@ -89,26 +89,28 @@ End that section with this line verbatim:
   speculative best-practice commentary, and issues already covered by linters,
   typecheckers, or existing PR comments.
 
-### Posting Inline Comments
+### Posting Inline Comments (MANDATORY for P0/P1)
 
-When you have Bash access and the environment provides `GITHUB_REPOSITORY`,
-`PR_NUMBER`, and a valid `GITHUB_TOKEN`, post high-confidence findings
-(P0/P1) as inline PR comments using the GitHub Create Review API:
+**After writing your review text**, if you found any P0 or P1 findings that
+map to specific diff lines, you MUST post them as inline PR review comments
+using Bash. The environment variables `GITHUB_REPOSITORY`, `PR_NUMBER`,
+`HEAD_SHA`, and `GITHUB_TOKEN` are pre-configured — use them directly.
 
 ```bash
-gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
-  --method POST \
-  -f commit_id="$HEAD_SHA" \
-  -f event=COMMENT \
-  -f body="Summary of review findings." \
-  --jsonc comments='[{"path":"src/file.ts","line":42,"body":"**[Critical]** description"}]'
+jq -n \
+  --arg sha "$HEAD_SHA" \
+  --arg body "Qwen Code found high-severity issues — see inline comments." \
+  --argjson comments '[{"path":"src/file.ts","line":42,"body":"**[P0]** description\n\n_— automated via Qwen Code /review_"}]' \
+  '{commit_id: $sha, event: "COMMENT", body: $body, comments: $comments}' \
+| gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+    --method POST --input -
 ```
 
 Rules:
-- Only post findings you can map to a specific diff line in the `comments` array.
-- Findings that cannot map to a diff line go in the `body` field.
-- Do NOT post P2/P3 (low-severity) findings as inline comments — keep them in
-  your text output only. Inline comments should be high-signal.
-- If you have no P0/P1 findings, skip the API call entirely.
-- Always include a trailing signature in each inline comment body:
-  `_— ${OPENAI_MODEL} via Qwen Code /review_`
+- Execute this Bash command after completing your review text output.
+- Only include findings you can map to a specific changed line in the diff.
+- Findings without a clear diff line stay in your text output only.
+- Do NOT post P2/P3 findings as inline comments.
+- If you have no P0/P1 findings that map to diff lines, skip the API call.
+- Each inline comment body must end with:
+  `\n\n_— automated via Qwen Code /review_`
