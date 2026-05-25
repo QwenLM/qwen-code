@@ -33,6 +33,9 @@ export type DaemonUiEventType =
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
+  | 'session.replay_complete'
+  // Prompt lifecycle (cross-client)
+  | 'prompt.cancelled'
   // Workspace events (Wave 3-4)
   | 'workspace.memory.changed'
   | 'workspace.agent.changed'
@@ -229,6 +232,37 @@ export interface DaemonUiStateResyncRequiredEvent extends DaemonUiEventBase {
   earliestAvailableId: number;
 }
 
+/**
+ * A prompt on the session was cancelled — emitted by the daemon when a
+ * client calls the cancel route OR when a prompt's originator SSE
+ * connection drops mid-flight. Lets multi-client UIs surface "cancelled"
+ * as a first-class event instead of inferring it from the absence of
+ * further assistant chunks.
+ *
+ * Semantic: "cancel requested", not "cancel confirmed" — the daemon
+ * publishes this before the agent has necessarily wound down. The
+ * reducer treats it like an `assistant.done(cancelled)` for the purpose
+ * of clearing in-flight tool spinners. `originatorClientId` (on the
+ * base) identifies the cancelling client.
+ */
+export interface DaemonUiPromptCancelledEvent extends DaemonUiEventBase {
+  type: 'prompt.cancelled';
+}
+
+/**
+ * Sentinel signalling that the daemon has finished replaying buffered
+ * events after a `Last-Event-ID` resume — consumers can drop a
+ * catch-up indicator deterministically. Fires on both the clean-replay
+ * and ring-evicted paths, and even when nothing was replayed
+ * (`replayedCount === 0`).
+ */
+export interface DaemonUiReplayCompleteEvent extends DaemonUiEventBase {
+  type: 'session.replay_complete';
+  replayedCount: number;
+  /** Highest event id delivered in the replay, when any frames replayed. */
+  lastReplayedEventId?: number;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
  * Workspace events (Wave 3-4)
  * ──────────────────────────────────────────────────────────────────────── */
@@ -357,6 +391,9 @@ export type DaemonUiEvent =
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
   | DaemonUiStateResyncRequiredEvent
+  | DaemonUiReplayCompleteEvent
+  // Prompt lifecycle (cross-client)
+  | DaemonUiPromptCancelledEvent
   // Workspace events
   | DaemonUiWorkspaceMemoryChangedEvent
   | DaemonUiWorkspaceAgentChangedEvent

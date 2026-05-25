@@ -90,6 +90,8 @@ export type {
   DaemonUiSessionApprovalModeChangedEvent,
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiStateResyncRequiredEvent,
+  DaemonUiReplayCompleteEvent,
+  DaemonUiPromptCancelledEvent,
   // Workspace events
   DaemonUiWorkspaceMemoryChangedEvent,
   DaemonUiWorkspaceAgentChangedEvent,

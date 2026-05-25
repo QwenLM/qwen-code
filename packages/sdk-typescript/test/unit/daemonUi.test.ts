@@ -945,7 +945,9 @@ describe('daemon UI normalizer and transcript reducer', () => {
     const block = state.blocks[0];
     expect(block).toMatchObject({ kind: 'tool', toolKind: 'updated_plan' });
     if (block?.kind !== 'tool') throw new Error('expected plan tool block');
-    const firstContent = (block.content as Array<Record<string, unknown>> | undefined)?.[0];
+    const firstContent = (
+      block.content as Array<Record<string, unknown>> | undefined
+    )?.[0];
     expect(firstContent).toMatchObject({
       content: {
         type: 'text',
@@ -1198,8 +1200,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
       if (originalReportError) {
         globalWithReportError.reportError = originalReportError;
       } else {
-        delete (globalWithReportError as { reportError?: unknown })
-          .reportError;
+        delete (globalWithReportError as { reportError?: unknown }).reportError;
       }
     }
   });
@@ -3777,10 +3778,7 @@ describe('daemon UI subagent nesting — review hardening (R1-R4)', () => {
     const result = runAdapterConformanceSuite(
       {
         reduce: (events) =>
-          reduceDaemonTranscriptEvents(
-            createDaemonTranscriptState(),
-            events,
-          ),
+          reduceDaemonTranscriptEvents(createDaemonTranscriptState(), events),
         renderToText: (state: DaemonTranscriptState) =>
           state.blocks
             .map((b: DaemonTranscriptBlock) => daemonBlockToMarkdown(b))
@@ -4298,10 +4296,9 @@ describe('KNOWN_DEVICE_FLOW_ERROR_KINDS stays in sync with public type', async (
 
 describe('daemonBlockToPlainText forwards opts (wenshao review 4350741340)', () => {
   it('sanitizes URL on tool preview when opts.sanitizeUrls is set', async () => {
-    const {
-      daemonBlockToPlainText,
-      createDaemonToolPreview,
-    } = await import('../../src/daemon/ui/index.js');
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
     const block = {
       id: 'b',
       kind: 'tool' as const,
@@ -4331,10 +4328,9 @@ describe('daemonBlockToHtml — additional coverage (wenshao R3 qwen3.7-max)', (
   } as const;
 
   it('strips token query param + Basic Auth from web_fetch URL when sanitizeUrls:true', async () => {
-    const {
-      daemonBlockToHtml,
-      createDaemonToolPreview,
-    } = await import('../../src/daemon/ui/index.js');
+    const { daemonBlockToHtml, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
     const block = {
       ...baseFields,
       kind: 'tool' as const,
@@ -4356,10 +4352,9 @@ describe('daemonBlockToHtml — additional coverage (wenshao R3 qwen3.7-max)', (
   });
 
   it('protocol-validates thumbnailUrl even when sanitizeUrls:false', async () => {
-    const {
-      daemonBlockToMarkdown,
-      createDaemonToolPreview,
-    } = await import('../../src/daemon/ui/index.js');
+    const { daemonBlockToMarkdown, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
     const block = {
       ...baseFields,
       kind: 'tool' as const,
@@ -4562,35 +4557,31 @@ describe('Late permission.resolved after sentinel pruned (wenshao R3 qwen3.7-max
 
 describe('ensureSafeImageUrl tightened to data:image/* (audit follow-up)', () => {
   it('allows http/https/data:image/* but rejects data:text/html', async () => {
-    const {
-      daemonBlockToMarkdown,
-      createDaemonToolPreview,
-    } = await import('../../src/daemon/ui/index.js');
-    const mkBlock = (thumbnailUrl: string) =>
-      ({
-        id: 'b',
-        kind: 'tool' as const,
-        toolCallId: 't',
-        title: 'gen',
-        status: 'completed',
-        preview: createDaemonToolPreview(
-          { prompt: 'p', thumbnailUrl },
-          { toolName: 'image_generator', toolKind: 'tool' },
-        ),
-        clientReceivedAt: 1,
-        createdAt: 1,
-        updatedAt: 1,
-      });
+    const { daemonBlockToMarkdown, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const mkBlock = (thumbnailUrl: string) => ({
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'gen',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        { prompt: 'p', thumbnailUrl },
+        { toolName: 'image_generator', toolKind: 'tool' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
 
     // https → passthrough
-    expect(daemonBlockToMarkdown(mkBlock('https://cdn.example.com/x.png'))).toContain(
-      'cdn.example.com',
-    );
+    expect(
+      daemonBlockToMarkdown(mkBlock('https://cdn.example.com/x.png')),
+    ).toContain('cdn.example.com');
     // data:image/png → passthrough
     expect(
-      daemonBlockToMarkdown(
-        mkBlock('data:image/png;base64,iVBORw0KGgo='),
-      ),
+      daemonBlockToMarkdown(mkBlock('data:image/png;base64,iVBORw0KGgo=')),
     ).toContain('data:image/png');
     // data:text/html → rejected to '#'
     expect(
@@ -4626,16 +4617,17 @@ describe('R5 review batch — coverage additions', () => {
       id: 2,
       v: 1,
       type: 'auth_device_flow_cancelled',
-      data: { /* no deviceFlowId */ },
+      data: {
+        /* no deviceFlowId */
+      },
     } as never);
     expect(events[0]?.type).toBe('debug');
   });
 
   it('sanitizeUrl clears OAuth implicit-grant access_token in #fragment', async () => {
-    const {
-      daemonBlockToMarkdown,
-      createDaemonToolPreview,
-    } = await import('../../src/daemon/ui/index.js');
+    const { daemonBlockToMarkdown, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
     const block = {
       id: 'b',
       kind: 'tool' as const,
@@ -4659,10 +4651,9 @@ describe('R5 review batch — coverage additions', () => {
   });
 
   it('sanitizeUrl strips AWS / GCP / Azure SAS credential params', async () => {
-    const {
-      daemonBlockToMarkdown,
-      createDaemonToolPreview,
-    } = await import('../../src/daemon/ui/index.js');
+    const { daemonBlockToMarkdown, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
     const mkBlock = (url: string) => ({
       id: 'b',
       kind: 'tool' as const,
@@ -4679,21 +4670,27 @@ describe('R5 review batch — coverage additions', () => {
     });
     // AWS S3 presigned
     const aws = daemonBlockToMarkdown(
-      mkBlock('https://bucket.s3.amazonaws.com/x?AWSAccessKeyId=AKIA_LEAK&Expires=1234&Signature=SIG_LEAK'),
+      mkBlock(
+        'https://bucket.s3.amazonaws.com/x?AWSAccessKeyId=AKIA_LEAK&Expires=1234&Signature=SIG_LEAK',
+      ),
       { sanitizeUrls: true },
     );
     expect(aws).not.toContain('AKIA_LEAK');
     expect(aws).not.toContain('SIG_LEAK');
     // GCP signed URL
     const gcp = daemonBlockToMarkdown(
-      mkBlock('https://storage.googleapis.com/b/o?GoogleAccessId=svc_LEAK@proj.iam.gserviceaccount.com&Expires=999&Signature=GCP_LEAK'),
+      mkBlock(
+        'https://storage.googleapis.com/b/o?GoogleAccessId=svc_LEAK@proj.iam.gserviceaccount.com&Expires=999&Signature=GCP_LEAK',
+      ),
       { sanitizeUrls: true },
     );
     expect(gcp).not.toContain('svc_LEAK');
     expect(gcp).not.toContain('GCP_LEAK');
     // Azure SAS
     const az = daemonBlockToMarkdown(
-      mkBlock('https://acct.blob.core.windows.net/c/x?sv=2020-08-04&se=2026-12-31&sig=AZ_LEAK&sp=r'),
+      mkBlock(
+        'https://acct.blob.core.windows.net/c/x?sv=2020-08-04&se=2026-12-31&sig=AZ_LEAK&sp=r',
+      ),
       { sanitizeUrls: true },
     );
     expect(az).not.toContain('AZ_LEAK');
@@ -4894,10 +4891,9 @@ describe('R6 review batch — recovery flow + pending pointer', () => {
 
 describe('R7 review batch — markdown escape + details sanitization', () => {
   it('escapeMarkdownText escapes < in metadata fields (titles/kinds) for HTML-backed pipelines', async () => {
-    const {
-      daemonBlockToMarkdown,
-      createDaemonToolPreview,
-    } = await import('../../src/daemon/ui/index.js');
+    const { daemonBlockToMarkdown, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
     // `escapeMarkdownText` is applied to METADATA fields (title /
     // toolKind / status) — those are reviewer-untrusted and should
     // escape `<` to prevent raw HTML pass-through when consumers run
@@ -4931,10 +4927,9 @@ describe('R7 review batch — markdown escape + details sanitization', () => {
   });
 
   it('markdown tool block details strips URL credentials when sanitizeUrls:true', async () => {
-    const {
-      daemonBlockToMarkdown,
-      createDaemonToolPreview,
-    } = await import('../../src/daemon/ui/index.js');
+    const { daemonBlockToMarkdown, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
     const block = {
       id: 'b',
       kind: 'tool' as const,
@@ -4961,10 +4956,9 @@ describe('R7 review batch — markdown escape + details sanitization', () => {
   });
 
   it('markdown tool block details preserves URLs verbatim when sanitizeUrls:false (back-compat)', async () => {
-    const {
-      daemonBlockToMarkdown,
-      createDaemonToolPreview,
-    } = await import('../../src/daemon/ui/index.js');
+    const { daemonBlockToMarkdown, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
     const block = {
       id: 'b',
       kind: 'tool' as const,
@@ -4975,8 +4969,7 @@ describe('R7 review batch — markdown escape + details sanitization', () => {
         { url: 'https://api.example.com/v1', method: 'GET' },
         { toolName: 'WebFetch', toolKind: 'tool' },
       ),
-      details:
-        '{\n  "url": "https://api.example.com/v1?token=visible"\n}',
+      details: '{\n  "url": "https://api.example.com/v1?token=visible"\n}',
       clientReceivedAt: 1,
       createdAt: 1,
       updatedAt: 1,
@@ -4985,5 +4978,106 @@ describe('R7 review batch — markdown escape + details sanitization', () => {
     // Default (no sanitizeUrls) — details survive verbatim per existing
     // contract; consumers must opt in.
     expect(md).toContain('token=visible');
+  });
+});
+
+describe('cross-client event recognition (prompt_cancelled / replay_complete)', () => {
+  it('normalizes prompt_cancelled to prompt.cancelled (not debug)', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'prompt_cancelled',
+      originatorClientId: 'client-X',
+      data: { sessionId: 's1' },
+    } as never);
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'prompt.cancelled',
+        originatorClientId: 'client-X',
+      }),
+    ]);
+  });
+
+  it('normalizes replay_complete to session.replay_complete with count', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'replay_complete',
+      data: { replayedCount: 3, lastEventId: 7 },
+    } as never);
+    expect(events[0]).toMatchObject({
+      type: 'session.replay_complete',
+      replayedCount: 3,
+      lastReplayedEventId: 7,
+    });
+  });
+
+  it('replay_complete with zero replay (empty ring) normalizes cleanly', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'replay_complete',
+      data: { replayedCount: 0 },
+    } as never);
+    expect(events[0]).toMatchObject({
+      type: 'session.replay_complete',
+      replayedCount: 0,
+    });
+    expect(events[0]).not.toHaveProperty('lastReplayedEventId');
+  });
+
+  it('prompt.cancelled clears in-flight tool spinners in the reducer', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'running-tool',
+            title: 'long task',
+            status: 'running',
+          },
+        },
+      } as never),
+      { now: 2 },
+    );
+    // Peer cancel arrives.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'prompt_cancelled',
+        originatorClientId: 'peer',
+        data: { sessionId: 's1' },
+      } as never),
+      { now: 3 },
+    );
+    const block = state.blocks.find(
+      (b): b is Extract<typeof b, { kind: 'tool' }> =>
+        b.kind === 'tool' && b.toolCallId === 'running-tool',
+    )!;
+    expect(block.status).toBe('cancelled');
+    expect(state.currentToolCallId).toBeUndefined();
+  });
+
+  it('session.replay_complete is a no-op against blocks', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    const before = state.blocks.length;
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'replay_complete',
+        data: { replayedCount: 5, lastEventId: 5 },
+      } as never),
+      { now: 2 },
+    );
+    expect(state.blocks.length).toBe(before);
   });
 });

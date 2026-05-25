@@ -73,6 +73,20 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // daemons predating F3 omit both event types.
   'permission_partial_vote',
   'permission_forbidden',
+  // Cross-client real-time sync (acp-bridge audit, 2026-05-24).
+  // `prompt_cancelled`: broadcast when a prompt is cancelled (explicit
+  //   `cancelSession` route OR originator SSE disconnect) so peer
+  //   subscribers observe the cancel as a first-class event instead of
+  //   inferring it from the absence of further `agent_message_chunk`
+  //   frames. Carries envelope-level `originatorClientId` (cancelling
+  //   client). Semantic is "cancel requested", not "confirmed".
+  // `replay_complete`: id-less sentinel emitted at the end of the
+  //   `Last-Event-ID` replay loop so consumers can deterministically
+  //   drop a catch-up indicator. Fires on both the clean-replay and the
+  //   ring-evicted (`state_resync_required`) paths, and even when there
+  //   was nothing to replay (`data.replayedCount === 0`).
+  'prompt_cancelled',
+  'replay_complete',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(

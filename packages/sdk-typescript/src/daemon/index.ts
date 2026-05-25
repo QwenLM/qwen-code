@@ -128,6 +128,8 @@ export type {
   DaemonUiSessionMetadataChangedEvent,
   DaemonUiShellOutputEvent,
   DaemonUiStateResyncRequiredEvent,
+  DaemonUiReplayCompleteEvent,
+  DaemonUiPromptCancelledEvent,
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
   DaemonUiToolProvenance,

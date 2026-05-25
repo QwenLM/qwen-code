@@ -150,9 +150,9 @@ function applyDaemonTranscriptEvent(
     // console.error) so it surfaces in DevTools but doesn't escalate as
     // an uncaught issue. Throttled at the call site is the consumer's
     // job — this fires once per dropped event.
-    if (typeof console !== 'undefined' && console.warn) {
+    if (typeof console !== 'undefined') {
       // eslint-disable-next-line no-console -- intentional diagnostic for awaitingResync silent-drop, per wenshao R5
-      console.warn(
+      console.warn?.(
         `[daemon-ui] dropping event \`${event.type}\` while awaitingResync; ` +
           `state may be stale until session reconnect (lastResyncRequired: ${
             next.lastResyncRequired
@@ -249,6 +249,20 @@ function applyDaemonTranscriptEvent(
       break;
     case 'session.state_resync_required':
       handleStateResyncRequired(next, event);
+      break;
+    case 'prompt.cancelled':
+      // Cross-client: a peer (or this client's own dropped connection)
+      // cancelled the active prompt. Clear in-flight tool spinners the
+      // same way an `assistant.done(cancelled)` would, so multi-client
+      // UIs don't show a tool spinning forever after a peer cancel.
+      // Idempotent — safe if the daemon also later emits terminal
+      // tool_call_update frames.
+      propagateCancellationToInFlightTools(next);
+      break;
+    case 'session.replay_complete':
+      // Sidechannel signal only — consumers read it off the event
+      // stream (or `selectors`) to drop a catch-up indicator. No
+      // transcript mutation.
       break;
     case 'workspace.memory.changed':
     case 'workspace.agent.changed':
@@ -444,8 +458,7 @@ function upsertToolBlock(
   // selectors fall back to `parentToolCallId` lookup in that case.
   const parentBlockId =
     event.parentToolCallId &&
-    state.toolBlockByCallId[event.parentToolCallId] !==
-      TRIMMED_TOOL_BLOCK_ID
+    state.toolBlockByCallId[event.parentToolCallId] !== TRIMMED_TOOL_BLOCK_ID
       ? state.toolBlockByCallId[event.parentToolCallId]
       : undefined;
   const block: DaemonToolTranscriptBlock = {
@@ -504,11 +517,7 @@ function upsertToolBlock(
   // returns and the block sits as visually-pending but currentToolCallId
   // never points at it. Effective-status keeps the pointer in sync
   // with what was actually written to the block.
-  updateCurrentToolPointer(
-    state,
-    event.toolCallId,
-    event.status ?? 'pending',
-  );
+  updateCurrentToolPointer(state, event.toolCallId, event.status ?? 'pending');
   clearActiveText(state);
 }
 
@@ -1169,8 +1178,10 @@ export function selectSubagentChildBlocks(
   state: DaemonTranscriptState,
   parentToolCallId: string,
 ): readonly DaemonToolTranscriptBlock[] {
-  return getOrBuildChildrenIndex(state.blocks).get(parentToolCallId) ??
-    EMPTY_CHILD_LIST;
+  return (
+    getOrBuildChildrenIndex(state.blocks).get(parentToolCallId) ??
+    EMPTY_CHILD_LIST
+  );
 }
 
 /**

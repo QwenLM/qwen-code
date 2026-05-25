@@ -297,6 +297,109 @@ function writeServeDebugLine(message: string): void {
 
 const MAX_DISPLAY_NAME_LENGTH = 256;
 
+/**
+ * Upper bound on how many prompt content blocks the bridge echoes per
+ * prompt. A programmatically-generated prompt with thousands of small
+ * blocks would otherwise trigger thousands of synchronous `publish()`
+ * fan-outs (each up to the per-bus subscriber cap) and flood the
+ * replay ring, evicting real history for every SSE subscriber. 256 is
+ * far above any human-authored prompt's block count.
+ */
+const MAX_ECHO_CONTENT_BLOCKS = 256;
+
+/**
+ * Echo a user prompt to the session bus so multi-client SSE subscribers
+ * see the input alongside the agent response. Iterates content blocks
+ * and emits one `user_message_chunk` per block, mirroring the shape the
+ * agent itself emits in the cron path (`Session.ts` cron handler) and
+ * the history-replay path (`HistoryReplayer`). The regular interactive
+ * `Session#executePrompt` was the historical outlier — it forwarded
+ * the prompt straight to the LLM without going through the session bus.
+ *
+ * Originator dedup: SDK consumers using `normalizeDaemonEvent` with
+ * `suppressOwnUserEcho: true` skip the echo for the originator (the
+ * envelope-level `originatorClientId` matches their own clientId).
+ *
+ * Source marker: `_meta.source: 'bridge-echo'` lets downstream tooling
+ * distinguish bridge-synthesized echoes from agent-emitted content if
+ * needed (e.g., for replay-deduplication when the agent later catches
+ * up and emits the same chunk through `HistoryReplayer`).
+ */
+function echoPromptToSessionBus(
+  entry: SessionEntry,
+  req: PromptRequest,
+  originatorClientId: string | undefined,
+): void {
+  // `PromptRequest.prompt` is a non-optional `ContentBlock[]` per the
+  // ACP type contract — read it directly so a future SDK bump that
+  // makes it optional surfaces as a TypeScript error rather than being
+  // silently swallowed by an `unknown` cast.
+  const prompt = req.prompt;
+  if (prompt.length === 0) return;
+  const serverTimestamp = Date.now();
+  const blockCount = Math.min(prompt.length, MAX_ECHO_CONTENT_BLOCKS);
+  for (let i = 0; i < blockCount; i += 1) {
+    const part = prompt[i];
+    if (!part || typeof part !== 'object' || Array.isArray(part)) continue;
+    // Every `ContentBlock` variant (text, image, audio, resource) is
+    // published to the bus verbatim. The SDK's `normalizeDaemonEvent`
+    // accepts any `content` shape; rich rendering of non-text blocks is
+    // the consumer's responsibility. (Core's first-class multimodal
+    // user-content emit is tracked separately in PR #4353 §D — that
+    // affects the agent-side replay path, not this bridge echo.)
+    try {
+      entry.events.publish({
+        type: 'session_update',
+        data: {
+          sessionId: req.sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: part,
+            _meta: { serverTimestamp, source: 'bridge-echo' },
+          },
+        },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+    } catch {
+      // bus may be closed (session being torn down); ignore — the
+      // prompt forward still proceeds.
+    }
+  }
+}
+
+/**
+ * Publish a `prompt_cancelled` event to the session bus so peer SSE
+ * subscribers observe the cancel as a first-class event instead of
+ * inferring it from the absence of further `agent_message_chunk`
+ * frames.
+ *
+ * Semantic: this signals **cancel REQUESTED**, not **cancel
+ * confirmed** — it's published before the ACP `cancel` notification is
+ * forwarded/awaited (so peers learn promptly even if the agent is slow
+ * to wind down or the channel is dead). If a consumer needs hard
+ * confirmation it should observe the subsequent terminal
+ * `tool_call_update` / `agent_message_chunk` quiescence.
+ *
+ * `originatorClientId` identifies the cancelling client. Used by both
+ * the explicit `cancelSession` route and the `sendPrompt` abort path
+ * (originator SSE disconnect) so neither cancel route is a silent gap.
+ */
+function broadcastPromptCancelled(
+  entry: SessionEntry,
+  sessionId: string,
+  originatorClientId: string | undefined,
+): void {
+  try {
+    entry.events.publish({
+      type: 'prompt_cancelled',
+      data: { sessionId },
+      ...(originatorClientId ? { originatorClientId } : {}),
+    });
+  } catch {
+    /* bus closed */
+  }
+}
+
 function hasControlCharacter(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
@@ -1902,6 +2005,26 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         } else {
           entry.activePromptOriginatorClientId = originatorClientId;
         }
+        // Echo the user prompt to the session bus so other SSE-subscribed
+        // clients see the input alongside the agent response.
+        //
+        // The interactive prompt path was the only one not emitting
+        // `user_message_chunk` — `Session#executePrompt` (the agent
+        // side) forwards the prompt directly to the LLM; the cron path
+        // (Session.ts:1402) and `HistoryReplayer` (line 65) emit it
+        // explicitly. Without this echo, multi-client UIs only saw
+        // assistant text from peer prompts — no record of who said what.
+        //
+        // Originator dedup: SDK consumers' `normalizeDaemonEvent` with
+        // `suppressOwnUserEcho: true` filters the echo when
+        // `event.originatorClientId === opts.clientId`. So the
+        // originator's local UI doesn't double-render its own input.
+        //
+        // Multi-modal: one envelope per content block. Non-text blocks
+        // pass through verbatim (the agent's Core multimodal echo is a
+        // separate follow-up tracked in PR #4353 §D); for now the
+        // common text path is the immediate fix.
+        echoPromptToSessionBus(entry, normalized, originatorClientId);
         const promptPromise = entry.connection
           .prompt(normalized)
           .finally(() => {
@@ -1945,6 +2068,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // forever (the agent is stuck waiting on a vote that no SSE
         // subscriber will ever cast).
         const onAbort = () => {
+          // Broadcast the cancel on the abort path too — client
+          // disconnect (SSE drop / tab close / laptop sleep) is the most
+          // common cancel trigger in production, and previously this path
+          // resolved permissions + forwarded ACP cancel WITHOUT telling
+          // peer SSE subscribers, leaving them in the exact
+          // silent-absence-of-chunks state this work set out to fix.
+          // `originatorClientId` here is the prompt's own originator (the
+          // client whose connection dropped).
+          broadcastPromptCancelled(entry, sessionId, originatorClientId);
           cancelPendingForSession(sessionId);
           entry.connection.cancel({ sessionId }).catch(() => {
             // Cancel is fire-and-forget; the agent may already be dead.
@@ -1988,10 +2120,29 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     async cancelSession(sessionId, req, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      resolveTrustedClientId(entry, context?.clientId);
-      // Validation-only: cancellation resolves permissions as system
-      // cancellations, so those generated events intentionally omit an
-      // originator client id.
+      const cancelOriginatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      // Broadcast `prompt_cancelled` so other SSE-subscribed clients see
+      // the cancel as a first-class event rather than inferring it from
+      // the absence of further `agent_message_chunk` frames. Mirrors
+      // `session_closed` — same audit gap (cross-client sync audit,
+      // 2026-05-24). Published before the ACP cancel forward (see the
+      // "cancel requested, not confirmed" semantic in
+      // `broadcastPromptCancelled`).
+      //
+      // Unconditional by design: not gated on `activePromptOriginatorClientId`
+      // because that field is only set when the active prompt carried an
+      // originator — gating on it would drop the broadcast for anonymous
+      // active prompts. A cancel against a genuinely idle session is a
+      // harmless no-op that consumers treat idempotently.
+      //
+      // The pending-permission resolution below intentionally omits the
+      // originator stamp (those resolutions are system-initiated, not
+      // user-voted); this top-level `prompt_cancelled` carries the
+      // cancelling client so peer UIs can attribute it.
+      broadcastPromptCancelled(entry, sessionId, cancelOriginatorClientId);
       // ACP spec: cancelling a prompt MUST resolve outstanding
       // requestPermission calls with outcome.cancelled. Do this *before*
       // forwarding the notification so the agent's wind-down sees the
@@ -2261,8 +2412,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           data: {
             sessionId,
             reason: 'client_close',
+            // `data.closedBy` is kept for back-compat with existing
+            // wire consumers; new code should read envelope-level
+            // `originatorClientId` (matches `session_metadata_updated`,
+            // `model_switched`, `approval_mode_changed`, etc.).
             ...(originatorClientId ? { closedBy: originatorClientId } : {}),
           },
+          ...(originatorClientId ? { originatorClientId } : {}),
         });
       } catch {
         /* bus already closed */
@@ -2289,9 +2445,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     updateSessionMetadata(sessionId, metadata, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      if (context?.clientId !== undefined) {
-        resolveTrustedClientId(entry, context.clientId);
-      }
+      // Capture the trusted originator so the broadcast envelope can
+      // attribute the change to a specific client (parity with
+      // `model_switched`, `approval_mode_changed`, etc., which stamp
+      // envelope-level `originatorClientId`). Prior to this, the
+      // metadata broadcast had no originator stamp at all — UIs
+      // couldn't tell which client renamed the session.
+      const metadataOriginatorClientId =
+        context?.clientId !== undefined
+          ? resolveTrustedClientId(entry, context.clientId)
+          : undefined;
       if (metadata.displayName !== undefined) {
         if (
           typeof metadata.displayName !== 'string' ||
@@ -2322,6 +2485,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             entry.events.publish({
               type: 'session_metadata_updated',
               data: { sessionId, displayName: entry.displayName },
+              ...(metadataOriginatorClientId
+                ? { originatorClientId: metadataOriginatorClientId }
+                : {}),
             });
           } catch {
             /* bus already closed */
