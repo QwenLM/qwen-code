@@ -25,13 +25,9 @@ Non–user-visible (refactor, types, docs): commands and output below; write N/A
 
 <!-- How you reproduced it and what a reviewer should confirm — steps if needed, expected vs observed behavior. Focus on outcomes; paste logs or test output when helpful. -->
 
-### Before
+### Evidence (Before & After)
 
-<!-- User-visible changes: evidence (tmux log, screenshots, video). Otherwise: N/A -->
-
-### After
-
-<!-- User-visible changes: evidence (tmux log, screenshots, video). Otherwise: N/A -->
+<!-- User-visible / TUI changes: paste before-and-after screenshots, tmux logs, or video side by side. Non-UI changes (docs, refactor, types): N/A -->
 
 ### Tested on
 
@@ -64,11 +60,7 @@ Otherwise reference without a closing keyword.
 <summary>中文说明</summary>
 
 <!--
-同步上面的描述。不必逐字对译，覆盖动机/改动/Reviewer Test Plan 即可。PR 标题保持英文。
+完整翻译上面的英文正文，逐段对应，不要省略或缩写。PR 标题保持英文。
 -->
-
-- 改了什么：
-- 改的动机是啥：
-- 审阅测试计划（复现步骤、预期现象、证据；TUI 改动附前后对比）：
 
 </details>
