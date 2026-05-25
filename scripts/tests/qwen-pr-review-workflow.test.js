@@ -133,10 +133,12 @@ function runResolvePrContext(eventName, eventPayload, extraEnv = {}) {
 describe('Qwen PR review workflow safety rails', () => {
   it('keeps qwen invocations scoped with deny list and MCP block', () => {
     expect(workflow).not.toContain('--yolo');
-    expect(workflow).not.toContain('"approvalMode": "yolo"');
     expect(workflow).toMatch(/pull-requests:\s+'write'/);
 
-    expect(workflow).toContain('--approval-mode default');
+    // YOLO mode auto-approves all tools not in the deny list;
+    // security is maintained by deny-list + MCP block + base-only checkout.
+    expect(workflow).toContain('--approval-mode yolo');
+    expect(workflow).toContain('"approvalMode": "yolo"');
     expect(workflow).not.toContain('--core-tools');
     expect(workflow).toContain('--exclude-tools "$QWEN_REVIEW_DENY_TOOLS"');
     expect(workflow).toContain(
