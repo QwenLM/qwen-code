@@ -665,8 +665,16 @@ function readMcpServers(
   const servers = toRecord(source['mcpServers']);
   return Object.entries(servers)
     .map(([name, value]) => {
-      const server = toMcpServerConfig(value);
-      return server ? { name, scope, server } : undefined;
+      try {
+        const server = toMcpServerConfig(value);
+        return server ? { name, scope, server } : undefined;
+      } catch (error) {
+        debugLogger.warn(
+          `Skipping malformed MCP server config [${scope}:${name}]:`,
+          error,
+        );
+        return undefined;
+      }
     })
     .filter(
       (
