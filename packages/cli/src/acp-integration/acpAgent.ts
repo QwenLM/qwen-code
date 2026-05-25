@@ -2261,12 +2261,15 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        // v1: no cross-process abort plumbing. Client disconnect aborts
-        // the bridge-side wait but the LLM call in this child runs to
-        // completion. Acceptable because recap is short (single-attempt
-        // side-query, maxOutputTokens: 300). A future request-id-based
-        // cancel ext-method can plumb a real signal end-to-end if the
-        // bandwidth cost ever becomes an issue.
+        // v1: no cross-process abort plumbing. The bridge does not listen
+        // for HTTP client disconnect and no AbortSignal is threaded through
+        // the ext-method, so the LLM call in this child always runs to
+        // completion. The only ceilings are the bridge's 60s
+        // `SESSION_RECAP_TIMEOUT_MS` backstop and the transport-closed race
+        // against ACP channel death. Acceptable because recap is short
+        // (single-attempt side-query, `maxOutputTokens: 300`). A future
+        // request-id-based cancel ext-method can plumb a real signal
+        // end-to-end if the bandwidth cost ever becomes an issue.
         const recap = await generateSessionRecap(
           config,
           new AbortController().signal,
