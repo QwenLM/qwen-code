@@ -6344,6 +6344,149 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('extNotification — followup_suggestion', () => {
+    it('publishes followup_suggestion when the child fires a prompt-suggestion notification', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/prompt-suggestion',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          suggestion: 'Run the tests?',
+          promptId: `${session.sessionId}########3`,
+        },
+      );
+
+      const collected: Array<{ type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      expect(collected[0]?.type).toBe('followup_suggestion');
+      expect(collected[0]?.data).toMatchObject({
+        sessionId: session.sessionId,
+        suggestion: 'Run the tests?',
+        promptId: `${session.sessionId}########3`,
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('drops malformed prompt-suggestion payloads silently', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capturedConn = new AgentSideConnection(
+          () => new FakeAgent(),
+          agentStream,
+        );
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const seen: string[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) seen.push(e.type);
+      })();
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/prompt-suggestion',
+        { v: 1, sessionId: session.sessionId, suggestion: '' },
+      );
+      void capturedConn!.extNotification(
+        'qwen/notify/session/prompt-suggestion',
+        { v: 1, sessionId: session.sessionId, promptId: 'p1' },
+      );
+      void capturedConn!.extNotification(
+        'qwen/notify/session/prompt-suggestion',
+        { v: 1 },
+      );
+      void capturedConn!.extNotification(
+        'qwen/notify/session/prompt-suggestion',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          suggestion: 123 as unknown as string,
+          promptId: 'p1',
+        },
+      );
+      await new Promise((r) => setTimeout(r, 10));
+      abort.abort();
+      await collecting;
+      expect(seen.filter((t) => t === 'followup_suggestion')).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('drops prompt-suggestion after session is closed', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capturedConn = new AgentSideConnection(
+          () => new FakeAgent(),
+          agentStream,
+        );
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.closeSession(session.sessionId);
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/prompt-suggestion',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          suggestion: 'stale',
+          promptId: 'p1',
+        },
+      );
+      // No throw — silently dropped.
+      await bridge.shutdown();
+    });
+  });
+
   describe('maxSessions cap (chiga0 Rec 3)', () => {
     it('refuses NEW spawns past the cap with SessionLimitExceededError', async () => {
       let n = 0;
