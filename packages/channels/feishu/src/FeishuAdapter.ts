@@ -374,7 +374,14 @@ export class FeishuChannel extends ChannelBase {
       } else if (item.msg_type === 'text') {
         return { content: content.text || undefined, isFromBot };
       } else if (item.msg_type === 'post') {
-        const langPost = Object.values(content)[0] as
+        // Post content may be wrapped in a language key like {"zh_cn": {title, content}}
+        // or it may be directly {title, content} (e.g. from API history fetch).
+        const firstValue = Object.values(content)[0];
+        const langPost = (
+          typeof firstValue === 'object' && firstValue !== null
+            ? firstValue
+            : content
+        ) as
           | {
               title?: string;
               content?: Array<Array<{ tag: string; text?: string }>>;
@@ -1474,15 +1481,16 @@ export class FeishuChannel extends ChannelBase {
         case 'post': {
           // Rich text (post) format: extract text from nested structure
           const lines: string[] = [];
-          const post = content as Record<
-            string,
-            {
-              title?: string;
-              content?: Array<Array<{ tag: string; text?: string }>>;
-            }
-          >;
-          // Post can have multiple language versions; pick first
-          const langPost = Object.values(post)[0];
+          const post = content as Record<string, unknown>;
+          // Post can have multiple language versions like {"zh_cn": {title, content}}
+          // or be directly {title, content} (no language wrapper).
+          const firstVal = Object.values(post)[0];
+          const langPost = (
+            typeof firstVal === 'object' && firstVal !== null ? firstVal : post
+          ) as {
+            title?: string;
+            content?: Array<Array<{ tag: string; text?: string }>>;
+          };
           if (langPost?.title) {
             lines.push(langPost.title);
           }
