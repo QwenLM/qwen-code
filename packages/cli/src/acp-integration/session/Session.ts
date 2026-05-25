@@ -1398,6 +1398,7 @@ export class Session implements SessionContext {
 
         try {
           let promptParts: Part[] = [{ text: prompt }];
+          let slashOnComplete: (() => Promise<void>) | undefined;
           if (isSlashCommand(prompt)) {
             const slashCommandResult = await handleSlashCommand(
               prompt,
@@ -1405,6 +1406,12 @@ export class Session implements SessionContext {
               this.config,
               this.settings,
             );
+            if (
+              slashCommandResult.type === 'submit_prompt' &&
+              slashCommandResult.onComplete
+            ) {
+              slashOnComplete = slashCommandResult.onComplete;
+            }
             const processedParts = await this.#processSlashCommandResult(
               slashCommandResult,
               [{ type: 'text', text: prompt }],
@@ -1513,6 +1520,11 @@ export class Session implements SessionContext {
               );
               nextMessage = { role: 'user', parts: toolResponseParts };
             }
+          }
+          // Fire onComplete from submit_prompt (e.g. markRunCompleted)
+          // after the model turn finishes.
+          if (slashOnComplete) {
+            await slashOnComplete();
           }
         } catch (error) {
           if (ac.signal.aborted) return;

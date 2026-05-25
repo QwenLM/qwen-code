@@ -1966,7 +1966,14 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          // Fire onComplete even on error so auto-improve ticks don't deadlock
+          // with currentRun stuck in 'implementing' status.
+          const onComplete = submitPromptOnCompleteRef.current;
           submitPromptOnCompleteRef.current = null;
+          currentAutoImproveLoopIdRef.current = null;
+          if (onComplete) {
+            void onComplete();
+          }
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {

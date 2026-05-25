@@ -45,6 +45,7 @@ export type NonInteractiveSlashCommandResult =
   | {
       type: 'submit_prompt';
       content: PartListUnion;
+      onComplete?: () => Promise<void>;
     }
   | {
       type: 'message';
@@ -89,6 +90,7 @@ function handleCommandResult(
       return {
         type: 'submit_prompt',
         content: result.content,
+        ...(result.onComplete ? { onComplete: result.onComplete } : {}),
       };
 
     case 'message':

@@ -1006,6 +1006,7 @@ export async function runNonInteractive(
                 void (async () => {
                   const label = job.prompt.slice(0, 40);
                   let modelText = job.prompt;
+                  let slashOnComplete: (() => Promise<void>) | undefined;
                   if (isSlashCommand(job.prompt)) {
                     const slashCommandResult = await handleSlashCommand(
                       job.prompt,
@@ -1015,9 +1016,20 @@ export async function runNonInteractive(
                     );
                     if (slashCommandResult.type === 'submit_prompt') {
                       modelText = partListToText(slashCommandResult.content);
+                      slashOnComplete = slashCommandResult.onComplete;
                     } else if (slashCommandResult.type === 'message') {
-                      modelText = slashCommandResult.content;
+                      // Terminal response — emit and skip model submission
+                      await emitNonInteractiveFinalMessage({
+                        message: slashCommandResult.content,
+                        isError: slashCommandResult.messageType === 'error',
+                        adapter,
+                        config,
+                        startTimeMs: startTime,
+                      });
+                      checkCronDone();
+                      return;
                     } else {
+                      checkCronDone();
                       return;
                     }
                   }
@@ -1027,6 +1039,11 @@ export async function runNonInteractive(
                     sendMessageType: SendMessageType.Cron,
                   });
                   await drainLocalQueue();
+                  // Fire onComplete from submit_prompt (e.g. markRunCompleted)
+                  // after the model turn finishes.
+                  if (slashOnComplete) {
+                    await slashOnComplete();
+                  }
                   checkCronDone();
                 })().catch(onDrainError);
               });
