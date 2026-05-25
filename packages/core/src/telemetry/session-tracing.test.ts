@@ -281,12 +281,7 @@ describe('session-tracing', () => {
     });
   });
 
-  // Regression coverage for #4486: startInteractionSpan was the only
-  // startSpan call site missing the parent ctx, so OTel minted a fresh
-  // random trace id and the interaction span split off from its
-  // sessionId-derived children. Tests below pin the parent context so a
-  // re-introduced bug fails fast instead of surviving until prod.
-  describe('interaction span — trace context', () => {
+  describe('interaction span — trace context (#4486)', () => {
     it('attaches to the session root context returned by getSessionContext', () => {
       const fakeRoot = { __sessionRoot: true } as unknown as Context;
       setSessionContext(fakeRoot, 'test-session');
@@ -302,10 +297,6 @@ describe('session-tracing', () => {
     });
 
     it('anchors at session root even when an unrelated OTel span is active', () => {
-      // resolveParentContext() would prefer the active span over the
-      // session root; interaction must bypass that and pin to session
-      // root so turn boundaries stay anchored regardless of any
-      // wrapping span (e.g. user code wrapping the run in tracing).
       const fakeRoot = { __sessionRoot: true } as unknown as Context;
       setSessionContext(fakeRoot, 'test-session');
       mockState.activeOtelSpan = { name: 'unrelated-wrapper-span' };
