@@ -97,6 +97,11 @@ export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
   promptId?: string;
+  /**
+   * Whether this visible user-history item actually reached the model.
+   * Set by slash-command processing; undefined falls back to lexical detection.
+   */
+  sentToModel?: boolean;
 };
 
 export type HistoryItemGemini = HistoryItemBase & {

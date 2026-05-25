@@ -237,7 +237,13 @@ function convertToHistoryItems(
           | undefined;
         if (!payload) continue;
         if (payload.phase === 'invocation' && payload.rawCommand) {
-          items.push({ type: 'user', text: payload.rawCommand });
+          items.push({
+            type: 'user',
+            text: payload.rawCommand,
+            ...(payload.sentToModel !== undefined
+              ? { sentToModel: payload.sentToModel }
+              : {}),
+          });
         }
         if (payload.phase === 'result') {
           const outputs = payload.outputHistoryItems ?? [];

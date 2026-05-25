@@ -109,9 +109,10 @@ function createTestCommand(
 }
 
 describe('useSlashCommandProcessor', () => {
-  const mockAddItem = vi.fn();
+  const mockAddItem = vi.fn().mockReturnValue(1);
   const mockClearItems = vi.fn();
   const mockLoadHistory = vi.fn();
+  const mockUpdateItem = vi.fn();
   const mockOpenThemeDialog = vi.fn();
   const mockOpenAuthDialog = vi.fn();
   const mockOpenMemoryDialog = vi.fn();
@@ -191,6 +192,7 @@ describe('useSlashCommandProcessor', () => {
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
         null, // logger
+        mockUpdateItem,
       ),
     );
 
@@ -630,7 +632,7 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
-        { type: MessageType.USER, text: '/filecmd' },
+        { type: MessageType.USER, text: '/filecmd', sentToModel: false },
         expect.any(Number),
       );
     });
@@ -662,7 +664,7 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
-        { type: MessageType.USER, text: '/mcpcmd' },
+        { type: MessageType.USER, text: '/mcpcmd', sentToModel: false },
         expect.any(Number),
       );
     });
@@ -997,7 +999,7 @@ describe('useSlashCommandProcessor', () => {
 
       // It should be added to the history.
       expect(mockAddItem).toHaveBeenCalledWith(
-        { type: MessageType.USER, text: '/exit' },
+        { type: MessageType.USER, text: '/exit', sentToModel: false },
         expect.any(Number),
       );
     });
@@ -1023,6 +1025,7 @@ describe('useSlashCommandProcessor', () => {
           new Map(), // extensionsUpdateState
           true, // isConfigInitialized
           null, // logger
+          mockUpdateItem,
         ),
       );
 

@@ -23,6 +23,8 @@ export function isRealUserTurn(
   item: HistoryItem,
 ): item is HistoryItem & HistoryItemUser {
   if (item.type !== 'user' || !item.text) return false;
+  if (item.sentToModel !== undefined) return item.sentToModel;
+  // Fallback for sessions without sentToModel (legacy or non-slash paths).
   return !isSlashCommand(item.text) && !item.text.startsWith('?');
 }
 
