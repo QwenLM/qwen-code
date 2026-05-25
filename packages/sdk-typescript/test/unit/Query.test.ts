@@ -313,6 +313,27 @@ describe('Query', () => {
       await query.close();
     });
 
+    it('should include canUseTool timeout in initialize request', async () => {
+      const query = new Query(transport, {
+        cwd: '/test',
+        timeout: {
+          canUseTool: 120_000,
+        },
+      });
+
+      await vi.waitFor(() => {
+        expect(transport.writtenMessages.length).toBeGreaterThan(0);
+      });
+
+      const initRequest =
+        transport.getLastWrittenMessage() as CLIControlRequest;
+      expect(initRequest.request.subtype).toBe('initialize');
+      expect(initRequest.request.timeout).toEqual({ canUseTool: 120_000 });
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
     it('should generate unique session ID', async () => {
       const transport2 = new MockTransport();
       const query1 = new Query(transport, { cwd: '/test' });

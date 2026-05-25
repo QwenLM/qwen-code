@@ -132,6 +132,15 @@ export class SystemController extends BaseController {
 
     this.context.config.setSdkMode(true);
 
+    const canUseToolTimeout = payload.timeout?.canUseTool;
+    if (
+      typeof canUseToolTimeout === 'number' &&
+      Number.isFinite(canUseToolTimeout) &&
+      canUseToolTimeout > 0
+    ) {
+      this.context.sdkCanUseToolTimeoutMs = canUseToolTimeout;
+    }
+
     // Process SDK MCP servers
     if (
       payload.sdkMcpServers &&
