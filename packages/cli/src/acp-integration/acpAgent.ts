@@ -2440,7 +2440,8 @@ class QwenAgent implements Agent {
           );
         }
         const settings = loadSettings(cwd);
-        const scope = params['scope'] === 'workspace' ? 'workspace' : 'user';
+        const settingScope = toSettingsScope(params['scope']);
+        const scope = settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
         const mcpServers = {
           ...toRecord(existing['mcpServers']),
@@ -2448,7 +2449,7 @@ class QwenAgent implements Agent {
             normalizeMcpServerConfig(params['server']),
           ),
         };
-        settings.setValue(toSettingsScope(scope), 'mcpServers', mcpServers);
+        settings.setValue(settingScope, 'mcpServers', mcpServers);
         const updated = loadSettings(cwd);
         this.settings = updated;
         return this.buildCoreSettings(updated, cwd);
@@ -2462,11 +2463,12 @@ class QwenAgent implements Agent {
           );
         }
         const settings = loadSettings(cwd);
-        const scope = params['scope'] === 'workspace' ? 'workspace' : 'user';
+        const settingScope = toSettingsScope(params['scope']);
+        const scope = settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
         const mcpServers = { ...toRecord(existing['mcpServers']) };
         delete mcpServers[name.trim()];
-        settings.setValue(toSettingsScope(scope), 'mcpServers', mcpServers);
+        settings.setValue(settingScope, 'mcpServers', mcpServers);
         const updated = loadSettings(cwd);
         this.settings = updated;
         return this.buildCoreSettings(updated, cwd);
@@ -2477,7 +2479,8 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid hook event');
         }
         const settings = loadSettings(cwd);
-        const scope = params['scope'] === 'workspace' ? 'workspace' : 'user';
+        const settingScope = toSettingsScope(params['scope']);
+        const scope = settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
         const hooksRoot = { ...toRecord(existing['hooks']) };
         const eventHooks = Array.isArray(hooksRoot[event])
@@ -2491,7 +2494,7 @@ class QwenAgent implements Agent {
           eventHooks.push(hook);
         }
         hooksRoot[event] = eventHooks;
-        settings.setValue(toSettingsScope(scope), 'hooks', hooksRoot);
+        settings.setValue(settingScope, 'hooks', hooksRoot);
         const updated = loadSettings(cwd);
         this.settings = updated;
         return this.buildCoreSettings(updated, cwd);
@@ -2506,7 +2509,8 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid hook index');
         }
         const settings = loadSettings(cwd);
-        const scope = params['scope'] === 'workspace' ? 'workspace' : 'user';
+        const settingScope = toSettingsScope(params['scope']);
+        const scope = settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
         const hooksRoot = { ...toRecord(existing['hooks']) };
         const eventHooks = Array.isArray(hooksRoot[event])
@@ -2514,7 +2518,7 @@ class QwenAgent implements Agent {
           : [];
         eventHooks.splice(index, 1);
         hooksRoot[event] = eventHooks;
-        settings.setValue(toSettingsScope(scope), 'hooks', hooksRoot);
+        settings.setValue(settingScope, 'hooks', hooksRoot);
         const updated = loadSettings(cwd);
         this.settings = updated;
         return this.buildCoreSettings(updated, cwd);
@@ -2547,14 +2551,16 @@ class QwenAgent implements Agent {
         if (!extension) {
           throw RequestError.invalidParams(undefined, 'Extension not found');
         }
+        const extScope =
+          toSettingsScope(params['scope']) === SettingScope.Workspace
+            ? ExtensionSettingScope.WORKSPACE
+            : ExtensionSettingScope.USER;
         await updateSetting(
           extension.config,
           extension.id,
           settingKey,
           async () => value,
-          params['scope'] === 'workspace'
-            ? ExtensionSettingScope.WORKSPACE
-            : ExtensionSettingScope.USER,
+          extScope,
         );
         const updated = loadSettings(cwd);
         this.settings = updated;
