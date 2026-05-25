@@ -5,6 +5,8 @@ import { filterPublicStaticParams, isPublicDocsPath } from '../public-docs';
 
 const generateAllStaticParams = generateStaticParamsFor('mdxPath');
 
+export const dynamicParams = false;
+
 export async function generateStaticParams(...args) {
   const staticParams = await generateAllStaticParams(...args);
   return filterPublicStaticParams(staticParams);
