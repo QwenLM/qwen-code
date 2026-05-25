@@ -42,6 +42,14 @@ export interface DaemonConnectionState {
   sessionId?: string;
   workspaceCwd?: string;
   error?: string;
+  /**
+   * True while the daemon is replaying buffered history after a resume
+   * (a `Last-Event-ID` subscription), cleared when the `replay_complete`
+   * sentinel arrives. Lets the UI show a deterministic "catching up"
+   * indicator instead of guessing with a spinner timeout. Only set on
+   * resume — a fresh live-tail subscription has no replay phase.
+   */
+  catchingUp?: boolean;
 }
 
 export interface DaemonSessionProviderProps {
@@ -171,10 +179,19 @@ export function DaemonSessionProvider({
             sessionRef.current = session;
           }
 
+          // `catchingUp` arms a positive "replaying history" indicator that
+          // the daemon's `replay_complete` sentinel deterministically
+          // clears (no spinner-timeout heuristics). The daemon only emits
+          // `replay_complete` when the subscription carried a
+          // `Last-Event-ID` (i.e. a resume), so only arm it then —
+          // otherwise a live-tail subscribe would never see the sentinel
+          // and the indicator would stick on forever.
+          const expectingReplay = session.lastEventId !== undefined;
           setConnection({
             status: 'connected',
             sessionId: session.sessionId,
             workspaceCwd: session.workspaceCwd,
+            ...(expectingReplay ? { catchingUp: true } : {}),
           });
 
           let sawEvent = false;
@@ -185,6 +202,14 @@ export function DaemonSessionProvider({
             if (!sawEvent) {
               sawEvent = true;
               reconnectAttempt = 0;
+            }
+            if (event.type === 'replay_complete') {
+              // Replay drained — flip from "catching up" to "live".
+              setConnection((current) =>
+                current.catchingUp
+                  ? { ...current, catchingUp: false }
+                  : current,
+              );
             }
             try {
               const eventOptions = eventOptionsRef.current;

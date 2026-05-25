@@ -28,6 +28,7 @@ interface MockSession {
   sessionId: string;
   workspaceCwd: string;
   clientId: string;
+  lastEventId?: number;
   prompt: (req: unknown, signal?: AbortSignal) => Promise<PromptResult>;
   cancel: () => Promise<void>;
   setModel: (modelId: string) => Promise<{ modelId: string }>;
@@ -410,6 +411,70 @@ describe('DaemonSessionProvider', () => {
       { kind: 'assistant', text: 'partial', streaming: false },
       { kind: 'error', text: 'Prompt failed: network down' },
     ]);
+  });
+
+  it('exposes catchingUp on resume and clears it on replay_complete', async () => {
+    // Resume subscriptions (session carries a Last-Event-ID) get a
+    // deterministic catch-up indicator: `catchingUp` arms on connect and
+    // clears when the daemon's `replay_complete` sentinel arrives.
+    const replayDrained = createDeferred<void>();
+    const session = createMockSession({
+      lastEventId: 5,
+      events: async function* resumeThenIdle(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        // First a replayed history frame, then the sentinel, then idle.
+        yield {
+          id: 6,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'replayed' },
+            },
+          },
+        };
+        yield {
+          v: 1,
+          type: 'replay_complete',
+          data: { replayedCount: 1, lastEventId: 6 },
+        };
+        replayDrained.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    const states: DaemonConnectionState[] = [];
+    function Harness() {
+      const connection = useDaemonConnection();
+      states.push(connection);
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await replayDrained.promise;
+      await flushPromises();
+    });
+
+    // While catching up we surface catchingUp:true; after replay_complete
+    // it clears to a plain connected state.
+    expect(states.some((s) => s.status === 'connected' && s.catchingUp)).toBe(
+      true,
+    );
+    const last = states[states.length - 1];
+    expect(last?.status).toBe('connected');
+    expect(last?.catchingUp).toBeFalsy();
   });
 
   it('clears prompt state and transcript when reconnect attaches a different session', async () => {
@@ -1003,6 +1068,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     sessionId: opts.sessionId ?? 'session-1',
     workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
     clientId: opts.clientId ?? 'client-1',
+    lastEventId: opts.lastEventId,
     prompt:
       opts.prompt ??
       vi.fn(async () => ({

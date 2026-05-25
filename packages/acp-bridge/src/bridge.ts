@@ -217,6 +217,16 @@ interface SessionEntry {
    */
   modelRoundtripInFlight?: boolean;
   /**
+   * Per-session approval-mode FIFO (doudouOUC #4484 post-merge review,
+   * A3). Mirrors `modelChangeQueue`: serializes concurrent
+   * `setSessionApprovalMode` calls so two `POST /session/:id/approval-mode`
+   * can't race their ACP roundtrip + persist and publish an
+   * `approval_mode_changed` event whose `next` mode disagrees with the
+   * mode the ACP child actually settled on. Always resolves — failures
+   * swallowed at the tail like `modelChangeQueue`.
+   */
+  approvalModeQueue: Promise<void>;
+  /**
    * Cached "transport closed" promise. The first `sendPrompt` on a
    * session lazy-builds this from `channel.exited.then(throw)`; every
    * subsequent prompt's race uses the SAME promise so the listener
@@ -243,6 +253,17 @@ interface SessionEntry {
    * inline session updates / permission requests can safely inherit this id.
    */
   activePromptOriginatorClientId?: string;
+  /**
+   * Per-prompt "already broadcast `prompt_cancelled`" latch (doudouOUC
+   * #4484 post-merge review, D2). The explicit `cancelSession` route and
+   * the `sendPrompt` abort path (originator SSE drop) can both fire for
+   * the same active prompt — e.g. a client POSTs /cancel then immediately
+   * closes its socket. Without dedup, peers receive two `prompt_cancelled`
+   * frames for one turn. Reset to `false` when a prompt starts and when it
+   * settles (so an idle-session cancel still broadcasts, preserving the
+   * prior unconditional behavior); set `true` on the first broadcast.
+   */
+  cancelBroadcast?: boolean;
   /**
    * Count of times `spawnOrAttach` has returned `attached: true` for
    * this entry — i.e. a second-or-subsequent client claimed this
@@ -331,6 +352,14 @@ const MAX_ECHO_CONTENT_BLOCKS = 256;
  * `suppressOwnUserEcho: true` skip the echo for the originator (the
  * envelope-level `originatorClientId` matches their own clientId).
  *
+ * Anonymous-prompt caveat (D2-review D5): a stable `X-Qwen-Client-Id` is a
+ * PRECONDITION for that dedup. A prompt with no clientId (curl smoke /
+ * pre-registration script) produces an envelope without
+ * `originatorClientId`, so `suppressOwnUserEcho` has nothing to match and
+ * the originating connection sees its own input echoed back. This is an
+ * accepted edge for headless/anonymous callers; interactive multi-client
+ * UIs always carry a clientId and are unaffected.
+ *
  * Source marker: `_meta.source: 'bridge-echo'` lets downstream tooling
  * distinguish bridge-synthesized echoes from agent-emitted content if
  * needed (e.g., for replay-deduplication when the agent later catches
@@ -345,8 +374,12 @@ function echoPromptToSessionBus(
   // ACP type contract — read it directly so a future SDK bump that
   // makes it optional surfaces as a TypeScript error rather than being
   // silently swallowed by an `unknown` cast.
+  // `PromptRequest.prompt` is typed as a non-optional `ContentBlock[]`, so
+  // TS guarantees the shape. The runtime `Array.isArray` guard (D6) is pure
+  // defense-in-depth for a malformed HTTP body that slips past the type
+  // contract — cheaper than a thrown `TypeError` mid-echo.
   const prompt = req.prompt;
-  if (prompt.length === 0) return;
+  if (!Array.isArray(prompt) || prompt.length === 0) return;
   const serverTimestamp = Date.now();
   const blockCount = Math.min(prompt.length, MAX_ECHO_CONTENT_BLOCKS);
   for (let i = 0; i < blockCount; i += 1) {
@@ -366,6 +399,14 @@ function echoPromptToSessionBus(
           update: {
             sessionUpdate: 'user_message_chunk',
             content: part,
+            // D3 (doudouOUC #4484 post-merge review): `_meta` lives inside
+            // the `update` object rather than at envelope level. Kept here
+            // deliberately — `_meta` is a standard JSON-RPC/MCP extension
+            // field permitted alongside spec fields, the SDK normalizer
+            // reads it from `update._meta`/`data._meta`, and every other
+            // agent-emitted session_update carries `_meta` the same way.
+            // Relocating to the envelope would be a coordinated wire change
+            // across all emitters + the SDK for no functional gain.
             _meta: { serverTimestamp, source: 'bridge-echo' },
           },
         },
@@ -399,16 +440,35 @@ function broadcastPromptCancelled(
   entry: SessionEntry,
   sessionId: string,
   originatorClientId: string | undefined,
+  reason?: 'forward_failed',
 ): void {
   try {
     entry.events.publish({
       type: 'prompt_cancelled',
-      data: { sessionId },
+      data: { sessionId, ...(reason ? { reason } : {}) },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
   } catch {
     /* bus closed */
   }
+}
+
+/**
+ * D2 dedup wrapper around {@link broadcastPromptCancelled}. Broadcasts at
+ * most once per active prompt by latching `entry.cancelBroadcast`, so the
+ * `cancelSession` route and the `sendPrompt` abort path can't both emit a
+ * `prompt_cancelled` for a single turn (POST /cancel then socket close).
+ * The latch is reset when a prompt starts and when it settles.
+ */
+function broadcastPromptCancelledOnce(
+  entry: SessionEntry,
+  sessionId: string,
+  originatorClientId: string | undefined,
+  reason?: 'forward_failed',
+): void {
+  if (entry.cancelBroadcast) return;
+  entry.cancelBroadcast = true;
+  broadcastPromptCancelled(entry, sessionId, originatorClientId, reason);
 }
 
 function hasControlCharacter(value: string): boolean {
@@ -1495,6 +1555,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       events,
       promptQueue: Promise.resolve(),
       modelChangeQueue: Promise.resolve(),
+      approvalModeQueue: Promise.resolve(),
       pendingPermissionIds: new Set(),
       clientIds: new Map(),
       clientLastSeenAt: new Map(),
@@ -2064,6 +2125,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // pass through verbatim (the agent's Core multimodal echo is a
         // separate follow-up tracked in PR #4353 §D); for now the
         // common text path is the immediate fix.
+        // A fresh prompt starts: clear the D2 cancel-broadcast latch so a
+        // cancel for THIS turn can broadcast (a stale latch from the prior
+        // turn must not suppress it).
+        entry.cancelBroadcast = false;
         echoPromptToSessionBus(entry, normalized, originatorClientId);
         const promptPromise = entry.connection
           .prompt(normalized)
@@ -2093,6 +2158,31 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           getTransportClosedReject(entry),
         ]);
 
+        // C3 (doudouOUC #4484 post-merge review): the user echo
+        // (`echoPromptToSessionBus`) was already published BEFORE the
+        // forward. If the forward itself fails (transport died, ACP child
+        // error) and it wasn't a user-initiated cancel that already
+        // broadcast, peers would be stuck having seen the echoed input with
+        // no response and no terminal signal — permanent silence. Emit a
+        // compensating `prompt_cancelled{reason:'forward_failed'}` so the
+        // turn visibly ends. The `…Once` latch dedups against the abort
+        // path (a normal cancel resolves rather than rejects, so this only
+        // fires on genuine forward failures). Side-effect only — the
+        // caller's `racedPromise` reference still surfaces the rejection.
+        void racedPromise
+          .then(
+            () => {},
+            () => {
+              broadcastPromptCancelledOnce(
+                entry,
+                sessionId,
+                originatorClientId,
+                'forward_failed',
+              );
+            },
+          )
+          .catch(() => {});
+
         if (!signal) return racedPromise;
         // Wire the abort: when the signal fires (e.g. SSE route's
         // req.on('close')), tell the agent to wind down. ACP cancel is a
@@ -2115,8 +2205,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           // peer SSE subscribers, leaving them in the exact
           // silent-absence-of-chunks state this work set out to fix.
           // `originatorClientId` here is the prompt's own originator (the
-          // client whose connection dropped).
-          broadcastPromptCancelled(entry, sessionId, originatorClientId);
+          // client whose connection dropped). `…Once` dedups against an
+          // explicit `cancelSession` for the same turn (D2).
+          broadcastPromptCancelledOnce(entry, sessionId, originatorClientId);
           cancelPendingForSession(sessionId);
           entry.connection.cancel({ sessionId }).catch(() => {
             // Cancel is fire-and-forget; the agent may already be dead.
@@ -2182,7 +2273,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // originator stamp (those resolutions are system-initiated, not
       // user-voted); this top-level `prompt_cancelled` carries the
       // cancelling client so peer UIs can attribute it.
-      broadcastPromptCancelled(entry, sessionId, cancelOriginatorClientId);
+      //
+      // `…Once` (D2): dedups against the `sendPrompt` abort path so a
+      // client that POSTs /cancel and then drops its socket doesn't emit
+      // two `prompt_cancelled` frames for the same turn. The latch resets
+      // at the next prompt start, so a later turn still broadcasts.
+      broadcastPromptCancelledOnce(entry, sessionId, cancelOriginatorClientId);
       // ACP spec: cancelling a prompt MUST resolve outstanding
       // requestPermission calls with outcome.cancelled. Do this *before*
       // forwarding the notification so the agent's wind-down sees the
@@ -3022,19 +3118,34 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             'and tests must opt in or omit `persist`.',
         );
       }
+      // Serialize the ACP roundtrip through `entry.approvalModeQueue` (A3)
+      // so two concurrent approval-mode changes can't interleave their
+      // `extMethod` calls and leave the published `approval_mode_changed`
+      // disagreeing with the mode the ACP child actually settled on.
+      // Mirrors `setSessionModel`'s `modelChangeQueue` usage.
       let response: { previous: ApprovalMode; current: ApprovalMode };
-      try {
-        response = (await Promise.race([
-          withTimeout(
-            entry.connection.extMethod(
+      const approvalWork = entry.approvalModeQueue.then(
+        () =>
+          Promise.race([
+            withTimeout(
+              entry.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+                { sessionId, mode },
+              ),
+              initTimeoutMs,
               SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
-              { sessionId, mode },
             ),
-            initTimeoutMs,
-            SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
-          ),
-          getTransportClosedReject(entry),
-        ])) as { previous: ApprovalMode; current: ApprovalMode };
+            getTransportClosedReject(entry),
+          ]) as Promise<{ previous: ApprovalMode; current: ApprovalMode }>,
+      );
+      // Tail-swallow so a failed change doesn't poison subsequent ones
+      // (matches `setSessionModel`).
+      entry.approvalModeQueue = approvalWork.then(
+        () => undefined,
+        () => undefined,
+      );
+      try {
+        response = await approvalWork;
       } catch (err) {
         // The ACP child rethrows `TrustGateError` as a JSON-RPC error
         // whose `data.errorKind` is the literal `'trust_gate'`. On the

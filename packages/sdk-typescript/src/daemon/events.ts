@@ -277,9 +277,13 @@ export interface DaemonStreamErrorData {
  */
 export interface DaemonStateResyncRequiredData {
   /**
-   * Machine-readable resync reason. Currently always `'ring_evicted'`
-   * (the only case the daemon emits this frame for); reserved for
-   * future causes (e.g. `'schema_version_bump'`).
+   * Machine-readable resync reason. One of:
+   * - `'ring_evicted'`: consumer's `Last-Event-ID` fell behind the ring's
+   *   earliest surviving id (same-epoch gap).
+   * - `'epoch_reset'`: consumer's `Last-Event-ID` is past the bus
+   *   high-water — its cursor is from a previous bus epoch (daemon
+   *   restart rebuilt the EventBus). The whole fresh ring is replayed.
+   * Reserved for future causes (e.g. `'schema_version_bump'`).
    */
   reason: string;
   /** Consumer's `Last-Event-ID` at reconnect time. */

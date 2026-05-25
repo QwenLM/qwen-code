@@ -160,7 +160,11 @@ export function normalizeDaemonEvent(
 
     case 'replay_complete': {
       const replayedCount = numberField(event.data, 'replayedCount') ?? 0;
-      const lastReplayedEventId = numberField(event.data, 'lastEventId');
+      // D4: prefer the canonical `lastReplayedEventId`; fall back to the
+      // deprecated `lastEventId` alias for daemons predating the rename.
+      const lastReplayedEventId =
+        numberField(event.data, 'lastReplayedEventId') ??
+        numberField(event.data, 'lastEventId');
       return [
         {
           ...base,

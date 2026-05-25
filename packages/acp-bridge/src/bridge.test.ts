@@ -2269,6 +2269,114 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('emits prompt_cancelled at most once when cancelSession races the SSE abort (D2)', async () => {
+      // doudouOUC #4484 post-merge review (D2): a client that POSTs
+      // /cancel and then immediately drops its socket triggers BOTH
+      // `cancelSession` and the `sendPrompt` abort path for the same turn.
+      // The `cancelBroadcast` latch must dedup so peers see exactly one
+      // `prompt_cancelled`.
+      let releasePrompt: (() => void) | undefined;
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          promptImpl: async () => {
+            await new Promise<void>((res) => {
+              releasePrompt = res;
+            });
+            return { stopReason: 'cancelled' };
+          },
+        }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const peerAbort = new AbortController();
+      const peerIter = bridge.subscribeEvents(session.sessionId, {
+        signal: peerAbort.signal,
+      });
+      const cancelEvents: BridgeEvent[] = [];
+      const collecting = (async () => {
+        for await (const e of peerIter) {
+          if (e.type === 'prompt_cancelled') cancelEvents.push(e);
+        }
+      })();
+
+      const promptAbort = new AbortController();
+      const promptPromise = bridge
+        .sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'long running' }],
+          },
+          promptAbort.signal,
+          { clientId: session.clientId },
+        )
+        .catch(() => {});
+
+      await new Promise((r) => setTimeout(r, 10));
+      // Both cancel routes fire for the same active prompt.
+      await bridge.cancelSession(
+        session.sessionId,
+        { sessionId: session.sessionId },
+        { clientId: session.clientId },
+      );
+      promptAbort.abort();
+
+      releasePrompt?.();
+      await promptPromise;
+      await new Promise((r) => setTimeout(r, 10));
+      peerAbort.abort();
+      await collecting;
+      // Exactly one broadcast despite two cancel triggers.
+      expect(cancelEvents).toHaveLength(1);
+      await bridge.shutdown();
+    });
+
+    it('emits a compensating prompt_cancelled{forward_failed} when the prompt forward rejects (C3)', async () => {
+      // doudouOUC #4484 post-merge review (C3): the user echo is published
+      // before the forward. If the forward itself rejects (transport died /
+      // ACP error) without a user cancel, peers must still see the turn end
+      // — otherwise they sit forever on the echoed input with no response.
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          promptImpl: async () => {
+            throw new Error('forward boom');
+          },
+        }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const peerAbort = new AbortController();
+      const peerIter = bridge.subscribeEvents(session.sessionId, {
+        signal: peerAbort.signal,
+      });
+      const peerCancel = (async () => {
+        for await (const e of peerIter) {
+          if (e.type === 'prompt_cancelled') return e;
+        }
+        throw new Error('peer never saw prompt_cancelled');
+      })();
+
+      await bridge
+        .sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'will fail to forward' }],
+          },
+          undefined,
+          { clientId: session.clientId },
+        )
+        .catch(() => {
+          // forward rejection surfaces to the caller too.
+        });
+
+      const evt = await peerCancel;
+      expect(evt.type).toBe('prompt_cancelled');
+      expect((evt.data as { reason?: string }).reason).toBe('forward_failed');
+      peerAbort.abort();
+      await bridge.shutdown();
+    });
+
     it('stamps envelope originatorClientId on session_closed', async () => {
       const factory: ChannelFactory = async () => makeChannel().channel;
       const bridge = makeBridge({ channelFactory: factory });
@@ -4555,6 +4663,72 @@ describe('createHttpAcpBridge', () => {
       );
       expect(res.persisted).toBe(false);
       expect(res.mode).toBe('yolo');
+      await bridge.shutdown();
+    });
+
+    it('serializes concurrent approval-mode changes through the per-session queue (A3)', async () => {
+      // doudouOUC #4484 post-merge review (A3): two concurrent
+      // `setSessionApprovalMode` calls must not interleave their ACP
+      // roundtrips, otherwise the last `approval_mode_changed` published
+      // can disagree with the mode the child actually settled on. The
+      // `approvalModeQueue` enforces FIFO. Detect by tracking concurrent
+      // in-flight ext calls (must never exceed 1) and the start/end order.
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const order: string[] = [];
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: async (method, params) => {
+            if (method === 'qwen/control/session/approval_mode') {
+              const mode = (params as { mode: string }).mode;
+              inFlight += 1;
+              maxInFlight = Math.max(maxInFlight, inFlight);
+              order.push(`start:${mode}`);
+              await new Promise((r) => setTimeout(r, 10));
+              order.push(`end:${mode}`);
+              inFlight -= 1;
+              return { previous: 'default', current: mode };
+            }
+            return {};
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await Promise.all([
+        bridge.setSessionApprovalMode(
+          session.sessionId,
+          ApprovalMode.YOLO,
+          { persist: false },
+          undefined,
+        ),
+        bridge.setSessionApprovalMode(
+          session.sessionId,
+          ApprovalMode.DEFAULT,
+          { persist: false },
+          undefined,
+        ),
+      ]);
+      // Never overlapped, and the second roundtrip began only after the
+      // first fully completed.
+      expect(maxInFlight).toBe(1);
+      expect(order).toEqual([
+        'start:yolo',
+        'end:yolo',
+        'start:default',
+        'end:default',
+      ]);
       await bridge.shutdown();
     });
 
