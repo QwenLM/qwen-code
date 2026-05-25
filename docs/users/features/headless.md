@@ -239,7 +239,7 @@ Key command-line options for headless usage:
 | `--continue`                 | Resume the most recent session for this project                          | `qwen --continue -p "Pick up where we left off"`                         |
 | `--resume [sessionId]`       | Resume a specific session (or choose interactively)                      | `qwen --resume 123e... -p "Finish the refactor"`                         |
 | `--max-session-turns`        | Cap the number of user/model/tool turns in the run                       | `qwen -p "..." --max-session-turns 30`                                   |
-| `--max-wall-time`            | Wall-clock budget; accepts `90` (s), `30s`, `5m`, `1h`                   | `qwen -p "..." --max-wall-time 10m`                                      |
+| `--max-wall-time`            | Wall-clock budget; accepts `90` (s), `30s`, `5m`, `1h`, `1.5h`           | `qwen -p "..." --max-wall-time 10m`                                      |
 | `--max-tool-calls`           | Cumulative tool-call budget for the run                                  | `qwen -p "..." --max-tool-calls 50`                                      |
 
 For complete details on all available configuration options, settings files, and environment variables, see the [Configuration Guide](../configuration/settings).
@@ -261,7 +261,8 @@ Qwen Code can abort an unattended run when it crosses one of the following thres
 #### Scope
 
 - **`--max-tool-calls` counts top-level dispatches only.** When the model calls the `agent` tool, the dispatch counts as **1**; inner tool calls performed by the spawned subagent are **not** counted. A model that funnels work through subagents can do unbounded inner work under a small top-level budget. Combine with `--exclude-tools agent` if you need a tighter cap.
-- **`structured_output` is exempt.** Under `--json-schema`, the model's terminal `structured_output` call is the "I'm done" contract, not real work — it doesn't count against `--max-tool-calls` so a budget-edge completion isn't aborted as a false positive.
+- **`structured_output` is exempt from `--max-tool-calls`.** Under `--json-schema`, the model's terminal `structured_output` call is the "I'm done" contract, not real work — it doesn't count against `--max-tool-calls` so a budget-edge completion isn't aborted as a false positive. The exemption is unconditional (including failed Ajv validations), so a model stuck in a malformed-output retry loop is NOT bounded by `--max-tool-calls`; combine with `--max-session-turns` or `--max-wall-time` to cap retries.
+- **`structured_output` is NOT exempt from `--max-session-turns`.** That counter is pre-existing and bumps for every turn including the terminal contract. Size `--max-session-turns` to `N+1` if you want to allow `N` real-work turns under `--json-schema`.
 - **Single-shot vs `--input-format stream-json`:** in stream-json input mode the daemon resets the budget counters at the start of every user message; the budget is per-message, not per-process.
 - **`qwen serve` / ACP sessions:** the daemon ACP session path does NOT currently consult `--max-wall-time` / `--max-tool-calls` from settings.json. These budgets only apply to single-shot `qwen -p` runs and to `--input-format stream-json` sessions. (`qwen serve` does emit the YOLO-no-sandbox warning at boot if `tools.approvalMode: 'yolo'` is set in settings.)
 

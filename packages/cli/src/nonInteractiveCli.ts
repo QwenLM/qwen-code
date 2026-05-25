@@ -248,15 +248,16 @@ export async function runNonInteractive(
       const exceeded = budgetEnforcer.getExceeded();
       if (exceeded) {
         await handleBudgetExceededError(config, exceeded);
-        // Explicit unreachable — `handleBudgetExceededError` is `never`,
-        // but the explicit throw documents that the cancellation branch
-        // below is mutually exclusive (no silent misattribution from
-        // budget → SIGINT if a future refactor makes one of them
-        // resumable).
-        throw new Error('unreachable');
+        // Explicit unreachable — `handleBudgetExceededError` is `never`
+        // in production (it calls `process.exit`). If a test stubs
+        // `process.exit` or a future refactor makes the handler
+        // resumable, this throw carries the original budget message
+        // so the outer catch's `errorMessage` field stays actionable
+        // (vs. a useless literal "unreachable").
+        throw new Error(exceeded.message);
       }
       await handleCancellationError(config);
-      throw new Error('unreachable');
+      throw new Error('Operation cancelled.');
     };
 
     interface LocalQueueItem {
@@ -657,12 +658,26 @@ export async function runNonInteractive(
           // tool runs. Ticking after would let the (N+1)th tool execute
           // and only then abort. See issue #4103.
           //
-          // Exempt `structured_output`: under --json-schema this is the
-          // terminal "I'm done" contract tool, not real work. Counting
-          // it would abort an otherwise-valid completion at the budget
-          // edge (e.g. budget=3, model used 3 tools then emits
-          // structured_output as call #4 → exit 55 instead of success).
-          if (requestInfo.name !== ToolNames.STRUCTURED_OUTPUT) {
+          // Exempt `structured_output` ONLY when `--json-schema` is
+          // active: under --json-schema this is the terminal "I'm done"
+          // contract tool, not real work, and counting it would abort
+          // an otherwise-valid completion at the budget edge (budget=3,
+          // model used 3 tools then emits structured_output as call #4
+          // → exit 55 instead of success). Guarding on
+          // `getJsonSchema()` keeps the exemption tied to the feature
+          // that owns the tool name — an MCP server that registers an
+          // unrelated tool literally named `structured_output` would
+          // otherwise inherit a free pass.
+          //
+          // Caveat: failed structured_output calls (Ajv validation
+          // failure) also skip the tick, so a model stuck in a
+          // validation-retry loop is not bounded by --max-tool-calls.
+          // Documented in docs/users/features/headless.md → "Scope".
+          // Combine with --max-session-turns or --max-wall-time.
+          const isStructuredOutputExempt =
+            requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
+            config.getJsonSchema?.() !== undefined;
+          if (!isStructuredOutputExempt) {
             budgetEnforcer.tickToolCall();
           }
           if (abortController.signal.aborted) await routeAbort();
@@ -1238,15 +1253,30 @@ export async function runNonInteractive(
         outputFormat === OutputFormat.TEXT && isAlreadyReportedError;
 
       if (!skipAdapterEmit) {
-        adapter.emitResult({
-          isError: true,
-          durationMs: Date.now() - startTime,
-          apiDurationMs: totalApiDurationMs,
-          numTurns: turnCount,
-          errorMessage: message,
-          usage,
-          stats,
-        });
+        // Wrap in try/catch: emitResult eventually hits stdout.write, which
+        // can throw on EPIPE / ERR_STREAM_WRITE_AFTER_END when a piped
+        // consumer closes early (`qwen -p ... | head -n 1` is the common
+        // case). Letting that throw bubble out skips `handleBudgetExceededError`
+        // / `handleError` below, dropping the documented exit code 55
+        // contract — precisely when stdout is in trouble. Best-effort emit
+        // and continue to the exit handler.
+        try {
+          adapter.emitResult({
+            isError: true,
+            durationMs: Date.now() - startTime,
+            apiDurationMs: totalApiDurationMs,
+            numTurns: turnCount,
+            errorMessage: message,
+            usage,
+            stats,
+          });
+        } catch (emitErr) {
+          debugLogger.error(
+            `Failed to emit terminal result envelope: ${
+              emitErr instanceof Error ? emitErr.message : String(emitErr)
+            }`,
+          );
+        }
       }
       if (budgetExceeded) {
         // Always exit AFTER emitResult so STREAM_JSON / JSON consumers

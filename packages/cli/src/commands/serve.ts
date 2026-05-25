@@ -12,7 +12,10 @@ import type { Argv, CommandModule } from 'yargs';
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { DEFAULT_RING_SIZE } from '../serve/eventBus.js';
-import { MCP_BUDGET_WARN_FRACTION } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  MCP_BUDGET_WARN_FRACTION,
+} from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
 import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
 
@@ -222,7 +225,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       const sandboxEnv = process.env['SANDBOX'];
       const suppress = process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
       const suppressed = suppress === '1' || suppress === 'true';
-      if (approvalMode === 'yolo' && !sandbox && !sandboxEnv && !suppressed) {
+      if (
+        approvalMode === ApprovalMode.YOLO &&
+        !sandbox &&
+        !sandboxEnv &&
+        !suppressed
+      ) {
         writeStderrLine(HEADLESS_YOLO_NO_SANDBOX_WARNING);
       }
     } catch {

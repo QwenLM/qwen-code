@@ -119,8 +119,15 @@ export function parseDurationSeconds(input: string): number {
     );
   }
   if (seconds < MIN_WALL_TIME_SECONDS) {
+    // Only suggest a "did you mean" rewrite when the user actually
+    // used the `ms` suffix — for bare sub-second inputs like `0.5` or
+    // `0.5s`, the rewrite would be a no-op ("did you mean 0.5s?") and
+    // just confuses the error.
+    const hint = /ms\b/i.test(trimmed)
+      ? ` (probably a typo — did you mean ${input.replace(/ms\b/i, 's')}?)`
+      : '';
     throw new Error(
-      `Invalid duration "${input}": below the ${MIN_WALL_TIME_SECONDS}s minimum (probably a typo — did you mean ${input.replace(/ms\b/i, 's')}?). Sub-second wall-clock budgets fire before any model round-trip can complete.`,
+      `Invalid duration "${input}": below the ${MIN_WALL_TIME_SECONDS}s minimum${hint}. Sub-second wall-clock budgets fire before any model round-trip can complete.`,
     );
   }
   if (seconds > MAX_WALL_TIME_SECONDS) {
@@ -170,6 +177,14 @@ export function validateMaxWallTimeSetting(value: number): number {
 }
 
 /**
+ * Upper bound for `maxToolCalls`. Above this, a value is almost certainly
+ * a typo (`1e10` meant `1e1`, or a misplaced zero): no realistic run
+ * executes a billion tool calls, and `tickToolCall`'s `>` gate would
+ * functionally never trip. Same fail-loud philosophy as `MAX_WALL_TIME_SECONDS`.
+ */
+const MAX_TOOL_CALLS = 1_000_000;
+
+/**
  * Validates a `maxToolCalls` value sourced from either the `--max-tool-calls`
  * CLI flag or `model.maxToolCalls` in settings.json. Mirrors
  * `validateMaxWallTimeSetting`: the enforcer treats anything `< 0` as "no
@@ -192,6 +207,11 @@ export function validateMaxToolCalls(value: number): number {
   if (value < 0) {
     throw new Error(
       `maxToolCalls must be >= 0 (or -1 for unlimited); got ${value}. Use -1 to disable, not a negative number.`,
+    );
+  }
+  if (value > MAX_TOOL_CALLS) {
+    throw new Error(
+      `maxToolCalls ${value} exceeds the supported ceiling (${MAX_TOOL_CALLS}). Likely a typo — use a smaller value or -1 for unlimited.`,
     );
   }
   return value;

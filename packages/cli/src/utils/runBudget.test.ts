@@ -124,6 +124,14 @@ describe('validateMaxToolCalls', () => {
     expect(() => validateMaxToolCalls(1.5)).toThrow();
     expect(() => validateMaxToolCalls(0.5)).toThrow();
   });
+
+  it('rejects values above the 1_000_000 ceiling (likely typo)', () => {
+    // `1e10` (10_000_000_000) parses as a valid integer in JS, would
+    // pass the `>= 0` gate forever, and silently disable the budget.
+    // Fail loud at startup.
+    expect(() => validateMaxToolCalls(1_000_001)).toThrow();
+    expect(() => validateMaxToolCalls(1e10)).toThrow();
+  });
 });
 
 describe('RunBudgetEnforcer', () => {
