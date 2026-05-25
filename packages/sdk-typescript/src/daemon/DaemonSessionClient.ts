@@ -14,6 +14,7 @@ import {
 import type {
   DaemonEvent,
   DaemonSessionContextStatus,
+  DaemonSessionRecapResult,
   DaemonSessionState,
   DaemonSession,
   DaemonSessionSupportedCommandsStatus,
@@ -216,6 +217,20 @@ export class DaemonSessionClient {
       modelId,
       this.clientId,
     );
+  }
+
+  /**
+   * One-sentence "where did I leave off" recap of this session. See
+   * `DaemonClient.recapSession` for the contract (best-effort, may
+   * return `recap: null`; cancellation via `signal`).
+   */
+  async recap(opts?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonSessionRecapResult> {
+    return await this.client.recapSession(this.sessionId, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
   }
 
   async context(): Promise<DaemonSessionContextStatus> {

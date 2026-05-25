@@ -47,6 +47,7 @@ import type {
   DaemonApprovalModeResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
+  DaemonSessionRecapResult,
   DaemonToolToggleResult,
 } from './types.js';
 
@@ -973,6 +974,44 @@ export class DaemonClient {
         return (await res.json()) as DaemonApprovalModeResult;
       },
     );
+  }
+
+  /**
+   * #4175 follow-up. Generate a one-sentence "where did I leave off"
+   * recap of the session. Wraps `generateSessionRecap` (core/services/
+   * sessionRecap.ts) via an ACP control-channel ext-method, so the
+   * summary is computed against the active GeminiClient chat history
+   * inside the daemon's ACP child.
+   *
+   * Non-strict mutation gate — posture matches `/session/:id/prompt`
+   * (the route costs tokens but mutates no state). Bypasses
+   * `fetchTimeoutMs` because the underlying side-query can take longer
+   * than the default 30s budget under a slow model; cancellation is
+   * via the optional `signal`. Older daemons (pre-recap support) return
+   * 404 — pre-flight `caps.features.session_recap` before calling.
+   *
+   * `recap` may be `null` on too-short histories or transient model
+   * failures (a 200 response with `recap: null`), per the best-effort
+   * contract of the core helper.
+   */
+  async recapSession(
+    sessionId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionRecapResult> {
+    const res = await this._fetch(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/recap`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+        signal: opts?.signal,
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/recap');
+    return (await res.json()) as DaemonSessionRecapResult;
   }
 
   /**

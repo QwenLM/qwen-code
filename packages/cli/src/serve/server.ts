@@ -1470,6 +1470,38 @@ export function createServeApp(
     }
   });
 
+  app.post('/session/:id/recap', mutate(), async (req, res) => {
+    // #4175 follow-up. Wraps `generateSessionRecap` (core/services/
+    // sessionRecap.ts) so daemon clients can fetch a one-sentence
+    // "where did I leave off" summary without driving the agent through
+    // a full prompt turn. Posture mirrors `/session/:id/prompt`:
+    // non-strict gate (token cost, not state mutation), and disconnect
+    // is detected via `res.once('close')` for the bridge-side
+    // cancellation. Best-effort — `recap: null` on short history or
+    // transient model failure is a normal 200, not an error.
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const response = await bridge.generateSessionRecap(
+        sessionId,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(response);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/recap',
+        sessionId,
+      });
+    }
+  });
+
   app.post(
     '/session/:id/approval-mode',
     mutate({ strict: true }),
