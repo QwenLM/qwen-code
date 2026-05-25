@@ -114,14 +114,14 @@ jobs:
       # so the model uses proper tool_use protocol instead of text-simulating
       # tool calls (which pollutes review output).
       QWEN_REVIEW_DENY_TOOLS: 'agent,skill,tool_search,ask_user_question,task_stop,send_message,enter_worktree,exit_worktree,exit_plan_mode,enter_plan_mode'
-      # Explicitly allow tools that non-interactive mode auto-denies under
-      # approval-mode=default. Shell is needed for `gh api` inline comments.
+      # YOLO mode auto-approves all tools not in the deny list. The
+      # --allowed-tools flag is kept as defence-in-depth for shell access.
       QWEN_REVIEW_ALLOWED_TOOLS: 'run_shell_command'
     steps:
       # Security (R4): this job runs on pull_request_target with model
-      # secrets. Tools are available (matching local qwen-code behavior) but
-      # scoped: code checkout is base branch only, Bash uses the bot token,
-      # orchestration tools are deny-listed, and MCP servers are blocked.
+      # secrets. Tools run in YOLO mode (auto-approve) but bounded by:
+      # deny-list blocks orchestration tools, code checkout is base branch
+      # only, Bash inherits the bot token scope, MCP servers are blocked.
       # harden-runner remains in audit mode to observe outbound domains
       # before a later block-mode allowlist. Must be first so monitoring
       # starts before anything else.
@@ -482,8 +482,8 @@ jobs:
           cat > .qwen/settings.json <<'EOF'
           {
             "security": { "folderTrust": { "enabled": false } },
-            "tools": { "approvalMode": "default" },
-            "permissions": { "allow": ["Bash(*)", "WebFetch(*)", "Read(*)", "Edit(*)", "Write(*)"] },
+            "tools": { "approvalMode": "yolo" },
+            "permissions": { "allow": ["Bash(*)", "WebFetch(*)"] },
             "sandbox": false
           }
           EOF
@@ -623,7 +623,7 @@ jobs:
           # parser below feeds raw_out to `jq` as a single document, so any
           # stderr line (node warnings, telemetry) would break the parse.
           raw_out="$(timeout --kill-after=15s 3m qwen \
-            --approval-mode default \
+            --approval-mode yolo \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
             -p "Triage the PR below." \
@@ -894,7 +894,7 @@ jobs:
           stop_token="qwen-light-stream-$(date +%s%N)"
           echo "::stop-commands::${stop_token}"
           timeout --kill-after=15s 3m qwen \
-            --approval-mode default \
+            --approval-mode yolo \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
             --allowed-tools "$QWEN_REVIEW_ALLOWED_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
@@ -1034,7 +1034,7 @@ jobs:
           stop_token="qwen-standard-stream-$(date +%s%N)"
           echo "::stop-commands::${stop_token}"
           timeout --kill-after=30s 8m qwen \
-            --approval-mode default \
+            --approval-mode yolo \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
             --allowed-tools "$QWEN_REVIEW_ALLOWED_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
@@ -1260,7 +1260,7 @@ jobs:
             stop_token="qwen-deep-stream-${focus}-$(date +%s%N)"
             echo "::stop-commands::${stop_token}"
             timeout --kill-after=20s 4m qwen \
-              --approval-mode default \
+              --approval-mode yolo \
               --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
               --allowed-tools "$QWEN_REVIEW_ALLOWED_TOOLS" \
               --allowed-mcp-server-names __qwen_review_no_mcp__ \
