@@ -516,7 +516,11 @@ export class ContentGenerationPipeline {
       // provider enhancement, post disable-reasoning) and before the SDK call
       // so the logger sees the exact bytes sent on the wire.
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
-      runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
+      runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest, {
+        provider: isDeepSeekHostname(this.contentGeneratorConfig)
+          ? 'deepseek'
+          : 'openai-compatible',
+      });
 
       const result = await executor(openaiRequest, context);
       return result;

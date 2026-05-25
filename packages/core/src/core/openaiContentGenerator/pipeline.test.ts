@@ -17,6 +17,7 @@ import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig, AuthType } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
+import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 
 // Mock dependencies
 vi.mock('./converter.js', () => ({
@@ -164,6 +165,93 @@ describe('ContentGenerationPipeline', () => {
           modalities: {},
         }),
       );
+    });
+
+    it('labels runtime OpenAI diagnostics as deepseek for DeepSeek hostnames', async () => {
+      const diagnosticsSpy = vi
+        .spyOn(runtimeDiagnostics, 'recordOpenAIWireRequest')
+        .mockImplementation(() => undefined);
+      try {
+        mockContentGeneratorConfig.baseUrl = 'https://api.deepseek.com';
+        const request: GenerateContentParameters = {
+          model: 'deepseek-v4-pro',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        };
+        const mockMessages = [
+          { role: 'user', content: 'Hello' },
+        ] as OpenAI.Chat.ChatCompletionMessageParam[];
+        const mockOpenAIResponse = {
+          id: 'response-id',
+          choices: [
+            { message: { content: 'Hello response' }, finish_reason: 'stop' },
+          ],
+          created: Date.now(),
+          model: 'deepseek-v4-pro',
+        } as OpenAI.Chat.ChatCompletion;
+        const mockGeminiResponse = new GenerateContentResponse();
+
+        (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+          mockMessages,
+        );
+        (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+          mockGeminiResponse,
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue(
+          mockOpenAIResponse,
+        );
+
+        await pipeline.execute(request, 'test-prompt-id');
+
+        expect(diagnosticsSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ model: 'deepseek-v4-pro' }),
+          { provider: 'deepseek' },
+        );
+      } finally {
+        diagnosticsSpy.mockRestore();
+      }
+    });
+
+    it('labels runtime OpenAI diagnostics as openai-compatible for non-DeepSeek hostnames', async () => {
+      const diagnosticsSpy = vi
+        .spyOn(runtimeDiagnostics, 'recordOpenAIWireRequest')
+        .mockImplementation(() => undefined);
+      try {
+        mockContentGeneratorConfig.baseUrl = 'https://example.test/v1';
+        const request: GenerateContentParameters = {
+          model: 'deepseek-v4-pro',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        };
+        const mockMessages = [
+          { role: 'user', content: 'Hello' },
+        ] as OpenAI.Chat.ChatCompletionMessageParam[];
+        const mockOpenAIResponse = {
+          id: 'response-id',
+          choices: [
+            { message: { content: 'Hello response' }, finish_reason: 'stop' },
+          ],
+          created: Date.now(),
+          model: 'deepseek-v4-pro',
+        } as OpenAI.Chat.ChatCompletion;
+        const mockGeminiResponse = new GenerateContentResponse();
+
+        (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+          mockMessages,
+        );
+        (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+          mockGeminiResponse,
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue(
+          mockOpenAIResponse,
+        );
+
+        await pipeline.execute(request, 'test-prompt-id');
+
+        expect(diagnosticsSpy).toHaveBeenCalledWith(expect.any(Object), {
+          provider: 'openai-compatible',
+        });
+      } finally {
+        diagnosticsSpy.mockRestore();
+      }
     });
 
     it('should use request.model when provided', async () => {
