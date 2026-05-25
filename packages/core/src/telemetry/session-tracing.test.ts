@@ -312,9 +312,9 @@ describe('session-tracing', () => {
     });
 
     it('falls back to otelContext.active() when no session context is set', () => {
-      // clearSessionTracingForTesting() in beforeEach already left
-      // getSessionContext() === undefined — do NOT call setSessionContext.
-      mockState.activeOtelSpan = { name: 'active-session-span' };
+      // Intentionally NOT calling setSessionContext — exercises the fallback.
+      const fakeActive = { kind: 'fake-active-span' };
+      mockState.activeOtelSpan = fakeActive;
 
       startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
         promptId: 'p',
@@ -323,9 +323,7 @@ describe('session-tracing', () => {
       });
 
       const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
-      expect(span?.parentContext).toEqual(
-        expect.objectContaining({ __activeSpan: expect.anything() }),
-      );
+      expect(span?.parentContext).toMatchObject({ __activeSpan: fakeActive });
     });
   });
 
