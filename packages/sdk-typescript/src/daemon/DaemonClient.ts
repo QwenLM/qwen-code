@@ -18,6 +18,9 @@ import type {
   DaemonSessionContextStatus,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonSessionExport,
+  DaemonSessionExportFormat,
+  DaemonSessionStats,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonUpdateAgentRequest,
@@ -152,6 +155,33 @@ function stripTrailingSlashes(url: string): string {
  *      fallback chain treats both "unset" and "set-but-empty"
  *      identically — no header sent.
  */
+/**
+ * Issue #4514 T2.6. Extract `filename` from a `Content-Disposition`
+ * header. Recognizes both the legacy `filename="..."` shape and the
+ * RFC 5987 `filename*=utf-8''...` shape (the latter percent-decodes).
+ * Returns `undefined` when the header is missing or carries no
+ * `filename` parameter so callers can fall back to a derived default
+ * instead of an empty string.
+ */
+function parseAttachmentFilename(
+  header: string | null | undefined,
+): string | undefined {
+  if (!header) return undefined;
+  const star = /filename\*\s*=\s*([^']*)'([^']*)'([^;]+)/i.exec(header);
+  if (star?.[3]) {
+    try {
+      return decodeURIComponent(star[3].trim());
+    } catch {
+      // Fall through to the legacy form below.
+    }
+  }
+  const quoted = /filename\s*=\s*"([^"]+)"/i.exec(header);
+  if (quoted?.[1]) return quoted[1];
+  const bare = /filename\s*=\s*([^;]+)/i.exec(header);
+  if (bare?.[1]) return bare[1].trim();
+  return undefined;
+}
+
 function readTokenFromEnv(): string | undefined {
   try {
     const proc = (
@@ -900,6 +930,66 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonSessionSupportedCommandsStatus;
+      },
+    );
+  }
+
+  /**
+   * Issue #4514 T2.5. Per-session aggregate metrics — promptCount,
+   * totalTokens, files touched, context window utilization. Wraps the
+   * same `collectSessionData` / `normalizeSessionData` pipeline the
+   * TUI's `/stats` slash command runs on the persisted JSONL, so the
+   * daemon surface and the local CLI agree for any state flushed to
+   * disk. Pre-flight `caps.features.session_stats` before calling.
+   */
+  async sessionStats(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionStats> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/stats`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/stats');
+        }
+        return (await res.json()) as DaemonSessionStats;
+      },
+    );
+  }
+
+  /**
+   * Issue #4514 T2.6. Render the session's conversation in one of the
+   * four formats supported by the `/export` slash command. The HTTP
+   * response carries the formatter's body verbatim with
+   * `Content-Type` / `Content-Disposition` set; this helper reads the
+   * body as text and returns it alongside the parsed headers so a
+   * webui can hand the result straight to `Blob` + `a.download`.
+   *
+   * Pre-flight `caps.features.session_export.modes` to confirm the
+   * daemon supports the requested format; older daemons reject the
+   * route with 404, and daemons that do not advertise a particular
+   * format reject the format with 400.
+   */
+  async sessionExport(
+    sessionId: string,
+    format: DaemonSessionExportFormat = 'md',
+    clientId?: string,
+  ): Promise<DaemonSessionExport> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/export?format=${encodeURIComponent(format)}`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/export');
+        }
+        const body = await res.text();
+        const contentType =
+          res.headers.get('content-type') ?? 'application/octet-stream';
+        const filename =
+          parseAttachmentFilename(res.headers.get('content-disposition')) ??
+          `qwen-session-${sessionId}.${format}`;
+        return { sessionId, format, body, contentType, filename };
       },
     );
   }

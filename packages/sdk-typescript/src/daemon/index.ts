@@ -143,6 +143,7 @@ export type {
 export {
   DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
+  DAEMON_SESSION_EXPORT_FORMATS,
   DaemonCapabilityMissingError,
   isDaemonContentHash,
   requireWorkspaceCwd,
@@ -261,6 +262,9 @@ export type {
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   DaemonSessionContextStatus,
+  DaemonSessionExport,
+  DaemonSessionExportFormat,
+  DaemonSessionStats,
   DaemonSessionState,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,

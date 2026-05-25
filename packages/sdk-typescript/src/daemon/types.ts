@@ -688,6 +688,78 @@ export interface DaemonSessionSupportedCommandsStatus {
   availableSkills: string[];
 }
 
+/**
+ * Issue #4514 T2.5. Response body of `GET /session/:id/stats` — a
+ * per-session aggregate of metrics the TUI's `/stats` slash command
+ * already surfaces (promptCount, totalTokens, files touched, context
+ * window utilization). The daemon and TUI share the same
+ * `collectSessionData` + `normalizeSessionData` pipeline on the
+ * persisted JSONL, so both surfaces agree for any state flushed to
+ * disk. Pre-flight `caps.features.session_stats` before calling —
+ * older daemons reject with 404.
+ *
+ * Optional fields are `undefined` when the session JSONL did not carry
+ * the corresponding telemetry. `uniqueFiles` is always present
+ * (possibly empty) so the empty-array case stays distinguishable from
+ * a missing datum.
+ */
+export interface DaemonSessionStats {
+  v: 1;
+  sessionId: string;
+  startTime: string;
+  cwd: string;
+  promptCount: number;
+  model?: string;
+  gitRepo?: string;
+  gitBranch?: string;
+  totalTokens?: number;
+  contextUsagePercent?: number;
+  contextWindowSize?: number;
+  filesWritten?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
+  uniqueFiles: string[];
+}
+
+/**
+ * Issue #4514 T2.6. Closed enumeration of formats supported by
+ * `GET /session/:id/export`. Mirrors `SERVE_SESSION_EXPORT_FORMATS` on
+ * the daemon side; adding a new format requires bumping both. The
+ * `session_export` capability tag advertises which subset the live
+ * daemon supports (`caps.features.session_export.modes`), so SDK
+ * clients can feature-detect a `'jsonl'` before requesting it from an
+ * older daemon that only knows `'md' | 'html' | 'json'`.
+ */
+export const DAEMON_SESSION_EXPORT_FORMATS = [
+  'md',
+  'html',
+  'json',
+  'jsonl',
+] as const;
+
+export type DaemonSessionExportFormat =
+  (typeof DAEMON_SESSION_EXPORT_FORMATS)[number];
+
+/**
+ * Issue #4514 T2.6. Response of `DaemonClient.exportSession` —
+ * a tuple of the rendered body plus the headers the daemon stamped.
+ * `body` is the formatter's verbatim output (markdown text, full HTML
+ * document, JSON, or JSONL); the SDK does not parse it.
+ *
+ * `contentType` mirrors the `Content-Type` header (`text/markdown;
+ * charset=utf-8` etc.) and `filename` mirrors the parsed
+ * `Content-Disposition` header (`qwen-session-<id>-<ts>.<ext>`). Both
+ * are pre-decoded for the caller so a webui can pass them straight to
+ * `Blob`/`a.download`.
+ */
+export interface DaemonSessionExport {
+  sessionId: string;
+  format: DaemonSessionExportFormat;
+  body: string;
+  contentType: string;
+  filename: string;
+}
+
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;

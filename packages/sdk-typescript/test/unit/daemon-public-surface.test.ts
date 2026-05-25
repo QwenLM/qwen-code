@@ -120,4 +120,19 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(typeof Public.createDaemonAuthState).toBe('function');
     expect(typeof Public.DEVICE_FLOW_EXPIRY_GRACE_MS).toBe('number');
   });
+
+  it('exposes the issue #4514 T2.5 + T2.6 session stats/export surface', () => {
+    // Pin the format enum at the published entry — without this, the
+    // shape could drift on a future barrel reshuffle (same failure
+    // mode the auth surface had above). The four formats are part of
+    // the wire contract: any rename must rev the `session_export`
+    // capability tag and the protocol docs.
+    expect(Array.isArray(Public.DAEMON_SESSION_EXPORT_FORMATS)).toBe(true);
+    expect([...Public.DAEMON_SESSION_EXPORT_FORMATS]).toEqual([
+      'md',
+      'html',
+      'json',
+      'jsonl',
+    ]);
+  });
 });

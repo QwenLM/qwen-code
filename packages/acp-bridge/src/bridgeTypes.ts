@@ -19,6 +19,9 @@ import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type { PermissionPolicy } from './permission.js';
 import type {
   ServeSessionContextStatus,
+  ServeSessionExport,
+  ServeSessionExportFormat,
+  ServeSessionStats,
   ServeSessionSupportedCommandsStatus,
   ServeWorkspaceEnvStatus,
   ServeWorkspaceMcpStatus,
@@ -298,6 +301,42 @@ export interface HttpAcpBridge {
   getSessionSupportedCommandsStatus(
     sessionId: string,
   ): Promise<ServeSessionSupportedCommandsStatus>;
+
+  /**
+   * Issue #4514 T2.5. Per-session aggregate metrics (promptCount,
+   * totalTokens, files touched, context window utilization). The ACP
+   * child loads the session's persisted JSONL through
+   * `SessionService.loadSession` and feeds it into
+   * `collectSessionData` + `normalizeSessionData` — the same SSOT the
+   * `/stats` and `/export` slash commands use, so daemon stats and
+   * TUI stats agree for any session state that has been flushed to
+   * disk (every `chatRecordingService` append is synchronous).
+   *
+   * Requires a live ACP session: the bridge throws
+   * `SessionNotFoundError` for unknown ids and the child throws
+   * invalid-params for sessions that have not written any records yet
+   * (a brand-new attach before the first user turn).
+   */
+  getSessionStats(sessionId: string): Promise<ServeSessionStats>;
+
+  /**
+   * Issue #4514 T2.6. Render the session's conversation in one of the
+   * four formats supported by the `/export` slash command (markdown,
+   * html, json, jsonl). The ACP child runs the same
+   * `collectSessionData` + `normalizeSessionData` pipeline as
+   * `getSessionStats` and then dispatches to the matching formatter,
+   * so a daemon export is byte-identical to a TUI export for the same
+   * session state.
+   *
+   * Same liveness contract as `getSessionStats`. The returned body may
+   * be large (HTML/Markdown for a long session can reach hundreds of
+   * KB); the HTTP route streams it as the response body rather than
+   * wrapping it in JSON.
+   */
+  getSessionExport(
+    sessionId: string,
+    format: ServeSessionExportFormat,
+  ): Promise<ServeSessionExport>;
 
   /**
    * Switch the active model service for a session. Throws

@@ -58,6 +58,9 @@ import {
 import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type {
   ServeSessionContextStatus,
+  ServeSessionExport,
+  ServeSessionExportFormat,
+  ServeSessionStats,
   ServeSessionSupportedCommandsStatus,
   ServeWorkspaceEnvStatus,
   ServeWorkspaceMcpStatus,
@@ -110,6 +113,11 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_preflight',
   'session_context',
   'session_supported_commands',
+  // Issue #4514 T2.5+T2.6. Read-only session routes — must appear in
+  // registry-declaration order so `EXPECTED_REGISTERED_FEATURES` (which
+  // filters this list) also reflects the live registry order.
+  'session_stats',
+  'session_export',
   'session_close',
   'session_metadata',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
@@ -232,6 +240,11 @@ interface FakeBridgeOpts {
   sessionSupportedCommandsImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
+  sessionStatsImpl?: (sessionId: string) => Promise<ServeSessionStats>;
+  sessionExportImpl?: (
+    sessionId: string,
+    format: ServeSessionExportFormat,
+  ) => Promise<ServeSessionExport>;
   setModelImpl?: (
     sessionId: string,
     req: SetSessionModelRequest,
@@ -325,6 +338,11 @@ interface FakeBridge extends HttpAcpBridge {
   workspacePreflightCalls: number;
   sessionContextCalls: string[];
   sessionSupportedCommandsCalls: string[];
+  sessionStatsCalls: string[];
+  sessionExportCalls: Array<{
+    sessionId: string;
+    format: ServeSessionExportFormat;
+  }>;
   setModelCalls: Array<{
     sessionId: string;
     req: SetSessionModelRequest;
@@ -388,6 +406,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   let workspacePreflightCalls = 0;
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
+  const sessionStatsCalls: string[] = [];
+  const sessionExportCalls: FakeBridge['sessionExportCalls'] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
@@ -485,6 +505,26 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       availableCommands: [],
       availableSkills: [],
     }));
+  const sessionStatsImpl =
+    opts.sessionStatsImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      startTime: '2026-05-26T00:00:00.000Z',
+      cwd: WS_BOUND,
+      promptCount: 0,
+      uniqueFiles: [],
+    }));
+  const sessionExportImpl =
+    opts.sessionExportImpl ??
+    (async (sessionId, format) => ({
+      v: 1 as const,
+      sessionId,
+      format,
+      body: `# fake export\nsession=${sessionId} format=${format}\n`,
+      contentType: 'text/markdown; charset=utf-8',
+      filename: `qwen-session-${sessionId}.${format}`,
+    }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
   const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
   const setApprovalModeImpl =
@@ -560,6 +600,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     listCalls,
     sessionContextCalls,
     sessionSupportedCommandsCalls,
+    sessionStatsCalls,
+    sessionExportCalls,
     setModelCalls,
     setApprovalModeCalls,
     setToolEnabledCalls,
@@ -683,6 +725,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionSupportedCommandsStatus(sessionId) {
       sessionSupportedCommandsCalls.push(sessionId);
       return sessionSupportedCommandsImpl(sessionId);
+    },
+    async getSessionStats(sessionId) {
+      sessionStatsCalls.push(sessionId);
+      return sessionStatsImpl(sessionId);
+    },
+    async getSessionExport(sessionId, format) {
+      sessionExportCalls.push({ sessionId, format });
+      return sessionExportImpl(sessionId, format);
     },
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
@@ -1408,6 +1458,178 @@ describe('createServeApp', () => {
       expect(contextRes.body.sessionId).toBe('missing');
       expect(commandsRes.status).toBe(404);
       expect(commandsRes.body.sessionId).toBe('missing');
+    });
+
+    // Issue #4514 T2.5. Read-only metrics route. Mirrors the
+    // `/context` + `/supported-commands` shape — bridge call passes
+    // through verbatim, missing session maps to 404.
+    it('GET /session/:id/stats returns the bridge metrics envelope', async () => {
+      const stats: ServeSessionStats = {
+        v: 1,
+        sessionId: 's-stats',
+        startTime: '2026-05-25T12:00:00.000Z',
+        cwd: WS_BOUND,
+        promptCount: 7,
+        model: 'qwen3-coder',
+        totalTokens: 12_345,
+        contextUsagePercent: 18,
+        contextWindowSize: 200_000,
+        filesWritten: 3,
+        linesAdded: 42,
+        linesRemoved: 11,
+        uniqueFiles: [
+          path.resolve(WS_BOUND, 'src/a.ts'),
+          path.resolve(WS_BOUND, 'src/b.ts'),
+        ],
+      };
+      const bridge = fakeBridge({ sessionStatsImpl: async () => stats });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-stats/stats')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(stats);
+      expect(bridge.sessionStatsCalls).toEqual(['s-stats']);
+    });
+
+    it('GET /session/:id/stats maps missing sessions to 404', async () => {
+      const bridge = fakeBridge({
+        sessionStatsImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/missing/stats')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    // Issue #4514 T2.6. Export streams formatter body verbatim with
+    // `Content-Type` + `Content-Disposition` reflecting the format the
+    // bridge picked.
+    it('GET /session/:id/export returns the formatted body + headers (default `md`)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-e/export')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toBe('text/markdown; charset=utf-8');
+      expect(res.headers['content-disposition']).toBe(
+        'attachment; filename="qwen-session-s-e.md"',
+      );
+      expect(res.headers['x-qwen-export-format']).toBe('md');
+      expect(res.text).toContain('format=md');
+      expect(bridge.sessionExportCalls).toEqual([
+        { sessionId: 's-e', format: 'md' },
+      ]);
+    });
+
+    it('GET /session/:id/export honors a valid `format` query param', async () => {
+      const bridge = fakeBridge({
+        sessionExportImpl: async (sessionId, format) => ({
+          v: 1,
+          sessionId,
+          format,
+          body: '{"hello":"world"}',
+          contentType: 'application/json; charset=utf-8',
+          filename: `qwen-session-${sessionId}.json`,
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-e/export?format=json')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toBe(
+        'application/json; charset=utf-8',
+      );
+      expect(res.text).toBe('{"hello":"world"}');
+      expect(bridge.sessionExportCalls).toEqual([
+        { sessionId: 's-e', format: 'json' },
+      ]);
+    });
+
+    it('GET /session/:id/export rejects an unknown `format` with 400', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-e/export?format=pdf')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('Invalid format');
+      // The bridge should never have been called for a malformed
+      // request — validation happens at the HTTP layer.
+      expect(bridge.sessionExportCalls).toEqual([]);
+    });
+
+    it('GET /session/:id/export rejects array `format` query with 400', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-e/export?format=md&format=json')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('single string');
+      expect(bridge.sessionExportCalls).toEqual([]);
+    });
+
+    it('GET /session/:id/export maps missing sessions to 404', async () => {
+      const bridge = fakeBridge({
+        sessionExportImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/missing/export')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
     });
   });
 

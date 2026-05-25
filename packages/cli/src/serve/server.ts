@@ -28,6 +28,10 @@ import {
   type DeviceFlowPublicView,
 } from './auth/deviceFlow.js';
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
+import {
+  SERVE_SESSION_EXPORT_FORMATS,
+  type ServeSessionExportFormat,
+} from './status.js';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
@@ -1200,6 +1204,80 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/supported-commands',
+        sessionId,
+      });
+    }
+  });
+
+  // Issue #4514 T2.5. Per-session aggregate metrics. Read-only, no
+  // mutation gate. The bridge call routes to the ACP child which reads
+  // the persisted JSONL (same SSOT as the `/stats` slash command).
+  app.get('/session/:id/stats', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    try {
+      res.status(200).json(await bridge.getSessionStats(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/stats',
+        sessionId,
+      });
+    }
+  });
+
+  // Issue #4514 T2.6. Per-session conversation export. The route
+  // streams the formatter's output verbatim (with `Content-Type` and
+  // `Content-Disposition` set from the bridge response) so browser
+  // `<a download>` works out of the box. Format defaults to `md` for
+  // parity with the `/export` slash command.
+  app.get('/session/:id/export', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    const rawFormat = req.query['format'];
+    // Reject array / non-string up front. Express parses repeated query
+    // keys into arrays which would otherwise sneak past the `includes`
+    // check below as `undefined` after the typeof coerce.
+    if (rawFormat !== undefined && typeof rawFormat !== 'string') {
+      res.status(400).json({
+        error: '`format` query parameter must be a single string',
+      });
+      return;
+    }
+    const format = (rawFormat ?? 'md') as string;
+    if (!(SERVE_SESSION_EXPORT_FORMATS as readonly string[]).includes(format)) {
+      res.status(400).json({
+        error: `Invalid format "${format}"; expected one of ${SERVE_SESSION_EXPORT_FORMATS.join(', ')}`,
+      });
+      return;
+    }
+    try {
+      const exported = await bridge.getSessionExport(
+        sessionId,
+        format as ServeSessionExportFormat,
+      );
+      res.setHeader('Content-Type', exported.contentType);
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${exported.filename}"`,
+      );
+      // Stamp the format echo too — clients that intercept the response
+      // for telemetry can branch on it without re-parsing the
+      // disposition header.
+      res.setHeader('X-Qwen-Export-Format', exported.format);
+      res.status(200).send(exported.body);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/export',
         sessionId,
       });
     }

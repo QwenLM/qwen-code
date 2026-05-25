@@ -14,8 +14,11 @@ import {
 import type {
   DaemonEvent,
   DaemonSessionContextStatus,
+  DaemonSessionExport,
+  DaemonSessionExportFormat,
   DaemonSessionState,
   DaemonSession,
+  DaemonSessionStats,
   DaemonSessionSupportedCommandsStatus,
   HeartbeatResult,
   PermissionResponse,
@@ -225,6 +228,30 @@ export class DaemonSessionClient {
   async supportedCommands(): Promise<DaemonSessionSupportedCommandsStatus> {
     return await this.client.sessionSupportedCommands(
       this.sessionId,
+      this.clientId,
+    );
+  }
+
+  /**
+   * Issue #4514 T2.5. Per-session aggregate metrics. Convenience wrapper
+   * around `DaemonClient.sessionStats` that binds the session id and
+   * client id so the call site reads like `session.stats()`.
+   */
+  async stats(): Promise<DaemonSessionStats> {
+    return await this.client.sessionStats(this.sessionId, this.clientId);
+  }
+
+  /**
+   * Issue #4514 T2.6. Export the session conversation in one of
+   * `'md' | 'html' | 'json' | 'jsonl'` (defaults to `'md'` for parity
+   * with the `/export` slash command).
+   */
+  async export(
+    format: DaemonSessionExportFormat = 'md',
+  ): Promise<DaemonSessionExport> {
+    return await this.client.sessionExport(
+      this.sessionId,
+      format,
       this.clientId,
     );
   }

@@ -7,6 +7,7 @@ export { SdkLogger } from './utils/logger.js';
 export {
   DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
+  DAEMON_SESSION_EXPORT_FORMATS,
   DaemonCapabilityMissingError,
   DaemonClient,
   DaemonHttpError,
@@ -90,6 +91,9 @@ export {
   type DaemonSessionDiedData,
   type DaemonSessionDiedEvent,
   type DaemonSessionEvent,
+  type DaemonSessionExport,
+  type DaemonSessionExportFormat,
+  type DaemonSessionStats,
   type DaemonSessionSubscribeOptions,
   type DaemonSessionState,
   type DaemonSessionSummary,

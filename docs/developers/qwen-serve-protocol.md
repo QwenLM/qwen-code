@@ -216,6 +216,8 @@ Capability tags:
 - `workspace_preflight` → `GET /workspace/preflight`
 - `session_context` → `GET /session/:id/context`
 - `session_supported_commands` → `GET /session/:id/supported-commands`
+- `session_stats` → `GET /session/:id/stats` (issue #4514 T2.5)
+- `session_export` → `GET /session/:id/export?format=md|html|json|jsonl` (issue #4514 T2.6 — `modes` lists supported formats)
 
 Common status cell:
 
@@ -845,6 +847,68 @@ caller named the path. Success responses and audit events include
 `availableCommands` is the same command snapshot used by the
 `available_commands_update` SSE notification. `availableSkills` lists skill
 names only; clients must not expect skill bodies or paths over this route.
+
+### `GET /session/:id/stats`
+
+Capability tag: `session_stats`. Bridge → ACP extMethod `qwen/status/session/stats`.
+
+Per-session aggregate metrics (issue #4514 T2.5). The ACP child loads the session's persisted JSONL through `SessionService.loadSession` and runs `collectSessionData` + `normalizeSessionData` — the same SSOT the `/stats` and `/export` slash commands use, so daemon stats and TUI stats agree for any state flushed to disk (`chatRecordingService` appends synchronously).
+
+Read-only; no mutation gate. Requires a live session (the ACP child must hold a `Config` for the session id so context window size is available). For archived sessions, call `POST /session/:id/load` first.
+
+Response (200):
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "startTime": "2026-05-26T00:00:00.000Z",
+  "cwd": "/work/a",
+  "promptCount": 7,
+  "model": "qwen3-coder",
+  "gitRepo": "qwen-code",
+  "gitBranch": "main",
+  "totalTokens": 12345,
+  "contextUsagePercent": 18,
+  "contextWindowSize": 200000,
+  "filesWritten": 3,
+  "linesAdded": 42,
+  "linesRemoved": 11,
+  "uniqueFiles": ["/work/a/src/a.ts", "/work/a/src/b.ts"]
+}
+```
+
+Optional fields are `undefined` when the session JSONL did not carry the corresponding telemetry. `uniqueFiles` is always present (possibly empty) so the empty-array case stays distinguishable from a missing datum.
+
+Errors:
+
+- `400 invalid_params` — sessionId is missing, or the session has not written any records yet (brand-new attach before the first user turn).
+- `404` — session unknown to the daemon.
+
+### `GET /session/:id/export`
+
+Capability tag: `session_export` (with `modes: ['md','html','json','jsonl']`). Bridge → ACP extMethod `qwen/status/session/export`.
+
+Render the session's conversation in one of the four formats supported by the `/export` slash command (issue #4514 T2.6). The child runs the same `collectSessionData` + `normalizeSessionData` pipeline as `/session/:id/stats` and dispatches to the matching formatter, so daemon export and TUI export are byte-identical for the same session state.
+
+Query parameters:
+
+| Name     | Required | Notes                                                                                                                                                                                                                                                                                                    |
+| -------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `format` | no       | One of `md` (default), `html`, `json`, `jsonl`. Anything else → `400`. Repeated `format` query keys → `400` (Express parses repeats as arrays). Pre-flight `caps.features.session_export.modes` before requesting a format an older daemon may not advertise — those daemons reject the format with 400. |
+
+Response (200) — the raw formatter body (not JSON), with:
+
+- `Content-Type: text/markdown; charset=utf-8` / `text/html; charset=utf-8` / `application/json; charset=utf-8` / `application/jsonl; charset=utf-8`
+- `Content-Disposition: attachment; filename="qwen-session-<id>-<ts>.<ext>"`
+- `X-Qwen-Export-Format: <md|html|json|jsonl>` (echo so telemetry-only proxies can branch without re-parsing disposition)
+
+Errors:
+
+- `400` — sessionId is missing, `format` is invalid or repeated, or the session has not written any records yet.
+- `404` — session unknown to the daemon.
+
+The body may be large (HTML or Markdown for a long session can reach hundreds of KB). The route streams the body verbatim rather than wrapping it in JSON, so a browser `<a download>` works without an SDK shim. SDK helpers (`DaemonClient.sessionExport` / `DaemonSessionClient.export`) read the response as text and surface the parsed `filename` next to the body.
 
 ### `POST /session`
 

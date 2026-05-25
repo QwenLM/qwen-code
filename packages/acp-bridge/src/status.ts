@@ -95,6 +95,20 @@ export const SERVE_STATUS_EXT_METHODS = {
   workspacePreflight: 'qwen/status/workspace/preflight',
   sessionContext: 'qwen/status/session/context',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
+  // Issue #4514 T2.5. Per-session aggregate metrics — promptCount,
+  // totalTokens, files touched, context window utilization. The ACP
+  // child reads the persisted JSONL via `SessionService.loadSession`
+  // and feeds it through `collectSessionData` + `normalizeSessionData`
+  // (same SSOT as the `/stats` and `/export` slash commands), then
+  // returns only the `metadata` slice.
+  sessionStats: 'qwen/status/session/stats',
+  // Issue #4514 T2.6. Per-session conversation export rendered in one
+  // of `md` / `html` / `json` / `jsonl`. Same SSOT as `/stats`; the
+  // child runs the matching formatter and returns the serialized body
+  // plus a suggested filename + content-type. The HTTP route streams
+  // `body` back with the matching `Content-Type` /
+  // `Content-Disposition` headers.
+  sessionExport: 'qwen/status/session/export',
 } as const;
 
 /**
@@ -329,6 +343,84 @@ export interface ServeSessionSupportedCommandsStatus {
   sessionId: string;
   availableCommands: AvailableCommand[];
   availableSkills: string[];
+}
+
+/**
+ * Issue #4514 T2.5. Wire shape for `GET /session/:id/stats`. Field set
+ * mirrors `ExportMetadata` in `packages/cli/src/ui/utils/export/types.ts`
+ * (which the `/stats` and `/export` slash commands already populate) so
+ * the daemon route and the TUI surfaces share a single source of truth.
+ *
+ * Optional fields are `undefined` when the session JSONL did not carry
+ * the corresponding telemetry. `uniqueFiles` is always present
+ * (possibly empty) because the empty-array case is a valid datum, not a
+ * missing one.
+ */
+export interface ServeSessionStats {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  /** ISO 8601 timestamp when the session started. */
+  startTime: string;
+  /** Working directory the session was started in. */
+  cwd: string;
+  /** Number of user prompts in the session. */
+  promptCount: number;
+  /** Active model id at extraction time, when known. */
+  model?: string;
+  /** Git repository name, when the session lives in a git checkout. */
+  gitRepo?: string;
+  /** Git branch at extraction time, when known. */
+  gitBranch?: string;
+  /** Total tokens used (prompt + completion across all assistant turns). */
+  totalTokens?: number;
+  /** Context window utilization percentage (0-100). */
+  contextUsagePercent?: number;
+  /** Context window size in tokens (denominator for the percentage). */
+  contextWindowSize?: number;
+  /** Files written or edited during the session. */
+  filesWritten?: number;
+  /** Lines added across `write_file` / `edit_file` / `replace` calls. */
+  linesAdded?: number;
+  /** Lines removed across the same. */
+  linesRemoved?: number;
+  /** Distinct file paths written or edited during the session. */
+  uniqueFiles: string[];
+}
+
+/**
+ * Issue #4514 T2.6. Closed enumeration of output formats supported by
+ * `GET /session/:id/export`. Mirrors the four extensions the `/export`
+ * slash command supports; adding a new format requires extending this
+ * array, the descriptor table in the ACP child, the capability tag
+ * `modes`, and the protocol docs.
+ */
+export const SERVE_SESSION_EXPORT_FORMATS = [
+  'md',
+  'html',
+  'json',
+  'jsonl',
+] as const;
+
+export type ServeSessionExportFormat =
+  (typeof SERVE_SESSION_EXPORT_FORMATS)[number];
+
+/**
+ * Issue #4514 T2.6. Wire shape returned by the bridge to the HTTP route.
+ * The route unwraps `body` into the response body, applies `contentType`
+ * as the `Content-Type` header, and stamps
+ * `Content-Disposition: attachment; filename="<filename>"` so browser
+ * downloads land with a sensible default file name.
+ */
+export interface ServeSessionExport {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  format: ServeSessionExportFormat;
+  /** Serialized session contents in the requested format. */
+  body: string;
+  /** MIME type matching `format` (already includes the `charset=utf-8`). */
+  contentType: string;
+  /** Suggested file name (`qwen-session-<id>-<ts>.<ext>`). */
+  filename: string;
 }
 
 /**

@@ -19,6 +19,7 @@ import {
 import type {
   DaemonCapabilities,
   DaemonSessionContextStatus,
+  DaemonSessionStats,
   DaemonSessionSupportedCommandsStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
@@ -476,6 +477,123 @@ describe('DaemonClient', () => {
         'client-1',
         'client-1',
       ]);
+    });
+
+    // Issue #4514 T2.5. `sessionStats` is the same wire shape as
+    // `sessionContext` — GET with sessionId in the path, JSON body
+    // back. Pin the URL + header passthrough.
+    it('GETs /session/:id/stats and forwards the response', async () => {
+      const stats: DaemonSessionStats = {
+        v: 1,
+        sessionId: 'with/slash',
+        startTime: '2026-05-26T00:00:00.000Z',
+        cwd: '/work/a',
+        promptCount: 5,
+        totalTokens: 4_321,
+        uniqueFiles: ['src/index.ts'],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, stats));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.sessionStats('with/slash', 'client-9'),
+      ).resolves.toEqual(stats);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/session/with%2Fslash/stats'],
+      ]);
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-9');
+    });
+
+    it('throws DaemonHttpError when /session/:id/stats responds non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'session not found', sessionId: 'gone' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.sessionStats('gone')).rejects.toMatchObject({
+        name: 'DaemonHttpError',
+        status: 404,
+      });
+    });
+
+    // Issue #4514 T2.6. Export returns the body as text (not JSON)
+    // along with the `Content-Type` and parsed `Content-Disposition`.
+    // The SDK helper parses both legacy `filename="..."` and RFC 5987
+    // `filename*=utf-8''...` shapes; we cover the legacy one here.
+    it('GETs /session/:id/export?format=... and surfaces body + headers', async () => {
+      const { fetch, calls } = recordingFetch(() => {
+        const body = '# fake export\nhello\n';
+        return new Response(body, {
+          status: 200,
+          headers: {
+            'content-type': 'text/markdown; charset=utf-8',
+            'content-disposition': 'attachment; filename="qwen-session-abc.md"',
+            'x-qwen-export-format': 'md',
+          },
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.sessionExport('abc');
+      expect(result).toEqual({
+        sessionId: 'abc',
+        format: 'md',
+        body: '# fake export\nhello\n',
+        contentType: 'text/markdown; charset=utf-8',
+        filename: 'qwen-session-abc.md',
+      });
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/session/abc/export?format=md'],
+      ]);
+    });
+
+    it('passes the requested format through to the URL', async () => {
+      const { fetch, calls } = recordingFetch(() => {
+        return new Response('{"k":1}', {
+          status: 200,
+          headers: {
+            'content-type': 'application/json; charset=utf-8',
+            'content-disposition':
+              "attachment; filename*=utf-8''my%20file.json",
+          },
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.sessionExport('abc', 'json');
+      expect(result.format).toBe('json');
+      expect(result.body).toBe('{"k":1}');
+      // RFC 5987 `filename*=utf-8''...` should decode through.
+      expect(result.filename).toBe('my file.json');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/abc/export?format=json',
+      );
+    });
+
+    it('falls back to a derived filename when Content-Disposition is absent', async () => {
+      const { fetch } = recordingFetch(
+        () =>
+          new Response('body', {
+            status: 200,
+            headers: { 'content-type': 'text/plain; charset=utf-8' },
+          }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.sessionExport('sess-x', 'jsonl');
+      expect(result.filename).toBe('qwen-session-sess-x.jsonl');
+    });
+
+    it('throws DaemonHttpError when /session/:id/export responds non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { error: 'Invalid format "pdf"' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        client.sessionExport('s', 'pdf' as any),
+      ).rejects.toMatchObject({
+        name: 'DaemonHttpError',
+        status: 400,
+      });
     });
   });
 

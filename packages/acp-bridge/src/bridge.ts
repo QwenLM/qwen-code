@@ -37,6 +37,7 @@ import {
   createIdleWorkspaceSkillsStatus,
   mapDomainErrorToErrorKind,
   type ServePreflightCell,
+  type ServeSessionExport,
   type ServeStatusCell,
 } from './status.js';
 import {
@@ -2793,6 +2794,39 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionSupportedCommands,
       );
+    },
+
+    async getSessionStats(sessionId) {
+      // Issue #4514 T2.5. Pure read — no extra params beyond the
+      // sessionId carried in the URL, so `requestSessionStatus` covers
+      // the full transport (timeout race + transport-closed race).
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionStats,
+      );
+    },
+
+    async getSessionExport(sessionId, format) {
+      // Issue #4514 T2.6. Inlined rather than reusing
+      // `requestSessionStatus` because the ext-method payload carries
+      // the `format` discriminator. The transport race is otherwise
+      // identical (`withTimeout(initTimeoutMs)` vs `transportClosed`).
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const response = await Promise.race([
+        withTimeout(
+          entry.connection.extMethod(SERVE_STATUS_EXT_METHODS.sessionExport, {
+            sessionId,
+            format,
+          }),
+          initTimeoutMs,
+          SERVE_STATUS_EXT_METHODS.sessionExport,
+        ),
+        getTransportClosedReject(entry),
+      ]);
+      return response as unknown as ServeSessionExport;
     },
 
     async setSessionModel(sessionId, req, context) {

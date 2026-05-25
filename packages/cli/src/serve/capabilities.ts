@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { SERVE_SESSION_EXPORT_FORMATS } from './status.js';
+
 export const SERVE_PROTOCOL_VERSION = 'v1' as const;
 
 export const SUPPORTED_SERVE_PROTOCOL_VERSIONS = [
@@ -81,6 +83,26 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
+  // Issue #4514 T2.5. Daemon hosts `GET /session/:id/stats` —
+  // per-session aggregate metrics (promptCount, totalTokens, files
+  // touched, context window utilization). Wraps `collectSessionData`
+  // + `normalizeSessionData` on the session's persisted JSONL, so
+  // daemon stats and the `/stats` slash command agree for any state
+  // flushed to disk (every `chatRecordingService` append is sync).
+  // Read-only; no mutation gate.
+  session_stats: { since: 'v1' },
+  // Issue #4514 T2.6. Daemon hosts `GET /session/:id/export?format=...`
+  // — conversation export in markdown / html / json / jsonl, same SSOT
+  // as the `/export` slash command. `modes` advertises the supported
+  // formatters so SDK clients can feature-detect before requesting an
+  // extension the daemon does not know about. Read-only; the route
+  // returns the rendered body directly (with the matching `Content-
+  // Type` and `Content-Disposition` headers) rather than wrapping it
+  // in JSON, so browser `<a download>` works out of the box.
+  session_export: {
+    since: 'v1',
+    modes: SERVE_SESSION_EXPORT_FORMATS,
+  },
   session_close: { since: 'v1' },
   session_metadata: { since: 'v1' },
   // Issue #4175 PR 14. Daemon supports the MCP client guardrail

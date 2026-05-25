@@ -452,6 +452,110 @@ describe('createHttpAcpBridge', () => {
     ).rejects.toBeInstanceOf(SessionNotFoundError);
   });
 
+  // Issue #4514 T2.5. Read-only session metrics ext-method. Mirrors
+  // the `qwen/status/session/context` transport — `requestSessionStatus`
+  // owns timeout + transport-closed race, so the bridge body is a one-
+  // liner; this test pins the ext-method label and the verbatim
+  // pass-through of the child's response.
+  it('forwards getSessionStats through qwen/status/session/stats', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            expect(method).toBe('qwen/status/session/stats');
+            return {
+              v: 1,
+              sessionId: params['sessionId'],
+              startTime: '2026-05-26T00:00:00.000Z',
+              cwd: WS_A,
+              promptCount: 4,
+              totalTokens: 9_001,
+              uniqueFiles: ['a.ts'],
+            };
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const stats = await bridge.getSessionStats(session.sessionId);
+    expect(stats).toMatchObject({
+      sessionId: session.sessionId,
+      promptCount: 4,
+      totalTokens: 9_001,
+      uniqueFiles: ['a.ts'],
+    });
+    expect(handles[0]?.agent.extMethodCalls.map((c) => c.method)).toEqual([
+      'qwen/status/session/stats',
+    ]);
+
+    await bridge.shutdown();
+  });
+
+  it('rejects getSessionStats for unknown sessions', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    await expect(bridge.getSessionStats('missing')).rejects.toBeInstanceOf(
+      SessionNotFoundError,
+    );
+  });
+
+  // Issue #4514 T2.6. Export ext-method carries the `format`
+  // discriminator and returns body + content-type + filename. The
+  // bridge does not validate the format (the HTTP route does that
+  // upstream); it threads whatever it gets through to the child.
+  it('forwards getSessionExport with format and returns the rendered body', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            expect(method).toBe('qwen/status/session/export');
+            expect(params['format']).toBe('html');
+            return {
+              v: 1,
+              sessionId: params['sessionId'],
+              format: 'html',
+              body: '<html><body>fake</body></html>',
+              contentType: 'text/html; charset=utf-8',
+              filename: `qwen-session-${String(params['sessionId'])}.html`,
+            };
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const result = await bridge.getSessionExport(session.sessionId, 'html');
+    expect(result).toMatchObject({
+      sessionId: session.sessionId,
+      format: 'html',
+      body: '<html><body>fake</body></html>',
+      contentType: 'text/html; charset=utf-8',
+    });
+    expect(result.filename).toBe(`qwen-session-${session.sessionId}.html`);
+    expect(handles[0]?.agent.extMethodCalls.map((c) => c.method)).toEqual([
+      'qwen/status/session/export',
+    ]);
+
+    await bridge.shutdown();
+  });
+
+  it('rejects getSessionExport for unknown sessions', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    await expect(
+      bridge.getSessionExport('missing', 'md'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+  });
+
   it('reuses an echoed daemon-issued client id on attach', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {

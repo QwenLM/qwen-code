@@ -387,6 +387,36 @@ describe('DaemonSessionClient', () => {
           availableSkills: ['review'],
         });
       }
+      if (req.url.endsWith('/session/s-1/stats')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          startTime: '2026-05-26T00:00:00.000Z',
+          cwd: '/work/a',
+          promptCount: 3,
+          totalTokens: 1_234,
+          uniqueFiles: ['a.ts'],
+        });
+      }
+      if (req.url.endsWith('/session/s-1/export?format=md')) {
+        return new Response('# md export', {
+          status: 200,
+          headers: {
+            'content-type': 'text/markdown; charset=utf-8',
+            'content-disposition': 'attachment; filename="qwen-session-s-1.md"',
+          },
+        });
+      }
+      if (req.url.endsWith('/session/s-1/export?format=jsonl')) {
+        return new Response('{"u":1}\n{"u":2}\n', {
+          status: 200,
+          headers: {
+            'content-type': 'application/jsonl; charset=utf-8',
+            'content-disposition':
+              'attachment; filename="qwen-session-s-1.jsonl"',
+          },
+        });
+      }
       if (req.url.endsWith('/session/s-1/cancel')) {
         return new Response(null, { status: 204 });
       }
@@ -446,6 +476,31 @@ describe('DaemonSessionClient', () => {
       ],
       availableSkills: ['review'],
     });
+    // Issue #4514 T2.5 — session-scoped stats wrapper.
+    await expect(session.stats()).resolves.toEqual({
+      v: 1,
+      sessionId: 's-1',
+      startTime: '2026-05-26T00:00:00.000Z',
+      cwd: '/work/a',
+      promptCount: 3,
+      totalTokens: 1_234,
+      uniqueFiles: ['a.ts'],
+    });
+    // Issue #4514 T2.6 — session-scoped export wrapper (default md
+    // for parity with the /export slash command).
+    await expect(session.export()).resolves.toEqual({
+      sessionId: 's-1',
+      format: 'md',
+      body: '# md export',
+      contentType: 'text/markdown; charset=utf-8',
+      filename: 'qwen-session-s-1.md',
+    });
+    await expect(session.export('jsonl')).resolves.toMatchObject({
+      sessionId: 's-1',
+      format: 'jsonl',
+      body: '{"u":1}\n{"u":2}\n',
+      contentType: 'application/jsonl; charset=utf-8',
+    });
     await expect(session.cancel()).resolves.toBeUndefined();
     await expect(
       session.respondToPermission('req-1', {
@@ -467,6 +522,9 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1/model',
       'http://daemon/session/s-1/context',
       'http://daemon/session/s-1/supported-commands',
+      'http://daemon/session/s-1/stats',
+      'http://daemon/session/s-1/export?format=md',
+      'http://daemon/session/s-1/export?format=jsonl',
       'http://daemon/session/s-1/cancel',
       'http://daemon/permission/req-1',
       'http://daemon/session/s-1/permission/req-2',
@@ -474,7 +532,14 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1',
     ]);
     expect(calls[0]?.signal).toBe(controller.signal);
+    // Twelve session-scoped calls — all should echo the trusted
+    // client id so the daemon's audit/originator stamps stay
+    // consistent. The two new entries (`stats`, `export*2`) inherit
+    // the same `this.clientId` plumbing the older methods use.
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+      'client-1',
       'client-1',
       'client-1',
       'client-1',

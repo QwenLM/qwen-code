@@ -105,9 +105,13 @@ import {
   type ServeMcpDiscoveryState,
   type ServeMcpServerRuntimeStatus,
   type ServeMcpTransport,
+  SERVE_SESSION_EXPORT_FORMATS,
   type ServePreflightCell,
   type ServePreflightKind,
   type ServeSessionContextStatus,
+  type ServeSessionExport,
+  type ServeSessionExportFormat,
+  type ServeSessionStats,
   type ServeSessionSupportedCommandsStatus,
   type ServeStatus,
   type ServeStatusCell,
@@ -119,8 +123,57 @@ import {
   type ServeWorkspaceSkillStatus,
   type ServeWorkspaceSkillsStatus,
 } from '../serve/status.js';
+import {
+  collectSessionData,
+  generateExportFilename,
+  normalizeSessionData,
+  toHtml,
+  toJson,
+  toJsonl,
+  toMarkdown,
+  type ExportSessionData,
+} from '../ui/utils/export/index.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
+
+// Issue #4514 T2.6. Per-format dispatch table for
+// `GET /session/:id/export`. Keys mirror `SERVE_SESSION_EXPORT_FORMATS`
+// so adding a new format only requires extending the array in
+// `status.ts` and adding the row here (compiler enforces exhaustiveness
+// through the `Record<ServeSessionExportFormat, ...>` type).
+const SESSION_EXPORT_DESCRIPTORS: Record<
+  ServeSessionExportFormat,
+  {
+    extension: string;
+    contentType: string;
+    format: (data: ExportSessionData) => string;
+  }
+> = {
+  md: {
+    extension: 'md',
+    contentType: 'text/markdown; charset=utf-8',
+    format: toMarkdown,
+  },
+  html: {
+    extension: 'html',
+    contentType: 'text/html; charset=utf-8',
+    format: toHtml,
+  },
+  json: {
+    extension: 'json',
+    contentType: 'application/json; charset=utf-8',
+    format: toJson,
+  },
+  jsonl: {
+    extension: 'jsonl',
+    // `application/jsonl` is the convention the WebUI and CLI exporters
+    // already use; `application/x-ndjson` is the IANA-registered name
+    // but no major HTTP client distinguishes the two, and matching the
+    // existing TUI export keeps the round-trip identical.
+    contentType: 'application/jsonl; charset=utf-8',
+    format: toJsonl,
+  },
+};
 
 /**
  * Env-var candidates per auth method, used by `buildAuthPreflightCell` for
@@ -1863,6 +1916,87 @@ class QwenAgent implements Agent {
     };
   }
 
+  // Issue #4514 T2.5+T2.6. Loads the session's persisted JSONL from
+  // disk and runs the same `collectSessionData` + `normalizeSessionData`
+  // pipeline the `/stats` and `/export` slash commands use, so daemon
+  // surfaces and TUI surfaces stay in lockstep. The session must be
+  // live (so we can read `Config` for cwd + context window size) AND
+  // must have written at least one record (otherwise the JSONL does
+  // not exist yet and we surface a `400 invalid_params` instead of
+  // fabricating zeroes).
+  private async loadNormalizedSessionData(sessionId: string): Promise<{
+    config: Config;
+    cwd: string;
+    normalized: ExportSessionData;
+  }> {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    const cwd = this.workspaceCwd(config);
+    const sessionService = new SessionService(cwd);
+    const sessionData = await sessionService.loadSession(sessionId);
+    if (!sessionData) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Session ${sessionId} has no persisted records yet — wait for the first user turn to flush.`,
+      );
+    }
+    const exportData = await collectSessionData(
+      sessionData.conversation,
+      config,
+    );
+    const normalized = normalizeSessionData(
+      exportData,
+      sessionData.conversation.messages,
+      config,
+    );
+    return { config, cwd, normalized };
+  }
+
+  private async buildSessionStats(
+    sessionId: string,
+  ): Promise<ServeSessionStats> {
+    const { cwd, normalized } = await this.loadNormalizedSessionData(sessionId);
+    // `collectSessionData` always populates `metadata`; the optional
+    // typing on `ExportSessionData.metadata` is for legacy paths that
+    // skip `extractMetadata`. We fall back to safe defaults defensively
+    // rather than asserting non-null so any future divergence surfaces
+    // as zero stats, not a 5xx.
+    const m = normalized.metadata;
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      startTime: normalized.startTime,
+      cwd: m?.cwd ?? cwd,
+      promptCount: m?.promptCount ?? 0,
+      model: m?.model,
+      gitRepo: m?.gitRepo,
+      gitBranch: m?.gitBranch,
+      totalTokens: m?.totalTokens,
+      contextUsagePercent: m?.contextUsagePercent,
+      contextWindowSize: m?.contextWindowSize,
+      filesWritten: m?.filesWritten,
+      linesAdded: m?.linesAdded,
+      linesRemoved: m?.linesRemoved,
+      uniqueFiles: m?.uniqueFiles ?? [],
+    };
+  }
+
+  private async buildSessionExport(
+    sessionId: string,
+    format: ServeSessionExportFormat,
+  ): Promise<ServeSessionExport> {
+    const { normalized } = await this.loadNormalizedSessionData(sessionId);
+    const desc = SESSION_EXPORT_DESCRIPTORS[format];
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      format,
+      body: desc.format(normalized),
+      contentType: desc.contentType,
+      filename: generateExportFilename(desc.extension),
+    };
+  }
+
   async extMethod(
     method: string,
     params: Record<string, unknown>,
@@ -1911,6 +2045,52 @@ class QwenAgent implements Agent {
         }
         return (await this.buildSessionSupportedCommandsStatus(
           sessionId,
+        )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionStats: {
+        // Issue #4514 T2.5. Bridge guarantees `sessionId` is a string
+        // (`requestSessionStatus` sends it directly from URL params),
+        // but we re-validate here so a wire client that calls the
+        // ext-method directly cannot trigger a NPE in
+        // `loadNormalizedSessionData`.
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return (await this.buildSessionStats(sessionId)) as unknown as Record<
+          string,
+          unknown
+        >;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionExport: {
+        // Issue #4514 T2.6. The HTTP route normalizes `format` against
+        // `SERVE_SESSION_EXPORT_FORMATS` and rejects unknowns with 400
+        // before the ext-method is dispatched. We re-validate so the
+        // ext-method has the same safety as a direct caller and so
+        // `SESSION_EXPORT_DESCRIPTORS[format]` never throws.
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const format = params['format'];
+        if (
+          typeof format !== 'string' ||
+          !(SERVE_SESSION_EXPORT_FORMATS as readonly string[]).includes(format)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Invalid or missing format; expected one of ${SERVE_SESSION_EXPORT_FORMATS.join(', ')}`,
+          );
+        }
+        return (await this.buildSessionExport(
+          sessionId,
+          format as ServeSessionExportFormat,
         )) as unknown as Record<string, unknown>;
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
