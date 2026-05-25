@@ -746,6 +746,19 @@ async function tickAutoImprove(
     );
   }
 
+  // Re-read state to close the TOCTOU window between initial check and write.
+  // This significantly reduces the race window where two concurrent ticks could
+  // both pass the check and start LLM sessions. A full solution would require
+  // file locking or an in-process mutex, but this double-check pattern provides
+  // practical protection for typical usage patterns.
+  const freshState = await readAutoImproveLoopState(repoRoot, loopId);
+  if (freshState && isActiveAutoImproveRunRef(freshState.currentRun)) {
+    return message(
+      'info',
+      t('Auto-improve tick skipped: previous run is still active.'),
+    );
+  }
+
   state.currentRun = makePendingRunRef();
   await writeAutoImproveLoopState(repoRoot, state);
 
