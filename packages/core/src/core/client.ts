@@ -1219,6 +1219,15 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    // Construct the streaming executor (if the flag is on) once at the top
+    // so every Turn — including the short-circuit returns below that never
+    // actually `.run()` — exposes a consistent `getStreamingExecutor()`. A
+    // Phase 3 caller that inspects the returned Turn to decide dispatch
+    // strategy would otherwise see `undefined` on every short-circuit path
+    // regardless of config.
+    const streamingExecutor = this.config.getStreamingToolDispatch()
+      ? new StreamingToolExecutor()
+      : undefined;
 
     if (messageType === SendMessageType.Retry) {
       this.stripOrphanedUserEntriesFromHistory();
@@ -1271,7 +1280,7 @@ export class GeminiClient {
             originalPrompt: promptText,
           },
         };
-        return new Turn(this.getChat(), prompt_id);
+        return new Turn(this.getChat(), prompt_id, streamingExecutor);
       }
 
       // Add additional context from hooks to the request
@@ -1503,7 +1512,7 @@ export class GeminiClient {
             endInteractionSpan('error', {
               errorMessage: 'max session turns exceeded',
             });
-          return new Turn(this.getChat(), prompt_id);
+          return new Turn(this.getChat(), prompt_id, streamingExecutor);
         }
       }
 
@@ -1513,7 +1522,7 @@ export class GeminiClient {
         this.cancelPendingMemoryPrefetch();
         if (isTopLevelInteraction)
           endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
-        return new Turn(this.getChat(), prompt_id);
+        return new Turn(this.getChat(), prompt_id, streamingExecutor);
       }
 
       // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
@@ -1540,7 +1549,7 @@ export class GeminiClient {
             endInteractionSpan('error', {
               errorMessage: 'session token limit exceeded',
             });
-          return new Turn(this.getChat(), prompt_id);
+          return new Turn(this.getChat(), prompt_id, streamingExecutor);
         }
       }
 
@@ -1586,13 +1595,10 @@ export class GeminiClient {
           await arenaAgentClient.reportCancelled();
           this.cancelPendingMemoryPrefetch();
           if (isTopLevelInteraction) endInteractionSpan('cancelled');
-          return new Turn(this.getChat(), prompt_id);
+          return new Turn(this.getChat(), prompt_id, streamingExecutor);
         }
       }
 
-      const streamingExecutor = this.config.getStreamingToolDispatch()
-        ? new StreamingToolExecutor()
-        : undefined;
       const turn = new Turn(this.getChat(), prompt_id, streamingExecutor);
 
       // Determine the model to use for this turn

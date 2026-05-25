@@ -916,5 +916,54 @@ describe('StreamingToolCallParser', () => {
       expect(completed.map((t) => t.id)).toEqual(['call_B']);
       expect(parser.isEmitted(0)).toBe(false);
     });
+
+    it('hasIncompleteToolCalls skips emitted entries (lockstep with getCompletedToolCalls)', () => {
+      // Tool A closes cleanly mid-stream and is markEmitted; sibling B is
+      // still mid-args at finish_reason. Without the skip, B's depth>0
+      // would make the converter declare the whole batch truncated and
+      // stamp wasOutputTruncated onto the cleanly-emitted A.
+      const parser = new StreamingToolCallParser();
+      parser.addChunk(0, '{"file_path":"/a.ts"}', 'call_A', 'read_file');
+      parser.markEmitted(0);
+      parser.addChunk(1, '{"file_path":"/b', 'call_B', 'read_file');
+
+      expect(parser.hasIncompleteToolCalls()).toBe(true);
+
+      // Now imagine B also closes cleanly and was emitted mid-stream — no
+      // entry should keep the parser in the "incomplete" state.
+      parser.addChunk(1, '.ts"}', undefined, undefined);
+      parser.markEmitted(1);
+      expect(parser.hasIncompleteToolCalls()).toBe(false);
+    });
+  });
+
+  describe('non-object args handling', () => {
+    it('treats top-level non-object JSON (array) as incomplete', () => {
+      const parser = new StreamingToolCallParser();
+      const result = parser.addChunk(0, '[1,2,3]', 'call_X', 'fn_X');
+      expect(result.complete).toBe(false);
+      expect(result.error?.message).toContain('must be a JSON object');
+    });
+
+    it('treats top-level primitive (number) as incomplete', () => {
+      const parser = new StreamingToolCallParser();
+      const result = parser.addChunk(0, '42', 'call_X', 'fn_X');
+      expect(result.complete).toBe(false);
+    });
+
+    it('treats top-level null as incomplete', () => {
+      const parser = new StreamingToolCallParser();
+      const result = parser.addChunk(0, 'null', 'call_X', 'fn_X');
+      expect(result.complete).toBe(false);
+    });
+
+    it('getCompletedToolCalls falls back to {} for non-object buffers', () => {
+      const parser = new StreamingToolCallParser();
+      // A provider that erroneously emits a primitive should not produce
+      // a misshapen Record<string, unknown>.
+      parser.addChunk(0, '"just a string"', 'call_X', 'fn_X');
+      const [completed] = parser.getCompletedToolCalls();
+      expect(completed.args).toEqual({});
+    });
   });
 });

@@ -7,6 +7,15 @@
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 
 /**
+ * The function-call args contract is a JSON object. The streaming depth
+ * tracker counts `{}` and `[]`, so primitives and arrays at the root also
+ * reach `depth === 0` and parse — but they don't satisfy the contract.
+ */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
  * Type definition for the result of parsing a JSON chunk in tool calls
  */
 export interface ToolCallParseResult {
@@ -196,9 +205,23 @@ export class StreamingToolCallParser {
       try {
         // Standard JSON parsing attempt
         const parsed = JSON.parse(newBuffer);
+        if (isPlainObject(parsed)) {
+          return {
+            complete: true,
+            value: parsed,
+            index: actualIndex,
+            id: meta.id,
+            name: meta.name,
+          };
+        }
+        // Non-object root (null, primitive, array): the depth tracker counts
+        // {}/[] but the function-call args contract is a JSON object, so
+        // treat this as a parse error rather than emit a fake-Record value.
         return {
-          complete: true,
-          value: parsed,
+          complete: false,
+          error: new Error(
+            `tool-call args must be a JSON object, got ${parsed === null ? 'null' : typeof parsed}`,
+          ),
           index: actualIndex,
           id: meta.id,
           name: meta.name,
@@ -208,14 +231,16 @@ export class StreamingToolCallParser {
         if (inString) {
           try {
             const repaired = JSON.parse(newBuffer + '"');
-            return {
-              complete: true,
-              value: repaired,
-              repaired: true,
-              index: actualIndex,
-              id: meta.id,
-              name: meta.name,
-            };
+            if (isPlainObject(repaired)) {
+              return {
+                complete: true,
+                value: repaired,
+                repaired: true,
+                index: actualIndex,
+                id: meta.id,
+                name: meta.name,
+              };
+            }
           } catch {
             // If repair fails, fall through to error case
           }
@@ -303,19 +328,23 @@ export class StreamingToolCallParser {
 
         // Try to parse the final buffer
         try {
-          args = JSON.parse(buffer);
+          const parsed = JSON.parse(buffer);
+          if (isPlainObject(parsed)) args = parsed;
         } catch {
           // Try with repair (auto-close strings)
           const inString = this.inStrings.get(index);
           if (inString) {
             try {
-              args = JSON.parse(buffer + '"');
+              const repaired = JSON.parse(buffer + '"');
+              if (isPlainObject(repaired)) args = repaired;
             } catch {
               // If all parsing fails, use safeJsonParse as fallback
-              args = safeJsonParse(buffer, {});
+              const fallback = safeJsonParse(buffer, {});
+              if (isPlainObject(fallback)) args = fallback;
             }
           } else {
-            args = safeJsonParse(buffer, {});
+            const fallback = safeJsonParse(buffer, {});
+            if (isPlainObject(fallback)) args = fallback;
           }
         }
 
@@ -480,6 +509,10 @@ export class StreamingToolCallParser {
     for (const [index] of this.buffers.entries()) {
       const meta = this.toolCallMeta.get(index);
       if (!meta?.name) continue;
+      // Mid-stream-emitted tool calls (streamingToolDispatch) closed cleanly
+      // by definition; including them here would force `finishReason='length'`
+      // and incorrectly stamp `wasOutputTruncated` onto cleanly-emitted calls.
+      if (meta.emitted) continue;
 
       const depth = this.depths.get(index) || 0;
       const inString = this.inStrings.get(index) || false;

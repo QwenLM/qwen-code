@@ -120,6 +120,15 @@ export class StreamingToolExecutor {
    * completes *after* the executor was wiped should treat the late
    * `recordResult()` as a no-op — the matching `functionCall` is no longer
    * in (or being added to) history.
+   *
+   * **Stale-callback hazard:** if the same `callId` is re-accepted after
+   * `reset()` (e.g. a provider redelivers it on the retry attempt) and the
+   * previous attempt's dispatcher is still running, its eventual
+   * `recordResult()` will land on the *new* attempt's slot and be silently
+   * misattributed. Dispatchers MUST cancel their in-flight work
+   * synchronously inside `reset()` / `discard()` — typically by aborting
+   * an `AbortController` owned alongside the executor — so no stale
+   * callbacks survive a wipe.
    */
   recordResult(response: ToolCallResponseInfo): void {
     if (this.discarded) return;
@@ -163,10 +172,12 @@ export class StreamingToolExecutor {
   /**
    * Resolves once every accepted request has a recorded result, returning
    * them in accept order. Rejects with {@link StreamingToolExecutorDiscardedError}
-   * if `discard()` is called first. Resolves immediately if already complete
-   * (including the empty-accept case, which resolves to `[]`). Stays pending
-   * across `close()` when the buffer isn't complete — the caller must record
-   * the remaining results or call `discard()`.
+   * if `discard()` *or* `reset()` runs first — the rejection's `reason`
+   * field distinguishes the two (`'aborted' | 'unauthorized' | 'stream-error'`
+   * for discard, `'retry'` for reset). Resolves immediately if already
+   * complete (including the empty-accept case, which resolves to `[]`).
+   * Stays pending across `close()` when the buffer isn't complete — the
+   * caller must record the remaining results or call `discard()` / `reset()`.
    */
   getRemainingResults(): Promise<ToolCallResponseInfo[]> {
     if (this.discarded) {
@@ -280,9 +291,11 @@ export class StreamingToolExecutor {
 
   private maybeSettlePending(): void {
     if (!this.isComplete() || this.pending.length === 0) return;
-    const results = this.getCompletedResults();
+    // Per-consumer snapshot — otherwise consumer A mutating the resolved
+    // array (e.g. `.shift()` while feeding history) would leak into
+    // consumer B's view.
     const pending = this.pending.splice(0);
-    for (const p of pending) p.resolve(results);
+    for (const p of pending) p.resolve(this.getCompletedResults());
   }
 
   private rejectPending(

@@ -15,6 +15,7 @@ import { reportError } from '../utils/errorReporting.js';
 import type { GeminiChat } from './geminiChat.js';
 import { StreamEventType } from './geminiChat.js';
 import { StreamingToolExecutor } from './streamingToolExecutor.js';
+import { UnauthorizedError } from '../utils/errors.js';
 
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
@@ -1232,6 +1233,68 @@ describe('Turn', () => {
       expect(executor.getDiscardReason()).toBe('stream-error');
       expect(events.at(-1)).toMatchObject({ type: GeminiEventType.Error });
       expect(vi.mocked(reportError)).toHaveBeenCalledTimes(1);
+    });
+
+    it("discards with reason 'unauthorized' and rethrows when the stream throws an UnauthorizedError", async () => {
+      const executor = new StreamingToolExecutor();
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      mockSendMessageStream.mockResolvedValue(
+        // eslint-disable-next-line require-yield
+        (async function* () {
+          throw new UnauthorizedError('not allowed');
+        })(),
+      );
+
+      let caught: unknown;
+      try {
+        for await (const _ of t.run(
+          'test-model',
+          [{ text: 'hi' }],
+          new AbortController().signal,
+        )) {
+          // consume
+        }
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(UnauthorizedError);
+      expect(executor.isDiscarded()).toBe(true);
+      expect(executor.getDiscardReason()).toBe('unauthorized');
+    });
+
+    it("catch-block aborted check wins over stream-error: signal.aborted + stream throw → reason 'aborted'", async () => {
+      // The catch's `if (signal.aborted)` branch must fire BEFORE the
+      // generic `discard('stream-error')` so a user-abort that races with
+      // a stream throw still surfaces as 'aborted', not 'stream-error'.
+      const executor = new StreamingToolExecutor();
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      const ctrl = new AbortController();
+      mockSendMessageStream.mockResolvedValue(
+        // eslint-disable-next-line require-yield
+        (async function* () {
+          // Abort first, then throw on the very next iteration.
+          ctrl.abort();
+          throw new Error('boom-after-abort');
+        })(),
+      );
+
+      for await (const _ of t.run(
+        'test-model',
+        [{ text: 'hi' }],
+        ctrl.signal,
+      )) {
+        // consume
+      }
+      expect(executor.isDiscarded()).toBe(true);
+      expect(executor.getDiscardReason()).toBe('aborted');
     });
 
     it('closes (not discards) the executor on consumer break-out, preserving buffered state', async () => {

@@ -1248,15 +1248,23 @@ export function convertOpenAIChunkToGemini(
           toolCall.function?.name,
         );
 
+        // Defer the mid-stream emit until the canonical `id` is present.
+        // Some OpenAI-compatible providers split metadata across deltas
+        // (name+arguments first, id later) — emitting with a synthesized id
+        // would lock it onto the wire and silently drop the canonical id
+        // when the finish_reason flush is suppressed by `markEmitted`. The
+        // finish_reason path still synthesizes ids for providers that
+        // never send one at all.
         if (
           streamingToolDispatch &&
           result.complete &&
           result.name &&
+          result.id &&
           !toolCallParser.isEmitted(result.index)
         ) {
           parts.push({
             functionCall: {
-              id: result.id || synthesizeToolCallId(),
+              id: result.id,
               name: result.name,
               args: result.value!,
             },

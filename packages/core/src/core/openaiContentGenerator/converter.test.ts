@@ -494,6 +494,102 @@ describe('OpenAIContentConverter', () => {
       expect(calls[0]?.args).toEqual({ file_path: '/c.ts' });
     });
 
+    it('flag-on: defers mid-stream emit until a canonical id arrives', () => {
+      // Providers that split metadata across deltas — args first, id later —
+      // must NOT lock in a synthesized id mid-stream and silently drop the
+      // canonical id when the finish_reason flush is suppressed.
+      const ctx: RequestContext = {
+        ...withStreamParser(new StreamingToolCallParser()),
+        streamingToolDispatch: true,
+      };
+
+      // First chunk: name + complete args, but NO id.
+      const noIdOpener = {
+        object: 'chat.completion.chunk',
+        id: 'open-noid',
+        created: 1,
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  type: 'function' as const,
+                  function: {
+                    name: 'read_file',
+                    arguments: '{"file_path":"/a.ts"}',
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+      const r1 = converter.convertOpenAIChunkToGemini(noIdOpener, ctx);
+      // No mid-stream emit yet — we don't have the canonical id.
+      expect(functionCallsOf(r1)).toEqual([]);
+
+      // Later chunk supplies the canonical id with empty args. The emit
+      // fires NOW with the canonical id, not synthesized.
+      const idLater = {
+        object: 'chat.completion.chunk',
+        id: 'open-idlater',
+        created: 1,
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_REAL',
+                  function: { arguments: '' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+      const r2 = converter.convertOpenAIChunkToGemini(idLater, ctx);
+      const emitted = functionCallsOf(r2);
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]?.id).toBe('call_REAL');
+      expect(emitted[0]?.args).toEqual({ file_path: '/a.ts' });
+
+      // finish_reason flush does not re-emit (markEmitted suppressed it).
+      const rFinish = converter.convertOpenAIChunkToGemini(finisher(), ctx);
+      expect(functionCallsOf(rFinish)).toEqual([]);
+    });
+
+    it('flag-on: non-object JSON args (array) do NOT emit mid-stream', () => {
+      // Provider mistakenly sends `[1,2,3]` as args — depth tracker hits 0
+      // but the parser now reports `complete: false`, so no emit.
+      const ctx: RequestContext = {
+        ...withStreamParser(new StreamingToolCallParser()),
+        streamingToolDispatch: true,
+      };
+
+      const r1 = converter.convertOpenAIChunkToGemini(
+        opener('call_BAD', 'fn_X', '[1,2,3]'),
+        ctx,
+      );
+      expect(functionCallsOf(r1)).toEqual([]);
+
+      // finish_reason fallback emits with args coerced to {}.
+      const rFinish = converter.convertOpenAIChunkToGemini(finisher(), ctx);
+      const flushed = functionCallsOf(rFinish);
+      expect(flushed).toHaveLength(1);
+      expect(flushed[0]?.id).toBe('call_BAD');
+      expect(flushed[0]?.args).toEqual({});
+    });
+
     it('flag-on: incomplete tool call at finish_reason still flushes through the fallback path', () => {
       const ctx: RequestContext = {
         ...withStreamParser(new StreamingToolCallParser()),

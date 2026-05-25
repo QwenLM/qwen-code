@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
 import { GeminiClient, SendMessageType } from './client.js';
+import { StreamingToolExecutor } from './streamingToolExecutor.js';
 import { findCompressSplitPoint } from '../services/chatCompressionService.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -93,6 +94,7 @@ vi.mock('node:fs', () => {
 
 // --- Mocks ---
 const mockTurnRunFn = vi.fn();
+const mockTurnCtorFn = vi.fn();
 
 vi.mock('./turn', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./turn.js')>();
@@ -102,8 +104,8 @@ vi.mock('./turn', async (importOriginal) => {
     // The run method is a property that holds our mock function
     run = mockTurnRunFn;
 
-    constructor() {
-      // The constructor can be empty or do some mock setup
+    constructor(...args: unknown[]) {
+      mockTurnCtorFn(...args);
     }
   }
   // Export the mock class as 'Turn'
@@ -5422,6 +5424,49 @@ Other open files:
           /* consume */
         }
         expect(recordAttributionSnapshot).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('streamingToolDispatch executor construction', () => {
+      beforeEach(() => {
+        mockTurnCtorFn.mockClear();
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: 'content', value: 'ok' };
+          })(),
+        );
+      });
+
+      it('passes a StreamingToolExecutor to Turn when the flag is on', async () => {
+        vi.mocked(mockConfig.getStreamingToolDispatch).mockReturnValue(true);
+        const stream = client.sendMessageStream(
+          [{ text: 'hi' }],
+          new AbortController().signal,
+          'prompt-flag-on',
+          { type: SendMessageType.UserQuery },
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+        const lastCall = mockTurnCtorFn.mock.calls.at(-1);
+        expect(lastCall).toBeDefined();
+        expect(lastCall![2]).toBeInstanceOf(StreamingToolExecutor);
+      });
+
+      it('passes undefined when the flag is off', async () => {
+        vi.mocked(mockConfig.getStreamingToolDispatch).mockReturnValue(false);
+        const stream = client.sendMessageStream(
+          [{ text: 'hi' }],
+          new AbortController().signal,
+          'prompt-flag-off',
+          { type: SendMessageType.UserQuery },
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+        const lastCall = mockTurnCtorFn.mock.calls.at(-1);
+        expect(lastCall).toBeDefined();
+        expect(lastCall![2]).toBeUndefined();
       });
     });
   });
