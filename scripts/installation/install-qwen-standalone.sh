@@ -29,9 +29,8 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-BRAND_ROSE='\033[38;5;168m'
-BRAND_PURPLE='\033[38;5;140m'
-BRAND_BLUE='\033[38;5;68m'
+BRAND_BLUE='\033[38;2;71;150;228m'
+BRAND_PURPLE='\033[38;2;132;122;206m'
 MUTED='\033[0;2m'
 NC='\033[0m'
 
@@ -1219,7 +1218,7 @@ install_standalone() {
         register_temp_dir "${temp_dir}"
         archive_path="${temp_dir}/${archive_name}"
 
-        echo -e "${BRAND_PURPLE}[1/3]${NC} Downloading ${archive_name}"
+        echo -e "${BRAND_BLUE}[1/3]${NC} Downloading ${archive_name}"
         if ! download_file "${archive_url}" "${archive_path}"; then
             if [[ -n "${github_fallback_base_url}" ]]; then
                 rm -f "${archive_path}"
@@ -1228,7 +1227,7 @@ install_standalone() {
                 MIRROR="github"
                 github_fallback_base_url=""
                 log_warning "Aliyun standalone archive download failed; retrying GitHub mirror."
-                echo -e "${BRAND_PURPLE}[1/3]${NC} Downloading ${archive_name}"
+                echo -e "${BRAND_BLUE}[1/3]${NC} Downloading ${archive_name}"
                 if download_file "${archive_url}" "${archive_path}"; then
                     :
                 else
@@ -1256,14 +1255,14 @@ install_standalone() {
     fi
 
     # Verify integrity before extraction or changing the install directory.
-    echo -e "${BRAND_PURPLE}[2/3]${NC} Verifying checksum"
+    echo -e "${BRAND_BLUE}[2/3]${NC} Verifying checksum"
     if ! verify_checksum "${archive_path}" "${checksum_source}" "${archive_name}"; then
         rm -rf "${temp_dir}"
         return 1
     fi
 
     # Extract into a temporary directory, then validate required entry points.
-    echo -e "${BRAND_PURPLE}[3/3]${NC} Installing"
+    echo -e "${BRAND_BLUE}[3/3]${NC} Installing"
     local extract_dir="${temp_dir}/extract"
     if ! extract_archive "${archive_path}" "${extract_dir}"; then
         rm -rf "${temp_dir}"
@@ -1403,14 +1402,48 @@ install_npm() {
     return 1
 }
 
+gradient_line() {
+    local text="$1"
+    local r1=$2 g1=$3 b1=$4
+    local r2=$5 g2=$6 b2=$7
+    local r3=$8 g3=$9 b3=${10}
+    local len=${#text}
+    [ "$len" -eq 0 ] && return
+    local i=0
+    local half=$(( len / 2 ))
+    while [ $i -lt $len ]; do
+        local char="${text:$i:1}"
+        local r g b
+        if [ $i -lt $half ]; then
+            local t=$(( i * 1000 / half ))
+            r=$(( (r1 * (1000 - t) + r2 * t) / 1000 ))
+            g=$(( (g1 * (1000 - t) + g2 * t) / 1000 ))
+            b=$(( (b1 * (1000 - t) + b2 * t) / 1000 ))
+        else
+            local t=$(( (i - half) * 1000 / (len - half) ))
+            r=$(( (r2 * (1000 - t) + r3 * t) / 1000 ))
+            g=$(( (g2 * (1000 - t) + g3 * t) / 1000 ))
+            b=$(( (b2 * (1000 - t) + b3 * t) / 1000 ))
+        fi
+        if [ "$char" = " " ]; then
+            printf " "
+        else
+            printf "\033[38;2;%d;%d;%dm%s" "$r" "$g" "$b" "$char"
+        fi
+        i=$(( i + 1 ))
+    done
+    printf "\033[0m\n"
+}
+
 print_logo() {
-    # "QWEN CODE" in ╔═╗║╚╝ style matching the CLI header, with brand gradient
-    echo -e "${BRAND_ROSE} ▄▄▄▄▄▄  ▄▄     ▄▄ ▄▄▄▄▄▄▄ ▄▄▄    ▄▄  ${BRAND_BLUE} ▄▄▄▄▄▄  ▄▄▄▄▄▄  ▄▄▄▄▄▄  ▄▄▄▄▄▄▄${NC}"
-    echo -e "${BRAND_ROSE}██╔═══██╗██║    ██║██╔════╝████╗  ██║ ${BRAND_BLUE}██╔════╝██╔═══██╗██╔══██╗██╔════╝${NC}"
-    echo -e "${BRAND_ROSE}██║   ██║██║ █╗ ██║█████╗  ██╔██╗ ██║ ${BRAND_PURPLE}██║     ██║   ██║██║  ██║█████╗${NC}"
-    echo -e "${BRAND_PURPLE}██║▄▄ ██║██║███╗██║██╔══╝  ██║╚██╗██║ ${BRAND_PURPLE}██║     ██║   ██║██║  ██║██╔══╝${NC}"
-    echo -e "${BRAND_PURPLE}╚██████╔╝╚███╔███╔╝███████╗██║ ╚████║ ${BRAND_BLUE}╚██████╗╚██████╔╝██████╔╝███████╗${NC}"
-    echo -e "${BRAND_BLUE} ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝  ${BRAND_BLUE}╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝${NC}"
+    # Per-character gradient matching CLI's ink-gradient rendering
+    # Direction: #4796E4 (blue) → #847ACE (purple) → #C3677F (rose)
+    gradient_line " ▄▄▄▄▄▄  ▄▄     ▄▄ ▄▄▄▄▄▄▄ ▄▄▄    ▄▄"  71 150 228  132 122 206  195 103 127
+    gradient_line "██╔═══██╗██║    ██║██╔════╝████╗  ██║"  71 150 228  132 122 206  195 103 127
+    gradient_line "██║   ██║██║ █╗ ██║█████╗  ██╔██╗ ██║"  71 150 228  132 122 206  195 103 127
+    gradient_line "██║▄▄ ██║██║███╗██║██╔══╝  ██║╚██╗██║"  71 150 228  132 122 206  195 103 127
+    gradient_line "╚██████╔╝╚███╔███╔╝███████╗██║ ╚████║"  71 150 228  132 122 206  195 103 127
+    gradient_line " ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝"  71 150 228  132 122 206  195 103 127
 }
 
 print_final_instructions() {
