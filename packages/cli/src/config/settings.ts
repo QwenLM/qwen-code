@@ -596,6 +596,18 @@ export function resetHomeEnvBootstrapForTesting(): void {
   homeEnvBootstrapped = false;
 }
 
+/**
+ * Collects environment variables from user-level `.env` files and returns
+ * them as a plain dictionary **without** mutating `process.env`.
+ *
+ * Candidates are iterated most-specific-first (`~/.qwen/.env` before
+ * `~/.env`).  `??=` ensures the first file to define a key wins, matching
+ * dotenv's first-occurrence-wins semantics used elsewhere.
+ *
+ * Note: this dict intentionally does NOT filter PROJECT_ENV_HARDCODED_EXCLUSIONS
+ * or advanced.excludedEnvVars — substitution scope is narrower than process.env
+ * population handled by preResolveHomeEnvOverrides / readHomeEnvInto.
+ */
 function getHomeEnvFallbackVars(): Record<string, string> {
   const globalQwenDir = Storage.getGlobalQwenDir();
   const candidates = [path.join(globalQwenDir, '.env')];
@@ -612,11 +624,13 @@ function getHomeEnvFallbackVars(): Record<string, string> {
       const parsed = dotenv.parse(fs.readFileSync(candidate, 'utf-8'));
       for (const key in parsed) {
         if (Object.hasOwn(parsed, key) && !Object.hasOwn(process.env, key)) {
-          result[key] = parsed[key]!;
+          result[key] ??= parsed[key]!;
         }
       }
-    } catch (_e) {
-      // Match dotenv quiet-mode behavior.
+    } catch (e) {
+      debugLogger.warn(
+        `Failed to read home .env candidate ${candidate}: ${getErrorMessage(e)}`,
+      );
     }
   }
   return result;
@@ -1062,10 +1076,19 @@ export function loadSettings(
   // Returned dict excludes keys already in process.env so process.env
   // takes precedence (customEnv is checked first by the resolver).
   const homeEnvFallback = getHomeEnvFallbackVars();
-  systemSettings = resolveEnvVarsInObject(systemResult.settings, homeEnvFallback);
-  systemDefaultSettings = resolveEnvVarsInObject(systemDefaultsResult.settings, homeEnvFallback);
+  systemSettings = resolveEnvVarsInObject(
+    systemResult.settings,
+    homeEnvFallback,
+  );
+  systemDefaultSettings = resolveEnvVarsInObject(
+    systemDefaultsResult.settings,
+    homeEnvFallback,
+  );
   userSettings = resolveEnvVarsInObject(userResult.settings, homeEnvFallback);
-  workspaceSettings = resolveEnvVarsInObject(workspaceResult.settings, homeEnvFallback);
+  workspaceSettings = resolveEnvVarsInObject(
+    workspaceResult.settings,
+    homeEnvFallback,
+  );
 
   // Support legacy theme names
   if (userSettings.ui?.theme === 'VS') {

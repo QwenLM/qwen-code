@@ -2163,14 +2163,14 @@ describe('Settings Loading and Merging', () => {
       };
 
       (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) =>
-          p === USER_SETTINGS_PATH || p === homeQwenEnvPath,
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH || p === homeQwenEnvPath,
       );
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH)
             return JSON.stringify(userSettingsContent);
-          if (p === homeQwenEnvPath) return 'MY_SECRET_TOKEN=secret_from_dotenv';
+          if (p === homeQwenEnvPath)
+            return 'MY_SECRET_TOKEN=secret_from_dotenv';
           return '{}';
         },
       );
@@ -2205,8 +2205,7 @@ describe('Settings Loading and Merging', () => {
       };
 
       (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) =>
-          p === USER_SETTINGS_PATH || p === homeQwenEnvPath,
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH || p === homeQwenEnvPath,
       );
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -2234,7 +2233,7 @@ describe('Settings Loading and Merging', () => {
     it('should not search dirname(qwenDir)/.env when QWEN_HOME is set (#4466)', () => {
       const customHome = '/custom/qwen/home';
       process.env['QWEN_HOME'] = customHome;
-      const homeEnvPath = path.join(customHome, '.env');
+      const customSettingsPath = path.join(customHome, 'settings.json');
       const dirnameEnvPath = path.join(path.dirname(customHome), '.env');
       const userSettingsContent = {
         mcpServers: {
@@ -2247,12 +2246,11 @@ describe('Settings Loading and Merging', () => {
       };
 
       (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) =>
-          p === USER_SETTINGS_PATH || p === dirnameEnvPath,
+        (p: fs.PathLike) => p === customSettingsPath || p === dirnameEnvPath,
       );
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
+          if (p === customSettingsPath)
             return JSON.stringify(userSettingsContent);
           if (p === dirnameEnvPath) return 'MY_TOKEN=should_not_be_found';
           return '{}';
