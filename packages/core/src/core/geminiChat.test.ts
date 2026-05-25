@@ -84,6 +84,24 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
   },
 }));
 
+const { mockDebugLoggerWarn } = vi.hoisted(() => ({
+  mockDebugLoggerWarn: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: mockDebugLoggerWarn,
+      error: vi.fn(),
+    }),
+  };
+});
+
 describe('GeminiChat', async () => {
   let mockContentGenerator: ContentGenerator;
   let chat: GeminiChat;
@@ -1533,6 +1551,36 @@ describe('GeminiChat', async () => {
         expect(
           uiTelemetryService.setLastPromptTokenCount,
         ).not.toHaveBeenCalled();
+
+        // `coerceUsageCount` warns on hostile, defined values so operators can
+        // diagnose silent coercion. `null` / `undefined` (the "field omitted"
+        // case) is expected and must stay silent.
+        const warnCalls = mockDebugLoggerWarn.mock.calls;
+        if (badValue == null) {
+          // No warn should mention prompt/total — provider simply omitted them.
+          const tokenWarn = warnCalls.find(
+            (args) =>
+              typeof args[0] === 'string' &&
+              (args[0].includes('promptTokenCount') ||
+                args[0].includes('totalTokenCount')),
+          );
+          expect(tokenWarn).toBeUndefined();
+        } else {
+          const promptWarn = warnCalls.find(
+            (args) =>
+              typeof args[0] === 'string' &&
+              args[0].includes('hostile promptTokenCount'),
+          );
+          const totalWarn = warnCalls.find(
+            (args) =>
+              typeof args[0] === 'string' &&
+              args[0].includes('hostile totalTokenCount'),
+          );
+          expect(promptWarn).toBeDefined();
+          expect(totalWarn).toBeDefined();
+          // The hostile value must be embedded so logs are actionable.
+          expect(promptWarn?.[0]).toContain(String(badValue));
+        }
       },
     );
 
