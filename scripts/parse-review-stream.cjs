@@ -129,7 +129,25 @@ function stripPreamble(text) {
   if (!marker && isRepetitiveStalling(text)) {
     return '';
   }
+  if (!marker && isPreambleFragment(text)) {
+    return '';
+  }
   return text;
+}
+
+/**
+ * Detect short standalone preamble fragments — the model emits a
+ * text-only "thinking aloud" message (no tool_use) before starting
+ * the actual review. These are short, lack any review structure, and
+ * typically start with filler phrases.
+ */
+function isPreambleFragment(text) {
+  if (text.length > 300) return false;
+  const lines = text.split('\n').filter((l) => l.trim());
+  if (lines.length > 4) return false;
+  return /^(Let me|I'll |I need to|I should|I want to|I'm going to|Looking at|Reviewing|Checking|Examining)/i.test(
+    text.trim(),
+  );
 }
 
 /**
@@ -221,6 +239,7 @@ module.exports = {
   buildOutput,
   stripPreamble,
   isRepetitiveStalling,
+  isPreambleFragment,
 };
 
 if (require.main === module) {

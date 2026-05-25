@@ -15,6 +15,7 @@ import {
   buildOutput,
   stripPreamble,
   isRepetitiveStalling,
+  isPreambleFragment,
 } from '../parse-review-stream.cjs';
 
 function jsonl(...events) {
@@ -224,6 +225,43 @@ describe('stripPreamble', () => {
       .map((_, i) => `Unique sentence number ${i} about something different.`)
       .join('\n');
     expect(stripPreamble(input)).toBe(input);
+  });
+
+  it('strips short standalone preamble fragments', () => {
+    expect(stripPreamble('Let me verify a few cross-file concerns before producing the review.')).toBe('');
+    expect(stripPreamble("I'll check the implementation details.")).toBe('');
+    expect(stripPreamble('Looking at the diff now.')).toBe('');
+  });
+
+  it('keeps short text that does not match preamble patterns', () => {
+    expect(stripPreamble('LGTM — only spelling fixes.')).toBe('LGTM — only spelling fixes.');
+    expect(stripPreamble('No issues found.')).toBe('No issues found.');
+  });
+});
+
+describe('isPreambleFragment', () => {
+  it('detects common filler phrases', () => {
+    expect(isPreambleFragment('Let me verify the cross-file impact.')).toBe(true);
+    expect(isPreambleFragment("I'll review the changes now.")).toBe(true);
+    expect(isPreambleFragment('I need to check a few things first.')).toBe(true);
+    expect(isPreambleFragment('Reviewing the diff carefully.')).toBe(true);
+    expect(isPreambleFragment('Checking for potential issues.')).toBe(true);
+  });
+
+  it('rejects text longer than 300 chars', () => {
+    const long = 'Let me ' + 'x'.repeat(300);
+    expect(isPreambleFragment(long)).toBe(false);
+  });
+
+  it('rejects multi-line text with more than 4 lines', () => {
+    const text = Array(5).fill('Let me check.').join('\n');
+    expect(isPreambleFragment(text)).toBe(false);
+  });
+
+  it('rejects text not starting with preamble phrases', () => {
+    expect(isPreambleFragment('No issues found.')).toBe(false);
+    expect(isPreambleFragment('## Review')).toBe(false);
+    expect(isPreambleFragment('LGTM')).toBe(false);
   });
 });
 
