@@ -14,6 +14,7 @@ import {
   accumulateSegments,
   buildOutput,
   isSubstantiveContent,
+  stripPreamble,
 } from '../parse-review-stream.cjs';
 
 function jsonl(...events) {
@@ -306,6 +307,50 @@ describe('isSubstantiveContent', () => {
   it('rejects short text without any markers', () => {
     expect(isSubstantiveContent('Let me check the code.')).toBe(false);
     expect(isSubstantiveContent('I will read the files now.')).toBe(false);
+  });
+});
+
+describe('stripPreamble', () => {
+  it('strips thinking text before a ## heading', () => {
+    const input =
+      'Let me read the files first.\n\nI see — I should use the diff.\n\n## Qwen Code Review (STANDARD)\n\n**What this PR does**: fixes a bug.';
+    expect(stripPreamble(input)).toBe(
+      '## Qwen Code Review (STANDARD)\n\n**What this PR does**: fixes a bug.',
+    );
+  });
+
+  it('strips thinking text before a ### heading', () => {
+    const input =
+      'I need to examine the code.\n\n### Correctness / Security\n\n- P1 bug.';
+    expect(stripPreamble(input)).toBe(
+      '### Correctness / Security\n\n- P1 bug.',
+    );
+  });
+
+  it('strips thinking text before a findings list', () => {
+    const input =
+      'Let me check.\n\n- **P1 `file.ts:42`** — off-by-one error.';
+    expect(stripPreamble(input)).toBe(
+      '- **P1 `file.ts:42`** — off-by-one error.',
+    );
+  });
+
+  it('strips text before "No correctness..." verdict', () => {
+    const input =
+      'Reviewing the diff carefully.\n\nNo correctness or security issues found.';
+    expect(stripPreamble(input)).toBe(
+      'No correctness or security issues found.',
+    );
+  });
+
+  it('returns text unchanged when it starts with review content', () => {
+    const input = '## Review\n\n- P2 finding.';
+    expect(stripPreamble(input)).toBe(input);
+  });
+
+  it('returns text unchanged when no review markers found', () => {
+    const input = 'Some random text without any markers.';
+    expect(stripPreamble(input)).toBe(input);
   });
 });
 

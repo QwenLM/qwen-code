@@ -141,6 +141,23 @@ function accumulateSegments(raw) {
 }
 
 /**
+ * Strip preamble text that precedes the actual review content.
+ * The model sometimes emits "Let me read...", "I'll check...", etc.
+ * before starting the real review (marked by a `## ` heading or a
+ * severity/findings line). If we find such a marker, drop everything
+ * before it.
+ */
+function stripPreamble(text) {
+  const marker = text.match(
+    /^(## |### |[-*] \*\*P[0-3]|[-*] \*\*`|[-*] \[?(Critical|High|Medium|Low|Suggestion)|No (?:correctness|maintainability|issues|additional))/m,
+  );
+  if (marker && marker.index > 0) {
+    return text.slice(marker.index);
+  }
+  return text;
+}
+
+/**
  * Build the final on-disk markdown body from accumulated segments.
  *
  * LIGHT and STANDARD are single-shot, tool-free qwen calls. DEEP is split
@@ -158,7 +175,7 @@ function buildOutput(segments, tier, status) {
   let body;
   let emitted;
   if (segments.length > 0) {
-    body = segments.join('\n\n');
+    body = segments.map(stripPreamble).join('\n\n');
     emitted = segments.length;
   } else {
     body = '(no assistant text parsed; see the raw stream in the job log)';
@@ -213,6 +230,7 @@ module.exports = {
   accumulateSegments,
   buildOutput,
   isSubstantiveContent,
+  stripPreamble,
 };
 
 if (require.main === module) {
