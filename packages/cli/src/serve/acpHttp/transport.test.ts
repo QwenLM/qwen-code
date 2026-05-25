@@ -132,6 +132,56 @@ class FakeBridge {
     return { modelServiceId: 'qwen-max' };
   }
 
+  lastApprovalMode: string | undefined;
+  async setSessionApprovalMode(_s: string, mode: string) {
+    this.lastApprovalMode = mode;
+    return { sessionId: 'sess-1', mode, previous: 'default', persisted: false };
+  }
+
+  // Session config options live in the child's session context state.
+  async getSessionContextStatus(sessionId: string) {
+    return {
+      v: 1,
+      sessionId,
+      workspaceCwd: '/ws',
+      state: {
+        configOptions: [
+          { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'qwen-max', options: [] },
+        ],
+      },
+    };
+  }
+  async getSessionSupportedCommandsStatus(sessionId: string) {
+    return { v: 1, sessionId, availableCommands: [], availableSkills: [] };
+  }
+  async getWorkspaceMcpStatus() {
+    return { ok: true, v: 1, workspaceCwd: '/ws' };
+  }
+  async getWorkspaceSkillsStatus() {
+    return { ok: true };
+  }
+  async getWorkspaceProvidersStatus() {
+    return { ok: true };
+  }
+  async getWorkspaceEnvStatus() {
+    return { ok: true };
+  }
+  async getWorkspacePreflightStatus() {
+    return { ok: true };
+  }
+  updateSessionMetadata(_s: string, metadata: unknown) {
+    return metadata;
+  }
+  async setWorkspaceToolEnabled(toolName: string, enabled: boolean) {
+    return { toolName, enabled };
+  }
+  async initWorkspace() {
+    return { path: '/ws/QWEN.md', action: 'created' as const };
+  }
+  async restartMcpServer() {
+    return { ok: true };
+  }
+
   recordHeartbeat() {
     return { sessionId: 'sess-1', lastSeenAt: Date.now() };
   }
@@ -343,9 +393,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/prompt',
       params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
     });
-    const [reqFrame] = (await got) as Array<{ id: number; method: string; params: { _meta: { qwen: { requestId: string } } } }>;
+    const [reqFrame] = (await got) as Array<{ id: number; method: string; params: { _meta: Record<string, { requestId: string }> } }>;
     expect(reqFrame.method).toBe('session/request_permission');
-    expect(reqFrame.params._meta.qwen.requestId).toBe('perm-1');
+    expect(reqFrame.params._meta['qwen.ai'].requestId).toBe('perm-1');
     // Client answers with a JSON-RPC response echoing the issued id.
     await post(connId, {
       jsonrpc: '2.0',
@@ -356,7 +406,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(resolvedWith).toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } });
   });
 
-  it('_qwen/session/set_model extension reaches the bridge', async () => {
+  it('standard session/set_config_option (model) routes to the bridge', async () => {
     const connId = await initialize();
     await newSession(connId);
     const sessStream = await openStream(connId, 'sess-1');
@@ -365,12 +415,39 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await post(connId, {
       jsonrpc: '2.0',
       id: 9,
-      method: '_qwen/session/set_model',
-      params: { sessionId: 'sess-1', modelServiceId: 'qwen-max' },
+      method: 'session/set_config_option',
+      params: { sessionId: 'sess-1', configId: 'model', value: 'qwen-max' },
     });
-    const [frame] = (await got) as Array<{ id: number; result: unknown }>;
+    const [frame] = (await got) as Array<{ id: number; result: { configOptions: unknown } }>;
     expect(frame.id).toBe(9);
-    expect(bridge.lastSetModel).toMatchObject({ modelServiceId: 'qwen-max' });
+    expect(bridge.lastSetModel).toMatchObject({ modelId: 'qwen-max' });
+  });
+
+  it('session/set_config_option (mode) routes to setSessionApprovalMode', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 10,
+      method: 'session/set_config_option',
+      params: { sessionId: 'sess-1', configId: 'mode', value: 'yolo' },
+    });
+    await got;
+    expect(bridge.lastApprovalMode).toBe('yolo');
+  });
+
+  it('_qwen.ai/workspace/mcp introspection reaches the bridge', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, { jsonrpc: '2.0', id: 12, method: '_qwen.ai/workspace/mcp' });
+    const [frame] = (await got) as Array<{ id: number; result: { ok: boolean } }>;
+    expect(frame.id).toBe(12);
+    expect(frame.result.ok).toBe(true);
   });
 
   it('unknown method → JSON-RPC method-not-found on conn stream', async () => {

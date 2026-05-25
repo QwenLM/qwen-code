@@ -496,3 +496,43 @@ Another reviewer pass (qwen3.7-max). Suite **30 tests**, live re-verified.
 | F5 | **P2** | `MAX_WORKSPACE_PATH_LENGTH` redeclared (`= 4096`) vs the canonical `fs/paths.js`. | Import from `../fs/paths.js` (no divergence). |
 | F6 | **P2** | `isObjectParams` duplicated `jsonRpc.isObject`. | Import `isObject`. |
 | F7 | **P2** | Raw `process.stderr.write` in `index.ts`/`sseStream.ts` vs `writeStderrLine` elsewhere. | Unified on `writeStderrLine` across the module. |
+
+---
+
+## 17. REST 等价对齐 + 扩展方案审计落地（round 8）
+
+目标：让 `/acp` 成为 REST+SSE 的**等价替代**。本批基于审计结论重构扩展方案，并补齐**所有 bridge 已暴露**的能力；bridge 尚未拥有的能力（文件 I/O、设备流、agents/memory CRUD）按架构正确性要求**先由 acp-bridge 补齐**（见 §17.3）。
+
+### 17.1 扩展方案审计 → 落地（替换 §5 的旧方案）
+
+依据**仓库实装 SDK `@agentclientprotocol/sdk@0.14.1`**（非仅官网）核对：
+- `session/set_config_option` 是**一等（非 `unstable_`）方法**，请求 `{sessionId, configId, value}`，`category` 含 `model`/`mode`/`thought_level`；而 `set_model` 仍走 `unstable_setSessionModel`。
+- 规范保留 `_` 前缀给扩展，示例为域风格 `_zed.dev/…`；厂商数据放 `_meta` 按域名分键。
+
+落地：
+- **命名空间 `_qwen/` → 反向域名 `_qwen.ai/`**；`_meta` 统一 `_meta:{ "qwen.ai": … }`（含 `initialize` 能力广告与 `session/request_permission` 的 requestId）。
+- **模型 + 审批模式 → 标准 `session/set_config_option`**（`configId:"model"|"mode"`），路由到现有 `bridge.setSessionModel`/`setSessionApprovalMode`；`session/new` 结果**广告 `configOptions`**（取自子进程会话状态 `getSessionContextStatus().state.configOptions`，已是 ACP 形状）。**删除**厂商 `_qwen.ai/session/set_model`。
+- REST(http+sse) **无需同步修改**：两 transport 共用同一 bridge，状态天然一致。
+
+### 17.2 本批新增的 `/acp` 方法（bridge 已支持，1:1 对齐 REST）
+
+| REST | `/acp` | bridge |
+|---|---|---|
+| `POST /session/:id/model` / `approval-mode` | **标准** `session/set_config_option`（model/mode） | setSessionModel / setSessionApprovalMode |
+| `GET /session/:id/context` | `_qwen.ai/session/context` | getSessionContextStatus |
+| `GET /session/:id/supported-commands` | `_qwen.ai/session/supported_commands` | getSessionSupportedCommandsStatus |
+| `PATCH /session/:id/metadata` | `_qwen.ai/session/update_metadata` | updateSessionMetadata |
+| `GET /workspace/{mcp,skills,providers,env,preflight}` | `_qwen.ai/workspace/{…}` | getWorkspace*Status |
+| `POST /workspace/init` | `_qwen.ai/workspace/init` | initWorkspace |
+| `POST /workspace/tools/:name/enable` | `_qwen.ai/workspace/set_tool_enabled` | setWorkspaceToolEnabled |
+| `POST /workspace/mcp/:server/restart` | `_qwen.ai/workspace/restart_mcp_server` | restartMcpServer |
+
+（既有：session/new·load·resume·close·list·prompt·cancel、heartbeat、permission、events 已对齐。）
+
+### 17.3 仍缺口 → 要求 acp-bridge 先补齐（架构正确性）
+
+REST 的 **文件 I/O**（`/file /glob /list /stat /file/write /file/edit`）、**设备流登录**（`/workspace/auth/*`）、**agents CRUD**（`/workspace/agents`）、**memory CRUD**（`/workspace/memory`）目前**不在 `HttpAcpBridge` 上**——REST 路由直接调 route 级服务（`WorkspaceFileSystemFactory`、`DeviceFlowRegistry`、`SubagentManager`、`writeWorkspaceContextFile`），绕过了 bridge。
+
+**决策（采纳评审/owner 意见）**：不让 `/acp` transport 再去直连这些 route 级服务（那会复制 REST 的架构漂移、并使 transport 耦合翻倍）。**正确做法是先在 `@qwen-code/acp-bridge` 的 `HttpAcpBridge` 上补齐这些能力**（如 `readWorkspaceFile`/`writeWorkspaceFile`/`globWorkspace`、`startDeviceFlow`/`pollDeviceFlow`、`listAgents`/`upsertAgent`/`deleteAgent`、`readMemory`/`writeMemory`），让 REST 与 `/acp` 都经由 bridge。届时 `/acp` 再加 `_qwen.ai/fs/*`、`_qwen.ai/auth/*`、`_qwen.ai/workspace/agent*`、`_qwen.ai/workspace/memory*`（文件读因无标准 ACP client→agent 方法，属合法厂商扩展）。
+
+**完整等价 = 本批（bridge 已有能力）+ acp-bridge 补齐缺口后的后续批**。

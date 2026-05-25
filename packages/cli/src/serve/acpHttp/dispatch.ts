@@ -11,6 +11,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
 import type { AcpConnection } from './connectionRegistry.js';
 import {
+  QWEN_META_KEY,
   QWEN_METHOD_NS,
   RPC,
   error,
@@ -44,6 +45,17 @@ const CONN_ROUTED_METHODS = new Set<string>([
   'session/list',
   'session/close',
   `${QWEN_METHOD_NS}session/heartbeat`,
+  `${QWEN_METHOD_NS}session/context`,
+  `${QWEN_METHOD_NS}session/supported_commands`,
+  `${QWEN_METHOD_NS}session/update_metadata`,
+  `${QWEN_METHOD_NS}workspace/mcp`,
+  `${QWEN_METHOD_NS}workspace/skills`,
+  `${QWEN_METHOD_NS}workspace/providers`,
+  `${QWEN_METHOD_NS}workspace/env`,
+  `${QWEN_METHOD_NS}workspace/preflight`,
+  `${QWEN_METHOD_NS}workspace/init`,
+  `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
+  `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
 ]);
 
 class AcpParamError extends Error {}
@@ -165,6 +177,25 @@ export class AcpDispatcher {
   }
 
   /**
+   * The session's ACP-shaped config options (model/mode/…), read from the
+   * child's own session state. Returned in `session/new` and as the result
+   * of `session/set_config_option`. Best-effort — `undefined` on error.
+   */
+  private async configOptionsFor(
+    sessionId: string,
+  ): Promise<unknown[] | undefined> {
+    try {
+      const ctx = (await this.bridge.getSessionContextStatus(sessionId)) as {
+        state?: { configOptions?: unknown };
+      };
+      const co = ctx?.state?.configOptions;
+      return Array.isArray(co) ? co : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Cancel a permission request the client abandoned (closed its stream /
    * connection before voting), so the bridge isn't left blocked. Invoked
    * by the connection-registry teardown path.
@@ -210,16 +241,29 @@ export class AcpDispatcher {
           audio: false,
           embeddedContext: true,
         },
-        // Advertise qwen extensions so clients feature-detect before use.
-        // Single home for the qwen block — `agentCapabilities._meta.qwen`
-        // per design §5 (no redundant top-level duplicate).
+        // Model + mode are exposed via the STANDARD `session/set_config_option`
+        // (categories `model`/`mode`); advertise that here.
+        configOptions: true,
+        // Vendor extensions are advertised under `_meta` keyed by domain
+        // (ACP convention, e.g. `_meta: { "zed.dev": … }`). Clients
+        // feature-detect before calling `_qwen.ai/…` methods.
         _meta: {
-          qwen: {
+          [QWEN_META_KEY]: {
             connectionId,
             workspaceCwd: this.boundWorkspace,
             methods: [
-              `${QWEN_METHOD_NS}session/set_model`,
               `${QWEN_METHOD_NS}session/heartbeat`,
+              `${QWEN_METHOD_NS}session/context`,
+              `${QWEN_METHOD_NS}session/supported_commands`,
+              `${QWEN_METHOD_NS}session/update_metadata`,
+              `${QWEN_METHOD_NS}workspace/mcp`,
+              `${QWEN_METHOD_NS}workspace/skills`,
+              `${QWEN_METHOD_NS}workspace/providers`,
+              `${QWEN_METHOD_NS}workspace/env`,
+              `${QWEN_METHOD_NS}workspace/preflight`,
+              `${QWEN_METHOD_NS}workspace/init`,
+              `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
+              `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
             ],
           },
         },
@@ -328,7 +372,14 @@ export class AcpDispatcher {
           conn.getOrCreateSession(session.sessionId).clientId =
             session.clientId;
           conn.ownSession(session.sessionId);
-          this.replyConn(conn, id, { sessionId: session.sessionId });
+          // Advertise the session's config options (model/mode/…) so a
+          // standard client can drive `session/set_config_option`. Sourced
+          // from the child's own session state (already ACP-shaped).
+          const configOptions = await this.configOptionsFor(session.sessionId);
+          this.replyConn(conn, id, {
+            sessionId: session.sessionId,
+            ...(configOptions ? { configOptions } : {}),
+          });
           return;
         }
 
@@ -419,15 +470,43 @@ export class AcpDispatcher {
           return;
         }
 
-        case `${QWEN_METHOD_NS}session/set_model`: {
+        // STANDARD method (SDK 0.14.1, non-`unstable_`): model + mode live
+        // here under categories `model`/`mode`, routed to the existing bridge
+        // setters. Replaces the old vendor `_qwen.ai/session/set_model`.
+        case 'session/set_config_option': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
-          const result = await this.bridge.setSessionModel(
-            sessionId,
-            params as never,
-            this.sessionCtx(conn, sessionId, loopback),
-          );
-          this.replySession(conn, sessionId, id, result as unknown);
+          const configId = String(params['configId'] ?? '');
+          const value = String(params['value'] ?? '');
+          const ctx = this.sessionCtx(conn, sessionId, loopback);
+          if (configId === 'model') {
+            await this.bridge.setSessionModel(
+              sessionId,
+              { modelId: value } as never,
+              ctx,
+            );
+          } else if (configId === 'mode') {
+            await this.bridge.setSessionApprovalMode(
+              sessionId,
+              value as never,
+              { persist: false },
+              ctx,
+            );
+          } else {
+            if (id !== undefined) {
+              this.replySession(
+                conn,
+                sessionId,
+                id,
+                undefined,
+                error(id, RPC.INVALID_PARAMS, `Unknown configId: ${configId}`),
+              );
+            }
+            return;
+          }
+          // Response returns the updated config option set (per ACP).
+          const configOptions = await this.configOptionsFor(sessionId);
+          this.replySession(conn, sessionId, id, { configOptions });
           return;
         }
 
@@ -437,6 +516,116 @@ export class AcpDispatcher {
           const result = this.bridge.recordHeartbeat(
             sessionId,
             this.sessionCtx(conn, sessionId, loopback),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/context`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          this.replyConn(
+            conn,
+            id,
+            await this.bridge.getSessionContextStatus(sessionId),
+          );
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/supported_commands`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          this.replyConn(
+            conn,
+            id,
+            await this.bridge.getSessionSupportedCommandsStatus(sessionId),
+          );
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/update_metadata`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const metadata = isObject(params['metadata'])
+            ? (params['metadata'] as Record<string, unknown>)
+            : {};
+          const result = this.bridge.updateSessionMetadata(
+            sessionId,
+            metadata as never,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/mcp`:
+          this.replyConn(conn, id, await this.bridge.getWorkspaceMcpStatus());
+          return;
+        case `${QWEN_METHOD_NS}workspace/skills`:
+          this.replyConn(conn, id, await this.bridge.getWorkspaceSkillsStatus());
+          return;
+        case `${QWEN_METHOD_NS}workspace/providers`:
+          this.replyConn(
+            conn,
+            id,
+            await this.bridge.getWorkspaceProvidersStatus(),
+          );
+          return;
+        case `${QWEN_METHOD_NS}workspace/env`:
+          this.replyConn(conn, id, await this.bridge.getWorkspaceEnvStatus());
+          return;
+        case `${QWEN_METHOD_NS}workspace/preflight`:
+          this.replyConn(
+            conn,
+            id,
+            await this.bridge.getWorkspacePreflightStatus(),
+          );
+          return;
+
+        case `${QWEN_METHOD_NS}workspace/init`: {
+          const force = params['force'] === true;
+          const result = await this.bridge.initWorkspace(
+            { force },
+            conn.clientId,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/set_tool_enabled`: {
+          const toolName = String(params['toolName'] ?? '');
+          if (!toolName) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`toolName` is required'),
+              );
+            }
+            return;
+          }
+          const result = await this.bridge.setWorkspaceToolEnabled(
+            toolName,
+            params['enabled'] === true,
+            conn.clientId,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/restart_mcp_server`: {
+          const serverName = String(params['serverName'] ?? '');
+          if (!serverName) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`serverName` is required'),
+              );
+            }
+            return;
+          }
+          const entryIndex = params['entryIndex'];
+          const result = await this.bridge.restartMcpServer(
+            serverName,
+            conn.clientId,
+            typeof entryIndex === 'number' ? { entryIndex } : undefined,
           );
           this.replyConn(conn, id, result as unknown);
           return;
@@ -546,7 +735,7 @@ export class AcpDispatcher {
             sessionId: data.sessionId,
             toolCall: data.toolCall,
             options: data.options,
-            _meta: { qwen: { requestId: data.requestId } },
+            _meta: { [QWEN_META_KEY]: { requestId: data.requestId } },
           }),
         );
         return;
