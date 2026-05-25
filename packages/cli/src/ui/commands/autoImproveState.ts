@@ -213,6 +213,7 @@ export async function readAutoImproveConfig(
     ) {
       return DEFAULT_AUTO_IMPROVE_CONFIG;
     }
+    if (error instanceof SyntaxError) return DEFAULT_AUTO_IMPROVE_CONFIG;
     throw error;
   }
 }

@@ -275,10 +275,11 @@ describe('autoImproveState', () => {
       await fs.mkdir(path.dirname(configPath), { recursive: true });
       await fs.writeFile(configPath, 'not json!!!', 'utf8');
 
-      // Malformed JSON causes a SyntaxError inside JSON.parse which is NOT
-      // caught by readAutoImproveConfig (only ENOENT is handled). The
-      // normalizeConfig step only handles shape issues, not parse errors.
-      await expect(readAutoImproveConfig(tempDir)).rejects.toThrow(SyntaxError);
+      // Malformed JSON causes a SyntaxError inside JSON.parse which is now
+      // caught by readAutoImproveConfig and returns the default config,
+      // matching the behavior of readAutoImproveLoopState.
+      const result = await readAutoImproveConfig(tempDir);
+      expect(result).toEqual(DEFAULT_AUTO_IMPROVE_CONFIG);
     });
 
     it('normalizes missing sources to defaults', async () => {
