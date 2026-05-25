@@ -3017,19 +3017,25 @@ function sendBridgeError(
   // `instanceof` chain above misses it and routes meant to surface a
   // 400 / 404 via `RequestError.invalidParams` / `methodNotFound` would
   // otherwise fall through to 500. Map the standard JSON-RPC error
-  // codes to the matching HTTP status before logging — only the
-  // unmapped tail (server-defined codes, malformed throws, plain
-  // `Error`s) reaches the 5xx operator-log path below.
+  // codes to the matching HTTP status + closed-set `code` string
+  // before logging — only the unmapped tail (server-defined codes,
+  // `-32603` internal errors, malformed throws, plain `Error`s)
+  // reaches the 5xx operator-log path below.
+  //
+  // The `'code' in err` narrowing is intentionally numeric-only at the
+  // typeof guard so `NodeJS.ErrnoException`s (`code: 'ENOENT'`, etc.)
+  // fall through to the 500 path instead of being misclassified as
+  // caller-fault JSON-RPC errors.
   if (err && typeof err === 'object' && 'code' in err && 'message' in err) {
     const code = (err as { code: unknown }).code;
     const message = (err as { message: unknown }).message;
     if (typeof code === 'number' && typeof message === 'string') {
-      const httpStatus = jsonRpcCodeToHttpStatus(code);
-      if (httpStatus !== undefined) {
+      const mapped = jsonRpcCodeToHttpStatus(code);
+      if (mapped !== undefined) {
         const data = (err as { data?: unknown }).data;
-        res.status(httpStatus).json({
+        res.status(mapped.status).json({
           error: message,
-          code: 'invalid_params',
+          code: mapped.code,
           ...(data !== undefined ? { data } : {}),
         });
         return;
@@ -3055,29 +3061,43 @@ function sendBridgeError(
 }
 
 /**
- * Standard JSON-RPC 2.0 error codes → HTTP status mapping. Returns
- * `undefined` for unmapped codes (server-defined `-32000..-32099` or
- * anything outside the documented set) so the caller falls through to
- * the 500 operator-log path. Keep this narrow — every code we map
- * silently bypasses the stderr breadcrumb, so over-mapping would
- * conceal real daemon failures.
+ * Standard JSON-RPC 2.0 error codes → `{status, code}` mapping.
+ * Returns `undefined` for unmapped codes (server-defined `-32000..
+ * -32099`, `-32603` Internal Error, or anything outside the documented
+ * set) so the caller falls through to the 500 operator-log path.
+ *
+ * The returned `code` is a stable lowercase-snake identifier
+ * consumed by SDK clients that branch on `body.code` — keeping each
+ * JSON-RPC code's identifier distinct lets a client tell "method
+ * dropped from the agent" (`method_not_found`, paired with HTTP 404)
+ * from "params were wrong" (`invalid_params`, paired with HTTP 400)
+ * even though both are caller-actionable.
+ *
+ * Keep this narrow — every code we map silently bypasses the stderr
+ * breadcrumb in `sendBridgeError`, so over-mapping would conceal real
+ * daemon failures. `-32603` is deliberately omitted so internal
+ * errors still hit the operator log.
  *
  * See https://www.jsonrpc.org/specification#error_object for the
  * canonical code definitions.
  */
-function jsonRpcCodeToHttpStatus(code: number): number | undefined {
-  if (code === -32700 || code === -32600 || code === -32602) {
-    // Parse error / Invalid Request / Invalid Params — caller fault.
-    return 400;
+function jsonRpcCodeToHttpStatus(
+  code: number,
+): { status: number; code: string } | undefined {
+  switch (code) {
+    case -32700:
+      return { status: 400, code: 'parse_error' };
+    case -32600:
+      return { status: 400, code: 'invalid_request' };
+    case -32602:
+      return { status: 400, code: 'invalid_params' };
+    case -32601:
+      // Method not found — route unknown to the agent (closest HTTP
+      // equivalent is 404, mirroring how `SessionNotFoundError` maps).
+      return { status: 404, code: 'method_not_found' };
+    default:
+      return undefined;
   }
-  if (code === -32601) {
-    // Method not found — route unknown to the agent (closest HTTP
-    // equivalent is 404, mirroring how `SessionNotFoundError` maps).
-    return 404;
-  }
-  // -32603 (Internal Error) and server-defined -32000..-32099 fall
-  // through to the 500 path so operators still see them in stderr.
-  return undefined;
 }
 
 /**

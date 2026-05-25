@@ -16,6 +16,7 @@ import {
   MCPServerConfig,
   SessionService,
   SESSION_TITLE_MAX_LENGTH,
+  Storage,
   tokenLimit,
   getMCPDiscoveryState,
   getMCPServerStatus,
@@ -27,6 +28,8 @@ import {
   WorkspaceMcpBudget,
   restoreWorktreeContext,
 } from '@qwen-code/qwen-code-core';
+import * as nodeFsPromises from 'node:fs/promises';
+import * as nodePath from 'node:path';
 import type {
   ApprovalMode,
   Config,
@@ -1927,11 +1930,29 @@ class QwenAgent implements Agent {
   // chain has drained.)
   //
   // The session must be live (so we can read `Config` for cwd +
-  // context window size) AND must have written at least one record.
-  // The "no records yet" case throws `RequestError.invalidParams`,
-  // which the bridge forwards as a JSON-RPC -32602 and `sendBridgeError`
-  // maps to HTTP 400 (`jsonRpcCodeToHttpStatus` in server.ts) so
-  // callers can branch deterministically rather than fabricate zeros.
+  // context window size). The disk lookup has three failure modes
+  // we deliberately keep separate:
+  //
+  //  - `ENOENT` (JSONL has never been written) → throw
+  //    `RequestError.invalidParams`, which the bridge forwards as
+  //    JSON-RPC -32602 and `sendBridgeError` maps to HTTP 400 with
+  //    `code: 'invalid_params'` and an actionable
+  //    "wait for the first user turn" message.
+  //  - `EACCES` / `EIO` / any other stat error → let the real
+  //    `NodeJS.ErrnoException` propagate. The bridge forwards it
+  //    untouched and `sendBridgeError`'s 500 + stderr breadcrumb path
+  //    surfaces the underlying errno to operators rather than
+  //    silently lying ("wait for the first user turn") to a daemon
+  //    whose chats dir has permission issues.
+  //  - File exists but `loadSession` still returns undefined (project
+  //    hash mismatch, empty file after reconstruct) → distinct error
+  //    path, also 500 + breadcrumb so operators see it.
+  //
+  // The pre-`loadSession` stat is necessary because
+  // `SessionService.loadSession` swallows non-ENOENT IO errors
+  // internally (`packages/core/src/utils/jsonl-utils.ts` returns
+  // `[]` after a `debugLogger.error`), and a remote-only operator
+  // would never see the swallowed event.
   private async loadNormalizedSessionData(sessionId: string): Promise<{
     config: Config;
     cwd: string;
@@ -1940,12 +1961,39 @@ class QwenAgent implements Agent {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
     const cwd = this.workspaceCwd(config);
+    const storage = new Storage(cwd);
+    const jsonlPath = nodePath.join(
+      storage.getProjectDir(),
+      'chats',
+      `${sessionId}.jsonl`,
+    );
+    try {
+      await nodeFsPromises.stat(jsonlPath);
+    } catch (err) {
+      const errno = (err as NodeJS.ErrnoException).code;
+      if (errno === 'ENOENT') {
+        throw RequestError.invalidParams(
+          undefined,
+          `Session ${sessionId} has no persisted records yet — wait for the first user turn to flush.`,
+        );
+      }
+      // EACCES, EIO, ENOTDIR — propagate as a real Error so it hits
+      // the 500 + operator-stderr path instead of being collapsed
+      // into the misleading "no records yet" message.
+      throw err;
+    }
     const sessionService = new SessionService(cwd);
     const sessionData = await sessionService.loadSession(sessionId);
     if (!sessionData) {
-      throw RequestError.invalidParams(
-        undefined,
-        `Session ${sessionId} has no persisted records yet — wait for the first user turn to flush.`,
+      // File existed at stat time but reconstruction yielded nothing.
+      // Causes: project-hash mismatch (`firstRecord.cwd` belongs to
+      // a different project, see `sessionService.ts:697-700`), all
+      // lines unparseable (silently dropped inside `readAllRecords`),
+      // or an empty file. All three are operator-actionable bugs
+      // (corrupt JSONL, cross-project session reuse) — surface as
+      // 500 with a distinct message so they don't blur with ENOENT.
+      throw new Error(
+        `Session ${sessionId}: JSONL exists at ${jsonlPath} but yielded no usable records — possible project-hash mismatch or corrupt file`,
       );
     }
     const exportData = await collectSessionData(

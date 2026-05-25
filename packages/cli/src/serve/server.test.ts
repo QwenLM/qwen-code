@@ -1665,11 +1665,15 @@ describe('createServeApp', () => {
       expect(res.body.error).toContain('no persisted records yet');
     });
 
-    it('GET /session/:id/export maps JSON-RPC -32601 from the agent to HTTP 404', async () => {
+    it('GET /session/:id/export maps JSON-RPC -32601 from the agent to HTTP 404 + method_not_found', async () => {
       // `RequestError.methodNotFound` from the ACP child — happens if a
       // future daemon dropped the ext-method but the registry still
       // advertises the capability. 404 mirrors `SessionNotFoundError`'s
-      // mapping so clients have one branch for "route absent."
+      // mapping. Pin `body.code === 'method_not_found'` (NOT
+      // `invalid_params`) so the per-JSON-RPC-code mapping in
+      // `jsonRpcCodeToHttpStatus` stays distinct — clients that
+      // branch on `body.code` for "fix your params" UX must not
+      // misfire on a route-dropped 404.
       const bridge = fakeBridge({
         sessionExportImpl: async () => {
           throw {
@@ -1689,6 +1693,125 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(404);
+      expect(res.body.code).toBe('method_not_found');
+    });
+
+    // Issue #4514 round-2 review. Backfill body.code on the -32602
+    // test (round-1 only asserted status) and pin the rest of the
+    // JSON-RPC table including the negative case so a future
+    // broadening of `jsonRpcCodeToHttpStatus` can't silently bypass
+    // the operator-stderr breadcrumb for real internal errors.
+    it('GET /session/:id/stats -32602 body carries code: invalid_params', async () => {
+      const bridge = fakeBridge({
+        sessionStatsImpl: async () => {
+          throw {
+            code: -32602,
+            message: 'Session sess-empty has no persisted records yet',
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/session/sess-empty/stats')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_params');
+    });
+
+    it('GET /session/:id/stats maps JSON-RPC -32700 (Parse error) to HTTP 400 + parse_error', async () => {
+      const bridge = fakeBridge({
+        sessionStatsImpl: async () => {
+          throw { code: -32700, message: 'Parse error' };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/session/s-p/stats')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('parse_error');
+    });
+
+    it('GET /session/:id/stats maps JSON-RPC -32600 (Invalid Request) to HTTP 400 + invalid_request', async () => {
+      const bridge = fakeBridge({
+        sessionStatsImpl: async () => {
+          throw { code: -32600, message: 'Invalid Request' };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/session/s-r/stats')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_request');
+    });
+
+    it('GET /session/:id/stats lets JSON-RPC -32603 (Internal) fall through to HTTP 500', async () => {
+      // Negative pin: internal errors must keep the operator-stderr
+      // path so daemons don't silently 4xx on real bugs. Same
+      // contract for any unmapped code (e.g. server-defined
+      // -32000..-32099) — those routes through the same `default`
+      // fallthrough in `jsonRpcCodeToHttpStatus`.
+      const bridge = fakeBridge({
+        sessionStatsImpl: async () => {
+          throw { code: -32603, message: 'Internal error' };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/session/s-i/stats')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(500);
+      // Pin that the JSON-RPC matcher did NOT misclassify this as a
+      // 4xx caller-fault — body.code from the 500 path comes from
+      // `errorPayload`, not from the matcher's closed-set codes.
+      expect(res.body.code).not.toBe('invalid_params');
+      expect(res.body.code).not.toBe('method_not_found');
+    });
+
+    // Issue #4514 round-2 review. Format-echo mismatch is the
+    // highest-value untested branch of the new export shape
+    // validator — pins that the route catches an agent that returned
+    // a different format than requested (e.g. a regression in the
+    // child's `SESSION_EXPORT_DESCRIPTORS` dispatch table).
+    it('GET /session/:id/export 500s when the bridge echoes a different format', async () => {
+      const bridge = fakeBridge({
+        sessionExportImpl: async (sessionId, _format) => ({
+          v: 1 as const,
+          sessionId,
+          format: 'json', // ← disagrees with the requested `md`
+          body: '{}',
+          contentType: 'application/json; charset=utf-8',
+          filename: 'qwen-code-export-wrong.json',
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-e/export?format=md')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(500);
     });
 
     // Issue #4514 review fold-in. The bridge casts the child's
