@@ -802,10 +802,12 @@ function cloneTranscriptState(
       state.lastResyncRequired !== undefined
         ? { ...state.lastResyncRequired }
         : undefined,
-    lastFollowupSuggestion:
-      state.lastFollowupSuggestion !== undefined
-        ? { ...state.lastFollowupSuggestion }
-        : undefined,
+    // Share the reference — the reducer assigns a new object when
+    // updating (never mutates in-place), so reference stability across
+    // unrelated dispatches lets `useSyncExternalStore` subscribers
+    // (e.g. `useDaemonFollowupSuggestion`) skip re-renders for events
+    // that don't touch the suggestion.
+    lastFollowupSuggestion: state.lastFollowupSuggestion,
   };
 }
 
