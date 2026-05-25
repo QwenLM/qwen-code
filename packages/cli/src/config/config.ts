@@ -838,12 +838,12 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('max-wall-time', {
           type: 'string',
           description:
-            'Run-level wall-clock budget for headless / unattended runs. Accepts seconds (e.g. `90`), or a duration string with unit (e.g. `30s`, `5m`, `1h`). Aborts the run with exit code 55 when exceeded.',
+            'Run-level wall-clock budget for headless / unattended runs. Accepts seconds (e.g. `90`), or a duration string with unit (e.g. `30s`, `5m`, `1h`, `1.5h`). Minimum 1s — sub-second values (`500ms`, `0.5`) are rejected as typos; max ~24 days. Aborts the run with exit code 55 when exceeded.',
         })
         .option('max-tool-calls', {
           type: 'number',
           description:
-            'Maximum cumulative tool calls executed during the run. Aborts with exit code 55 when exceeded. -1 / unset means no limit.',
+            'Maximum cumulative tool calls executed during the run (success or failure; `structured_output` under --json-schema is exempt). Aborts with exit code 55 when exceeded. -1 / unset means no limit; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos.',
         })
         .option('core-tools', {
           type: 'array',

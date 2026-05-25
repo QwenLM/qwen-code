@@ -67,18 +67,23 @@ const MIN_WALL_TIME_SECONDS = 1;
 /**
  * Parses a duration string used by `--max-wall-time`.
  *
- * Accepted forms (all must resolve to a positive duration):
+ * Accepted forms (all must resolve to a duration in
+ * `[MIN_WALL_TIME_SECONDS, MAX_WALL_TIME_SECONDS]`):
  *   - plain number (interpreted as seconds): `"90"` → 90
- *   - suffixed: `"30s"`, `"5m"`, `"1h"`, `"500ms"`
+ *   - suffixed: `"30s"`, `"5m"`, `"1h"`, `"1.5h"`, `"3600s"`
+ *   - `ms` suffix is syntactically accepted but rejected at the floor
+ *     unless the value resolves to `>= 1s` (e.g. `"1000ms"` is legal,
+ *     `"500ms"` is not)
  *   - case-insensitive suffix; whitespace tolerated
  *
  * Returns the duration in **seconds** for parity with `maxWallTimeSeconds`
- * in settings.json. Sub-second precision is preserved (`"500ms"` → `0.5`).
+ * in settings.json.
  *
  * Throws on garbage input, on negative values (regex-rejected — no sign
- * allowed), on zero, and on values above `MAX_WALL_TIME_SECONDS`. A typo
- * in a CI budget flag should fail loud at startup, not silently disable
- * (or instant-fire) the guardrail.
+ * allowed), on zero, on sub-second values below `MIN_WALL_TIME_SECONDS`,
+ * and on values above `MAX_WALL_TIME_SECONDS`. A typo in a CI budget flag
+ * should fail loud at startup, not silently disable (or instant-fire) the
+ * guardrail.
  */
 export function parseDurationSeconds(input: string): number {
   const trimmed = input.trim().toLowerCase();
