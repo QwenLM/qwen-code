@@ -790,28 +790,63 @@ function partitionToolCalls(calls: ScheduledToolCall[]): ToolBatch[] {
 
 /**
  * Tool names whose confirmation prompt may emit a command-substitution
- * warning. When the L5 override (YOLO / auto-approve) skips
- * `getConfirmationDetails()`, that warning never reaches the user. The
- * substitution is still *executed* — by design, since #4093 made
- * substitution-bearing commands overridable — but operators
- * troubleshooting an exfiltration incident need an audit trail. Emit a
- * DEBUG-level log here so the signal exists when `DEBUG=*` is set,
- * without spamming every YOLO invocation.
+ * warning. When any path bypasses `getConfirmationDetails()` — YOLO,
+ * auto-mode auto-approve, PM allow-rule fast path, permission-request
+ * hook allow, or sibling-tool auto-approval — that warning never
+ * reaches the user. The substitution is still *executed* — by design,
+ * since #4093 made substitution-bearing commands overridable — but
+ * operators troubleshooting an exfiltration incident need an audit
+ * trail. Emit a WARN-level log to the debug log file (controlled by
+ * `QWEN_DEBUG_LOG_FILE`, active by default) so the signal is present
+ * in every session's debug log without spamming the TUI.
  */
 const SHELL_LIKE_TOOL_NAMES_FOR_SUBST_AUDIT: ReadonlySet<string> = new Set([
   ToolNames.SHELL,
   ToolNames.MONITOR,
 ]);
 
+/** Bypass paths that skip the confirmation-dialog warning surface. */
+type SubstitutionBypassReason =
+  | 'yolo'
+  | 'auto-approve'
+  | 'allow-rule'
+  | 'hook'
+  | 'sibling-auto';
+
+/**
+ * Pure predicate: would `maybeLogSubstitutionBypass` actually emit a
+ * warning for this tool + args shape? Extracted so callers can be
+ * unit-tested without mocking the module-private `debugLogger`.
+ *
+ * Checks substitution against BOTH the raw command and the stripped
+ * form (`stripShellWrapper`). This matches the dual-check that
+ * `buildShellExecWarnings` (`shell-utils.ts`) uses, so the audit log
+ * and the confirmation-dialog warning fire on the same commands.
+ * Without the stripped check, wrappers like `bash -c 'echo $(cat /etc/shadow)'`
+ * (where `$(` sits inside single quotes at the outer level) would slip
+ * past the audit log while still showing a warning in the dialog
+ * (PR #4386 R4).
+ */
+export function shouldAuditSubstitutionBypass(
+  canonicalName: string,
+  args: Record<string, unknown> | undefined,
+): boolean {
+  if (!SHELL_LIKE_TOOL_NAMES_FOR_SUBST_AUDIT.has(canonicalName)) return false;
+  const cmd = args?.['command'];
+  if (typeof cmd !== 'string') return false;
+  if (detectCommandSubstitution(cmd)) return true;
+  const stripped = stripShellWrapper(cmd);
+  return stripped !== cmd && detectCommandSubstitution(stripped);
+}
+
 function maybeLogSubstitutionBypass(
   canonicalName: string,
   args: Record<string, unknown> | undefined,
   approvalMode: ApprovalMode,
-  bypassReason: 'yolo' | 'auto-approve',
+  bypassReason: SubstitutionBypassReason,
 ): void {
-  if (!SHELL_LIKE_TOOL_NAMES_FOR_SUBST_AUDIT.has(canonicalName)) return;
-  const cmd = args?.['command'];
-  if (typeof cmd !== 'string' || !detectCommandSubstitution(cmd)) return;
+  if (!shouldAuditSubstitutionBypass(canonicalName, args)) return;
+  const cmd = args!['command'] as string;
   debugLogger.warn(
     `Auto-approving ${canonicalName} command with substitution (mode=${approvalMode}, bypass=${bypassReason}): ${cmd}`,
   );
@@ -1676,6 +1711,12 @@ export class CoreToolScheduler {
                 recordAllow(this.config.getAutoModeDenialState()),
               );
             }
+            maybeLogSubstitutionBypass(
+              canonicalName,
+              reqInfo.args,
+              approvalMode,
+              'allow-rule',
+            );
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
@@ -1904,6 +1945,18 @@ export class CoreToolScheduler {
                       hookResult.updatedInput,
                     );
                   }
+                  // Audit-log substitution bypass: the hook just skipped
+                  // the user-facing confirmation dialog (which would have
+                  // shown the warning). Use the post-hook args so any
+                  // `updatedInput` modification is what gets logged.
+                  maybeLogSubstitutionBypass(
+                    canonicalName,
+                    (hookResult.updatedInput as
+                      | Record<string, unknown>
+                      | undefined) ?? reqInfo.args,
+                    approvalMode,
+                    'hook',
+                  );
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.ProceedOnce,
                   );
@@ -3295,6 +3348,12 @@ export class CoreToolScheduler {
         const { finalPermission } = flowResult;
 
         if (finalPermission === 'allow') {
+          maybeLogSubstitutionBypass(
+            canonicalToolName(pendingTool.request.name),
+            pendingTool.request.args as Record<string, unknown>,
+            this.config.getApprovalMode(),
+            'sibling-auto',
+          );
           this.setToolCallOutcome(
             pendingTool.request.callId,
             ToolConfirmationOutcome.ProceedAlways,
