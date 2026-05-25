@@ -1536,6 +1536,14 @@ describe('mergeExcludeTools', () => {
     expect(config.getPermissionsDeny()).toContain('tool_search');
   });
 
+  it('should auto-disable tool_search for deepseek-v4-pro models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v4-pro'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
   it('should auto-disable tool_search for deepseek-v3 models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v3'];
     const argv = await parseArguments();
