@@ -399,6 +399,7 @@ function buildTickPrompt(state: AutoImproveLoopState): string {
           state.sourceSnapshot.customSources,
         )}`
       : '',
+    `Target branch:\n${state.targetBranch}`,
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -412,7 +413,6 @@ ${AUTO_IMPROVE_LOOP_ID_LINE_PREFIX}${state.loopId}
 - Summary file: ${summaryPathDisplay}
 - Runs dir: ${runsDirDisplay}
 - Run index file: ${runIndexPathDisplay}
-- Loop default branch: ${state.targetBranch}
 - Delivery policy: source-aware local commit. Do not push unless the user explicitly requested push in the start prompt or selected source.
 - Repair budget: 5 test/repair attempts.
 - Source snapshot: ${describeSources(state)}
