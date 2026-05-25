@@ -589,15 +589,25 @@ function VirtualizedList<T>(
         const currentScrollTop = getScrollTop();
         const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
         const actualCurrent = Math.min(currentScrollTop, maxScroll);
-        let newScrollTop = Math.max(0, actualCurrent + delta);
+        const newScrollTop = Math.max(0, actualCurrent + delta);
+        // Reaching the bottom must use the same live-recomputing end anchor as
+        // scrollTo/scrollToEnd ({ index: last, offset: SCROLL_TO_ITEM_END }).
+        // A fixed getAnchorForScrollTop(maxScroll) anchor would not track the
+        // last item growing during streaming, so keyboard scroll-to-bottom
+        // would lag behind new tokens.
         if (newScrollTop >= maxScroll) {
           setIsStickingToBottom(true);
-          newScrollTop = Number.MAX_SAFE_INTEGER;
+          setPendingScrollTop(Number.MAX_SAFE_INTEGER);
+          if (data.length > 0) {
+            setScrollAnchor({
+              index: data.length - 1,
+              offset: SCROLL_TO_ITEM_END,
+            });
+          }
+          return;
         }
         setPendingScrollTop(newScrollTop);
-        setScrollAnchor(
-          getAnchorForScrollTop(Math.min(newScrollTop, maxScroll), offsets),
-        );
+        setScrollAnchor(getAnchorForScrollTop(newScrollTop, offsets));
       },
       scrollTo: (offset: number) => {
         const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
