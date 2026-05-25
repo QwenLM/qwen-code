@@ -7,8 +7,14 @@
 ### 1. 启动 qwen serve daemon
 
 ```bash
+# 基本启动
 qwen serve
 # 默认监听 http://127.0.0.1:4170
+
+# 带 token 和 workspace 启动
+QWEN_SERVER_TOKEN=<your-token> qwen serve \
+  --port 4170 \
+  --workspace /path/to/your/project
 ```
 
 ### 2. 运行 MCP Server（stdio 模式）
@@ -16,7 +22,7 @@ qwen serve
 ```bash
 QWEN_DAEMON_URL=http://127.0.0.1:4170 \
 QWEN_DAEMON_TOKEN=<your-token> \
-node packages/sdk-typescript/dist/mcp/serve-bridge/bin.js
+qwen-serve-mcp
 ```
 
 ### 环境变量
@@ -29,16 +35,17 @@ node packages/sdk-typescript/dist/mcp/serve-bridge/bin.js
 
 ## 在 MCP 客户端中配置
 
-### Claude Desktop / Cursor
+### 方式一：通过 npx（推荐，无需本地安装）
 
-在 MCP 配置文件中添加：
+适用于任何外部项目，无需本地源码：
 
 ```json
 {
   "mcpServers": {
-    "qwen-serve": {
-      "command": "node",
-      "args": ["/path/to/packages/sdk-typescript/dist/mcp/serve-bridge/bin.js"],
+    "qwen-serve-bridge": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "-p", "@qwen-code/sdk", "qwen-serve-mcp"],
       "env": {
         "QWEN_DAEMON_URL": "http://127.0.0.1:4170",
         "QWEN_DAEMON_TOKEN": "<your-token>"
@@ -47,6 +54,51 @@ node packages/sdk-typescript/dist/mcp/serve-bridge/bin.js
   }
 }
 ```
+
+### 方式二：全局安装后使用
+
+```bash
+npm install -g @qwen-code/sdk
+```
+
+```json
+{
+  "mcpServers": {
+    "qwen-serve-bridge": {
+      "type": "stdio",
+      "command": "qwen-serve-mcp",
+      "env": {
+        "QWEN_DAEMON_URL": "http://127.0.0.1:4170",
+        "QWEN_DAEMON_TOKEN": "<your-token>"
+      }
+    }
+  }
+}
+```
+
+### 方式三：指定本地路径（开发调试用）
+
+适用于本地开发 qwen-code 源码时：
+
+```json
+{
+  "mcpServers": {
+    "qwen-serve-bridge": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/path/to/qwen-code/packages/sdk-typescript/dist/mcp/serve-bridge/bin.js"],
+      "env": {
+        "QWEN_DAEMON_URL": "http://127.0.0.1:4170",
+        "QWEN_DAEMON_TOKEN": "<your-token>",
+        "QWEN_WORKSPACE_CWD": "/path/to/your/project"
+      }
+    }
+  }
+}
+```
+
+> **注意**：方式三需要指定 Node >=22 的完整路径（如 `~/.nvm/versions/node/v22.x.x/bin/node`），
+> 除非系统默认 Node 版本已经 >=22。
 
 ### 编程式使用
 
