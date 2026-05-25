@@ -3,7 +3,7 @@
 ## Goal
 
 Add a built-in `/auto-improve` command that runs a session-scoped loop for
-small, locally verifiable repository improvements. The command should be useful
+bounded, locally verifiable repository improvements. The command should be useful
 without becoming a hard-coded automation framework: first version keeps the
 actual implementation, testing, repair, delivery, and documentation work
 prompt-driven, while the built-in command owns reliable local state, scheduling,
@@ -74,8 +74,10 @@ can mark it stale rather than pretending it is still running.
 Each tick is prompt-driven. The prompt instructs the agent to:
 
 - read the loop state;
-- select exactly one small, coherent, locally verifiable improvement from the
-  source snapshot and optional start prompt;
+- select exactly one coherent, locally verifiable improvement from the source
+  snapshot and optional start prompt, preferring bounded work while making the
+  change complete enough to address the selected issue, PR comment, requested
+  change, or failing check;
 - create a dedicated issue branch from the repository default branch for
   GitHub issue-derived tasks;
 - create an isolated worktree and branch;

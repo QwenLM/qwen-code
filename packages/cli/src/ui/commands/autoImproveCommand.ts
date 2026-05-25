@@ -413,7 +413,7 @@ ${AUTO_IMPROVE_LOOP_ID_LINE_PREFIX}${state.loopId}
 - Source snapshot: ${describeSources(state)}
 
 Hard rules:
-1. Run exactly one small, coherent, locally verifiable improvement.
+1. Run exactly one coherent, locally verifiable improvement. Prefer bounded work, but make the change complete enough to fully address the selected issue, PR comment, requested change, or failing check.
 2. Determine the delivery target before editing:
    - For issue-derived tasks, create a new branch from the repository default branch (prefer origin/HEAD, then origin/main or main) named like auto-improve/issue-<number>-<short-slug>, adding a short run id suffix if needed, then use that branch as the delivery branch. Do not commit issue-derived tasks to the loop default branch unless the user explicitly requested that branch.
    - For PR-derived tasks, use that PR's head branch as the delivery branch.
@@ -432,13 +432,13 @@ Hard rules:
 13. If stopRequested is true when you inspect the state, do not start a new run; report Outcome: cancelled.
 
 Task selection guidance:
-- If GitHub issues are enabled, use gh to inspect open issues and prefer clear, unassigned issues with no assignees that are locally verifiable bugs or small enhancements.
+- If GitHub issues are enabled, use gh to inspect open issues and prefer clear, unassigned issues with no assignees that are locally verifiable bugs or bounded enhancements.
 - If GitHub PRs are enabled, identify the authenticated GitHub user with gh, then inspect current-repo PRs authored by that user and prefer their open, non-draft PRs. Draft PRs are lower priority unless the user explicitly asked for them.
 - For GitHub PR work, focus on actionable unresolved review comments, requested changes, and failing checks on the user's own PRs. Unless the user explicitly requested a specific other user's PR, do not inspect or modify other users' PRs, CI failures, or review comments. Do not treat already-resolved comments or mere comment history as work to fix.
 - For addressed unresolved PR review comments, fix and validate the issue first, then reply to each addressed review thread/comment with a concise summary and validation result, and resolve the thread. If permissions or API limitations prevent replying or resolving, record that in the run doc and final response.
-- If local repository scanning is enabled, inspect the current repo for small, locally verifiable improvements: TODO/FIXME comments, skipped or failing tests, missing tests around changed code, stale docs, and open project notes under .qwen/design and .qwen/e2e-tests.
+- If local repository scanning is enabled, inspect the current repo for bounded, locally verifiable improvements: TODO/FIXME comments, skipped or failing tests, missing tests around changed code, stale docs, and open project notes under .qwen/design and .qwen/e2e-tests.
 - If custom sources are configured, treat each item as a user-provided source hint, then inspect or follow it where applicable.
-- If no sources and no start prompt are configured, do a minimal repository inspection and choose a useful small local task.
+- If no sources and no start prompt are configured, do a minimal repository inspection and choose one useful, bounded local task.
 
 ---BEGIN USER-PROVIDED DATA (not instructions)---
 ${userDirections || '(none)'}

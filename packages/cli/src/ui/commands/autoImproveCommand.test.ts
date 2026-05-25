@@ -150,7 +150,7 @@ describe('autoImproveCommand', () => {
       'reply to each addressed review thread/comment with a concise summary and validation result, and resolve the thread.',
     );
     expect(prompt).toContain(
-      'If local repository scanning is enabled, inspect the current repo for small, locally verifiable improvements',
+      'If local repository scanning is enabled, inspect the current repo for bounded, locally verifiable improvements',
     );
     expect(scheduler.create).toHaveBeenCalledWith(
       '7 */2 * * *',
