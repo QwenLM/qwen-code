@@ -218,6 +218,20 @@ describe('BackgroundShellRegistry', () => {
       reg.register(makeEntry({ shellId: 'b' }));
       expect(seen).toEqual(['a']);
     });
+
+    it('setNotificationCallback(undefined) clears the callback', () => {
+      // useGeminiStream's cleanup relies on this contract to avoid
+      // leaked callbacks firing into torn-down React state on unmount.
+      // If a future refactor breaks the clearing path, stale callbacks
+      // would fire silently — no test would catch it without this guard.
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.setNotificationCallback(undefined);
+      reg.complete('a', 0, 2000);
+      expect(callback).not.toHaveBeenCalled();
+    });
   });
 
   describe('notifications', () => {
@@ -348,6 +362,58 @@ describe('BackgroundShellRegistry', () => {
 
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).not.toContain('secret credentials');
+      expect(modelText).not.toContain('<output-tail');
+    });
+
+    it('skips output-tail when the output file does not exist', () => {
+      // Guards the catch branch in `readOutputTail`. If the try/catch
+      // ever regresses to throwing, `complete()` would propagate the
+      // error and the entry would never reach a terminal status.
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      reg.register(
+        makeEntry({
+          shellId: 'a',
+          outputPath: join(tmpdir(), 'qwen-shell-no-such-file-xyz.log'),
+        }),
+      );
+
+      expect(() => reg.complete('a', 0, 2000)).not.toThrow();
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).not.toContain('<output-tail');
+      expect(reg.get('a')!.status).toBe('completed');
+    });
+
+    it('skips output-tail when outputPath is a directory (not a regular file)', () => {
+      // Guards the `!stat.isFile()` early-return in `readOutputTail`.
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      const dir = makeTempDir();
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a', outputPath: dir }));
+
+      reg.complete('a', 0, 2000);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).not.toContain('<output-tail');
+    });
+
+    it('skips output-tail when the output file is empty (stat.size === 0)', () => {
+      // Guards the `stat.size <= 0` early-return in `readOutputTail`.
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      const outputPath = makeOutputFile('');
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a', outputPath }));
+
+      reg.complete('a', 0, 2000);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      const [, modelText] = callback.mock.calls[0];
       expect(modelText).not.toContain('<output-tail');
     });
 
