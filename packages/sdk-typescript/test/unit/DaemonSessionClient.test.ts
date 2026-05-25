@@ -819,4 +819,70 @@ describe('DaemonSessionClient', () => {
       'GET /session/:id/events: stream failed',
     );
   });
+
+  it('compress/setMeta/getMeta forward sessionId + clientId to the underlying client (T1.3 + T1.4 / #4514)', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/compress')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          originalTokenCount: 100,
+          newTokenCount: 50,
+          compressionStatus: 'COMPRESSED',
+          durationMs: 7,
+        });
+      }
+      if (req.method === 'POST' && req.url.endsWith('/_meta')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          meta: { a: 1 },
+          byteSize: 7,
+          changeKind: 'replace',
+        });
+      }
+      if (req.method === 'GET' && req.url.endsWith('/_meta')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          meta: { a: 1 },
+          byteSize: 7,
+        });
+      }
+      return jsonResponse(500, { error: 'unexpected' });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: false,
+        clientId: 'client-meta',
+      },
+    });
+
+    await session.compress();
+    await session.setMeta({ a: 1 });
+    await session.setMeta({ b: 2 }, { merge: true });
+    await session.getMeta();
+
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      'POST http://daemon/session/s-1/compress',
+      'POST http://daemon/session/s-1/_meta',
+      'POST http://daemon/session/s-1/_meta',
+      'GET http://daemon/session/s-1/_meta',
+    ]);
+    // All four calls must echo the bound clientId on the header.
+    expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-meta',
+      'client-meta',
+      'client-meta',
+      'client-meta',
+    ]);
+    // merge=true is forwarded on the second body.
+    expect(JSON.parse(calls[2]!.body!)).toEqual({
+      meta: { b: 2 },
+      merge: true,
+    });
+    // merge omitted on the first.
+    expect(JSON.parse(calls[1]!.body!)).toEqual({ meta: { a: 1 } });
+  });
 });

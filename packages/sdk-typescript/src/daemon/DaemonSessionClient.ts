@@ -15,7 +15,9 @@ import type {
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonSessionState,
+  DaemonCompressSessionResult,
   DaemonSession,
+  DaemonSessionMetaResult,
   DaemonSessionSupportedCommandsStatus,
   HeartbeatResult,
   PermissionResponse,
@@ -263,6 +265,48 @@ export class DaemonSessionClient {
       this.sessionId,
       metadata,
       this.clientId,
+    );
+  }
+
+  /**
+   * T1.3 (#4514). Trigger manual compaction on this session. See
+   * `DaemonClient.compressSession` for the full contract — including
+   * the two 409 cases (`compaction_in_flight`, `prompt_in_flight`) and
+   * the NOOP-no-event behavior.
+   */
+  async compress(): Promise<DaemonCompressSessionResult> {
+    return await this.client.compressSession(
+      this.sessionId,
+      this.clientId ? { clientId: this.clientId } : undefined,
+    );
+  }
+
+  /**
+   * T1.4 (#4514). Write to this session's daemon-side `_meta` bag.
+   * See `DaemonClient.setSessionMeta` for the validation contract
+   * (key regex, reserved `qwen.` prefix, 8 KB total cap) and merge
+   * semantics (`null` values SET, do not delete).
+   */
+  async setMeta(
+    meta: Record<string, unknown>,
+    opts?: { merge?: boolean },
+  ): Promise<DaemonSessionMetaResult> {
+    return await this.client.setSessionMeta(
+      this.sessionId,
+      { meta, ...(opts?.merge === true ? { merge: true } : {}) },
+      this.clientId ? { clientId: this.clientId } : undefined,
+    );
+  }
+
+  /**
+   * T1.4 (#4514). Read this session's `_meta` bag. Returns `meta: {}`
+   * for a fresh session; same bag is also echoed on
+   * `GET /session/:id/context` (`state.meta`).
+   */
+  async getMeta(): Promise<DaemonSessionMetaResult> {
+    return await this.client.getSessionMeta(
+      this.sessionId,
+      this.clientId ? { clientId: this.clientId } : undefined,
     );
   }
 

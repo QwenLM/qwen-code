@@ -1704,6 +1704,129 @@ describe('PR 21 — auth device-flow events', () => {
     });
   });
 
+  // T1.3 (#4514) compress + T1.4 (#4514) meta event reducer coverage.
+  // Mirrors the PR 17 mutation-event split: happy-path counter + last-
+  // snapshot accumulation, malformed-payload rejection, envelope-level
+  // originator merge. T1.3 specifically asserts that NOOP-status compress
+  // calls (when the daemon emits them — which it does NOT in v1) would
+  // still update the count, since the event-stream contract is "if you
+  // see it, it happened."
+  describe('T1.3 session_compacted + T1.4 session_meta_changed events', () => {
+    it('session_compacted: increments counter and merges envelope originator', () => {
+      const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 11,
+        v: 1,
+        type: 'session_compacted',
+        originatorClientId: 'client-Z',
+        data: {
+          sessionId: 'sess-1',
+          originalTokenCount: 18000,
+          newTokenCount: 4000,
+          compressionStatus: 'COMPRESSED',
+          durationMs: 1234,
+        },
+      });
+      expect(next.sessionCompactedCount).toBe(1);
+      expect(next.lastSessionCompacted?.compressionStatus).toBe('COMPRESSED');
+      expect(next.lastSessionCompacted?.originalTokenCount).toBe(18000);
+      expect(next.lastSessionCompacted?.originatorClientId).toBe('client-Z');
+    });
+
+    it('session_compacted: malformed payload routes to unrecognized counter', () => {
+      const malformed: DaemonEvent = {
+        id: 12,
+        v: 1,
+        type: 'session_compacted',
+        // Missing `compressionStatus` / `durationMs`.
+        data: { sessionId: 'sess-1', originalTokenCount: 1, newTokenCount: 1 },
+      };
+      expect(asKnownDaemonEvent(malformed)).toBeUndefined();
+      const next = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        malformed,
+      );
+      expect(next.unrecognizedKnownEventCount).toBe(1);
+      expect(next.sessionCompactedCount).toBe(0);
+    });
+
+    it('session_meta_changed: stores full bag, increments counter, merges originator', () => {
+      const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 13,
+        v: 1,
+        type: 'session_meta_changed',
+        originatorClientId: 'client-meta',
+        data: {
+          sessionId: 'sess-1',
+          meta: { chat_id: 'c-1', sender: 'u-7' },
+          byteSize: 32,
+          changeKind: 'replace',
+        },
+      });
+      expect(next.sessionMetaChangedCount).toBe(1);
+      expect(next.sessionMeta).toEqual({ chat_id: 'c-1', sender: 'u-7' });
+      expect(next.lastSessionMetaChange?.changeKind).toBe('replace');
+      expect(next.lastSessionMetaChange?.originatorClientId).toBe(
+        'client-meta',
+      );
+    });
+
+    it('session_meta_changed: full-bag replacement converges regardless of order', () => {
+      // T1.4 wire contract: the event carries the new FULL bag, not a
+      // diff. Even if a `merge` event arrives FIRST and a `replace`
+      // event arrives SECOND (e.g. due to Last-Event-ID gap), the
+      // reducer ends at the replace's bag because each event replaces
+      // `sessionMeta` wholesale.
+      let state = createDaemonSessionViewState();
+      state = reduceDaemonSessionEvent(state, {
+        id: 1,
+        v: 1,
+        type: 'session_meta_changed',
+        data: {
+          sessionId: 's',
+          meta: { a: 1, b: 2 },
+          byteSize: 12,
+          changeKind: 'merge',
+        },
+      });
+      state = reduceDaemonSessionEvent(state, {
+        id: 2,
+        v: 1,
+        type: 'session_meta_changed',
+        data: {
+          sessionId: 's',
+          meta: { c: 3 },
+          byteSize: 8,
+          changeKind: 'replace',
+        },
+      });
+      expect(state.sessionMeta).toEqual({ c: 3 });
+      expect(state.sessionMetaChangedCount).toBe(2);
+    });
+
+    it('session_meta_changed: malformed payload routes to unrecognized counter', () => {
+      const malformed: DaemonEvent = {
+        id: 14,
+        v: 1,
+        type: 'session_meta_changed',
+        // `meta` is not an object — the guard rejects.
+        data: {
+          sessionId: 's',
+          meta: 'not-an-object',
+          byteSize: 1,
+          changeKind: 'replace',
+        },
+      };
+      expect(asKnownDaemonEvent(malformed)).toBeUndefined();
+      const next = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        malformed,
+      );
+      expect(next.unrecognizedKnownEventCount).toBe(1);
+      expect(next.sessionMetaChangedCount).toBe(0);
+      expect(next.sessionMeta).toBeUndefined();
+    });
+  });
+
   // F3 Commit 7 — multi-client permission coordination event reducer
   // tests. Covers permission_partial_vote / permission_forbidden plus
   // the side-effect that resolved/already_resolved events clear

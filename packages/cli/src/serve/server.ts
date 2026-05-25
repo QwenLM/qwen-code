@@ -36,16 +36,21 @@ import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
+  CompactionInFlightError,
   createHttpAcpBridge,
   InvalidClientIdError,
+  InvalidMetaKeyError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  MetaTooLargeError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
+  PromptInFlightError,
+  ReservedMetaKeyError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -1522,6 +1527,127 @@ export function createServeApp(
     },
   );
 
+  app.post('/session/:id/compress', mutate(), async (req, res) => {
+    // T1.3 (#4514). Manual compaction equivalent to TUI `/compress`.
+    // Non-strict mutation gate (parity with `/prompt` and the recap
+    // PR #4504 template) — operators trigger compress from authenticated
+    // adapter code, not as a privileged settings mutation. Body is
+    // accepted as empty `{}`; no `force` field in v1 (always force=true
+    // server-side, matches TUI's hard-coded behavior).
+    //
+    // Concurrency surfaces as two distinct 409s:
+    //   - `compaction_in_flight` — another compress is mid-LLM-call
+    //   - `prompt_in_flight` — a prompt is active; daemon refuses to
+    //     race the agent's own pre-send tryCompress
+    // SDK clients distinguish via the `code` field.
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res.status(400).json({
+        error: 'Session id path parameter is required',
+        code: 'invalid_session_id',
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const response = await bridge.compressSession(
+        sessionId,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(response);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/compress',
+        sessionId,
+      });
+    }
+  });
+
+  app.post('/session/:id/_meta', mutate(), (req, res) => {
+    // T1.4 (#4514). Daemon-side per-session KV bag for channel
+    // adapters (IM bot routing context: chat_id, sender, thread).
+    // Non-strict gate — adapters set routing metadata from their
+    // worker code, same posture as prompt forwarding. Validation
+    // order: (1) body is an object, (2) `meta` is an object,
+    // (3) `merge` is boolean when provided. Per-key regex / reserved
+    // prefix / 8 KB size cap are enforced inside the bridge layer
+    // and surface via sendBridgeError as 400 / 413.
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res.status(400).json({
+        error: 'Session id path parameter is required',
+        code: 'invalid_session_id',
+      });
+      return;
+    }
+    const body = safeBody(req);
+    const metaField = body['meta'];
+    const mergeField = body['merge'];
+    if (
+      typeof metaField !== 'object' ||
+      metaField === null ||
+      Array.isArray(metaField)
+    ) {
+      res.status(400).json({
+        error: '`meta` is required and must be a plain object',
+        code: 'invalid_meta',
+      });
+      return;
+    }
+    if (mergeField !== undefined && typeof mergeField !== 'boolean') {
+      res.status(400).json({
+        error: '`merge` must be a boolean when provided',
+        code: 'invalid_body',
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const response = bridge.setSessionMeta(
+        sessionId,
+        {
+          meta: metaField as Record<string, unknown>,
+          ...(mergeField === true ? { merge: true } : {}),
+        },
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(response);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/_meta',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/_meta', (req, res) => {
+    // T1.4 (#4514). Read-only counterpart to POST /_meta; no mutation
+    // gate (matches `GET /session/:id/context`). Returns `meta: {}` +
+    // `byteSize: 2` for a fresh session — see `createSessionEntry` for
+    // the seed. The full bag is also echoed on `GET /session/:id/context`
+    // (`state.meta`) so adapters that already fetch context don't need
+    // a second round-trip.
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res.status(400).json({
+        error: 'Session id path parameter is required',
+        code: 'invalid_session_id',
+      });
+      return;
+    }
+    try {
+      const response = bridge.getSessionMeta(sessionId);
+      res.status(200).json(response);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/_meta',
+        sessionId,
+      });
+    }
+  });
+
   app.post(
     '/workspace/mcp/:server/restart',
     mutate({ strict: true }),
@@ -2864,6 +2990,58 @@ function sendBridgeError(
       error: err.message,
       code: 'invalid_metadata',
       field: err.field,
+    });
+    return;
+  }
+  // T1.3 (#4514). Two distinct 409s for compress so callers can
+  // distinguish "another compress is running" (retry possible after
+  // it finishes) from "a prompt is on the wire" (retry possible
+  // after the prompt completes or is cancelled).
+  if (err instanceof CompactionInFlightError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'compaction_in_flight',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof PromptInFlightError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'prompt_in_flight',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  // T1.4 (#4514). Meta validation errors all surface with distinct
+  // codes so SDK consumers can render specific remediation hints
+  // (invalid key vs reserved namespace vs payload too large) rather
+  // than treating them as a generic 400/413.
+  if (err instanceof InvalidMetaKeyError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_meta_key',
+      sessionId: err.sessionId,
+      key: err.key,
+    });
+    return;
+  }
+  if (err instanceof ReservedMetaKeyError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'reserved_meta_key',
+      sessionId: err.sessionId,
+      key: err.key,
+    });
+    return;
+  }
+  if (err instanceof MetaTooLargeError) {
+    res.status(413).json({
+      error: err.message,
+      code: 'meta_too_large',
+      sessionId: err.sessionId,
+      byteSize: err.byteSize,
+      limitBytes: err.limitBytes,
     });
     return;
   }

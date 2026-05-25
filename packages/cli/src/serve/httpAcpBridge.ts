@@ -93,6 +93,12 @@ export {
   CancelSentinelCollisionError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
+  // T1.3 + T1.4 (#4514) — session compress + per-session _meta bag.
+  CompactionInFlightError,
+  PromptInFlightError,
+  InvalidMetaKeyError,
+  ReservedMetaKeyError,
+  MetaTooLargeError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 export {

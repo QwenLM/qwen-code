@@ -45,8 +45,10 @@ import type {
   SessionMetadataResult,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
+  DaemonCompressSessionResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
+  DaemonSessionMetaResult,
   DaemonToolToggleResult,
 } from './types.js';
 
@@ -971,6 +973,124 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/approval-mode');
         }
         return (await res.json()) as DaemonApprovalModeResult;
+      },
+    );
+  }
+
+  /**
+   * T1.3 (#4514). Trigger manual compaction on a session, equivalent to
+   * TUI `/compress`. Returns synchronously with token counts +
+   * compression status; the daemon also publishes a `session_compacted`
+   * SSE event on the session bus UNLESS `compressionStatus` is `'NOOP'`
+   * (below-threshold no-op). Pre-flight
+   * `caps.features.session_compress` before calling — older daemons
+   * reject the route with 404.
+   *
+   * Two 409 cases the caller should be prepared for:
+   * - `compaction_in_flight`: another compress is already mid-flight
+   *   on the same session; retry after a short delay.
+   * - `prompt_in_flight`: a prompt is active on the session; the
+   *   daemon refuses to race the agent's own pre-send tryCompress
+   *   inside `sendMessageStream`. Retry after the prompt completes
+   *   (subscribe to `session_update` terminal frames or poll).
+   *
+   * No request body fields in v1 (always `force=true` server-side,
+   * matches TUI). No AbortSignal propagation in v1 — the daemon
+   * applies a 180 s timeout server-side.
+   */
+  async compressSession(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonCompressSessionResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/compress`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/compress');
+        }
+        return (await res.json()) as DaemonCompressSessionResult;
+      },
+    );
+  }
+
+  /**
+   * T1.4 (#4514). Write to the per-session metadata bag. The bag is
+   * daemon-side only — NOT injected into LLM prompt context in v1 —
+   * and surfaces through `getSessionMeta()` + `GET /session/:id/context`
+   * (`state.meta`). Every successful write fires a
+   * `session_meta_changed` SSE event with the new full bag.
+   *
+   * `merge` defaults to `false` (replace whole bag). `merge: true`
+   * shallow-merges — `null` values SET the key to null, they do NOT
+   * delete it (per-key DELETE deferred; clients delete by replacing
+   * the bag with the unwanted keys removed).
+   *
+   * Validation errors:
+   * - 400 `invalid_meta_key`: key fails `^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$`
+   * - 400 `reserved_meta_key`: key starts with `qwen.` (reserved)
+   * - 413 `meta_too_large`: post-write serialized bag exceeds 8 KB
+   *
+   * Pre-flight `caps.features.session_meta`.
+   */
+  async setSessionMeta(
+    sessionId: string,
+    body: { meta: Record<string, unknown>; merge?: boolean },
+    opts?: { clientId?: string },
+  ): Promise<DaemonSessionMetaResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/_meta`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({
+          meta: body.meta,
+          ...(body.merge === true ? { merge: true } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/_meta');
+        }
+        return (await res.json()) as DaemonSessionMetaResult;
+      },
+    );
+  }
+
+  /**
+   * T1.4 (#4514). Read the per-session metadata bag. Returns
+   * `meta: {}, byteSize: 2` for a fresh session (`changeKind` is
+   * absent on read). The same bag is also echoed on
+   * `GET /session/:id/context` (`state.meta`), so adapters that
+   * already fetch context don't need this separate round-trip.
+   *
+   * Pre-flight `caps.features.session_meta`.
+   */
+  async getSessionMeta(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSessionMetaResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/_meta`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/_meta');
+        }
+        return (await res.json()) as DaemonSessionMetaResult;
       },
     );
   }

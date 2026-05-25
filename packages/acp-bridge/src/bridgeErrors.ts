@@ -172,6 +172,119 @@ export class InvalidSessionMetadataError extends Error {
 }
 
 /**
+ * T1.3 (#4514). Thrown by `bridge.compressSession` when another compress
+ * call is already mid-flight on the same session. The chat history is
+ * single-threaded; two concurrent compress calls would race the
+ * `setHistory` write inside `tryCompressChat`. Routes map this to HTTP
+ * 409 with code `compaction_in_flight` so the caller can distinguish
+ * "concurrent compress" from "concurrent prompt" (`PromptInFlightError`)
+ * — both are 409 but require different remediation by the client.
+ */
+export class CompactionInFlightError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Compress on session ${sessionId}: another compress is already ` +
+        'mid-flight on this session.',
+    );
+    this.name = 'CompactionInFlightError';
+    this.sessionId = sessionId;
+  }
+}
+
+/**
+ * T1.3 (#4514). Thrown by `bridge.compressSession` when a prompt is
+ * active on the session (`entry.activePromptOriginatorClientId` is set).
+ * The agent's own `sendMessageStream` calls `tryCompress(force=false)`
+ * as a pre-send threshold gate; overlapping a daemon-driven compress
+ * with that path would race two concurrent compresses against the same
+ * chat object — once at the agent's pre-send gate, once from the daemon
+ * extMethod handler. Routes map this to HTTP 409 with code
+ * `prompt_in_flight`.
+ *
+ * v1 limitation: this only fences compress START. A prompt that STARTS
+ * after the daemon's `compressInFlight` flag is set can still trigger
+ * the agent's pre-send `tryCompress`; in practice that path either
+ * NOOPs (history already compressed) or re-compresses to the same
+ * result. Hard prompt-side serialization is deferred to a follow-up.
+ */
+export class PromptInFlightError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Compress on session ${sessionId}: a prompt is currently active. ` +
+        'Daemon-driven compress is refused while a prompt is in flight to ' +
+        "avoid racing the agent's own pre-send tryCompress call.",
+    );
+    this.name = 'PromptInFlightError';
+    this.sessionId = sessionId;
+  }
+}
+
+/**
+ * T1.4 (#4514). Thrown by `bridge.setSessionMeta` when a key in the
+ * incoming `meta` bag fails the validation regex
+ * `^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$`. Routes map this to HTTP 400 with
+ * code `invalid_meta_key`.
+ */
+export class InvalidMetaKeyError extends Error {
+  readonly sessionId: string;
+  readonly key: string;
+  constructor(sessionId: string, key: string) {
+    super(
+      `Session ${sessionId} _meta: key "${key}" does not match the ` +
+        'allowed pattern (alphanumeric + dot/underscore/dash, ' +
+        '1–64 chars, must start with a letter).',
+    );
+    this.name = 'InvalidMetaKeyError';
+    this.sessionId = sessionId;
+    this.key = key;
+  }
+}
+
+/**
+ * T1.4 (#4514). Thrown by `bridge.setSessionMeta` when a key in the
+ * incoming `meta` bag starts with the reserved `qwen.` prefix.
+ * Reserved for future daemon-owned keys (e.g. `qwen.lastSeenAt`,
+ * `qwen.audit.*`); rejecting client writes today keeps the namespace
+ * clean. Routes map this to HTTP 400 with code `reserved_meta_key`.
+ */
+export class ReservedMetaKeyError extends Error {
+  readonly sessionId: string;
+  readonly key: string;
+  constructor(sessionId: string, key: string) {
+    super(
+      `Session ${sessionId} _meta: key "${key}" starts with the reserved ` +
+        '"qwen." prefix. This namespace is reserved for daemon-owned keys.',
+    );
+    this.name = 'ReservedMetaKeyError';
+    this.sessionId = sessionId;
+    this.key = key;
+  }
+}
+
+/**
+ * T1.4 (#4514). Thrown by `bridge.setSessionMeta` when the resulting
+ * serialized bag would exceed the per-session size cap (8 KB). Routes
+ * map this to HTTP 413 with code `meta_too_large`.
+ */
+export class MetaTooLargeError extends Error {
+  readonly sessionId: string;
+  readonly byteSize: number;
+  readonly limitBytes: number;
+  constructor(sessionId: string, byteSize: number, limitBytes: number) {
+    super(
+      `Session ${sessionId} _meta: serialized size ${byteSize} bytes ` +
+        `exceeds the per-session cap of ${limitBytes} bytes.`,
+    );
+    this.name = 'MetaTooLargeError';
+    this.sessionId = sessionId;
+    this.byteSize = byteSize;
+    this.limitBytes = limitBytes;
+  }
+}
+
+/**
  * #4175 F3. Thrown by `MultiClientPermissionMediator.vote` when the
  * active policy is wired into the schema/registry but the mediator
  * implementation has not been built yet.

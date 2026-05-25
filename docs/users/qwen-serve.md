@@ -15,6 +15,8 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 - **First-responder permissions** — when the agent asks for permission to run a tool, every connected client sees the request; whichever client answers first wins.
 - **One daemon, one workspace** — each `qwen serve` process binds to exactly one workspace at boot (per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02). Multi-workspace deployments run one daemon per workspace on separate ports (or behind an orchestrator).
 - **Remote runtime control** ([#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 17) — change a session's approval mode (`POST /session/:id/approval-mode`), toggle a tool per workspace (`POST /workspace/tools/:name/enable`), scaffold an empty `QWEN.md` (`POST /workspace/init`, mechanical only — does NOT call the model; for AI-fill, follow up with `POST /session/:id/prompt`), or restart a single MCP server with a budget pre-check (`POST /workspace/mcp/:server/restart`). All four are strict-gated — configure `--token` first.
+- **Manual context compaction** ([#4514](https://github.com/QwenLM/qwen-code/issues/4514) T1.3) — trigger TUI-`/compress`-equivalent compaction over HTTP via `POST /session/:id/compress`. Non-strict gate; returns token counts + compaction status synchronously and fires a `session_compacted` SSE event when history actually changes (NOOP responses don't bump the counter).
+- **Per-session routing metadata** ([#4514](https://github.com/QwenLM/qwen-code/issues/4514) T1.4) — IM bot / channel adapters can stash `chat_id` / `sender_id` / `thread_id` and other routing context in a daemon-side KV bag via `POST /session/:id/_meta` (read via `GET /session/:id/_meta` or `state.meta` on `/session/:id/context`). Daemon-side only — NOT injected into LLM prompt in v1; 8 KB cap; the `qwen.*` key prefix is reserved.
 
 ## v0.16-alpha known limits
 
@@ -358,7 +360,7 @@ Two structural choices are explicit non-goals for the Stage 1 / 1.5 / 2 main-lin
 The Stage 1.5 plan describes TUI as an in-process EventBus subscriber. In practice **TUI UI is strictly larger than the wire protocol**:
 
 - **Local-only UI** — the ~15 Ink dialog components (`ModelDialog`, `MemoryDialog`, `PermissionsDialog`, `SessionPicker`, `WelcomeBackDialog`, `FolderTrustDialog`, …) and the `local-jsx` slash commands (`/ide`, `/auth`, `/init`, `/resume`, `/rename`, `/delete`, `/language`, `/arena`, …) render terminal-specific Ink JSX. Remote clients on HTTP/SSE can't equivalently render Ink, and these flows emit no wire event.
-- **Session-state mutations without wire events** — `/approval-mode`, `/memory add`, `/mcp add-server`, `/agents`, `/tools enable/disable`, `/auth`, `/init` (writing `CLAUDE.md`) all change agent behavior, but only `/model` currently publishes an event (`model_switched`).
+- **Session-state mutations without wire events** — `/memory add`, `/mcp add-server`, `/agents`, `/auth` all change agent behavior but emit no SSE event. (`/model` publishes `model_switched`; `/approval-mode` publishes `approval_mode_changed` since Wave 4 PR 17; `/tools enable/disable` publishes `tool_toggled`; `/init` publishes `workspace_initialized`; manual `/compress` over HTTP publishes `session_compacted` since T1.3 #4514; `_meta` writes publish `session_meta_changed` since T1.4 #4514.)
 
 **Stage 1 choice — option (A) from the review**: don't promote these mutations to wire events. The two deployment modes have different consequences.
 

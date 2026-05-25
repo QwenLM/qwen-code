@@ -27,6 +27,13 @@ export {
   type DaemonApprovalModeChangedData,
   type DaemonApprovalModeChangedEvent,
   type DaemonApprovalModeResult,
+  // T1.3 / T1.4 (#4514) — session compress + per-session _meta types.
+  type DaemonCompressSessionResult,
+  type DaemonSessionCompactedData,
+  type DaemonSessionCompactedEvent,
+  type DaemonSessionMetaChangedData,
+  type DaemonSessionMetaChangedEvent,
+  type DaemonSessionMetaResult,
   type DaemonInitWorkspaceResult,
   type DaemonMcpRestartResult,
   type DaemonMcpServerRestartedData,

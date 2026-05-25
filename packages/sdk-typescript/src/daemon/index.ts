@@ -203,6 +203,11 @@ export type {
   DaemonSessionEvent,
   DaemonSessionMetadataUpdatedData,
   DaemonSessionMetadataUpdatedEvent,
+  // T1.3 / T1.4 (#4514) — session compress + per-session _meta bag events.
+  DaemonSessionCompactedData,
+  DaemonSessionCompactedEvent,
+  DaemonSessionMetaChangedData,
+  DaemonSessionMetaChangedEvent,
   DaemonSessionUpdateData,
   DaemonSessionUpdateEvent,
   DaemonSessionViewState,
@@ -235,6 +240,9 @@ export type {
   DaemonAgentMutationResult,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
+  // T1.3 / T1.4 (#4514) — session compress + per-session _meta result types.
+  DaemonCompressSessionResult,
+  DaemonSessionMetaResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
   DaemonToolToggleResult,

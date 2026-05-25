@@ -327,6 +327,103 @@ export interface HttpAcpBridge {
   }>;
 
   /**
+   * T1.3 (#4514). Trigger manual compaction on a live session, equivalent
+   * to TUI `/compress`. Always invokes `tryCompressChat(..., force=true)`
+   * server-side; the route accepts an empty body `{}` and does not expose
+   * a `force` field in v1.
+   *
+   * Concurrency:
+   * - Refuses with `CompactionInFlightError` (HTTP 409) when another
+   *   compress on the same session is already mid-flight.
+   * - Refuses with `PromptInFlightError` (HTTP 409) when a prompt is
+   *   active on the session — the agent's own pre-send `tryCompress`
+   *   inside `sendMessageStream` would race the daemon-driven call.
+   *
+   * Cancellation: not propagated in v1 (placeholder signal passed down).
+   * Operators wait or `killSession`.
+   *
+   * Timeout: `SESSION_COMPRESS_TIMEOUT_MS` (180 s).
+   *
+   * Events: publishes `session_compacted` on the session bus with
+   * envelope-level `originatorClientId` ONLY when
+   * `compressionStatus !== 'NOOP'` — NOOP means below-threshold / nothing
+   * to do and emitting would falsely bump the SDK reducer's
+   * `sessionCompactedCount`. The HTTP response still returns the NOOP
+   * status synchronously so the caller knows.
+   */
+  compressSession(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<{
+    sessionId: string;
+    originalTokenCount: number;
+    newTokenCount: number;
+    /**
+     * Mirrors the `CompressionStatus` string union from
+     * `@qwen-code/qwen-code-core` (`turn.ts`). Typed as `string` here to
+     * keep the bridge interface decoupled from the core enum's exact
+     * shape; SDK consumers narrow on the wire as needed. Known values
+     * include `'COMPRESSED'`, `'NOOP'`, and various `*_FAILED_*` flavors.
+     */
+    compressionStatus: string;
+    /** Wall-clock duration of the underlying side-query, in ms. */
+    durationMs: number;
+  }>;
+
+  /**
+   * T1.4 (#4514). Replace or merge the per-session metadata bag — an
+   * in-memory KV used by channel adapters (IM bots, IDE plugins) to
+   * stash routing context (chat_id, sender_id, thread_id) on the daemon
+   * side. NOT injected into the LLM prompt in v1; daemon-side only,
+   * echoed on `GET /session/:id/context` (`state.meta`) and pushed via
+   * `session_meta_changed` SSE event on every change.
+   *
+   * Validation (in `bridge.ts` impl, throws typed errors mapped by
+   * `sendBridgeError`):
+   * - Each key must match `^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$`
+   *   (`InvalidMetaKeyError`, HTTP 400).
+   * - Keys starting with `qwen.` are reserved for daemon-owned future
+   *   use (`ReservedMetaKeyError`, HTTP 400).
+   * - Total serialized (JSON.stringify) byte length must be ≤ 8 KB
+   *   (`MetaTooLargeError`, HTTP 413). Implicit nesting-depth bound
+   *   from the size cap; no separate depth walk.
+   *
+   * Merge semantics: `merge=false` (default) replaces the bag wholesale.
+   * `merge=true` shallow-merges — `null` values SET the key to null,
+   * they do NOT delete the key. To delete keys, post a replacement bag
+   * with the unwanted keys removed (per-key DELETE deferred to a
+   * follow-up).
+   *
+   * Persistence: not persisted across daemon restart in v1. Sessions
+   * restored via load/resume come back with `meta: {}`.
+   *
+   * Synchronous (in-memory map write + event publish); no ACP roundtrip.
+   * Throws `SessionNotFoundError` for unknown ids.
+   */
+  setSessionMeta(
+    sessionId: string,
+    req: { meta: Record<string, unknown>; merge?: boolean },
+    context?: BridgeClientRequestContext,
+  ): {
+    sessionId: string;
+    meta: Record<string, unknown>;
+    byteSize: number;
+    changeKind: 'replace' | 'merge';
+  };
+
+  /**
+   * T1.4 (#4514). Read the per-session metadata bag. Returns
+   * `meta: {}` and `byteSize: 2` for a session that never had meta
+   * written (the empty object JSON-serializes to `"{}"`). Throws
+   * `SessionNotFoundError` for unknown ids.
+   */
+  getSessionMeta(sessionId: string): {
+    sessionId: string;
+    meta: Record<string, unknown>;
+    byteSize: number;
+  };
+
+  /**
    * Add or remove a tool name from the workspace's `tools.disabled`
    * settings list and fan-out a `tool_toggled` event to every live
    * session SSE bus.

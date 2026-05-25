@@ -1343,6 +1343,132 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('compressSession (T1.3 / #4514)', () => {
+    it('POSTs an empty body and returns the typed result', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          originalTokenCount: 18000,
+          newTokenCount: 4000,
+          compressionStatus: 'COMPRESSED',
+          durationMs: 1234,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.compressSession('s-1');
+      expect(result.compressionStatus).toBe('COMPRESSED');
+      expect(result.durationMs).toBe(1234);
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/compress');
+      expect(calls[0]?.method).toBe('POST');
+      // T1.3 decision #9: always sends `{}` — no `force` field in v1.
+      expect(calls[0]?.body).toBe('{}');
+    });
+
+    it('forwards X-Qwen-Client-Id when supplied', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          originalTokenCount: 100,
+          newTokenCount: 100,
+          compressionStatus: 'NOOP',
+          durationMs: 5,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.compressSession('s-1', { clientId: 'client-X' });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-X');
+    });
+
+    it('throws on 409 compaction_in_flight', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(409, {
+          error: 'busy',
+          code: 'compaction_in_flight',
+          sessionId: 's-1',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.compressSession('s-1')).rejects.toMatchObject({
+        status: 409,
+      });
+    });
+  });
+
+  describe('setSessionMeta / getSessionMeta (T1.4 / #4514)', () => {
+    it('POST with default replace mode omits the merge field', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          meta: { chat_id: 'c-1' },
+          byteSize: 16,
+          changeKind: 'replace',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.setSessionMeta('s-1', {
+        meta: { chat_id: 'c-1' },
+      });
+      expect(result.changeKind).toBe('replace');
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/_meta');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        meta: { chat_id: 'c-1' },
+      });
+    });
+
+    it('POST with merge:true includes the field', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          meta: { a: 1, b: 2 },
+          byteSize: 14,
+          changeKind: 'merge',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setSessionMeta(
+        's-1',
+        { meta: { b: 2 }, merge: true },
+        { clientId: 'client-7' },
+      );
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        meta: { b: 2 },
+        merge: true,
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+    });
+
+    it('GET returns the stored bag', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          meta: { x: 'y' },
+          byteSize: 9,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.getSessionMeta('s-1');
+      expect(result.meta).toEqual({ x: 'y' });
+      expect(calls[0]?.method).toBe('GET');
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/_meta');
+    });
+
+    it('throws on 413 meta_too_large', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(413, {
+          error: 'too large',
+          code: 'meta_too_large',
+          byteSize: 9000,
+          limitBytes: 8192,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.setSessionMeta('s-1', { meta: { big: 'x' } }),
+      ).rejects.toMatchObject({ status: 413 });
+    });
+  });
+
   describe('setWorkspaceToolEnabled (#4175 Wave 4 PR 17)', () => {
     it('POSTs the enabled flag and URL-encodes the tool name', async () => {
       const { fetch, calls } = recordingFetch(() =>

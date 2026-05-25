@@ -87,6 +87,19 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   //   was nothing to replay (`data.replayedCount === 0`).
   'prompt_cancelled',
   'replay_complete',
+  // T1.3 (#4514) — manual compaction success. Carries token counts +
+  // duration on the data payload. NOT emitted when the compress call
+  // results in `compressionStatus: 'NOOP'` (below-threshold no-op); the
+  // synchronous HTTP response still returns the NOOP status so callers
+  // know. Originator client id lives on the SSE envelope (matches
+  // `session_metadata_updated` convention), not the data payload.
+  'session_compacted',
+  // T1.4 (#4514) — per-session metadata bag changed via
+  // `POST /session/:id/_meta`. Fires on both `replace` and `merge`
+  // change kinds; data payload carries the new full bag (not a diff)
+  // so subscribers can mirror state without back-fetch. Envelope-level
+  // `originatorClientId` identifies the writer.
+  'session_meta_changed',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -498,6 +511,63 @@ export interface DaemonApprovalModeChangedData {
 }
 
 /**
+ * T1.3 (#4514). Session-scoped: published on `POST /session/:id/compress`
+ * success when `compressionStatus !== 'NOOP'`. Carries the same shape
+ * as the synchronous HTTP response so subscribers can mirror
+ * compaction without back-fetch.
+ *
+ * **No event on NOOP**: a below-threshold compress call returns 200
+ * with `compressionStatus: 'NOOP'` but does NOT publish this event —
+ * history is unchanged, and emitting would falsely bump the reducer's
+ * `sessionCompactedCount`. Consumers that care about the no-op count
+ * should track it from the HTTP response, not the event stream.
+ *
+ * `originatorClientId` lives on the SSE envelope (matches the existing
+ * `session_metadata_updated` convention), not the data payload.
+ */
+export interface DaemonSessionCompactedData {
+  sessionId: string;
+  originalTokenCount: number;
+  newTokenCount: number;
+  /** String name of the core `CompressionStatus` enum; see `DaemonCompressSessionResult`. */
+  compressionStatus: string;
+  durationMs: number;
+  /**
+   * #4282 fold-in 2 (gpt-5.5 SV3) pattern — envelope-level
+   * `originatorClientId` is folded into this field by the reducer via
+   * `mergeOriginator`. Daemon never populates it directly on the data
+   * payload; the field exists so the reducer's stored snapshot can
+   * carry the originator into consumer state. SDK consumers branch on
+   * `lastSessionCompacted?.originatorClientId === myClientId` to tell
+   * self-originated compresses apart from peer-originated ones.
+   */
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * T1.4 (#4514). Session-scoped: published on every `POST /session/:id/_meta`
+ * mutation (both `replace` and `merge` kinds). Carries the new FULL
+ * bag, not a diff, so subscribers can mirror state without back-fetch
+ * even if they missed a prior event in a Last-Event-ID gap.
+ *
+ * `originatorClientId` lives on the SSE envelope.
+ *
+ * `changeKind` discriminates `replace` (default) from `merge`. Per-key
+ * delete is not a kind in v1 — clients deleting keys POST a smaller
+ * replacement bag, which fires as `replace`.
+ */
+export interface DaemonSessionMetaChangedData {
+  sessionId: string;
+  meta: Record<string, unknown>;
+  byteSize: number;
+  changeKind: 'replace' | 'merge';
+  /** Envelope-level originator folded in by `mergeOriginator`; see `DaemonSessionCompactedData`. */
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
+/**
  * #4175 Wave 4 PR 17. Workspace-scoped: fan-outs to every active
  * session SSE bus when `POST /workspace/tools/:name/enable` mutates
  * the workspace `tools.disabled` settings list. The event is emitted
@@ -687,6 +757,14 @@ export type DaemonMcpServerRestartRefusedEvent = DaemonEventEnvelope<
   'mcp_server_restart_refused',
   DaemonMcpServerRestartRefusedData
 >;
+export type DaemonSessionCompactedEvent = DaemonEventEnvelope<
+  'session_compacted',
+  DaemonSessionCompactedData
+>;
+export type DaemonSessionMetaChangedEvent = DaemonEventEnvelope<
+  'session_meta_changed',
+  DaemonSessionMetaChangedData
+>;
 
 export type DaemonAuthDeviceFlowStartedEvent = DaemonEventEnvelope<
   'auth_device_flow_started',
@@ -722,7 +800,9 @@ export type DaemonSessionEvent =
   | DaemonModelSwitchFailedEvent
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
-  | DaemonSessionMetadataUpdatedEvent;
+  | DaemonSessionMetadataUpdatedEvent
+  | DaemonSessionCompactedEvent
+  | DaemonSessionMetaChangedEvent;
 
 export type DaemonControlEvent =
   | DaemonPermissionRequestEvent
@@ -889,6 +969,28 @@ export interface DaemonSessionViewState {
   mcpRestartRefusedCount: number;
   lastMcpRestartRefused?: DaemonMcpServerRestartRefusedData;
   /**
+   * T1.3 (#4514). Per-stream count of `session_compacted` events. The
+   * daemon does NOT publish the event on `compressionStatus: 'NOOP'`
+   * (history unchanged), so this counter reflects ACTUAL history
+   * mutations only — a NOOP compress call shows up only in the
+   * synchronous HTTP response. Adapters tap this to render "this
+   * session was compacted N times" without polling.
+   */
+  sessionCompactedCount: number;
+  lastSessionCompacted?: DaemonSessionCompactedData;
+  /**
+   * T1.4 (#4514). Latest snapshot of the daemon-side `_meta` bag.
+   * Replaced wholesale on every `session_meta_changed` event (which
+   * carries the new full bag, not a diff) so consumers always
+   * converge regardless of Last-Event-ID gaps. `undefined` until the
+   * first meta write or the first context fetch — the daemon's
+   * `GET /session/:id/context` ALSO surfaces this bag at `state.meta`,
+   * but the reducer only updates from event frames.
+   */
+  sessionMeta?: Record<string, unknown>;
+  sessionMetaChangedCount: number;
+  lastSessionMetaChange?: DaemonSessionMetaChangedData;
+  /**
    * F3 Commit 7. Per-pending consensus vote progress, keyed by
    * `requestId`. Updated on every `permission_partial_vote` frame;
    * cleared when the corresponding `permission_resolved` /
@@ -1024,6 +1126,12 @@ export function createDaemonSessionViewState(
     lastMcpRestart: seed.lastMcpRestart,
     mcpRestartRefusedCount: seed.mcpRestartRefusedCount ?? 0,
     lastMcpRestartRefused: seed.lastMcpRestartRefused,
+    // T1.3 / T1.4 (#4514) — session compress + meta counters/state.
+    sessionCompactedCount: seed.sessionCompactedCount ?? 0,
+    lastSessionCompacted: seed.lastSessionCompacted,
+    sessionMeta: seed.sessionMeta,
+    sessionMetaChangedCount: seed.sessionMetaChangedCount ?? 0,
+    lastSessionMetaChange: seed.lastSessionMetaChange,
     permissionVoteProgress: { ...seed.permissionVoteProgress },
     forbiddenVotes: seed.forbiddenVotes ? [...seed.forbiddenVotes] : [],
     forbiddenVoteCount: seed.forbiddenVoteCount ?? 0,
@@ -1198,6 +1306,14 @@ export function asKnownDaemonEvent(
     case 'mcp_server_restart_refused':
       return isMcpServerRestartRefusedData(event.data)
         ? (event as DaemonMcpServerRestartRefusedEvent)
+        : undefined;
+    case 'session_compacted':
+      return isSessionCompactedData(event.data)
+        ? (event as DaemonSessionCompactedEvent)
+        : undefined;
+    case 'session_meta_changed':
+      return isSessionMetaChangedData(event.data)
+        ? (event as DaemonSessionMetaChangedEvent)
         : undefined;
     default:
       return undefined;
@@ -1537,6 +1653,28 @@ export function reduceDaemonSessionEvent(
         ...base,
         mcpRestartRefusedCount: base.mcpRestartRefusedCount + 1,
         lastMcpRestartRefused: mergeOriginator(event.data, event),
+      };
+    case 'session_compacted':
+      // T1.3 (#4514). Daemon does NOT publish this on
+      // `compressionStatus: 'NOOP'`, so any event reaching here
+      // represents an actual history mutation. Bumping the count is
+      // safe — the route's NOOP path is observable only via the
+      // synchronous HTTP response, not the event stream.
+      return {
+        ...base,
+        sessionCompactedCount: base.sessionCompactedCount + 1,
+        lastSessionCompacted: mergeOriginator(event.data, event),
+      };
+    case 'session_meta_changed':
+      // T1.4 (#4514). Replace `sessionMeta` wholesale on every
+      // change — the event carries the new full bag, not a diff, so
+      // the consumer always converges to the daemon's authoritative
+      // shape regardless of replay ordering or missed Last-Event-IDs.
+      return {
+        ...base,
+        sessionMeta: event.data.meta,
+        sessionMetaChangedCount: base.sessionMetaChangedCount + 1,
+        lastSessionMetaChange: mergeOriginator(event.data, event),
       };
     default: {
       const _exhaustive: never = event;
@@ -2173,6 +2311,37 @@ function isApprovalModeChangedData(
     isNonEmptyString(value['next']) &&
     typeof value['persisted'] === 'boolean'
   );
+}
+
+function isSessionCompactedData(
+  value: unknown,
+): value is DaemonSessionCompactedData {
+  // `compressionStatus` is typed as bare string (forward-compat for
+  // future core CompressionStatus enum extensions); the predicate
+  // checks structure + numeric fields only.
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isFiniteNumber(value['originalTokenCount']) &&
+    isFiniteNumber(value['newTokenCount']) &&
+    isNonEmptyString(value['compressionStatus']) &&
+    isFiniteNumber(value['durationMs'])
+  );
+}
+
+function isSessionMetaChangedData(
+  value: unknown,
+): value is DaemonSessionMetaChangedData {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['sessionId'])) return false;
+  if (!isFiniteNumber(value['byteSize'])) return false;
+  const changeKind = value['changeKind'];
+  if (changeKind !== 'replace' && changeKind !== 'merge') return false;
+  const meta = value['meta'];
+  // `meta` itself must be a plain object (not array, not primitive),
+  // but the inner values are JSON-arbitrary so we only check the
+  // outer shape here.
+  return isRecord(meta);
 }
 
 function isToolToggledData(value: unknown): value is DaemonToolToggledData {

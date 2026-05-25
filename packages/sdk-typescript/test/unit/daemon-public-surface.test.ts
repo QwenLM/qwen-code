@@ -120,4 +120,27 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(typeof Public.createDaemonAuthState).toBe('function');
     expect(typeof Public.DEVICE_FLOW_EXPIRY_GRACE_MS).toBe('number');
   });
+
+  it('exposes the T1.3 + T1.4 (#4514) compress + meta type surface at the published entry', () => {
+    // Same lockdown discipline as the PR 21 test above: re-exports
+    // from `src/daemon/index.ts` are necessary but not sufficient
+    // — `src/index.ts` is what npm consumers actually import. The
+    // type-only imports below would fail to compile if any of these
+    // names were absent from `src/index.ts`, which is the regression
+    // fence for the published-barrel-drift bug. These six names are
+    // the wire-shape contract for compress + _meta.
+    expectTypeOf<T14.DaemonCompressSessionResult>().not.toBeNever();
+    expectTypeOf<T14.DaemonSessionMetaResult>().not.toBeNever();
+    expectTypeOf<T14.DaemonSessionCompactedData>().not.toBeNever();
+    expectTypeOf<T14.DaemonSessionCompactedEvent>().not.toBeNever();
+    expectTypeOf<T14.DaemonSessionMetaChangedData>().not.toBeNever();
+    expectTypeOf<T14.DaemonSessionMetaChangedEvent>().not.toBeNever();
+  });
 });
+
+// T1.3 + T1.4 (#4514): type-only namespace import. If any of the names
+// referenced inside the `T14.*` expectTypeOf assertions above are
+// missing from `src/index.ts`, this import fails to resolve them and
+// tsc rejects the file — the same compile-time regression fence the
+// rest of the suite uses for typed event surface coverage.
+import type * as T14 from '../../src/index.js';

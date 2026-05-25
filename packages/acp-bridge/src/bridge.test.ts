@@ -23,10 +23,14 @@ import type {
   ResumeSessionResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  CompactionInFlightError,
   InvalidClientIdError,
+  InvalidMetaKeyError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  MetaTooLargeError,
+  ReservedMetaKeyError,
   RestoreInProgressError,
   SessionNotFoundError,
   McpServerNotFoundError,
@@ -4605,6 +4609,325 @@ describe('createHttpAcpBridge', () => {
       ]);
       expect(timed.kind).toBe('timeout');
       aborts.forEach((a) => a.abort());
+      await bridge.shutdown();
+    });
+  });
+
+  describe('compressSession (T1.3 / #4514)', () => {
+    /**
+     * Build a channel factory that answers `qwen/control/session/compress`
+     * with a configurable response. `delayMs` lets us pause mid-call so
+     * collision tests can fire a second compress while the first is
+     * still on the extMethod await.
+     */
+    function compressFactory(opts: {
+      response?: {
+        sessionId?: string;
+        originalTokenCount?: number;
+        newTokenCount?: number;
+        compressionStatus?: string;
+      };
+      delayMs?: number;
+      shouldThrow?: () => unknown;
+    }): ChannelFactory {
+      return async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: async (method, _params) => {
+            if (method === 'qwen/control/session/compress') {
+              if (opts.shouldThrow) throw opts.shouldThrow();
+              if (opts.delayMs)
+                await new Promise((r) => setTimeout(r, opts.delayMs));
+              const r = opts.response ?? {};
+              return {
+                sessionId: r.sessionId ?? 'sess',
+                originalTokenCount: r.originalTokenCount ?? 18000,
+                newTokenCount: r.newTokenCount ?? 4000,
+                compressionStatus: r.compressionStatus ?? 'COMPRESSED',
+              };
+            }
+            return {};
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+    }
+
+    it('happy path returns counts + durationMs and emits session_compacted', async () => {
+      const bridge = makeBridge({
+        channelFactory: compressFactory({
+          response: { originalTokenCount: 18000, newTokenCount: 4000 },
+        }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const collect = (async () => {
+        for await (const e of sub) events.push(e);
+      })();
+      const result = await bridge.compressSession(session.sessionId, {
+        clientId: session.clientId,
+      });
+      expect(result.sessionId).toBe(session.sessionId);
+      expect(result.originalTokenCount).toBe(18000);
+      expect(result.newTokenCount).toBe(4000);
+      expect(result.compressionStatus).toBe('COMPRESSED');
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
+      // Wait one tick for the SSE bus to deliver.
+      await new Promise((r) => setTimeout(r, 10));
+      const compacted = events.find((e) => e.type === 'session_compacted');
+      expect(compacted).toBeDefined();
+      expect(
+        (compacted as BridgeEvent & { data?: { compressionStatus?: string } })
+          ?.data?.compressionStatus,
+      ).toBe('COMPRESSED');
+      expect(
+        (compacted as BridgeEvent & { originatorClientId?: string })
+          ?.originatorClientId,
+      ).toBe(session.clientId);
+      await bridge.shutdown();
+      await collect.catch(() => {});
+    });
+
+    it('NOOP returns synchronously but does NOT emit session_compacted', async () => {
+      // T1.3 decision #4b: NOOP means below-threshold / nothing to do,
+      // so emitting would falsely bump the SDK reducer's
+      // `sessionCompactedCount` and trick consumers into thinking the
+      // session state changed when it did not. The HTTP response is
+      // the only signal in the NOOP path.
+      const bridge = makeBridge({
+        channelFactory: compressFactory({
+          response: {
+            originalTokenCount: 100,
+            newTokenCount: 100,
+            compressionStatus: 'NOOP',
+          },
+        }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const collect = (async () => {
+        for await (const e of sub) events.push(e);
+      })();
+      const result = await bridge.compressSession(session.sessionId);
+      expect(result.compressionStatus).toBe('NOOP');
+      expect(result.originalTokenCount).toBe(result.newTokenCount);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(events.some((e) => e.type === 'session_compacted')).toBe(false);
+      await bridge.shutdown();
+      await collect.catch(() => {});
+    });
+
+    it('refuses concurrent compress with CompactionInFlightError', async () => {
+      // T1.3 decision #2a: two concurrent compresses on the same
+      // session would race `setHistory`; the second arrives WHILE the
+      // first is still on the extMethod await (here simulated with a
+      // 100ms delay). 409 short-circuit lets the caller distinguish
+      // collision from upstream failure.
+      const bridge = makeBridge({
+        channelFactory: compressFactory({ delayMs: 100 }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const first = bridge.compressSession(session.sessionId);
+      // Yield to event loop so first reaches the extMethod await.
+      await new Promise((r) => setTimeout(r, 5));
+      await expect(
+        bridge.compressSession(session.sessionId),
+      ).rejects.toBeInstanceOf(CompactionInFlightError);
+      await first;
+      // Flag must be cleared in finally so subsequent compresses succeed.
+      const second = await bridge.compressSession(session.sessionId);
+      expect(second.compressionStatus).toBe('COMPRESSED');
+      await bridge.shutdown();
+    });
+
+    it('clears compressInFlight in finally even on extMethod error', async () => {
+      // Without the `finally` clause, a thrown extMethod (transport
+      // close, agent crash) would strand the flag set and every
+      // subsequent compress would 409 forever. We assert the failure
+      // mode by REJECTING-NOT-409: if the flag had stranded, the
+      // second call would reject with `CompactionInFlightError`
+      // instead of the upstream's generic error. ACP normalizes
+      // thrown errors into `"Internal error"` on the wire, so we
+      // don't pin against the original message.
+      const bridge = makeBridge({
+        channelFactory: compressFactory({
+          shouldThrow: () => new Error('upstream blew up'),
+        }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(bridge.compressSession(session.sessionId)).rejects.toThrow();
+      // The critical assertion: the second call must NOT throw 409.
+      // It will still throw because the factory keeps throwing, but
+      // the rejection class is the upstream error, not the
+      // collision guard.
+      await expect(
+        bridge.compressSession(session.sessionId),
+      ).rejects.not.toBeInstanceOf(CompactionInFlightError);
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown session ids', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          throw new Error('factory should not be called');
+        },
+      });
+      await expect(bridge.compressSession('unknown')).rejects.toBeInstanceOf(
+        SessionNotFoundError,
+      );
+    });
+  });
+
+  describe('setSessionMeta / getSessionMeta (T1.4 / #4514)', () => {
+    function metaBridge() {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      return makeBridge({ channelFactory: factory });
+    }
+
+    it('round-trips a replace write through getSessionMeta', async () => {
+      const bridge = metaBridge();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const writeRes = bridge.setSessionMeta(session.sessionId, {
+        meta: { chat_id: 'c-1', sender: 'u-7' },
+      });
+      expect(writeRes.changeKind).toBe('replace');
+      expect(writeRes.meta).toEqual({ chat_id: 'c-1', sender: 'u-7' });
+      expect(writeRes.byteSize).toBeGreaterThan(2);
+      const readRes = bridge.getSessionMeta(session.sessionId);
+      expect(readRes.meta).toEqual({ chat_id: 'c-1', sender: 'u-7' });
+      expect(readRes.byteSize).toBe(writeRes.byteSize);
+      await bridge.shutdown();
+    });
+
+    it('merge=true shallow-merges and preserves prior keys', async () => {
+      const bridge = metaBridge();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      bridge.setSessionMeta(session.sessionId, { meta: { a: 1, b: 2 } });
+      const merged = bridge.setSessionMeta(session.sessionId, {
+        meta: { b: 99, c: 3 },
+        merge: true,
+      });
+      expect(merged.changeKind).toBe('merge');
+      expect(merged.meta).toEqual({ a: 1, b: 99, c: 3 });
+      await bridge.shutdown();
+    });
+
+    it('null values under merge SET the key (do not delete) per v1 contract', async () => {
+      // T1.4 decision #6: per-key delete is deferred; null is a
+      // legitimate JSON value the bag preserves verbatim.
+      const bridge = metaBridge();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      bridge.setSessionMeta(session.sessionId, { meta: { a: 1, b: 2 } });
+      const merged = bridge.setSessionMeta(session.sessionId, {
+        meta: { a: null },
+        merge: true,
+      });
+      expect(merged.meta).toEqual({ a: null, b: 2 });
+      await bridge.shutdown();
+    });
+
+    it('replace with {} clears the bag (the v1 delete pattern)', async () => {
+      const bridge = metaBridge();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      bridge.setSessionMeta(session.sessionId, { meta: { a: 1 } });
+      const cleared = bridge.setSessionMeta(session.sessionId, { meta: {} });
+      expect(cleared.meta).toEqual({});
+      expect(cleared.byteSize).toBe(2); // "{}"
+      await bridge.shutdown();
+    });
+
+    it('rejects invalid key regex with InvalidMetaKeyError', async () => {
+      const bridge = metaBridge();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(() =>
+        bridge.setSessionMeta(session.sessionId, { meta: { '1bad': 'x' } }),
+      ).toThrow(InvalidMetaKeyError);
+      expect(() =>
+        bridge.setSessionMeta(session.sessionId, {
+          meta: { 'has space': 'x' },
+        }),
+      ).toThrow(InvalidMetaKeyError);
+      await bridge.shutdown();
+    });
+
+    it('rejects reserved qwen.* prefix with ReservedMetaKeyError', async () => {
+      const bridge = metaBridge();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(() =>
+        bridge.setSessionMeta(session.sessionId, {
+          meta: { 'qwen.lastSeen': 'x' },
+        }),
+      ).toThrow(ReservedMetaKeyError);
+      await bridge.shutdown();
+    });
+
+    it('rejects 8 KB+ payloads with MetaTooLargeError', async () => {
+      const bridge = metaBridge();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const oversized = 'x'.repeat(9 * 1024);
+      expect(() =>
+        bridge.setSessionMeta(session.sessionId, { meta: { big: oversized } }),
+      ).toThrow(MetaTooLargeError);
+      await bridge.shutdown();
+    });
+
+    it('emits session_meta_changed with envelope-level originatorClientId', async () => {
+      const bridge = metaBridge();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const collect = (async () => {
+        for await (const e of sub) events.push(e);
+      })();
+      await new Promise((r) => setImmediate(r));
+      bridge.setSessionMeta(
+        session.sessionId,
+        { meta: { chat_id: 'c-9' } },
+        { clientId: session.clientId },
+      );
+      await new Promise((r) => setImmediate(r));
+      const ev = events.find((e) => e.type === 'session_meta_changed');
+      expect(ev).toBeDefined();
+      expect(
+        (ev as BridgeEvent & { data?: { changeKind?: string } })?.data
+          ?.changeKind,
+      ).toBe('replace');
+      expect(
+        (ev as BridgeEvent & { originatorClientId?: string })
+          ?.originatorClientId,
+      ).toBe(session.clientId);
+      await bridge.shutdown();
+      await collect.catch(() => {});
+    });
+
+    it('getSessionMeta returns {} and byteSize 2 for a fresh session', async () => {
+      const bridge = metaBridge();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const read = bridge.getSessionMeta(session.sessionId);
+      expect(read.meta).toEqual({});
+      expect(read.byteSize).toBe(2);
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown session ids', async () => {
+      const bridge = metaBridge();
+      expect(() => bridge.getSessionMeta('unknown')).toThrow(
+        SessionNotFoundError,
+      );
+      expect(() =>
+        bridge.setSessionMeta('unknown', { meta: { a: 1 } }),
+      ).toThrow(SessionNotFoundError);
       await bridge.shutdown();
     });
   });

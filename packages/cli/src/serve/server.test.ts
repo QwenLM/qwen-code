@@ -31,12 +31,17 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { ApprovalMode, TrustGateError } from '@qwen-code/qwen-code-core';
 import {
+  CompactionInFlightError,
   InvalidClientIdError,
+  InvalidMetaKeyError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   MAX_WORKSPACE_PATH_LENGTH,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  MetaTooLargeError,
+  PromptInFlightError,
+  ReservedMetaKeyError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -145,6 +150,11 @@ const EXPECTED_STAGE1_FEATURES = [
   // `permission_partial_vote` / `permission_forbidden` SSE events. Always-
   // on; runtime-active policy is at `/capabilities` body `policy.permission`.
   'permission_mediation',
+  // T1.3 + T1.4 (#4514). Manual compaction + per-session metadata bag.
+  // Both always-on once landed; appended at the registry tail so the
+  // ordering test catches accidental reshuffles.
+  'session_compress',
+  'session_meta',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -170,13 +180,19 @@ const EXPECTED_REGISTERED_FEATURES = [
   // they appear here in their registry-declaration order, not the
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.filter(
-    (f) => f !== 'auth_device_flow' && f !== 'permission_mediation',
+    (f) =>
+      f !== 'auth_device_flow' &&
+      f !== 'permission_mediation' &&
+      f !== 'session_compress' &&
+      f !== 'session_meta',
   ),
   'mcp_workspace_pool',
   'mcp_pool_restart',
   'require_auth',
   'auth_device_flow',
   'permission_mediation',
+  'session_compress',
+  'session_meta',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -284,6 +300,32 @@ interface FakeBridgeOpts {
     context?: BridgeClientRequestContext,
   ) => BridgeHeartbeatResult;
   heartbeatStateImpl?: (sessionId: string) => BridgeHeartbeatState | undefined;
+  // T1.3 / T1.4 (#4514).
+  compressSessionImpl?: (
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ) => Promise<{
+    sessionId: string;
+    originalTokenCount: number;
+    newTokenCount: number;
+    compressionStatus: string;
+    durationMs: number;
+  }>;
+  setSessionMetaImpl?: (
+    sessionId: string,
+    req: { meta: Record<string, unknown>; merge?: boolean },
+    context?: BridgeClientRequestContext,
+  ) => {
+    sessionId: string;
+    meta: Record<string, unknown>;
+    byteSize: number;
+    changeKind: 'replace' | 'merge';
+  };
+  getSessionMetaImpl?: (sessionId: string) => {
+    sessionId: string;
+    meta: Record<string, unknown>;
+    byteSize: number;
+  };
 }
 
 interface FakeBridge extends HttpAcpBridge {
@@ -364,6 +406,17 @@ interface FakeBridge extends HttpAcpBridge {
     context?: BridgeClientRequestContext;
   }>;
   heartbeatStateCalls: string[];
+  // T1.3 / T1.4 (#4514).
+  compressSessionCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  setSessionMetaCalls: Array<{
+    sessionId: string;
+    req: { meta: Record<string, unknown>; merge?: boolean };
+    context?: BridgeClientRequestContext;
+  }>;
+  getSessionMetaCalls: string[];
   shutdownCalls: number;
 }
 
@@ -542,6 +595,51 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionLastSeenAt: 1_700_000_000_000,
       clientLastSeenAt: new Map<string, number>(),
     }));
+  // T1.3 / T1.4 (#4514) — compress + meta defaults.
+  const compressSessionCalls: FakeBridge['compressSessionCalls'] = [];
+  const compressSessionImpl =
+    opts.compressSessionImpl ??
+    (async (sessionId: string) => ({
+      sessionId,
+      originalTokenCount: 18000,
+      newTokenCount: 4000,
+      compressionStatus: 'COMPRESSED',
+      durationMs: 42,
+    }));
+  const metaStore = new Map<string, Record<string, unknown>>();
+  const setSessionMetaCalls: FakeBridge['setSessionMetaCalls'] = [];
+  const setSessionMetaImpl =
+    opts.setSessionMetaImpl ??
+    ((
+      sessionId: string,
+      req: { meta: Record<string, unknown>; merge?: boolean },
+    ) => {
+      const prior = metaStore.get(sessionId) ?? {};
+      const next =
+        req.merge === true ? { ...prior, ...req.meta } : { ...req.meta };
+      metaStore.set(sessionId, next);
+      const serialized = JSON.stringify(next);
+      return {
+        sessionId,
+        meta: next,
+        byteSize: Buffer.byteLength(serialized, 'utf8'),
+        changeKind: (req.merge === true ? 'merge' : 'replace') as
+          | 'merge'
+          | 'replace',
+      };
+    });
+  const getSessionMetaCalls: FakeBridge['getSessionMetaCalls'] = [];
+  const getSessionMetaImpl =
+    opts.getSessionMetaImpl ??
+    ((sessionId: string) => {
+      const meta = metaStore.get(sessionId) ?? {};
+      const serialized = JSON.stringify(meta);
+      return {
+        sessionId,
+        meta,
+        byteSize: Buffer.byteLength(serialized, 'utf8'),
+      };
+    });
   return {
     // F3 Commit 6 — `HttpAcpBridge.permissionPolicy` is required so
     // `/capabilities` can expose `policy.permission`. Tests don't
@@ -569,6 +667,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     updateMetadataCalls,
     heartbeatCalls,
     heartbeatStateCalls,
+    compressSessionCalls,
+    setSessionMetaCalls,
+    getSessionMetaCalls,
     get shutdownCalls() {
       return shutdownCalls;
     },
@@ -696,6 +797,25 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return setApprovalModeImpl(sessionId, mode, o, context);
+    },
+    async compressSession(sessionId, context) {
+      compressSessionCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return compressSessionImpl(sessionId, context);
+    },
+    setSessionMeta(sessionId, req, context) {
+      setSessionMetaCalls.push({
+        sessionId,
+        req,
+        ...(context ? { context } : {}),
+      });
+      return setSessionMetaImpl(sessionId, req, context);
+    },
+    getSessionMeta(sessionId) {
+      getSessionMetaCalls.push(sessionId);
+      return getSessionMetaImpl(sessionId);
     },
     async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
       setToolEnabledCalls.push({
@@ -2484,6 +2604,243 @@ describe('createServeApp', () => {
       ).send({ mode: 'yolo' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/compress (T1.3 / #4514)', () => {
+    // Non-strict gate — same posture as /prompt; loopback dev mode
+    // accepts the call without a token, but bearer auth (if configured)
+    // is still honored.
+    it('200 with typed result on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/compress')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        sessionId: 'session-A',
+        compressionStatus: 'COMPRESSED',
+      });
+      expect(typeof res.body.durationMs).toBe('number');
+      expect(bridge.compressSessionCalls).toHaveLength(1);
+    });
+
+    it('accepts empty body and ignores any force field in v1', async () => {
+      // T1.3 decision #9: no `force` field in v1 schema; always
+      // `force=true` server-side. The route reads nothing from the
+      // body in v1, so any client-sent fields are silently ignored.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/compress')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ force: false });
+      expect(res.status).toBe(200);
+      // Bridge call carries no `force` — the agent always invokes with true.
+      expect(bridge.compressSessionCalls[0]).toMatchObject({
+        sessionId: 'session-A',
+      });
+    });
+
+    it('forwards X-Qwen-Client-Id to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/compress')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-7')
+        .send({});
+      expect(res.status).toBe(200);
+      expect(bridge.compressSessionCalls[0]?.context).toEqual({
+        clientId: 'client-7',
+      });
+    });
+
+    it('409 compaction_in_flight when bridge throws CompactionInFlightError', async () => {
+      const bridge = fakeBridge({
+        compressSessionImpl: async (sessionId) => {
+          throw new CompactionInFlightError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/compress')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('compaction_in_flight');
+      expect(res.body.sessionId).toBe('session-A');
+    });
+
+    it('409 prompt_in_flight when bridge throws PromptInFlightError', async () => {
+      // T1.3 decision #2b: distinct from compaction_in_flight so SDK
+      // consumers can pick the right retry path (wait for the prompt
+      // vs wait for the other compress).
+      const bridge = fakeBridge({
+        compressSessionImpl: async (sessionId) => {
+          throw new PromptInFlightError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/compress')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('prompt_in_flight');
+    });
+
+    it('404 when bridge reports unknown session', async () => {
+      const bridge = fakeBridge({
+        compressSessionImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/missing/compress')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST/GET /session/:id/_meta (T1.4 / #4514)', () => {
+    it('POST round-trip with replace mode returns the stored bag', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ meta: { chat_id: 'c-1' } });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        sessionId: 'session-A',
+        meta: { chat_id: 'c-1' },
+        changeKind: 'replace',
+      });
+      expect(typeof res.body.byteSize).toBe('number');
+    });
+
+    it('POST merge=true forwards to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      await request(app)
+        .post('/session/session-A/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ meta: { a: 1 } });
+      const res = await request(app)
+        .post('/session/session-A/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ meta: { b: 2 }, merge: true });
+      expect(res.status).toBe(200);
+      expect(res.body.meta).toEqual({ a: 1, b: 2 });
+      expect(res.body.changeKind).toBe('merge');
+    });
+
+    it('GET returns the stored bag', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      await request(app)
+        .post('/session/session-A/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ meta: { x: 'y' } });
+      const res = await request(app)
+        .get('/session/session-A/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.meta).toEqual({ x: 'y' });
+    });
+
+    it('GET returns {} for a fresh session', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .get('/session/session-fresh/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.meta).toEqual({});
+      expect(res.body.byteSize).toBe(2);
+    });
+
+    it('400 invalid_meta when body.meta is missing or not a plain object', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const missing = await request(app)
+        .post('/session/session-A/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('invalid_meta');
+      const arr = await request(app)
+        .post('/session/session-A/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ meta: ['not', 'an', 'object'] });
+      expect(arr.status).toBe(400);
+      expect(arr.body.code).toBe('invalid_meta');
+      expect(bridge.setSessionMetaCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_body when merge is non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ meta: {}, merge: 'truthy' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_body');
+    });
+
+    it('400 invalid_meta_key when bridge throws InvalidMetaKeyError', async () => {
+      const bridge = fakeBridge({
+        setSessionMetaImpl: (sessionId) => {
+          throw new InvalidMetaKeyError(sessionId, '1bad');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ meta: { ok: 'value' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_meta_key');
+      expect(res.body.key).toBe('1bad');
+    });
+
+    it('400 reserved_meta_key when bridge throws ReservedMetaKeyError', async () => {
+      const bridge = fakeBridge({
+        setSessionMetaImpl: (sessionId) => {
+          throw new ReservedMetaKeyError(sessionId, 'qwen.lastSeen');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ meta: { ok: 'value' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('reserved_meta_key');
+    });
+
+    it('413 meta_too_large when bridge throws MetaTooLargeError', async () => {
+      const bridge = fakeBridge({
+        setSessionMetaImpl: (sessionId) => {
+          throw new MetaTooLargeError(sessionId, 9000, 8192);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/_meta')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ meta: { big: 'x' } });
+      expect(res.status).toBe(413);
+      expect(res.body.code).toBe('meta_too_large');
+      expect(res.body.byteSize).toBe(9000);
+      expect(res.body.limitBytes).toBe(8192);
     });
   });
 

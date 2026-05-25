@@ -37,6 +37,7 @@ import {
   createIdleWorkspaceSkillsStatus,
   mapDomainErrorToErrorKind,
   type ServePreflightCell,
+  type ServeSessionContextStatus,
   type ServeStatusCell,
 } from './status.js';
 import {
@@ -61,6 +62,11 @@ import {
   WorkspaceInitRaceError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  CompactionInFlightError,
+  PromptInFlightError,
+  InvalidMetaKeyError,
+  ReservedMetaKeyError,
+  MetaTooLargeError,
 } from './bridgeErrors.js';
 import { canonicalizeWorkspace } from './workspacePaths.js';
 import type {
@@ -282,6 +288,33 @@ interface SessionEntry {
    * eviction in this PR; revocation policy (PR 24) will own that.
    */
   clientLastSeenAt: Map<string, number>;
+  /**
+   * T1.3 (#4514). Set `true` for the duration of a `compressSession`
+   * extMethod call so a second concurrent compress on the same session
+   * fails fast with `CompactionInFlightError` (HTTP 409
+   * `compaction_in_flight`) rather than racing the `setHistory` write
+   * inside `tryCompressChat`. Cleared in `finally` so a thrown
+   * extMethod (timeout, transport close, agent-side compress_failed)
+   * never strands the flag.
+   */
+  compressInFlight: boolean;
+  /**
+   * T1.4 (#4514). Daemon-side per-session metadata bag set via
+   * `POST /session/:id/_meta`. NOT injected into LLM context in v1;
+   * surfaced through `GET /session/:id/_meta`, echoed on
+   * `GET /session/:id/context` (`state.meta`, always present even when
+   * empty), and pushed via `session_meta_changed` SSE event on every
+   * change. Not persisted across daemon restart: a session restored
+   * via load/resume comes back with `meta: {}`.
+   */
+  meta: Record<string, unknown>;
+  /**
+   * T1.4 (#4514). Cached `JSON.stringify(meta).length` in bytes so the
+   * 8 KB cap check on writes is O(new-payload) rather than re-
+   * serializing the existing bag every time. Kept in sync with `meta`
+   * by `setSessionMeta`.
+   */
+  metaSerializedByteSize: number;
 }
 
 function isServeDebugLoggingEnabled(): boolean {
@@ -423,6 +456,43 @@ const DEFAULT_INIT_TIMEOUT_MS = 10_000;
  * as long as the slowest legitimate per-server discovery.
  */
 const MCP_RESTART_TIMEOUT_MS = 300_000;
+/**
+ * T1.3 (#4514): wall-clock bound for the daemon-driven manual compaction
+ * extMethod (`qwen/control/session/compress`). Threading the placeholder
+ * AbortSignal down means we can't preempt the LLM side-query early in
+ * v1, so the timeout is the only backstop against a wedged compress
+ * call holding `entry.compressInFlight` set forever (which would block
+ * every subsequent compress on the session with HTTP 409). 180s is
+ * generous for the worst-case 200k-token history side-query while still
+ * recoverable on transport stalls; tuned vs `MCP_RESTART_TIMEOUT_MS`
+ * (300s, longer because it covers OAuth re-auth) and
+ * `SESSION_RECAP_TIMEOUT_MS` (will be 60s when the recap PR lands —
+ * recap is a smaller summarize call).
+ */
+const SESSION_COMPRESS_TIMEOUT_MS = 180_000;
+/**
+ * T1.4 (#4514): per-session cap on the serialized `_meta` bag, in
+ * bytes. Sized for IM-style routing context (chat_id / sender_id /
+ * thread_id / a handful of profile fields) — typical payloads stay
+ * well under 1 KB. Picked 8 KB over 32 KB / 64 KB to keep the bag
+ * "routing context" rather than "blob storage"; clients that need to
+ * stash large state should use `/file/write` or future durable
+ * surfaces. Enforced as `Buffer.byteLength(JSON.stringify(bag), 'utf8')`.
+ */
+const SESSION_META_MAX_BYTES = 8 * 1024;
+/**
+ * T1.4 (#4514): allowed pattern for `_meta` keys. Defensive against
+ * path-traversal-style or whitespace-bearing keys that would surface
+ * surprises in adapter code; also restricts the reserved `qwen.`
+ * prefix's namespace to a predictable shape.
+ */
+const SESSION_META_KEY_PATTERN = /^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/;
+/**
+ * T1.4 (#4514): reserved prefix for future daemon-owned `_meta` keys
+ * (e.g. `qwen.lastSeenAt`, `qwen.audit.*`). Client writes hitting this
+ * prefix are rejected with `ReservedMetaKeyError`.
+ */
+const SESSION_META_RESERVED_PREFIX = 'qwen.';
 const DEFAULT_MAX_SESSIONS = 20;
 /**
  * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
@@ -1460,6 +1530,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       clientLastSeenAt: new Map(),
       attachCount: 0,
       spawnOwnerWantedKill: false,
+      // T1.3 / T1.4 (#4514): per-session compress + meta state defaults.
+      // The empty bag's JSON form `"{}"` is 2 bytes.
+      compressInFlight: false,
+      meta: {},
+      metaSerializedByteSize: 2,
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
@@ -2782,10 +2857,32 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     async getSessionContextStatus(sessionId) {
-      return requestSessionStatus(
+      // T1.4 (#4514). Splice the daemon-side `_meta` bag into the ACP-
+      // sourced context status so adapter UIs can render routing
+      // context (chat_id / sender / thread) in one /context fetch
+      // without separately polling /_meta. Always present (even `{}`)
+      // when the daemon supports meta — see the `state.meta` JSDoc on
+      // `ServeSessionContextStatus` for the always-present rationale.
+      // The entry lookup happens here (not just inside
+      // `requestSessionStatus`) so we can read `entry.meta` after the
+      // ACP roundtrip completes.
+      const status = await requestSessionStatus<ServeSessionContextStatus>(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionContext,
       );
+      const entry = byId.get(sessionId);
+      // Defensive: a session can have been killed between the ACP
+      // call returning and us splicing meta. If `entry` is gone we
+      // can still return the ACP-sourced shape but with an empty
+      // meta — the consumer's next request will get a clean 404.
+      const meta = entry?.meta ?? {};
+      return {
+        ...status,
+        state: {
+          ...status.state,
+          meta,
+        },
+      };
     },
 
     async getSessionSupportedCommandsStatus(sessionId) {
@@ -3021,6 +3118,159 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         mode: response.current,
         previous: response.previous,
         persisted,
+      };
+    },
+
+    async compressSession(sessionId, context) {
+      // T1.3 (#4514). Daemon-driven manual compaction equivalent to TUI
+      // `/compress`. Forwards through `qwen/control/session/compress`
+      // into the agent's own `GeminiClient.tryCompressChat(force=true)`.
+      //
+      // Two-tier concurrency guard:
+      //   1. `compressInFlight` — refuses overlapping daemon-driven
+      //      compresses (`CompactionInFlightError → 409`).
+      //   2. `activePromptOriginatorClientId` — refuses while a prompt
+      //      is on the wire (`PromptInFlightError → 409`); the agent's
+      //      own pre-send `tryCompress` inside `sendMessageStream`
+      //      would race the daemon-driven call on the same chat
+      //      history. v1 only fences at compress START — a prompt that
+      //      ARRIVES after we set `compressInFlight` can still trigger
+      //      the agent's pre-send path. In practice that path either
+      //      NOOPs (history already compressed) or harmlessly re-
+      //      compresses; hard prompt-side serialization is deferred.
+      //
+      // `session_compacted` SSE event publishes only when
+      // `compressionStatus !== 'NOOP'` — NOOP means below-threshold
+      // (no history change), and emitting would falsely bump the SDK
+      // reducer's `sessionCompactedCount`. The HTTP response still
+      // returns the NOOP status synchronously so the caller knows.
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      if (entry.compressInFlight) {
+        throw new CompactionInFlightError(sessionId);
+      }
+      if (entry.activePromptOriginatorClientId !== undefined) {
+        throw new PromptInFlightError(sessionId);
+      }
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      entry.compressInFlight = true;
+      const startedAt = Date.now();
+      try {
+        const response = (await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionCompress,
+              { sessionId },
+            ),
+            SESSION_COMPRESS_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.sessionCompress,
+          ),
+          getTransportClosedReject(entry),
+        ])) as {
+          sessionId: string;
+          originalTokenCount: number;
+          newTokenCount: number;
+          compressionStatus: string;
+        };
+        const durationMs = Date.now() - startedAt;
+        const result = {
+          sessionId: entry.sessionId,
+          originalTokenCount: response.originalTokenCount,
+          newTokenCount: response.newTokenCount,
+          compressionStatus: response.compressionStatus,
+          durationMs,
+        };
+        // NOOP = below-threshold, history identical — do NOT publish.
+        // See JSDoc on the interface method for the rationale.
+        if (response.compressionStatus !== 'NOOP') {
+          entry.events.publish({
+            type: 'session_compacted',
+            data: result,
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
+        return result;
+      } finally {
+        entry.compressInFlight = false;
+      }
+    },
+
+    setSessionMeta(sessionId, req, context) {
+      // T1.4 (#4514). Pure daemon-side per-session KV bag — no ACP
+      // roundtrip. Validation order (fail-fast, before any mutation):
+      //   1. Body shape (object + meta object + merge boolean): caller's
+      //      responsibility, enforced at the HTTP route layer.
+      //   2. Per-key regex + reserved-prefix check (here).
+      //   3. Serialized size cap (here, AFTER the merge so the cap
+      //      reflects the post-write byte count).
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const incoming = req.meta;
+      const merge = req.merge === true;
+      // Validate each new key. We don't re-validate existing keys on
+      // the entry under merge mode because they passed validation when
+      // first written.
+      for (const key of Object.keys(incoming)) {
+        if (!SESSION_META_KEY_PATTERN.test(key)) {
+          throw new InvalidMetaKeyError(sessionId, key);
+        }
+        if (key.startsWith(SESSION_META_RESERVED_PREFIX)) {
+          throw new ReservedMetaKeyError(sessionId, key);
+        }
+      }
+      const next: Record<string, unknown> = merge
+        ? { ...entry.meta, ...incoming }
+        : { ...incoming };
+      const serialized = JSON.stringify(next);
+      const byteSize = Buffer.byteLength(serialized, 'utf8');
+      if (byteSize > SESSION_META_MAX_BYTES) {
+        throw new MetaTooLargeError(
+          sessionId,
+          byteSize,
+          SESSION_META_MAX_BYTES,
+        );
+      }
+      entry.meta = next;
+      entry.metaSerializedByteSize = byteSize;
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      const changeKind: 'replace' | 'merge' = merge ? 'merge' : 'replace';
+      entry.events.publish({
+        type: 'session_meta_changed',
+        data: {
+          sessionId: entry.sessionId,
+          meta: next,
+          byteSize,
+          changeKind,
+        },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+      return {
+        sessionId: entry.sessionId,
+        meta: next,
+        byteSize,
+        changeKind,
+      };
+    },
+
+    getSessionMeta(sessionId) {
+      // T1.4 (#4514). Synchronous read of the in-memory bag. Returns
+      // `meta: {}, byteSize: 2` for a fresh session (the empty object
+      // JSON-serializes to `"{}"`); see `createSessionEntry` for the
+      // seed.
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return {
+        sessionId: entry.sessionId,
+        meta: entry.meta,
+        byteSize: entry.metaSerializedByteSize,
       };
     },
 

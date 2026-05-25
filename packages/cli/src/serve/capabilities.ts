@@ -212,6 +212,38 @@ export const SERVE_CAPABILITY_REGISTRY = {
     since: 'v1',
     modes: ['first-responder', 'designated', 'consensus', 'local-only'],
   },
+  // T1.3 (#4514). Daemon exposes `POST /session/:id/compress` —
+  // manual compaction equivalent to TUI `/compress`. Non-strict
+  // mutation gate (parity with `/prompt`); body is `{}` (no `force`
+  // field in v1 — always `force=true` server-side, matches TUI's
+  // hard-coded behavior). Returns `{sessionId, originalTokenCount,
+  // newTokenCount, compressionStatus, durationMs}` synchronously and
+  // publishes `session_compacted` SSE event ONLY when
+  // `compressionStatus !== 'NOOP'` (NOOP = below-threshold no-op,
+  // history unchanged). Two distinct 409s for concurrency:
+  // `compaction_in_flight` (another compress mid-flight) and
+  // `prompt_in_flight` (a prompt is on the wire — daemon refuses to
+  // race the agent's own pre-send tryCompress). 180 s timeout.
+  // SDK helpers: `DaemonClient.compressSession()` +
+  // `DaemonSessionClient.compress()`.
+  session_compress: { since: 'v1' },
+  // T1.4 (#4514). Daemon exposes the per-session metadata bag for
+  // channel adapters (IM bot routing context — chat_id, sender,
+  // thread): `POST /session/:id/_meta` (replace or shallow-merge),
+  // `GET /session/:id/_meta` (read). Daemon-side only — no ACP
+  // roundtrip — and NOT injected into LLM prompt in v1; surfaced
+  // through `GET /session/:id/context` (`state.meta`, always present
+  // when this tag is advertised) and pushed via the
+  // `session_meta_changed` SSE event on every change. Per-key regex
+  // `^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$`; keys starting with `qwen.` are
+  // reserved (400 `reserved_meta_key`); total serialized bag ≤ 8 KB
+  // (413 `meta_too_large`). `null` values under `merge:true` SET the
+  // key to null — they do NOT delete it (per-key DELETE deferred).
+  // Not persisted across daemon restart in v1; sessions restored via
+  // load/resume come back with `meta: {}`. SDK helpers:
+  // `DaemonClient.{set,get}SessionMeta()` +
+  // `DaemonSessionClient.{setMeta,getMeta}()`.
+  session_meta: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;

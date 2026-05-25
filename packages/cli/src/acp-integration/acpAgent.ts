@@ -9,6 +9,7 @@ import {
   APPROVAL_MODES,
   AuthType,
   clearCachedCredentialFile,
+  CompressionStatus,
   createDebugLogger,
   QwenOAuth2Event,
   qwenOAuth2Events,
@@ -78,6 +79,7 @@ import type {
 import { buildAuthMethods } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
+import { randomUUID } from 'node:crypto';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
@@ -2242,6 +2244,84 @@ class QwenAgent implements Agent {
         }
         const current = config.getApprovalMode();
         return { previous, current };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionCompress: {
+        // T1.3 (#4514). Daemon-driven manual compaction equivalent to
+        // TUI `/compress`. Always `force=true` server-side; the daemon
+        // route accepts an empty body `{}` and does not expose a `force`
+        // field in v1. Auto-compaction already runs threshold-gated
+        // before every prompt; an explicit daemon call is operator
+        // intent.
+        //
+        // Concurrency is enforced at the bridge layer
+        // (`compressInFlight` + `activePromptOriginatorClientId` checks),
+        // not here — by the time this case runs, the bridge has already
+        // ruled out the two race conditions.
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const client = session.getConfig().getGeminiClient();
+        if (!client) {
+          // Defensive: `sessionOrThrow` guarantees the session exists,
+          // but a session created in a failed auth state can have a
+          // null GeminiClient. Surface as a structured failure rather
+          // than letting the optional chain crash.
+          throw new RequestError(-32004, 'No active GeminiClient on session', {
+            errorKind: 'compress_failed',
+            compressionStatus: 'NO_CLIENT',
+          });
+        }
+        try {
+          const info = await client.tryCompressChat(
+            `compress-daemon-${randomUUID()}`,
+            /* force */ true,
+            /* signal */ undefined,
+          );
+          // `compressionStatus` is a numeric enum (`CompressionStatus`)
+          // in core; convert to its string name for the wire so the
+          // SDK / bridge can pattern-match on stable identifiers
+          // (`'NOOP'`, `'COMPRESSED'`, `'COMPRESSION_FAILED_*'`)
+          // instead of magic numbers. Reverse-lookup on a numeric enum
+          // returns the member name; defensive `?? 'UNKNOWN'` keeps a
+          // future enum extension from crashing the route — the bridge
+          // treats anything other than `'NOOP'` as "history changed,
+          // emit event" and the route returns it verbatim.
+          const statusName =
+            CompressionStatus[info.compressionStatus] ?? 'UNKNOWN';
+          // `tryCompressChat` may report failure via
+          // `compressionStatus` rather than throwing. Surface those as
+          // structured failures so the bridge / route can return 500
+          // with `errorKind: compress_failed`. We check by prefix so
+          // any future `COMPRESSION_FAILED_*` flavor stays caught.
+          if (statusName.includes('FAILED')) {
+            throw new RequestError(-32004, 'Compress failed', {
+              errorKind: 'compress_failed',
+              compressionStatus: statusName,
+            });
+          }
+          return {
+            sessionId,
+            originalTokenCount: info.originalTokenCount,
+            newTokenCount: info.newTokenCount,
+            compressionStatus: statusName,
+          };
+        } catch (err) {
+          // Re-wrap unhandled exceptions (transport / auth / OOM
+          // mid-side-query). `tryCompressChat` does not guarantee
+          // every failure converts into a `*_FAILED_*` status.
+          // Preserve RequestError instances (already structured) and
+          // wrap everything else.
+          if (err instanceof RequestError) throw err;
+          const message = err instanceof Error ? err.message : String(err);
+          throw new RequestError(-32004, message, {
+            errorKind: 'compress_failed',
+          });
+        }
       }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;

@@ -107,6 +107,13 @@ export const SERVE_STATUS_EXT_METHODS = {
 export const SERVE_CONTROL_EXT_METHODS = {
   sessionClose: 'qwen/control/session/close',
   sessionApprovalMode: 'qwen/control/session/approval_mode',
+  // T1.3 (#4514). Manual compaction trigger: the daemon route
+  // `POST /session/:id/compress` forwards through this extMethod so the
+  // ACP child's own `GeminiClient.tryCompressChat` runs against the
+  // session's live chat history. Always `force=true` server-side; the
+  // route accepts an empty body `{}` and does not expose a `force`
+  // field in v1 (matches TUI `/compress`).
+  sessionCompress: 'qwen/control/session/compress',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
 } as const;
 
@@ -320,6 +327,15 @@ export interface ServeSessionContextStatus {
     models?: unknown;
     modes?: unknown;
     configOptions?: unknown[] | null;
+    /**
+     * T1.4 (#4514). Daemon-side per-session metadata bag set via
+     * `POST /session/:id/_meta`. Always present (even `{}`) on daemons
+     * that advertise the `session_meta` capability tag so adapters
+     * cannot mistake "old daemon without support" for "new daemon with
+     * empty bag". Pre-T1.4 daemons omit the field; SDK consumers gate
+     * on the capability tag, not field absence.
+     */
+    meta?: Record<string, unknown>;
     [key: string]: unknown;
   };
 }

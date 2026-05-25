@@ -105,7 +105,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
  'session_approval_mode_control', 'workspace_tool_toggle',
  'workspace_init', 'workspace_mcp_restart',
- 'auth_device_flow', 'permission_mediation']
+ 'auth_device_flow', 'permission_mediation',
+ 'session_compress', 'session_meta']
 ```
 
 > The conditional `require_auth` tag (PR 15) appears only when the daemon
@@ -816,13 +817,21 @@ caller named the path. Success responses and audit events include
   "state": {
     "models": {},
     "modes": {},
-    "configOptions": []
+    "configOptions": [],
+    "meta": {}
   }
 }
 ```
 
 `state` mirrors the same ACP model/mode/config-option shapes used by
 `POST /session`, `POST /session/:id/load`, and `POST /session/:id/resume`.
+
+**T1.4 (#4514)**: `state.meta` is the daemon-side `_meta` bag set via
+`POST /session/:id/_meta` (see the dedicated section below). Always
+present (even `{}`) when the daemon advertises the `session_meta`
+capability tag — this is intentional, so SDK consumers cannot mistake
+"old daemon without support" for "new daemon with empty bag". Pre-T1.4
+daemons omit the field entirely.
 
 ### `GET /session/:id/supported-commands`
 
@@ -1249,6 +1258,114 @@ Errors (non-2xx):
 - `500` — internal error (e.g. `ToolRegistry` not initialized).
 
 SSE events (workspace-scoped): `mcp_server_restarted` with `{serverName, durationMs, originatorClientId?}` on success; `mcp_server_restart_refused` with `{serverName, reason, originatorClientId?}` on soft skip.
+
+#### `POST /session/:id/compress` (T1.3 / #4514)
+
+Capability tag: `session_compress`. Bridge → ACP extMethod `qwen/control/session/compress`. Non-strict mutation gate (parity with `/prompt` and `/recap`).
+
+Manual compaction trigger equivalent to TUI `/compress`. Always invokes the agent's `tryCompressChat` with `force=true` server-side; the route accepts an empty body and does not expose a `force` field in v1 (matches TUI's hard-coded behavior). Auto-compaction already runs threshold-gated before every prompt — an explicit daemon-driven compress is by definition operator intent.
+
+Request body:
+
+```json
+{}
+```
+
+No fields are read from the body in v1. Any fields a client sends are silently ignored.
+
+Response (200):
+
+```json
+{
+  "sessionId": "sess:42",
+  "originalTokenCount": 184320,
+  "newTokenCount": 12480,
+  "compressionStatus": "COMPRESSED",
+  "durationMs": 4180
+}
+```
+
+`compressionStatus` is the string name of core's `CompressionStatus` numeric enum: `'COMPRESSED'`, `'NOOP'`, or one of the `COMPRESSION_FAILED_*` flavors (the bridge translates `*_FAILED_*` to HTTP 500 below before the route returns). Typed as bare string in the SDK so future enum extensions don't crash older consumers.
+
+**NOOP** is a SUCCESS (returns 200) — it means the history was below the compaction threshold, no work was needed. `originalTokenCount === newTokenCount` in this case, and the daemon deliberately does NOT publish a `session_compacted` SSE event so SDK reducer counters (`sessionCompactedCount`) stay accurate for "real" compactions.
+
+Errors:
+
+- `400 {code: 'invalid_session_id'}` — empty path parameter.
+- `404` — session unknown (`SessionNotFoundError`).
+- `409 {code: 'compaction_in_flight', sessionId}` — another compress is already mid-LLM-call on this session. The chat history is single-threaded; concurrent compresses would race `setHistory`. Retry after a short delay.
+- `409 {code: 'prompt_in_flight', sessionId}` — a prompt is currently active (`entry.activePromptOriginatorClientId` is set). The agent's own pre-send `tryCompress` inside `sendMessageStream` would race a daemon-driven compress on the same chat object. Retry after the prompt completes (subscribe to terminal `session_update` frames). **v1 limitation**: this only fences compress START; a prompt that arrives AFTER `compressInFlight` is set can still trigger the agent's pre-send path. In practice that path either NOOPs (history already compressed) or harmlessly re-compresses — hard prompt-side serialization is deferred to a follow-up.
+- `500 {code: 'compress_failed', compressionStatus: '...'}` — `tryCompressChat` reported a `COMPRESSION_FAILED_*` status or threw an uncaught exception (transport / auth / OOM mid-side-query). `compressionStatus` carries the specific failure flavor when available.
+
+Timeout: 180 s server-side (`SESSION_COMPRESS_TIMEOUT_MS`). Longer than `SESSION_RECAP_TIMEOUT_MS` (60 s) because compression on a 200k-token history involves a larger side-query. Cancellation is **not propagated** in v1 — a placeholder `AbortSignal` is passed down; operators wait or `killSession`.
+
+SSE event (session-scoped): `session_compacted` with `{sessionId, originalTokenCount, newTokenCount, compressionStatus, durationMs, originatorClientId?}`. **Not published** when `compressionStatus === 'NOOP'`.
+
+SDK helpers: `DaemonClient.compressSession(sessionId, {clientId?})` + `DaemonSessionClient.compress()`.
+
+#### `POST /session/:id/_meta` and `GET /session/:id/_meta` (T1.4 / #4514)
+
+Capability tag: `session_meta`. **Daemon-side only** — no ACP roundtrip; non-strict mutation gate on POST, no gate on GET (matches `GET /session/:id/context`).
+
+Per-session metadata bag for channel adapters (IM bot routing context — `chat_id`, `sender_id`, `thread_id` — and IDE plugins that need to stash workspace-specific routing state). The bag is **NOT injected into LLM prompt context in v1**; surfaced through this route, echoed on `GET /session/:id/context` (`state.meta`, always present even when empty), and pushed via `session_meta_changed` SSE event on every mutation.
+
+**Persistence**: not persisted across daemon restart in v1. Sessions restored via `POST /session/:id/{load,resume}` come back with `meta: {}`. Revisit when T2.1 (`unstable_session_resume` → stable) lands a persistence substrate.
+
+**POST request:**
+
+```json
+{
+  "meta": {
+    "chat_id": "c-1234",
+    "sender_id": "u-7",
+    "thread_id": "t-44"
+  },
+  "merge": false
+}
+```
+
+- `meta` (required): plain object whose keys match `^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$` and whose values are any JSON-serializable type (string / number / boolean / null / nested object / array).
+- `merge` (optional, default `false`): when `true`, shallow-merges into the existing bag; when `false`/omitted, replaces wholesale.
+- **`null` values under `merge:true` SET the key to null** — they do NOT delete it. To delete keys, POST a replacement bag (`merge:false`) with the unwanted keys removed. Per-key DELETE is deferred to a follow-up.
+
+**POST response (200):**
+
+```json
+{
+  "sessionId": "sess:42",
+  "meta": { "chat_id": "c-1234", "sender_id": "u-7", "thread_id": "t-44" },
+  "byteSize": 64,
+  "changeKind": "replace"
+}
+```
+
+`byteSize` is `Buffer.byteLength(JSON.stringify(meta), 'utf8')` after the write completes. `changeKind` is `'replace'` (default) or `'merge'`.
+
+**GET response (200):**
+
+```json
+{
+  "sessionId": "sess:42",
+  "meta": { "chat_id": "c-1234" },
+  "byteSize": 18
+}
+```
+
+Fresh sessions (no prior write) return `meta: {}` and `byteSize: 2` (the empty object JSON-serializes to `"{}"`).
+
+**Errors:**
+
+- `400 {code: 'invalid_session_id'}` — empty path parameter.
+- `400 {code: 'invalid_meta'}` — `meta` missing or not a plain object (arrays / primitives rejected).
+- `400 {code: 'invalid_body'}` — `merge` non-boolean.
+- `400 {code: 'invalid_meta_key', key}` — a key in the bag fails the regex.
+- `400 {code: 'reserved_meta_key', key}` — a key starts with the reserved `qwen.` prefix (reserved for future daemon-owned keys like `qwen.lastSeenAt`, `qwen.audit.*`).
+- `413 {code: 'meta_too_large', byteSize, limitBytes}` — post-write serialized bag would exceed the 8 KB per-session cap. The cap is intentionally tight: this is routing context, not blob storage; clients with large state should use `/file/write` or future durable surfaces.
+- `404` — session unknown.
+
+SSE event (session-scoped): `session_meta_changed` with `{sessionId, meta, byteSize, changeKind, originatorClientId?}`. The event carries the new **full bag**, not a diff — subscribers always converge regardless of Last-Event-ID gaps. Envelope-level `originatorClientId` lets cross-client UIs suppress echoes of their own writes.
+
+SDK helpers: `DaemonClient.setSessionMeta(sessionId, {meta, merge?}, {clientId?})` + `DaemonClient.getSessionMeta(sessionId, {clientId?})` + `DaemonSessionClient.setMeta(meta, {merge?})` + `DaemonSessionClient.getMeta()`.
 
 ### `GET /session/:id/events` (SSE)
 

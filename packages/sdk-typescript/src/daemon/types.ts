@@ -729,6 +729,63 @@ export interface DaemonApprovalModeResult {
 }
 
 /**
+ * T1.3 (#4514). Result body of `POST /session/:id/compress`. Daemon
+ * forwards through the agent's `tryCompressChat(force=true)` and
+ * returns the underlying `ChatCompressionInfo` plus a wall-clock
+ * `durationMs` measured around the side-query.
+ *
+ * `compressionStatus` is the string name of the core `CompressionStatus`
+ * numeric enum (`'COMPRESSED'`, `'NOOP'`, `'COMPRESSION_FAILED_*'`).
+ * Typed as `string` (rather than a closed literal union) so an SDK
+ * built against an older core enum still parses a hypothetical future
+ * `COMPRESSION_FAILED_*` flavor — branch on the values you handle and
+ * treat the rest as opaque. `'NOOP'` is a SUCCESS (below threshold, no
+ * history change) and the daemon deliberately does NOT publish a
+ * `session_compacted` SSE event in that case; the synchronous response
+ * is the only signal so reducer `sessionCompactedCount` stays accurate.
+ */
+export interface DaemonCompressSessionResult {
+  sessionId: string;
+  originalTokenCount: number;
+  newTokenCount: number;
+  /**
+   * String name of the core `CompressionStatus` numeric enum (e.g.
+   * `'COMPRESSED'`, `'NOOP'`, `'COMPRESSION_FAILED_INFLATED_TOKEN_COUNT'`).
+   * Treat any value containing `'FAILED'` as an error; the bridge
+   * surfaces such cases as HTTP 500 with `errorKind: 'compress_failed'`,
+   * but a future daemon may return the status verbatim on a 200 if the
+   * failure mode shifts category — branch defensively.
+   */
+  compressionStatus: string;
+  /** Wall-clock duration of the underlying side-query, in ms. */
+  durationMs: number;
+}
+
+/**
+ * T1.4 (#4514). Result body of `POST /session/:id/_meta` and
+ * `GET /session/:id/_meta`. The bag is daemon-side only — NOT injected
+ * into LLM prompt context in v1 — and echoed on
+ * `GET /session/:id/context` (`state.meta`) when the daemon advertises
+ * the `session_meta` capability tag.
+ *
+ * `byteSize` is `Buffer.byteLength(JSON.stringify(meta), 'utf8')` and
+ * counts toward the per-session 8 KB cap. A fresh session has
+ * `meta: {}` and `byteSize: 2` (the empty object serializes to `"{}"`).
+ *
+ * `changeKind` is only present on the POST result (read responses
+ * omit it). `'replace'` is the default; `'merge'` is set when the
+ * request carried `merge: true`. `null` values under merge SET the
+ * key to null — they do NOT delete it; per-key DELETE is deferred to
+ * a follow-up. To delete a key, post a replacement bag without it.
+ */
+export interface DaemonSessionMetaResult {
+  sessionId: string;
+  meta: Record<string, unknown>;
+  byteSize: number;
+  changeKind?: 'replace' | 'merge';
+}
+
+/**
  * #4175 Wave 4 PR 17. Result body of `POST /workspace/tools/:name/
  * enable`. The `enabled` flag echoes the requested state; daemon
  * always succeeds when the bridge has a `persistDisabledTools` hook
