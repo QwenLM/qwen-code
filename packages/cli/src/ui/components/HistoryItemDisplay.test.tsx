@@ -115,6 +115,7 @@ describe('<HistoryItemDisplay />', () => {
       lastRun: '001-fix (success)',
       recentRuns: [
         {
+          runId: '001-fix',
           status: 'success',
           issueNumber: 4347,
           task: 'Strip provider-leaked scratchpad',
