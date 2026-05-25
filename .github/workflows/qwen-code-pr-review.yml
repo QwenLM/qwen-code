@@ -620,7 +620,8 @@ jobs:
             --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
-            --prompt "$(cat /tmp/preflight-prompt-rendered.md)" 2>/tmp/preflight-stderr.log)"
+            -p "Triage the PR below." \
+            < /tmp/preflight-prompt-rendered.md 2>/tmp/preflight-stderr.log)"
           qwen_status=$?
           set -e
           # Echo raw_out (and qwen's stderr) inside a stop-commands fence:
@@ -892,8 +893,8 @@ jobs:
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
             --output-format stream-json --include-partial-messages \
-            --prompt "$(cat /tmp/light-prompt-rendered.md)" \
-            2> >(tee /tmp/qwen-light-stderr.log >&2) | tee "$out"
+            -p "Review the PR below." \
+            2> >(tee /tmp/qwen-light-stderr.log >&2) < /tmp/light-prompt-rendered.md | tee "$out"
           status=${PIPESTATUS[0]}
           echo "::${stop_token}::"
           set -e
@@ -1032,8 +1033,8 @@ jobs:
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
             --allowed-mcp-server-names __qwen_review_no_mcp__ \
             --output-format stream-json --include-partial-messages \
-            --prompt "$(cat /tmp/standard-prompt-rendered.md)" \
-            2> >(tee /tmp/qwen-standard-stderr.log >&2) | tee "$out"
+            -p "Review the PR below." \
+            2> >(tee /tmp/qwen-standard-stderr.log >&2) < /tmp/standard-prompt-rendered.md | tee "$out"
           status=${PIPESTATUS[0]}
           echo "::${stop_token}::"
           set -e
@@ -1257,8 +1258,8 @@ jobs:
               --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
               --allowed-mcp-server-names __qwen_review_no_mcp__ \
               --output-format stream-json --include-partial-messages \
-              --prompt "$(cat "$rendered")" \
-              2> >(tee "/tmp/qwen-deep-${focus}-stderr.log" >&2) | tee "$out"
+              -p "Review the PR below." \
+              2> >(tee "/tmp/qwen-deep-${focus}-stderr.log" >&2) < "$rendered" | tee "$out"
             status=${PIPESTATUS[0]}
             echo "::${stop_token}::"
             set -e
