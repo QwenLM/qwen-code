@@ -549,7 +549,9 @@ export async function convertClaudePluginPackage(
 
 /**
  * Collects resources (commands, skills, agents) to a destination folder.
- * If a resource is already in the destination folder, it will be skipped.
+ * Resources are always copied unconditionally — the caller
+ * (`convertClaudePluginPackage`) clears `destDir` beforehand so it can
+ * honor selective sub-entry lists.
  * @param resourcePaths String or array of resource paths
  * @param pluginRoot Root directory of the plugin
  * @param destDir Destination directory for collected resources
