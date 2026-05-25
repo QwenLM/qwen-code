@@ -161,7 +161,10 @@ export class SleepInhibitor {
   ): { command: string; args: string[] } | undefined {
     switch (this.platform) {
       case 'darwin':
-        return { command: 'caffeinate', args: ['-i'] };
+        // -i prevents idle sleep, -s prevents system sleep (including
+        // lid-close on AC power). Both are needed to match the Linux
+        // systemd-inhibit semantics which blocks all sleep transitions.
+        return { command: 'caffeinate', args: ['-is'] };
       case 'linux':
         return {
           command: 'systemd-inhibit',

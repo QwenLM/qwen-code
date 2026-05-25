@@ -78,7 +78,7 @@ describe('SleepInhibitor', () => {
 
     expect(spawn).toHaveBeenCalledWith(
       'caffeinate',
-      ['-i'],
+      ['-is'],
       expect.any(Object),
     );
     handle.release();
