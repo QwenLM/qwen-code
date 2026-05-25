@@ -244,7 +244,6 @@ export async function buildAvailableCommandsSnapshot(
           name: skill.name,
           description: skill.description,
           body: skill.body,
-          filePath: skill.filePath,
           level: skill.level,
         });
       }

@@ -99,7 +99,6 @@ export class SkillCommandLoader implements ICommandLoader {
             name: skill.name,
             description: skill.description,
             body: skill.body,
-            filePath: skill.filePath,
             level: skill.level,
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
