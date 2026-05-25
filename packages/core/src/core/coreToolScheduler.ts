@@ -1890,7 +1890,7 @@ export class CoreToolScheduler {
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.ProceedOnce,
                   );
-                  this.resetAutoModeFallbackAfterConfirmation(
+                  this.recordAutoModeFallbackResolution(
                     reqInfo.callId,
                     ToolConfirmationOutcome.ProceedOnce,
                   );
@@ -1908,7 +1908,7 @@ export class CoreToolScheduler {
                     ToolConfirmationOutcome.Cancel,
                     cancelPayload,
                   );
-                  this.resetAutoModeFallbackAfterConfirmation(
+                  this.recordAutoModeFallbackResolution(
                     reqInfo.callId,
                     ToolConfirmationOutcome.Cancel,
                   );
@@ -2222,7 +2222,7 @@ export class CoreToolScheduler {
 
     this.setToolCallOutcome(callId, outcome);
 
-    this.resetAutoModeFallbackAfterConfirmation(callId, outcome);
+    this.recordAutoModeFallbackResolution(callId, outcome);
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
       // Use custom cancel message from payload if provided, otherwise use default
@@ -2340,7 +2340,7 @@ export class CoreToolScheduler {
     // (#4321 review-9 wenshao Critical).
   }
 
-  private resetAutoModeFallbackAfterConfirmation(
+  private recordAutoModeFallbackResolution(
     callId: string,
     outcome: ToolConfirmationOutcome,
   ): void {
@@ -2357,9 +2357,13 @@ export class CoreToolScheduler {
       wasAutoModeFallback &&
       isApproveOutcome(outcome)
     ) {
-      this.config.setAutoModeDenialState(
-        recordFallbackApprove(this.config.getAutoModeDenialState()),
+      const before = this.config.getAutoModeDenialState();
+      const after = recordFallbackApprove(before);
+      debugLogger.debug(
+        `Auto mode denial counters reset after fallback approval: ` +
+          `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
       );
+      this.config.setAutoModeDenialState(after);
     }
   }
 

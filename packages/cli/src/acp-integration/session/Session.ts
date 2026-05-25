@@ -2038,9 +2038,13 @@ export class Session implements SessionContext {
           wasAutoModeDenialFallback &&
           isApproveOutcome(outcome)
         ) {
-          this.config.setAutoModeDenialState(
-            recordFallbackApprove(this.config.getAutoModeDenialState()),
+          const before = this.config.getAutoModeDenialState();
+          const after = recordFallbackApprove(before);
+          debugLogger.debug(
+            `Auto mode denial counters reset after fallback approval: ` +
+              `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
           );
+          this.config.setAutoModeDenialState(after);
         }
       };
 
