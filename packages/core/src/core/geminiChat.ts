@@ -106,8 +106,13 @@ function isCompressionFailureStatus(status: CompressionStatus): boolean {
  *
  * Hostile providers (broken upstream, OpenAI-compat proxy returning
  * `null`/`NaN`, misconfigured override) can yield non-finite or negative
- * `usageMetadata.{prompt,candidates,cached,total}TokenCount`. Letting those
- * values flow into the compaction gate arithmetic is catastrophic:
+ * token counts on `usageMetadata`. This PR coerces the three fields that
+ * feed the compaction gate or its cache-hit telemetry — `promptTokenCount`,
+ * `totalTokenCount`, and `cachedContentTokenCount`. `candidatesTokenCount`
+ * is intentionally left raw here because it does not feed the gate; it
+ * still flows unguarded into OTel spans via `loggingContentGenerator`, and
+ * tightening that surface is tracked separately. Letting hostile values
+ * flow into the compaction gate arithmetic is catastrophic:
  *
  * - `lastPromptTokenCount + NaN >= hard` is always false → hard-rescue is
  *   silently disabled, eventually OOMing the V8 heap.
