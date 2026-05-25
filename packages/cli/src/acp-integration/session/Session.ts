@@ -1638,7 +1638,10 @@ export class Session implements SessionContext {
 
   #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
     while (this.notificationQueue.length >= MAX_NOTIFICATION_QUEUE) {
-      this.notificationQueue.shift();
+      const evicted = this.notificationQueue.shift()!;
+      debugLogger.warn(
+        `Notification queue overflow: evicting task=${evicted.taskId} kind=${evicted.kind}`,
+      );
     }
     this.notificationQueue.push(item);
     void this.#drainNotificationQueue();
