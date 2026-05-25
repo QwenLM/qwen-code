@@ -118,9 +118,8 @@ the summary comment is redundant noise.
 ```bash
 jq -n \
   --arg sha "$HEAD_SHA" \
-  --arg body "Qwen Code review — see inline comments." \
-  --argjson comments '[{"path":"src/file.ts","line":42,"body":"**[P2]** description\n\n_— automated via Qwen Code /review_"}]' \
-  '{commit_id: $sha, event: "COMMENT", body: $body, comments: $comments}' \
+  --argjson comments '[{"path":"src/file.ts","line":42,"body":"**[P2]** description"}]' \
+  '{commit_id: $sha, event: "COMMENT", body: "", comments: $comments}' \
 | gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
     --method POST --input -
 ```
@@ -130,5 +129,5 @@ Rules:
 - Post ALL findings (P0–P3) that map to a specific changed line in the diff.
 - Findings without a clear diff line stay in your text output only.
 - If you have no findings that map to diff lines, skip the API call.
-- Each inline comment body must end with:
-  `\n\n_— automated via Qwen Code /review_`
+- The review body MUST be an empty string `""` — do not add any text there.
+- Keep each inline comment body concise: severity tag + description only.
