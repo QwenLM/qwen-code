@@ -326,8 +326,8 @@ const MCP_RESTART_TIMEOUT_MS = 300_000;
  * healthy call finishes in 1–5 seconds; we cap at 60s to absorb model-
  * provider hiccups without inheriting the 10s `initTimeoutMs` default
  * (which would false-fire on any GPT-style slow start). The race is a
- * safety net against a wedged ACP channel — actual cancellation on
- * client disconnect is handled at the HTTP route layer.
+ * safety net against a wedged ACP channel — there is no HTTP-side
+ * disconnect cancellation in v1 (see server.ts route comment).
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_SESSIONS = 20;

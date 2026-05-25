@@ -221,8 +221,11 @@ export class DaemonSessionClient {
 
   /**
    * One-sentence "where did I leave off" recap of this session. See
-   * `DaemonClient.recapSession` for the contract (best-effort, may
-   * return `recap: null`; cancellation via `signal`).
+   * `DaemonClient.recapSession` for the full contract: best-effort
+   * (may return `recap: null`); the optional `signal` aborts only the
+   * local HTTP fetch — the daemon-side wait + the LLM call in the ACP
+   * child both run to completion regardless (no cross-process abort
+   * plumbing in v1).
    */
   async recap(opts?: {
     signal?: AbortSignal;

@@ -984,11 +984,19 @@ export class DaemonClient {
    * inside the daemon's ACP child.
    *
    * Non-strict mutation gate — posture matches `/session/:id/prompt`
-   * (the route costs tokens but mutates no state). Bypasses
-   * `fetchTimeoutMs` because the underlying side-query can take longer
-   * than the default 30s budget under a slow model; cancellation is
-   * via the optional `signal`. Older daemons (pre-recap support) return
-   * 404 — pre-flight `caps.features.session_recap` before calling.
+   * (the route costs tokens but mutates no state). Calls `_fetch`
+   * directly without the per-call `fetchTimeoutMs` wrapper because the
+   * underlying side-query can take longer than the default 30s under
+   * a slow model. Older daemons (pre-recap support) return 404 —
+   * pre-flight `caps.features.session_recap` before calling.
+   *
+   * Cancellation: the optional `signal` aborts only the LOCAL HTTP
+   * fetch. It does NOT propagate to the daemon — the bridge-side wait
+   * continues until the 60s `SESSION_RECAP_TIMEOUT_MS` backstop, and
+   * the side-query inside the ACP child always runs to completion (no
+   * cross-process abort plumbing in v1). A future request-id-based
+   * cancel ext-method will plumb a real signal end-to-end if/when the
+   * bandwidth cost justifies it.
    *
    * `recap` may be `null` on too-short histories or transient model
    * failures (a 200 response with `recap: null`), per the best-effort
