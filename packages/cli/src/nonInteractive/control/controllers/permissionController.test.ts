@@ -96,4 +96,91 @@ describe('PermissionController', () => {
       );
     });
   });
+
+  it('uses default timeout when SDK canUseTool timeout is undefined', async () => {
+    const context = createContext(); // undefined timeout
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const sendControlRequest = vi
+      .spyOn(controller, 'sendControlRequest')
+      .mockResolvedValue({
+        subtype: 'success',
+        request_id: 'request-2',
+        response: { behavior: 'allow' },
+      });
+    const onConfirm = vi.fn();
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-2',
+          name: 'ask_user_question',
+          args: { questions: [] },
+        },
+        confirmationDetails: {
+          type: 'ask_user_question',
+          title: 'Please answer',
+          onConfirm,
+        },
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(sendControlRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtype: 'can_use_tool',
+          tool_name: 'ask_user_question',
+        }),
+        60_000, // DEFAULT_CAN_USE_TOOL_TIMEOUT_MS
+        context.abortSignal,
+      );
+    });
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+    });
+  });
+
+  it('calls onConfirm with Cancel when sendControlRequest rejects', async () => {
+    const context = createContext(120_000);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockRejectedValue(
+      new Error('Request timeout'),
+    );
+    const onConfirm = vi.fn();
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-3',
+          name: 'ask_user_question',
+          args: { questions: [] },
+        },
+        confirmationDetails: {
+          type: 'ask_user_question',
+          title: 'Please answer',
+          onConfirm,
+        },
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        expect.objectContaining({
+          cancelMessage: expect.stringContaining('Request timeout'),
+        }),
+      );
+    });
+  });
 });
