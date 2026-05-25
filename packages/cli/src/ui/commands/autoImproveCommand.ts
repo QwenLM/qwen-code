@@ -24,6 +24,7 @@ import {
   initializeAutoImproveLoopFiles,
   isActiveAutoImproveRunRef,
   isRecord,
+  isTerminalAutoImproveRunStatus,
   listAutoImproveLoopStates,
   readActiveAutoImproveLoop,
   readAutoImproveConfig,
@@ -206,9 +207,17 @@ async function markRunCompleted(
 ): Promise<void> {
   const state = await readAutoImproveLoopState(repoRoot, loopId);
   if (!state || !state.currentRun) return;
+  // Preserve terminal statuses set during the tick (e.g. by the tick
+  // itself or cancellation). Only default to 'success' when the run is
+  // still in a transient state like 'implementing'.
+  const finalStatus = isTerminalAutoImproveRunStatus(
+    state.currentRun.status,
+  )
+    ? state.currentRun.status
+    : 'success';
   state.lastRun = {
     ...state.currentRun,
-    status: state.currentRun.status === 'cancelled' ? 'cancelled' : 'success',
+    status: finalStatus,
   };
   delete state.currentRun;
   if (state.stopRequested || state.status === 'stopping') {

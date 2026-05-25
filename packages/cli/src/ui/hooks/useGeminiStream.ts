@@ -100,6 +100,7 @@ const debugLogger = createDebugLogger('GEMINI_STREAM');
 export function parseAutoImproveTickLoopId(
   submitType: SendMessageType,
   query: PartListUnion,
+  includeExpandedPrompt = false,
 ): string | null {
   if (submitType === SendMessageType.ToolResult) {
     return null;
@@ -117,16 +118,22 @@ export function parseAutoImproveTickLoopId(
             .join('\n')
         : '';
   const trimmed = text.trim();
+  // Slash-command pattern: matches `/auto-improve tick <id>` (user-initiated)
   const slashMatch = trimmed.match(/^\/auto-improve\s+tick\s+(\S+)$/);
   if (slashMatch) return slashMatch[1]!;
-  const expandedPromptLine = trimmed
-    .split(/\r?\n/)
-    .find((line) => line.startsWith(AUTO_IMPROVE_LOOP_ID_LINE_PREFIX));
-  const expandedPromptLoopId = expandedPromptLine
-    ?.slice(AUTO_IMPROVE_LOOP_ID_LINE_PREFIX.length)
-    .trim()
-    .split(/\s+/)[0];
-  return expandedPromptLoopId || null;
+  // Expanded-prompt pattern: matches `- Loop id: <id>` inside the full
+  // tick prompt body (submit_prompt callback path only).
+  if (includeExpandedPrompt) {
+    const expandedPromptLine = trimmed
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(AUTO_IMPROVE_LOOP_ID_LINE_PREFIX));
+    const expandedPromptLoopId = expandedPromptLine
+      ?.slice(AUTO_IMPROVE_LOOP_ID_LINE_PREFIX.length)
+      .trim()
+      .split(/\s+/)[0];
+    if (expandedPromptLoopId) return expandedPromptLoopId;
+  }
+  return null;
 }
 
 /**
@@ -834,6 +841,7 @@ export const useGeminiStream = (
               currentAutoImproveLoopIdRef.current = parseAutoImproveTickLoopId(
                 submitType,
                 localQueryToSendToGemini,
+                true,
               );
 
               return {
