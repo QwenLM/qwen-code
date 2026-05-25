@@ -191,13 +191,8 @@ export const AutoImproveStatusBox: React.FC<AutoImproveStatusBoxProps> = ({
           <Text bold color={theme.text.link}>
             {t('Recent runs')}
           </Text>
-          {recentRuns.map((run, index) => (
-            <RecentRun
-              key={`${run.issueNumber ?? run.prNumber ?? run.source ?? 'run'}-${
-                run.branch ?? run.commit ?? index
-              }`}
-              run={run}
-            />
+          {recentRuns.map((run) => (
+            <RecentRun key={run.runId} run={run} />
           ))}
         </Box>
       )}
