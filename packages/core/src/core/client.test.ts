@@ -1984,7 +1984,7 @@ describe('Gemini Client (client.ts)', () => {
   // tryCompressChat is now a thin wrapper around GeminiChat.tryCompress.
   // The compression logic itself is exercised in chatCompressionService.test.ts
   // (token math, threshold checks, hook firing) and geminiChat.test.ts (history
-  // mutation, recording, hasFailedCompressionAttempt). The tests below cover
+  // mutation, recording, consecutiveFailures circuit breaker). The tests below cover
   // only what the wrapper itself adds: argument forwarding and the IDE-context
   // flag flip.
   describe('tryCompressChat (delegation)', () => {

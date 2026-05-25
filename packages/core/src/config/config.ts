@@ -268,7 +268,6 @@ export interface BugCommandSettings {
 }
 
 export interface ChatCompressionSettings {
-  contextPercentageThreshold?: number;
   /**
    * Estimated tokens for a single inline image / document part when
    * apportioning chars across history in `findCompressSplitPoint`.
@@ -1072,6 +1071,24 @@ export class Config {
     this.loadMemoryFromIncludeDirectories =
       params.loadMemoryFromIncludeDirectories ?? false;
     this.importFormat = params.importFormat ?? 'tree';
+    // Auto-compaction threshold moved to built-in constants (computeThresholds
+    // in chatCompressionService.ts). The old `contextPercentageThreshold`
+    // field is deprecated; if present in user settings, emit a one-time
+    // warning and ignore the value.
+    if (
+      params.chatCompression &&
+      typeof (params.chatCompression as Record<string, unknown>)[
+        'contextPercentageThreshold'
+      ] !== 'undefined'
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[qwen-code] chatCompression.contextPercentageThreshold has been removed ' +
+          'and is now controlled by built-in thresholds. Setting will be ignored. ' +
+          'Remove this key from your settings.json to silence this warning; ' +
+          'see docs/users/configuration/settings.md for current compaction behavior.',
+      );
+    }
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
