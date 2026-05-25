@@ -33,6 +33,27 @@ function makeMinimalConfig(projectRoot: string): Config {
   } as unknown as Config;
 }
 
+/**
+ * Build the scoped Config and return its non-null PermissionManager.
+ * `createSkillScopedAgentConfig` always installs one, but Config's
+ * declared `getPermissionManager(): PermissionManager | null` forces
+ * tests to launder the null at the call site — this helper does it
+ * once with an assertion that fires loudly if the contract ever breaks.
+ */
+function scopedPm(projectRoot: string) {
+  const scoped = createSkillScopedAgentConfig(
+    makeMinimalConfig(projectRoot),
+    projectRoot,
+  );
+  const pm = scoped.getPermissionManager();
+  if (!pm) {
+    throw new Error(
+      'createSkillScopedAgentConfig must install a PermissionManager',
+    );
+  }
+  return pm;
+}
+
 async function writeSkillFile(
   projectRoot: string,
   skillName: string,
@@ -77,10 +98,7 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
 
   it("denies write_file to an existing AUTO-skill path (the #4437 bug — was 'allow')", async () => {
     const filePath = await writeSkillFile(projectRoot, 'my-skill', AUTO_SKILL);
-    const pm = createSkillScopedAgentConfig(
-      makeMinimalConfig(projectRoot),
-      projectRoot,
-    ).getPermissionManager!();
+    const pm = scopedPm(projectRoot);
 
     const decision = await pm.evaluate({
       toolName: ToolNames.WRITE_FILE,
@@ -91,10 +109,7 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
 
   it('denies write_file to an existing USER-skill path (already worked — kept as regression guard)', async () => {
     const filePath = await writeSkillFile(projectRoot, 'my-skill', USER_SKILL);
-    const pm = createSkillScopedAgentConfig(
-      makeMinimalConfig(projectRoot),
-      projectRoot,
-    ).getPermissionManager!();
+    const pm = scopedPm(projectRoot);
 
     const decision = await pm.evaluate({
       toolName: ToolNames.WRITE_FILE,
@@ -111,10 +126,7 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
       'brand-new',
       'SKILL.md',
     );
-    const pm = createSkillScopedAgentConfig(
-      makeMinimalConfig(projectRoot),
-      projectRoot,
-    ).getPermissionManager!();
+    const pm = scopedPm(projectRoot);
 
     const decision = await pm.evaluate({
       toolName: ToolNames.WRITE_FILE,
@@ -125,10 +137,7 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
 
   it('still allows edit on an existing auto-skill (update path preserved)', async () => {
     const filePath = await writeSkillFile(projectRoot, 'my-skill', AUTO_SKILL);
-    const pm = createSkillScopedAgentConfig(
-      makeMinimalConfig(projectRoot),
-      projectRoot,
-    ).getPermissionManager!();
+    const pm = scopedPm(projectRoot);
 
     const decision = await pm.evaluate({
       toolName: ToolNames.EDIT,
@@ -139,10 +148,7 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
 
   it('still denies edit on a user skill (update path safety preserved)', async () => {
     const filePath = await writeSkillFile(projectRoot, 'my-skill', USER_SKILL);
-    const pm = createSkillScopedAgentConfig(
-      makeMinimalConfig(projectRoot),
-      projectRoot,
-    ).getPermissionManager!();
+    const pm = scopedPm(projectRoot);
 
     const decision = await pm.evaluate({
       toolName: ToolNames.EDIT,
@@ -153,10 +159,7 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
 
   it('write_file deny rule message points the agent at a fresh name', async () => {
     const filePath = await writeSkillFile(projectRoot, 'my-skill', AUTO_SKILL);
-    const pm = createSkillScopedAgentConfig(
-      makeMinimalConfig(projectRoot),
-      projectRoot,
-    ).getPermissionManager!();
+    const pm = scopedPm(projectRoot);
 
     const rule = pm.findMatchingDenyRule({
       toolName: ToolNames.WRITE_FILE,
