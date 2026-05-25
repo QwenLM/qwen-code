@@ -1076,6 +1076,26 @@ const SETTINGS_SCHEMA = {
           'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
         showInDialog: false,
       },
+      maxWallTimeSeconds: {
+        type: 'number',
+        label: 'Max Wall-Clock Time (seconds)',
+        category: 'Model',
+        requiresRestart: false,
+        default: -1,
+        description:
+          'Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited. Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1h).',
+        showInDialog: false,
+      },
+      maxToolCalls: {
+        type: 'number',
+        label: 'Max Tool Calls',
+        category: 'Model',
+        requiresRestart: false,
+        default: -1,
+        description:
+          'Cumulative tool-call budget for a run (counts every executed tool, success or failure). -1 means unlimited. Overridable via --max-tool-calls.',
+        showInDialog: false,
+      },
       chatCompression: {
         type: 'object',
         label: 'Chat Compression',
@@ -1109,7 +1129,8 @@ const SETTINGS_SCHEMA = {
         category: 'Model',
         requiresRestart: false,
         default: true,
-        description: 'Disable all loop detection checks (streaming and LLM).',
+        description:
+          'Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.',
         showInDialog: false,
       },
       skipStartupContext: {

@@ -75,6 +75,10 @@ export function isValidSessionId(value: string): boolean {
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import {
+  parseDurationSeconds,
+  validateMaxWallTimeSetting,
+} from '../utils/runBudget.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -171,6 +175,8 @@ export interface CliArgs {
   /** Internal: preserve the outer session ID when relaunching in a sandbox */
   sandboxSessionId?: string | undefined;
   maxSessionTurns: number | undefined;
+  maxWallTime: string | undefined;
+  maxToolCalls: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   disabledSlashCommands: string[] | undefined;
@@ -828,6 +834,16 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'number',
           description: 'Maximum number of session turns',
         })
+        .option('max-wall-time', {
+          type: 'string',
+          description:
+            'Run-level wall-clock budget for headless / unattended runs. Accepts seconds (e.g. `90`), or a duration string with unit (e.g. `30s`, `5m`, `1h`). Aborts the run with exit code 55 when exceeded.',
+        })
+        .option('max-tool-calls', {
+          type: 'number',
+          description:
+            'Maximum cumulative tool calls executed during the run. Aborts with exit code 55 when exceeded. -1 / unset means no limit.',
+        })
         .option('core-tools', {
           type: 'array',
           string: true,
@@ -1114,6 +1130,36 @@ export async function loadHierarchicalGeminiMemory(
     memoryImportFormat,
     contextRuleExcludes,
   );
+}
+
+/**
+ * Resolves the wall-clock budget for a run. Returns seconds (`-1` =
+ * unlimited). Order of precedence: `--max-wall-time` flag, then
+ * `model.maxWallTimeSeconds` from settings, else unlimited.
+ *
+ * The CLI flag is a duration string (`30s` / `5m` / `1h` / `90`); the
+ * settings entry is a plain number of seconds (parity with
+ * `model.maxSessionTurns`). Both layers reject `0` and out-of-range
+ * values up front — a typo in a CI guardrail should fail loud at startup,
+ * not silently disable the budget.
+ */
+function resolveMaxWallTimeSeconds(argv: CliArgs, settings: Settings): number {
+  if (argv.maxWallTime !== undefined && argv.maxWallTime !== null) {
+    try {
+      return parseDurationSeconds(String(argv.maxWallTime));
+    } catch (err) {
+      throw new Error(`--max-wall-time: ${(err as Error).message}`);
+    }
+  }
+  const fromSettings = settings.model?.maxWallTimeSeconds;
+  if (typeof fromSettings === 'number') {
+    try {
+      return validateMaxWallTimeSetting(fromSettings);
+    } catch (err) {
+      throw new Error(`settings.json: ${(err as Error).message}`);
+    }
+  }
+  return -1;
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
@@ -1731,6 +1777,8 @@ export async function loadCliConfig(
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
+    maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
+    maxToolCalls: argv.maxToolCalls ?? settings.model?.maxToolCalls ?? -1,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? false,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
