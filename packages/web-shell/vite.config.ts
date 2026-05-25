@@ -7,6 +7,7 @@ const daemonProxy: ProxyOptions = {
   target: 'http://127.0.0.1:4170',
   changeOrigin: true,
   bypass: (req) => {
+    if (req.url?.startsWith('/api/')) return undefined;
     const fetchMode = req.headers['sec-fetch-mode'];
     const fetchDest = req.headers['sec-fetch-dest'];
     const accept = req.headers.accept ?? '';

@@ -27,6 +27,18 @@ export interface CopyCommandResult {
   message: string;
 }
 
+export const COPY_MESSAGES = {
+  NO_OUTPUT: 'No output in history',
+  NO_TEXT: 'Last AI output contains no text to copy.',
+  CODE_MISSING: 'No matching code block found in the last AI output.',
+  LATEX_MISSING: 'No matching LaTeX block found in the last AI output.',
+  INLINE_LATEX_MISSING:
+    'No matching inline LaTeX expression found in the last AI output.',
+  OUTPUT_COPIED: 'Last output copied to the clipboard',
+  CLIPBOARD_PREFIX: 'Failed to copy to the clipboard. ',
+  COPIED_SUFFIX: ' copied to the clipboard',
+} as const;
+
 type ClipboardWriter = (text: string) => Promise<void>;
 
 const INLINE_MATH_MAX_CHARS = 1024;

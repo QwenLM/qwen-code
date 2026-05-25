@@ -35,12 +35,15 @@ import {
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import {
+  CancelSentinelCollisionError,
   InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   MAX_WORKSPACE_PATH_LENGTH,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  PermissionForbiddenError,
+  PermissionPolicyNotImplementedError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -6097,5 +6100,154 @@ describe('auth device-flow routes', () => {
     expect(identified.status).toBe(200);
     expect(identified.body).not.toHaveProperty('userCode');
     expect(identified.body).not.toHaveProperty('verificationUri');
+  });
+});
+
+describe('GET /workspace/mcp/:server/tools', () => {
+  it('returns tools for a valid server name', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .get('/workspace/mcp/my-server/tools')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ serverName: 'my-server' });
+    expect(bridge.workspaceMcpToolsCalls).toEqual(['my-server']);
+  });
+
+  it('decodes URL-encoded server names', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .get('/workspace/mcp/my%20server/tools')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(bridge.workspaceMcpToolsCalls).toEqual(['my server']);
+  });
+
+  it('400 when server name exceeds length limit', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const longName = 'a'.repeat(300);
+    const res = await request(app)
+      .get(`/workspace/mcp/${longName}/tools`)
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_server_name');
+    expect(bridge.workspaceMcpToolsCalls).toHaveLength(0);
+  });
+});
+
+describe('POST /workspace/mcp/:server/restart — entryIndex validation', () => {
+  const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+  const auth = (req: request.Test): request.Test =>
+    req
+      .set('Host', `127.0.0.1:${tokenOpts.port}`)
+      .set('Authorization', 'Bearer secret');
+
+  it('400 on entryIndex=-1', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(tokenOpts, undefined, { bridge });
+    const res = await auth(
+      request(app).post('/workspace/mcp/docs/restart?entryIndex=-1'),
+    ).send({});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_entry_index');
+    expect(bridge.restartMcpServerCalls).toHaveLength(0);
+  });
+
+  it('400 on entryIndex=abc', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(tokenOpts, undefined, { bridge });
+    const res = await auth(
+      request(app).post('/workspace/mcp/docs/restart?entryIndex=abc'),
+    ).send({});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_entry_index');
+  });
+
+  it('400 on entryIndex=1.5', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(tokenOpts, undefined, { bridge });
+    const res = await auth(
+      request(app).post('/workspace/mcp/docs/restart?entryIndex=1.5'),
+    ).send({});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_entry_index');
+  });
+});
+
+describe('sendPermissionVoteError branches', () => {
+  it('403 permission_forbidden when bridge throws PermissionForbiddenError', async () => {
+    const bridge = fakeBridge({
+      respondImpl: () => {
+        throw new PermissionForbiddenError(
+          'req-1',
+          'session-A',
+          'designated_mismatch',
+        );
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/permission/req-1')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ outcome: { outcome: 'selected', optionId: 'opt-1' } });
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({
+      code: 'permission_forbidden',
+      requestId: 'req-1',
+      sessionId: 'session-A',
+      reason: 'designated_mismatch',
+    });
+  });
+
+  it('501 permission_policy_not_implemented when bridge throws PermissionPolicyNotImplementedError', async () => {
+    const bridge = fakeBridge({
+      respondImpl: () => {
+        throw new PermissionPolicyNotImplementedError('consensus');
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/permission/req-1')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ outcome: { outcome: 'selected', optionId: 'opt-1' } });
+    expect(res.status).toBe(501);
+    expect(res.body).toMatchObject({
+      code: 'permission_policy_not_implemented',
+      policy: 'consensus',
+    });
+  });
+
+  it('500 cancel_sentinel_collision when bridge throws CancelSentinelCollisionError', async () => {
+    const bridge = fakeBridge({
+      respondImpl: () => {
+        throw new CancelSentinelCollisionError('req-1', '__cancel__');
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/permission/req-1')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ outcome: { outcome: 'selected', optionId: 'opt-1' } });
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({
+      code: 'cancel_sentinel_collision',
+      requestId: 'req-1',
+      sentinel: '__cancel__',
+    });
+  });
+});
+
+describe('GET /capabilities — policy.permission', () => {
+  it('includes policy.permission in capabilities response', async () => {
+    const app = createServeApp(baseOpts);
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('policy');
+    expect(res.body.policy).toHaveProperty('permission');
   });
 });

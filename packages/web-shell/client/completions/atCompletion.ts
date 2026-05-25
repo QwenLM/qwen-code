@@ -2,7 +2,7 @@ import type {
   CompletionContext,
   CompletionResult,
 } from '@codemirror/autocomplete';
-import { getDaemonAuthHeaders } from '../config/daemon';
+import { getDaemonAuthHeaders, getDaemonBaseUrl } from '../config/daemon';
 
 export function atCompletionSource(
   context: CompletionContext,
@@ -32,8 +32,9 @@ export function atCompletionSource(
 async function fetchFiles(prefix: string): Promise<string[]> {
   try {
     const pattern = prefix ? `${prefix}*` : '**/*';
+    const base = getDaemonBaseUrl();
     const res = await fetch(
-      `/glob?pattern=${encodeURIComponent(pattern)}&maxResults=50`,
+      `${base}/glob?pattern=${encodeURIComponent(pattern)}&maxResults=50`,
       { headers: getDaemonAuthHeaders() },
     );
     if (!res.ok) return [];

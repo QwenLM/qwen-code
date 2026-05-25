@@ -338,7 +338,8 @@ export function McpDialog({
       if (e.key === 'r') {
         e.preventDefault();
         if (view === 'servers') reload();
-        else if (selected && view === 'server') handleRestart(selected.name);
+        else if (selected && view === 'server' && busyServer !== selected.name)
+          handleRestart(selected.name);
       }
     },
     [

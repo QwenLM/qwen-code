@@ -335,22 +335,27 @@ export function Editor({
           paste(event) {
             const items = event.clipboardData?.items;
             if (!items) return false;
+            let hasImage = false;
             for (const item of items) {
               if (item.type.startsWith('image/')) {
-                event.preventDefault();
+                hasImage = true;
                 const file = item.getAsFile();
-                if (!file) return true;
+                if (!file) continue;
+                const mediaType = item.type;
                 const reader = new FileReader();
                 reader.onload = () => {
                   const base64 = (reader.result as string).split(',')[1];
                   setPastedImages((prev) => [
                     ...prev,
-                    { data: base64, media_type: item.type },
+                    { data: base64, media_type: mediaType },
                   ]);
                 };
                 reader.readAsDataURL(file);
-                return true;
               }
+            }
+            if (hasImage) {
+              event.preventDefault();
+              return true;
             }
             return false;
           },

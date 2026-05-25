@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
 import { isEditableTarget } from '../../utils/dom';
 import styles from './ToolApproval.module.css';
@@ -48,9 +48,19 @@ function getCommandFromRawInput(request: PermissionRequest): string | null {
 
 export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   const [selected, setSelected] = useState(0);
+  const submittedRef = useRef(false);
 
   const { toolName, description } = parseTitle(request.title);
   const contentText = extractContentText(request);
+
+  const confirm = useCallback(
+    (optionId: string) => {
+      if (submittedRef.current) return;
+      submittedRef.current = true;
+      onConfirm(request.id, optionId);
+    },
+    [request.id, onConfirm],
+  );
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -64,27 +74,32 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
         setSelected((s) => (s + 1) % optCount);
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        onConfirm(request.id, request.options[selected].id);
+        confirm(request.options[selected].id);
       } else if (e.key === 'Escape') {
         e.preventDefault();
         const reject = request.options.find(
           (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
         );
-        if (reject) onConfirm(request.id, reject.id);
+        if (reject) confirm(reject.id);
       } else if (e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key) - 1;
         if (idx < optCount) {
           e.preventDefault();
-          onConfirm(request.id, request.options[idx].id);
+          confirm(request.options[idx].id);
         }
       }
     },
-    [request, selected, onConfirm],
+    [request, selected, confirm],
   );
 
   useEffect(() => {
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    const timer = setTimeout(() => {
+      window.addEventListener('keydown', handleKeyDown);
+    }, 50);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
   }, [handleKeyDown]);
 
   const isExec = isExecKind(request);
@@ -117,7 +132,7 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
             <div
               key={option.id}
               className={`${styles.option} ${isSelected ? styles.optionActive : ''}`}
-              onClick={() => onConfirm(request.id, option.id)}
+              onClick={() => confirm(option.id)}
               onMouseEnter={() => setSelected(i)}
             >
               <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>

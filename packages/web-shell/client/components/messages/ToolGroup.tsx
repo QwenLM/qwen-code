@@ -155,11 +155,20 @@ function hasExpandableContent(tool: ACPToolCall): boolean {
     return !!text && text.split('\n').length > 1;
   }
   if (name === 'edit' || name === 'write' || name === 'editfile') {
-    return !!extractDiff(tool);
+    return hasDiffContent(tool);
   }
   if (name === 'read' || name === 'read_file' || name === 'readfile') {
     const text = extractText(tool);
     return !!text && text.split('\n').length > 3;
+  }
+  return false;
+}
+
+function hasDiffContent(tool: ACPToolCall): boolean {
+  if (tool.content?.some((b) => b.type === 'diff')) return true;
+  if (tool.rawOutput && typeof tool.rawOutput === 'object') {
+    const raw = tool.rawOutput as Record<string, unknown>;
+    if (typeof raw.fileDiff === 'string' && raw.fileDiff) return true;
   }
   return false;
 }

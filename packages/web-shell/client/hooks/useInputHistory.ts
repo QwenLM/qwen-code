@@ -6,7 +6,11 @@ const MAX_HISTORY = 100;
 function loadHistory(): string[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((v) => typeof v === 'string')
+      : [];
   } catch {
     return [];
   }

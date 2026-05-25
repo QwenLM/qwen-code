@@ -3572,6 +3572,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         entry.spawnOwnerWantedKill = true;
         return;
       }
+      // F3 Commit 3 — mediator-driven cancel cascade. Must run BEFORE
+      // byId.delete so the mediator's emit callback can still reach
+      // entry.events via byId.get(sessionId) (same order as closeSession).
+      permissionMediator.forgetSession(sessionId);
+      entry.pendingPermissionIds.clear();
       // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (defaultEntry === entry) defaultEntry = undefined;
@@ -3612,9 +3617,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // subsequent load/resume of the same persisted id. See the
       // matching guard in BridgeClient.bufferEarlyEvent.
       ci?.client.markSessionClosed(sessionId);
-      // F3 Commit 3 — mediator-driven cancel cascade.
-      permissionMediator.forgetSession(sessionId);
-      entry.pendingPermissionIds.clear();
       // Publish `session_died` BEFORE closing the bus. After the eager
       // `byId.delete` above, the channel.exited handler's
       // `byId.get(...)` returns undefined so the automatic publish

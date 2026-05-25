@@ -44,7 +44,10 @@ import {
   normalizeLanguage,
   type WebShellLanguage,
 } from './i18n';
-import { copyFromLastAssistantMessage } from './utils/copyCommand';
+import {
+  copyFromLastAssistantMessage,
+  COPY_MESSAGES,
+} from './utils/copyCommand';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
@@ -103,6 +106,8 @@ function replaceSessionUrl(sessionId: string): void {
   if (typeof window === 'undefined') return;
   const url = new URL(window.location.href);
   url.pathname = `/session/${encodeURIComponent(sessionId)}`;
+  url.searchParams.delete('token');
+  url.searchParams.delete('daemon');
   window.history.replaceState(null, '', url);
 }
 
@@ -161,34 +166,22 @@ function translateCopyMessage(
   message: string,
   t: ReturnType<typeof getTranslator>,
 ): string {
-  if (message === 'No output in history') return t('copy.noOutput');
-  if (message === 'Last AI output contains no text to copy.') {
-    return t('copy.noText');
-  }
-  if (message === 'No matching code block found in the last AI output.') {
-    return t('copy.codeMissing');
-  }
-  if (message === 'No matching LaTeX block found in the last AI output.') {
-    return t('copy.latexMissing');
-  }
-  if (
-    message ===
-    'No matching inline LaTeX expression found in the last AI output.'
-  ) {
+  if (message === COPY_MESSAGES.NO_OUTPUT) return t('copy.noOutput');
+  if (message === COPY_MESSAGES.NO_TEXT) return t('copy.noText');
+  if (message === COPY_MESSAGES.CODE_MISSING) return t('copy.codeMissing');
+  if (message === COPY_MESSAGES.LATEX_MISSING) return t('copy.latexMissing');
+  if (message === COPY_MESSAGES.INLINE_LATEX_MISSING) {
     return t('copy.inlineLatexMissing');
   }
-  if (message === 'Last output copied to the clipboard') {
-    return t('copy.outputCopied');
-  }
-  if (message.startsWith('Failed to copy to the clipboard. ')) {
+  if (message === COPY_MESSAGES.OUTPUT_COPIED) return t('copy.outputCopied');
+  if (message.startsWith(COPY_MESSAGES.CLIPBOARD_PREFIX)) {
     return `${t('copy.failedFallback')}. ${message.slice(
-      'Failed to copy to the clipboard. '.length,
+      COPY_MESSAGES.CLIPBOARD_PREFIX.length,
     )}`;
   }
-  const copiedSuffix = ' copied to the clipboard';
-  if (message.endsWith(copiedSuffix)) {
+  if (message.endsWith(COPY_MESSAGES.COPIED_SUFFIX)) {
     return t('copy.toClipboard', {
-      label: message.slice(0, -copiedSuffix.length),
+      label: message.slice(0, -COPY_MESSAGES.COPIED_SUFFIX.length),
     });
   }
   return message;
@@ -267,14 +260,18 @@ export function App({
     [messageBlocks],
   );
   const pendingApproval = useMemo(
-    () => extractPendingPermission(state.blocks),
-    [state.blocks],
+    () => extractPendingPermission(messageBlocks),
+    [messageBlocks],
   );
   const shouldHideComposer = pendingApproval !== null;
   const floatingTodos = useMemo(() => getFloatingTodos(messages), [messages]);
+  const coalescedState = useMemo(
+    () => ({ ...state, blocks: messageBlocks }),
+    [state, messageBlocks],
+  );
   const transcriptStreamingState = useMemo(
-    () => extractStreamingState(state),
-    [state],
+    () => extractStreamingState(coalescedState),
+    [coalescedState],
   );
   const streamingState = useMemo<StreamingState>(() => {
     if (promptStatus === 'idle') {

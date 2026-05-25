@@ -67,7 +67,9 @@ function sanitizeSvg(svg: string): string {
 
   doc
     .querySelectorAll(
-      'script, foreignObject, iframe, object, embed, link, style, animate, set, animateTransform, animateMotion',
+      'script, foreignObject, iframe, object, embed, link, style, ' +
+        'animate, set, animateTransform, animateMotion, ' +
+        'use, image, feImage, mpath',
     )
     .forEach((node) => node.remove());
 
@@ -75,12 +77,20 @@ function sanitizeSvg(svg: string): string {
     for (const attr of Array.from(element.attributes)) {
       const name = attr.name.toLowerCase();
       const value = attr.value.trim().toLowerCase();
-      if (
-        name.startsWith('on') ||
-        ((name === 'href' || name.endsWith(':href')) &&
-          value.startsWith('javascript:'))
-      ) {
+      if (name.startsWith('on')) {
         element.removeAttribute(attr.name);
+        continue;
+      }
+      if (name === 'href' || name.endsWith(':href') || name === 'src') {
+        if (
+          value.startsWith('javascript:') ||
+          value.startsWith('data:') ||
+          value.startsWith('http:') ||
+          value.startsWith('https:') ||
+          value.startsWith('//')
+        ) {
+          element.removeAttribute(attr.name);
+        }
       }
     }
   }
@@ -88,14 +98,27 @@ function sanitizeSvg(svg: string): string {
   return doc.documentElement.outerHTML;
 }
 
-const SAFE_URL_SCHEMES = /^(https?:|mailto:|#|\/)/i;
+const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
+const SAFE_IMAGE_DATA_URI =
+  /^data:image\/(png|jpeg|gif|webp|svg\+xml);base64,/i;
 
-function isSafeUrl(url: string | undefined): boolean {
+function isSafeHref(url: string | undefined): boolean {
   if (!url) return false;
   const trimmed = url.trim();
   if (!trimmed) return false;
-  if (trimmed.startsWith('/') || trimmed.startsWith('#')) return true;
-  return SAFE_URL_SCHEMES.test(trimmed);
+  if (trimmed.startsWith('#')) return true;
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) return true;
+  return SAFE_HREF_SCHEMES.test(trimmed);
+}
+
+function isSafeImageSrc(url: string | undefined): boolean {
+  if (!url) return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('#')) return true;
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) return true;
+  if (SAFE_IMAGE_DATA_URI.test(trimmed)) return true;
+  return SAFE_HREF_SCHEMES.test(trimmed);
 }
 
 function MermaidBlock({ code }: { code: string }) {
@@ -105,35 +128,38 @@ function MermaidBlock({ code }: { code: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    import('mermaid').then(async (mod) => {
-      if (cancelled) return;
-      const mermaid = mod.default;
-      mermaid.initialize({
-        startOnLoad: false,
-        theme: 'dark',
-        securityLevel: 'strict',
-      });
-      try {
-        const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const { svg: rendered } = await mermaid.render(id, code);
-        const safeSvg = sanitizeSvg(rendered);
-        if (!cancelled) {
-          if (safeSvg) {
-            setSvg(safeSvg);
-          } else {
-            setError('Mermaid render failed');
+    const timer = setTimeout(() => {
+      import('mermaid').then(async (mod) => {
+        if (cancelled) return;
+        const mermaid = mod.default;
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: 'dark',
+          securityLevel: 'strict',
+        });
+        try {
+          const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const { svg: rendered } = await mermaid.render(id, code);
+          const safeSvg = sanitizeSvg(rendered);
+          if (!cancelled) {
+            if (safeSvg) {
+              setSvg(safeSvg);
+            } else {
+              setError('Mermaid render failed');
+            }
+          }
+        } catch (error: unknown) {
+          if (!cancelled) {
+            setError(
+              error instanceof Error ? error.message : 'Mermaid render failed',
+            );
           }
         }
-      } catch (error: unknown) {
-        if (!cancelled) {
-          setError(
-            error instanceof Error ? error.message : 'Mermaid render failed',
-          );
-        }
-      }
-    });
+      });
+    }, 150);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [code]);
 
@@ -261,7 +287,7 @@ const components: Components = {
     return <>{children}</>;
   },
   a({ href, children }: { href?: string; children?: ReactNode }) {
-    const safeHref = isSafeUrl(href) ? href : undefined;
+    const safeHref = isSafeHref(href) ? href : undefined;
     return (
       <a
         href={safeHref}
@@ -281,7 +307,7 @@ const components: Components = {
     );
   },
   img({ src, alt }: { src?: string; alt?: string }) {
-    const safeSrc = isSafeUrl(src) ? src : undefined;
+    const safeSrc = isSafeImageSrc(src) ? src : undefined;
     return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
   },
 };

@@ -8,6 +8,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   extractPendingPermission,
+  extractStreamingState,
   transcriptBlocksToMessages,
 } from './transcriptAdapter';
 
@@ -23,6 +24,7 @@ function textBlock(
     kind,
     text,
     streaming,
+    clientReceivedAt: createdAt,
     createdAt,
     updatedAt: createdAt,
   };
@@ -37,6 +39,7 @@ function statusBlock(
     id,
     kind: 'status',
     text,
+    clientReceivedAt: createdAt,
     createdAt,
     updatedAt: createdAt,
   };
@@ -63,6 +66,7 @@ function toolBlock(
     content: overrides.content,
     locations: overrides.locations,
     details: overrides.details,
+    clientReceivedAt: createdAt,
     createdAt,
     updatedAt: overrides.updatedAt ?? createdAt,
   };
@@ -74,7 +78,16 @@ function state(blocks: DaemonTranscriptBlock[]): DaemonTranscriptState {
     blockIndexById: Object.fromEntries(
       blocks.map((block, index) => [block.id, index]),
     ),
-  } as DaemonTranscriptState;
+    toolBlockByCallId: {},
+    trimmedToolNotificationByCallId: {},
+    permissionBlockByRequestId: {},
+    toolProgress: {},
+    nextOrdinal: blocks.length,
+    now: Date.now(),
+    maxBlocks: 1000,
+    awaitingResync: false,
+    resyncRequiredCount: 0,
+  };
 }
 
 describe('transcriptAdapter', () => {
@@ -283,5 +296,66 @@ describe('transcriptAdapter', () => {
         isStreaming: false,
       },
     ]);
+  });
+});
+
+describe('extractStreamingState', () => {
+  it('returns idle for empty blocks', () => {
+    expect(extractStreamingState(state([]))).toBe('idle');
+  });
+
+  it('returns thinking when last block is a streaming thought', () => {
+    expect(
+      extractStreamingState(
+        state([textBlock('t1', 'thought', 'thinking...', 1, true)]),
+      ),
+    ).toBe('thinking');
+  });
+
+  it('returns responding when last block is a streaming assistant', () => {
+    expect(
+      extractStreamingState(
+        state([textBlock('a1', 'assistant', 'hello', 1, true)]),
+      ),
+    ).toBe('responding');
+  });
+
+  it('returns responding when last tool is in_progress', () => {
+    expect(
+      extractStreamingState(
+        state([toolBlock('t1', 'call-1', 'in_progress', 1)]),
+      ),
+    ).toBe('responding');
+  });
+
+  it('returns idle when last assistant is not streaming', () => {
+    expect(
+      extractStreamingState(
+        state([textBlock('a1', 'assistant', 'done', 1, false)]),
+      ),
+    ).toBe('idle');
+  });
+
+  it('returns responding when an earlier tool is still in_progress', () => {
+    expect(
+      extractStreamingState(
+        state([
+          toolBlock('t1', 'call-1', 'in_progress', 1),
+          textBlock('a1', 'assistant', 'partial', 2, false),
+        ]),
+      ),
+    ).toBe('responding');
+  });
+
+  it('returns idle when all tools are completed after user block', () => {
+    expect(
+      extractStreamingState(
+        state([
+          textBlock('u1', 'user', 'hello', 1),
+          toolBlock('t1', 'call-1', 'completed', 2),
+          textBlock('a1', 'assistant', 'done', 3, false),
+        ]),
+      ),
+    ).toBe('idle');
   });
 });

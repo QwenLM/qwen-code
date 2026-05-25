@@ -48,8 +48,6 @@ export function handleSilentDaemonEvent(
       }
       return true;
     }
-    case 'state_resync_required':
-      return true;
     case 'session_metadata_updated':
     case 'memory_changed':
     case 'agent_changed':

@@ -144,7 +144,7 @@ export function transcriptBlocksToMessages(
             activeSubAgent.subTools?.[activeSubAgent.subTools.length - 1];
           if (lastSubTool) {
             lastSubTool.rawOutput =
-              ((lastSubTool.rawOutput as string) || '') + shellBlock.text;
+              String(lastSubTool.rawOutput ?? '') + shellBlock.text;
           } else {
             activeSubAgent.subContent =
               (activeSubAgent.subContent || '') + shellBlock.text;
@@ -157,8 +157,7 @@ export function transcriptBlocksToMessages(
           if (lastTool) {
             const nextTool = {
               ...lastTool,
-              rawOutput:
-                ((lastTool.rawOutput as string) || '') + shellBlock.text,
+              rawOutput: String(lastTool.rawOutput ?? '') + shellBlock.text,
             };
             messages[messages.length - 1] = {
               ...lastMsg,
@@ -272,9 +271,17 @@ export function extractPendingPermission(
     if (!isPermissionBlock(block)) continue;
     const perm = block;
     if (perm.resolved) continue;
+    const toolCallRecord = getRecord(perm.toolCall);
+    const toolCallId =
+      typeof toolCallRecord?.['toolCallId'] === 'string'
+        ? toolCallRecord['toolCallId']
+        : typeof toolCallRecord?.['id'] === 'string'
+          ? toolCallRecord['id']
+          : undefined;
     return {
       id: perm.requestId,
       sessionId: perm.sessionId,
+      toolCallId,
       title: perm.title,
       content: [
         {

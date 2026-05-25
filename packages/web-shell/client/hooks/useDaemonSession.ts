@@ -139,6 +139,13 @@ interface ActivePrompt {
   controller: AbortController;
 }
 
+interface PendingSessionLoad {
+  id: number;
+  sessionId: string;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
 export interface SendPromptOptions {
   optimisticUserMessage?: boolean;
 }
@@ -202,7 +209,9 @@ function detachDaemonClient(input: {
       headers,
       keepalive: true,
     },
-  ).catch(() => {});
+  ).catch((err) => {
+    console.warn('[web-shell] detachDaemonClient failed:', err);
+  });
 }
 
 function isOwnUserMessageChunk(event: unknown, clientId?: string): boolean {
@@ -216,12 +225,18 @@ function isOwnUserMessageChunk(event: unknown, clientId?: string): boolean {
 export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
   const opts = { ...DEFAULT_CONFIG, ...config };
   const store = useMemo(() => createDaemonTranscriptStore(), []);
+  const loadWarningsRef = useRef(config.loadWarnings);
+  loadWarningsRef.current = config.loadWarnings;
   const clientIdRef = useRef<string | undefined>(undefined);
   if (!clientIdRef.current || opts.clientId) {
     clientIdRef.current = getStableClientId(opts.clientId);
   }
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
+  const pendingSessionLoadRef = useRef<PendingSessionLoad | undefined>(
+    undefined,
+  );
+  const pendingSessionLoadIdRef = useRef(0);
   const suppressedOwnUserEchoCountRef = useRef(0);
   const heartbeatSupportedRef = useRef(false);
   const passiveAssistantDoneTimerRef = useRef<
@@ -337,13 +352,13 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               : undefined;
           const loadWarnings = [
             providerResult.status === 'rejected'
-              ? config.loadWarnings?.models
+              ? loadWarningsRef.current?.models
               : undefined,
             commandResult.status === 'rejected'
-              ? config.loadWarnings?.commands
+              ? loadWarningsRef.current?.commands
               : undefined,
             contextResult.status === 'rejected'
-              ? config.loadWarnings?.context
+              ? loadWarningsRef.current?.context
               : undefined,
           ].filter((warning): warning is string => Boolean(warning));
           const { models, currentModel, contextWindow } =
@@ -366,6 +381,11 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
                 : 0,
             contextWindow,
           }));
+          const pendingLoad = pendingSessionLoadRef.current;
+          if (pendingLoad?.sessionId === activeSession.sessionId) {
+            pendingSessionLoadRef.current = undefined;
+            pendingLoad.resolve();
+          }
           if (loadWarnings.length > 0) {
             store.dispatch(
               loadWarnings.map((text) => ({
@@ -388,6 +408,10 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               if (event.type === 'state_resync_required') {
                 setPromptStatus('idle');
                 store.reset();
+                setConnection((cur) => ({
+                  ...cur,
+                  status: 'connecting',
+                }));
                 break;
               }
               if (handleSilentDaemonEvent(event, setConnection)) {
@@ -418,8 +442,11 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
                   passiveAssistantDoneTimerRef,
                 );
               }
-            } catch {
-              // skip malformed events
+            } catch (eventError) {
+              console.warn(
+                '[web-shell] malformed SSE event skipped:',
+                eventError,
+              );
             }
           }
 
@@ -435,6 +462,15 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
           session = undefined;
           sessionRef.current = undefined;
           setPromptStatus('idle');
+          const pendingLoad = pendingSessionLoadRef.current;
+          if (
+            pendingLoad &&
+            (pendingLoad.sessionId === restoreSessionId ||
+              pendingLoad.sessionId === reconnectSessionId)
+          ) {
+            pendingSessionLoadRef.current = undefined;
+            pendingLoad.reject(error);
+          }
 
           if (
             error instanceof DaemonHttpError &&
@@ -455,6 +491,9 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
                   : 'Session no longer exists. A fresh session will be opened.';
             store.dispatch([{ type: 'error', text: reason }]);
             if (error.status === 401 || error.status === 403) {
+              console.error(
+                `[web-shell] auth failure: status=${error.status}, session=${restoreSessionId ?? reconnectSessionId ?? 'unknown'}`,
+              );
               setConnection({ status: 'error', error: reason });
               return;
             }
@@ -513,9 +552,6 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
     restoreSessionId,
     restoreSessionNonce,
     newSessionNonce,
-    config.loadWarnings?.models,
-    config.loadWarnings?.commands,
-    config.loadWarnings?.context,
   ]);
 
   const actions = useMemo<DaemonActions>(
@@ -641,22 +677,25 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
       },
 
       async loadSession(sessionId: string): Promise<void> {
-        const currentSession = sessionRef.current;
-        if (currentSession) {
-          await DaemonSessionClient.load(
-            currentSession.client,
+        const loadId = pendingSessionLoadIdRef.current + 1;
+        pendingSessionLoadIdRef.current = loadId;
+        pendingSessionLoadRef.current?.reject(
+          new Error('Session load superseded by a newer request'),
+        );
+        const loadPromise = new Promise<void>((resolve, reject) => {
+          pendingSessionLoadRef.current = {
+            id: loadId,
             sessionId,
-            {
-              workspaceCwd: currentSession.workspaceCwd,
-            },
-            clientIdRef.current,
-          );
-        }
+            resolve,
+            reject,
+          };
+        });
         setPromptStatus('idle');
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
         store.reset();
         setRestoreSessionId(sessionId);
         setRestoreSessionNonce((nonce) => nonce + 1);
+        return loadPromise;
       },
 
       async releaseSession(sessionId: string): Promise<void> {
@@ -828,16 +867,27 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
 
   useEffect(() => {
     if (!connection.sessionId || !heartbeatSupportedRef.current) return;
+    let cancelled = false;
     let consecutiveFailures = 0;
     const timer = setInterval(() => {
       sessionRef.current
         ?.heartbeat()
         .then(() => {
+          if (cancelled) return;
+          if (consecutiveFailures >= 3) {
+            setConnection((cur) => ({
+              ...cur,
+              status: 'connected',
+              error: undefined,
+            }));
+          }
           consecutiveFailures = 0;
         })
-        .catch(() => {
+        .catch((err) => {
+          if (cancelled) return;
           consecutiveFailures += 1;
-          if (consecutiveFailures >= 3) {
+          if (consecutiveFailures === 3) {
+            console.warn('[web-shell] heartbeat failed 3 times:', err);
             setConnection((cur) => ({
               ...cur,
               status: 'disconnected',
@@ -846,7 +896,10 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
           }
         });
     }, 30_000);
-    return () => clearInterval(timer);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [connection.sessionId]);
 
   return { store, state, connection, actions, promptStatus };

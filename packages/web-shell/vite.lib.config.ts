@@ -31,7 +31,7 @@ function injectCssModules(): Plugin {
         item.code =
           `const __qwenWebShellCss=${escapedCss};\n` +
           `if(typeof document!=="undefined"&&!document.querySelector('style[data-qwen-web-shell="component"]')){` +
-          `const s=document.createElement("style");s.dataset.qwenWebShell="component";s.textContent=__qwenWebShellCss;document.head.appendChild(s);}\n` +
+          `const s=document.createElement("style");s.dataset.qwenWebShell="component";s.textContent=__qwenWebShellCss;try{document.head.appendChild(s);}catch(e){console.warn("[qwen-web-shell] CSS injection blocked by CSP:",e);}}\n` +
           item.code;
       }
     },
