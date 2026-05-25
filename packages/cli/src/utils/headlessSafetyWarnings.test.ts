@@ -44,19 +44,29 @@ describe('getHeadlessYoloSafetyWarning', () => {
     expect(getHeadlessYoloSafetyWarning(cfg, {})).toBeNull();
   });
 
-  it('does not warn when SANDBOX env is strictly truthy', () => {
+  it('does not warn when SANDBOX env is set to the value the sandbox transport actually writes', () => {
     const cfg = makeConfig(ApprovalMode.YOLO, undefined);
+    // macOS seatbelt
+    expect(
+      getHeadlessYoloSafetyWarning(cfg, { SANDBOX: 'sandbox-exec' }),
+    ).toBeNull();
+    // Docker / Podman container name
+    expect(
+      getHeadlessYoloSafetyWarning(cfg, { SANDBOX: 'qwen-code-sandbox' }),
+    ).toBeNull();
+    // Generic truthy values
     expect(getHeadlessYoloSafetyWarning(cfg, { SANDBOX: '1' })).toBeNull();
     expect(getHeadlessYoloSafetyWarning(cfg, { SANDBOX: 'true' })).toBeNull();
   });
 
-  it('still warns when SANDBOX env is a non-truthy value like 0 / false / no', () => {
+  it('warns when SANDBOX env is unset or empty string', () => {
     const cfg = makeConfig(ApprovalMode.YOLO, undefined);
-    for (const val of ['0', 'false', 'no']) {
-      expect(getHeadlessYoloSafetyWarning(cfg, { SANDBOX: val })).toBe(
-        HEADLESS_YOLO_NO_SANDBOX_WARNING,
-      );
-    }
+    expect(getHeadlessYoloSafetyWarning(cfg, {})).toBe(
+      HEADLESS_YOLO_NO_SANDBOX_WARNING,
+    );
+    expect(getHeadlessYoloSafetyWarning(cfg, { SANDBOX: '' })).toBe(
+      HEADLESS_YOLO_NO_SANDBOX_WARNING,
+    );
   });
 
   it('respects the explicit suppression env var when set to 1 or true', () => {

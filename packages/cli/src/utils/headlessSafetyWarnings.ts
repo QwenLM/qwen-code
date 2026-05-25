@@ -31,10 +31,14 @@ export function getHeadlessYoloSafetyWarning(
 ): string | null {
   if (config.getApprovalMode() !== ApprovalMode.YOLO) return null;
   if (config.getSandbox()) return null;
-  // SANDBOX is set by the sandbox transport itself (container / seatbelt
-  // wrapper). Use the same strict truthy check as the suppression env to
-  // avoid `SANDBOX=false` / `SANDBOX=0` accidentally silencing the warning.
-  if (isTruthyEnv(env['SANDBOX'])) return null;
+  // `SANDBOX` is set by the sandbox transport itself: macOS seatbelt sets
+  // it to `sandbox-exec`, Docker/Podman to the container name (e.g.
+  // `qwen-code-sandbox`). Match the rest of the codebase
+  // (sandboxConfig.ts, gemini.tsx, Footer.tsx, prompts.ts, …) which all
+  // treat any non-empty value as "inside a sandbox". A strict 1/true
+  // check here misfires inside real sandboxes, where the helper would
+  // wrongly emit a "no sandbox" warning despite the run being contained.
+  if (env['SANDBOX']) return null;
   if (isTruthyEnv(env['QWEN_CODE_SUPPRESS_YOLO_WARNING'])) return null;
   return HEADLESS_YOLO_NO_SANDBOX_WARNING;
 }

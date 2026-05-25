@@ -55,6 +55,14 @@ const SECOND = 1000;
  */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_WALL_TIME_SECONDS = Math.floor(MAX_TIMEOUT_MS / SECOND);
+/**
+ * Wall-clock budgets below 1s are almost always a typo (someone meant `1m`
+ * or `1h`); accepting them silently produces a run that aborts on the next
+ * event-loop tick before any model request returns. Round-trip latency to
+ * any reasonable LLM is multiple seconds, so a sub-second budget is also
+ * not a meaningful guardrail. Reject loudly.
+ */
+const MIN_WALL_TIME_SECONDS = 1;
 
 /**
  * Parses a duration string used by `--max-wall-time`.
@@ -110,6 +118,11 @@ export function parseDurationSeconds(input: string): number {
       `Invalid duration "${input}": must be greater than zero. Omit the flag entirely if you don't want a wall-clock budget.`,
     );
   }
+  if (seconds < MIN_WALL_TIME_SECONDS) {
+    throw new Error(
+      `Invalid duration "${input}": below the ${MIN_WALL_TIME_SECONDS}s minimum (probably a typo — did you mean ${input.replace(/ms\b/i, 's')}?). Sub-second wall-clock budgets fire before any model round-trip can complete.`,
+    );
+  }
   if (seconds > MAX_WALL_TIME_SECONDS) {
     throw new Error(
       `Invalid duration "${input}": exceeds the maximum supported wall-clock budget (${MAX_WALL_TIME_SECONDS}s ≈ 24 days). Use a smaller value.`,
@@ -143,9 +156,42 @@ export function validateMaxWallTimeSetting(value: number): number {
         `Use -1 to disable, not 0.`,
     );
   }
+  if (value < MIN_WALL_TIME_SECONDS) {
+    throw new Error(
+      `model.maxWallTimeSeconds ${value} is below the ${MIN_WALL_TIME_SECONDS}s minimum. Sub-second budgets fire before any model round-trip can complete.`,
+    );
+  }
   if (value > MAX_WALL_TIME_SECONDS) {
     throw new Error(
       `model.maxWallTimeSeconds ${value} exceeds the maximum supported wall-clock budget (${MAX_WALL_TIME_SECONDS}s ≈ 24 days).`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Validates a `maxToolCalls` value sourced from either the `--max-tool-calls`
+ * CLI flag or `model.maxToolCalls` in settings.json. Mirrors
+ * `validateMaxWallTimeSetting`: the enforcer treats anything `< 0` as "no
+ * limit", so any non-`-1` negative would silently disable the budget. Reject
+ * up front to keep the fail-loud philosophy symmetric across all budgets.
+ *
+ * `0` IS legal here — it means "no tool calls allowed; first tick aborts"
+ * (asymmetric with wall-time where 0 is fatal). Documented in the schema.
+ */
+export function validateMaxToolCalls(value: number): number {
+  if (value === -1) return -1;
+  if (!Number.isFinite(value)) {
+    throw new Error(`maxToolCalls must be a finite number; got ${value}.`);
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error(
+      `maxToolCalls must be an integer (or -1 for unlimited); got ${value}.`,
+    );
+  }
+  if (value < 0) {
+    throw new Error(
+      `maxToolCalls must be >= 0 (or -1 for unlimited); got ${value}. Use -1 to disable, not a negative number.`,
     );
   }
   return value;

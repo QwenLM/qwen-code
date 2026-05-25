@@ -656,7 +656,15 @@ export async function runNonInteractive(
           // at exactly N executions: the (N+1)th tick aborts before the
           // tool runs. Ticking after would let the (N+1)th tool execute
           // and only then abort. See issue #4103.
-          budgetEnforcer.tickToolCall();
+          //
+          // Exempt `structured_output`: under --json-schema this is the
+          // terminal "I'm done" contract tool, not real work. Counting
+          // it would abort an otherwise-valid completion at the budget
+          // edge (e.g. budget=3, model used 3 tools then emits
+          // structured_output as call #4 → exit 55 instead of success).
+          if (requestInfo.name !== ToolNames.STRUCTURED_OUTPUT) {
+            budgetEnforcer.tickToolCall();
+          }
           if (abortController.signal.aborted) await routeAbort();
           const toolResponse = await executeToolCall(
             config,
@@ -794,6 +802,11 @@ export async function runNonInteractive(
 
         for await (const event of responseStream) {
           if (abortController.signal.aborted) {
+            // Pair the startAssistantMessage() above so stream-json mode
+            // doesn't leave an unterminated message_start when a budget /
+            // SIGINT abort lands mid-stream. Symmetric with the drain-item
+            // loop fix below.
+            adapter.finalizeAssistantMessage();
             await routeAbort();
           }
           // Use adapter for all event processing
@@ -914,7 +927,17 @@ export async function runNonInteractive(
                   // final drain item surfaces as exit code 55 instead of
                   // being silently swallowed by the outer success path
                   // (drain-loop fall-through; see issue #4103 review).
+                  //
+                  // Also flush queued task notifications and finalize
+                  // one-shot monitors here. Previously this site used a
+                  // bare `return` and let control fall through to the
+                  // outer holdback loop, which did the flushing before
+                  // exiting; routing through `routeAbort` skips that
+                  // path, so we re-do it inline to preserve the
+                  // task_started↔task_notification pairing invariant.
                   adapter.finalizeAssistantMessage();
+                  flushQueuedNotificationsToSdk(localQueue);
+                  finalizeOneShotMonitors();
                   await routeAbort();
                 }
                 adapter.processEvent(event);
@@ -1181,16 +1204,20 @@ export async function runNonInteractive(
 
       // If a run-level budget tripped during an awaited stream / tool
       // call, the underlying fetch's AbortError lands here before our
-      // explicit `routeAbort` sites can fire. Re-route through the
-      // budget handler so the user sees the friendly "Run aborted: …"
-      // envelope (exit 55) instead of a raw "AbortError" line.
+      // explicit `routeAbort` sites can fire. Capture the reason so we
+      // can (a) include the friendly "Run aborted: …" message in the
+      // adapter's terminal result envelope (STREAM_JSON consumers
+      // depend on that envelope to close the stream cleanly) and (b)
+      // exit with the budget handler's exit code 55 instead of the
+      // generic `handleError` exit code 1 from a raw "AbortError".
       const budgetExceeded = budgetEnforcer.getExceeded();
-      if (budgetExceeded) {
-        await handleBudgetExceededError(config, budgetExceeded);
-      }
 
       // For JSON and STREAM_JSON modes, compute usage from metrics
-      const message = error instanceof Error ? error.message : String(error);
+      const message = budgetExceeded
+        ? budgetExceeded.message
+        : error instanceof Error
+          ? error.message
+          : String(error);
       const metrics = uiTelemetryService.getMetrics();
       const usage = computeUsageFromMetrics(metrics);
       // Get stats for JSON format output
@@ -1220,6 +1247,11 @@ export async function runNonInteractive(
           usage,
           stats,
         });
+      }
+      if (budgetExceeded) {
+        // Always exit AFTER emitResult so STREAM_JSON / JSON consumers
+        // see a terminal result envelope before the process dies.
+        await handleBudgetExceededError(config, budgetExceeded);
       }
       await handleError(error, config);
     } finally {

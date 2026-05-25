@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   RunBudgetEnforcer,
   parseDurationSeconds,
+  validateMaxToolCalls,
   validateMaxWallTimeSetting,
 } from './runBudget.js';
 
@@ -19,8 +20,8 @@ describe('parseDurationSeconds', () => {
     ['  45  ', 45],
     ['5m', 300],
     ['1h', 3600],
-    ['500ms', 0.5],
     ['1.5h', 5400],
+    ['1s', 1],
   ])('parses %s as %d seconds', (input, expected) => {
     expect(parseDurationSeconds(input)).toBeCloseTo(expected);
   });
@@ -32,8 +33,18 @@ describe('parseDurationSeconds', () => {
     },
   );
 
+  it('rejects sub-second budgets — they fire before any model round-trip', () => {
+    // Previously a tiny budget like `500ms` parsed cleanly and immediately
+    // aborted the run on the next event-loop tick. That's a typo, not a
+    // useful guardrail.
+    expect(() => parseDurationSeconds('500ms')).toThrow(/minimum/i);
+    expect(() => parseDurationSeconds('1ms')).toThrow(/minimum/i);
+    expect(() => parseDurationSeconds('0.5')).toThrow(/minimum/i);
+  });
+
   it('rejects values larger than Node.js can safely time out on', () => {
-    // 100 days in seconds is well above MAX_TIMEOUT_MS / 1000 (~24.8d).
+    // The regex doesn't accept `d`, so `100d` fails as a format error;
+    // `2400h` parses but exceeds MAX_WALL_TIME_SECONDS (~24.8d).
     expect(() => parseDurationSeconds('100d')).toThrow();
     expect(() => parseDurationSeconds('2400h')).toThrow();
   });
@@ -44,13 +55,18 @@ describe('validateMaxWallTimeSetting', () => {
     expect(validateMaxWallTimeSetting(-1)).toBe(-1);
   });
 
-  it('accepts positive numbers', () => {
+  it('accepts positive numbers at or above the 1s floor', () => {
     expect(validateMaxWallTimeSetting(60)).toBe(60);
-    expect(validateMaxWallTimeSetting(0.5)).toBeCloseTo(0.5);
+    expect(validateMaxWallTimeSetting(1)).toBe(1);
   });
 
   it('rejects 0 (mirrors CLI flag behavior — 0 is a foot-gun)', () => {
     expect(() => validateMaxWallTimeSetting(0)).toThrow();
+  });
+
+  it('rejects sub-second values', () => {
+    expect(() => validateMaxWallTimeSetting(0.5)).toThrow(/minimum/i);
+    expect(() => validateMaxWallTimeSetting(0.001)).toThrow(/minimum/i);
   });
 
   it('rejects negatives other than -1', () => {
@@ -66,6 +82,47 @@ describe('validateMaxWallTimeSetting', () => {
 
   it('rejects values larger than the Node.js timeout ceiling', () => {
     expect(() => validateMaxWallTimeSetting(3_000_000)).toThrow();
+  });
+});
+
+describe('validateMaxToolCalls', () => {
+  it('accepts -1 (unlimited sentinel)', () => {
+    expect(validateMaxToolCalls(-1)).toBe(-1);
+  });
+
+  it('accepts 0 (no-tool-calls-allowed sentinel)', () => {
+    // Asymmetric with wall-time where 0 is fatal — for tool-calls, 0 means
+    // "the first tick aborts", which is a legitimate "model must answer
+    // without invoking tools" mode.
+    expect(validateMaxToolCalls(0)).toBe(0);
+  });
+
+  it('accepts positive integers', () => {
+    expect(validateMaxToolCalls(5)).toBe(5);
+    expect(validateMaxToolCalls(1000)).toBe(1000);
+  });
+
+  it('rejects NaN — yargs coerces non-numeric flag values to NaN', () => {
+    // `qwen -p '...' --max-tool-calls abc` would otherwise silently
+    // disable the budget; the >= 0 gate in tickToolCall is false for NaN.
+    expect(() => validateMaxToolCalls(Number.NaN)).toThrow();
+  });
+
+  it('rejects Infinity', () => {
+    expect(() => validateMaxToolCalls(Number.POSITIVE_INFINITY)).toThrow();
+  });
+
+  it('rejects negatives other than -1', () => {
+    // `--max-tool-calls=-5` (typo for `5`) would otherwise silently
+    // disable the budget — the exact foot-gun the wall-time validator
+    // was built to prevent.
+    expect(() => validateMaxToolCalls(-5)).toThrow();
+    expect(() => validateMaxToolCalls(-2)).toThrow();
+  });
+
+  it('rejects fractional values', () => {
+    expect(() => validateMaxToolCalls(1.5)).toThrow();
+    expect(() => validateMaxToolCalls(0.5)).toThrow();
   });
 });
 
