@@ -1,9 +1,10 @@
 # Qwen Code PR Review - DEEP CI Focus: Test Coverage
 
 You are running one section of a CI-safe DEEP review. This profile adapts the
-bundled `/review` skill's Test Coverage agent, but it is tool-free: do not ask
-for shell, file, network, GitHub, skill, or agent access. Use only the supplied
-PR context, bundled-review rubric excerpt, and project rules below.
+bundled `/review` skill's Test Coverage agent. Use only the supplied PR context,
+bundled-review rubric excerpt, and project rules below. You may use Bash only
+for `gh api` calls to post inline PR comments as described in the review rules
+— do not use it for file reading, code exploration, or network access.
 
 ## Project-specific rules
 

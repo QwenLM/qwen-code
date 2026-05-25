@@ -88,3 +88,27 @@ End that section with this line verbatim:
 - Prefer high-signal findings with concrete impact. Avoid style preferences,
   speculative best-practice commentary, and issues already covered by linters,
   typecheckers, or existing PR comments.
+
+### Posting Inline Comments
+
+When you have Bash access and the environment provides `GITHUB_REPOSITORY`,
+`PR_NUMBER`, and a valid `GITHUB_TOKEN`, post high-confidence findings
+(P0/P1) as inline PR comments using the GitHub Create Review API:
+
+```bash
+gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+  --method POST \
+  -f commit_id="$HEAD_SHA" \
+  -f event=COMMENT \
+  -f body="Summary of review findings." \
+  --jsonc comments='[{"path":"src/file.ts","line":42,"body":"**[Critical]** description"}]'
+```
+
+Rules:
+- Only post findings you can map to a specific diff line in the `comments` array.
+- Findings that cannot map to a diff line go in the `body` field.
+- Do NOT post P2/P3 (low-severity) findings as inline comments — keep them in
+  your text output only. Inline comments should be high-signal.
+- If you have no P0/P1 findings, skip the API call entirely.
+- Always include a trailing signature in each inline comment body:
+  `_— ${OPENAI_MODEL} via Qwen Code /review_`

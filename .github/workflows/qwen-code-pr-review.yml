@@ -91,10 +91,10 @@ jobs:
       group: 'qwen-pr-review-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.pr_number }}'
       cancel-in-progress: true
     # 30 min was empirically too low for the former multi-agent deep path
-    # on a ~800-line PR. LIGHT/STANDARD are toolless single-shot qwen
-    # calls; DEEP is four bounded, toolless focus passes that reuse the
-    # bundled /review rubric. Opened/comment/review/dispatch still need
-    # room for package install, preflight, and a large DEEP prompt.
+    # on a ~800-line PR. LIGHT/STANDARD are single-shot qwen calls with
+    # Bash (for gh inline comments); DEEP is four bounded focus passes
+    # that reuse the bundled /review rubric. All triggers need room for
+    # package install, preflight, and a large DEEP prompt.
     timeout-minutes: 60
     runs-on: 'ubuntu-latest'
     permissions:
@@ -107,19 +107,18 @@ jobs:
     env:
       OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
       QWEN_PR_REVIEW_MAX_CHANGED_LINES: "${{ vars.QWEN_PR_REVIEW_MAX_CHANGED_LINES || '1500' }}"
-      # Toolless qwen mode for all LLM calls in this pull_request_target
-      # workflow. `--core-tools structured_output` activates the core-tool
-      # allowlist while naming no registered core tool for these text-only
-      # runs, so Shell/ReadFile/Edit/etc. are unavailable. The explicit deny
-      # list covers non-core orchestration tools that bypass coreTools.
-      QWEN_REVIEW_CORE_TOOLS: 'structured_output'
+      # Core-tool allowlist for all LLM calls in this workflow.
+      # Bash is available so the model can post inline PR comments via `gh`.
+      # The explicit deny list blocks orchestration tools (agent loops, skills,
+      # worktrees) that are unnecessary and increase attack surface.
+      QWEN_REVIEW_CORE_TOOLS: 'structured_output,Bash'
       QWEN_REVIEW_DENY_TOOLS: 'agent,skill,tool_search,ask_user_question,task_stop,send_message,enter_worktree,exit_worktree,exit_plan_mode'
     steps:
       # Security (R4): this job runs on pull_request_target with model
-      # secrets, so all qwen calls below are toolless and run without a
-      # GitHub token in the qwen process. harden-runner remains in audit
-      # mode to observe outbound domains before a later block-mode
-      # allowlist. Must be first so monitoring starts before anything else.
+      # secrets. qwen has Bash (for `gh` inline comments) scoped to the
+      # bot token. harden-runner remains in audit mode to observe outbound
+      # domains before a later block-mode allowlist. Must be first so
+      # monitoring starts before anything else.
       - name: 'Harden runner (egress audit)'
         uses: 'step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5' # v2.19.3
         with:
@@ -616,7 +615,7 @@ jobs:
           # stderr is sent to a file, NOT merged into raw_out: the JSON
           # parser below feeds raw_out to `jq` as a single document, so any
           # stderr line (node warnings, telemetry) would break the parse.
-          raw_out="$(timeout --kill-after=15s 3m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
+          raw_out="$(timeout --kill-after=15s 3m qwen \
             --approval-mode default \
             --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
@@ -819,6 +818,7 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          HEAD_SHA: '${{ steps.pr.outputs.head_sha }}'
           ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
           DIFF_AVAILABLE: '${{ steps.size.outputs.diff_available }}'
         timeout-minutes: 5
@@ -886,7 +886,7 @@ jobs:
           # prompt-injected `::workflow-command::` lines from the stream.
           stop_token="qwen-light-stream-$(date +%s%N)"
           echo "::stop-commands::${stop_token}"
-          timeout --kill-after=15s 3m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
+          timeout --kill-after=15s 3m qwen \
             --approval-mode default \
             --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
@@ -963,6 +963,7 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          HEAD_SHA: '${{ steps.pr.outputs.head_sha }}'
           ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
           DIFF_AVAILABLE: '${{ steps.size.outputs.diff_available }}'
         timeout-minutes: 10
@@ -1025,7 +1026,7 @@ jobs:
           # prompt-injected `::workflow-command::` lines from the stream.
           stop_token="qwen-standard-stream-$(date +%s%N)"
           echo "::stop-commands::${stop_token}"
-          timeout --kill-after=30s 8m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
+          timeout --kill-after=30s 8m qwen \
             --approval-mode default \
             --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
             --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
@@ -1077,14 +1078,11 @@ jobs:
             rm -f qwen-review-summary.md
           fi
 
-      # ─── DEEP: CI-safe bundled review profile, deliberately toolless ───────
+      # ─── DEEP: CI-safe bundled review profile ─────────────────────────────
       #
-      # This workflow runs under pull_request_target with model secrets.
-      # Running the bundled multi-agent /review skill directly here would
-      # expose those secrets to model-controlled shell/file/network tools.
-      # DEEP therefore adapts the bundled /review rubric into several
-      # focused, tool-free CI passes. It reuses the review dimensions
-      # without fetch-pr/worktree/install/autofix/inline-review behavior.
+      # DEEP adapts the bundled /review rubric into several focused passes
+      # with Bash access (for `gh` inline comments). It reuses the review
+      # dimensions without fetch-pr/worktree/install/autofix behavior.
       - name: 'Run DEEP review'
         id: 'review'
         if: |-
@@ -1096,6 +1094,7 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          HEAD_SHA: '${{ steps.pr.outputs.head_sha }}'
           ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
           DIFF_AVAILABLE: '${{ steps.size.outputs.diff_available }}'
         timeout-minutes: 20
@@ -1185,7 +1184,7 @@ jobs:
             // Never fall back to the full bundled SKILL.md here. SKILL.md
             // is written for the toolful /review skill (shell, ReadFile,
             // worktree, autofix, GitHub submission). Dumping it into the
-            // toolless CI DEEP prompt across four focus passes wastes context
+            // CI DEEP prompt across four focus passes wastes context
             // budget and invites the model to narrate about tools it
             // does not have. Send only what we successfully extracted,
             // with an inline gap notice so the model knows the rubric is
@@ -1252,7 +1251,7 @@ jobs:
             local stop_token
             stop_token="qwen-deep-stream-${focus}-$(date +%s%N)"
             echo "::stop-commands::${stop_token}"
-            timeout --kill-after=20s 4m env -u GITHUB_TOKEN -u GH_TOKEN qwen \
+            timeout --kill-after=20s 4m qwen \
               --approval-mode default \
               --core-tools "$QWEN_REVIEW_CORE_TOOLS" \
               --exclude-tools "$QWEN_REVIEW_DENY_TOOLS" \
@@ -1335,7 +1334,7 @@ jobs:
             {
               printf '## Qwen Code Review (DEEP)\n\n'
               printf '_CI-safe profile adapted from bundled `/review`; '
-              printf 'focused tool-free passes: correctness/security, test coverage, '
+              printf 'focused passes: correctness/security, test coverage, '
               printf 'maintainability/performance, and undirected audit._\n'
               cat /tmp/deep-combined-body.md
             } > qwen-review-summary.md

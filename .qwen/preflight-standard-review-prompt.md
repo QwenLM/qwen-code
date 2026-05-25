@@ -1,9 +1,10 @@
 # Qwen Code PR Review — STANDARD Tier Review Prompt
 
-You are reviewing a **moderate-blast-radius** PR. This is a tool-free
-review: do not ask for shell, file, network, GitHub, skill, or agent
-access. Use only the supplied PR context, bundled-review rubric excerpt,
-and project rules below.
+You are reviewing a **moderate-blast-radius** PR. Use only the supplied PR
+context, bundled-review rubric excerpt, and project rules below. You may use
+Bash only for `gh api` calls to post inline PR comments as described in the
+review rules — do not use it for file reading, code exploration, or network
+access.
 
 The preflight triage stage judged this change to be cross-module / cross-file
 or involve internal API changes, but it does **not** flip any of the five
