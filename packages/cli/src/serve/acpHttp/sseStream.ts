@@ -5,6 +5,7 @@
  */
 
 import type { Response } from 'express';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 /**
  * A long-lived Server-Sent-Events writer for the ACP-over-HTTP transport.
@@ -83,10 +84,10 @@ export class SseStream {
     try {
       this.onClose?.();
     } catch (err) {
-      process.stderr.write(
+      writeStderrLine(
         `qwen serve: /acp SSE onClose threw: ${
           err instanceof Error ? err.message : String(err)
-        }\n`,
+        }`,
       );
     }
   }
@@ -99,10 +100,10 @@ export class SseStream {
     // first failure, log once and close so the subscription tears down.
     this.writeChain = next.catch((err: unknown) => {
       if (!this.closed) {
-        process.stderr.write(
+        writeStderrLine(
           `qwen serve: /acp SSE write failed, closing stream: ${
             err instanceof Error ? err.message : String(err)
-          }\n`,
+          }`,
         );
         this.close();
       }

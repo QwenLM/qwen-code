@@ -633,6 +633,38 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(Date.now() - start).toBeLessThan(1500);
   });
 
+  it('concurrent session/close calls the bridge exactly once (no TOCTOU double-close)', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    await Promise.all([
+      post(connId, { jsonrpc: '2.0', id: 70, method: 'session/close', params: { sessionId: 'sess-1' } }),
+      post(connId, { jsonrpc: '2.0', id: 71, method: 'session/close', params: { sessionId: 'sess-1' } }),
+    ]);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bridge.closedSessions.filter((s) => s === 'sess-1')).toHaveLength(1);
+  });
+
+  it('clean iterator end closes the session stream (no zombie)', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    await new Promise((r) => setTimeout(r, 50));
+    // Subprocess ends cleanly → bridge event iterator returns done.
+    bridge.queues.get('sess-1')?.end();
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 3000);
+    const start = Date.now();
+    try {
+      for await (const _f of readSse(sessStream, ac.signal)) {
+        // drain
+      }
+    } finally {
+      clearTimeout(timer);
+      ac.abort();
+    }
+    expect(Date.now() - start).toBeLessThan(1500);
+  });
+
   it('DELETE without a connection id → 400', async () => {
     const res = await fetch(`${base}/acp`, { method: 'DELETE' });
     expect(res.status).toBe(400);

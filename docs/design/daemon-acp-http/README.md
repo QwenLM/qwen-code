@@ -480,3 +480,19 @@ Another reviewer pass (qwen3.7-max). Suite **28 tests**, live re-verified.
 | E4 | **P2** | `pumpSessionEvents` `.catch` closed by sessionId — a reconnect between the throw and the microtask could kill the NEW stream. | Identity-guard: only close if `binding.stream` is still this stream. |
 | E6 | **P2** | `sendSession` auto-created a binding — a late pump/reply frame after `closeSessionStream` resurrected a ghost binding that buffered up to 256 frames forever. | `sendSession` is now lookup-only: drops frames when the session has no live binding. |
 | E5 | accepted | `session/load`/`resume` don't reject when another live connection owns the session ("hijack"). | **Accepted, not changed:** the daemon's trust boundary is the bearer token + single-workspace bind, and multi-client attach is intentional (the bridge is multi-client by design; REST has the same property). A token-holder gains no capability they lack via REST. Tracked with the other token-boundary items (DELETE ownership, §13). |
+
+---
+
+## 16. Review round 7 — PR fold-ins
+
+Another reviewer pass (qwen3.7-max). Suite **30 tests**, live re-verified.
+
+| # | Severity | Finding | Fix |
+|---|----------|---------|-----|
+| F1 | **P0** | Concurrent `session/close` TOCTOU: `ownedSessions.delete` ran only in `finally` (after the await), so two concurrent closes both passed `requireOwned` → misleading error to the 2nd + redundant bridge close. | Delete the ownership gate SYNCHRONOUSLY before the await; bridge close runs once. Test added. |
+| F2 | **P1** | Pump lifecycle: a CLEAN iterator end (subprocess ended, `done`) resolved → the `.catch` never fired → zombie stream; and a MID-STREAM iterator error sent no `stream_error`. | `pumpSessionEvents` wraps the whole loop (sync + mid-stream errors send `stream_error` then re-throw); the consumer `.then(onDone, onErr)` closes the stream on BOTH paths (identity-guarded). Tests added. |
+| F3 | **P2** | 503 connection-cap rejection had no stderr log. | `writeStderrLine` with the cap value. |
+| F4 | **P2** | `_qwen/notify stream_error` spread let `event.data.kind` shadow the discriminator. | Spread first, then `kind: 'stream_error'`. |
+| F5 | **P2** | `MAX_WORKSPACE_PATH_LENGTH` redeclared (`= 4096`) vs the canonical `fs/paths.js`. | Import from `../fs/paths.js` (no divergence). |
+| F6 | **P2** | `isObjectParams` duplicated `jsonRpc.isObject`. | Import `isObject`. |
+| F7 | **P2** | Raw `process.stderr.write` in `index.ts`/`sseStream.ts` vs `writeStderrLine` elsewhere. | Unified on `writeStderrLine` across the module. |

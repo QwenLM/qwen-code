@@ -8,12 +8,14 @@ import path from 'node:path';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
 import type { AcpConnection } from './connectionRegistry.js';
 import {
   QWEN_METHOD_NS,
   RPC,
   error,
   isNotification,
+  isObject,
   isRequest,
   isResponse,
   notification,
@@ -43,9 +45,6 @@ const CONN_ROUTED_METHODS = new Set<string>([
   'session/close',
   `${QWEN_METHOD_NS}session/heartbeat`,
 ]);
-
-/** Matches the REST surface's `MAX_WORKSPACE_PATH_LENGTH` (PATH_MAX). */
-const MAX_WORKSPACE_PATH_LENGTH = 4096;
 
 class AcpParamError extends Error {}
 
@@ -284,7 +283,7 @@ export class AcpDispatcher {
     if (!isRequest(msg) && !isNotification(msg)) return;
 
     const method = msg.method;
-    const params = (isObjectParams(msg.params) ? msg.params : {}) as Record<
+    const params = (isObject(msg.params) ? msg.params : {}) as Record<
       string,
       unknown
     >;
@@ -374,6 +373,11 @@ export class AcpDispatcher {
         case 'session/close': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          // Close the ownership gate SYNCHRONOUSLY (before the await) so two
+          // concurrent `session/close`s don't both pass `requireOwned` —
+          // the second would otherwise send a misleading error and trigger a
+          // redundant bridge close.
+          conn.ownedSessions.delete(sessionId);
           try {
             await this.bridge.closeSession(
               sessionId,
@@ -479,30 +483,34 @@ export class AcpDispatcher {
     sessionId: string,
     signal: AbortSignal,
   ): Promise<void> {
-    let iterable: AsyncIterable<BridgeEvent>;
     try {
-      iterable = this.bridge.subscribeEvents(sessionId, { signal });
+      const iterable = this.bridge.subscribeEvents(sessionId, { signal });
+      for await (const event of iterable) {
+        if (signal.aborted) break;
+        // Count event delivery as connection activity so a long, quiet prompt
+        // (no inbound HTTP) isn't reaped by the idle-TTL sweep.
+        conn.touch();
+        this.translateEvent(conn, sessionId, event);
+      }
     } catch (err) {
-      // Surface the error to the client, then RE-THROW so the caller's
-      // `.catch()` closes the stream. Returning here (resolved) would leave
-      // a zombie SSE stream — heartbeating but delivering nothing, with no
-      // disconnect signal for the client to reconnect on.
-      conn.sendSession(
-        sessionId,
-        notification(`${QWEN_METHOD_NS}notify`, {
-          kind: 'stream_error',
-          error: errMsg(err),
-        }),
-      );
+      // Symmetric for the SYNC `subscribeEvents` throw and a MID-STREAM
+      // iterator error: surface a `stream_error` to the client, then re-throw
+      // so the caller's `.catch()` closes the stream. Returning would leave a
+      // zombie SSE stream (heartbeats, no events, no reconnect signal).
+      if (!signal.aborted) {
+        conn.sendSession(
+          sessionId,
+          notification(`${QWEN_METHOD_NS}notify`, {
+            kind: 'stream_error',
+            error: errMsg(err),
+          }),
+        );
+      }
       throw err;
     }
-    for await (const event of iterable) {
-      if (signal.aborted) break;
-      // Count event delivery as connection activity so a long, quiet prompt
-      // (no inbound HTTP) isn't reaped by the idle-TTL sweep.
-      conn.touch();
-      this.translateEvent(conn, sessionId, event);
-    }
+    // Normal completion (iterator returned `done` — e.g. the subprocess ended
+    // cleanly). The caller's `.then` closes the stream so it isn't left as a
+    // zombie heartbeating with nothing more to deliver.
   }
 
   private translateEvent(
@@ -547,8 +555,10 @@ export class AcpDispatcher {
         conn.sendSession(
           sessionId,
           notification(`${QWEN_METHOD_NS}notify`, {
-            kind: 'stream_error',
+            // Spread first so a stray `kind` in event.data can't shadow the
+            // discriminator the client's error handler keys on.
             ...(event.data as object),
+            kind: 'stream_error',
           }),
         );
         return;
@@ -683,10 +693,6 @@ export class AcpDispatcher {
     if (id === undefined) return;
     conn.sendSession(sessionId, errorFrame ?? success(id, result));
   }
-}
-
-function isObjectParams(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 // Re-export so tests can reference the request type without the jsonRpc path.

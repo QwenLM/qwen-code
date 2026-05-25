@@ -6,6 +6,7 @@
 
 import type { Application, Request, Response } from 'express';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AcpDispatcher } from './dispatch.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { SseStream } from './sseStream.js';
@@ -63,10 +64,10 @@ export function mountAcpHttp(
     // client ids don't linger in the bridge's voter/known-client sets.
     (sessionId, clientId) => {
       void bridge.detachClient(sessionId, clientId).catch((err: unknown) => {
-        process.stderr.write(
+        writeStderrLine(
           `qwen serve: /acp detachClient(${sessionId}) failed: ${
             err instanceof Error ? err.message : String(err)
-          }\n`,
+          }`,
         );
       });
     },
@@ -86,6 +87,9 @@ export function mountAcpHttp(
       const conn = registry.create(isLoopbackReq(req));
       if (!conn) {
         // Connection cap reached — shed load rather than grow unbounded.
+        writeStderrLine(
+          `qwen serve: /acp connection cap reached (max=${registry.connectionCap}), rejecting initialize`,
+        );
         res.setHeader('Retry-After', '5');
         res
           .status(503)
@@ -139,10 +143,10 @@ export function mountAcpHttp(
     await dispatcher
       .handle(conn, message, headerOf(req, ACP_SESSION_HEADER), isLoopbackReq(req))
       .catch((err: unknown) => {
-        process.stderr.write(
+        writeStderrLine(
           `qwen serve: /acp handle error: ${
             err instanceof Error ? err.message : String(err)
-          }\n`,
+          }`,
         );
       });
   });
@@ -164,8 +168,8 @@ export function mountAcpHttp(
       const stream = new SseStream(
         res,
         () => {
-          process.stderr.write(
-            `qwen serve: /acp connection stream closed (${connId})\n`,
+          writeStderrLine(
+            `qwen serve: /acp connection stream closed (${connId})`,
           );
         },
         () => conn.touch(),
@@ -203,23 +207,27 @@ export function mountAcpHttp(
     // handshake precedes any buffered frames the attach flushes.
     stream.open();
     conn.attachSessionStream(sessionId, stream, ac);
-    void dispatcher
-      .pumpSessionEvents(conn, sessionId, ac.signal)
-      .catch((err: unknown) => {
-        process.stderr.write(
+    // Identity-guarded close: only tear down if THIS stream is still the
+    // session's current one (a reconnect between settle and this microtask
+    // would otherwise kill the fresh stream).
+    const closeIfCurrent = () => {
+      if (conn.sessions.get(sessionId)?.stream === stream) {
+        conn.closeSessionStream(sessionId);
+      }
+    };
+    void dispatcher.pumpSessionEvents(conn, sessionId, ac.signal).then(
+      // NORMAL completion (iterator returned `done` — subprocess ended): close
+      // so the stream isn't a zombie heartbeating with nothing left to deliver.
+      closeIfCurrent,
+      (err: unknown) => {
+        writeStderrLine(
           `qwen serve: /acp event pump error (${sessionId}): ${
             err instanceof Error ? err.message : String(err)
-          }\n`,
+          }`,
         );
-        // Don't leave a zombie SSE stream that heartbeats but delivers
-        // nothing — close it so the client gets a disconnect + reconnects.
-        // Identity-guard: only close if THIS stream is still the session's
-        // current one (a reconnect between the throw and this microtask
-        // would otherwise kill the fresh stream).
-        if (conn.sessions.get(sessionId)?.stream === stream) {
-          conn.closeSessionStream(sessionId);
-        }
-      });
+        closeIfCurrent();
+      },
+    );
   });
 
   // ── DELETE /acp ────────────────────────────────────────────────────

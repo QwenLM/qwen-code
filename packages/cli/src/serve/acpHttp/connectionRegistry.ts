@@ -316,6 +316,11 @@ export class ConnectionRegistry {
     return this.byId.size;
   }
 
+  /** The configured concurrent-connection cap (for operator-facing logs). */
+  get connectionCap(): number {
+    return this.maxConnections;
+  }
+
   dispose(): void {
     clearInterval(this.sweepTimer);
     for (const id of [...this.byId.keys()]) this.delete(id);
