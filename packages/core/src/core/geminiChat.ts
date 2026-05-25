@@ -2380,6 +2380,14 @@ export class GeminiChat {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
+    let coercedUsage:
+      | {
+          promptTokenCount: number;
+          totalTokenCount: number;
+          candidatesTokenCount: number;
+          cachedContentTokenCount: number;
+        }
+      | undefined;
 
     let hasToolCall = false;
     let hasFinishReason = false;
@@ -2430,6 +2438,18 @@ export class GeminiChat {
             usageMetadata.candidatesTokenCount,
             'candidatesTokenCount',
           );
+          const cachedContentTokenCount = coerceUsageCount(
+            usageMetadata.cachedContentTokenCount,
+            'cachedContentTokenCount',
+          );
+          // Stash coerced values so recordAssistantTurn can reuse them
+          // without re-calling coerceUsageCount inline.
+          coercedUsage = {
+            promptTokenCount,
+            totalTokenCount,
+            candidatesTokenCount,
+            cachedContentTokenCount,
+          };
           const lastPromptTokenCount = promptTokenCount || totalTokenCount;
           if (lastPromptTokenCount) {
             // Always update the per-chat counter so this chat (including
@@ -2442,10 +2462,6 @@ export class GeminiChat {
               lastPromptTokenCount,
             );
           }
-          const cachedContentTokenCount = coerceUsageCount(
-            usageMetadata.cachedContentTokenCount,
-            'cachedContentTokenCount',
-          );
           if (cachedContentTokenCount && this.telemetryService) {
             this.telemetryService.setLastCachedContentTokenCount(
               cachedContentTokenCount,
@@ -2536,26 +2552,8 @@ export class GeminiChat {
                 )
             : []),
         ],
-        tokens: usageMetadata
-          ? {
-              ...usageMetadata,
-              promptTokenCount: coerceUsageCount(
-                usageMetadata.promptTokenCount,
-                'promptTokenCount',
-              ),
-              totalTokenCount: coerceUsageCount(
-                usageMetadata.totalTokenCount,
-                'totalTokenCount',
-              ),
-              candidatesTokenCount: coerceUsageCount(
-                usageMetadata.candidatesTokenCount,
-                'candidatesTokenCount',
-              ),
-              cachedContentTokenCount: coerceUsageCount(
-                usageMetadata.cachedContentTokenCount,
-                'cachedContentTokenCount',
-              ),
-            }
+        tokens: coercedUsage
+          ? { ...usageMetadata, ...coercedUsage }
           : usageMetadata,
         contextWindowSize,
       };
