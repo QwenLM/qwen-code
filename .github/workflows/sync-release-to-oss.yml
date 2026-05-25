@@ -10,6 +10,10 @@ on:
         required: true
         type: 'string'
 
+concurrency:
+  group: 'sync-release-to-oss'
+  cancel-in-progress: false
+
 jobs:
   sync:
     name: 'Sync Release Assets to Aliyun OSS'

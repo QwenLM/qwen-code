@@ -400,6 +400,10 @@ jobs:
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
 
+      - name: 'Verify Standalone Archives'
+        run: |-
+          npm run verify:installation-release -- --dir dist/standalone
+
       - name: 'Create GitHub Release and Tag'
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' }}

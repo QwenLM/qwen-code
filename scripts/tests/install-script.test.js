@@ -1649,8 +1649,11 @@ describe('standalone release packaging', () => {
     const releaseWorkflow = readScript('.github/workflows/release.yml');
     const ossWorkflow = readScript('.github/workflows/sync-release-to-oss.yml');
 
-    // release.yml builds standalone archives and creates GitHub Release
+    // release.yml builds standalone archives, verifies them, and creates GitHub Release
     expect(releaseWorkflow).toContain('npm run package:standalone:release --');
+    expect(releaseWorkflow).toContain(
+      'npm run verify:installation-release -- --dir dist/standalone',
+    );
     expect(releaseWorkflow).not.toContain('package:installation-assets');
     expect(releaseWorkflow).not.toContain('verify_node_checksum()');
     expect(releaseWorkflow).not.toContain('download_node()');
@@ -1661,7 +1664,7 @@ describe('standalone release packaging', () => {
     const createReleaseStep = releaseWorkflow.slice(createReleaseStepIndex);
     expect(createReleaseStep).toContain('dist/standalone/qwen-code-*');
     expect(createReleaseStep).toContain('dist/standalone/SHA256SUMS');
-    // OSS logic must not remain in release.yml
+    // OSS upload logic must not remain in release.yml
     expect(releaseWorkflow).not.toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
     expect(releaseWorkflow).not.toContain(
       'node scripts/upload-aliyun-oss-assets.js',
