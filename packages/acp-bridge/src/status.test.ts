@@ -46,7 +46,7 @@ describe('BridgeTimeoutError', () => {
   it('preserves the legacy message format and exposes label/timeoutMs', () => {
     const err = new BridgeTimeoutError('init', 250);
     expect(err.name).toBe('BridgeTimeoutError');
-    expect(err.message).toBe('HttpAcpBridge init timed out after 250ms');
+    expect(err.message).toBe('AcpSessionBridge init timed out after 250ms');
     expect(err.label).toBe('init');
     expect(err.timeoutMs).toBe(250);
     expect(err).toBeInstanceOf(Error);

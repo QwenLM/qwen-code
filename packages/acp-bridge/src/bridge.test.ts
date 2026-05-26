@@ -50,7 +50,7 @@ import {
   SESS_A,
 } from './internal/testUtils.js';
 
-describe('createHttpAcpBridge', () => {
+describe('createAcpSessionBridge', () => {
   it('accepts a valid BridgeOptions.eventRingSize at construction time', () => {
     // Smoke: positive finite integers are accepted; the underlying
     // EventBus ring-size threading is exercised end-to-end in
@@ -6984,7 +6984,7 @@ describe('createHttpAcpBridge', () => {
 //   - `bridge.permissionPolicy` accessor wired through the mediator
 //   - F3 BridgeOptions validation (positive-integer quorum)
 // ============================================================
-describe('createHttpAcpBridge — F3 multi-client permission coordination', () => {
+describe('createAcpSessionBridge — F3 multi-client permission coordination', () => {
   it('exposes the active permission policy through bridge.permissionPolicy (default first-responder)', () => {
     const bridge = makeBridge({});
     expect(bridge.permissionPolicy).toBe('first-responder');

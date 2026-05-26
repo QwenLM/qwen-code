@@ -141,7 +141,7 @@ export interface BridgeHeartbeatState {
   clientLastSeenAt: ReadonlyMap<string, number>;
 }
 
-export interface HttpAcpBridge {
+export interface AcpSessionBridge {
   /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
    * existing session for the same workspace.
@@ -435,3 +435,6 @@ export interface ShellCommandResult {
   output: string;
   aborted: boolean;
 }
+
+/** @deprecated Use `AcpSessionBridge` instead. */
+export type HttpAcpBridge = AcpSessionBridge;

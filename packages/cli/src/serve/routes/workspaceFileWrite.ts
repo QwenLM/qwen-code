@@ -5,7 +5,7 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
-import type { HttpAcpBridge } from '../httpAcpBridge.js';
+import type { AcpSessionBridge } from '../acpSessionBridge.js';
 import {
   isContentHash,
   type ContentHash,
@@ -19,7 +19,7 @@ import {
 } from './workspaceFileRead.js';
 
 interface RegisterDeps {
-  bridge: HttpAcpBridge;
+  bridge: AcpSessionBridge;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;
   safeBody: (req: Request) => Record<string, unknown>;
