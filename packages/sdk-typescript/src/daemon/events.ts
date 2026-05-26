@@ -68,6 +68,10 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // `POST /workspace/mcp/servers` on success (including replace and
   // same-fingerprint no-op).
   'mcp_server_added',
+  // T2.8 (#4514) — counterpart of `mcp_server_added`. Fired by
+  // `DELETE /workspace/mcp/servers/:name` when an entry was actually
+  // removed. Idempotent skip ('not_present') does NOT emit.
+  'mcp_server_removed',
   // #4175 F3 (Commit 7) — multi-client permission coordination events.
   // `permission_partial_vote` only fires under `consensus` policy;
   // `permission_forbidden` fires under `designated` (originator
@@ -663,6 +667,27 @@ export type DaemonMcpServerAddedEvent = DaemonEventEnvelope<
   DaemonMcpServerAddedData
 >;
 
+/**
+ * T2.8 (#4514). Fired when `DELETE /workspace/mcp/servers/:name`
+ * actually drops an entry. Idempotent skip ('not_present') does NOT
+ * emit this event. The event fans out to every active session SSE bus.
+ *
+ * `wasShadowingSettings`: true when the removed runtime server was
+ *   masking a settings-defined server of the same name — the settings
+ *   entry now takes effect again.
+ */
+export interface DaemonMcpServerRemovedData {
+  readonly name: string;
+  readonly wasShadowingSettings: boolean;
+  readonly originatorClientId: string;
+  [key: string]: unknown;
+}
+
+export type DaemonMcpServerRemovedEvent = DaemonEventEnvelope<
+  'mcp_server_removed',
+  DaemonMcpServerRemovedData
+>;
+
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -821,7 +846,8 @@ export type DaemonControlEvent =
   | DaemonWorkspaceInitializedEvent
   | DaemonMcpServerRestartedEvent
   | DaemonMcpServerRestartRefusedEvent
-  | DaemonMcpServerAddedEvent;
+  | DaemonMcpServerAddedEvent
+  | DaemonMcpServerRemovedEvent;
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
@@ -1320,6 +1346,10 @@ export function asKnownDaemonEvent(
       return isMcpServerAddedData(event.data)
         ? (event as DaemonMcpServerAddedEvent)
         : undefined;
+    case 'mcp_server_removed':
+      return isMcpServerRemovedData(event.data)
+        ? (event as DaemonMcpServerRemovedEvent)
+        : undefined;
     case 'turn_complete':
       return isTurnCompleteData(event.data)
         ? (event as DaemonTurnCompleteEvent)
@@ -1688,6 +1718,7 @@ export function reduceDaemonSessionEvent(
         lastTurnError: event.data,
       };
     case 'mcp_server_added':
+    case 'mcp_server_removed':
       return base;
     default: {
       const _exhaustive: never = event;
@@ -2424,6 +2455,16 @@ function isTurnErrorData(value: unknown): value is DaemonTurnErrorData {
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['message'])
   );
+}
+
+function isMcpServerRemovedData(
+  value: unknown,
+): value is DaemonMcpServerRemovedData {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['name'])) return false;
+  if (typeof value['wasShadowingSettings'] !== 'boolean') return false;
+  if (!isNonEmptyString(value['originatorClientId'])) return false;
+  return true;
 }
 
 function isPermissionOption(value: unknown): value is DaemonPermissionOption {

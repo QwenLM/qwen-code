@@ -34,6 +34,8 @@ export {
   type DaemonShellCommandResult,
   type DaemonMcpServerAddedData,
   type DaemonMcpServerAddedEvent,
+  type DaemonMcpServerRemovedData,
+  type DaemonMcpServerRemovedEvent,
   type DaemonMcpServerRestartedData,
   type DaemonMcpServerRestartedEvent,
   type DaemonMcpServerRestartRefusedData,

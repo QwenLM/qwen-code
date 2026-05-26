@@ -175,3 +175,28 @@ describe('mcp_server_added event drift insurance', () => {
     }
   });
 });
+
+describe('mcp_server_removed event drift insurance', () => {
+  it('is exported in DAEMON_KNOWN_EVENT_TYPE_VALUES', () => {
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain('mcp_server_removed');
+  });
+
+  it('asKnownDaemonEvent returns the right discriminator', () => {
+    const evt: DaemonEvent = {
+      v: 1,
+      type: 'mcp_server_removed',
+      data: {
+        name: 'echo',
+        wasShadowingSettings: true,
+        originatorClientId: 'client-2',
+      },
+    };
+    const known = asKnownDaemonEvent(evt);
+    expect(known?.type).toBe('mcp_server_removed');
+    if (known?.type === 'mcp_server_removed') {
+      expect(known.data.name).toBe('echo');
+      expect(known.data.wasShadowingSettings).toBe(true);
+      expect(known.data.originatorClientId).toBe('client-2');
+    }
+  });
+});

@@ -168,6 +168,8 @@ export type {
   DaemonStateResyncRequiredEvent,
   DaemonMcpServerAddedData,
   DaemonMcpServerAddedEvent,
+  DaemonMcpServerRemovedData,
+  DaemonMcpServerRemovedEvent,
   DaemonMcpServerRestartedData,
   DaemonMcpServerRestartedEvent,
   DaemonMcpServerRestartRefusedData,
