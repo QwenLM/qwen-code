@@ -37,6 +37,7 @@ import {
   buildShellExecWarnings,
   getCommandRoot,
   getShellConfiguration,
+  hasShellSubstitution,
   hasUnsafeMonitorBackgroundOperator,
   normalizeMonitorCommand as normalizeMonitorShellCommand,
   splitCommands,
@@ -167,6 +168,18 @@ class MonitorToolInvocation extends BaseToolInvocation<
   }
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    // Belt-and-suspenders substitution gate on the RAW command. Unlike
+    // `stripShellWrapper` (which the shell tool uses),
+    // `normalizeMonitorShellCommand` preserves leading env-prefix tokens
+    // in `safetyCommand`, so the AST below already sees substitution
+    // inside `FOO=$(...) bash -c '...'`. Gating here keeps monitor in
+    // lockstep with `ShellToolInvocation.getDefaultPermission` (PR #4386
+    // R6) — if `normalizeMonitorShellCommand`'s env-preservation ever
+    // regresses, this guard prevents a silent auto-allow.
+    if (hasShellSubstitution(this.params.command)) {
+      return 'ask';
+    }
+
     const command = normalizeMonitorShellCommand(
       this.params.command,
     ).safetyCommand;

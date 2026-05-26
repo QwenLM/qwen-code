@@ -54,7 +54,7 @@ import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import {
-  detectCommandSubstitution,
+  hasShellSubstitution,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import {
@@ -834,9 +834,11 @@ export function shouldAuditSubstitutionBypass(
   if (!SHELL_LIKE_TOOL_NAMES_FOR_SUBST_AUDIT.has(canonicalName)) return false;
   const cmd = args?.['command'];
   if (typeof cmd !== 'string') return false;
-  if (detectCommandSubstitution(cmd)) return true;
-  const stripped = stripShellWrapper(cmd);
-  return stripped !== cmd && detectCommandSubstitution(stripped);
+  // Delegate dual-check (raw + stripShellWrapper) to the shared
+  // predicate so detection semantics here, in `buildShellExecWarnings`
+  // (UI warning surface), and in the L3/L4 substitution gates stay
+  // in lockstep. See PR #4386 R6 (cid 3298521063).
+  return hasShellSubstitution(cmd);
 }
 
 function maybeLogSubstitutionBypass(
