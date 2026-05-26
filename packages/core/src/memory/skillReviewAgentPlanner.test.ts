@@ -223,11 +223,13 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
     ).toBe('deny');
   });
 
-  it('denies write_file when fs.stat fails with a non-ENOENT error (EISDIR)', async () => {
-    // The catch in evaluateScopedDecision deliberately defaults to
-    // 'deny' for any non-ENOENT error so we never overwrite something
-    // we cannot prove is safe. Easiest reproducible failure mode is
-    // EISDIR — the target path is a directory, not a file.
+  it('denies write_file when the target path is a directory, not a file', async () => {
+    // `fs.stat` on a directory SUCCEEDS (returning stats with
+    // `isDirectory: true`); it does not throw EISDIR. So this exercise
+    // path A in evaluateScopedDecision — `try { await fs.stat(); return
+    // 'deny'; }` — i.e. "target exists" rather than the non-ENOENT
+    // catch. WriteFileTool would later fail with EISDIR on the actual
+    // write, but the permission layer catches it earlier here.
     const dirAsFile = path.join(
       projectRoot,
       '.qwen',
@@ -244,6 +246,18 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
       }),
     ).toBe('deny');
   });
+
+  // Note on coverage of the `fs.stat` catch branch in
+  // evaluateScopedDecision:
+  // The branch is defense-in-depth — anything that would make `fs.stat`
+  // throw a non-ENOENT error (EACCES, ELOOP, ENAMETOOLONG, EIO) also
+  // throws from `assertRealProjectSkillPath`'s `realpath`/`lstat` one
+  // step earlier, which is exercised by the symlink-traversal test
+  // above. Spying on `fs.stat` from ESM tests is blocked
+  // (https://vitest.dev/guide/browser/#limitations), and chmod-based
+  // reproductions of EACCES are non-portable to Windows CI. The deny
+  // contract is straightforward enough that the structural duplication
+  // here is acceptable.
 });
 
 describe('listExistingSkillDirNames', () => {
