@@ -744,20 +744,24 @@ export type DaemonSessionExportFormat =
   (typeof DAEMON_SESSION_EXPORT_FORMATS)[number];
 
 /**
- * Issue #4514 T2.6. Response of `DaemonClient.exportSession` —
+ * Issue #4514 T2.6. Response of `DaemonClient.sessionExport` —
  * a tuple of the rendered body plus the headers the daemon stamped.
  * `body` is the formatter's verbatim output (markdown text, full HTML
  * document, JSON, or JSONL); the SDK does not parse it.
  *
  * `contentType` mirrors the `Content-Type` header (`text/markdown;
- * charset=utf-8` etc.) and `filename` mirrors the parsed
- * `Content-Disposition` header (today the daemon emits
- * `qwen-code-export-<ts>.<ext>` — the same pattern the TUI `/export`
- * slash command writes). When the header is missing or
- * unparseable, the SDK falls back to a derived `qwen-session-<id>.<format>`
- * so callers always have *some* filename to use. Both are pre-decoded
- * (RFC 5987 `filename*=utf-8''…` is percent-decoded for you) so a
- * webui can hand them straight to `Blob` / `a.download`.
+ * charset=utf-8` etc.) and `filename` is daemon-selected — today the
+ * upstream emits the same `generateExportFilename` output as the TUI
+ * `/export` slash command, but SDK consumers should treat the name as
+ * opaque rather than parsing it. When the `Content-Disposition`
+ * header is missing or unparseable the SDK falls back to a derived
+ * `qwen-session-<sanitized-sessionId>.<format>` so callers always
+ * have *some* filename to use (the sessionId is FS-sanitized:
+ * non-`[A-Za-z0-9._-]` characters become `_` so the result is safe
+ * to feed into `Blob` / `a.download` even if a future non-qwen
+ * daemon emits non-hex session ids). The parsed header value is also
+ * pre-decoded (RFC 5987 `filename*=utf-8''…` is percent-decoded for
+ * you).
  */
 export interface DaemonSessionExport {
   sessionId: string;

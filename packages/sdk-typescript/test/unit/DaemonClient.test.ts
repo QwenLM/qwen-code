@@ -582,6 +582,26 @@ describe('DaemonClient', () => {
       expect(result.filename).toBe('qwen-session-sess-x.jsonl');
     });
 
+    // Copilot review fold-in (#4515 review comment id 3299346707): the
+    // derived fallback used a raw `sessionId`, so a non-qwen daemon (or
+    // a future qwen daemon with looser session ids) that emits an id
+    // containing `/` would produce an unsafe `qwen-session-with/slash.md`
+    // that breaks Blob/a.download and could traverse upward in legacy
+    // file pickers. The SDK now strips non-`[A-Za-z0-9._-]` characters
+    // before interpolating.
+    it('sanitizes unsafe characters out of the derived fallback filename', async () => {
+      const { fetch } = recordingFetch(
+        () =>
+          new Response('body', {
+            status: 200,
+            headers: { 'content-type': 'text/plain; charset=utf-8' },
+          }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.sessionExport('with/slash:and..stuff', 'md');
+      expect(result.filename).toBe('qwen-session-with_slash_and..stuff.md');
+    });
+
     it('throws DaemonHttpError when /session/:id/export responds non-2xx', async () => {
       const { fetch } = recordingFetch(() =>
         jsonResponse(400, { error: 'Invalid format "pdf"' }),

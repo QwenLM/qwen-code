@@ -182,6 +182,24 @@ function parseAttachmentFilename(
   return undefined;
 }
 
+/**
+ * Issue #4514 T2.6 (Copilot review fold-in). Strips characters that
+ * would produce an unsafe filename when the daemon omits a
+ * Content-Disposition header and the SDK has to derive one from the
+ * session id. The qwen daemon's `SESSION_ID_RE` accepts only
+ * `[0-9a-fA-F-]`, so this is theoretical against a real qwen serve
+ * deployment — but the SDK can in principle talk to any non-qwen
+ * daemon that re-uses the same wire shape, and a session id with a
+ * literal `/` would otherwise produce a filename like
+ * `qwen-session-with/slash.md` that breaks `Blob` / `a.download`
+ * and could traverse upward in some legacy file pickers. Conservative
+ * allowlist: letters, digits, dot, underscore, dash. Everything else
+ * collapses to `_`.
+ */
+function sanitizeSessionIdForFilename(sessionId: string): string {
+  return sessionId.replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
 function readTokenFromEnv(): string | undefined {
   try {
     const proc = (
@@ -991,7 +1009,7 @@ export class DaemonClient {
           res.headers.get('content-type') ?? 'application/octet-stream';
         const filename =
           parseAttachmentFilename(res.headers.get('content-disposition')) ??
-          `qwen-session-${sessionId}.${format}`;
+          `qwen-session-${sanitizeSessionIdForFilename(sessionId)}.${format}`;
         return { sessionId, format, body, contentType, filename };
       },
     );
