@@ -4813,17 +4813,14 @@ describe('createHttpAcpBridge', () => {
       // so asserting the error (if any) is NOT a TypeError makes the test
       // fail when the guard is gone (the previous `.catch(() => {})` passed
       // regardless — dead-code-safe, wenshao).
-      let caught: unknown;
-      await bridge
+      const caught: unknown = await bridge
         .sendPrompt(
           session.sessionId,
           { sessionId: session.sessionId, prompt: undefined as never },
           undefined,
           { clientId: session.clientId },
         )
-        .catch((e) => {
-          caught = e;
-        });
+        .catch((e) => e);
 
       await new Promise((r) => setTimeout(r, 10));
       abort.abort();
