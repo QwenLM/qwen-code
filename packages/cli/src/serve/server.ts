@@ -11,10 +11,12 @@ import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { APPROVAL_MODES, TrustGateError } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
+  allowOriginCors,
   bearerAuth,
   createMutationGate,
   denyBrowserOriginCors,
   hostAllowlist,
+  parseAllowOriginPatterns,
 } from './auth.js';
 import {
   DeviceFlowRegistry,
@@ -512,7 +514,21 @@ export function createServeApp(
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
   // gets a full 10MB `JSON.parse` before the 401 fires — a trivially
   // amplified CPU/memory cost from any wrong-token client.
-  app.use(denyBrowserOriginCors);
+  //
+  // T2.4 (issue #4514): when `--allow-origin` is configured, install the
+  // allowlist middleware instead of the deny-wall. The allowlist owns
+  // both halves of the policy (matched → CORS headers + pass-through or
+  // 204 preflight; unmatched → 403 with the same error envelope as the
+  // wall). When `--allow-origin` is empty/undefined, the install path
+  // is unchanged so today's behavior is bit-for-bit preserved. Pattern
+  // parsing happens in `runQwenServe.ts` for boot-time validation; here
+  // we just hand the already-validated arg list to `parseAllowOriginPatterns`
+  // which fast-paths a Set.
+  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
+    app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
+  } else {
+    app.use(denyBrowserOriginCors);
+  }
   app.use(hostAllowlist(opts.hostname, getPort));
 
   // --- Demo page: mirrors the `/health` loopback-gating pattern.
@@ -656,6 +672,10 @@ export function createServeApp(
       features: getAdvertisedServeFeatures(undefined, {
         requireAuth: opts.requireAuth === true,
         mcpPoolActive: opts.mcpPoolActive !== false,
+        // T2.4 (issue #4514): advertise `allow_origin` iff the daemon
+        // was booted with at least one `--allow-origin` pattern.
+        allowOriginActive:
+          opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
       }),
       modelServices: [],
       // #3803 §02: surface the bound workspace so clients can detect

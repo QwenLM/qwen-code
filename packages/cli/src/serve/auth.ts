@@ -28,6 +28,158 @@ export const denyBrowserOriginCors: RequestHandler = (
 };
 
 /**
+ * T2.4 (issue #4514). Parsed shape of `--allow-origin <pattern>...`. The
+ * literal `*` collapses into a single boolean flag; explicit origin
+ * strings live in a Set keyed by the lowercased origin (RFC 6454 §4
+ * scheme/host case-insensitivity, port-sensitive).
+ */
+export interface ParsedAllowOriginPatterns {
+  allowAny: boolean;
+  origins: Set<string>;
+}
+
+/**
+ * T2.4 (issue #4514). Thrown by `parseAllowOriginPatterns` when an entry
+ * is neither the `*` literal nor a value that round-trips through
+ * `new URL(...).origin`. Caught at boot in `runQwenServe` and converted
+ * to a structured stderr message identifying the malformed entry.
+ *
+ * Rejection is strict by intent: trailing slashes, paths, userinfo, and
+ * query strings all fail the equality check. Auto-normalizing would
+ * silently accept ambiguous input — operators are better served by an
+ * explicit "fix your config" than a silent accept-and-rewrite.
+ */
+export class InvalidAllowOriginPatternError extends Error {
+  readonly pattern: string;
+  constructor(pattern: string, reason: string) {
+    super(
+      `Invalid --allow-origin pattern ${JSON.stringify(pattern)}: ${reason}. ` +
+        'Expected `*` or a URL origin of the form `<scheme>://<host>[:<port>]` ' +
+        '(no trailing slash, no path, no userinfo, no query).',
+    );
+    this.name = 'InvalidAllowOriginPatternError';
+    this.pattern = pattern;
+  }
+}
+
+/**
+ * T2.4 (issue #4514). Validate the raw `--allow-origin` arg list and fold
+ * it into the lookup-friendly `ParsedAllowOriginPatterns` shape. Throws
+ * `InvalidAllowOriginPatternError` on the first malformed entry so the
+ * operator sees the exact value to fix.
+ *
+ * Entries are matched origin-style (scheme + host + port). Scheme/host
+ * lowercase per RFC 6454 §4; port stays exact (origins don't carry a
+ * path, so there's nothing to canonicalize past `.origin`).
+ */
+export function parseAllowOriginPatterns(
+  raw: readonly string[],
+): ParsedAllowOriginPatterns {
+  const origins = new Set<string>();
+  let allowAny = false;
+  for (const entry of raw) {
+    if (entry === '*') {
+      allowAny = true;
+      continue;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(entry);
+    } catch {
+      throw new InvalidAllowOriginPatternError(entry, 'not a parseable URL');
+    }
+    if (parsed.origin !== entry) {
+      throw new InvalidAllowOriginPatternError(
+        entry,
+        `expected the canonical origin ${JSON.stringify(parsed.origin)} ` +
+          'without trailing slash, path, userinfo, or query',
+      );
+    }
+    origins.add(parsed.origin.toLowerCase());
+  }
+  return { allowAny, origins };
+}
+
+/**
+ * T2.4 (issue #4514). Build the CORS allowlist middleware. Replaces
+ * `denyBrowserOriginCors` when `--allow-origin` is configured — owns both
+ * halves of the policy (match → allow with CORS headers, unmatched →
+ * 403). When no `Origin` header is present (CLI/SDK clients), passes
+ * through with no work.
+ *
+ * Mirrors the `denyBrowserOriginCors` 403 body verbatim so existing
+ * clients that parsed the wall's response don't have to special-case the
+ * allowlist deployment shape.
+ *
+ * OPTIONS preflight short-circuits with 204 — standard CORS pattern. Safe
+ * because the preflight only confirms which methods/headers the daemon
+ * will accept; the actual subsequent request still runs through the full
+ * chain (`hostAllowlist` → `bearerAuth` → routes), so any DNS-rebinding
+ * defense or auth check still fires before state is read or mutated.
+ *
+ * `Access-Control-Allow-Credentials` is intentionally NOT set: the
+ * daemon's auth model is bearer-token-in-`Authorization`, which works
+ * cross-origin without `credentials: 'include'`. Adding credentials
+ * would require a separate flag plus a "no `*` allowed" boot check
+ * (CORS spec forbids `*` with credentials).
+ */
+export function allowOriginCors(
+  patterns: ParsedAllowOriginPatterns,
+): RequestHandler {
+  const allowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
+  const allowedHeaders =
+    'Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID';
+  const maxAgeSeconds = '86400';
+  return (req: Request, res: Response, next: NextFunction) => {
+    const origin = req.headers.origin;
+    if (!origin) {
+      next();
+      return;
+    }
+    // `Origin: null` is sent by sandboxed iframes, file:// documents,
+    // data: URLs, and cross-origin redirects. Echoing it under `*`
+    // would let any attacker page mint a sandboxed iframe to read API
+    // responses without holding the bearer locally. The CORS spec
+    // doesn't forbid `null` echoes but the threat surface is non-
+    // obvious. Operators who genuinely need null origins (a rare set
+    // — typically only debugging file:// HTML) can ask for an opt-in
+    // flag if/when that materializes.
+    if (origin === 'null') {
+      res.setHeader('Vary', 'Origin');
+      res.status(403).json({ error: 'Request denied by CORS policy' });
+      return;
+    }
+    const matched =
+      patterns.allowAny || patterns.origins.has(origin.toLowerCase());
+    if (matched) {
+      // Echo the request's origin verbatim (not literal `*`) even under
+      // the any-origin pattern. Browser caches use the echo paired with
+      // `Vary: Origin` as the response key, and echoing leaves room to
+      // add `Access-Control-Allow-Credentials` in a future flag without
+      // a schema change (the CORS spec forbids `*` with credentials).
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', allowedMethods);
+      res.setHeader('Access-Control-Allow-Headers', allowedHeaders);
+      res.setHeader('Access-Control-Max-Age', maxAgeSeconds);
+      if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+      }
+      next();
+      return;
+    }
+    // `Vary: Origin` on the reject path too — the daemon now returns
+    // different status codes for the same URL depending on Origin, and
+    // an intermediary cache (corporate proxy, CDN) without origin
+    // awareness could otherwise serve a stale 403 to a different
+    // origin. The match path sets the same header for symmetry.
+    res.setHeader('Vary', 'Origin');
+    res.status(403).json({ error: 'Request denied by CORS policy' });
+  };
+}
+
+/**
  * Reject requests whose Host header isn't one of the bound interfaces.
  * Defense against DNS rebinding when the daemon is on loopback.
  *
