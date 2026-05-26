@@ -1193,24 +1193,35 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           ),
           transportClosed,
         ]);
-        entry.events.publish({
-          type: 'model_switched',
-          data: { sessionId: entry.sessionId, modelId },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
+        // Guard the publish (mirrors setSessionModel): a bus-closed throw here
+        // must NOT fall into the catch below and misreport a successful switch
+        // as model_switch_failed.
+        try {
+          entry.events.publish({
+            type: 'model_switched',
+            data: { sessionId: entry.sessionId, modelId },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        } catch {
+          /* bus closed */
+        }
       } catch (err) {
         // Surface the failure to ALL attached clients, not just the
         // caller — a shared session swallowing a denied model change
         // silently would surprise the others.
-        entry.events.publish({
-          type: 'model_switch_failed',
-          data: {
-            sessionId: entry.sessionId,
-            requestedModelId: modelId,
-            error: err instanceof Error ? err.message : String(err),
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
+        try {
+          entry.events.publish({
+            type: 'model_switch_failed',
+            data: {
+              sessionId: entry.sessionId,
+              requestedModelId: modelId,
+              error: err instanceof Error ? err.message : String(err),
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        } catch {
+          /* bus closed */
+        }
         throw err;
       } finally {
         entry.modelRoundtripInFlight = false;
