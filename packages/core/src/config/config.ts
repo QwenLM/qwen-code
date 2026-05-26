@@ -2478,6 +2478,11 @@ export class Config {
       );
     }
 
+    // T2.8 — runtime layer wins over settings + extensions (shadow semantics)
+    for (const [name, cfg] of this.runtimeMcpServers) {
+      mcpServers[name] = cfg;
+    }
+
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(
         Object.entries(mcpServers).filter(([key]) =>
