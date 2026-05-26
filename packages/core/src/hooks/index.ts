@@ -12,7 +12,7 @@ export { HookSystem } from './hookSystem.js';
 export { HookRegistry } from './hookRegistry.js';
 export { HookRunner } from './hookRunner.js';
 export { HookAggregator } from './hookAggregator.js';
-export { HookPlanner } from './hookPlanner.js';
+export { HookPlanner, hookEventSupportsMatcher } from './hookPlanner.js';
 export { HookEventHandler } from './hookEventHandler.js';
 
 // Export new hook runners

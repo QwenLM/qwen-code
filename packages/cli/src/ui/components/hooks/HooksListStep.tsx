@@ -10,6 +10,13 @@ import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { HookEventDisplayInfo } from './types.js';
 import { t } from '../../../i18n/index.js';
 
+function configCountFor(hook: HookEventDisplayInfo): number {
+  return hook.matcherGroups.reduce(
+    (sum, group) => sum + group.configs.length,
+    0,
+  );
+}
+
 interface HooksListStepProps {
   hooks: HookEventDisplayInfo[];
   selectedIndex: number;
@@ -21,7 +28,6 @@ export function HooksListStep({
 }: HooksListStepProps): React.JSX.Element {
   const { columns: terminalWidth } = useTerminalSize();
 
-  // Calculate responsive width for hook name column (min 20, max 35)
   const hookNameWidth = Math.min(
     35,
     Math.max(20, Math.floor(terminalWidth * 0.25)),
@@ -35,13 +41,11 @@ export function HooksListStep({
     );
   }
 
-  // Calculate total configured hooks
   const totalConfigured = hooks.reduce(
-    (sum, hook) => sum + hook.configs.length,
+    (sum, hook) => sum + configCountFor(hook),
     0,
   );
 
-  // Get the correct plural/singular form
   const hooksConfiguredText =
     totalConfigured === 1
       ? t('{{count}} hook configured', { count: String(totalConfigured) })
@@ -66,7 +70,7 @@ export function HooksListStep({
 
       {hooks.map((hook, index) => {
         const isSelected = index === selectedIndex;
-        const configCount = hook.configs.length;
+        const configCount = configCountFor(hook);
         const maxDigits = String(hooks.length).length;
         const paddedIndex = String(index + 1).padStart(maxDigits);
 
