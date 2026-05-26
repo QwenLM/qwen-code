@@ -265,7 +265,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
 
     const run = async () => {
       const client = new DaemonClient({
-        baseUrl: opts.baseUrl,
+        baseUrl: opts.baseUrl || window.location.origin,
         token: opts.token,
       });
       let session: DaemonSessionClient | undefined;
@@ -799,32 +799,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
       async readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile> {
         const session = sessionRef.current;
         if (!session) throw new Error('Not connected');
-        const query = new URLSearchParams({ path: filePath });
-        const headers: Record<string, string> = {};
-        if (opts.token) headers['Authorization'] = `Bearer ${opts.token}`;
-        if (session.clientId) headers['X-Qwen-Client-Id'] = session.clientId;
-        const response = await fetch(
-          `${stripTrailingSlashes(opts.baseUrl)}/file?${query.toString()}`,
-          { headers },
-        );
-        if (!response.ok) {
-          let message = `GET /file failed (${response.status})`;
-          try {
-            const body = (await response.json()) as {
-              error?: unknown;
-              hint?: unknown;
-            };
-            if (typeof body.error === 'string') {
-              message = body.hint
-                ? `${body.error} ${String(body.hint)}`
-                : body.error;
-            }
-          } catch {
-            /* keep fallback */
-          }
-          throw new Error(message);
-        }
-        return (await response.json()) as DaemonWorkspaceFile;
+        return session.client.readWorkspaceFile(filePath, {}, session.clientId);
       },
 
       async writeMemory(
@@ -874,7 +849,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         return session.updateMetadata({ displayName });
       },
     }),
-    [opts.baseUrl, opts.token, store],
+    [store],
   );
 
   useEffect(() => {
