@@ -45,10 +45,24 @@ export function agentTools(state: BridgeState): any[] {
           });
 
           // Wait for the collector to be resolved by _meta event (with timeout).
+          const COLLECT_TIMEOUT_MS = 30000;
+          let timedOut = false;
           await Promise.race([
             collector.promise,
-            new Promise((r) => setTimeout(r, 30000)),
+            new Promise<void>((r) =>
+              setTimeout(() => {
+                timedOut = true;
+                r();
+              }, COLLECT_TIMEOUT_MS),
+            ),
           ]);
+
+          if (timedOut && collector.texts.length === 0) {
+            throw new Error(
+              `Timed out waiting for agent response (${COLLECT_TIMEOUT_MS / 1000}s). ` +
+                'The agent may still be processing. Check session_context for status.',
+            );
+          }
 
           const responseText =
             collector.texts.join('') || '(task completed, no text output)';
