@@ -2549,21 +2549,21 @@ export class GeminiChat {
           // Context usage tracks prompt size; output isn't in history yet.
           const lastPromptTokenCount =
             usageMetadata.promptTokenCount ?? usageMetadata.totalTokenCount;
-          this.lastCandidatesTokenCount =
-            usageMetadata.promptTokenCount !== undefined
-              ? usageMetadata.totalTokenCount !== undefined
-                ? Math.max(
-                    0,
-                    usageMetadata.totalTokenCount -
-                      usageMetadata.promptTokenCount,
-                  )
-                : (usageMetadata.candidatesTokenCount ?? 0) +
-                  (usageMetadata.thoughtsTokenCount ?? 0)
-              : 0;
           if (lastPromptTokenCount) {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
             this.lastPromptTokenCount = lastPromptTokenCount;
+            this.lastCandidatesTokenCount =
+              usageMetadata.promptTokenCount !== undefined
+                ? usageMetadata.totalTokenCount !== undefined
+                  ? Math.max(
+                      0,
+                      usageMetadata.totalTokenCount -
+                        usageMetadata.promptTokenCount,
+                    )
+                  : (usageMetadata.candidatesTokenCount ?? 0) +
+                    (usageMetadata.thoughtsTokenCount ?? 0)
+                : 0;
             // Mirror to the global telemetry only when wired — subagents
             // pass `telemetryService=undefined` to keep their context usage
             // out of the main session's UI counters.

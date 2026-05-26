@@ -29,6 +29,10 @@ import {
   ChatCompressionService,
   MAX_CONSECUTIVE_FAILURES,
 } from '../services/chatCompressionService.js';
+import {
+  estimateContentTokens,
+  estimatePromptTokens,
+} from '../services/tokenEstimation.js';
 import { SessionStartSource } from '../hooks/types.js';
 
 // Mock fs module to prevent actual file system operations during tests
@@ -2703,6 +2707,100 @@ describe('GeminiChat', async () => {
       expect(
         compressSpy.mock.calls[1][1].precomputedEffectiveTokens,
       ).toBeLessThan(177_000);
+    });
+
+    it('resets previous response candidate tokens after successful compression', async () => {
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 50_000,
+            newTokenCount: 50_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ack' }] },
+          ],
+          info: {
+            originalTokenCount: 176_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 40_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          makeStreamResponse('first', {
+            promptTokenCount: 176_000,
+            candidatesTokenCount: 100_000,
+            totalTokenCount: 276_000,
+          }),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('after compression'))
+        .mockResolvedValueOnce(makeStreamResponse('after reset'));
+
+      chat.setLastPromptTokenCount(50_000);
+      const firstStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'prime candidate tokens' },
+        'prompt-prime-compression-reset',
+      );
+      for await (const _ of firstStream) {
+        /* consume */
+      }
+
+      const rescueStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'trigger compression' },
+        'prompt-compression-reset-rescue',
+      );
+      for await (const _ of rescueStream) {
+        /* consume */
+      }
+
+      const followUpStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'after compression reset' },
+        'prompt-after-compression-reset',
+      );
+      for await (const _ of followUpStream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(3);
+      expect(compressSpy.mock.calls[1][1].force).toBe(true);
+      expect(
+        compressSpy.mock.calls[2][1].precomputedEffectiveTokens,
+      ).toBeLessThan(100_000);
+    });
+
+    it('ignores previous response candidate tokens when the prompt token count is zero', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'history question' }] },
+        { role: 'model', parts: [{ text: 'history answer' }] },
+      ];
+      const userMessage: Content = {
+        role: 'user',
+        parts: [{ text: 'follow-up question' }],
+      };
+
+      expect(estimatePromptTokens(history, userMessage, 0, 9999)).toBe(
+        estimateContentTokens([...history, userMessage]),
+      );
     });
 
     it('forwards latched consecutiveFailures into hard-rescue (no pre-call reset); success recovers via the post-call branch', async () => {
