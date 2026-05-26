@@ -21,12 +21,7 @@ import type {
   ServeSessionContextStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
-  ServeWorkspaceEnvStatus,
   ServeWorkspaceMcpToolsStatus,
-  ServeWorkspaceMcpStatus,
-  ServeWorkspacePreflightStatus,
-  ServeWorkspaceProvidersStatus,
-  ServeWorkspaceSkillsStatus,
   ServeWorkspaceToolsStatus,
   ServeSessionContextUsageStatus,
   ServeSessionStatsStatus,
@@ -288,45 +283,37 @@ export interface HttpAcpBridge {
   knownClientIds(): ReadonlySet<string>;
 
   /**
-   * Read daemon-runtime MCP status for the bound workspace. Does not spawn
-   * an ACP child when the daemon is idle.
+   * Generic workspace-status query delegated through the live ACP channel.
+   * Returns `idle()` when no child is running. Used by DaemonWorkspaceService
+   * to forward status methods without coupling to their concrete shapes.
    */
-  getWorkspaceMcpStatus(): Promise<ServeWorkspaceMcpStatus>;
+  queryWorkspaceStatus<T>(method: string, idle: () => T): Promise<T>;
+
+  /**
+   * Generic workspace command invocation delegated through the live ACP
+   * channel. Throws `SessionNotFoundError` when no child is running (no
+   * idle fallback). Used by DaemonWorkspaceService for mutations that
+   * require an active channel (e.g. MCP restart).
+   */
+  invokeWorkspaceCommand<T>(
+    method: string,
+    params?: Record<string, unknown>,
+    opts?: { timeoutMs?: number },
+  ): Promise<T>;
 
   /**
    * Read discovered MCP tools for one server from the live ACP registry.
+   * (New in upstream — kept in bridge pending workspace service migration.)
    */
   getWorkspaceMcpToolsStatus(
     serverName: string,
   ): Promise<ServeWorkspaceMcpToolsStatus>;
 
   /**
-   * Read daemon-runtime skill status for the bound workspace.
-   */
-  getWorkspaceSkillsStatus(): Promise<ServeWorkspaceSkillsStatus>;
-
-  /**
    * Read the live built-in tool registry for the bound workspace.
+   * (New in upstream — kept in bridge pending workspace service migration.)
    */
   getWorkspaceToolsStatus(): Promise<ServeWorkspaceToolsStatus>;
-
-  /**
-   * Read daemon-runtime model-provider status for the bound workspace.
-   */
-  getWorkspaceProvidersStatus(): Promise<ServeWorkspaceProvidersStatus>;
-
-  /**
-   * Read the daemon-process environment snapshot for the bound workspace.
-   * Answered entirely from `process.*` state — does not consult ACP.
-   */
-  getWorkspaceEnvStatus(): Promise<ServeWorkspaceEnvStatus>;
-
-  /**
-   * Read daemon-runtime preflight diagnostics. Daemon-level cells are
-   * always populated; ACP-level cells require a live ACP child — when
-   * the daemon is idle they are emitted with `status: 'not_started'`.
-   */
-  getWorkspacePreflightStatus(): Promise<ServeWorkspacePreflightStatus>;
 
   /** Read the current ACP context/config state for a live session. */
   getSessionContextStatus(
@@ -419,29 +406,6 @@ export interface HttpAcpBridge {
   ): Promise<ShellCommandResult>;
 
   /**
-   * Add or remove a tool name from the workspace's `tools.disabled`
-   * settings list and fan-out a `tool_toggled` event to every live
-   * session SSE bus.
-   */
-  setWorkspaceToolEnabled(
-    toolName: string,
-    enabled: boolean,
-    originatorClientId: string | undefined,
-  ): Promise<{ toolName: string; enabled: boolean }>;
-
-  /**
-   * Scaffold an empty `QWEN.md` (or whatever
-   * `getCurrentGeminiMdFilename()` returns) at the bound workspace
-   * root. Default refuses to overwrite via
-   * `WorkspaceInitConflictError`; `opts.force === true` overwrites.
-   */
-  initWorkspace(
-    opts: { force?: boolean },
-    originatorClientId: string | undefined,
-  ): Promise<{
-    path: string;
-    action: 'created' | 'overwrote' | 'noop';
-  }>;
 
   /**
    * T2.8 (#4514): Add a runtime MCP server through the ACP child's
