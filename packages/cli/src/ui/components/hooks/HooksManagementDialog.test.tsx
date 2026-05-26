@@ -5,10 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { cleanup } from 'ink-testing-library';
 import { HooksManagementDialog } from './HooksManagementDialog.js';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { loadSettings, SettingScope } from '../../../config/settings.js';
 import type { Key } from '../../contexts/KeypressContext.js';
 
 vi.mock('../../hooks/useKeypress.js', () => ({
@@ -17,6 +19,8 @@ vi.mock('../../hooks/useKeypress.js', () => ({
 
 const mockedUseKeypress = vi.mocked(useKeypress);
 const mockedUseConfig = vi.mocked(useConfig);
+const mockedLoadSettings = vi.mocked(loadSettings);
+let keypressHandler: ((key: Key) => void) | null = null;
 
 /**
  * Returns a `useConfig` return value with `disableAllHooks` flipped on, while
@@ -140,9 +144,23 @@ function createKey(name: string, sequence = ''): Key {
   };
 }
 
+function mockSettingsHooks(userHooks: Record<string, unknown>): void {
+  mockedLoadSettings.mockReturnValue({
+    forScope: vi.fn((scope: SettingScope) => ({
+      settings:
+        scope === SettingScope.User ? { hooks: userHooks } : { hooks: {} },
+    })),
+  } as unknown as ReturnType<typeof loadSettings>);
+}
+
+function pressKey(name: string, sequence = ''): void {
+  const latestHandler = mockedUseKeypress.mock.calls.at(-1)?.[0];
+  expect(latestHandler).toBeDefined();
+  latestHandler!(createKey(name, sequence));
+}
+
 describe('HooksManagementDialog', () => {
   const mockOnClose = vi.fn();
-  let keypressHandler: ((key: Key) => void) | null = null;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -155,6 +173,7 @@ describe('HooksManagementDialog', () => {
 
   afterEach(() => {
     keypressHandler = null;
+    cleanup();
   });
 
   it('should render loading state initially', () => {
@@ -203,5 +222,146 @@ describe('HooksManagementDialog', () => {
     keypressHandler!(createKey('escape', '\x1b'));
 
     expect(mockOnClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('should navigate from a matcher hook to matcher detail', async () => {
+    mockSettingsHooks({
+      PreToolUse: [
+        {
+          matcher: 'Read',
+          hooks: [{ type: 'command', command: 'echo read' }],
+        },
+        {
+          matcher: 'Bash',
+          hooks: [{ type: 'command', command: 'echo bash' }],
+        },
+      ],
+    });
+
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Hooks');
+    });
+
+    pressKey('return');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('[User] Read');
+    });
+
+    pressKey('down');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('❯ 2. [User] Bash');
+    });
+    pressKey('return');
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('PreToolUse - Matcher: Bash');
+      expect(lastFrame()).toContain('echo bash');
+    });
+
+    pressKey('escape', '\x1b');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('PreToolUse - Matchers');
+    });
+  });
+
+  it('should navigate from matcher detail to config detail', async () => {
+    mockSettingsHooks({
+      PreToolUse: [
+        {
+          matcher: 'Read',
+          hooks: [{ type: 'command', command: 'echo read' }],
+        },
+        {
+          matcher: 'Bash',
+          hooks: [
+            { type: 'command', command: 'echo first' },
+            { type: 'command', command: 'echo second' },
+          ],
+        },
+      ],
+    });
+
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Hooks');
+    });
+
+    pressKey('return');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('[User] Read');
+    });
+    pressKey('down');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('❯ 2. [User] Bash');
+    });
+    pressKey('return');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('PreToolUse - Matcher: Bash');
+    });
+
+    pressKey('down');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('❯ 2. [command] echo second');
+    });
+    pressKey('return');
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Hook details');
+      expect(lastFrame()).toContain('echo second');
+    });
+  });
+
+  it('should navigate directly from a non-matcher hook to config detail', async () => {
+    mockSettingsHooks({
+      Stop: [
+        {
+          hooks: [{ type: 'command', command: 'echo stop one' }],
+        },
+        {
+          hooks: [{ type: 'command', command: 'echo stop two' }],
+        },
+      ],
+    });
+
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Hooks');
+    });
+
+    for (let i = 0; i < 6; i++) {
+      pressKey('down');
+      await vi.waitFor(() => {
+        expect(lastFrame()).toContain(`❯  ${i + 2}.`);
+      });
+    }
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('❯  7. Stop');
+    });
+    pressKey('return');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Stop');
+      expect(lastFrame()).toContain('echo stop one');
+    });
+
+    pressKey('down');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('❯ 2. [command] echo stop two');
+    });
+    pressKey('return');
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Hook details');
+      expect(lastFrame()).toContain('echo stop two');
+    });
   });
 });

@@ -18,6 +18,7 @@ import type {
   HookEventName,
 } from '@qwen-code/qwen-code-core';
 import { supportsMatchers } from '../components/hooks/constants.js';
+import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
 
 /**
  * Format hook source for display
@@ -90,11 +91,6 @@ const listCommand: SlashCommand = {
         ),
       };
     }
-
-    const normalizeMatcher = (matcher: string | undefined): string => {
-      const trimmed = matcher?.trim();
-      return trimmed ? trimmed : '*';
-    };
 
     interface FlattenedHook {
       name: string;
