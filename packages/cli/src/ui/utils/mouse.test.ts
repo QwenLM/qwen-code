@@ -63,6 +63,19 @@ describe('parseSGRMouseEvent', () => {
     expect(parseSGRMouseEvent('not-a-mouse-event')).toBeNull();
     expect(parseSGRMouseEvent(`${ESC}[<10`)).toBeNull(); // incomplete
   });
+
+  it('does not match a well-formed X11 sequence', () => {
+    // Security property: useMouseEvents parses via parseSGRMouseEvent (not
+    // parseMouseEvent) so an X11 sequence arriving as pasted text cannot
+    // misfire a mouse event. The SGR regex requires `<` at position 3 where
+    // X11 has `M`, so it structurally cannot match X11.
+    const byte0 = String.fromCharCode(64 + 32); // wheel up
+    const byte1 = String.fromCharCode(10 + 32);
+    const byte2 = String.fromCharCode(20 + 32);
+    const x11 = `${ESC}[M${byte0}${byte1}${byte2}`;
+    expect(parseX11MouseEvent(x11)).not.toBeNull(); // it IS a valid X11 seq
+    expect(parseSGRMouseEvent(x11)).toBeNull(); // but SGR parser ignores it
+  });
 });
 
 describe('parseX11MouseEvent', () => {
