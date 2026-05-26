@@ -138,6 +138,18 @@ describe('elicitation helpers', () => {
       isValid: true,
       value: 12.5,
     });
+    expect(validateElicitationInput('.5', { type: 'number' })).toEqual({
+      isValid: true,
+      value: 0.5,
+    });
+    expect(validateElicitationInput('1e-3', { type: 'number' })).toEqual({
+      isValid: true,
+      value: 0.001,
+    });
+    expect(validateElicitationInput('1e', { type: 'number' })).toEqual({
+      isValid: false,
+      error: 'Enter a number',
+    });
   });
 
   it('handles server-provided string patterns defensively', () => {

@@ -332,14 +332,10 @@ export function validateElicitationInput(
 
   if (type === 'number' || type === 'integer') {
     const trimmedValue = stringValue.trim();
-    const numberPattern =
-      type === 'integer'
-        ? /^[+-]?\d+$/
-        : /^[+-]?(?:(?:\d+\.?\d*)|(?:\.\d+))(?:[eE][+-]?\d+)?$/;
     const numberValue = Number(trimmedValue);
     if (
       trimmedValue === '' ||
-      !numberPattern.test(trimmedValue) ||
+      !isValidNumericLiteral(trimmedValue, type === 'integer') ||
       !Number.isFinite(numberValue) ||
       (type === 'integer' && !Number.isInteger(numberValue))
     ) {
@@ -399,6 +395,57 @@ export function validateElicitationInput(
   }
 
   return { isValid: true, value: stringValue };
+}
+
+function isAsciiDigit(value: string, index: number): boolean {
+  const code = value.charCodeAt(index);
+  return code >= 48 && code <= 57;
+}
+
+function consumeSign(value: string, index: number): number {
+  return value[index] === '+' || value[index] === '-' ? index + 1 : index;
+}
+
+function consumeDigits(value: string, index: number): number {
+  let cursor = index;
+  while (cursor < value.length && isAsciiDigit(value, cursor)) {
+    cursor++;
+  }
+  return cursor;
+}
+
+function isValidNumericLiteral(value: string, integerOnly: boolean): boolean {
+  let cursor = consumeSign(value, 0);
+  const integerStart = cursor;
+  cursor = consumeDigits(value, cursor);
+  const hasIntegerDigits = cursor > integerStart;
+
+  if (integerOnly) {
+    return hasIntegerDigits && cursor === value.length;
+  }
+
+  let hasFractionDigits = false;
+  if (value[cursor] === '.') {
+    cursor++;
+    const fractionStart = cursor;
+    cursor = consumeDigits(value, cursor);
+    hasFractionDigits = cursor > fractionStart;
+  }
+
+  if (!hasIntegerDigits && !hasFractionDigits) {
+    return false;
+  }
+
+  if (value[cursor] === 'e' || value[cursor] === 'E') {
+    cursor = consumeSign(value, cursor + 1);
+    const exponentStart = cursor;
+    cursor = consumeDigits(value, cursor);
+    if (cursor === exponentStart) {
+      return false;
+    }
+  }
+
+  return cursor === value.length;
 }
 
 function validatePattern(
