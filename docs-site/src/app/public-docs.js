@@ -7,7 +7,7 @@ export const PUBLIC_DOC_ROOTS = ['users', 'developers'];
 const PUBLIC_DOC_ROOT_SET = new Set(PUBLIC_DOC_ROOTS);
 
 function publicRootFromSegments(segments = []) {
-  if (segments.length === 0) {
+  if (segments.length === 0 || (segments.length === 1 && segments[0] === '')) {
     return undefined;
   }
 

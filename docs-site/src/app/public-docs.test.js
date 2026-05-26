@@ -5,6 +5,7 @@ import { filterPublicStaticParams, isPublicDocsPath } from './public-docs.js';
 describe('isPublicDocsPath', () => {
   it.each([
     [[], true],
+    [[''], true],
     [['users', 'foo'], true],
     [['design', 'bar'], false],
     [['en', 'users'], true],
@@ -20,6 +21,7 @@ describe('filterPublicStaticParams', () => {
     expect(
       filterPublicStaticParams([
         { mdxPath: [] },
+        { mdxPath: [''] },
         { mdxPath: ['users', 'foo'] },
         { mdxPath: ['en', 'developers'] },
         { mdxPath: ['design', 'bar'] },
@@ -27,6 +29,7 @@ describe('filterPublicStaticParams', () => {
       ]),
     ).toEqual([
       { mdxPath: [] },
+      { mdxPath: [''] },
       { mdxPath: ['users', 'foo'] },
       { mdxPath: ['en', 'developers'] },
     ]);
