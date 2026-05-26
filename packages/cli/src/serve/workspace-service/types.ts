@@ -7,8 +7,6 @@
 /**
  * Type definitions for the DaemonWorkspaceService layer.
  *
- * The service encapsulates workspace-scoped capabilities that the
- * `HttpAcpBridge` (now `AcpSessionBridge`) previously handled inline.
  * Each sub-service gets a `WorkspaceRequestContext` as its first
  * parameter so audit, client-identity, and route metadata flow
  * naturally without threading individual fields.
@@ -72,6 +70,8 @@ export interface WorkspaceRequestContext {
   sessionId?: string;
   /** Route name like 'GET /workspace/memory' for audit. */
   route: string;
+  /** Absolute path to the workspace root — trust boundary. */
+  workspaceCwd: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +135,13 @@ export interface FileService {
     p: ResolvedPath,
     content: string,
   ): Promise<WriteTextAtomicOutcome>;
+
+  edit(
+    ctx: WorkspaceRequestContext,
+    p: ResolvedPath,
+    content: string,
+    opts: WriteTextAtomicOptions,
+  ): Promise<WriteTextAtomicOutcome>;
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +189,9 @@ export interface AuthService {
 
   /** List currently pending device flows. */
   listPendingDeviceFlows(ctx: WorkspaceRequestContext): DeviceFlowPublicView[];
+
+  /** Get overall auth status for the workspace. */
+  getAuthStatus(ctx: WorkspaceRequestContext): Promise<{ authenticated: boolean; pendingFlows: DeviceFlowPublicView[] }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,16 +282,20 @@ export interface WriteMemoryResult {
  * Workspace memory (QWEN.md / AGENTS.md) read + write operations.
  */
 export interface MemoryService {
-  /** Read the current workspace memory status (file list + totals). */
-  getMemoryStatus(
-    ctx: WorkspaceRequestContext,
-  ): Promise<ServeWorkspaceMemoryStatus>;
+  /** List memory entries (file list + totals). */
+  list(ctx: WorkspaceRequestContext): Promise<ServeWorkspaceMemoryStatus>;
+
+  /** Read a specific memory entry by key/path. */
+  read(ctx: WorkspaceRequestContext, key: string): Promise<{ content: string; path: string }>;
 
   /** Write content to a workspace or global memory file. */
-  writeMemory(
+  write(
     ctx: WorkspaceRequestContext,
     params: WriteMemoryParams,
   ): Promise<WriteMemoryResult>;
+
+  /** Delete a memory entry. */
+  delete(ctx: WorkspaceRequestContext, key: string): Promise<{ deleted: boolean }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +308,7 @@ export interface MemoryService {
  * without taking a direct reference to the bridge (avoiding circular
  * dependency).
  */
-export type QueryWorkspaceStatusFn = <T>(method: string) => Promise<T>;
+export type QueryWorkspaceStatusFn = <T>(method: string, idle: () => T) => Promise<T>;
 
 /**
  * Callback shape for invoking workspace-level mutation commands
@@ -303,8 +317,8 @@ export type QueryWorkspaceStatusFn = <T>(method: string) => Promise<T>;
  */
 export type InvokeWorkspaceCommandFn = <T>(
   method: string,
-  params: Record<string, unknown>,
-  originatorClientId?: string,
+  params?: Record<string, unknown>,
+  opts?: { timeoutMs?: number },
 ) => Promise<T>;
 
 /**
@@ -404,11 +418,20 @@ export interface DaemonWorkspaceServiceDeps {
   /** Canonical absolute path of the bound workspace. */
   boundWorkspace: string;
 
+  /** Context filename (e.g. 'QWEN.md') from workspace settings. */
+  contextFilename: string;
+
   /** Factory for per-request filesystem instances. */
   fsFactory: WorkspaceFileSystemFactory;
 
   /** Device-flow auth registry. */
   deviceFlowRegistry: DeviceFlowRegistry;
+
+  /** Subagent manager for agents CRUD. */
+  subagentManager: unknown;
+
+  /** Persist tool enable/disable to workspace settings file. */
+  persistDisabledTools: (workspace: string, toolName: string, enabled: boolean) => Promise<void>;
 
   /**
    * Query workspace status from the ACP child. The bridge owns the
