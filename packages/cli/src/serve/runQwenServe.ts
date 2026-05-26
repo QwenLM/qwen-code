@@ -857,6 +857,11 @@ export async function runQwenServe(
   // owns workspace-scoped status queries, tool toggle, init, and MCP
   // restart — routes in server.ts delegate here instead of reaching
   // into the bridge for workspace concerns.
+  // Construct the statusProvider once — shared between bridge and workspace
+  // service so both answer env/preflight cells from the same daemon-local
+  // implementation.
+  const statusProviderForWs = createDaemonStatusProvider();
+
   const workspaceService = createDaemonWorkspaceService({
     boundWorkspace,
     contextFilename: contextFilenameForInit ?? 'QWEN.md',
@@ -864,12 +869,16 @@ export async function runQwenServe(
     // Device-flow registry is constructed inside createServeApp (it
     // needs provider map + event sink wiring that lives there). The
     // workspace service's auth sub-service uses it for the auth routes
-    // — those routes are wired in a follow-up PR, so a stub registry
-    // won't be called through the routes we're wiring here. Pass
-    // undefined and let createServeApp construct the registry + inject
-    // it into the workspace service's default path.
-    deviceFlowRegistry: undefined as never,
+    // — those routes are wired in a follow-up PR, so the registry is
+    // not available at this point. Passing undefined is safe because the
+    // type is now optional; auth routes will throw at call-time if
+    // they're invoked before the registry is wired.
+    deviceFlowRegistry: undefined,
     subagentManager: undefined,
+    // Daemon-host status provider for env + preflight cells.
+    statusProvider: statusProviderForWs,
+    // Channel liveness check — proxied through bridge.sessionCount.
+    isChannelLive: () => bridge.sessionCount > 0,
     persistDisabledTools: persistDisabledToolsFn,
     queryWorkspaceStatus: (method, idle) =>
       bridge.queryWorkspaceStatus(method, idle),

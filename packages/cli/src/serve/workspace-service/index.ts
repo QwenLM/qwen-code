@@ -39,6 +39,8 @@ import { createAuthService } from './authService.js';
 import { createAgentsService } from './agentsService.js';
 import { createMemoryService } from './memoryService.js';
 
+import type { DeviceFlowRegistry } from '../auth/deviceFlow.js';
+
 import type {
   DaemonWorkspaceService,
   DaemonWorkspaceServiceDeps,
@@ -81,21 +83,6 @@ async function canonicalizeExistingAncestor(
   }
 }
 
-/**
- * Construct an idle preflight envelope (no ACP child available).
- */
-function createIdlePreflightStatus(
-  workspaceCwd: string,
-): ServeWorkspacePreflightStatus {
-  return {
-    v: STATUS_SCHEMA_VERSION,
-    workspaceCwd,
-    initialized: true,
-    acpChannelLive: false,
-    cells: createIdleAcpPreflightCells(),
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -109,6 +96,8 @@ export function createDaemonWorkspaceService(
     fsFactory,
     deviceFlowRegistry,
     subagentManager,
+    statusProvider,
+    isChannelLive,
     persistDisabledTools,
     queryWorkspaceStatus,
     invokeWorkspaceCommand,
@@ -122,8 +111,11 @@ export function createDaemonWorkspaceService(
     boundWorkspace,
   });
 
+  // Device-flow registry may be absent during early boot (it's constructed
+  // inside createServeApp and injected later). Auth routes that reach through
+  // `workspaceService.auth` will throw at call time if the registry is missing.
   const auth = createAuthService({
-    registry: deviceFlowRegistry,
+    registry: deviceFlowRegistry as DeviceFlowRegistry,
   });
 
   const agents = createAgentsService({
@@ -170,16 +162,82 @@ export function createDaemonWorkspaceService(
     },
 
     async getWorkspaceEnvStatus(_ctx: WorkspaceRequestContext) {
-      return queryWorkspaceStatus('qwen/status/workspace/env', () =>
-        createIdleEnvStatus(boundWorkspace, false),
-      );
+      // Env status is answered daemon-locally from process state — no ACP
+      // query needed. The old bridge used statusProvider.getEnvStatus()
+      // directly; replicate that behavior here.
+      if (!statusProvider) {
+        return createIdleEnvStatus(boundWorkspace, false);
+      }
+      try {
+        const acpChannelLive = isChannelLive?.() ?? false;
+        return await statusProvider.getEnvStatus(
+          boundWorkspace,
+          acpChannelLive,
+        );
+      } catch {
+        return createIdleEnvStatus(boundWorkspace, false);
+      }
     },
 
     async getWorkspacePreflightStatus(_ctx: WorkspaceRequestContext) {
-      return queryWorkspaceStatus(
-        SERVE_STATUS_EXT_METHODS.workspacePreflight,
-        () => createIdlePreflightStatus(boundWorkspace),
-      );
+      // Preflight stitches two halves:
+      // 1. Daemon cells from statusProvider.getDaemonPreflightCells() — always local
+      // 2. ACP cells from queryWorkspaceStatus (live ACP child) or idle placeholders
+      const acpChannelLive = isChannelLive?.() ?? false;
+
+      // Get daemon cells (local, no ACP query).
+      let daemonCells: ServeWorkspacePreflightStatus['cells'] = [];
+      if (statusProvider) {
+        try {
+          daemonCells =
+            await statusProvider.getDaemonPreflightCells(boundWorkspace);
+        } catch {
+          // Daemon cells failing is non-fatal; proceed with empty.
+        }
+      }
+
+      // Get ACP cells — either from live child or idle placeholders.
+      let acpCells: ServeWorkspacePreflightStatus['cells'] =
+        createIdleAcpPreflightCells();
+      let errors: ServeWorkspacePreflightStatus['errors'] | undefined;
+
+      if (acpChannelLive) {
+        try {
+          const acpResult = await queryWorkspaceStatus(
+            SERVE_STATUS_EXT_METHODS.workspacePreflight,
+            () => ({ cells: createIdleAcpPreflightCells() }),
+          );
+          // The ACP response may contain only ACP-locality cells.
+          if (acpResult && 'cells' in acpResult) {
+            const result = acpResult as {
+              cells: ServeWorkspacePreflightStatus['cells'];
+              errors?: ServeWorkspacePreflightStatus['errors'];
+            };
+            // Filter to only ACP cells from the ACP response (daemon cells come from our provider).
+            acpCells = result.cells.filter((c) => c.locality === 'acp');
+            errors = result.errors;
+          }
+        } catch (err) {
+          // ACP query failed — fall back to idle placeholders and report error.
+          acpCells = createIdleAcpPreflightCells();
+          errors = [
+            {
+              kind: 'preflight',
+              status: 'error',
+              error: err instanceof Error ? err.message : String(err),
+            },
+          ];
+        }
+      }
+
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: boundWorkspace,
+        initialized: true,
+        acpChannelLive,
+        cells: [...daemonCells, ...acpCells],
+        ...(errors ? { errors } : {}),
+      } as ServeWorkspacePreflightStatus;
     },
 
     // -- Mutations --
