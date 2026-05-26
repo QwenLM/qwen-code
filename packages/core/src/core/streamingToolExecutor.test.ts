@@ -432,4 +432,65 @@ describe('StreamingToolExecutor', () => {
       expect(r2.map((r) => r.callId)).toEqual(['a', 'b']);
     });
   });
+
+  describe('addCancellationListener()', () => {
+    it('fires the listener once per discard() with the reason', () => {
+      const ex = new StreamingToolExecutor();
+      const seen: Array<string | undefined> = [];
+      ex.addCancellationListener((r) => seen.push(r));
+      ex.discard('aborted');
+      ex.discard('retry'); // idempotent — listener does not refire
+      expect(seen).toEqual(['aborted']);
+    });
+
+    it('fires the listener once per reset() with the reason', () => {
+      const ex = new StreamingToolExecutor();
+      const seen: Array<string | undefined> = [];
+      ex.addCancellationListener((r) => seen.push(r));
+      ex.reset('retry');
+      ex.reset('retry');
+      expect(seen).toEqual(['retry', 'retry']);
+    });
+
+    it('does not fire on close() — close preserves state', () => {
+      const ex = new StreamingToolExecutor();
+      const seen: Array<string | undefined> = [];
+      ex.addCancellationListener((r) => seen.push(r));
+      ex.close();
+      expect(seen).toEqual([]);
+    });
+
+    it('multiple listeners all fire', () => {
+      const ex = new StreamingToolExecutor();
+      const a: Array<string | undefined> = [];
+      const b: Array<string | undefined> = [];
+      ex.addCancellationListener((r) => a.push(r));
+      ex.addCancellationListener((r) => b.push(r));
+      ex.discard('stream-error');
+      expect(a).toEqual(['stream-error']);
+      expect(b).toEqual(['stream-error']);
+    });
+
+    it('unsubscribe stops further notifications', () => {
+      const ex = new StreamingToolExecutor();
+      const seen: Array<string | undefined> = [];
+      const off = ex.addCancellationListener((r) => seen.push(r));
+      ex.reset('retry');
+      off();
+      ex.reset('retry');
+      expect(seen).toEqual(['retry']);
+    });
+
+    it('listener that unsubscribes itself mid-fire does not perturb other listeners', () => {
+      const ex = new StreamingToolExecutor();
+      const order: string[] = [];
+      const offA = ex.addCancellationListener(() => {
+        order.push('a');
+        offA();
+      });
+      ex.addCancellationListener(() => order.push('b'));
+      ex.reset('retry');
+      expect(order).toEqual(['a', 'b']);
+    });
+  });
 });

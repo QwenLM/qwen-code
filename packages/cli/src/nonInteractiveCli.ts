@@ -27,6 +27,7 @@ import {
   createDebugLogger,
   SendMessageType,
   restoreWorktreeContext,
+  StreamingToolDispatcher,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -607,6 +608,7 @@ export async function runNonInteractive(
       const processToolCallBatch = async (
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => void,
+        dispatcher?: StreamingToolDispatcher,
       ): Promise<Part[]> => {
         const toolResponseParts: Part[] = [];
 
@@ -674,6 +676,14 @@ export async function runNonInteractive(
           // validation-retry loop is not bounded by --max-tool-calls.
           // Documented in docs/users/features/headless.md → "Scope".
           // Combine with --max-session-turns or --max-wall-time.
+          //
+          // Phase 3 of #4387 interaction: the tick fires for EVERY tool
+          // in the batch regardless of whether it was early-dispatched.
+          // Early dispatch is just "started running sooner"; from a
+          // budgeting perspective each tool still counts as one
+          // execution. The abort check at the end of the tick also
+          // applies — if --max-tool-calls is exhausted, we route the
+          // abort before either path actually consumes the result.
           const isStructuredOutputExempt =
             requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
             config.getJsonSchema?.() !== undefined;
@@ -681,17 +691,32 @@ export async function runNonInteractive(
             budgetEnforcer.tickToolCall();
           }
           if (abortController.signal.aborted) await routeAbort();
-          const toolResponse = await executeToolCall(
-            config,
-            requestInfo,
-            abortController.signal,
-            {
-              outputUpdateHandler,
-              ...(toolCallUpdateCallback && {
-                onToolCallsUpdate: toolCallUpdateCallback,
-              }),
-            },
-          );
+
+          // Phase 3 of #4387: if the streaming dispatcher kicked this
+          // tool off early, await its in-flight promise instead of
+          // re-running. A resolved-undefined means the early dispatch
+          // was aborted (e.g. mid-stream retry) — fall back to the
+          // normal path so the model still gets a paired
+          // functionResponse. The dispatcher's per-request options
+          // factory wires the same `outputUpdateHandler` /
+          // `onToolCallsUpdate` callbacks the fallback branch uses,
+          // so a `canUpdateOutput: true` tool's progress chunks
+          // surface through the adapter on either path.
+          const earlyPromise = dispatcher?.getEarlyResult(requestInfo.callId);
+          const earlyResult = earlyPromise ? await earlyPromise : undefined;
+          const toolResponse =
+            earlyResult ??
+            (await executeToolCall(
+              config,
+              requestInfo,
+              abortController.signal,
+              {
+                outputUpdateHandler,
+                ...(toolCallUpdateCallback && {
+                  onToolCallsUpdate: toolCallUpdateCallback,
+                }),
+              },
+            ));
 
           if (toolResponse.error) {
             // In JSON/STREAM_JSON mode, tool errors are tolerated and
@@ -794,6 +819,24 @@ export async function runNonInteractive(
         }
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
+        // Phase 3 of #4387: when the stream-driven flag is on and we're
+        // not in --json-schema mode (sibling-suppression makes early
+        // dispatch unsafe in that mode — see RFC §3.5), dispatch
+        // concurrency-safe tools the moment their tool-call payload
+        // closes. The dispatcher owns its own AbortController so
+        // executor.discard/reset (driven by Turn lifecycle) cancels
+        // in-flight work without leaking orphan tool runs.
+        // Defensive against partially-stubbed `Config` in some tests —
+        // these getters are recent additions; missing methods read as
+        // "feature off". Production `Config` always has both.
+        const enableEarlyDispatch =
+          typeof config.getStreamingToolDispatch === 'function' &&
+          config.getStreamingToolDispatch() &&
+          (typeof config.getJsonSchema !== 'function' ||
+            !config.getJsonSchema());
+        const dispatcher = enableEarlyDispatch
+          ? new StreamingToolDispatcher(config, abortController.signal)
+          : undefined;
         const apiStartTime = Date.now();
         const responseStream = geminiClient.sendMessageStream(
           currentMessages[0]?.parts || [],
@@ -815,46 +858,69 @@ export async function runNonInteractive(
         // Start assistant message for this turn
         adapter.startAssistantMessage();
 
-        for await (const event of responseStream) {
-          if (abortController.signal.aborted) {
-            // Pair the startAssistantMessage() above so stream-json mode
-            // doesn't leave an unterminated message_start when a budget /
-            // SIGINT abort lands mid-stream. Symmetric with the drain-item
-            // loop fix below.
-            adapter.finalizeAssistantMessage();
-            await routeAbort();
+        try {
+          for await (const event of responseStream) {
+            if (abortController.signal.aborted) {
+              // Pair the startAssistantMessage() above so stream-json mode
+              // doesn't leave an unterminated message_start when a budget /
+              // SIGINT abort lands mid-stream. Symmetric with the drain-item
+              // loop fix below. Note `routeAbort` (from main) supersedes
+              // the older `handleCancellationError` — it dispatches by
+              // abort source (budget vs SIGINT) instead of always
+              // surfacing as cancellation.
+              adapter.finalizeAssistantMessage();
+              await routeAbort();
+            }
+            // Use adapter for all event processing
+            adapter.processEvent(event);
+            if (event.type === GeminiEventType.ToolCallRequest) {
+              toolCallRequests.push(event.value);
+              // Kick off the early dispatch (no-op if the tool isn't
+              // safe-classified or the dispatcher is disabled). Turn
+              // already accepted the request into the executor; calling
+              // dispatcher.accept() here is idempotent on duplicate
+              // callIds via the executor's accept-once guard.
+              dispatcher?.accept(event.value);
+            }
+            if (
+              event.type === GeminiEventType.Content &&
+              plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
+            ) {
+              const remaining =
+                PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
+              plainTextPreview += String(event.value).slice(0, remaining);
+            }
+            if (event.type === GeminiEventType.LoopDetected) {
+              emitLoopDetectedMessage(config, event.value?.loopType);
+            }
+            if (
+              outputFormat === OutputFormat.TEXT &&
+              event.type === GeminiEventType.Error
+            ) {
+              const errorText = parseAndFormatApiError(
+                event.value.error,
+                config.getContentGeneratorConfig()?.authType,
+              );
+              process.stderr.write(`${errorText}\n`);
+              // We have already formatted and written the message; mark the
+              // throw so the top-level handleError doesn't reformat (which
+              // would yield "[API Error: [API Error: ...]]") or print it a
+              // second time. Exit code stays 1 — same as before.
+              throw new AlreadyReportedError(errorText);
+            }
           }
-          // Use adapter for all event processing
-          adapter.processEvent(event);
-          if (event.type === GeminiEventType.ToolCallRequest) {
-            toolCallRequests.push(event.value);
-          }
-          if (
-            event.type === GeminiEventType.Content &&
-            plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
-          ) {
-            const remaining =
-              PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
-            plainTextPreview += String(event.value).slice(0, remaining);
-          }
-          if (event.type === GeminiEventType.LoopDetected) {
-            emitLoopDetectedMessage(config, event.value?.loopType);
-          }
-          if (
-            outputFormat === OutputFormat.TEXT &&
-            event.type === GeminiEventType.Error
-          ) {
-            const errorText = parseAndFormatApiError(
-              event.value.error,
-              config.getContentGeneratorConfig()?.authType,
-            );
-            process.stderr.write(`${errorText}\n`);
-            // We have already formatted and written the message; mark the
-            // throw so the top-level handleError doesn't reformat (which
-            // would yield "[API Error: [API Error: ...]]") or print it a
-            // second time. Exit code stays 1 — same as before.
-            throw new AlreadyReportedError(errorText);
-          }
+        } catch (err) {
+          // Belt-and-suspenders: the Turn already fires
+          // executor.discard('aborted' | 'unauthorized' | 'stream-error')
+          // for the cases it knows about (and the cancellation listener
+          // in the dispatcher aborts in-flight tools synchronously). But
+          // if a different exception escapes the for-await — e.g. the
+          // AlreadyReportedError we throw on text-mode API errors above
+          // — we must still cancel the early dispatcher so its in-flight
+          // tool runs don't outlive this turn. Idempotent if the Turn
+          // already discarded.
+          dispatcher?.discard('stream-error');
+          throw err;
         }
 
         // Finalize assistant message
@@ -873,12 +939,22 @@ export async function runNonInteractive(
           // `modelOverride` so the next turn's sendMessageStream sees
           // it; the drain turn updates a per-item `itemModelOverride`
           // scoped to that drain item.
+          //
+          // Phase 3 of #4387: pass the dispatcher so the helper can
+          // await early-dispatched results instead of re-running safe
+          // tools. The dispatcher's `getEarlyResult()` returns a
+          // settled promise for completed early dispatches and
+          // `undefined` for tools that weren't dispatched early
+          // (unsafe kind, gated off, or aborted mid-stream — in which
+          // case the helper falls back to the normal scheduling path).
           const toolResponseParts = await processToolCallBatch(
             toolCallRequests,
             (override) => {
               modelOverride = override;
             },
+            dispatcher,
           );
+          dispatcher?.dispose();
 
           if (structuredSubmission !== undefined) {
             // Single-shot terminal contract; aborts in-flight background
@@ -890,6 +966,13 @@ export async function runNonInteractive(
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
+          // No tool calls — the dispatcher (if any) had nothing to
+          // dispatch. Release its executor subscription so a stale
+          // listener can't fire on a later Turn that reuses the same
+          // abort signal. The Phase 2 executor's `close()` already
+          // fired through Turn's `finally`; this just detaches the
+          // dispatcher.
+          dispatcher?.dispose();
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.

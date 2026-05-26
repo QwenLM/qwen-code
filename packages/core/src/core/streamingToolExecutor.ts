@@ -88,6 +88,9 @@ export class StreamingToolExecutor {
     resolve: (results: ToolCallResponseInfo[]) => void;
     reject: (error: Error) => void;
   }> = [];
+  private readonly cancellationListeners = new Set<
+    (reason: StreamingToolExecutorDiscardReason | undefined) => void
+  >();
 
   /**
    * Record a completed tool-call request surfaced by the stream. Subsequent
@@ -216,6 +219,7 @@ export class StreamingToolExecutor {
     this.responses.clear();
     this.acceptedIds.clear();
     this.rejectPending(reason);
+    this.notifyCancellation(reason);
   }
 
   /**
@@ -234,6 +238,7 @@ export class StreamingToolExecutor {
     this.responses.clear();
     this.acceptedIds.clear();
     this.rejectPending(reason);
+    this.notifyCancellation(reason);
   }
 
   /**
@@ -287,6 +292,44 @@ export class StreamingToolExecutor {
    */
   getAcceptedRequests(): ToolCallRequestInfo[] {
     return this.requests.slice();
+  }
+
+  /**
+   * Subscribe to buffer-wipe events. The listener fires exactly once per
+   * `discard()` / `reset()` call (in registration order) with the supplied
+   * reason — same value the matching `StreamingToolExecutorDiscardedError`
+   * carries. Used by external dispatchers (e.g. `StreamingToolDispatcher`)
+   * that own in-flight tool runs and must abort them synchronously when the
+   * executor's buffer goes away — see the stale-callback hazard note on
+   * {@link recordResult}.
+   *
+   * Listeners are invoked AFTER the buffer is wiped and AFTER pending
+   * `getRemainingResults()` consumers are rejected, so a listener calling
+   * back into the executor sees the post-wipe state. Throws from a listener
+   * propagate to the caller of `discard()`/`reset()` — keep them
+   * synchronous and side-effect-light.
+   *
+   * Returns an unsubscribe function. Safe to call after the executor has
+   * been wiped (it just removes the listener for any future events; a
+   * subsequent `reset()` would still fire surviving listeners).
+   */
+  addCancellationListener(
+    fn: (reason: StreamingToolExecutorDiscardReason | undefined) => void,
+  ): () => void {
+    this.cancellationListeners.add(fn);
+    return () => {
+      this.cancellationListeners.delete(fn);
+    };
+  }
+
+  private notifyCancellation(
+    reason: StreamingToolExecutorDiscardReason | undefined,
+  ): void {
+    if (this.cancellationListeners.size === 0) return;
+    // Snapshot so a listener that unsubscribes itself (or another) mid-fire
+    // doesn't perturb the iteration we're currently dispatching.
+    const snapshot = [...this.cancellationListeners];
+    for (const fn of snapshot) fn(reason);
   }
 
   private maybeSettlePending(): void {

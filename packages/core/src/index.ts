@@ -70,6 +70,10 @@ export {
   StreamingToolExecutorDiscardedError,
   type StreamingToolExecutorDiscardReason,
 } from './core/streamingToolExecutor.js';
+export {
+  StreamingToolDispatcher,
+  isEarlyDispatchSafe,
+} from './core/streamingToolDispatcher.js';
 export * from './core/tokenLimits.js';
 export * from './core/turn.js';
 
