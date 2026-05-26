@@ -44,19 +44,40 @@ def compare_request(idx: int, left: dict[str, Any], right: dict[str, Any]) -> li
         if left.get(key) != right.get(key):
             diffs.append(f"{prefix}.{key}: {left.get(key)!r} != {right.get(key)!r}")
 
-    left_roles = [item.get("role") for item in left.get("messages") or []]
-    right_roles = [item.get("role") for item in right.get("messages") or []]
+    left_messages = left.get("messages") or []
+    right_messages = right.get("messages") or []
+    left_roles = [item.get("role") for item in left_messages]
+    right_roles = [item.get("role") for item in right_messages]
     if left_roles != right_roles:
         diffs.append(f"{prefix}.message_roles: {left_roles!r} != {right_roles!r}")
-    for msg_idx, (left_msg, right_msg) in enumerate(
-        zip(left.get("messages") or [], right.get("messages") or [])
-    ):
+    # Surface count mismatches explicitly. zip() below silently truncates to the
+    # shorter list, so without this diagnostic an extra trailing message
+    # carrying the feature-relevant prompt / tool result would never be
+    # reported (the message_roles diff alone hides which side is longer and by
+    # how much, and only fires when the *prefix* roles differ at some index).
+    if len(left_messages) != len(right_messages):
+        diffs.append(
+            f"{prefix}.message_count: {len(left_messages)} != {len(right_messages)}"
+        )
+    for msg_idx, (left_msg, right_msg) in enumerate(zip(left_messages, right_messages)):
         if left_msg.get("content_hash") != right_msg.get("content_hash"):
             diffs.append(
                 f"{prefix}.messages[{msg_idx}].content_hash: "
                 f"{left_msg.get('content_hash')!r} != "
                 f"{right_msg.get('content_hash')!r}"
             )
+    # Mirror the request-level missing/extra handling so the user sees the
+    # actual content of trailing messages that fell off the zip().
+    if len(left_messages) > len(right_messages):
+        for msg_idx, message in enumerate(
+            left_messages[len(right_messages) :], len(right_messages)
+        ):
+            diffs.append(f"{prefix}.messages[{msg_idx}].missing_in_right: {message!r}")
+    elif len(right_messages) > len(left_messages):
+        for msg_idx, message in enumerate(
+            right_messages[len(left_messages) :], len(left_messages)
+        ):
+            diffs.append(f"{prefix}.messages[{msg_idx}].extra_in_right: {message!r}")
 
     left_tool_list = left.get("tools") or []
     right_tool_list = right.get("tools") or []
