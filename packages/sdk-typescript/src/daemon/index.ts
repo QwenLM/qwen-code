@@ -238,6 +238,7 @@ export type {
   DaemonApprovalModeResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
+  DaemonSessionRecapResult,
   DaemonToolToggleResult,
   DaemonAvailableCommand,
   DaemonCapabilities,
