@@ -409,8 +409,8 @@ export class ContentGenerationPipeline {
 
     // DeepSeek's KV cache is prefix-exact: a different tool order changes the
     // serialized prompt prefix even when the tool set and schemas are identical.
-    // Sort only for official DeepSeek endpoints to avoid surprising other
-    // OpenAI-compatible providers with changed tool presentation order.
+    // Gate on isDeepSeekProvider so both official and self-hosted DeepSeek
+    // deployments benefit; non-DeepSeek providers keep caller order.
     if (isDeepSeekProvider(this.contentGeneratorConfig)) {
       sortToolsForCacheStableRequest(providerRequest);
     }
