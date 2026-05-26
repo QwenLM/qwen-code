@@ -2428,6 +2428,79 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
+    it('rejects before request serialization when oversized resumed history cannot be compressed', async () => {
+      const oversizedResumedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      chat.setHistory(oversizedResumedHistory);
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount: 180_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+        new Error('Invalid string length'),
+      );
+
+      await expect(
+        chat.sendMessageStream(
+          'test-model',
+          { message: 'continue' },
+          'prompt-id-oversized-resume-guard',
+        ),
+      ).rejects.toThrow(/context is too large/i);
+
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      expect(compressSpy.mock.calls[0][1].force).toBe(true);
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      expect(chat.getHistory()).toHaveLength(2);
+    });
+
+    it('rejects before request serialization when hard-rescue compression is still oversized', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ]);
+
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [
+          { role: 'user', parts: [{ text: 'still large summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        info: {
+          originalTokenCount: 180_000,
+          newTokenCount: 177_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+        new Error('Invalid string length'),
+      );
+
+      await expect(
+        chat.sendMessageStream(
+          'test-model',
+          { message: 'continue' },
+          'prompt-id-oversized-after-compression',
+        ),
+      ).rejects.toThrow(/context is too large/i);
+
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      expect(chat.getHistory()[0].parts?.[0].text).toBe('still large summary');
+    });
+
     it('forwards latched consecutiveFailures into hard-rescue (no pre-call reset); success recovers via the post-call branch', async () => {
       // Hard-rescue uses force=true, which already bypasses the
       // chatCompressionService breaker (the `!force` check in compress's

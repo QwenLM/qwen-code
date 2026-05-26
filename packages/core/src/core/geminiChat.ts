@@ -106,6 +106,42 @@ function isCompressionFailureStatus(status: CompressionStatus): boolean {
   );
 }
 
+function shouldStopAfterHardRescue(
+  shouldForceFromHard: boolean,
+  compressionInfo: ChatCompressionInfo,
+  hardLimit: number,
+  localPromptTokensAfterCompression: number,
+): boolean {
+  if (!shouldForceFromHard) {
+    return false;
+  }
+  if (compressionInfo.compressionStatus !== CompressionStatus.COMPRESSED) {
+    return localPromptTokensAfterCompression >= hardLimit;
+  }
+  return (
+    compressionInfo.newTokenCount >= hardLimit ||
+    localPromptTokensAfterCompression >= hardLimit
+  );
+}
+
+function getHardRescueFailureMessage(
+  effectiveTokens: number,
+  hardLimit: number,
+  compressionInfo: ChatCompressionInfo,
+  localPromptTokensAfterCompression: number,
+): string {
+  const tokenCount =
+    compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+      ? compressionInfo.newTokenCount
+      : Math.max(effectiveTokens, localPromptTokensAfterCompression);
+  return (
+    `Context is too large to send safely after automatic compression. ` +
+    `Estimated prompt tokens: ${tokenCount}; hard limit: ${hardLimit}; ` +
+    `compression status: ${compressionInfo.compressionStatus}. ` +
+    `Start a new session or reduce the resumed history before continuing.`
+  );
+}
+
 export enum StreamEventType {
   /** A regular content chunk from the API. */
   CHUNK = 'chunk',
@@ -1549,6 +1585,32 @@ export class GeminiChat {
           trigger: shouldForceFromHard ? 'auto' : undefined,
         },
       );
+
+      const localPromptTokensAfterCompression = shouldForceFromHard
+        ? estimatePromptTokens(
+            this.getHistoryShallow(true),
+            userContent,
+            0,
+            imageTokenEstimate,
+          )
+        : 0;
+      if (
+        shouldStopAfterHardRescue(
+          shouldForceFromHard,
+          compressionInfo,
+          hard,
+          localPromptTokensAfterCompression,
+        )
+      ) {
+        const message = getHardRescueFailureMessage(
+          effectiveTokens,
+          hard,
+          compressionInfo,
+          localPromptTokensAfterCompression,
+        );
+        debugLogger.warn(message);
+        throw new Error(message);
+      }
 
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
