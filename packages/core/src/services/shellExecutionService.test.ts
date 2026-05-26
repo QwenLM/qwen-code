@@ -19,6 +19,7 @@ import { type ChildProcess } from 'node:child_process';
 import pkg from '@xterm/headless';
 import type {
   ShellAbortReason,
+  ShellExecutionConfig,
   ShellExecuteOptions,
   ShellOutputEvent,
   ShellPostPromoteSettleInfo,
@@ -122,7 +123,7 @@ const shellExecutionConfig = {
   pager: 'cat',
   showColor: false,
   disableDynamicLineTrimming: true,
-};
+} satisfies ShellExecutionConfig;
 
 const WINDOWS_SYSTEM_PATH = 'C:\\Windows\\System32;C:\\Shared\\Tools';
 const WINDOWS_USER_PATH = 'C:\\Users\\tester\\bin;C:\\Shared\\Tools';
@@ -267,7 +268,7 @@ describe('ShellExecutionService', () => {
       ptyProcess: typeof mockPtyProcess,
       ac: AbortController,
     ) => void,
-    config = shellExecutionConfig,
+    config: ShellExecutionConfig = shellExecutionConfig,
     options: ShellExecuteOptions = {},
   ) => {
     const abortController = new AbortController();
@@ -335,6 +336,65 @@ describe('ShellExecutionService', () => {
         pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
       });
       expect(result.output.trim()).toBe('你好');
+    });
+
+    it('bounds buffered PTY output before building the final string', async () => {
+      const { result } = await simulateExecution(
+        'large-output',
+        (pty) => {
+          pty.onData.mock.calls[0][0]('12345678');
+          pty.onData.mock.calls[0][0]('abcdefg');
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      expect(result.rawOutput.length).toBe(10);
+      expect(result.output).toContain('12345678ab');
+      expect(result.output).toContain(
+        'Output exceeded the maximum captured size',
+      );
+      expect(result.output).not.toContain('cdefg');
+    });
+
+    it('keeps PTY replay fallback bounded after the capture limit is exceeded', async () => {
+      mockSerializeTerminalToText.mockImplementationOnce(() => {
+        throw new Error('replay failed');
+      });
+
+      const { result } = await simulateExecution(
+        'large-output-replay-fallback',
+        (pty) => {
+          pty.onData.mock.calls[0][0]('12345678');
+          pty.onData.mock.calls[0][0]('abcdefg');
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      expect(result.rawOutput.toString()).toBe('12345678ab');
+      expect(result.output).toContain('12345678ab');
+      expect(result.output).toContain(
+        'Output exceeded the maximum captured size',
+      );
+      expect(result.output).not.toContain('cdefg');
+    });
+
+    it('does not add a capture-limit notice at the exact PTY buffer boundary', async () => {
+      const { result } = await simulateExecution(
+        'exact-output',
+        (pty) => {
+          pty.onData.mock.calls[0][0]('1234567890');
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      expect(result.rawOutput.length).toBe(10);
+      expect(result.output).toBe('1234567890');
+      expect(result.output).not.toContain(
+        'Output exceeded the maximum captured size',
+      );
     });
 
     it('should handle commands with no output', async () => {
@@ -1510,6 +1570,29 @@ describe('ShellExecutionService child_process fallback', () => {
     return { result, handle, abortController };
   };
 
+  const simulateExecutionWithConfig = async (
+    command: string,
+    simulation: (cp: typeof mockChildProcess, ac: AbortController) => void,
+    config: ShellExecutionConfig,
+    options: ShellExecuteOptions = {},
+  ) => {
+    const abortController = new AbortController();
+    const handle = await ShellExecutionService.execute(
+      command,
+      '/test/dir',
+      onOutputEventMock,
+      abortController.signal,
+      true,
+      config,
+      options,
+    );
+
+    await new Promise((resolve) => process.nextTick(resolve));
+    simulation(mockChildProcess, abortController);
+    const result = await handle.result;
+    return { result, handle, abortController };
+  };
+
   describe('Successful Execution', () => {
     it('should execute a command and capture stdout and stderr', async () => {
       const { result, handle } = await simulateExecution('ls -l', (cp) => {
@@ -1564,6 +1647,120 @@ describe('ShellExecutionService child_process fallback', () => {
         cp.emit('close', 0, null);
       });
       expect(result.output.trim()).toBe('你好');
+    });
+
+    it('bounds buffered child_process output before building the final string', async () => {
+      const abortController = new AbortController();
+      const handle = await ShellExecutionService.execute(
+        'large-output',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        false,
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      await new Promise((resolve) => process.nextTick(resolve));
+      mockChildProcess.stdout?.emit('data', Buffer.from('12345678'));
+      mockChildProcess.stdout?.emit('data', Buffer.from('abcdefg'));
+      mockChildProcess.emit('exit', 0, null);
+      mockChildProcess.emit('close', 0, null);
+
+      const result = await handle.result;
+
+      expect(result.rawOutput.length).toBe(10);
+      expect(result.output).toContain('12345678ab');
+      expect(result.output).toContain(
+        'Output exceeded the maximum captured size',
+      );
+      expect(result.output).not.toContain('cdefg');
+      expect(onOutputEventMock).toHaveBeenCalledWith({
+        type: 'data',
+        chunk: expect.stringContaining(
+          'Output exceeded the maximum captured size',
+        ),
+      });
+    });
+
+    it('does not add a capture-limit notice at the exact child_process buffer boundary', async () => {
+      const { result } = await simulateExecutionWithConfig(
+        'exact-output',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from('1234567890'));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      expect(result.rawOutput.length).toBe(10);
+      expect(result.output).toBe('1234567890');
+      expect(result.output).not.toContain(
+        'Output exceeded the maximum captured size',
+      );
+    });
+
+    it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 'abc', undefined])(
+      'falls back to the default capture limit for invalid maxBufferedOutputBytes: %s',
+      async (configuredValue) => {
+        const { result } = await simulateExecutionWithConfig(
+          'invalid-limit',
+          (cp) => {
+            cp.stdout?.emit('data', Buffer.from('1234567890abcde'));
+            cp.emit('exit', 0, null);
+            cp.emit('close', 0, null);
+          },
+          {
+            ...shellExecutionConfig,
+            maxBufferedOutputBytes: configuredValue as unknown as number,
+          },
+        );
+
+        expect(result.rawOutput.length).toBe(15);
+        expect(result.output).toBe('1234567890abcde');
+        expect(result.output).not.toContain(
+          'Output exceeded the maximum captured size',
+        );
+      },
+    );
+
+    it('reports capture-limit notice for streaming child_process output', async () => {
+      const { result } = await simulateExecutionWithConfig(
+        'streaming-large-output',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from('abcdef'));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 1 },
+        { streamStdout: true },
+      );
+
+      expect(onOutputEventMock).toHaveBeenCalledWith({
+        type: 'data',
+        chunk: 'abcdef',
+      });
+      expect(result.rawOutput.length).toBe(1);
+      expect(result.output).toContain(
+        'Output exceeded the maximum captured size',
+      );
+    });
+
+    it('emits only the capture-limit notice when stripped captured output is empty', async () => {
+      const { result } = await simulateExecutionWithConfig(
+        'empty-captured-output',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from('\nabc'));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 1 },
+      );
+
+      expect(result.rawOutput.length).toBe(1);
+      expect(result.output).toMatch(
+        /^\[Output exceeded the maximum captured size/,
+      );
     });
 
     it('should handle commands with no output', async () => {
