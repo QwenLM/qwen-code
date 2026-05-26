@@ -14,6 +14,7 @@ import type { ToolRegistry } from './tool-registry.js';
 import type { Config } from '../config/config.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import { connectionIdOf } from './mcp-pool-key.js';
 
 vi.mock('./mcp-client.js', async () => {
   const originalModule = await vi.importActual('./mcp-client.js');
@@ -3173,5 +3174,379 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
     expect(
       events.filter((e) => (e as { kind: string }).kind === 'budget_warning'),
     ).toHaveLength(2);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────
+// T2.8: addRuntimeMcpServer / removeRuntimeMcpServer
+// ────────────────────────────────────────────────────────────────────
+describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.8)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Shared mock config builder for the T2.8 tests. Returns a mock Config
+   * that has `getSettingsMcpServers` (for shadow detection) and all the
+   * standard accessors the manager needs.
+   */
+  function mkRuntimeConfig(
+    opts: {
+      settingsServers?: Record<string, unknown>;
+      runtimeAddSpy?: ReturnType<typeof vi.fn>;
+      runtimeRemoveSpy?: ReturnType<typeof vi.fn>;
+    } = {},
+  ) {
+    const addSpy = opts.runtimeAddSpy ?? vi.fn();
+    const removeSpy = opts.runtimeRemoveSpy ?? vi.fn().mockReturnValue(true);
+    return {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({}),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'test-session-1',
+      isMcpServerDisabled: () => false,
+      getSettingsMcpServers: () => opts.settingsServers ?? {},
+      addRuntimeMcpServer: addSpy,
+      removeRuntimeMcpServer: removeSpy,
+    } as unknown as Config;
+  }
+
+  // ───── ADD cases ──────────────────────────────────────────────────
+
+  it('case 1: happy fresh add → replaced=false, correct transport and toolCount', async () => {
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'my-server::abc123',
+      serverName: 'my-server',
+      entryIndex: 0,
+      toolsSnapshot: [{ name: 'tool1' }, { name: 'tool2' }],
+      promptsSnapshot: [],
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+
+    const config = mkRuntimeConfig();
+    const manager = mkManager({ config, options: { pool: fakePool } });
+
+    const result = await manager.addRuntimeMcpServer(
+      'my-server',
+      { command: 'echo', args: ['hello'] },
+      'client-1',
+    );
+
+    expect(result).toMatchObject({
+      name: 'my-server',
+      transport: 'stdio',
+      replaced: false,
+      shadowedSettings: false,
+      toolCount: 2,
+      originatorClientId: 'client-1',
+    });
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+    expect(config.addRuntimeMcpServer).toHaveBeenCalledWith(
+      'my-server',
+      expect.objectContaining({ command: 'echo' }),
+    );
+  });
+
+  it('case 2: budget enforce + at-cap + new name → throws McpBudgetWouldExceedError', async () => {
+    const { McpBudgetWouldExceedError } = await import('./mcp-errors.js');
+    const fakeBudget = {
+      getMode: () => 'enforce' as const,
+      tryReserve: vi.fn().mockReturnValue('refused'),
+      getBudget: () => 1,
+      getReservedCount: () => 1,
+      beginBulkPass: vi.fn(),
+      endBulkPass: vi.fn(),
+      release: vi.fn(),
+    };
+    const fakePool = {
+      acquire: vi.fn(),
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(fakeBudget),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+
+    const config = mkRuntimeConfig();
+    const manager = mkManager({ config, options: { pool: fakePool } });
+
+    await expect(
+      manager.addRuntimeMcpServer(
+        'new-server',
+        { command: 'node', args: ['server.js'] },
+        'client-2',
+      ),
+    ).rejects.toThrow(McpBudgetWouldExceedError);
+
+    // Pool acquire should NOT have been called
+    expect(fakePool.acquire).not.toHaveBeenCalled();
+  });
+
+  it('case 3: budget warn + at-cap + new name → skipped with budget_warning_only', async () => {
+    const fakeBudget = {
+      getMode: () => 'warn' as const,
+      tryReserve: vi.fn().mockReturnValue('reserved'),
+      getBudget: () => 1,
+      getReservedCount: () => 2, // over budget after reserve
+      beginBulkPass: vi.fn(),
+      endBulkPass: vi.fn(),
+      release: vi.fn(),
+    };
+    const fakePool = {
+      acquire: vi.fn(),
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(fakeBudget),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+
+    const config = mkRuntimeConfig();
+    const manager = mkManager({ config, options: { pool: fakePool } });
+
+    const result = await manager.addRuntimeMcpServer(
+      'warn-server',
+      { command: 'node', args: ['server.js'] },
+      'client-3',
+    );
+
+    expect(result).toEqual({
+      name: 'warn-server',
+      skipped: true,
+      reason: 'budget_warning_only',
+    });
+    // Budget slot should have been released (soft refusal)
+    expect(fakeBudget.release).toHaveBeenCalledWith('warn-server');
+    // Pool acquire should NOT have been called
+    expect(fakePool.acquire).not.toHaveBeenCalled();
+  });
+
+  it('case 4: replace same name + same fingerprint → replaced=true, pool.acquire NOT re-called', async () => {
+    const serverConfig = {
+      command: 'echo',
+      args: ['hi'],
+    } as unknown as import('../config/config.js').MCPServerConfig;
+    // Compute the REAL connection ID so the mock matches what the
+    // implementation will compute via `connectionIdOf`.
+    const realId = connectionIdOf('dup-srv', serverConfig);
+
+    const releaseSpyConn1 = vi.fn();
+    const conn1 = {
+      release: releaseSpyConn1,
+      on: vi.fn(),
+      id: realId,
+      serverName: 'dup-srv',
+      entryIndex: 0,
+      toolsSnapshot: [
+        { name: 'tool-a' },
+        { name: 'tool-b' },
+        { name: 'tool-c' },
+      ],
+      promptsSnapshot: [],
+    };
+    const acquireSpy = vi.fn().mockResolvedValue(conn1);
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+
+    const config = mkRuntimeConfig();
+    const manager = mkManager({ config, options: { pool: fakePool } });
+
+    // First add
+    await manager.addRuntimeMcpServer('dup-srv', serverConfig, 'client-4');
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+
+    // Second add with SAME config (same fingerprint)
+    acquireSpy.mockClear();
+    const result = await manager.addRuntimeMcpServer(
+      'dup-srv',
+      serverConfig,
+      'client-4',
+    );
+
+    // pool.acquire should NOT have been re-called (idempotent replace)
+    expect(acquireSpy).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      name: 'dup-srv',
+      replaced: true,
+      toolCount: 3,
+    });
+  });
+
+  it('case 5: shadows settings → shadowedSettings=true', async () => {
+    const acquireSpy = vi.fn().mockResolvedValue({
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'shadow-srv::def',
+      serverName: 'shadow-srv',
+      entryIndex: 0,
+      toolsSnapshot: [{ name: 't1' }],
+      promptsSnapshot: [],
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+
+    // Settings layer has an existing server with the same name
+    const config = mkRuntimeConfig({
+      settingsServers: { 'shadow-srv': { command: 'old-cmd' } },
+    });
+    const manager = mkManager({ config, options: { pool: fakePool } });
+
+    const result = await manager.addRuntimeMcpServer(
+      'shadow-srv',
+      { command: 'new-cmd', args: [] },
+      'client-5',
+    );
+
+    expect(result).toMatchObject({
+      name: 'shadow-srv',
+      shadowedSettings: true,
+    });
+  });
+
+  // ───── REMOVE cases ───────────────────────────────────────────────
+
+  it('case 1: removes runtime entry → removed=true, wasShadowingSettings=false', async () => {
+    const releaseSpyConn = vi.fn();
+    const conn = {
+      release: releaseSpyConn,
+      on: vi.fn(),
+      id: 'rm-srv::aaa',
+      serverName: 'rm-srv',
+      entryIndex: 0,
+      toolsSnapshot: [],
+      promptsSnapshot: [],
+    };
+    const acquireSpy = vi.fn().mockResolvedValue(conn);
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+
+    const removeSpy = vi.fn().mockReturnValue(true);
+    const config = mkRuntimeConfig({ runtimeRemoveSpy: removeSpy });
+    const manager = mkManager({ config, options: { pool: fakePool } });
+
+    // Add then remove
+    await manager.addRuntimeMcpServer(
+      'rm-srv',
+      { command: 'echo' },
+      'client-6',
+    );
+    const result = await manager.removeRuntimeMcpServer('rm-srv', 'client-6');
+
+    expect(result).toMatchObject({
+      name: 'rm-srv',
+      removed: true,
+      wasShadowingSettings: false,
+      originatorClientId: 'client-6',
+    });
+    expect(releaseSpyConn).toHaveBeenCalledTimes(1);
+    expect(removeSpy).toHaveBeenCalledWith('rm-srv');
+  });
+
+  it('case 2: removes shadow over settings → wasShadowingSettings=true', async () => {
+    const conn = {
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'shadow-rm::bbb',
+      serverName: 'shadow-rm',
+      entryIndex: 0,
+      toolsSnapshot: [],
+      promptsSnapshot: [],
+    };
+    const acquireSpy = vi.fn().mockResolvedValue(conn);
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+
+    const removeSpy = vi.fn().mockReturnValue(true);
+    const config = mkRuntimeConfig({
+      settingsServers: { 'shadow-rm': { command: 'settings-cmd' } },
+      runtimeRemoveSpy: removeSpy,
+    });
+    const manager = mkManager({ config, options: { pool: fakePool } });
+
+    // Add runtime entry that shadows settings
+    await manager.addRuntimeMcpServer(
+      'shadow-rm',
+      { command: 'runtime-cmd' },
+      'client-7',
+    );
+    const result = await manager.removeRuntimeMcpServer(
+      'shadow-rm',
+      'client-7',
+    );
+
+    expect(result).toMatchObject({
+      name: 'shadow-rm',
+      removed: true,
+      wasShadowingSettings: true,
+    });
+  });
+
+  it('case 3: non-existent → skipped not_present', async () => {
+    const removeSpy = vi.fn().mockReturnValue(false);
+    const config = mkRuntimeConfig({ runtimeRemoveSpy: removeSpy });
+    const manager = mkManager({ config });
+
+    const result = await manager.removeRuntimeMcpServer('ghost', 'client-8');
+
+    expect(result).toEqual({
+      name: 'ghost',
+      skipped: true,
+      reason: 'not_present',
+    });
+  });
+
+  // ───── Error class tests ──────────────────────────────────────────
+
+  it('throws InvalidMcpConfigError for config with unknown transport', async () => {
+    const { InvalidMcpConfigError } = await import('./mcp-errors.js');
+    const config = mkRuntimeConfig();
+    const manager = mkManager({ config });
+
+    await expect(
+      manager.addRuntimeMcpServer(
+        'bad-cfg',
+        {} as unknown as import('../config/config.js').MCPServerConfig,
+        'client-9',
+      ),
+    ).rejects.toThrow(InvalidMcpConfigError);
+  });
+
+  it('throws McpServerSpawnFailedError when pool.acquire rejects', async () => {
+    const { McpServerSpawnFailedError } = await import('./mcp-errors.js');
+    const fakePool = {
+      acquire: vi.fn().mockRejectedValue(new Error('Connection refused')),
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+
+    const removeSpy = vi.fn().mockReturnValue(true);
+    const config = mkRuntimeConfig({ runtimeRemoveSpy: removeSpy });
+    const manager = mkManager({ config, options: { pool: fakePool } });
+
+    await expect(
+      manager.addRuntimeMcpServer(
+        'fail-srv',
+        { command: 'bad-binary' },
+        'client-10',
+      ),
+    ).rejects.toThrow(McpServerSpawnFailedError);
+
+    // Config overlay should have been rolled back
+    expect(removeSpy).toHaveBeenCalledWith('fail-srv');
   });
 });

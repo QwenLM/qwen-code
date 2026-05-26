@@ -2463,6 +2463,17 @@ export class Config {
     return this.mcpTransportPool;
   }
 
+  /**
+   * T2.8: return the raw settings-layer MCP servers map (without the
+   * runtime overlay or extension contributions).  Used by
+   * `McpClientManager.addRuntimeMcpServer` to detect shadow-over-
+   * settings (a runtime entry whose name collides with a pre-existing
+   * settings entry).
+   */
+  getSettingsMcpServers(): Record<string, MCPServerConfig> | undefined {
+    return this.mcpServers;
+  }
+
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
     let mcpServers = { ...(this.mcpServers || {}) };
     const extensions = this.getActiveExtensions();
