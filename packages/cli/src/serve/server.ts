@@ -1488,8 +1488,8 @@ export function createServeApp(
     const body = safeBody(req);
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
-    const displayName = body['displayName'];
-    if (displayName !== undefined && typeof displayName !== 'string') {
+    const rawDisplayName = body['displayName'];
+    if (rawDisplayName !== undefined && typeof rawDisplayName !== 'string') {
       res.status(400).json({
         error: '`displayName` must be a string',
         code: 'invalid_metadata',
@@ -1497,6 +1497,10 @@ export function createServeApp(
       });
       return;
     }
+    const displayName =
+      typeof rawDisplayName === 'string'
+        ? rawDisplayName.slice(0, 256)
+        : undefined;
     try {
       const effective = bridge.updateSessionMetadata(
         sessionId,

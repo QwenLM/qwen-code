@@ -22,10 +22,10 @@ function parseDiff(diff: string): {
   for (const line of diff.split('\n')) {
     if (line.startsWith('@@')) {
       lines.push({ type: 'header', content: line });
-    } else if (line.startsWith('+')) {
+    } else if (line.startsWith('+') && !line.startsWith('+++ ')) {
       additions++;
       lines.push({ type: 'add', content: line.slice(1) });
-    } else if (line.startsWith('-')) {
+    } else if (line.startsWith('-') && !line.startsWith('--- ')) {
       deletions++;
       lines.push({ type: 'del', content: line.slice(1) });
     } else {

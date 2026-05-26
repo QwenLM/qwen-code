@@ -54,6 +54,7 @@ export function handleSilentDaemonEvent(
     case 'tool_toggled':
     case 'mcp_server_restarted':
     case 'mcp_server_restart_refused':
+    case 'replay_complete':
       return true;
     default:
       return false;

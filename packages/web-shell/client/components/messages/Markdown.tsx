@@ -74,11 +74,12 @@ export function sanitizeSvg(svg: string): string {
     .forEach((node) => node.remove());
 
   doc.querySelectorAll('use').forEach((node) => {
-    const href =
-      node.getAttribute('href') ??
-      node.getAttribute('xlink:href') ??
-      node.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
-    if (!href || !href.startsWith('#')) {
+    const hrefs = [
+      node.getAttribute('href'),
+      node.getAttribute('xlink:href'),
+      node.getAttributeNS('http://www.w3.org/1999/xlink', 'href'),
+    ].filter((h): h is string => h !== null);
+    if (hrefs.length === 0 || hrefs.some((h) => !h.startsWith('#'))) {
       node.remove();
     }
   });
@@ -102,7 +103,7 @@ export function sanitizeSvg(svg: string): string {
           element.removeAttribute(attr.name);
         }
       }
-      if (name === 'style') {
+      if (/url\(/i.test(attr.value)) {
         const hasExternalUrl = /url\(\s*(?!['"]?#)/i.test(attr.value);
         if (hasExternalUrl) {
           element.removeAttribute(attr.name);

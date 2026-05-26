@@ -262,10 +262,11 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
   useEffect(() => {
     const abort = new AbortController();
     let disposed = false;
+    const effectiveBaseUrl = opts.baseUrl || window.location.origin;
 
     const run = async () => {
       const client = new DaemonClient({
-        baseUrl: opts.baseUrl || window.location.origin,
+        baseUrl: effectiveBaseUrl,
         token: opts.token,
       });
       let session: DaemonSessionClient | undefined;
@@ -317,7 +318,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
             if (disposed || abort.signal.aborted) {
               if (nextSession.clientId) {
                 detachDaemonClient({
-                  baseUrl: opts.baseUrl,
+                  baseUrl: effectiveBaseUrl,
                   token: opts.token,
                   sessionId: nextSession.sessionId,
                   clientId: nextSession.clientId,
@@ -451,6 +452,13 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
           }
 
           if (!disposed && !abort.signal.aborted) {
+            const stalePrompt = activePromptsRef.current.get(
+              activeSession.sessionId,
+            );
+            if (stalePrompt) {
+              stalePrompt.controller.abort();
+              activePromptsRef.current.delete(activeSession.sessionId);
+            }
             session = undefined;
             sessionRef.current = undefined;
           }
@@ -538,7 +546,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
       }
       if (session?.clientId) {
         detachDaemonClient({
-          baseUrl: opts.baseUrl,
+          baseUrl: effectiveBaseUrl,
           token: opts.token,
           sessionId: session.sessionId,
           clientId: session.clientId,
@@ -597,6 +605,12 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
           }
           return result;
         } catch (error) {
+          if (options?.optimisticUserMessage === false) {
+            suppressedOwnUserEchoCountRef.current = Math.max(
+              0,
+              suppressedOwnUserEchoCountRef.current - 1,
+            );
+          }
           if (error instanceof DOMException && error.name === 'AbortError') {
             return { stopReason: 'cancelled' };
           }
@@ -745,16 +759,28 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
       },
 
       async loadMcpTools(serverName: string): Promise<WebShellMcpToolsStatus> {
-        return {
-          v: 1,
-          serverName,
-          tools: [],
-          errors: [
-            {
-              error: 'The connected daemon does not expose MCP tool details.',
-            },
-          ],
-        };
+        const session = sessionRef.current;
+        if (!session) throw new Error('Not connected');
+        try {
+          const result = await session.client.workspaceMcpTools(serverName);
+          return {
+            v: 1,
+            serverName: result.serverName,
+            tools: [],
+            errors: result.errors,
+          };
+        } catch {
+          return {
+            v: 1,
+            serverName,
+            tools: [],
+            errors: [
+              {
+                error: 'The connected daemon does not expose MCP tool details.',
+              },
+            ],
+          };
+        }
       },
 
       async restartMcpServer(
@@ -849,6 +875,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         return session.updateMetadata({ displayName });
       },
     }),
+    // Actions access the server via sessionRef (set by the connection effect), not opts directly.
     [store],
   );
 
@@ -857,16 +884,17 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
     let cancelled = false;
     let consecutiveFailures = 0;
     const timer = setInterval(() => {
+      if (!sessionRef.current) return;
       sessionRef.current
-        ?.heartbeat()
+        .heartbeat()
         .then(() => {
           if (cancelled) return;
           if (consecutiveFailures >= 3) {
-            setConnection((cur) => ({
-              ...cur,
-              status: 'connected',
-              error: undefined,
-            }));
+            setConnection((cur) =>
+              cur.status === 'connected'
+                ? cur
+                : { ...cur, status: 'connected', error: undefined },
+            );
           }
           consecutiveFailures = 0;
         })

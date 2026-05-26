@@ -795,13 +795,17 @@ export function App({
     if (!nextPrompt) return;
 
     drainingQueueRef.current = true;
-    window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       try {
         handleSubmit(nextPrompt.text, nextPrompt.images);
       } finally {
         drainingQueueRef.current = false;
       }
     }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      drainingQueueRef.current = false;
+    };
   }, [
     connected,
     dialogOpen,

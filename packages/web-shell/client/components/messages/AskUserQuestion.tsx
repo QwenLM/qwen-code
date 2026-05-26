@@ -37,6 +37,15 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
   );
   const [customFocused, setCustomFocused] = useState(false);
 
+  useEffect(() => {
+    setCurrentIdx(0);
+    setSelectedIdx(0);
+    setAnswers({});
+    setCustomInputs({});
+    setSelectedMulti({});
+    setCustomFocused(false);
+  }, [request.id]);
+
   const current = questions[currentIdx];
   const isMulti = current?.multiSelect ?? false;
   const totalOptions = (current?.options.length ?? 0) + 1; // +1 for "Other"

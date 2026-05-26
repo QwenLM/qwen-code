@@ -1304,7 +1304,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     if (!info) return idle();
     const response = await withTimeout(
       Promise.race([
-        info.connection.extMethod(method, { cwd: boundWorkspace, ...params }),
+        info.connection.extMethod(method, { ...params, cwd: boundWorkspace }),
         getChannelClosedReject(info),
       ]),
       initTimeoutMs,
