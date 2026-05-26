@@ -4806,7 +4806,14 @@ describe('createHttpAcpBridge', () => {
         }
       })();
 
-      // prompt is not an array → guard returns early, no throw, no echo.
+      // prompt is not an array → the Array.isArray guard returns early.
+      // Capture the outcome rather than swallowing it: if the guard were
+      // removed, echoPromptToSessionBus would throw a TypeError on
+      // `undefined.length` and sendPrompt would reject WITH that TypeError —
+      // so asserting the error (if any) is NOT a TypeError makes the test
+      // fail when the guard is gone (the previous `.catch(() => {})` passed
+      // regardless — dead-code-safe, wenshao).
+      let caught: unknown;
       await bridge
         .sendPrompt(
           session.sessionId,
@@ -4814,14 +4821,14 @@ describe('createHttpAcpBridge', () => {
           undefined,
           { clientId: session.clientId },
         )
-        .catch(() => {
-          // forward may resolve or reject depending on the fake agent; we
-          // only assert the echo path didn't throw / didn't emit.
+        .catch((e) => {
+          caught = e;
         });
 
       await new Promise((r) => setTimeout(r, 10));
       abort.abort();
       await collecting;
+      expect(caught).not.toBeInstanceOf(TypeError);
       expect(userChunks).toHaveLength(0);
       await bridge.shutdown();
     });
