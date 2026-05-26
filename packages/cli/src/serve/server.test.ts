@@ -7527,3 +7527,58 @@ describe('T2.9 serve-side errorKind taxonomy (issue #4514)', () => {
     expect(SERVE_ERROR_KINDS).toContain('writer_idle_timeout');
   });
 });
+
+describe('sendBridgeError daemonLog routing', () => {
+  it('routes 5xx errors through daemonLog when provided', async () => {
+    const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'daemon-log-'));
+    const stderrLines: string[] = [];
+    const { initDaemonLogger } = await import('./daemonLogger.js');
+    const daemonLog = initDaemonLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: (line: string) => stderrLines.push(line),
+    });
+    const bridge = fakeBridge({
+      spawnImpl: async () => {
+        throw new Error('daemon-log-test-boom');
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+    const res = await request(app)
+      .post('/session')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ cwd: '/work/a' });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('daemon-log-test-boom');
+    await daemonLog.flush();
+    // Verify the daemon log file contains the structured error
+    const logPath = daemonLog.getLogPath();
+    const logContent = await fsp.readFile(logPath, 'utf8');
+    expect(logContent).toContain('[ERROR]');
+    expect(logContent).toContain('[DAEMON]');
+    expect(logContent).toContain('daemon-log-test-boom');
+    expect(logContent).toContain('route=POST /session');
+    // Verify stderr also received the line (tee behavior)
+    expect(stderrLines.some((l) => l.includes('daemon-log-test-boom'))).toBe(
+      true,
+    );
+    await fsp.rm(tmp, { recursive: true, force: true });
+  });
+
+  it('falls back to writeStderrLine when daemonLog is not provided', async () => {
+    const bridge = fakeBridge({
+      spawnImpl: async () => {
+        throw new Error('legacy-stderr-test-boom');
+      },
+    });
+    // No daemonLog in deps → legacy path
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/session')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ cwd: '/work/a' });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('legacy-stderr-test-boom');
+  });
+});

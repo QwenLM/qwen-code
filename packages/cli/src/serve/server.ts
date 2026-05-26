@@ -14,6 +14,7 @@ import {
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import type { DaemonLogger } from './daemonLogger.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -260,6 +261,13 @@ export interface ServeAppDeps {
    * Qwen provider. Used by tests that stub the OAuth flow.
    */
   deviceFlowProviders?: DeviceFlowProvider[];
+  /**
+   * Optional daemon logger. When provided, `sendBridgeError` routes
+   * each 5xx error through `daemonLog.error(...)` (which tees to stderr +
+   * the daemon log file). When omitted, falls back to existing
+   * stderr-only behavior.
+   */
+  daemonLog?: DaemonLogger;
 }
 
 /**
@@ -630,6 +638,25 @@ export function createServeApp(
   // review thread D) prevents a string-key typo from silently
   // detaching `runQwenServe`'s shutdown dispose call.
   setDeviceFlowRegistry(app, deviceFlowRegistry);
+
+  // Daemon logger — when injected via `deps.daemonLog`, 5xx errors logged
+  // by `sendBridgeError` route through the structured daemon log (which
+  // already tees to stderr). When absent (tests, direct embeds), the
+  // legacy `writeStderrLine` path is preserved.
+  const { daemonLog } = deps;
+
+  // Curry `daemonLog` into the module-level error helpers so route
+  // handlers don't repeat the parameter at every call site.
+  const sendBridgeError = (
+    res: import('express').Response,
+    err: unknown,
+    ctx?: { route?: string; sessionId?: string },
+  ) => sendBridgeErrorImpl(res, err, ctx, daemonLog);
+  const sendPermissionVoteError = (
+    res: import('express').Response,
+    err: unknown,
+    ctx: { route: string; sessionId?: string },
+  ) => sendPermissionVoteErrorImpl(res, err, ctx, daemonLog);
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -3044,10 +3071,11 @@ function parseLastEventId(raw: unknown): number | undefined {
   return n;
 }
 
-function sendPermissionVoteError(
+function sendPermissionVoteErrorImpl(
   res: import('express').Response,
   err: unknown,
   ctx: { route: string; sessionId?: string },
+  daemonLog?: DaemonLogger,
 ): void {
   // BkwQI: voter's `optionId` wasn't in the option set the agent
   // originally offered (e.g. forging `ProceedAlways*` when the
@@ -3101,7 +3129,7 @@ function sendPermissionVoteError(
     });
     return;
   }
-  sendBridgeError(res, err, ctx);
+  sendBridgeErrorImpl(res, err, ctx, daemonLog);
 }
 
 function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
@@ -3170,10 +3198,11 @@ type OmitId<T> = Omit<T, 'id'>;
  * /session/:id/prompt', sessionId })`. Optional so test/dev call
  * sites that don't care about the log can omit it.
  */
-function sendBridgeError(
+function sendBridgeErrorImpl(
   res: import('express').Response,
   err: unknown,
   ctx?: { route?: string; sessionId?: string },
+  daemonLog?: DaemonLogger,
 ): void {
   if (err instanceof WorkspaceInitConflictError) {
     // #4175 Wave 4 PR 17. The target file already exists with non-
@@ -3380,18 +3409,29 @@ function sendBridgeError(
   // 5xx is the kind of error operators need to see in their daemon log
   // — bridge ENOMEM, agent stack trace, unexpected throw, etc. Without
   // logging here every 500 disappears once the caller consumes the
-  // response body. This is a stop-gap until structured access/error
-  // logging lands (tracked under §10 follow-ups). Use the stdio helper
-  // (not `console.error`) to keep the no-console lint rule happy and
-  // route through the same writer the rest of the daemon uses.
-  const ctxParts = [
-    ctx?.route,
-    ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
-  ].filter(Boolean);
-  const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
-  writeStderrLine(
-    `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-  );
+  // response body. When `daemonLog` is provided, route through the
+  // structured daemon logger (which tees to stderr + log file). When
+  // absent (tests, direct embeds), fall back to the legacy stderr-only
+  // `writeStderrLine` path.
+  if (daemonLog) {
+    daemonLog.error(
+      err instanceof Error ? err.message : String(err),
+      err instanceof Error ? err : undefined,
+      {
+        ...(ctx?.route ? { route: ctx.route } : {}),
+        ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+      },
+    );
+  } else {
+    const ctxParts = [
+      ctx?.route,
+      ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
+    ].filter(Boolean);
+    const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
+    writeStderrLine(
+      `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+    );
+  }
   res.status(500).json(errorPayload(err));
 }
 
