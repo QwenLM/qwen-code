@@ -1016,6 +1016,9 @@ describe('AnthropicContentGenerator', () => {
       // generateContent(); make sure the per-request header attaches there
       // too so streaming Anthropic/DeepSeek requests stay consistent.
       const { AnthropicContentGenerator } = await importGenerator();
+      // Use message_delta (not bare message_stop) so the empty-stream
+      // fallback is not triggered — bare message_stop now indicates an empty
+      // stream and causes a non-streaming retry.
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
           yield {
@@ -1042,6 +1045,10 @@ describe('AnthropicContentGenerator', () => {
       for await (const _chunk of stream) {
         void _chunk;
       }
+
+      // Regression guard: normal streams must NOT trigger the empty-stream
+      // fallback (which would double latency + API cost).
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(1);
 
       const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
       const headers = ((options as { headers?: Record<string, string> })
@@ -2433,7 +2440,7 @@ describe('AnthropicContentGenerator', () => {
             // events when the real failure body is only available non-streaming.
           })(),
         )
-        .mockRejectedValueOnce(new Error('400 Team API AKday消费金额已达上限'));
+        .mockRejectedValueOnce(new Error('400 quota exceeded'));
 
       const generator = new AnthropicContentGenerator(
         {
@@ -2456,7 +2463,7 @@ describe('AnthropicContentGenerator', () => {
         for await (const _chunk of stream) {
           void _chunk;
         }
-      }).rejects.toThrow('400 Team API AKday消费金额已达上限');
+      }).rejects.toThrow('400 quota exceeded');
 
       expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
       const [streamingRequest] = anthropicState.createImpl.mock

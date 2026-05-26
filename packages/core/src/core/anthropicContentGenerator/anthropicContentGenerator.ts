@@ -1015,11 +1015,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
         signal: abortSignal,
         ...(headers ? { headers } : {}),
       })) as Message;
+      yield this.converter.convertAnthropicResponseToGemini(response);
     } catch (error) {
       throw redactProxyError(error);
     }
-
-    yield this.converter.convertAnthropicResponseToGemini(response);
   }
 
   private buildGeminiChunk(
