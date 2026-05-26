@@ -13,8 +13,16 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { createServeBridgeMcpServer } from '../../src/daemon-mcp/serve-bridge/createServeBridgeMcpServer.js';
-import { resolveSessionId, handler, daemonFetch, authHeaders } from '../../src/daemon-mcp/serve-bridge/types.js';
-import type { BridgeState } from '../../src/daemon-mcp/serve-bridge/types.js';
+import {
+  resolveSessionId,
+  handler,
+  daemonFetch,
+  authHeaders,
+} from '../../src/daemon-mcp/serve-bridge/types.js';
+import type {
+  BridgeState,
+  SessionEventStream,
+} from '../../src/daemon-mcp/serve-bridge/types.js';
 import { DaemonClient } from '../../src/daemon/DaemonClient.js';
 
 // --- Helpers ---
@@ -23,20 +31,6 @@ function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'content-type': 'application/json' },
-  });
-}
-
-function sseResponse(frames: string): Response {
-  const encoder = new TextEncoder();
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(encoder.encode(frames));
-      controller.close();
-    },
-  });
-  return new Response(body, {
-    status: 200,
-    headers: { 'content-type': 'text/event-stream' },
   });
 }
 
@@ -93,6 +87,7 @@ function makeMockState(opts?: {
     token,
     defaultSessionId: opts?.defaultSessionId,
     workspaceCwd: '/tmp/test-workspace',
+    eventStreams: new Map(),
   };
 
   return { state, calls };
@@ -103,7 +98,7 @@ function makeMockState(opts?: {
 describe('serve-bridge', () => {
   describe('createServeBridgeMcpServer', () => {
     it('should create a server with name qwen-serve-bridge', () => {
-      const { fetch } = recordingFetch(() => jsonResponse(200, {}));
+      recordingFetch(() => jsonResponse(200, {}));
       const server = createServeBridgeMcpServer({
         daemonUrl: 'http://127.0.0.1:4170',
         token: 'test',
@@ -159,7 +154,9 @@ describe('serve-bridge', () => {
 
   describe('handler', () => {
     it('should pass args through and return result', async () => {
-      const fn = vi.fn().mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+      const fn = vi
+        .fn()
+        .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
       const wrapped = handler(fn);
       const result = await wrapped({ foo: 'bar' }, {});
       expect(fn).toHaveBeenCalledWith({ foo: 'bar' });
@@ -189,19 +186,20 @@ describe('serve-bridge', () => {
 
   describe('daemonFetch', () => {
     it('should call the correct URL with auth headers', async () => {
-      const mockFetch = vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ ok: true }), { status: 200 }),
-      );
+      const mockFetch = vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ ok: true }), { status: 200 }),
+        );
       const originalFetch = globalThis.fetch;
       globalThis.fetch = mockFetch;
 
       try {
         const { state } = makeMockState({ token: 'abc' });
         const result = await daemonFetch(state, '/health');
-        expect(mockFetch).toHaveBeenCalledWith(
-          'http://127.0.0.1:4170/health',
-          { headers: { Authorization: 'Bearer abc' } },
-        );
+        expect(mockFetch).toHaveBeenCalledWith('http://127.0.0.1:4170/health', {
+          headers: { Authorization: 'Bearer abc' },
+        });
         expect(result).toEqual({ ok: true });
       } finally {
         globalThis.fetch = originalFetch;
@@ -209,9 +207,9 @@ describe('serve-bridge', () => {
     });
 
     it('should append query parameters', async () => {
-      const mockFetch = vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({}), { status: 200 }),
-      );
+      const mockFetch = vi
+        .fn()
+        .mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
       const originalFetch = globalThis.fetch;
       globalThis.fetch = mockFetch;
 
@@ -227,15 +225,17 @@ describe('serve-bridge', () => {
     });
 
     it('should throw on non-OK response', async () => {
-      const mockFetch = vi.fn().mockResolvedValue(
-        new Response('Not Found', { status: 404 }),
-      );
+      const mockFetch = vi
+        .fn()
+        .mockResolvedValue(new Response('Not Found', { status: 404 }));
       const originalFetch = globalThis.fetch;
       globalThis.fetch = mockFetch;
 
       try {
         const { state } = makeMockState({ token: 'abc' });
-        await expect(daemonFetch(state, '/stat', { path: 'x' })).rejects.toThrow('404');
+        await expect(
+          daemonFetch(state, '/stat', { path: 'x' }),
+        ).rejects.toThrow('404');
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -245,7 +245,7 @@ describe('serve-bridge', () => {
   describe('tool handlers', () => {
     describe('health', () => {
       it('should call GET /health and return result', async () => {
-        const { state, calls } = makeMockState({
+        const { state } = makeMockState({
           fetchReply: () => jsonResponse(200, { status: 'ok' }),
         });
 
@@ -254,7 +254,9 @@ describe('serve-bridge', () => {
           '../../src/daemon-mcp/serve-bridge/tools/infrastructure.js'
         );
         const tools = infrastructureTools(state);
-        const healthTool = tools.find((t: { name: string }) => t.name === 'health');
+        const healthTool = tools.find(
+          (t: { name: string }) => t.name === 'health',
+        );
 
         expect(healthTool).toBeDefined();
         expect(healthTool.name).toBe('health');
@@ -264,7 +266,7 @@ describe('serve-bridge', () => {
 
     describe('session_create', () => {
       it('should set defaultSessionId after successful creation', async () => {
-        const { state, calls } = makeMockState({
+        const { state } = makeMockState({
           fetchReply: (req) => {
             if (req.url.endsWith('/session') && req.method === 'POST') {
               return jsonResponse(200, {
@@ -281,7 +283,9 @@ describe('serve-bridge', () => {
           '../../src/daemon-mcp/serve-bridge/tools/session.js'
         );
         const tools = sessionTools(state);
-        const createTool = tools.find((t: { name: string }) => t.name === 'session_create');
+        const createTool = tools.find(
+          (t: { name: string }) => t.name === 'session_create',
+        );
         expect(createTool).toBeDefined();
 
         // Call the handler
@@ -302,7 +306,9 @@ describe('serve-bridge', () => {
           '../../src/daemon-mcp/serve-bridge/tools/session.js'
         );
         const tools = sessionTools(state);
-        const closeTool = tools.find((t: { name: string }) => t.name === 'session_close');
+        const closeTool = tools.find(
+          (t: { name: string }) => t.name === 'session_close',
+        );
 
         await closeTool.handler({ session_id: 'sess-to-close' }, {});
         expect(state.defaultSessionId).toBeUndefined();
@@ -318,7 +324,9 @@ describe('serve-bridge', () => {
           '../../src/daemon-mcp/serve-bridge/tools/session.js'
         );
         const tools = sessionTools(state);
-        const closeTool = tools.find((t: { name: string }) => t.name === 'session_close');
+        const closeTool = tools.find(
+          (t: { name: string }) => t.name === 'session_close',
+        );
 
         await closeTool.handler({ session_id: 'other-session' }, {});
         expect(state.defaultSessionId).toBe('keep-this');
@@ -401,33 +409,42 @@ describe('serve-bridge', () => {
     });
   });
 
-  describe('prompt tool with SSE collection', () => {
-    it('should collect response text from SSE events', async () => {
-      const sseFrames = [
-        'retry: 3000\n\n',
-        'id: 1\nevent: session_update\ndata: {"id":1,"v":1,"type":"session_update","data":{"sessionId":"s1","update":{"content":{"text":"hello","type":"text"},"sessionUpdate":"agent_message_chunk"}}}\n\n',
-        'id: 2\nevent: session_update\ndata: {"id":2,"v":1,"type":"session_update","data":{"sessionId":"s1","update":{"content":{"text":" world","type":"text"},"sessionUpdate":"agent_message_chunk"}}}\n\n',
-        'id: 3\nevent: session_update\ndata: {"id":3,"v":1,"type":"session_update","data":{"sessionId":"s1","update":{"content":{"text":"","type":"text","_meta":{"usage":{}}},"sessionUpdate":"agent_message_chunk"}}}\n\n',
-      ].join('');
-
+  describe('prompt tool with persistent SSE', () => {
+    it('should collect response text via the persistent event stream', async () => {
       const { state } = makeMockState({
         defaultSessionId: 'test-session',
         fetchReply: (req) => {
-          if (req.url.includes('/events')) {
-            return sseResponse(sseFrames);
-          }
           if (req.url.includes('/prompt')) {
+            // Simulate: prompt returns stopReason, but before that the
+            // persistent SSE stream will have populated the collector.
+            // We simulate this by filling the collector just before the
+            // prompt response resolves.
+            const stream = state.eventStreams.get('test-session')!;
+            const collector = stream.activeCollector!;
+            collector.texts.push('hello');
+            collector.texts.push(' world');
+            collector.resolve();
             return jsonResponse(200, { stopReason: 'end_turn' });
           }
           return jsonResponse(404, {});
         },
       });
 
+      // Set up a fake persistent event stream (normally created by session_create)
+      const fakeStream: SessionEventStream = {
+        sessionId: 'test-session',
+        abortCtrl: new AbortController(),
+        activeCollector: null,
+      };
+      state.eventStreams.set('test-session', fakeStream);
+
       const { agentTools } = await import(
         '../../src/daemon-mcp/serve-bridge/tools/agent.js'
       );
       const tools = agentTools(state);
-      const promptTool = tools.find((t: { name: string }) => t.name === 'prompt');
+      const promptTool = tools.find(
+        (t: { name: string }) => t.name === 'prompt',
+      );
 
       const result = await promptTool.handler({ prompt: 'test' }, {});
       const parsed = JSON.parse(result.content[0].text);
@@ -435,6 +452,26 @@ describe('serve-bridge', () => {
       expect(parsed.stop_reason).toBe('end_turn');
       expect(parsed.session_id).toBe('test-session');
       expect(parsed.response).toBe('hello world');
+      // Collector should be cleared after prompt completes
+      expect(fakeStream.activeCollector).toBeNull();
+    });
+
+    it('should throw if no SSE stream exists for the session', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'no-stream-session',
+      });
+
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const tools = agentTools(state);
+      const promptTool = tools.find(
+        (t: { name: string }) => t.name === 'prompt',
+      );
+
+      const result = await promptTool.handler({ prompt: 'test' }, {});
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('No SSE stream');
     });
   });
 });

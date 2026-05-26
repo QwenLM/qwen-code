@@ -8,7 +8,12 @@ import { z } from 'zod';
 import { tool } from '../../tool.js';
 import { formatJsonResult } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
-import { handler, resolveSessionId } from '../types.js';
+import {
+  handler,
+  resolveSessionId,
+  startEventStream,
+  stopEventStream,
+} from '../types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function sessionTools(state: BridgeState): any[] {
@@ -17,9 +22,18 @@ export function sessionTools(state: BridgeState): any[] {
       'session_create',
       'Create a new qwen-code session or attach to an existing one. The created session becomes the default for subsequent tool calls.',
       {
-        workspace_cwd: z.string().optional().describe('Workspace path. Defaults to daemon bound workspace.'),
-        model_service_id: z.string().optional().describe('Model service to use.'),
-        session_scope: z.enum(['single', 'thread']).optional().describe('Session scope.'),
+        workspace_cwd: z
+          .string()
+          .optional()
+          .describe('Workspace path. Defaults to daemon bound workspace.'),
+        model_service_id: z
+          .string()
+          .optional()
+          .describe('Model service to use.'),
+        session_scope: z
+          .enum(['single', 'thread'])
+          .optional()
+          .describe('Session scope.'),
       },
       handler(async (args) => {
         const session = await state.client.createOrAttachSession({
@@ -28,6 +42,8 @@ export function sessionTools(state: BridgeState): any[] {
           sessionScope: args.session_scope,
         });
         state.defaultSessionId = session.sessionId;
+        // Start persistent SSE connection for this session
+        startEventStream(state, session.sessionId);
         return formatJsonResult(session);
       }),
     ),
@@ -44,6 +60,7 @@ export function sessionTools(state: BridgeState): any[] {
           workspaceCwd: args.workspace_cwd,
         });
         state.defaultSessionId = result.sessionId;
+        startEventStream(state, result.sessionId);
         return formatJsonResult(result);
       }),
     ),
@@ -60,6 +77,7 @@ export function sessionTools(state: BridgeState): any[] {
           workspaceCwd: args.workspace_cwd,
         });
         state.defaultSessionId = result.sessionId;
+        startEventStream(state, result.sessionId);
         return formatJsonResult(result);
       }),
     ),
@@ -68,10 +86,15 @@ export function sessionTools(state: BridgeState): any[] {
       'session_close',
       'Force-close a live session.',
       {
-        session_id: z.string().optional().describe('Session ID. Uses default session if omitted.'),
+        session_id: z
+          .string()
+          .optional()
+          .describe('Session ID. Uses default session if omitted.'),
       },
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
+        // Stop persistent SSE before closing session
+        stopEventStream(state, sessionId);
         await state.client.closeSession(sessionId);
         if (state.defaultSessionId === sessionId) {
           state.defaultSessionId = undefined;
@@ -84,8 +107,14 @@ export function sessionTools(state: BridgeState): any[] {
       'session_update_metadata',
       'Update session metadata such as display name.',
       {
-        session_id: z.string().optional().describe('Session ID. Uses default session if omitted.'),
-        display_name: z.string().optional().describe('New display name for the session.'),
+        session_id: z
+          .string()
+          .optional()
+          .describe('Session ID. Uses default session if omitted.'),
+        display_name: z
+          .string()
+          .optional()
+          .describe('New display name for the session.'),
       },
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
@@ -100,10 +129,14 @@ export function sessionTools(state: BridgeState): any[] {
       'session_list',
       'List live sessions for a workspace.',
       {
-        workspace_cwd: z.string().describe('Workspace path to list sessions for.'),
+        workspace_cwd: z
+          .string()
+          .describe('Workspace path to list sessions for.'),
       },
       handler(async (args) => {
-        const sessions = await state.client.listWorkspaceSessions(args.workspace_cwd);
+        const sessions = await state.client.listWorkspaceSessions(
+          args.workspace_cwd,
+        );
         return formatJsonResult({ sessions });
       }),
     ),
