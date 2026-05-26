@@ -415,6 +415,56 @@ export interface HttpAcpBridge {
   }>;
 
   /**
+   * T2.8 (#4514): Add a runtime MCP server through the ACP child's
+   * `McpClientManager.addRuntimeMcpServer`. On success, broadcasts an
+   * `mcp_server_added` event to every session bus. Soft-refuse
+   * (`budget_warning_only` skip) does NOT emit an event — the caller
+   * receives the skip shape and decides locally.
+   *
+   * Throws `SessionNotFoundError` when no ACP channel is live (caller
+   * should spawn or attach first). Typed ACP errors (budget-exceeded,
+   * spawn-failed, invalid-config) are re-instantiated from the
+   * JSON-RPC `data.errorKind` so the route's `sendBridgeError` can
+   * map them to stable HTTP status codes.
+   */
+  addRuntimeMcpServer(
+    name: string,
+    config: Record<string, unknown>,
+    originatorClientId: string,
+  ): Promise<
+    | {
+        name: string;
+        transport: string;
+        replaced: boolean;
+        shadowedSettings: boolean;
+        toolCount: number;
+        originatorClientId: string;
+      }
+    | { name: string; skipped: true; reason: 'budget_warning_only' }
+  >;
+
+  /**
+   * T2.8 (#4514): Remove a runtime MCP server through the ACP child's
+   * `McpClientManager.removeRuntimeMcpServer`. On success, broadcasts
+   * an `mcp_server_removed` event. Idempotent skip (`not_present`)
+   * does NOT emit — the caller receives the skip shape.
+   *
+   * Throws `SessionNotFoundError` when no ACP channel is live.
+   */
+  removeRuntimeMcpServer(
+    name: string,
+    originatorClientId: string,
+  ): Promise<
+    | {
+        name: string;
+        removed: true;
+        wasShadowingSettings: boolean;
+        originatorClientId: string;
+      }
+    | { name: string; skipped: true; reason: 'not_present' }
+  >;
+
+  /**
    * Restart a configured MCP server through the ACP child's
    * `McpClientManager` (pre-F2) or transport pool (F2 #4175 commit 5).
    * Pre-checks the live budget snapshot and returns a structured

@@ -5506,6 +5506,272 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('addRuntimeMcpServer (T2.8 #4514)', () => {
+    /**
+     * Build a channel factory whose ACP `extMethod` handler returns a
+     * configurable response for `qwen/control/workspace/mcp/runtime-add`.
+     */
+    function runtimeAddFactory(
+      respond: (
+        params: Record<string, unknown>,
+      ) =>
+        | Record<string, unknown>
+        | Promise<Record<string, unknown>>
+        | Promise<never>,
+    ): ChannelFactory {
+      return async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/workspace/mcp/runtime-add') {
+              return Promise.resolve(respond(params));
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+    }
+
+    it('returns the success shape and broadcasts mcp_server_added', async () => {
+      const bridge = makeBridge({
+        channelFactory: runtimeAddFactory((params) => ({
+          name: params['name'],
+          transport: 'stdio',
+          replaced: false,
+          shadowedSettings: false,
+          toolCount: 3,
+          originatorClientId: params['originatorClientId'],
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      const result = await bridge.addRuntimeMcpServer(
+        'test-server',
+        { command: 'node', args: ['server.js'] },
+        'client-1',
+      );
+      expect(result).toEqual({
+        name: 'test-server',
+        transport: 'stdio',
+        replaced: false,
+        shadowedSettings: false,
+        toolCount: 3,
+        originatorClientId: 'client-1',
+      });
+      const next = await it.next();
+      expect(next.value?.type).toBe('mcp_server_added');
+      expect(next.value?.data).toMatchObject({
+        name: 'test-server',
+        transport: 'stdio',
+        replaced: false,
+        shadowedSettings: false,
+        toolCount: 3,
+        originatorClientId: 'client-1',
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('does not emit event when result is skipped (budget_warning_only)', async () => {
+      const bridge = makeBridge({
+        channelFactory: runtimeAddFactory(() => ({
+          name: 'test-server',
+          skipped: true,
+          reason: 'budget_warning_only',
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      const result = await bridge.addRuntimeMcpServer(
+        'test-server',
+        { command: 'node', args: ['server.js'] },
+        'client-1',
+      );
+      expect(result).toEqual({
+        name: 'test-server',
+        skipped: true,
+        reason: 'budget_warning_only',
+      });
+      // No event should have been emitted — verify by checking that
+      // the async iterator has nothing ready (next() would hang).
+      // Use Promise.race with a short timeout to confirm no event.
+      const noEvent = await Promise.race([
+        it.next().then(() => 'got_event'),
+        new Promise<string>((r) => setTimeout(() => r('timeout'), 50)),
+      ]);
+      expect(noEvent).toBe('timeout');
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError when no ACP channel is live', async () => {
+      // Create a bridge but do NOT spawn any session
+      const bridge = makeBridge({});
+      const err = await bridge
+        .addRuntimeMcpServer(
+          'test-server',
+          { command: 'node', args: ['server.js'] },
+          'client-1',
+        )
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(SessionNotFoundError);
+      await bridge.shutdown();
+    });
+
+    it('stamps mcp_server_added with the originator clientId', async () => {
+      const bridge = makeBridge({
+        channelFactory: runtimeAddFactory((params) => ({
+          name: params['name'],
+          transport: 'sse',
+          replaced: true,
+          shadowedSettings: true,
+          toolCount: 5,
+          originatorClientId: params['originatorClientId'],
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      await bridge.addRuntimeMcpServer(
+        'my-mcp',
+        { url: 'http://localhost:3000/sse' },
+        session.clientId!,
+      );
+      const next = await it.next();
+      expect(next.value?.originatorClientId).toBe(session.clientId);
+      abort.abort();
+      await bridge.shutdown();
+    });
+  });
+
+  describe('removeRuntimeMcpServer (T2.8 #4514)', () => {
+    /**
+     * Build a channel factory whose ACP `extMethod` handler returns a
+     * configurable response for `qwen/control/workspace/mcp/runtime-remove`.
+     */
+    function runtimeRemoveFactory(
+      respond: (
+        params: Record<string, unknown>,
+      ) =>
+        | Record<string, unknown>
+        | Promise<Record<string, unknown>>
+        | Promise<never>,
+    ): ChannelFactory {
+      return async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/workspace/mcp/runtime-remove') {
+              return Promise.resolve(respond(params));
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+    }
+
+    it('returns the removed shape and broadcasts mcp_server_removed', async () => {
+      const bridge = makeBridge({
+        channelFactory: runtimeRemoveFactory((params) => ({
+          name: params['name'],
+          removed: true,
+          wasShadowingSettings: false,
+          originatorClientId: params['originatorClientId'],
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      const result = await bridge.removeRuntimeMcpServer(
+        'test-server',
+        'client-2',
+      );
+      expect(result).toEqual({
+        name: 'test-server',
+        removed: true,
+        wasShadowingSettings: false,
+        originatorClientId: 'client-2',
+      });
+      const next = await it.next();
+      expect(next.value?.type).toBe('mcp_server_removed');
+      expect(next.value?.data).toMatchObject({
+        name: 'test-server',
+        wasShadowingSettings: false,
+        originatorClientId: 'client-2',
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('does not emit event when result is skipped (not_present)', async () => {
+      const bridge = makeBridge({
+        channelFactory: runtimeRemoveFactory(() => ({
+          name: 'ghost',
+          skipped: true,
+          reason: 'not_present',
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      const result = await bridge.removeRuntimeMcpServer('ghost', 'client-2');
+      expect(result).toEqual({
+        name: 'ghost',
+        skipped: true,
+        reason: 'not_present',
+      });
+      // No event should have been emitted
+      const noEvent = await Promise.race([
+        it.next().then(() => 'got_event'),
+        new Promise<string>((r) => setTimeout(() => r('timeout'), 50)),
+      ]);
+      expect(noEvent).toBe('timeout');
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError when no ACP channel is live', async () => {
+      const bridge = makeBridge({});
+      const err = await bridge
+        .removeRuntimeMcpServer('test-server', 'client-2')
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(SessionNotFoundError);
+      await bridge.shutdown();
+    });
+  });
+
   describe('initWorkspace (#4175 Wave 4 PR 17)', () => {
     /**
      * Per-test workspace temp dir so the bridge's writeFile lands on a
