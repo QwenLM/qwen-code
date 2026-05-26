@@ -3169,8 +3169,8 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     // the typed code for the bridge's sendBridgeError mapping
     expect(err).toBeInstanceOf(Error);
     const data = (err as { data?: Record<string, unknown> }).data;
-    expect(data?.errorKind).toBe('mcp_budget_would_exceed');
-    expect(data?.serverName).toBe('my-srv');
+    expect(data?.['errorKind']).toBe('mcp_budget_would_exceed');
+    expect(data?.['serverName']).toBe('my-srv');
 
     mockConnectionState.resolve();
     await agentPromise;
