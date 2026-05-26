@@ -36,6 +36,10 @@ export function sessionTools(state: BridgeState): any[] {
           .describe('Session scope.'),
       },
       handler(async (args) => {
+        // Stop SSE for previous default session to prevent connection leak
+        if (state.defaultSessionId) {
+          stopEventStream(state, state.defaultSessionId);
+        }
         const session = await state.client.createOrAttachSession({
           workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
           modelServiceId: args.model_service_id,

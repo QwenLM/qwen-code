@@ -47,6 +47,7 @@ export interface PromptCollector {
   texts: string[];
   resolve: () => void;
   promise: Promise<void>;
+  resolved: boolean;
 }
 
 /**

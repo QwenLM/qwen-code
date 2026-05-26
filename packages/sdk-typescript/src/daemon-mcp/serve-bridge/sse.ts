@@ -22,7 +22,21 @@ export function createPromptCollector(): PromptCollector {
   const promise = new Promise<void>((r) => {
     resolve = r;
   });
-  return { texts: [], resolve, promise };
+  const collector: PromptCollector = {
+    texts: [],
+    resolve,
+    promise,
+    resolved: false,
+  };
+  // Wrap resolve to guard against double-resolution
+  const originalResolve = resolve;
+  collector.resolve = () => {
+    if (!collector.resolved) {
+      collector.resolved = true;
+      originalResolve();
+    }
+  };
+  return collector;
 }
 
 /**

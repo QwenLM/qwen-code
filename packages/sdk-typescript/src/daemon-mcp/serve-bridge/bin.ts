@@ -41,9 +41,9 @@ process.on('SIGTERM', shutdown);
 
 // Prevent silent crashes from unhandled rejections
 process.on('unhandledRejection', (err) => {
-  process.stderr.write(
-    `[qwen-serve-bridge] unhandled rejection: ${err instanceof Error ? err.message : String(err)}\n`,
-  );
+  const detail =
+    err instanceof Error ? (err.stack ?? err.message) : String(err);
+  process.stderr.write(`[qwen-serve-bridge] unhandled rejection: ${detail}\n`);
   process.exit(1);
 });
 
