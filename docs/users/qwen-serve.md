@@ -270,11 +270,31 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 > "alive" until Node's keepalive probes time out — typically ~2 hours
 > on Linux defaults. On `--hostname 0.0.0.0` deployments behind such
 > NATs, phantom SSE connections can accumulate and eventually hit the
-> 256 `server.maxConnections` ceiling. Stage 2 will add an
-> application-level idle deadline (last-byte-written tracking +
-> per-connection timeout). Until then, operators on networks that
-> swallow RSTs may want to lower `server.keepAliveTimeout` via a
-> reverse proxy or accept periodic daemon restarts.
+> 256 `server.maxConnections` ceiling.
+>
+> Set [`--writer-idle-timeout-ms <n>`](#deadlines-and-writer-idle-timeout)
+> (issue [#4514](https://github.com/QwenLM/qwen-code/issues/4514) T2.9)
+> to close the gap with an explicit application-level idle deadline:
+> when no write has successfully flushed for `n` ms the daemon emits
+> a terminal `client_evicted` frame with
+> `reason: 'writer_idle_timeout'` and closes the stream. The flag is
+> off by default to preserve the legacy contract — operators on
+> networks that swallow RSTs should pick a value well above the 15s
+> heartbeat interval (e.g. `60000`–`300000`) so legitimate idle
+> connections aren't evicted while genuinely stuck writers are
+> reaped promptly. Pre-flight `caps.features.includes('writer_idle_timeout')`
+> from your SDK to confirm the daemon supports it.
+
+### Deadlines and writer idle timeout
+
+Issue [#4514](https://github.com/QwenLM/qwen-code/issues/4514) T2.9 ships two opt-in flags that close the long-running / remote-deployment gaps the 15s heartbeat + AbortSignal don't cover. Both are off by default — single-user loopback workflows stay bit-for-bit unchanged.
+
+| Flag                           | Env var                             | Default | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------ | ----------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--prompt-deadline-ms <n>`     | `QWEN_SERVE_PROMPT_DEADLINE_MS`     | unset   | Server-side wallclock cap on a single `POST /session/:id/prompt`. On expiry the daemon aborts the prompt's AbortController and returns HTTP `504` with `{code:"prompt_deadline_exceeded", errorKind:"prompt_deadline_exceeded", deadlineMs:n}`. A per-prompt request body field `deadlineMs` can SHORTEN the effective deadline below the flag but never extend it. Capability tag (conditional): `prompt_absolute_deadline`.                                                                                                                                                                                                |
+| `--writer-idle-timeout-ms <n>` | `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS` | unset   | Per-SSE-connection idle deadline. When no write has SUCCESSFULLY flushed for `n` ms — neither a real event nor the 15s heartbeat — the daemon emits a terminal `client_evicted` frame with `data.reason = 'writer_idle_timeout'` (mirrored on `data.errorKind`) and closes the stream. **Pick a value comfortably above the 15s heartbeat** (e.g. `30000`–`300000`) so legitimate idle streams aren't evicted; values `< 15000` WILL evict otherwise-healthy idle connections before the first heartbeat fires (intentional only for tests / short-lived dev sessions). Capability tag (conditional): `writer_idle_timeout`. |
+
+Both flags accept a positive integer in milliseconds; `0`, `NaN`, non-integer, or negative values are rejected at boot with a clear error message. CLI flag wins over env var; explicit `ServeOptions` field (embedded callers) wins over env. SDK consumers should pre-flight the matching capability tag before relying on either behavior — daemons predating this PR omit both tags and the request `deadlineMs` field is silently dropped.
 
 ## Multi-session & multi-workspace deployment
 
