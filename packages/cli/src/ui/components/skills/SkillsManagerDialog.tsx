@@ -456,10 +456,10 @@ export function SkillsManagerDialog({
       <Text color={theme.text.secondary}>
         {hasQuery
           ? t('{{matched}} / {{total}} skills · ', {
-              matched: matchedCount,
-              total: totalCount,
+              matched: String(matchedCount),
+              total: String(totalCount),
             })
-          : t('{{count}} skills · ', { count: totalCount })}
+          : t('{{count}} skills · ', { count: String(totalCount) })}
         {t(
           'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope',
         )}
