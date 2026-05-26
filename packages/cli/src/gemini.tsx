@@ -324,13 +324,13 @@ export async function startInteractiveUI(
                 <VimModeProvider settings={settings}>
                   <AgentViewProvider config={config}>
                     <BackgroundTaskViewProvider config={config}>
-                      <AppContainer
-                        config={config}
-                        settings={settings}
-                        startupWarnings={startupWarnings}
-                        version={version}
-                        initializationResult={initializationResult}
-                      />
+                        <AppContainer
+                          config={config}
+                          settings={settings}
+                          startupWarnings={startupWarnings}
+                          version={version}
+                          initializationResult={initializationResult}
+                        />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
                 </VimModeProvider>
