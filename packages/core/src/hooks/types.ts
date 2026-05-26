@@ -268,6 +268,17 @@ export interface HookOutput {
 
 export const MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH = 10_000;
 
+export function sanitizeUserPromptExpansionAdditionalContext(
+  raw: string,
+): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH)
+    .replace(/&(?:amp?|lt?|gt?)?$/, '');
+}
+
 /**
  * Factory function to create the appropriate hook output class based on event name
  * Returns specialized HookOutput subclasses for events with specific methods
@@ -500,7 +511,7 @@ export class PostToolUseFailureHookOutput extends DefaultHookOutput {
  */
 export class UserPromptSubmitHookOutput extends DefaultHookOutput {
   override getAdditionalContext(): string | undefined {
-    return this.getRawAdditionalContext();
+    return super.getAdditionalContext();
   }
 }
 
@@ -513,11 +524,7 @@ export class UserPromptExpansionHookOutput extends DefaultHookOutput {
     if (raw === undefined) {
       return undefined;
     }
-    return raw
-      .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH)
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH);
+    return sanitizeUserPromptExpansionAdditionalContext(raw);
   }
 }
 

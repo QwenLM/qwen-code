@@ -487,11 +487,13 @@ export class HookRunner {
       switch (eventName) {
         case HookEventName.UserPromptSubmit:
           {
-            const additionalContext = createHookOutput(
-              eventName,
-              hookOutput,
-            ).getAdditionalContext();
-            if (additionalContext && 'prompt' in modifiedInput) {
+            const additionalContext =
+              hookOutput.hookSpecificOutput['additionalContext'];
+            if (
+              typeof additionalContext === 'string' &&
+              additionalContext &&
+              'prompt' in modifiedInput
+            ) {
               (modifiedInput as UserPromptSubmitInput).prompt +=
                 '\n\n' + additionalContext;
             }

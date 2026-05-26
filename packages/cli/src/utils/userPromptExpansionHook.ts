@@ -8,6 +8,7 @@ import type { PartListUnion } from '@google/genai';
 import {
   MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
   partToString,
+  sanitizeUserPromptExpansionAdditionalContext,
 } from '@qwen-code/qwen-code-core';
 
 export function appendUserPromptExpansionAdditionalContext(
@@ -43,14 +44,6 @@ export function serializeUserPromptExpansionPrompt(
 export function formatUserPromptExpansionBlockedMessage(
   reason: string,
 ): string {
-  const truncatedReason = reason.slice(
-    0,
-    MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
-  );
-  const sanitizedReason = truncatedReason
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH);
+  const sanitizedReason = sanitizeUserPromptExpansionAdditionalContext(reason);
   return `UserPromptExpansion blocked: ${sanitizedReason}`;
 }

@@ -75,6 +75,14 @@ describe('formatUserPromptExpansionBlockedMessage', () => {
     );
     expect(result.length).toBe('UserPromptExpansion blocked: '.length + 10_000);
   });
+
+  it('does not leave a partial entity after truncation', () => {
+    const result = formatUserPromptExpansionBlockedMessage(
+      'x'.repeat(9_999) + '<',
+    );
+
+    expect(result).toBe(`UserPromptExpansion blocked: ${'x'.repeat(9_999)}`);
+  });
 });
 
 describe('serializeUserPromptExpansionPrompt', () => {

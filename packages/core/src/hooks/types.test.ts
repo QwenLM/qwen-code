@@ -12,12 +12,12 @@ import {
 } from './types.js';
 
 describe('UserPromptSubmitHookOutput.getAdditionalContext', () => {
-  it('preserves raw additionalContext', () => {
+  it('sanitizes additionalContext', () => {
     const output = createHookOutput('UserPromptSubmit', {
       hookSpecificOutput: { additionalContext: '<xml>value</xml>' },
     });
 
-    expect(output.getAdditionalContext()).toBe('<xml>value</xml>');
+    expect(output.getAdditionalContext()).toBe('&lt;xml&gt;value&lt;/xml&gt;');
   });
 });
 
@@ -52,12 +52,12 @@ describe('UserPromptExpansionHookOutput.getAdditionalContext', () => {
     ).toBe('');
   });
 
-  it('escapes after truncating and caps the escaped result', () => {
+  it('escapes ampersands and angle brackets before capping the result', () => {
     const output = new UserPromptExpansionHookOutput({
       hookSpecificOutput: {
-        additionalContext:
-          '<'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH) +
-          'ignored',
+        additionalContext: `a&b<${'x'.repeat(
+          MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+        )}`,
       },
     });
 
@@ -66,6 +66,23 @@ describe('UserPromptExpansionHookOutput.getAdditionalContext', () => {
     expect(result).toHaveLength(
       MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
     );
+    expect(result?.startsWith('a&amp;b&lt;')).toBe(true);
     expect(result).not.toContain('<');
+  });
+
+  it('does not leave a partial entity after truncation', () => {
+    const output = new UserPromptExpansionHookOutput({
+      hookSpecificOutput: {
+        additionalContext:
+          'x'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH - 1) +
+          '<',
+      },
+    });
+
+    const result = output.getAdditionalContext();
+
+    expect(result).toBe(
+      'x'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH - 1),
+    );
   });
 });
