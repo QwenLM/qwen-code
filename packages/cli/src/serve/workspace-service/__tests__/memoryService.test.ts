@@ -11,15 +11,13 @@ import * as os from 'node:os';
 
 // Mock @qwen-code/qwen-code-core so the service can import it without
 // pulling in the full dependency tree.
-vi.mock('@qwen-code/qwen-code-core', () => {
-  return {
+vi.mock('@qwen-code/qwen-code-core', () => ({
     Storage: {
       getGlobalQwenDir: () => '/mock-home/.qwen',
     },
     getAllGeminiMdFilenames: () => ['QWEN.md', 'AGENTS.md'],
     writeWorkspaceContextFile: vi.fn(),
-  };
-});
+  }));
 
 // Mock @qwen-code/acp-bridge/status
 vi.mock('@qwen-code/acp-bridge/status', () => {
@@ -39,15 +37,15 @@ vi.mock('@qwen-code/acp-bridge/status', () => {
 });
 
 // Import the mocked modules so we can control behavior in tests
-const { writeWorkspaceContextFile } = await import(
+const { writeWorkspaceContextFile } = (await import(
   '@qwen-code/qwen-code-core'
-) as { writeWorkspaceContextFile: ReturnType<typeof vi.fn> };
+)) as unknown as { writeWorkspaceContextFile: ReturnType<typeof vi.fn> };
 
 import {
   createMemoryService,
   type MemoryServiceDeps,
 } from '../memoryService.js';
-import type { WorkspaceRequestContext, WriteMemoryParams } from '../types.js';
+import type { WorkspaceRequestContext } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -174,11 +172,13 @@ describe('MemoryService', () => {
     });
 
     it('allows mutation when clientId is undefined', async () => {
-      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue({
-        filePath: '/workspace/QWEN.md',
-        bytesWritten: 42,
-        changed: true,
-      });
+      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          filePath: '/workspace/QWEN.md',
+          bytesWritten: 42,
+          changed: true,
+        },
+      );
 
       const deps = makeDeps();
       const svc = createMemoryService(deps);
@@ -195,11 +195,13 @@ describe('MemoryService', () => {
     });
 
     it('allows mutation when clientId is in knownClientIds', async () => {
-      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue({
-        filePath: '/workspace/QWEN.md',
-        bytesWritten: 100,
-        changed: true,
-      });
+      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          filePath: '/workspace/QWEN.md',
+          bytesWritten: 100,
+          changed: true,
+        },
+      );
 
       const deps = makeDeps();
       const svc = createMemoryService(deps);
@@ -217,11 +219,13 @@ describe('MemoryService', () => {
     });
 
     it('delegates to writeWorkspaceContextFile with correct params', async () => {
-      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue({
-        filePath: '/workspace/QWEN.md',
-        bytesWritten: 50,
-        changed: true,
-      });
+      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          filePath: '/workspace/QWEN.md',
+          bytesWritten: 50,
+          changed: true,
+        },
+      );
 
       const deps = makeDeps();
       const svc = createMemoryService(deps);
@@ -241,11 +245,13 @@ describe('MemoryService', () => {
     });
 
     it('publishes memory_written event after successful write', async () => {
-      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue({
-        filePath: '/workspace/QWEN.md',
-        bytesWritten: 50,
-        changed: true,
-      });
+      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          filePath: '/workspace/QWEN.md',
+          bytesWritten: 50,
+          changed: true,
+        },
+      );
 
       const deps = makeDeps();
       const svc = createMemoryService(deps);
@@ -270,11 +276,13 @@ describe('MemoryService', () => {
     });
 
     it('does not publish event when write did not change anything', async () => {
-      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue({
-        filePath: '/workspace/QWEN.md',
-        bytesWritten: 0,
-        changed: false,
-      });
+      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          filePath: '/workspace/QWEN.md',
+          bytesWritten: 0,
+          changed: false,
+        },
+      );
 
       const deps = makeDeps();
       const svc = createMemoryService(deps);
@@ -289,11 +297,13 @@ describe('MemoryService', () => {
     });
 
     it('does not include originatorClientId in event when undefined', async () => {
-      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue({
-        filePath: '/workspace/QWEN.md',
-        bytesWritten: 20,
-        changed: true,
-      });
+      (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          filePath: '/workspace/QWEN.md',
+          bytesWritten: 20,
+          changed: true,
+        },
+      );
 
       const deps = makeDeps();
       const svc = createMemoryService(deps);

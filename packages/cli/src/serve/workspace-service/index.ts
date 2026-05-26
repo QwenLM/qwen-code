@@ -127,7 +127,8 @@ export function createDaemonWorkspaceService(
   });
 
   const agents = createAgentsService({
-    subagentManager: subagentManager as import('@qwen-code/qwen-code-core').SubagentManager,
+    subagentManager:
+      subagentManager as import('@qwen-code/qwen-code-core').SubagentManager,
     boundWorkspace,
     publishWorkspaceEvent,
     knownClientIds,
@@ -149,9 +150,8 @@ export function createDaemonWorkspaceService(
     // -- Status queries (delegate to ACP child via queryWorkspaceStatus) --
 
     async getWorkspaceMcpStatus(_ctx: WorkspaceRequestContext) {
-      return queryWorkspaceStatus(
-        SERVE_STATUS_EXT_METHODS.workspaceMcp,
-        () => createIdleWorkspaceMcpStatus(boundWorkspace),
+      return queryWorkspaceStatus(SERVE_STATUS_EXT_METHODS.workspaceMcp, () =>
+        createIdleWorkspaceMcpStatus(boundWorkspace),
       );
     },
 
@@ -170,9 +170,8 @@ export function createDaemonWorkspaceService(
     },
 
     async getWorkspaceEnvStatus(_ctx: WorkspaceRequestContext) {
-      return queryWorkspaceStatus(
-        'qwen/status/workspace/env',
-        () => createIdleEnvStatus(boundWorkspace, false),
+      return queryWorkspaceStatus('qwen/status/workspace/env', () =>
+        createIdleEnvStatus(boundWorkspace, false),
       );
     },
 
@@ -322,7 +321,7 @@ export function createDaemonWorkspaceService(
     ) {
       const params: Record<string, unknown> = { serverName };
       if (opts?.entryIndex !== undefined) {
-        params.entryIndex = opts.entryIndex;
+        params['entryIndex'] = opts.entryIndex;
       }
       const result = await invokeWorkspaceCommand<RestartMcpServerResult>(
         SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
@@ -330,7 +329,7 @@ export function createDaemonWorkspaceService(
       );
       publishWorkspaceEvent({
         type: 'mcp_server_restarted',
-        data: { serverName, ...result },
+        data: { ...result, serverName },
         originatorClientId: ctx.originatorClientId,
       });
       return result;

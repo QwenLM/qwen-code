@@ -25,9 +25,7 @@ import type {
 } from '@qwen-code/acp-bridge';
 
 import type {
-  WorkspaceFileSystem,
   WorkspaceFileSystemFactory,
-  RequestContext,
   ResolvedPath,
   FsStat,
   FsEntry,
@@ -39,8 +37,6 @@ import type {
   GlobOptions,
   WriteTextAtomicOptions,
   WriteTextAtomicOutcome,
-  WriteOutcome,
-  ContentHash,
 } from '../fs/index.js';
 
 import type {
@@ -191,7 +187,9 @@ export interface AuthService {
   listPendingDeviceFlows(ctx: WorkspaceRequestContext): DeviceFlowPublicView[];
 
   /** Get overall auth status for the workspace. */
-  getAuthStatus(ctx: WorkspaceRequestContext): Promise<{ authenticated: boolean; pendingFlows: DeviceFlowPublicView[] }>;
+  getAuthStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<{ authenticated: boolean; pendingFlows: DeviceFlowPublicView[] }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +284,10 @@ export interface MemoryService {
   list(ctx: WorkspaceRequestContext): Promise<ServeWorkspaceMemoryStatus>;
 
   /** Read a specific memory entry by key/path. */
-  read(ctx: WorkspaceRequestContext, key: string): Promise<{ content: string; path: string }>;
+  read(
+    ctx: WorkspaceRequestContext,
+    key: string,
+  ): Promise<{ content: string; path: string }>;
 
   /** Write content to a workspace or global memory file. */
   write(
@@ -295,7 +296,10 @@ export interface MemoryService {
   ): Promise<WriteMemoryResult>;
 
   /** Delete a memory entry. */
-  delete(ctx: WorkspaceRequestContext, key: string): Promise<{ deleted: boolean }>;
+  delete(
+    ctx: WorkspaceRequestContext,
+    key: string,
+  ): Promise<{ deleted: boolean }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,7 +312,10 @@ export interface MemoryService {
  * without taking a direct reference to the bridge (avoiding circular
  * dependency).
  */
-export type QueryWorkspaceStatusFn = <T>(method: string, idle: () => T) => Promise<T>;
+export type QueryWorkspaceStatusFn = <T>(
+  method: string,
+  idle: () => T,
+) => Promise<T>;
 
 /**
  * Callback shape for invoking workspace-level mutation commands
@@ -431,7 +438,11 @@ export interface DaemonWorkspaceServiceDeps {
   subagentManager: unknown;
 
   /** Persist tool enable/disable to workspace settings file. */
-  persistDisabledTools: (workspace: string, toolName: string, enabled: boolean) => Promise<void>;
+  persistDisabledTools: (
+    workspace: string,
+    toolName: string,
+    enabled: boolean,
+  ) => Promise<void>;
 
   /**
    * Query workspace status from the ACP child. The bridge owns the
