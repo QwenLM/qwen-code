@@ -165,6 +165,9 @@ describe('autoImproveCommand', () => {
     );
     expect(prompt).toContain('inspect isResolved and isOutdated');
     expect(prompt).toContain(
+      'continue with endCursor until hasNextPage is false',
+    );
+    expect(prompt).toContain(
       'Do not treat already-resolved threads, ordinary comment history, or replies alone as work to fix.',
     );
     expect(prompt).toContain(
