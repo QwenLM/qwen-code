@@ -550,14 +550,17 @@ function parseJsonObjectFromText(
     withoutFence = withoutFence.replace(/\s*```$/i, '');
   }
 
-  const firstStructuredChar = withoutFence.search(/[[{]/);
-  if (firstStructuredChar !== -1 && withoutFence[firstStructuredChar] === '[') {
-    return undefined;
-  }
-
   for (const jsonSlice of findJsonObjectSlices(withoutFence)) {
     const parseFailed = Symbol('parseFailed');
-    const parsed = safeJsonParse<unknown>(jsonSlice, parseFailed);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonSlice);
+    } catch {
+      if (!shouldAttemptJsonRepair(jsonSlice)) {
+        continue;
+      }
+      parsed = safeJsonParse<unknown>(jsonSlice, parseFailed);
+    }
     if (parsed === parseFailed) {
       continue;
     }
@@ -573,24 +576,71 @@ function parseJsonObjectFromText(
   return undefined;
 }
 
+function shouldAttemptJsonRepair(jsonSlice: string): boolean {
+  return (
+    /"[^"]+"\s*:/.test(jsonSlice) ||
+    /:\s*(?:"|[-\d[{]|\btrue\b|\bfalse\b|\bnull\b)/.test(jsonSlice)
+  );
+}
+
 function findJsonObjectSlices(text: string): string[] {
   if (!text.includes('{')) return [];
 
   const slices: string[] = [];
-  let start = -1;
+  let inString = false;
+  let escaped = false;
+  let squareDepth = 0;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '[') {
+      squareDepth++;
+      continue;
+    }
+    if (char === ']' && squareDepth > 0) {
+      squareDepth--;
+      continue;
+    }
+    if (char !== '{' || squareDepth > 0) {
+      continue;
+    }
+
+    const slice = findJsonObjectSliceFrom(text, i);
+    if (slice) {
+      slices.push(slice);
+    }
+  }
+
+  return slices;
+}
+
+function findJsonObjectSliceFrom(
+  text: string,
+  start: number,
+): string | undefined {
   let depth = 0;
   let inString = false;
   let escaped = false;
 
-  for (let i = 0; i < text.length; i++) {
+  for (let i = start; i < text.length; i++) {
     const char = text[i];
-    if (start === -1) {
-      if (char === '{') {
-        start = i;
-        depth = 1;
-      }
-      continue;
-    }
 
     if (inString) {
       if (escaped) {
@@ -610,13 +660,12 @@ function findJsonObjectSlices(text: string): string[] {
     } else if (char === '}') {
       depth--;
       if (depth === 0) {
-        slices.push(text.slice(start, i + 1));
-        start = -1;
+        return text.slice(start, i + 1);
       }
     }
   }
 
-  return slices;
+  return undefined;
 }
 
 function logGenerateJsonTextFallbackFailure(

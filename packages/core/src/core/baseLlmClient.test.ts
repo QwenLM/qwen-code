@@ -472,6 +472,30 @@ describe('BaseLlmClient', () => {
       expect(result).toEqual({ color: 'cyan' });
     });
 
+    it('should parse a JSON object even when prose brackets appear first', async () => {
+      const mockResponse = createMockResponseWithText(
+        'Based on [your request], here is: {"status":"done"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ status: 'done' });
+    });
+
+    it('should recover a later valid JSON object after an unclosed brace candidate', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{prefix {"valid":"json"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ valid: 'json' });
+    });
+
     it('should repair near-valid JSON from text fallback', async () => {
       const mockResponse = createMockResponseWithText('{color:"blue",}');
       mockGenerateContent.mockResolvedValue(mockResponse);
@@ -480,6 +504,21 @@ describe('BaseLlmClient', () => {
       const result = await client.generateJson(defaultOptions);
 
       expect(result).toEqual({ color: 'blue' });
+    });
+
+    it('should not repair prose fragments into fabricated JSON objects', async () => {
+      const mockResponse = createMockResponseWithText(
+        'Notes: {TODO: fix this}. No structured response.',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
     });
 
     it('should log when function calls do not match respond_in_schema', async () => {
