@@ -4732,6 +4732,60 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('serializes persist + publish too, not just the extMethod (A3, persist:true)', async () => {
+      // Regression for the wenshao Critical: covering only the extMethod left
+      // persist+publish outside the queue, so two concurrent persist:true
+      // changes could interleave their persist phases and publish out of
+      // order. Make persist slow + inversely ordered to the calls; assert the
+      // published approval_mode_changed events still come out in call order
+      // (A then B), proving persist+publish run inside the serialized work.
+      const { factory } = approvalModeFactoryWithCallTracker();
+      // persist for 'yolo' is SLOWER than for 'default' — if persist ran
+      // outside the queue, 'default' would publish before 'yolo'.
+      const persistDelay: Record<string, number> = { yolo: 30, default: 1 };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        persistApprovalMode: async (_ws: string, mode: string) => {
+          await new Promise((r) => setTimeout(r, persistDelay[mode] ?? 1));
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const published: string[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) {
+          if (e.type === 'approval_mode_changed') {
+            published.push((e.data as { next: string }).next);
+          }
+        }
+      })();
+
+      await Promise.all([
+        bridge.setSessionApprovalMode(
+          session.sessionId,
+          ApprovalMode.YOLO,
+          { persist: true },
+          undefined,
+        ),
+        bridge.setSessionApprovalMode(
+          session.sessionId,
+          ApprovalMode.DEFAULT,
+          { persist: true },
+          undefined,
+        ),
+      ]);
+      await new Promise((r) => setTimeout(r, 20));
+      abort.abort();
+      await collecting;
+      // In call order despite yolo's slower persist — persist+publish are
+      // serialized inside the queue, so default can't overtake yolo.
+      expect(published).toEqual(['yolo', 'default']);
+      await bridge.shutdown();
+    });
+
     it('a failed approval-mode change does not poison the queue (A3 tail-swallow)', async () => {
       // The approvalModeQueue tail-swallows failures so a rejected change
       // can't wedge every subsequent one. First call rejects; the second

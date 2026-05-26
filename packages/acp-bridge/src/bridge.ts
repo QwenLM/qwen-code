@@ -460,7 +460,7 @@ function broadcastPromptCancelled(
  * most once per active prompt by latching `entry.cancelBroadcast`, so the
  * `cancelSession` route and the `sendPrompt` abort path can't both emit a
  * `prompt_cancelled` for a single turn (POST /cancel then socket close).
- * The latch is reset when a prompt starts and when it settles.
+ * The latch is reset when the next prompt starts.
  */
 function broadcastPromptCancelledOnce(
   entry: SessionEntry,
@@ -3129,41 +3129,93 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             'and tests must opt in or omit `persist`.',
         );
       }
-      // Serialize the ACP roundtrip through `entry.approvalModeQueue` (A3)
-      // so two concurrent approval-mode changes can't interleave their
-      // `extMethod` calls and leave the published `approval_mode_changed`
-      // disagreeing with the mode the ACP child actually settled on.
-      // Mirrors `setSessionModel`'s `modelChangeQueue` usage.
-      let response: { previous: ApprovalMode; current: ApprovalMode };
-      const approvalWork = entry.approvalModeQueue.then(
-        () =>
-          Promise.race([
-            withTimeout(
-              entry.connection.extMethod(
-                SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
-                { sessionId, mode },
-              ),
-              initTimeoutMs,
+      // Serialize the WHOLE change — ACP roundtrip + persist + publish — through
+      // `entry.approvalModeQueue` (A3). Covering only the `extMethod` call (the
+      // earlier shape) left persist+publish OUTSIDE the queue: two concurrent
+      // `persist:true` calls could interleave their persist phases and publish
+      // out of order, so the bus's last `approval_mode_changed` disagreed with
+      // the mode the ACP child actually settled on. Keeping persist+publish in
+      // the queued work means the next change can't start its `extMethod` until
+      // this change's side effects are fully done. Mirrors `modelChangeQueue`.
+      const approvalWork = entry.approvalModeQueue.then(async () => {
+        const response = (await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+              { sessionId, mode },
             ),
-            getTransportClosedReject(entry),
-          ]) as Promise<{ previous: ApprovalMode; current: ApprovalMode }>,
-      );
-      // Tail-swallow so a failed change doesn't poison subsequent ones
-      // (matches `setSessionModel`).
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+          ),
+          getTransportClosedReject(entry),
+        ])) as { previous: ApprovalMode; current: ApprovalMode };
+
+        let persisted = false;
+        if (opts.persist) {
+          try {
+            await persistApprovalMode?.(boundWorkspace, mode);
+            persisted = persistApprovalMode !== undefined;
+          } catch (err) {
+            // Persist failure is non-fatal — the in-process change already
+            // took effect inside the ACP child. Log but don't fail the route.
+            writeStderrLine(
+              `setSessionApprovalMode: persist failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
+        try {
+          entry.events.publish({
+            type: 'approval_mode_changed',
+            data: {
+              sessionId: entry.sessionId,
+              previous: response.previous,
+              next: response.current,
+              persisted,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        } catch {
+          /* bus closed */
+        }
+        // #4282 fold-in 4 (S2): a persisted change becomes the workspace
+        // default, so fan out a workspace-scoped mirror for peer sessions.
+        // #4297 fold-in 1: skip the requesting session (its own bus already
+        // got the publish above) to avoid double-counting in the reducer.
+        if (persisted) {
+          broadcastWorkspaceEvent(
+            {
+              type: 'approval_mode_changed',
+              data: {
+                sessionId: entry.sessionId,
+                previous: response.previous,
+                next: response.current,
+                persisted,
+              },
+              ...(originatorClientId ? { originatorClientId } : {}),
+            },
+            entry.sessionId,
+          );
+        }
+        return {
+          sessionId: entry.sessionId,
+          mode: response.current,
+          previous: response.previous,
+          persisted,
+        };
+      });
+      // Tail-swallow so a failed change doesn't poison subsequent ones.
       entry.approvalModeQueue = approvalWork.then(
         () => undefined,
         () => undefined,
       );
       try {
-        response = await approvalWork;
+        return await approvalWork;
       } catch (err) {
-        // The ACP child rethrows `TrustGateError` as a JSON-RPC error
-        // whose `data.errorKind` is the literal `'trust_gate'`. On the
-        // wire it arrives as a plain `{code, message, data}` object —
-        // re-instantiate the typed class here so the HTTP route layer
-        // recognizes it via `instanceof` / `err.name` and maps the
-        // failure to HTTP 403 with the `auth_env_error` errorKind.
+        // The ACP child rethrows `TrustGateError` as a JSON-RPC error whose
+        // `data.errorKind` is `'trust_gate'`; re-instantiate the typed class so
+        // the HTTP route maps it to 403 with the `auth_env_error` errorKind.
         const data = (err as { data?: unknown })?.data;
         if (
           data &&
@@ -3180,71 +3232,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         }
         throw err;
       }
-      let persisted = false;
-      if (opts.persist) {
-        try {
-          await persistApprovalMode?.(boundWorkspace, mode);
-          persisted = persistApprovalMode !== undefined;
-        } catch (err) {
-          // Persist failure is non-fatal — the in-process change already
-          // took effect inside the ACP child. Log to stderr so operators
-          // notice but don't fail the route (the SDK consumer would have
-          // no good recovery path; the runtime change is real).
-          writeStderrLine(
-            `setSessionApprovalMode: persist failed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-      }
-      try {
-        entry.events.publish({
-          type: 'approval_mode_changed',
-          data: {
-            sessionId: entry.sessionId,
-            previous: response.previous,
-            next: response.current,
-            persisted,
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-      } catch {
-        /* bus closed */
-      }
-      // #4282 fold-in 4 (qwen-latest S2): when the change is persisted to
-      // workspace settings, the new mode becomes the default for every
-      // future session in this workspace. Fan out a workspace-scoped
-      // mirror so peer sessions can update their UI before they next
-      // spawn an ACP child. The session-scoped publish above remains the
-      // authoritative signal for the requesting session (and carries the
-      // sessionId in `data`); the workspace mirror is informational.
-      //
-      // #4297 fold-in 1: skip the requesting session in the broadcast.
-      // The session-scoped publish above already delivered the event on
-      // its own bus, so a broadcast that included it would double-count
-      // in the SDK reducer's `approvalModeChangedCount` (peers see 1,
-      // requester used to see 2 — silent contract violation).
-      if (persisted) {
-        broadcastWorkspaceEvent(
-          {
-            type: 'approval_mode_changed',
-            data: {
-              sessionId: entry.sessionId,
-              previous: response.previous,
-              next: response.current,
-              persisted,
-            },
-            ...(originatorClientId ? { originatorClientId } : {}),
-          },
-          entry.sessionId,
-        );
-      }
-      return {
-        sessionId: entry.sessionId,
-        mode: response.current,
-        previous: response.previous,
-        persisted,
-      };
     },
 
     async generateSessionRecap(sessionId, _context) {
