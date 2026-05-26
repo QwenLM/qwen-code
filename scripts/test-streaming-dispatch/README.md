@@ -21,6 +21,7 @@ scripts/test-streaming-dispatch/
 ├── scenario-json-schema.sh     # --json-schema gate (dispatcher must stay off)
 ├── scenario-shell-bypass.sh    # classifier rejects wrapper-trailing-content bypass
 ├── scenario-abort.sh           # SIGINT must not leave orphan tool subprocesses
+├── scenario-perf.sh            # 4 slow shell tools — regression guard for speedup claim
 └── test-results/<stamp>/       # per-run logs (gitignored)
 ```
 
@@ -84,6 +85,60 @@ provoke the model into emitting these, and even if it did, the test
 would risk actually executing the trailing command on a regression.
 This scenario asserts the classifier rejects every malicious shape at
 the same code path the streaming loop uses.
+
+### `perf`
+
+Designed to **demonstrate** the early-dispatch speedup by giving the
+model 4 slow read-only shell commands (`find ... wc -l`, `du -sk
+node_modules`, etc.) and instructing it to fire all four in a single
+response. The hypothesis was that running 4 × ~2s tools should save
+~2s of wall time vs. running them after the stream.
+
+**Empirical finding (N=5, idealab qwen3.7-max, 2026-05-26):**
+
+|             | flag off                         | flag on                          | Δ        |
+| ----------- | -------------------------------- | -------------------------------- | -------- |
+| samples (s) | 87.0 / 31.1 / 32.6 / 29.8 / 31.6 | 31.7 / 31.3 / 25.3 / 30.3 / 39.0 |          |
+| median (s)  | 31.6                             | 31.3                             | **0.27** |
+| min / max   | 29.8 / 87.0                      | 25.3 / 39.0                      |          |
+
+Difference is well within API latency variance (single off run took
+87s; on samples spread 25-39s). **No measurable wall-time speedup at
+this workload shape.**
+
+Why the naive expectation was wrong:
+
+- OpenAI-compatible providers emit all parallel `tool_calls` in a tight
+  burst at the **end** of the model stream (after text, just before
+  `finish_reason`). The spread between first and last `tool_call`
+  complete is ~200-500ms — that's the only window early-dispatch can
+  exploit within a single response.
+- `CoreToolScheduler` already runs concurrency-safe tools in parallel
+  after the stream ends. Early dispatch's marginal saving is the
+  ~200-500ms head-start, not the full max-tool-time.
+
+Where this feature **does** deliver measurable wall-time wins:
+
+- **Single long-running tool** in a multi-turn flow: model continues
+  generating text while the tool runs, saving close to the full tool
+  duration.
+- **Multi-turn workflows** where late-dispatched tools overlap with the
+  next turn's stream.
+- **Providers that interleave** `tool_calls` with text mid-stream
+  instead of batching at the end.
+
+The architectural value of streaming tool dispatch is broader than
+single-turn parallel-call wall time:
+
+- Lower latency to **first** tool result available
+- Smoother UX (progress indicators fire sooner)
+- Robust orphan management on retry / abort (validated by `abort`
+  scenario and vitest)
+- Foundation for future React / TUI integration (RFC §4 open)
+
+The `perf` scenario stays in the harness as a regression guard:
+flag-on must never run materially slower than flag-off, and outputs
+must remain byte-identical.
 
 ### `abort`
 
