@@ -378,6 +378,214 @@ describe('session-tracing', () => {
     });
   });
 
+  describe('LLM request spans — Phase 4a (timing decomposition + GenAI dual-emit)', () => {
+    it('startLLMRequestSpan dual-emits gen_ai.request.model alongside qwen-code.model', () => {
+      const span = startLLMRequestSpan('test-model', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['qwen-code.model']).toBe('test-model');
+      expect(attrs['gen_ai.request.model']).toBe('test-model');
+    });
+
+    it('endLLMRequestSpan dual-emits gen_ai.usage.input_tokens / output_tokens', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 100,
+        outputTokens: 50,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['input_tokens']).toBe(100);
+      expect(attrs['gen_ai.usage.input_tokens']).toBe(100);
+      expect(attrs['output_tokens']).toBe(50);
+      expect(attrs['gen_ai.usage.output_tokens']).toBe(50);
+    });
+
+    it('endLLMRequestSpan dual-emits gen_ai.usage.cached_tokens when present', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 100,
+        cachedInputTokens: 40,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['cached_input_tokens']).toBe(40);
+      expect(attrs['gen_ai.usage.cached_tokens']).toBe(40);
+    });
+
+    it('endLLMRequestSpan omits cached_input_tokens when undefined', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true, inputTokens: 100 });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['cached_input_tokens']).toBeUndefined();
+      expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan emits cached_input_tokens === 0 (cache miss is meaningful info, not undefined)', () => {
+      // Providers that report 0 cached tokens are signaling an explicit cache
+      // miss. Distinct from undefined ("we don't know"). Both attribute names
+      // must propagate the literal 0.
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 100,
+        cachedInputTokens: 0,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['cached_input_tokens']).toBe(0);
+      expect(attrs['gen_ai.usage.cached_tokens']).toBe(0);
+    });
+
+    it('endLLMRequestSpan writes ttft_ms and dual-emits gen_ai.server.time_to_first_token (in seconds)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 234,
+        durationMs: 1000,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['ttft_ms']).toBe(234);
+      // Spec uses seconds as double — 234ms → 0.234s
+      expect(attrs['gen_ai.server.time_to_first_token']).toBeCloseTo(0.234, 6);
+    });
+
+    it('endLLMRequestSpan omits ttft_ms when undefined (non-streaming or aborted before first chunk)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true, durationMs: 500 });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['ttft_ms']).toBeUndefined();
+      expect(attrs['gen_ai.server.time_to_first_token']).toBeUndefined();
+      expect(attrs['sampling_ms']).toBeUndefined();
+      expect(attrs['output_tokens_per_second']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan derives sampling_ms when ttftMs is set (no requestSetup)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1000,
+      });
+
+      // sampling_ms = duration - ttft - (requestSetup ?? 0) = 1000 - 200 - 0
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(800);
+    });
+
+    it('endLLMRequestSpan derives sampling_ms accounting for requestSetupMs (Phase 4b populates this)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        requestSetupMs: 300,
+        durationMs: 1000,
+      });
+
+      // sampling_ms = 1000 - 200 - 300
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(500);
+    });
+
+    it('endLLMRequestSpan clamps sampling_ms to 0 when ttft + setup exceed duration (clock skew)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 800,
+        requestSetupMs: 500,
+        durationMs: 1000,
+      });
+
+      // Math.max(0, 1000 - 800 - 500) = 0
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(0);
+    });
+
+    it('endLLMRequestSpan derives output_tokens_per_second from sampling_ms + outputTokens', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1200,
+        outputTokens: 500,
+      });
+
+      // sampling_ms = 1000ms = 1s; otps = 500 / 1.0 = 500
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(1000);
+      expect(mockSpans[0]!.attributes['output_tokens_per_second']).toBe(500);
+    });
+
+    it('endLLMRequestSpan rounds output_tokens_per_second to 2 decimals', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1325, // sampling_ms = 1125
+        outputTokens: 100, // otps = 100 / 1.125 = 88.888…
+      });
+
+      expect(mockSpans[0]!.attributes['output_tokens_per_second']).toBe(88.89);
+    });
+
+    it('endLLMRequestSpan omits output_tokens_per_second when sampling_ms == 0', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 1000,
+        durationMs: 1000,
+        outputTokens: 50,
+      });
+
+      // sampling_ms = 0 → otps would be Infinity, must be omitted
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(0);
+      expect(
+        mockSpans[0]!.attributes['output_tokens_per_second'],
+      ).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan omits output_tokens_per_second when outputTokens missing', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1000,
+      });
+
+      expect(
+        mockSpans[0]!.attributes['output_tokens_per_second'],
+      ).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan writes Phase 4b retry placeholders when caller provides them', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        attempt: 3,
+        requestSetupMs: 4500,
+        retryTotalDelayMs: 4200,
+        durationMs: 5000,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['attempt']).toBe(3);
+      expect(attrs['request_setup_ms']).toBe(4500);
+      expect(attrs['retry_total_delay_ms']).toBe(4200);
+    });
+
+    it('endLLMRequestSpan omits Phase 4b fields when caller does not provide them (Phase 4a default)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true, durationMs: 500 });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['attempt']).toBeUndefined();
+      expect(attrs['request_setup_ms']).toBeUndefined();
+      expect(attrs['retry_total_delay_ms']).toBeUndefined();
+    });
+  });
+
   describe('tool spans', () => {
     it('creates and ends a tool span', () => {
       const span = startToolSpan('ReadFile', { 'tool.call_id': 'call-1' });

@@ -9,9 +9,11 @@ import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import type {
   ContextCategoryBreakdown,
-  ContextToolDetail,
   ContextMemoryDetail,
   ContextSkillDetail,
+  ContextThresholds,
+  ContextTier,
+  ContextToolDetail,
 } from '../../types.js';
 import { t } from '../../../i18n/index.js';
 
@@ -139,6 +141,106 @@ const CategoryRow: React.FC<{
     </Box>
   );
 };
+
+/**
+ * A row inside the "Compaction thresholds" section: label + token count, with
+ * a left-edge marker when the current usage has crossed this tier.
+ */
+const ThresholdRow: React.FC<{
+  label: string;
+  tokens: number;
+  isCurrent?: boolean;
+  hint?: string;
+}> = ({ label, tokens, isCurrent, hint }) => {
+  const tokenStr = `${formatTokens(tokens)} ${t('tokens')}`;
+  return (
+    <Box width={CONTENT_WIDTH}>
+      <Box width={2}>
+        <Text color={isCurrent ? theme.status.warning : theme.text.secondary}>
+          {isCurrent ? '▶' : ' '}
+        </Text>
+      </Box>
+      <Box width={22}>
+        <Text color={theme.text.primary}>{label}</Text>
+      </Box>
+      <Box flexGrow={1} justifyContent="flex-end">
+        <Text color={theme.text.secondary}>
+          {tokenStr}
+          {hint ? `  ${hint}` : ''}
+        </Text>
+      </Box>
+    </Box>
+  );
+};
+
+/**
+ * Color associated with each compaction tier — green for safe, escalating to
+ * red for hard. Keep these aligned with how `theme.status.*` is used elsewhere
+ * so the tier badge feels native to the existing design.
+ */
+function tierColor(tier: ContextTier): string {
+  switch (tier) {
+    case 'safe':
+      return theme.status.success;
+    case 'warn':
+      return theme.status.warning;
+    case 'auto':
+      return theme.status.warning;
+    case 'hard':
+      return theme.status.error;
+    default:
+      return theme.text.secondary;
+  }
+}
+
+/**
+ * Renders the three-tier compaction threshold ladder (warn / auto / hard) with
+ * the effective window and a current-tier marker. Source of the data is
+ * `breakdown.thresholds` + `breakdown.currentTier`, which the context command
+ * derives from `computeThresholds()` in core.
+ */
+const CompactionThresholds: React.FC<{
+  thresholds: ContextThresholds;
+  currentTier: ContextTier;
+}> = ({ thresholds, currentTier }) => (
+  <Box flexDirection="column" marginTop={1}>
+    <Text bold color={theme.text.primary}>
+      {t('Compaction thresholds')}
+    </Text>
+    <ThresholdRow
+      label={t('Effective window')}
+      tokens={thresholds.effectiveWindow}
+    />
+    <ThresholdRow
+      label={t('Warn threshold')}
+      tokens={thresholds.warn}
+      isCurrent={currentTier === 'warn'}
+    />
+    <ThresholdRow
+      label={t('Auto threshold')}
+      tokens={thresholds.auto}
+      isCurrent={currentTier === 'auto'}
+    />
+    <ThresholdRow
+      label={t('Hard threshold')}
+      tokens={thresholds.hard}
+      isCurrent={currentTier === 'hard'}
+    />
+    <Box width={CONTENT_WIDTH}>
+      <Box width={2}>
+        <Text> </Text>
+      </Box>
+      <Box width={22}>
+        <Text color={theme.text.primary}>{t('Current tier')}</Text>
+      </Box>
+      <Box flexGrow={1} justifyContent="flex-end">
+        <Text bold color={tierColor(currentTier)}>
+          {currentTier}
+        </Text>
+      </Box>
+    </Box>
+  </Box>
+);
 
 /**
  * A detail row for individual items (MCP tools, memory files, skills).
@@ -345,6 +447,15 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           tokens={breakdown.messages}
           contextWindowSize={contextWindowSize}
           symbolColor={theme.text.accent}
+        />
+      )}
+
+      {/* Three-tier compaction thresholds — visible even when isEstimated so
+          the user can see the auto-compact landscape before any API call. */}
+      {breakdown.thresholds && breakdown.currentTier && (
+        <CompactionThresholds
+          thresholds={breakdown.thresholds}
+          currentTier={breakdown.currentTier}
         />
       )}
 

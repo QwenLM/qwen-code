@@ -13,6 +13,7 @@ import * as https from 'node:https';
 import { stat } from 'node:fs/promises';
 import { parseGitHubRepoForReleases } from './github.js';
 import { isScopedNpmPackage } from './npm.js';
+import { redactUrlCredentials } from './redaction.js';
 
 export interface MarketplaceInstallOptions {
   marketplaceUrl: string;
@@ -274,7 +275,7 @@ export async function parseInstallSource(
     }
   } else {
     // None of the above formats matched
-    throw new Error(`Install source not found: ${repo}`);
+    throw new Error(`Install source not found: ${redactUrlCredentials(repo)}`);
   }
 
   // Step 3: If marketplace config exists, update type to marketplace

@@ -46,9 +46,46 @@ export interface EndInteractionOptions {
 export interface LLMRequestMetadata {
   inputTokens?: number;
   outputTokens?: number;
+  /**
+   * Tokens served from the provider's prompt cache (Anthropic
+   * cache_read_input_tokens, OpenAI prompt_tokens_details.cached_tokens, etc).
+   * Normalized to GenerateContentResponseUsageMetadata.cachedContentTokenCount
+   * by each provider generator before reaching LoggingContentGenerator.
+   */
+  cachedInputTokens?: number;
   success: boolean;
   durationMs?: number;
   error?: string;
+  /**
+   * Time from the successful attempt's request dispatch to the first stream
+   * chunk containing user-visible content (text / functionCall / inlineData /
+   * executableCode / thought). Undefined for non-streaming requests, requests
+   * aborted before the first user-visible chunk, and any path that does not
+   * pass through LoggingContentGenerator's stream wrapper.
+   *
+   * Semantics: diverges from claude-code's ttftMs (which fires on
+   * Anthropic's message_start metadata event). Matches the "time to first
+   * actual token" intent of the industry-standard TTFT name.
+   * See docs/design/telemetry-llm-request-timing-design.md (D1).
+   */
+  ttftMs?: number;
+  /**
+   * Time from generateContent/generateContentStream entry to the start of the
+   * successful attempt (ms). Includes all failed retries + backoff sleeps.
+   * Populated by the retry layer in Phase 4b; undefined in Phase 4a.
+   */
+  requestSetupMs?: number;
+  /**
+   * Final attempt number (1-based). 1 = no retries. Populated by the retry
+   * layer in Phase 4b; undefined in Phase 4a.
+   */
+  attempt?: number;
+  /**
+   * Sum of all backoff delays before the successful attempt (ms). 0 if no
+   * retries occurred. Populated by the retry layer in Phase 4b; undefined
+   * in Phase 4a.
+   */
+  retryTotalDelayMs?: number;
 }
 
 export interface ToolSpanMetadata {
@@ -321,6 +358,10 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
     'qwen-code.model': model,
     'qwen-code.prompt_id': promptId,
     'llm_request.context': parentCtx ? 'interaction' : 'standalone',
+    // Dual-emit OTel GenAI semantic convention (Stable). Private name
+    // (qwen-code.model) remains authoritative; gen_ai.* is a compat layer
+    // for spec-aware backends. See docs/design/telemetry-llm-request-timing-design.md (D8).
+    'gen_ai.request.model': model,
   };
 
   const span = getTracer().startSpan(
@@ -362,10 +403,55 @@ export function endLLMRequestSpan(
     const endAttributes: Attributes = { duration_ms: duration };
 
     if (metadata) {
-      if (metadata.inputTokens !== undefined)
+      if (metadata.inputTokens !== undefined) {
         endAttributes['input_tokens'] = metadata.inputTokens;
-      if (metadata.outputTokens !== undefined)
+        // Dual-emit OTel GenAI semconv (Stable). Private name stays authoritative.
+        endAttributes['gen_ai.usage.input_tokens'] = metadata.inputTokens;
+      }
+      if (metadata.outputTokens !== undefined) {
         endAttributes['output_tokens'] = metadata.outputTokens;
+        endAttributes['gen_ai.usage.output_tokens'] = metadata.outputTokens;
+      }
+      if (metadata.cachedInputTokens !== undefined) {
+        endAttributes['cached_input_tokens'] = metadata.cachedInputTokens;
+        // Dual-emit OTel GenAI semconv (Experimental — may rename before Stable).
+        endAttributes['gen_ai.usage.cached_tokens'] =
+          metadata.cachedInputTokens;
+      }
+      if (metadata.ttftMs !== undefined) {
+        endAttributes['ttft_ms'] = metadata.ttftMs;
+        // Dual-emit OTel GenAI semconv (Experimental). Spec unit is seconds-as-double.
+        endAttributes['gen_ai.server.time_to_first_token'] =
+          metadata.ttftMs / 1000;
+      }
+      if (metadata.requestSetupMs !== undefined) {
+        endAttributes['request_setup_ms'] = metadata.requestSetupMs;
+      }
+      if (metadata.attempt !== undefined) {
+        endAttributes['attempt'] = metadata.attempt;
+      }
+      if (metadata.retryTotalDelayMs !== undefined) {
+        endAttributes['retry_total_delay_ms'] = metadata.retryTotalDelayMs;
+      }
+      // Derived: sampling_ms = time from first user-visible chunk to end
+      // (== output generation time, excluding setup + first-token delay).
+      // Computable only when ttftMs is set. requestSetupMs defaults to 0
+      // when undefined (no retries) — this gives the correct sampling
+      // duration in both Phase 4a (no retry data) and Phase 4b (with).
+      if (metadata.ttftMs !== undefined) {
+        const samplingMs = Math.max(
+          0,
+          duration - metadata.ttftMs - (metadata.requestSetupMs ?? 0),
+        );
+        endAttributes['sampling_ms'] = samplingMs;
+        // Derived: output tokens per second during sampling. Undefined when
+        // sampling_ms is 0 (avoid divide-by-zero) or when outputTokens missing.
+        if (samplingMs > 0 && metadata.outputTokens !== undefined) {
+          endAttributes['output_tokens_per_second'] =
+            Math.round((metadata.outputTokens / (samplingMs / 1000)) * 100) /
+            100;
+        }
+      }
       endAttributes['success'] = metadata.success;
       if (metadata.error !== undefined)
         endAttributes['error'] = truncateSpanError(metadata.error);

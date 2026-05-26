@@ -79,6 +79,7 @@ import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
+import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
 import {
   startEarlyInputCapture,
@@ -820,6 +821,17 @@ export async function main() {
           'Warning: Debug logging is degraded (write failures occurred)',
         );
       }
+    }
+
+    // Headless + YOLO without a sandbox lets the model auto-approve and
+    // execute shell / write / edit tools at the current process's
+    // privilege level. Emit a one-line stderr warning so unattended runs
+    // have at least an observable signal. Interactive runs are excluded
+    // because the user is at the keyboard and the TUI shows approval
+    // state directly. See issue #4103.
+    if (!config.isInteractive()) {
+      const yoloWarning = getHeadlessYoloSafetyWarning(config);
+      if (yoloWarning) writeStderrLine(yoloWarning);
     }
 
     // For non-stream-json mode, initialize config here. Stream-json defers

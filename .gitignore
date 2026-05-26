@@ -56,6 +56,9 @@ bundle
 junit.xml
 packages/*/coverage/
 
+# PR body draft
+pr_body.md
+
 # Generated files
 packages/cli/src/generated/
 packages/core/src/generated/
