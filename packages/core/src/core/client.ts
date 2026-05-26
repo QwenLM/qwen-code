@@ -85,6 +85,7 @@ import {
 } from '../utils/environmentContext.js';
 import {
   buildApiHistoryFromConversation,
+  getResumeTokenCounts,
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
@@ -234,9 +235,19 @@ export class GeminiClient {
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
-      this.getChat().setLastPromptTokenCount(
-        uiTelemetryService.getLastPromptTokenCount(),
+      const resumeTokenCounts = getResumeTokenCounts(
+        resumedSessionData.conversation,
       );
+      const chat = this.getChat();
+      chat.setLastPromptTokenCount(
+        resumeTokenCounts?.promptTokenCount ??
+          uiTelemetryService.getLastPromptTokenCount(),
+      );
+      if (resumeTokenCounts) {
+        chat.setLastCandidatesTokenCount(
+          resumeTokenCounts.candidatesTokenCount,
+        );
+      }
 
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);

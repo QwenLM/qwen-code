@@ -29,7 +29,7 @@ import {
 } from './contentGenerator.js';
 import { BaseLlmClient } from './baseLlmClient.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { type GeminiChat } from './geminiChat.js';
+import { GeminiChat } from './geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import {
@@ -558,6 +558,47 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(123_456);
+    });
+
+    it('seeds resumed chat with previous response output token count', async () => {
+      const setLastCandidatesTokenCountSpy = vi.spyOn(
+        GeminiChat.prototype,
+        'setLastCandidatesTokenCount',
+      );
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              uuid: 'assistant-1',
+              parentUuid: null,
+              sessionId: 'resumed-session-id',
+              timestamp: new Date(0).toISOString(),
+              type: 'assistant',
+              cwd: '/test/project',
+              version: '1.0.0',
+              message: { role: 'model', parts: [{ text: 'done' }] },
+              usageMetadata: {
+                promptTokenCount: 200,
+                candidatesTokenCount: 60,
+                thoughtsTokenCount: 20,
+                totalTokenCount: 260,
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      });
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(200);
+      expect(setLastCandidatesTokenCountSpy).toHaveBeenCalledWith(60);
     });
 
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {

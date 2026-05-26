@@ -1333,6 +1333,16 @@ export class GeminiChat {
   }
 
   /**
+   * Seed the previous-response output token count for chats restored from
+   * disk. Resume restores the chat history and last prompt size separately;
+   * this carries the most recent assistant response's output tokens so the
+   * first post-resume prompt estimate matches steady-state sessions.
+   */
+  setLastCandidatesTokenCount(count: number): void {
+    this.lastCandidatesTokenCount = Math.max(0, count);
+  }
+
+  /**
    * Attempt to compress this chat's history.
    *
    * Returns the compression info regardless of outcome. On a successful
