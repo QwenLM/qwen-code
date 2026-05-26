@@ -598,7 +598,7 @@ export class QwenLogger {
         truncated_content_length: event.truncated_content_length,
         threshold: event.threshold,
         lines: event.lines,
-        output_file: event.output_file,
+        output_file: path.basename(event.output_file),
       }),
     });
 

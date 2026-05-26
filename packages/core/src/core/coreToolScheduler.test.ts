@@ -240,6 +240,7 @@ vi.mock('../telemetry/session-tracing.js', () => ({
 }));
 
 vi.mock('fs/promises', () => ({
+  chmod: vi.fn(),
   mkdir: vi.fn(),
   writeFile: vi.fn(),
 }));

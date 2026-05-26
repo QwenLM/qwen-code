@@ -24,6 +24,7 @@ import {
   KittySequenceOverflowEvent,
   IdeConnectionType,
   HookCallEvent,
+  ToolOutputTruncatedEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
@@ -386,6 +387,37 @@ describe('QwenLogger', () => {
           },
           snapshots: JSON.stringify({
             truncated_sequence: 'truncated...',
+          }),
+        }),
+      );
+    });
+
+    it('should log only the saved output basename for tool output truncation events', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new ToolOutputTruncatedEvent('prompt-id-1', {
+        toolName: 'test-tool',
+        originalContentLength: 1000,
+        truncatedContentLength: 100,
+        threshold: 500,
+        lines: 10,
+        outputFile: '/Users/test-user/.qwen/tmp/project-hash/test-tool.output',
+      });
+
+      logger.logToolOutputTruncatedEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'tool',
+          name: 'tool_output_truncated',
+          snapshots: JSON.stringify({
+            original_content_length: 1000,
+            truncated_content_length: 100,
+            threshold: 500,
+            lines: 10,
+            output_file: 'test-tool.output',
           }),
         }),
       );
