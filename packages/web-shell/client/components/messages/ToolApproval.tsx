@@ -50,6 +50,11 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   const [selected, setSelected] = useState(0);
   const submittedRef = useRef(false);
 
+  useEffect(() => {
+    submittedRef.current = false;
+    setSelected(0);
+  }, [request.id]);
+
   const { toolName, description } = parseTitle(request.title);
   const contentText = extractContentText(request);
 

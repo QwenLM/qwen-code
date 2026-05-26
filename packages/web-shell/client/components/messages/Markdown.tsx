@@ -60,7 +60,7 @@ const SUPPORTED_LANGUAGES = new Set([
   'diff',
 ]);
 
-function sanitizeSvg(svg: string): string {
+export function sanitizeSvg(svg: string): string {
   if (typeof DOMParser === 'undefined') return '';
   const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
   if (doc.querySelector('parsererror')) return '';
@@ -69,9 +69,19 @@ function sanitizeSvg(svg: string): string {
     .querySelectorAll(
       'script, foreignObject, iframe, object, embed, link, style, ' +
         'animate, set, animateTransform, animateMotion, ' +
-        'use, image, feImage, mpath',
+        'image, feImage, mpath',
     )
     .forEach((node) => node.remove());
+
+  doc.querySelectorAll('use').forEach((node) => {
+    const href =
+      node.getAttribute('href') ??
+      node.getAttribute('xlink:href') ??
+      node.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+    if (!href || !href.startsWith('#')) {
+      node.remove();
+    }
+  });
 
   for (const element of Array.from(doc.querySelectorAll('*'))) {
     for (const attr of Array.from(element.attributes)) {
@@ -92,6 +102,12 @@ function sanitizeSvg(svg: string): string {
           element.removeAttribute(attr.name);
         }
       }
+      if (name === 'style') {
+        const hasExternalUrl = /url\(\s*(?!['"]?#)/i.test(attr.value);
+        if (hasExternalUrl) {
+          element.removeAttribute(attr.name);
+        }
+      }
     }
   }
 
@@ -99,10 +115,9 @@ function sanitizeSvg(svg: string): string {
 }
 
 const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
-const SAFE_IMAGE_DATA_URI =
-  /^data:image\/(png|jpeg|gif|webp|svg\+xml);base64,/i;
+const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp);base64,/i;
 
-function isSafeHref(url: string | undefined): boolean {
+export function isSafeHref(url: string | undefined): boolean {
   if (!url) return false;
   const trimmed = url.trim();
   if (!trimmed) return false;
@@ -111,7 +126,7 @@ function isSafeHref(url: string | undefined): boolean {
   return SAFE_HREF_SCHEMES.test(trimmed);
 }
 
-function isSafeImageSrc(url: string | undefined): boolean {
+export function isSafeImageSrc(url: string | undefined): boolean {
   if (!url) return false;
   const trimmed = url.trim();
   if (!trimmed) return false;

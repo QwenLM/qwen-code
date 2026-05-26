@@ -492,7 +492,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
             store.dispatch([{ type: 'error', text: reason }]);
             if (error.status === 401 || error.status === 403) {
               console.error(
-                `[web-shell] auth failure: status=${error.status}, session=${restoreSessionId ?? reconnectSessionId ?? 'unknown'}`,
+                `[web-shell] auth failure: status=${error.status}, session=${missingSessionId ?? 'unknown'}`,
               );
               setConnection({ status: 'error', error: reason });
               return;
@@ -530,6 +530,12 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
       abort.abort();
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       setPromptStatus('idle');
+      if (pendingSessionLoadRef.current) {
+        pendingSessionLoadRef.current.reject(
+          new Error('Session effect disposed'),
+        );
+        pendingSessionLoadRef.current = undefined;
+      }
       if (session?.clientId) {
         detachDaemonClient({
           baseUrl: opts.baseUrl,
@@ -707,6 +713,12 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
       async newSession(): Promise<void> {
         setPromptStatus('idle');
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+        if (pendingSessionLoadRef.current) {
+          pendingSessionLoadRef.current.reject(
+            new Error('New session requested'),
+          );
+          pendingSessionLoadRef.current = undefined;
+        }
         store.reset();
         setRestoreSessionId(undefined);
         setNewSessionNonce((nonce) => nonce + 1);

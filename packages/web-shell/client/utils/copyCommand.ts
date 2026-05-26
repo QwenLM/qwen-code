@@ -369,14 +369,14 @@ export async function copyFromLastAssistantMessage(
   if (lastAiOutput === null) {
     return {
       status: 'info',
-      message: 'No output in history',
+      message: COPY_MESSAGES.NO_OUTPUT,
     };
   }
 
   if (!lastAiOutput) {
     return {
       status: 'info',
-      message: 'Last AI output contains no text to copy.',
+      message: COPY_MESSAGES.NO_TEXT,
     };
   }
 
@@ -391,15 +391,15 @@ export async function copyFromLastAssistantMessage(
         status: 'info',
         message:
           wantsInline || args.trim().toLowerCase().startsWith('inline-latex')
-            ? 'No matching inline LaTeX expression found in the last AI output.'
-            : 'No matching LaTeX block found in the last AI output.',
+            ? COPY_MESSAGES.INLINE_LATEX_MISSING
+            : COPY_MESSAGES.LATEX_MISSING,
       };
     }
     if (selectedLatexBlock !== undefined) {
       await writeText(selectedLatexBlock.content);
       return {
         status: 'info',
-        message: `${selectedLatexBlock.label} copied to the clipboard`,
+        message: `${selectedLatexBlock.label}${COPY_MESSAGES.COPIED_SUFFIX}`,
       };
     }
 
@@ -407,7 +407,7 @@ export async function copyFromLastAssistantMessage(
     if (selectedCodeBlock === null) {
       return {
         status: 'info',
-        message: 'No matching code block found in the last AI output.',
+        message: COPY_MESSAGES.CODE_MISSING,
       };
     }
 
@@ -417,14 +417,14 @@ export async function copyFromLastAssistantMessage(
     return {
       status: 'info',
       message: selectedCodeBlock
-        ? `${selectedCodeBlock.label} copied to the clipboard`
-        : 'Last output copied to the clipboard',
+        ? `${selectedCodeBlock.label}${COPY_MESSAGES.COPIED_SUFFIX}`
+        : COPY_MESSAGES.OUTPUT_COPIED,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
       status: 'error',
-      message: `Failed to copy to the clipboard. ${message}`,
+      message: `${COPY_MESSAGES.CLIPBOARD_PREFIX}${message}`,
     };
   }
 }

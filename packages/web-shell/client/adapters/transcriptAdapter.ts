@@ -1,6 +1,5 @@
 import type {
   DaemonTranscriptBlock,
-  DaemonTranscriptState,
   DaemonTextTranscriptBlock,
   DaemonToolTranscriptBlock,
   DaemonShellTranscriptBlock,
@@ -367,9 +366,8 @@ function getPermissionOptionKind(
 }
 
 export function extractStreamingState(
-  state: DaemonTranscriptState,
+  blocks: readonly DaemonTranscriptBlock[],
 ): 'idle' | 'waiting' | 'responding' | 'thinking' {
-  const blocks = state.blocks;
   if (blocks.length === 0) return 'idle';
 
   const last = blocks[blocks.length - 1];

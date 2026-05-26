@@ -243,6 +243,66 @@ describe('transcriptAdapter', () => {
     });
   });
 
+  it('extracts toolCallId from toolCall.toolCallId', () => {
+    const permission = {
+      id: 'perm-tc1',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-tc1',
+      resolved: undefined,
+      title: 'Bash: ls',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: { toolCallId: 'call-abc', rawInput: {} },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    const result = extractPendingPermission(state([permission]).blocks);
+    expect(result?.toolCallId).toBe('call-abc');
+  });
+
+  it('falls back to toolCall.id when toolCallId is absent', () => {
+    const permission = {
+      id: 'perm-tc2',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-tc2',
+      resolved: undefined,
+      title: 'Bash: pwd',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: { id: 'call-xyz', rawInput: {} },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    const result = extractPendingPermission(state([permission]).blocks);
+    expect(result?.toolCallId).toBe('call-xyz');
+  });
+
+  it('returns undefined toolCallId when toolCall has neither field', () => {
+    const permission = {
+      id: 'perm-tc3',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-tc3',
+      resolved: undefined,
+      title: 'Read: file',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: { rawInput: {} },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    const result = extractPendingPermission(state([permission]).blocks);
+    expect(result?.toolCallId).toBeUndefined();
+  });
+
   it('keeps assistant chunks inside an active subagent until completion', () => {
     const messages = transcriptBlocksToMessages([
       toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
@@ -301,13 +361,13 @@ describe('transcriptAdapter', () => {
 
 describe('extractStreamingState', () => {
   it('returns idle for empty blocks', () => {
-    expect(extractStreamingState(state([]))).toBe('idle');
+    expect(extractStreamingState(state([]).blocks)).toBe('idle');
   });
 
   it('returns thinking when last block is a streaming thought', () => {
     expect(
       extractStreamingState(
-        state([textBlock('t1', 'thought', 'thinking...', 1, true)]),
+        state([textBlock('t1', 'thought', 'thinking...', 1, true)]).blocks,
       ),
     ).toBe('thinking');
   });
@@ -315,7 +375,7 @@ describe('extractStreamingState', () => {
   it('returns responding when last block is a streaming assistant', () => {
     expect(
       extractStreamingState(
-        state([textBlock('a1', 'assistant', 'hello', 1, true)]),
+        state([textBlock('a1', 'assistant', 'hello', 1, true)]).blocks,
       ),
     ).toBe('responding');
   });
@@ -323,7 +383,7 @@ describe('extractStreamingState', () => {
   it('returns responding when last tool is in_progress', () => {
     expect(
       extractStreamingState(
-        state([toolBlock('t1', 'call-1', 'in_progress', 1)]),
+        state([toolBlock('t1', 'call-1', 'in_progress', 1)]).blocks,
       ),
     ).toBe('responding');
   });
@@ -331,7 +391,7 @@ describe('extractStreamingState', () => {
   it('returns idle when last assistant is not streaming', () => {
     expect(
       extractStreamingState(
-        state([textBlock('a1', 'assistant', 'done', 1, false)]),
+        state([textBlock('a1', 'assistant', 'done', 1, false)]).blocks,
       ),
     ).toBe('idle');
   });
@@ -342,7 +402,7 @@ describe('extractStreamingState', () => {
         state([
           toolBlock('t1', 'call-1', 'in_progress', 1),
           textBlock('a1', 'assistant', 'partial', 2, false),
-        ]),
+        ]).blocks,
       ),
     ).toBe('responding');
   });
@@ -354,7 +414,7 @@ describe('extractStreamingState', () => {
           textBlock('u1', 'user', 'hello', 1),
           toolBlock('t1', 'call-1', 'completed', 2),
           textBlock('a1', 'assistant', 'done', 3, false),
-        ]),
+        ]).blocks,
       ),
     ).toBe('idle');
   });

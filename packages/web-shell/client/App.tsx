@@ -265,13 +265,9 @@ export function App({
   );
   const shouldHideComposer = pendingApproval !== null;
   const floatingTodos = useMemo(() => getFloatingTodos(messages), [messages]);
-  const coalescedState = useMemo(
-    () => ({ ...state, blocks: messageBlocks }),
-    [state, messageBlocks],
-  );
   const transcriptStreamingState = useMemo(
-    () => extractStreamingState(coalescedState),
-    [coalescedState],
+    () => extractStreamingState(messageBlocks),
+    [messageBlocks],
   );
   const streamingState = useMemo<StreamingState>(() => {
     if (promptStatus === 'idle') {
