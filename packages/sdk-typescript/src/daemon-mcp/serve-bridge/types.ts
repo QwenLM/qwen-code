@@ -19,6 +19,7 @@ export {
   createPromptCollector,
   startEventStream,
   stopEventStream,
+  startSessionCleanup,
 } from './sse.js';
 export {
   authHeaders,
@@ -59,6 +60,8 @@ export interface SessionEventStream {
   abortCtrl: AbortController;
   /** Current active prompt collector (null when idle). */
   activeCollector: PromptCollector | null;
+  /** Timestamp of last activity (prompt sent or chunk received). */
+  lastActivityMs: number;
 }
 
 /**

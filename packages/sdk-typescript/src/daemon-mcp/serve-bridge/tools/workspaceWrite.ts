@@ -165,62 +165,79 @@ export function workspaceWriteTools(state: BridgeState): any[] {
         model: z.string().optional().describe('Model ID for the agent.'),
       },
       handler(async (args) => {
-        switch (args.action) {
-          case 'list':
-            return formatJsonResult(await state.client.listWorkspaceAgents());
-          case 'get': {
-            if (!args.agent_type) {
-              return formatToolError('agent_type is required for get action.');
-            }
-            return formatJsonResult(await state.client.getWorkspaceAgent(args.agent_type));
-          }
-          case 'create': {
-            if (!args.name || !args.description || !args.system_prompt || !args.scope) {
-              return formatToolError(
-                'name, description, system_prompt, and scope are required for create action.',
-              );
-            }
-            return formatJsonResult(
-              await state.client.createWorkspaceAgent({
-                name: args.name,
-                description: args.description,
-                systemPrompt: args.system_prompt,
-                scope: args.scope,
-                tools: args.tools,
-                disallowedTools: args.disallowed_tools,
-                model: args.model,
-              }),
-            );
-          }
-          case 'update': {
-            if (!args.agent_type) {
-              return formatToolError('agent_type is required for update action.');
-            }
-            return formatJsonResult(
-              await state.client.updateWorkspaceAgent(
-                args.agent_type,
-                {
-                  description: args.description,
-                  systemPrompt: args.system_prompt,
-                  tools: args.tools,
-                  disallowedTools: args.disallowed_tools,
-                  model: args.model,
-                },
-                { scope: args.scope },
-              ),
-            );
-          }
-          case 'delete': {
-            if (!args.agent_type) {
-              return formatToolError('agent_type is required for delete action.');
-            }
-            await state.client.deleteWorkspaceAgent(args.agent_type, {
-              scope: args.scope,
-            });
-            return formatJsonResult({ ok: true, deleted: args.agent_type });
-          }
-        }
+        return handleAgentsManage(state, args);
       }),
     ),
   ];
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+async function handleAgentsManage(state: BridgeState, args: any): Promise<any> {
+  switch (args.action) {
+    case 'list':
+      return formatJsonResult(await state.client.listWorkspaceAgents());
+    case 'get':
+      return handleAgentGet(state, args);
+    case 'create':
+      return handleAgentCreate(state, args);
+    case 'update':
+      return handleAgentUpdate(state, args);
+    case 'delete':
+      return handleAgentDelete(state, args);
+  }
+}
+
+async function handleAgentGet(state: BridgeState, args: any): Promise<any> {
+  if (!args.agent_type) {
+    return formatToolError('agent_type is required for get action.');
+  }
+  return formatJsonResult(await state.client.getWorkspaceAgent(args.agent_type));
+}
+
+async function handleAgentCreate(state: BridgeState, args: any): Promise<any> {
+  if (!args.name || !args.description || !args.system_prompt || !args.scope) {
+    return formatToolError(
+      'name, description, system_prompt, and scope are required for create action.',
+    );
+  }
+  return formatJsonResult(
+    await state.client.createWorkspaceAgent({
+      name: args.name,
+      description: args.description,
+      systemPrompt: args.system_prompt,
+      scope: args.scope,
+      tools: args.tools,
+      disallowedTools: args.disallowed_tools,
+      model: args.model,
+    }),
+  );
+}
+
+async function handleAgentUpdate(state: BridgeState, args: any): Promise<any> {
+  if (!args.agent_type) {
+    return formatToolError('agent_type is required for update action.');
+  }
+  return formatJsonResult(
+    await state.client.updateWorkspaceAgent(
+      args.agent_type,
+      {
+        description: args.description,
+        systemPrompt: args.system_prompt,
+        tools: args.tools,
+        disallowedTools: args.disallowed_tools,
+        model: args.model,
+      },
+      { scope: args.scope },
+    ),
+  );
+}
+
+async function handleAgentDelete(state: BridgeState, args: any): Promise<any> {
+  if (!args.agent_type) {
+    return formatToolError('agent_type is required for delete action.');
+  }
+  await state.client.deleteWorkspaceAgent(args.agent_type, {
+    scope: args.scope,
+  });
+  return formatJsonResult({ ok: true, deleted: args.agent_type });
 }

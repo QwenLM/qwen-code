@@ -12,6 +12,7 @@ import { DaemonClient } from '../../daemon/DaemonClient.js';
 import { createSdkMcpServer } from '../createSdkMcpServer.js';
 import type { McpSdkServerConfigWithInstance } from '../createSdkMcpServer.js';
 import type { ServeBridgeMcpServerOptions, BridgeState } from './types.js';
+import { startSessionCleanup } from './types.js';
 import { allTools } from './tools/index.js';
 
 /**
@@ -48,9 +49,21 @@ export function createServeBridgeMcpServer(
 
   const tools = allTools(state);
 
-  return createSdkMcpServer({
+  // Start periodic cleanup of idle SSE connections
+  const stopCleanup = startSessionCleanup(state);
+
+  const server = createSdkMcpServer({
     name: 'qwen-serve-bridge',
     version: '1.0.0',
     tools,
   });
+
+  // Stop cleanup timer when server closes
+  const originalClose = server.instance.close.bind(server.instance);
+  server.instance.close = async () => {
+    stopCleanup();
+    return originalClose();
+  };
+
+  return server;
 }

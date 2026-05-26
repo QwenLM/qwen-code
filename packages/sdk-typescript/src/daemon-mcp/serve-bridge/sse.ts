@@ -52,6 +52,7 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
     sessionId,
     abortCtrl,
     activeCollector: null,
+    lastActivityMs: Date.now(),
   };
   state.eventStreams.set(sessionId, stream);
 
@@ -70,6 +71,7 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
             | Record<string, unknown>
             | undefined;
           if (!content) continue;
+          stream.lastActivityMs = Date.now();
           const collector = stream.activeCollector;
           if (collector) {
             const text = content['text'];
@@ -102,4 +104,33 @@ export function stopEventStream(state: BridgeState, sessionId: string): void {
     stream.activeCollector?.resolve();
     state.eventStreams.delete(sessionId);
   }
+}
+
+/** Default session idle TTL: 30 minutes. */
+const SESSION_TTL_MS = 30 * 60 * 1000;
+/** Cleanup interval: every 5 minutes. */
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Start a periodic cleanup timer that removes idle SSE streams.
+ * Returns a cleanup function to stop the timer (call on server shutdown).
+ */
+export function startSessionCleanup(state: BridgeState): () => void {
+  const timer = setInterval(() => {
+    const now = Date.now();
+    for (const [sessionId, stream] of state.eventStreams) {
+      if (now - stream.lastActivityMs > SESSION_TTL_MS) {
+        process.stderr.write(
+          `[serve-bridge] Cleaning up idle session SSE: ${sessionId}\n`,
+        );
+        stopEventStream(state, sessionId);
+        if (state.defaultSessionId === sessionId) {
+          state.defaultSessionId = undefined;
+        }
+      }
+    }
+  }, CLEANUP_INTERVAL_MS);
+  // Don't keep the process alive just for cleanup
+  timer.unref();
+  return () => clearInterval(timer);
 }

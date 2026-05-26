@@ -30,7 +30,7 @@ qwen-serve-mcp
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `QWEN_DAEMON_URL` | daemon 基础 URL | `http://127.0.0.1:4170` |
-| `QWEN_DAEMON_TOKEN` | Bearer token（loopback 可省略 health 路由） | 无 |
+| `QWEN_DAEMON_TOKEN` | Bearer token（daemon 启动时未设置 token 则无需传） | 无 |
 | `QWEN_WORKSPACE_CWD` | 默认工作区路径 | 无 |
 
 ## 在 MCP 客户端中配置
