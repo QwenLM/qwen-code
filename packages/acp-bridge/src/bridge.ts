@@ -3681,7 +3681,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // surface the skip to the SDK consumer.
       const info = liveChannelInfo();
       if (!info) {
-        throw new SessionNotFoundError(`mcp-runtime-add:${name}`);
+        throw Object.assign(
+          new Error(`No live ACP channel for runtime MCP add: ${name}`),
+          { data: { errorKind: 'acp_channel_unavailable' } },
+        );
       }
       type AddOk = {
         name: string;
@@ -3753,7 +3756,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Idempotent skip (`not_present`) returns without emitting.
       const info = liveChannelInfo();
       if (!info) {
-        throw new SessionNotFoundError(`mcp-runtime-remove:${name}`);
+        throw Object.assign(
+          new Error(`No live ACP channel for runtime MCP remove: ${name}`),
+          { data: { errorKind: 'acp_channel_unavailable' } },
+        );
       }
       type RemoveOk = {
         name: string;

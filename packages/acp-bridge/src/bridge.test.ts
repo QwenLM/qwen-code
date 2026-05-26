@@ -5620,7 +5620,7 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
-    it('throws SessionNotFoundError when no ACP channel is live', async () => {
+    it('throws with errorKind acp_channel_unavailable when no ACP channel is live', async () => {
       // Create a bridge but do NOT spawn any session
       const bridge = makeBridge({});
       const err = await bridge
@@ -5630,7 +5630,10 @@ describe('createHttpAcpBridge', () => {
           'client-1',
         )
         .catch((e) => e);
-      expect(err).toBeInstanceOf(SessionNotFoundError);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as { data?: { errorKind?: string } }).data?.errorKind).toBe(
+        'acp_channel_unavailable',
+      );
       await bridge.shutdown();
     });
 
@@ -5762,12 +5765,15 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
-    it('throws SessionNotFoundError when no ACP channel is live', async () => {
+    it('throws with errorKind acp_channel_unavailable when no ACP channel is live', async () => {
       const bridge = makeBridge({});
       const err = await bridge
         .removeRuntimeMcpServer('test-server', 'client-2')
         .catch((e) => e);
-      expect(err).toBeInstanceOf(SessionNotFoundError);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as { data?: { errorKind?: string } }).data?.errorKind).toBe(
+        'acp_channel_unavailable',
+      );
       await bridge.shutdown();
     });
   });

@@ -53,7 +53,11 @@ function mkManager(
       getSessionId: () => 'sid-1',
       isMcpServerDisabled: () => false,
     } as unknown as Config);
-  const toolRegistry = overrides.toolRegistry ?? ({} as ToolRegistry);
+  const toolRegistry =
+    overrides.toolRegistry ??
+    ({
+      removeMcpToolsByServer: vi.fn(),
+    } as unknown as ToolRegistry);
   return new McpClientManager(config, toolRegistry, overrides.options ?? {});
 }
 

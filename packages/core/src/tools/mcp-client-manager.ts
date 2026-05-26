@@ -2752,7 +2752,9 @@ export class McpClientManager {
         /* best effort */
       }
       this.clients.delete(name);
-      this.releaseSlotName(name);
+      // Do NOT releaseSlotName here — the budget slot carries over to
+      // the new entry being spawned. Releasing + not re-reserving would
+      // leave the running server unaccounted in the budget.
     }
 
     // Write the Config runtime overlay BEFORE spawning so
@@ -2874,6 +2876,11 @@ export class McpClientManager {
       this.clients.delete(name);
       this.eventEmitter?.emit('mcp-client-update', this.clients);
     }
+
+    // Cleanup: tool registry, status, health check (mirrors removeServer)
+    this.toolRegistry.removeMcpToolsByServer(name);
+    removeMCPServerStatus(name);
+    this.stopHealthCheck(name);
 
     // Release budget slot
     const budget = this.pool?.getBudget();

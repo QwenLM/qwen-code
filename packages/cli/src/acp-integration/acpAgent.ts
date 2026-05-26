@@ -2544,7 +2544,7 @@ class QwenAgent implements Agent {
             throw new RequestError(-32099, err.message, {
               errorKind: err.code,
               serverName: err.serverName,
-              details: err.details,
+              ...err.details,
             });
           }
           if (err instanceof InvalidMcpConfigError) {

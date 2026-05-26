@@ -1990,14 +1990,22 @@ export function createServeApp(
         });
         return;
       }
-      // Validate client identity
+      // Validate client identity (required for runtime MCP mutation)
       const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
+      if (!clientId) {
+        res.status(400).json({
+          error:
+            '`X-Qwen-Client-Id` header is required for runtime MCP mutation',
+          code: 'missing_client_id',
+        });
+        return;
+      }
       try {
         const result = await bridge.addRuntimeMcpServer(
           name,
           config as Record<string, unknown>,
-          clientId ?? '',
+          clientId,
         );
         res.status(200).json(result);
       } catch (err) {
@@ -2039,14 +2047,19 @@ export function createServeApp(
         });
         return;
       }
-      // Validate client identity
+      // Validate client identity (required for runtime MCP mutation)
       const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
+      if (!clientId) {
+        res.status(400).json({
+          error:
+            '`X-Qwen-Client-Id` header is required for runtime MCP mutation',
+          code: 'missing_client_id',
+        });
+        return;
+      }
       try {
-        const result = await bridge.removeRuntimeMcpServer(
-          name,
-          clientId ?? '',
-        );
+        const result = await bridge.removeRuntimeMcpServer(name, clientId);
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, {
