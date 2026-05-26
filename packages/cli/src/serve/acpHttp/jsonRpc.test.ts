@@ -39,6 +39,14 @@ describe('jsonRpc helpers', () => {
     expect(isResponse(m)).toBe(true);
   });
 
+  it('rejects a response with BOTH result and error (XOR); parseInbound → 400-shape', () => {
+    const m = { jsonrpc: '2.0', id: 3, result: {}, error: { code: -1, message: 'x' } };
+    expect(isResponse(m)).toBe(false);
+    const r = parseInbound(m);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.error.code).toBe(RPC.INVALID_REQUEST);
+  });
+
   it('rejects JSON-RPC batch arrays', () => {
     const r = parseInbound([{ jsonrpc: '2.0', id: 1, method: 'x' }]);
     expect(r.ok).toBe(false);

@@ -216,7 +216,7 @@ export class AcpDispatcher {
   cancelAbandonedPermission(
     req: { sessionId: string; bridgeRequestId: string },
     clientId: string | undefined,
-  ): void {
+  ): boolean {
     try {
       this.bridge.respondToSessionPermission(
         req.sessionId,
@@ -226,16 +226,18 @@ export class AcpDispatcher {
         >[2],
         clientId !== undefined ? { clientId } : undefined,
       );
+      return true;
     } catch (err) {
-      // "Session already gone" is the common, expected path (no-op). Any
-      // OTHER failure means the mediator may be stuck with no operator
-      // signal — log it so a stuck permission is diagnosable.
+      // "Session already gone" is the common, expected path (treat as done).
+      // Any OTHER failure means the mediator may still be stuck — log it AND
+      // report failure so a caller can keep the pending entry for a later
+      // teardown retry rather than dropping it.
       const msg = errMsg(err);
-      if (!/not found|unknown session/i.test(msg)) {
-        writeStderrLine(
-          `qwen serve: /acp cancelAbandonedPermission(${logSafe(req.sessionId)}) failed: ${logSafe(msg)}`,
-        );
-      }
+      if (/not found|unknown session/i.test(msg)) return true;
+      writeStderrLine(
+        `qwen serve: /acp cancelAbandonedPermission(${logSafe(req.sessionId)}) failed: ${logSafe(msg)}`,
+      );
+      return false;
     }
   }
 
@@ -487,14 +489,18 @@ export class AcpDispatcher {
                   workspaceCwd: cwd,
                   clientId: conn.clientId,
                 });
-          // Teardown raced the restore. Cleanup depends on what restore did:
-          //  - attached:true  → we attached to an already-live session;
-          //    detachClient rolls back just our attach.
+          // Teardown raced the restore — EITHER the whole connection was
+          // destroyed (`conn.destroyed`) OR a `session/close` for this id
+          // started DURING the await (`closingSessions`); in the latter the
+          // close's `finally` teardown would destroy the binding we're about
+          // to create. Both need the same cleanup; only the client reply
+          // differs. Cleanup depends on what restore did:
+          //  - attached:true  → detachClient rolls back just our attach.
           //  - attached:false → restore SPAWNED a fresh session from disk;
           //    detachClient only decrements attachCount and does NOT reap
-          //    (reaping is the spawn-owner's job) — so kill it, like
-          //    session/new does, or the child leaks until shutdown.
-          if (conn.destroyed) {
+          //    (reaping is the spawn-owner's job) — so kill it.
+          const closeRaced = conn.closingSessions.has(sessionId);
+          if (conn.destroyed || closeRaced) {
             const cleanup = restored.attached
               ? this.bridge.detachClient(sessionId, restored.clientId)
               : this.bridge.killSession(sessionId, {
@@ -502,9 +508,19 @@ export class AcpDispatcher {
                 });
             void cleanup.catch((err) =>
               writeStderrLine(
-                `qwen serve: /acp orphan ${restored.attached ? 'detach' : 'kill'}(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
+                `qwen serve: /acp orphan ${restored.attached ? 'detach' : 'kill'}(${logSafe(sessionId)}) teardown-race: ${logSafe(errMsg(err))}`,
               ),
             );
+            // Connection-still-alive close race → tell the client to retry.
+            if (closeRaced && !conn.destroyed && id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `session ${sessionId} was closed during load; retry`,
+                ),
+              );
+            }
             return;
           }
           conn.getOrCreateSession(sessionId).clientId = restored.clientId;
@@ -888,7 +904,10 @@ export class AcpDispatcher {
         if (!binding?.stream || binding.stream.isClosed) {
           this.cancelAbandonedPermission(
             { sessionId, bridgeRequestId: data.requestId },
-            undefined,
+            // Pass the bridge-stamped clientId when the binding still exists
+            // (stream closed but session live) — only `undefined` when the
+            // session is fully gone.
+            binding?.clientId,
           );
           return;
         }
@@ -958,11 +977,10 @@ export class AcpDispatcher {
     // A client error response is a cancellation; otherwise pass the result
     // through. The cast defers shape validation to the bridge, so a
     // MALFORMED result (e.g. `{}` with no `outcome`) makes the mediator
-    // throw — and since we already removed the pending entry, teardown's
-    // `abandonPendingForSession` can no longer cancel it, leaving the
-    // agent's prompt stuck on a vote that never resolves (a token-holder
-    // could stall a session with one bad POST). So on ANY failure, fall back
-    // to an explicit cancel so the mediator is always released.
+    // throw — caught below, where we fall back to an explicit cancel so the
+    // mediator is always released. The pending entry is dropped only after a
+    // successful vote/cancel (see the NOTE above), so a double-failure leaves
+    // it for teardown to retry.
     const vote =
       'error' in msg
         ? { outcome: { outcome: 'cancelled' } }
@@ -978,14 +996,18 @@ export class AcpDispatcher {
       );
       conn.pending.delete(id); // vote landed — safe to drop
     } catch (err) {
-      conn.pending.delete(id);
       writeStderrLine(
         `qwen serve: /acp permission vote failed (${logSafe(pending.sessionId)}): ${logSafe(errMsg(err))}`,
       );
-      this.cancelAbandonedPermission(
+      // Cancel BEFORE deleting, and ONLY drop the entry if the cancel
+      // landed. If it also failed, keep the entry so teardown's
+      // `abandonPendingForSession` can retry — otherwise the mediator is
+      // permanently stuck with no recovery path.
+      const cancelled = this.cancelAbandonedPermission(
         pending,
         conn.sessions.get(pending.sessionId)?.clientId,
       );
+      if (cancelled) conn.pending.delete(id);
     }
   }
 

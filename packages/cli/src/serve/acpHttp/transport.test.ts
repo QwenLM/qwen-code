@@ -209,8 +209,10 @@ class FakeBridge {
   async cancelSession(sessionId: string) {
     this.cancelled.push(sessionId);
   }
+  closeGate: Promise<void> | undefined;
   async closeSession(sessionId: string) {
     this.closedSessions.push(sessionId);
+    if (this.closeGate) await this.closeGate;
     if (this.closeShouldThrow) throw new Error('bridge close failed');
   }
   async detachClient(sessionId: string, clientId?: string) {
@@ -1047,6 +1049,51 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const kinds = frames.map((f) => f.params.kind);
     expect(kinds).toEqual(expect.arrayContaining(['stream_error', 'client_evicted']));
     // (takeFrames already locked + aborted `sess`; afterEach force-closes.)
+  });
+
+  it('session/load while a session/close is in-flight → rejected (TOCTOU guard)', async () => {
+    let releaseClose: () => void = () => {};
+    bridge.closeGate = new Promise<void>((r) => (releaseClose = r));
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 2); // session/new reply + load reject
+    await new Promise((r) => setTimeout(r, 50));
+    // close is now in flight (awaiting closeGate) → sess-1 is "closing".
+    void post(connId, { jsonrpc: '2.0', id: 300, method: 'session/close', params: { sessionId: 'sess-1' } });
+    await new Promise((r) => setTimeout(r, 30));
+    await post(connId, { jsonrpc: '2.0', id: 301, method: 'session/load', params: { sessionId: 'sess-1' } });
+    const frames = (await got) as Array<{ id: number; error?: { code: number } }>;
+    const loadReply = frames.find((f) => f.id === 301);
+    expect(loadReply?.error?.code).toBe(-32602); // "being closed; retry"
+    releaseClose();
+  });
+
+  it('client error response to a permission request → cancellation', async () => {
+    let resolvedWith: unknown;
+    bridge.respondToSessionPermission = ((_s: string, _r: string, resp: unknown) => {
+      resolvedWith = resp;
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: { requestId: 'perm-e', sessionId: 'sess-1', toolCall: {}, options: [{ optionId: 'allow' }] },
+      });
+      await new Promise((r) => setTimeout(r, 40));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sess = await openStream(connId, 'sess-1');
+    const got = takeFrames(sess, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, { jsonrpc: '2.0', id: 310, method: 'session/prompt', params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] } });
+    const [reqFrame] = (await got) as Array<{ id: string }>;
+    // Client answers with a JSON-RPC ERROR (not result) → treated as cancel.
+    await post(connId, { jsonrpc: '2.0', id: reqFrame.id, error: { code: -32000, message: 'user declined' } });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(resolvedWith).toEqual({ outcome: { outcome: 'cancelled' } });
   });
 
   it('DELETE without a connection id → 400', async () => {

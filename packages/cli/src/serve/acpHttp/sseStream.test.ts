@@ -110,6 +110,26 @@ describe('SseStream', () => {
     s.close();
   });
 
+  it('a req "close" event auto-closes the stream and fires onClose', () => {
+    let closed = false;
+    const res = mockRes();
+    const s = new SseStream(res, () => {
+      closed = true;
+    });
+    s.open();
+    (res as unknown as { req: EventEmitter }).req.emit('close');
+    expect(s.isClosed).toBe(true);
+    expect(closed).toBe(true);
+  });
+
+  it('a res "error" event auto-closes the stream', () => {
+    const res = mockRes();
+    const s = new SseStream(res);
+    s.open();
+    (res as unknown as EventEmitter).emit('error', new Error('ECONNRESET'));
+    expect(s.isClosed).toBe(true);
+  });
+
   it('doWrite resolves after drain when write() returns false (backpressure)', async () => {
     let backpressured = true;
     const res = mockRes(() => !backpressured); // false first → drain needed

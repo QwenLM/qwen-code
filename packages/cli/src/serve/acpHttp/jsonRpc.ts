@@ -110,7 +110,12 @@ export function isResponse(m: unknown): m is JsonRpcResponse {
     'id' in m &&
     // JSON-RPC 2.0 §5: EXACTLY one of result/error (XOR). Accepting both
     // would let a buggy client's approval (result + error) be misread as a
-    // cancellation by the `'error' in msg` check downstream.
+    // cancellation by the `'error' in msg` check downstream. A dual-field
+    // message therefore fails isRequest/isNotification/isResponse →
+    // `parseInbound` rejects it → the POST handler returns 400 (logged by the
+    // malformed-request path in index.ts), so the client is told its vote was
+    // not accepted (not a silent drop); it can retry with a valid response,
+    // and teardown still releases the pending entry if it doesn't.
     'result' in m !== 'error' in m
   );
 }
