@@ -57,7 +57,7 @@ jobs:
       group: 'qwen-pr-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}'
       cancel-in-progress: true
     timeout-minutes: ${{ fromJSON(github.event.inputs.timeout_minutes || '60') }}
-    runs-on: 'ubuntu-latest'
+    runs-on: 'ecs-qwen'
     permissions:
       contents: 'read'
       pull-requests: 'write'
