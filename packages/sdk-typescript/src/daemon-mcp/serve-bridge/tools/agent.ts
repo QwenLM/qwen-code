@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { tool } from '../../tool.js';
 import { formatJsonResult } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
-import { handler, resolveSessionId } from '../types.js';
+import { handler, resolveSessionId, createPromptCollector } from '../types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function agentTools(state: BridgeState): any[] {
@@ -18,61 +18,49 @@ export function agentTools(state: BridgeState): any[] {
       'Send a prompt to the qwen-code agent and wait for the full response. Collects all agent output text from the SSE event stream. Note: this call can take a long time as the agent processes the prompt.',
       {
         prompt: z.string().describe('The prompt text to send to the agent.'),
-        session_id: z.string().optional().describe('Session ID. Uses default session if omitted.'),
+        session_id: z
+          .string()
+          .optional()
+          .describe('Session ID. Uses default session if omitted.'),
       },
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
 
-        // Collect agent response text chunks from SSE in parallel with the prompt call.
-        const collectedTexts: string[] = [];
-        const abortCtrl = new AbortController();
+        // Use the persistent SSE stream established at session_create.
+        const stream = state.eventStreams.get(sessionId);
+        if (!stream) {
+          throw new Error(
+            'No SSE stream for session. Was the session created via session_create?',
+          );
+        }
 
-        const ssePromise = (async () => {
-          try {
-            for await (const event of state.client.subscribeEvents(sessionId, {
-              signal: abortCtrl.signal,
-            })) {
-              const data = event.data as Record<string, unknown> | undefined;
-              if (!data) continue;
-              const update = data['update'] as Record<string, unknown> | undefined;
-              if (!update) continue;
-              if (update['sessionUpdate'] === 'agent_message_chunk') {
-                const content = update['content'] as Record<string, unknown> | undefined;
-                if (content) {
-                  const text = content['text'];
-                  if (typeof text === 'string' && text) {
-                    collectedTexts.push(text);
-                  }
-                  // _meta signals end of message
-                  if ('_meta' in content) {
-                    abortCtrl.abort();
-                    return;
-                  }
-                }
-              }
-            }
-          } catch {
-            // SSE aborted or connection closed — expected on completion
-          }
-        })();
+        // Install a new collector to capture this prompt's response chunks.
+        const collector = createPromptCollector();
+        stream.activeCollector = collector;
 
-        // Small delay to ensure SSE connection is established before sending prompt
-        await new Promise((r) => setTimeout(r, 200));
+        try {
+          // Send prompt — response text arrives via the persistent SSE stream.
+          const result = await state.client.prompt(sessionId, {
+            prompt: [{ type: 'text', text: args.prompt }],
+          });
 
-        const result = await state.client.prompt(sessionId, {
-          prompt: [{ type: 'text', text: args.prompt }],
-        });
+          // Wait for the collector to be resolved by _meta event (with timeout).
+          await Promise.race([
+            collector.promise,
+            new Promise((r) => setTimeout(r, 30000)),
+          ]);
 
-        // Give SSE a moment to deliver remaining chunks after prompt returns
-        await Promise.race([ssePromise, new Promise((r) => setTimeout(r, 3000))]);
-        abortCtrl.abort();
-
-        const responseText = collectedTexts.join('') || '(task completed, no text output)';
-        return formatJsonResult({
-          session_id: sessionId,
-          stop_reason: result.stopReason,
-          response: responseText,
-        });
+          const responseText =
+            collector.texts.join('') || '(task completed, no text output)';
+          return formatJsonResult({
+            session_id: sessionId,
+            stop_reason: result.stopReason,
+            response: responseText,
+          });
+        } finally {
+          // Clear the collector regardless of outcome.
+          stream.activeCollector = null;
+        }
       }),
     ),
 
@@ -80,7 +68,10 @@ export function agentTools(state: BridgeState): any[] {
       'prompt_cancel',
       'Cancel the currently active prompt in a session.',
       {
-        session_id: z.string().optional().describe('Session ID. Uses default session if omitted.'),
+        session_id: z
+          .string()
+          .optional()
+          .describe('Session ID. Uses default session if omitted.'),
       },
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
@@ -94,11 +85,17 @@ export function agentTools(state: BridgeState): any[] {
       'Switch the active model for a session.',
       {
         model_id: z.string().describe('Model ID to switch to.'),
-        session_id: z.string().optional().describe('Session ID. Uses default session if omitted.'),
+        session_id: z
+          .string()
+          .optional()
+          .describe('Session ID. Uses default session if omitted.'),
       },
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
-        const result = await state.client.setSessionModel(sessionId, args.model_id);
+        const result = await state.client.setSessionModel(
+          sessionId,
+          args.model_id,
+        );
         return formatJsonResult(result);
       }),
     ),
@@ -107,7 +104,10 @@ export function agentTools(state: BridgeState): any[] {
       'session_context',
       'Get the current session model/mode/config state.',
       {
-        session_id: z.string().optional().describe('Session ID. Uses default session if omitted.'),
+        session_id: z
+          .string()
+          .optional()
+          .describe('Session ID. Uses default session if omitted.'),
       },
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
