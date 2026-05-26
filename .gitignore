@@ -97,3 +97,6 @@ tmp/
 # code graph skills
 .venv
 .codegraph
+
+# streaming-tool-dispatch e2e harness run artifacts
+scripts/test-streaming-dispatch/test-results/
