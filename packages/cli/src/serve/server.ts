@@ -2008,6 +2008,54 @@ export function createServeApp(
     },
   );
 
+  // T2.8 (#4514): Remove a runtime MCP server. Validates :name path param,
+  // forwards to HttpAcpBridge.removeRuntimeMcpServer. Idempotent: missing
+  // entry returns 200 {skipped:true, reason:'not_present'}.
+  app.delete(
+    '/workspace/mcp/servers/:name',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const name = req.params['name'] ?? '';
+      // Validate name: must be non-empty string, alphanumeric + _ and -
+      if (name.length === 0) {
+        res.status(400).json({
+          error: 'Server name is required and must be a non-empty string',
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      if (name.length > MAX_SERVER_NAME_LENGTH) {
+        res.status(400).json({
+          error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+        res.status(400).json({
+          error:
+            'Server name must contain only alphanumeric characters, underscores, and hyphens',
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      // Validate client identity
+      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
+      if (clientId === null) return;
+      try {
+        const result = await bridge.removeRuntimeMcpServer(
+          name,
+          clientId ?? '',
+        );
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'DELETE /workspace/mcp/servers/:name',
+        });
+      }
+    },
+  );
+
   app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
     // #4175 Wave 4 PR 17. Scaffold-only init: the bridge writes an
     // empty QWEN.md without invoking the LLM. Default refuses
