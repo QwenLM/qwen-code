@@ -180,7 +180,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ),
     [uiState.confirmationRequest, uiState.pendingGeminiHistoryItems],
   );
-  const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
+  const [historyRestoredText, setHistoryRestoredText] = useState<string | null>(
+    null,
+  );
   const [escPressCount, setEscPressCount] = useState(0);
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -234,6 +236,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const exportCompletion = useExportCompletion(buffer, slashCommands);
   const shellHistory = useShellHistory(config.getProjectRoot());
   const shellHistoryData = shellHistory.history;
+  const isHistoryRestoredText =
+    historyRestoredText !== null && buffer.text === historyRestoredText;
 
   const completion = useCommandCompletion(
     buffer,
@@ -242,10 +246,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     commandContext,
     reverseSearchActive,
     config,
-    // Suppress completion when history navigation just occurred
-    !justNavigatedHistory,
+    // Suppress completion for history-restored text until the user edits it.
+    !isHistoryRestoredText,
     recentSlashCommands,
   );
+  const showCompletionSuggestions =
+    completion.showSuggestions && !isHistoryRestoredText;
 
   // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
   const midInputGhostTextRef = useRef<{
@@ -415,9 +421,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
       buffer.setText(newText);
-      setJustNavigatedHistory(true);
+      setHistoryRestoredText(newText);
     },
-    [buffer, setJustNavigatedHistory],
+    [buffer],
   );
 
   const inputHistory = useInputHistory({
@@ -443,20 +449,27 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     prevHasAgentsRef.current = hasAgents;
   }, [hasAgents, inputHistory]);
 
-  // Effect to reset completion if history navigation just occurred and set the text
+  // History-restored input should not immediately open completion menus and
+  // steal Up/Down from continued history navigation. Editing the text clears
+  // this marker and lets completions appear again.
   useEffect(() => {
-    if (justNavigatedHistory) {
+    if (historyRestoredText === null) {
+      return;
+    }
+
+    if (buffer.text === historyRestoredText) {
       resetCompletionState();
       resetReverseSearchCompletionState();
       resetCommandSearchCompletionState();
       setExpandedSuggestionIndex(-1);
-      setJustNavigatedHistory(false);
+      return;
     }
+
+    setHistoryRestoredText(null);
   }, [
-    justNavigatedHistory,
+    historyRestoredText,
     buffer.text,
     resetCompletionState,
-    setJustNavigatedHistory,
     resetReverseSearchCompletionState,
     resetCommandSearchCompletionState,
   ]);
@@ -545,7 +558,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           setLivePanelFocused(false);
           return true;
         }
-        if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
+        if (
+          key.sequence &&
+          key.sequence.length === 1 &&
+          !key.ctrl &&
+          !key.meta
+        ) {
           setLivePanelFocused(false);
           return false;
         }
@@ -676,7 +694,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (
         key.sequence === '!' &&
         buffer.text === '' &&
-        !completion.showSuggestions
+        !showCompletionSuggestions
       ) {
         // Hide shortcuts when toggling shell mode
         if (showShortcuts && onToggleShortcuts) {
@@ -691,7 +709,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (
         key.sequence === '?' &&
         buffer.text === '' &&
-        !completion.showSuggestions &&
+        !showCompletionSuggestions &&
         onToggleShortcuts
       ) {
         onToggleShortcuts();
@@ -742,7 +760,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
-        if (completion.showSuggestions) {
+        if (showCompletionSuggestions) {
           completion.resetCompletionState();
           setExpandedSuggestionIndex(-1);
           resetEscapeState();
@@ -873,7 +891,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       // Export-specific arrow/Tab/Enter handling (Phase 1 + Phase 2).
-      if (exportCompletion.handleExportInput(key, completion)) {
+      if (
+        !isHistoryRestoredText &&
+        exportCompletion.handleExportInput(key, completion)
+      ) {
         return true;
       }
 
@@ -899,7 +920,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // If the command is a perfect match, pressing enter should execute it.
       if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
         if (
-          completion.showSuggestions &&
+          showCompletionSuggestions &&
           exportCompletion.navigatedRef.current &&
           exportCompletion.navigatedTextRef.current === buffer.text &&
           acceptActiveCompletionSuggestion()
@@ -919,7 +940,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.paste &&
         !key.shift &&
         buffer.text.length === 0 &&
-        !completion.showSuggestions &&
+        !showCompletionSuggestions &&
         !reverseSearchActive &&
         !commandSearchActive &&
         followup.state.isVisible &&
@@ -942,7 +963,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
-      if (completion.showSuggestions) {
+      if (showCompletionSuggestions) {
         if (completion.suggestions.length > 1) {
           const isCompletionUpKey = keyMatchers[Command.COMPLETION_UP](key);
           const isCompletionDownKey = keyMatchers[Command.COMPLETION_DOWN](key);
@@ -973,7 +994,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         key.name === 'tab' &&
         !key.paste &&
         !key.shift &&
-        !completion.showSuggestions &&
+        !showCompletionSuggestions &&
         midInputGhostTextRef.current?.acceptText
       ) {
         buffer.insert(midInputGhostTextRef.current.acceptText);
@@ -1354,6 +1375,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       followup,
       onPromptSuggestionDismiss,
       exportCompletion,
+      isHistoryRestoredText,
+      showCompletionSuggestions,
     ],
   );
 
@@ -1477,7 +1500,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const activeCompletion = getActiveCompletion();
   const shouldUseExportSuggestions =
-    !commandSearchActive && !reverseSearchActive;
+    !commandSearchActive && !reverseSearchActive && !isHistoryRestoredText;
   const suggestionDisplayProps =
     shouldUseExportSuggestions && exportCompletion.suggestionDisplayProps
       ? exportCompletion.suggestionDisplayProps
@@ -1489,7 +1512,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         };
   const shouldShowSuggestions =
     (shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
-    activeCompletion.showSuggestions;
+    (!isHistoryRestoredText || commandSearchActive || reverseSearchActive
+      ? activeCompletion.showSuggestions
+      : false);
 
   // Whether any input-side handler would consume a Tab keystroke. AppContainer
   // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
