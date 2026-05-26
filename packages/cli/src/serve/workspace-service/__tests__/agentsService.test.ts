@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 // Mock the core module so the service implementation can import it
 // without pulling in the full dependency tree (undici via config.ts).
@@ -33,13 +33,22 @@ vi.mock('@qwen-code/qwen-code-core', () => {
 });
 
 // Import SubagentError/SubagentErrorCode from the mock for test assertions.
-const { SubagentError, SubagentErrorCode } = await import('@qwen-code/qwen-code-core') as {
-  SubagentError: new (message: string, code: string, name?: string) => Error & { code: string; subagentName?: string };
+const { SubagentError, SubagentErrorCode } = (await import(
+  '@qwen-code/qwen-code-core'
+)) as {
+  SubagentError: new (
+    message: string,
+    code: string,
+    name?: string,
+  ) => Error & { code: string; subagentName?: string };
   SubagentErrorCode: Record<string, string>;
 };
 
-import { createAgentsService, type AgentsServiceDeps } from '../agentsService.js';
-import type { WorkspaceRequestContext, CreateAgentParams, UpdateAgentParams } from '../types.js';
+import {
+  createAgentsService,
+  type AgentsServiceDeps,
+} from '../agentsService.js';
+import type { WorkspaceRequestContext } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -63,7 +72,9 @@ interface MockSubagentConfig {
   runConfig?: { max_time_minutes?: number; max_turns?: number };
 }
 
-function makeSubagentConfig(overrides?: Partial<MockSubagentConfig>): MockSubagentConfig {
+function makeSubagentConfig(
+  overrides?: Partial<MockSubagentConfig>,
+): MockSubagentConfig {
   return {
     name: 'test-agent',
     description: 'A test agent',
@@ -93,7 +104,9 @@ function makeMockManager(): MockManager {
   };
 }
 
-function makeDeps(overrides?: Partial<Record<string, unknown>>): AgentsServiceDeps {
+function makeDeps(
+  overrides?: Partial<Record<string, unknown>>,
+): AgentsServiceDeps {
   const base = {
     subagentManager: makeMockManager(),
     boundWorkspace: '/workspace',
@@ -104,7 +117,9 @@ function makeDeps(overrides?: Partial<Record<string, unknown>>): AgentsServiceDe
   return base as unknown as AgentsServiceDeps;
 }
 
-function makeCtx(overrides?: Partial<WorkspaceRequestContext>): WorkspaceRequestContext {
+function makeCtx(
+  overrides?: Partial<WorkspaceRequestContext>,
+): WorkspaceRequestContext {
   return {
     originatorClientId: 'client-1',
     route: 'POST /workspace/agents',
@@ -126,7 +141,9 @@ describe('AgentsService', () => {
 
       const result = await svc.listAgents(ctx);
 
-      expect(deps.subagentManager.listSubagents).toHaveBeenCalledWith({ force: true });
+      expect(deps.subagentManager.listSubagents).toHaveBeenCalledWith({
+        force: true,
+      });
       expect(result.agents).toHaveLength(1);
       expect(result.agents[0]!.name).toBe('test-agent');
       expect(result.workspaceCwd).toBe('/workspace');
@@ -142,7 +159,9 @@ describe('AgentsService', () => {
         filePath: '/workspace/.qwen/agents/test.md',
       });
       const manager = makeMockManager();
-      (manager.listSubagents as ReturnType<typeof vi.fn>).mockResolvedValue([config]);
+      (manager.listSubagents as ReturnType<typeof vi.fn>).mockResolvedValue([
+        config,
+      ]);
       const deps = makeDeps({ subagentManager: manager });
       const svc = createAgentsService(deps);
 
@@ -171,7 +190,9 @@ describe('AgentsService', () => {
 
       const result = await svc.getAgent(makeCtx(), 'test-agent');
 
-      expect(deps.subagentManager.loadSubagent).toHaveBeenCalledWith('test-agent');
+      expect(deps.subagentManager.loadSubagent).toHaveBeenCalledWith(
+        'test-agent',
+      );
       expect(result).toBeDefined();
       expect(result!.name).toBe('test-agent');
       expect(result!.systemPrompt).toBe('You are a test agent.');
@@ -179,7 +200,9 @@ describe('AgentsService', () => {
 
     it('returns undefined when agent not found', async () => {
       const manager = makeMockManager();
-      (manager.loadSubagent as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (manager.loadSubagent as ReturnType<typeof vi.fn>).mockResolvedValue(
+        null,
+      );
       const deps = makeDeps({ subagentManager: manager });
       const svc = createAgentsService(deps);
 
@@ -195,7 +218,9 @@ describe('AgentsService', () => {
         runConfig: { max_time_minutes: 10, max_turns: 5 },
       });
       const manager = makeMockManager();
-      (manager.loadSubagent as ReturnType<typeof vi.fn>).mockResolvedValue(config);
+      (manager.loadSubagent as ReturnType<typeof vi.fn>).mockResolvedValue(
+        config,
+      );
       const deps = makeDeps({ subagentManager: manager });
       const svc = createAgentsService(deps);
 
@@ -359,7 +384,9 @@ describe('AgentsService', () => {
 
     it('throws NOT_FOUND when agent does not exist', async () => {
       const manager = makeMockManager();
-      (manager.loadSubagent as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (manager.loadSubagent as ReturnType<typeof vi.fn>).mockResolvedValue(
+        null,
+      );
       const deps = makeDeps({ subagentManager: manager });
       const svc = createAgentsService(deps);
 
@@ -432,13 +459,19 @@ describe('AgentsService', () => {
       const result = await svc.deleteAgent(makeCtx(), 'test-agent');
 
       expect(result.deleted).toBe(true);
-      expect(deps.subagentManager.deleteSubagent).toHaveBeenCalledWith('test-agent');
+      expect(deps.subagentManager.deleteSubagent).toHaveBeenCalledWith(
+        'test-agent',
+      );
     });
 
     it('returns deleted: false when agent not found', async () => {
       const manager = makeMockManager();
       (manager.deleteSubagent as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new SubagentError('not found', SubagentErrorCode.NOT_FOUND, 'missing'),
+        new SubagentError(
+          'not found',
+          SubagentErrorCode['NOT_FOUND'],
+          'missing',
+        ),
       );
       const deps = makeDeps({ subagentManager: manager });
       const svc = createAgentsService(deps);
@@ -465,7 +498,11 @@ describe('AgentsService', () => {
     it('does not publish event when agent not found', async () => {
       const manager = makeMockManager();
       (manager.deleteSubagent as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new SubagentError('not found', SubagentErrorCode.NOT_FOUND, 'missing'),
+        new SubagentError(
+          'not found',
+          SubagentErrorCode['NOT_FOUND'],
+          'missing',
+        ),
       );
       const deps = makeDeps({ subagentManager: manager });
       const svc = createAgentsService(deps);
@@ -478,7 +515,11 @@ describe('AgentsService', () => {
     it('re-throws non-NOT_FOUND errors', async () => {
       const manager = makeMockManager();
       (manager.deleteSubagent as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new SubagentError('file error', SubagentErrorCode.FILE_ERROR, 'test-agent'),
+        new SubagentError(
+          'file error',
+          SubagentErrorCode['FILE_ERROR'],
+          'test-agent',
+        ),
       );
       const deps = makeDeps({ subagentManager: manager });
       const svc = createAgentsService(deps);

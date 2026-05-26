@@ -24,7 +24,6 @@ import {
 
 import {
   createIdleWorkspaceMemoryStatus,
-  type ServeContextFileScope,
   type ServeWorkspaceMemoryFile,
   type ServeWorkspaceMemoryStatus,
   STATUS_SCHEMA_VERSION,
@@ -72,7 +71,9 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   }
 
   return {
-    async list(ctx: WorkspaceRequestContext): Promise<ServeWorkspaceMemoryStatus> {
+    async list(
+      _ctx: WorkspaceRequestContext,
+    ): Promise<ServeWorkspaceMemoryStatus> {
       const filenames = new Set(getAllGeminiMdFilenames());
       const files: ServeWorkspaceMemoryFile[] = [];
 
