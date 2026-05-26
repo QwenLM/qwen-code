@@ -16,6 +16,17 @@ import {
   createHttpAcpBridge,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
+import {
+  DEFAULT_OTLP_ENDPOINT,
+  DEFAULT_TELEMETRY_TARGET,
+  createDaemonBridgeTelemetry,
+  hashDaemonWorkspace,
+  initializeTelemetry,
+  resolveTelemetrySettings,
+  shutdownTelemetry,
+  type TelemetryRuntimeConfig,
+  type TelemetrySettings,
+} from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
@@ -31,6 +42,7 @@ import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 import type { ServeOptions } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import { getCliVersion } from '../utils/version.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
@@ -81,6 +93,33 @@ function parseDeadlineEnv(
     );
   }
   return parsed;
+}
+
+function createDaemonTelemetryRuntimeConfig(
+  telemetry: TelemetrySettings,
+  cliVersion: string,
+  daemonSessionId: string,
+): TelemetryRuntimeConfig {
+  return {
+    getTelemetryEnabled: () => telemetry.enabled ?? false,
+    getTelemetryOtlpEndpoint: () =>
+      telemetry.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
+    getTelemetryOtlpProtocol: () => telemetry.otlpProtocol ?? 'grpc',
+    getTelemetryOtlpTracesEndpoint: () => telemetry.otlpTracesEndpoint,
+    getTelemetryOtlpLogsEndpoint: () => telemetry.otlpLogsEndpoint,
+    getTelemetryOtlpMetricsEndpoint: () => telemetry.otlpMetricsEndpoint,
+    getTelemetryTarget: () => telemetry.target ?? DEFAULT_TELEMETRY_TARGET,
+    getTelemetryOutfile: () => telemetry.outfile,
+    getTelemetryIncludeSensitiveSpanAttributes: () =>
+      telemetry.includeSensitiveSpanAttributes ?? false,
+    getTelemetryResourceAttributes: () => telemetry.resourceAttributes ?? {},
+    getTelemetryMetricsIncludeSessionId: () =>
+      telemetry.metrics?.includeSessionId ?? false,
+    getTelemetryResourceAttributeWarnings: () =>
+      telemetry.resourceAttributeWarnings ?? [],
+    getCliVersion: () => cliVersion,
+    getSessionId: () => daemonSessionId,
+  };
 }
 
 /**
@@ -624,8 +663,9 @@ export async function runQwenServe(
   let contextFilenameForInit: string | undefined;
   let permissionPolicy: PermissionPolicy | undefined;
   let permissionConsensusQuorum: number | undefined;
+  let bootSettings: ReturnType<typeof loadSettings> | undefined;
   try {
-    const bootSettings = loadSettings(boundWorkspace);
+    bootSettings = loadSettings(boundWorkspace);
     contextFilenameForInit = extractContextFilename(
       bootSettings.merged.context?.fileName,
     );
@@ -659,6 +699,20 @@ export async function runQwenServe(
         `to apply context.fileName / policy.* overrides.`,
     );
   }
+
+  const daemonWorkspaceHash = hashDaemonWorkspace(boundWorkspace);
+  const daemonTelemetrySettings = await resolveTelemetrySettings({
+    env: process.env,
+    settings: bootSettings?.merged.telemetry,
+  });
+  initializeTelemetry(
+    createDaemonTelemetryRuntimeConfig(
+      daemonTelemetrySettings,
+      await getCliVersion(),
+      `daemon:${daemonWorkspaceHash}:${process.pid}`,
+    ),
+  );
+  const daemonTelemetry = createDaemonBridgeTelemetry();
 
   // F3 Commit 2 — allocate the audit ring + publisher in the daemon
   // host (here) rather than inside the bridge factory, because the
@@ -710,6 +764,7 @@ export async function runQwenServe(
       childEnvOverrides,
       channelFactory,
       onDiagnosticLine: diagnosticSink,
+      telemetry: daemonTelemetry,
       // F3 Commit 5 — wire the validated policy/quorum from
       // settings into the bridge. Bridge factory does its own
       // defensive `Number.isInteger` recheck on the quorum so a
@@ -1032,15 +1087,27 @@ export async function runQwenServe(
             const finish = (err?: Error | null) => {
               if (settled) return;
               settled = true;
-              // Drain finished (or timed out) — safe to detach now.
-              process.removeListener('SIGINT', onSignal);
-              process.removeListener('SIGTERM', onSignal);
-              // Server.close error takes precedence (operator-visible
-              // listener problem); fall back to the bridge error
-              // captured during shutdown if any.
-              const finalErr = err ?? bridgeShutdownError;
-              if (finalErr) rej(finalErr);
-              else res();
+              void shutdownTelemetry()
+                .catch((telemetryErr) => {
+                  writeStderrLine(
+                    `qwen serve: telemetry shutdown error: ${
+                      telemetryErr instanceof Error
+                        ? telemetryErr.message
+                        : String(telemetryErr)
+                    }`,
+                  );
+                })
+                .finally(() => {
+                  // Drain finished (or timed out) — safe to detach now.
+                  process.removeListener('SIGINT', onSignal);
+                  process.removeListener('SIGTERM', onSignal);
+                  // Server.close error takes precedence (operator-visible
+                  // listener problem); fall back to the bridge error
+                  // captured during shutdown if any.
+                  const finalErr = err ?? bridgeShutdownError;
+                  if (finalErr) rej(finalErr);
+                  else res();
+                });
             };
 
             // PR 21: dispose the device-flow registry FIRST so any
