@@ -480,9 +480,15 @@ export function SkillsManagerDialog({
       }
 
       // Defer navigation/selection keys to MultiSelect.
+      // j/k are only deferred when no search query is active — they are
+      // valid filter characters (e.g. "json", "jwt", "kotlin", "jdk").
+      // When the user IS searching, MultiSelect receives
+      // `isFocused={false}` which disables its vim-style key handlers,
+      // so j/k flow through to the printable-character branch below.
+      if ((key.name === 'j' || key.name === 'k') && !query) {
+        return;
+      }
       if (
-        key.name === 'j' ||
-        key.name === 'k' ||
         key.name === 'up' ||
         key.name === 'down' ||
         key.name === 'space' ||
@@ -599,6 +605,7 @@ export function SkillsManagerDialog({
         ) : items.length > 0 ? (
           <MultiSelect
             items={items}
+            isFocused={!query}
             selectedKeys={selectedKeys ?? []}
             onSelectedKeysChange={setSelectedKeys}
             // Enter == "pick" the highlighted skill: close the dialog and
