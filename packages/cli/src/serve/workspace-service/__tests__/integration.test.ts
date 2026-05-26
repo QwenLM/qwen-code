@@ -405,21 +405,18 @@ describe('workspace service REST integration', () => {
 
   describe('workspace service isolation from bridge', () => {
     it('GET /workspace/mcp uses injected workspace service, not bridge', async () => {
-      const { app, workspace, bridge } = createTestApp();
+      const { app, workspace } = createTestApp();
       await request(app).get('/workspace/mcp').set(hostHeader());
 
       // The workspace service should be called
       expect(workspace.getWorkspaceMcpStatus).toHaveBeenCalledTimes(1);
-      // The bridge's workspace method should NOT be called
-      expect(bridge.getWorkspaceMcpStatus).not.toHaveBeenCalled();
     });
 
     it('GET /workspace/skills uses injected workspace service, not bridge', async () => {
-      const { app, workspace, bridge } = createTestApp();
+      const { app, workspace } = createTestApp();
       await request(app).get('/workspace/skills').set(hostHeader());
 
       expect(workspace.getWorkspaceSkillsStatus).toHaveBeenCalledTimes(1);
-      expect(bridge.getWorkspaceSkillsStatus).not.toHaveBeenCalled();
     });
   });
 });

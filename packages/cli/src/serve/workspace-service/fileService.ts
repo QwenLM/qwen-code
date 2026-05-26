@@ -15,17 +15,6 @@
 import type {
   WorkspaceFileSystemFactory,
   WorkspaceFileSystem,
-  ResolvedPath,
-  FsStat,
-  FsEntry,
-  ReadMeta,
-  ReadTextOptions,
-  ReadBytesOptions,
-  ReadBytesOutcome,
-  ListOptions,
-  GlobOptions,
-  WriteTextAtomicOptions,
-  WriteTextAtomicOutcome,
   RequestContext,
 } from '../fs/index.js';
 
