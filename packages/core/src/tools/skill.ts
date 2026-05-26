@@ -302,7 +302,7 @@ ${skillDescriptions}
     // no longer shadows a same-named non-skill command, and we don't want
     // this branch to block the legitimate command path.
     if (this.config.getDisabledSkillNames().has(params.skill.toLowerCase())) {
-      return `Skill "${params.skill}" is disabled. Re-enable it via /skills manage or remove it from skills.disabled.`;
+      return `Skill "${params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
     }
 
     // Distinct error for a conditional skill (registered via `paths:`
@@ -420,24 +420,34 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       .has(this.params.skill.toLowerCase());
     if (disabled) {
       if (this.commandExecutor) {
-        const content = await this.commandExecutor(this.params.skill);
-        if (content !== null) {
-          // Delegated to a same-named non-skill command (file command or
-          // MCP prompt). Don't emit `SkillLaunchEvent` and don't track via
-          // `onSkillLoaded` — no skill body was loaded, and conflating the
-          // two would inflate skill telemetry / `/context` skill-token
-          // attribution with command runs.
-          return {
-            llmContent: [{ text: content }],
-            returnDisplay: `Delegated to command: ${this.params.skill}`,
-          };
+        // Wrap in try/catch matching the non-disabled path's graceful
+        // degradation (line 444 below): if the MCP server throws
+        // (network error, timeout, protocol violation), fall through to
+        // the disabled-error message instead of propagating an unhandled
+        // rejection out of execute(). Without this, disabling a skill
+        // makes the system MORE fragile to MCP failures, not less.
+        try {
+          const content = await this.commandExecutor(this.params.skill);
+          if (content !== null) {
+            // Delegated to a same-named non-skill command (file command
+            // or MCP prompt). Don't emit `SkillLaunchEvent` and don't
+            // track via `onSkillLoaded` — no skill body was loaded, and
+            // conflating the two would inflate skill telemetry /
+            // `/context` skill-token attribution with command runs.
+            return {
+              llmContent: [{ text: content }],
+              returnDisplay: `Delegated to command: ${this.params.skill}`,
+            };
+          }
+        } catch {
+          // Fall through to the disabled-error message below.
         }
       }
       logSkillLaunch(
         this.config,
         new SkillLaunchEvent(this.params.skill, false),
       );
-      const msg = `Skill "${this.params.skill}" is disabled. Re-enable it via /skills manage or remove it from skills.disabled.`;
+      const msg = `Skill "${this.params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
       return { llmContent: msg, returnDisplay: msg };
     }
 

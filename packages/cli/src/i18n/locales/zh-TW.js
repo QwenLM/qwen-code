@@ -97,7 +97,6 @@ export default {
     '分析項目並創建定製的 QWEN.md 檔案',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
-  'List available skills.': '列出可用技能。',
   'Open the skills panel (browse, search, toggle, pick).':
     '開啟技能面板（瀏覽、搜尋、啟停、選擇）。',
   'Manage Skills': '管理技能',

@@ -110,7 +110,6 @@ export default {
     'Анализ проекта и создание адаптированного файла QWEN.md',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Просмотр доступных инструментов Qwen Code. Использование: /tools [desc]',
-  'List available skills.': 'Показать доступные навыки.',
   'Open the skills panel (browse, search, toggle, pick).':
     'Открыть панель навыков (обзор, поиск, вкл/выкл, выбор).',
   'Manage Skills': 'Управление навыками',

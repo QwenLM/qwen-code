@@ -102,7 +102,14 @@ function namesFromScope(
   settings: LoadedSettings,
   scope: SettingScope,
 ): string[] {
-  return settings.forScope(scope).settings.skills?.disabled ?? [];
+  // settings.json is user-editable: `disabled` could be a non-array
+  // (e.g. `"disabled": "all"`) OR contain non-strings. Guard with
+  // `Array.isArray` BEFORE returning so downstream `.map(lower)` /
+  // `normalizeNames` never see a non-iterable. The element-level
+  // string filter still happens in `normalizeNames`. Mirrors the same
+  // defense in `buildDisabledSkillNamesProvider` (config.ts).
+  const raw = settings.forScope(scope).settings.skills?.disabled;
+  return Array.isArray(raw) ? raw : [];
 }
 
 function buildHigherDisabled(settings: LoadedSettings): {
@@ -302,7 +309,13 @@ export function SkillsManagerDialog({
     // Locked names are intentionally excluded so we don't write redundant
     // entries the higher scope is already enforcing.
     const previousWorkspace = namesFromScope(settings, SettingScope.Workspace);
-    const previousMap = new Map(previousWorkspace.map((n) => [lower(n), n]));
+    // Only string entries can be re-emitted with their original casing.
+    // A stray non-string survived the namesFromScope `Array.isArray` guard
+    // but would crash `lower()` (`.trim is not a function`).
+    const previousStrings = previousWorkspace.filter(
+      (n): n is string => typeof n === 'string',
+    );
+    const previousMap = new Map(previousStrings.map((n) => [lower(n), n]));
     const nextDisabled: string[] = [];
     for (const s of unlockedSkills) {
       if (selected.has(s.name)) continue;
@@ -352,6 +365,13 @@ export function SkillsManagerDialog({
       // a command-form entry.
       await reloadCommands();
       if (skillManager) {
+        // Tell `slashCommandProcessor`'s change-listener to skip its own
+        // `reloadCommands()` — we just awaited one above, the listener's
+        // fire-and-forget reload would be a wasted CommandService
+        // rebuild. SkillTool's listener still runs normally so the model
+        // description picks up the new disabled set. One-shot consumed
+        // by the next `notifyChangeListeners` call.
+        skillManager.suppressNextSlashReload();
         await skillManager.notifyConfigChanged();
       }
     } catch (e) {
@@ -419,6 +439,14 @@ export function SkillsManagerDialog({
         selectedKeys.includes(skill.name) &&
         !higher.set.has(lower(skill.name));
       if (!isEnabled) {
+        // Persist any OTHER pending toggles before bailing — otherwise
+        // the user's session-long edits get silently discarded just
+        // because their cursor happened to land on a toggled-off (or
+        // locked) row when they pressed Enter. Mirrors handleSaveAndClose
+        // (Esc) which persists unconditionally once data has loaded.
+        if (skills !== null && selectedKeys !== null) {
+          await persistChanges();
+        }
         onClose();
         return;
       }
@@ -428,7 +456,7 @@ export function SkillsManagerDialog({
         setInputBuffer(`/${skill.name}`);
       }
     },
-    [higher.set, onClose, persistChanges, selectedKeys, setInputBuffer],
+    [higher.set, onClose, persistChanges, selectedKeys, setInputBuffer, skills],
   );
 
   useKeypress(

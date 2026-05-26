@@ -73,7 +73,6 @@ export default {
     'プロジェクトを分析し、カスタマイズされた QWEN.md ファイルを作成',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
-  'List available skills.': '利用可能なスキルを一覧表示する。',
   'Open the skills panel (browse, search, toggle, pick).':
     'スキルパネルを開く（一覧・検索・有効化/無効化・選択）。',
   'Manage Skills': 'スキルを管理',

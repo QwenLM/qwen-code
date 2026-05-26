@@ -90,7 +90,6 @@ export default {
     'Analysiert das Projekt und erstellt eine maßgeschneiderte QWEN.md-Datei.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Verfügbare Qwen Code Werkzeuge auflisten. Verwendung: /tools [desc]',
-  'List available skills.': 'Verfügbare Skills auflisten.',
   'Open the skills panel (browse, search, toggle, pick).':
     'Skills-Panel öffnen (durchsuchen, suchen, ein/aus, auswählen).',
   'Manage Skills': 'Skills verwalten',

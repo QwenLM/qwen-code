@@ -925,7 +925,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               ? completion.suggestions[targetIndex]
               : undefined;
           acceptActiveCompletionSuggestion();
-          if (accepted?.submitOnAccept) {
+          // Only auto-submit on Enter — `Command.ACCEPT_SUGGESTION`
+          // matches BOTH Tab and Enter (see keyBindings.ts and the
+          // identical caveat at lines 861-862). Without the
+          // `key.name === 'return'` gate, `/skil<Tab>` would auto-submit
+          // and open the dialog, breaking the standard shell convention
+          // where Tab means "complete without executing." The implicit
+          // contract `submitOnAccept` was designed for is "press Enter on
+          // the highlighted suggestion, no second Enter needed."
+          if (accepted?.submitOnAccept && key.name === 'return') {
             handleSubmitAndClear(`/${accepted.value}`);
           }
           return true;

@@ -414,6 +414,15 @@ export const useSlashCommandProcessor = (
       return;
     }
     return skillManager.addChangeListener(() => {
+      // The `/skills` dialog calls `reloadCommands()` itself BEFORE it
+      // calls `notifyConfigChanged()`, so a listener-driven second reload
+      // would be a wasted CommandService rebuild on every save. Honor the
+      // one-shot suppression signal — disk-driven changes (no
+      // dialog-orchestrated reload) leave the flag false and reload
+      // normally.
+      if (skillManager.consumeSlashReloadSuppression()) {
+        return;
+      }
       reloadCommands();
     });
   }, [config, isConfigInitialized, reloadCommands]);

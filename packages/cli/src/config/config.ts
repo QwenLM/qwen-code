@@ -1223,13 +1223,16 @@ export function buildDisabledSkillNamesProvider(
   loadedSettings: LoadedSettings,
 ): () => ReadonlySet<string> {
   return () => {
-    const list = loadedSettings.merged.skills?.disabled ?? [];
-    // Defensive: settings.json is user-editable, so a stray non-string
-    // (e.g. `"disabled": [42, null]`) must not throw out of the provider.
-    // This closure is invoked from `validateToolParams` and `execute` in
-    // SkillTool — neither wraps the call in a try/catch, so an unhandled
-    // TypeError would brick every skill invocation. Filter to strings
-    // before normalizing.
+    // Defensive: settings.json is user-editable, so the `disabled` slot
+    // could be a non-array (e.g. `"disabled": "all"` or `"disabled": 42`)
+    // OR an array containing non-strings (e.g. `[42, null]`). The `??`
+    // fallback only catches `null`/`undefined`, so we MUST also guard
+    // against non-array values before `.filter()` — otherwise calling
+    // `"all".filter` throws `TypeError: list.filter is not a function`
+    // and bricks every skill invocation (validateToolParams + execute
+    // both call this provider without a try/catch).
+    const raw = loadedSettings.merged.skills?.disabled;
+    const list = Array.isArray(raw) ? raw : [];
     return new Set(
       list
         .filter((n): n is string => typeof n === 'string')

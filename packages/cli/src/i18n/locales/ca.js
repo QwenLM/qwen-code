@@ -108,7 +108,6 @@ export default {
     'Analitza el projecte i crea un fitxer QWEN.md personalitzat.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Llistar les eines disponibles de Qwen Code. Ús: /tools [desc]',
-  'List available skills.': 'Llistar les habilitats disponibles.',
   'Open the skills panel (browse, search, toggle, pick).':
     "Obrir el panell d'habilitats (explorar, cercar, activar, triar).",
   'Manage Skills': 'Gestionar habilitats',

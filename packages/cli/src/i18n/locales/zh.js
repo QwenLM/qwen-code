@@ -108,7 +108,6 @@ export default {
     '分析项目并创建定制的 QWEN.md 文件',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
-  'List available skills.': '列出可用技能。',
   'Open the skills panel (browse, search, toggle, pick).':
     '打开技能面板（浏览、搜索、启停、选择）。',
   // SkillsManagerDialog (`/skills` 弹出的面板)
