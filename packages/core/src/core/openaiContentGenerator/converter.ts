@@ -37,7 +37,6 @@ const debugLogger = createDebugLogger('CONVERTER');
 interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   cached_tokens?: number;
   prompt_cache_hit_tokens?: number;
-  prompt_cache_miss_tokens?: number;
 }
 
 export interface ExtendedChatCompletionAssistantMessageParam

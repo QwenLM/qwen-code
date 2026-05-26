@@ -1826,13 +1826,67 @@ describe('OpenAIContentConverter', () => {
             completion_tokens: 45,
             total_tokens: 21270,
             prompt_cache_hit_tokens: 21120,
-            prompt_cache_miss_tokens: 105,
           },
         } as unknown as OpenAI.Chat.ChatCompletion,
         requestContext,
       );
 
       expect(response.usageMetadata).toEqual(
+        expect.objectContaining({
+          promptTokenCount: 21225,
+          candidatesTokenCount: 45,
+          totalTokenCount: 21270,
+          cachedContentTokenCount: 21120,
+        }),
+      );
+    });
+
+    it('prefers standard cached token fields over provider-specific fallbacks', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-cache-precedence',
+          created: 123,
+          model: 'deepseek-v4-pro',
+          choices: [],
+          usage: {
+            prompt_tokens: 400,
+            completion_tokens: 20,
+            total_tokens: 420,
+            prompt_tokens_details: { cached_tokens: 100 },
+            cached_tokens: 200,
+            prompt_cache_hit_tokens: 300,
+          },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.usageMetadata).toEqual(
+        expect.objectContaining({
+          cachedContentTokenCount: 100,
+        }),
+      );
+    });
+
+    it('maps DeepSeek prompt cache hit tokens from streaming chunks', () => {
+      const chunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-deepseek-cache',
+          created: 456,
+          choices: [],
+          model: 'deepseek-v4-pro',
+          usage: {
+            prompt_tokens: 21225,
+            completion_tokens: 45,
+            total_tokens: 21270,
+            prompt_cache_hit_tokens: 21120,
+          },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        withStreamParser(),
+      );
+
+      expect(chunk.usageMetadata).toEqual(
         expect.objectContaining({
           promptTokenCount: 21225,
           candidatesTokenCount: 45,
