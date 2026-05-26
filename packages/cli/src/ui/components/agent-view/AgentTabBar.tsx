@@ -83,9 +83,9 @@ export const AgentTabBar: React.FC = () => {
         switchToPrevious();
       } else if (key.name === 'right') {
         switchToNext();
-      } else if (key.name === 'up') {
+      } else if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
         setAgentTabBarFocused(false);
-      } else if (key.name === 'down') {
+      } else if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
         // Switch to main first — the footer pill only renders under the
         // main view, so focusing it from an agent tab would strand focus
         // on an offscreen surface.

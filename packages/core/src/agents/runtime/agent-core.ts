@@ -16,6 +16,7 @@
  * and how to interpret the results.
  */
 
+import { randomUUID } from 'node:crypto';
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
@@ -94,6 +95,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_DELETE,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
+  // Worktree management belongs to the parent session — a subagent must
+  // never enter or exit the user's worktree state independently.
+  ToolNames.ENTER_WORKTREE,
+  ToolNames.EXIT_WORKTREE,
 ]);
 
 /**
@@ -267,7 +272,7 @@ export class AgentCore {
     hooks?: AgentHooks,
     runtimeView?: RuntimeContentGeneratorView,
   ) {
-    const randomPart = Math.random().toString(36).slice(2, 8);
+    const randomPart = randomUUID().replace(/-/g, '').slice(0, 8);
     this.subagentId = `${name}-${randomPart}`;
     this.name = name;
     this.runtimeContext = runtimeContext;
@@ -1637,10 +1642,11 @@ Important Rules:
     const thoughtTok = Number(usage.thoughtsTokenCount || 0);
     const cachedTok = Number(usage.cachedContentTokenCount || 0);
     const totalTok = Number(usage.totalTokenCount || 0);
-    // Prefer totalTokenCount (prompt + output) for context usage — the
-    // output from this round becomes history for the next, matching
-    // the approach in geminiChat.ts.
-    const contextTok = isFinite(totalTok) && totalTok > 0 ? totalTok : inTok;
+    // Context usage tracks prompt size; output isn't in history yet.
+    // Guard against malformed provider values (`Infinity`/`NaN`) so the
+    // downstream compaction math doesn't get poisoned — `Infinity` is
+    // truthy and would otherwise overwrite a valid prior reading.
+    const contextTok = inTok || totalTok;
     if (isFinite(contextTok) && contextTok > 0) {
       this.lastPromptTokenCount = contextTok;
     }

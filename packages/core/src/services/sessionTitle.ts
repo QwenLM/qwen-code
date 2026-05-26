@@ -70,8 +70,8 @@ const TRAILING_PAIRED_BRACKETS_RE =
  * command) can surface actionable messages instead of a generic "could not
  * generate".
  *
- * - `no_fast_model`: config.getFastModel() returned undefined. User needs to
- *   configure one via `/model --fast <name>`.
+ * - `no_fast_model`: config.getFastModel() returned undefined.
+ *   User needs to configure one via `/model --fast <name>`.
  * - `no_client`: BaseLlmClient or GeminiClient not yet initialized. Rare,
  *   usually means the session hasn't authenticated yet.
  * - `empty_history`: the conversation has fewer than 2 turns of usable text.
@@ -130,7 +130,6 @@ export async function tryGenerateSessionTitle(
 
     const result = await runSideQuery<{ title?: string }>(config, {
       purpose: 'session-title',
-      model,
       systemInstruction: TITLE_SYSTEM_PROMPT,
       schema: TITLE_SCHEMA as unknown as Record<string, unknown>,
       contents: [

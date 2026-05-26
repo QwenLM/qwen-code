@@ -17,6 +17,8 @@ import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
+import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
+import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 
 /**
  * The OpenAI SDK adds an abort listener for every `chat.completions.create`
@@ -218,7 +220,7 @@ export class ContentGenerationPipeline {
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
-        throw error;
+        throw redactProxyError(error);
       }
 
       // Use shared error handling logic
@@ -514,6 +516,7 @@ export class ContentGenerationPipeline {
       // provider enhancement, post disable-reasoning) and before the SDK call
       // so the logger sees the exact bytes sent on the wire.
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
+      runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
 
       const result = await executor(openaiRequest, context);
       return result;
@@ -532,7 +535,7 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     request: GenerateContentParameters,
   ): Promise<never> {
-    this.config.errorHandler.handle(error, context, request);
+    this.config.errorHandler.handle(redactProxyError(error), context, request);
   }
 
   /**
@@ -543,6 +546,8 @@ export class ContentGenerationPipeline {
     isStreaming: boolean,
   ): RequestContext {
     const effectiveModel = request.model || this.contentGeneratorConfig.model;
+    const providerOverrides =
+      this.config.provider.getRequestContextOverrides?.() ?? {};
     const toolCallParser = isStreaming
       ? new StreamingToolCallParser()
       : undefined;
@@ -557,7 +562,10 @@ export class ContentGenerationPipeline {
       model: effectiveModel,
       modalities: this.contentGeneratorConfig.modalities ?? {},
       startTime: Date.now(),
-      splitToolMedia: this.contentGeneratorConfig.splitToolMedia ?? false,
+      splitToolMedia:
+        providerOverrides.splitToolMedia ??
+        this.contentGeneratorConfig.splitToolMedia ??
+        false,
       ...(toolCallParser ? { toolCallParser } : {}),
       ...(responseParsingOptions ? { responseParsingOptions } : {}),
       ...(taggedThinkingParser ? { taggedThinkingParser } : {}),

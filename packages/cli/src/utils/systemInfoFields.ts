@@ -6,8 +6,10 @@
 
 import type { ExtendedSystemInfo } from './systemInfo.js';
 import { t } from '../i18n/index.js';
-import { findProviderByCredentials } from '../auth/allProviders.js';
-import { resolveMetadataKey } from '../auth/providerConfig.js';
+import {
+  findProviderByCredentials,
+  resolveMetadataKey,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Field configuration for system information display
@@ -30,6 +32,7 @@ export function getSystemInfoFields(
   addField(fields, t('Qwen Code'), formatCliVersion(info));
   addField(fields, t('Runtime'), formatRuntime(info));
   addField(fields, t('IDE Client'), info.ideClient);
+  addField(fields, 'LSP', info.lspStatus ?? '');
   addField(fields, t('OS'), formatOs(info));
   addField(fields, t('Auth'), formatAuth(info));
   addField(fields, t('Base URL'), formatBaseUrl(info));

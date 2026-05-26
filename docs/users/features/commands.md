@@ -45,12 +45,11 @@ Commands for adjusting interface appearance and work environment.
 
 Commands specifically for controlling interface and output language.
 
-| Command               | Description                                                                 | Usage Examples             |
-| --------------------- | --------------------------------------------------------------------------- | -------------------------- |
-| `/language`           | View or change language settings                                            | `/language`                |
-| → `ui [language]`     | Set UI interface language                                                   | `/language ui zh-CN`       |
-| → `output [language]` | Set LLM output language                                                     | `/language output Chinese` |
-| → `translate on/off`  | Toggle AI translation for dynamic slash command descriptions (default: off) | `/language translate on`   |
+| Command               | Description                      | Usage Examples             |
+| --------------------- | -------------------------------- | -------------------------- |
+| `/language`           | View or change language settings | `/language`                |
+| → `ui [language]`     | Set UI interface language        | `/language ui zh-CN`       |
+| → `output [language]` | Set LLM output language          | `/language output Chinese` |
 
 - Available built-in UI languages: `zh-CN` (Simplified Chinese), `en-US` (English), `ru-RU` (Russian), `de-DE` (German), `ja-JP` (Japanese), `pt-BR` (Portuguese - Brazil), `fr-FR` (French), `ca-ES` (Catalan)
 - Output language examples: `Chinese`, `English`, `Japanese`, etc.
@@ -213,16 +212,17 @@ this setting.
 
 Commands for obtaining information and performing system settings.
 
-| Command     | Description                                     | Usage Examples                   |
-| ----------- | ----------------------------------------------- | -------------------------------- |
-| `/help`     | Display help information for available commands | `/help` or `/?`                  |
-| `/about`    | Display version information                     | `/about`                         |
-| `/stats`    | Display detailed statistics for current session | `/stats`                         |
-| `/settings` | Open settings editor                            | `/settings`                      |
-| `/auth`     | Change authentication method                    | `/auth`                          |
-| `/bug`      | Submit issue about Qwen Code                    | `/bug Button click unresponsive` |
-| `/copy`     | Copy last output content to clipboard           | `/copy`                          |
-| `/quit`     | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
+| Command         | Description                                     | Usage Examples                   |
+| --------------- | ----------------------------------------------- | -------------------------------- |
+| `/help`         | Display help information for available commands | `/help` or `/?`                  |
+| `/status`       | Display version information                     | `/status` or `/about`            |
+| `/status paths` | Display current session file and log paths      | `/status paths`                  |
+| `/stats`        | Display detailed statistics for current session | `/stats`                         |
+| `/settings`     | Open settings editor                            | `/settings`                      |
+| `/auth`         | Change authentication method                    | `/auth`                          |
+| `/bug`          | Submit issue about Qwen Code                    | `/bug Button click unresponsive` |
+| `/copy`         | Copy last output content to clipboard           | `/copy`                          |
+| `/quit`         | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
 
 ### 1.9 Common Shortcuts
 

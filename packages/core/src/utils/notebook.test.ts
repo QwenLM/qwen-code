@@ -5,7 +5,21 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { readNotebook } from './notebook.js';
+import {
+  findCellIndex,
+  getCellDisplayId,
+  hasStableCellIds,
+  inferInsertedCellSourceArrayStyle,
+  inferNotebookJsonFormat,
+  isAmbiguousCellId,
+  makeCellId,
+  parseCellId,
+  parseNotebook,
+  readNotebook,
+  readNotebookWithMetadata,
+  serializeNotebook,
+  toNotebookSource,
+} from './notebook.js';
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
@@ -369,11 +383,262 @@ describe('notebook utilities', () => {
     expect(result.length).toBeLessThan(120000);
   });
 
+  it('reports when notebook cell rendering is truncated', async () => {
+    const cells = Array.from({ length: 200 }, (_, i) => ({
+      cell_type: 'code' as const,
+      source: ['x = ' + 'a'.repeat(600) + '\n'],
+      execution_count: i + 1,
+      outputs: [
+        { output_type: 'stream' as const, text: ['result '.repeat(100)] },
+      ],
+      metadata: {},
+    }));
+    const filePath = await writeNotebook('big-metadata.ipynb', {
+      cells,
+      metadata: { language_info: { name: 'python' } },
+    });
+
+    const result = await readNotebookWithMetadata(filePath);
+    expect(result.isTruncated).toBe(true);
+    expect(result.content).toContain('remaining cells truncated');
+  });
+
   it('should throw on invalid JSON', async () => {
     tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'notebook-test-'));
     const filePath = path.join(tempDir, 'bad.ipynb');
     await fsp.writeFile(filePath, 'not json', 'utf-8');
 
     await expect(readNotebook(filePath)).rejects.toThrow();
+  });
+
+  it('should parse notebooks with a leading UTF-8 BOM', async () => {
+    const notebook = {
+      cells: [
+        {
+          cell_type: 'code',
+          source: ['print("bom")'],
+          execution_count: null,
+          outputs: [],
+          metadata: {},
+        },
+      ],
+      metadata: { language_info: { name: 'python' } },
+    };
+    tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'notebook-test-'));
+    const filePath = path.join(tempDir, 'bom.ipynb');
+    await fsp.writeFile(filePath, `\ufeff${JSON.stringify(notebook)}`, 'utf-8');
+
+    expect(
+      parseNotebook(`\ufeff${JSON.stringify(notebook)}`).cells,
+    ).toHaveLength(1);
+    await expect(readNotebookWithMetadata(filePath)).resolves.toMatchObject({
+      isTruncated: false,
+    });
+  });
+
+  it('should parse cell-N IDs as zero-based indexes', () => {
+    expect(parseCellId('cell-0')).toBe(0);
+    expect(parseCellId('cell-12')).toBe(12);
+    expect(parseCellId('abc-12')).toBeUndefined();
+    expect(parseCellId('cell-nope')).toBeUndefined();
+  });
+
+  it('should find cells by the same IDs read_file displays', () => {
+    const notebook = parseNotebook(
+      JSON.stringify({
+        cells: [
+          { cell_type: 'code', id: 'real-id', source: '', metadata: {} },
+          { cell_type: 'code', source: '', metadata: {} },
+        ],
+        metadata: {},
+      }),
+    );
+
+    expect(getCellDisplayId(notebook.cells[0]!, 0)).toBe('real-id');
+    expect(getCellDisplayId(notebook.cells[1]!, 1)).toBe('cell-1');
+    expect(findCellIndex(notebook, 'real-id')).toBe(0);
+    expect(findCellIndex(notebook, 'cell-1')).toBe(1);
+    expect(findCellIndex(notebook, 'cell-0')).toBe(-1);
+    expect(findCellIndex(notebook, 'missing')).toBe(-1);
+  });
+
+  it('should reject ambiguous displayed cell IDs', () => {
+    const notebook = parseNotebook(
+      JSON.stringify({
+        cells: [
+          { cell_type: 'code', id: 'cell-1', source: '', metadata: {} },
+          { cell_type: 'code', source: '', metadata: {} },
+        ],
+        metadata: {},
+      }),
+    );
+
+    expect(isAmbiguousCellId(notebook, 'cell-1')).toBe(true);
+    expect(findCellIndex(notebook, 'cell-1')).toBe(-1);
+  });
+
+  it('should preserve newline boundaries when converting source to arrays', () => {
+    expect(toNotebookSource('a\nb\n', true)).toEqual(['a\n', 'b\n']);
+    expect(toNotebookSource('a\nb', true)).toEqual(['a\n', 'b']);
+    expect(toNotebookSource('', true)).toEqual([]);
+    expect(toNotebookSource('a\nb\n', false)).toBe('a\nb\n');
+  });
+
+  it('should preserve notebook JSON indentation and trailing newline style', () => {
+    const raw = JSON.stringify(
+      {
+        cells: [{ cell_type: 'markdown', source: '# Title', metadata: {} }],
+        metadata: {},
+      },
+      null,
+      2,
+    );
+    const notebook = parseNotebook(raw);
+    notebook.cells[0]!.source = '# Updated';
+
+    const format = inferNotebookJsonFormat(raw);
+    const serialized = serializeNotebook(notebook, format);
+
+    expect(format).toEqual({ indent: 2, trailingNewline: false });
+    expect(serialized).toContain('\n  "cells"');
+    expect(serialized.endsWith('\n')).toBe(false);
+  });
+
+  it('should preserve tab-indented notebook JSON when serializing after edits', () => {
+    const raw = [
+      '{',
+      '\t"cells": [',
+      '\t\t{',
+      '\t\t\t"cell_type": "markdown",',
+      '\t\t\t"source": "# Title",',
+      '\t\t\t"metadata": {}',
+      '\t\t}',
+      '\t],',
+      '\t"metadata": {}',
+      '}',
+      '',
+    ].join('\n');
+    const notebook = parseNotebook(raw);
+    notebook.cells[0]!.source = '# Updated';
+
+    const format = inferNotebookJsonFormat(raw);
+    const serialized = serializeNotebook(notebook, format);
+
+    expect(format).toEqual({ indent: '\t', trailingNewline: true });
+    expect(serialized).toContain('\n\t"cells"');
+    expect(serialized.endsWith('\n')).toBe(true);
+  });
+
+  it('should preserve mixed whitespace notebook JSON indentation after edits', () => {
+    const indent = ' \t';
+    const raw = [
+      '{',
+      `${indent}"cells": [`,
+      `${indent}${indent}{`,
+      `${indent}${indent}${indent}"cell_type": "markdown",`,
+      `${indent}${indent}${indent}"source": "# Title",`,
+      `${indent}${indent}${indent}"metadata": {}`,
+      `${indent}${indent}}`,
+      `${indent}],`,
+      `${indent}"metadata": {}`,
+      '}',
+    ].join('\n');
+    const notebook = parseNotebook(raw);
+    notebook.cells[0]!.source = '# Updated';
+
+    const format = inferNotebookJsonFormat(raw);
+    const serialized = serializeNotebook(notebook, format);
+
+    expect(format).toEqual({ indent, trailingNewline: false });
+    expect(serialized).toContain(`\n${indent}"cells"`);
+    expect(serialized).toContain(`\n${indent}${indent}{`);
+    expect(serialized.endsWith('\n')).toBe(false);
+  });
+
+  it('should preserve compact notebook JSON when serializing after edits', () => {
+    const raw = JSON.stringify({
+      cells: [{ cell_type: 'markdown', source: '# Title', metadata: {} }],
+      metadata: {},
+    });
+    const notebook = parseNotebook(raw);
+    notebook.cells[0]!.source = '# Updated';
+
+    const format = inferNotebookJsonFormat(raw);
+    const serialized = serializeNotebook(notebook, format);
+
+    expect(format).toEqual({ indent: undefined, trailingNewline: false });
+    expect(serialized).toBe(JSON.stringify(notebook));
+  });
+
+  it('should infer inserted source style from adjacent cells', () => {
+    const notebook = parseNotebook(
+      JSON.stringify({
+        cells: [
+          { cell_type: 'markdown', source: '# string source', metadata: {} },
+          {
+            cell_type: 'code',
+            source: ['print("array source")'],
+            metadata: {},
+          },
+        ],
+        metadata: {},
+      }),
+    );
+
+    expect(inferInsertedCellSourceArrayStyle(notebook, 1)).toBe(false);
+    expect(inferInsertedCellSourceArrayStyle(notebook, 0)).toBe(false);
+    expect(inferInsertedCellSourceArrayStyle(notebook, 2)).toBe(true);
+  });
+
+  it('should generate deterministic cell IDs that cannot collide with cell-N fallbacks', () => {
+    const notebook = parseNotebook(
+      JSON.stringify({
+        nbformat: 4,
+        nbformat_minor: 5,
+        cells: [
+          { cell_type: 'code', id: 'qwen-cell-1', source: '', metadata: {} },
+          { cell_type: 'code', source: '', metadata: {} },
+        ],
+        metadata: {},
+      }),
+    );
+
+    expect(hasStableCellIds(notebook)).toBe(false);
+    expect(makeCellId(notebook)).toBe('qwen-cell-2');
+    notebook.cells.push({
+      cell_type: 'code',
+      id: 'qwen-cell-2',
+      source: '',
+      metadata: {},
+    });
+    expect(makeCellId(notebook)).toBe('qwen-cell-3');
+  });
+
+  it('should not generate cell IDs for old notebook formats', () => {
+    const notebook = parseNotebook(
+      JSON.stringify({
+        nbformat: 4,
+        nbformat_minor: 4,
+        cells: [],
+        metadata: {},
+      }),
+    );
+
+    expect(makeCellId(notebook)).toBeUndefined();
+  });
+
+  it('should reject notebook JSON without a cells array', () => {
+    expect(() => parseNotebook(JSON.stringify({ metadata: {} }))).toThrow(
+      'missing cells array',
+    );
+  });
+
+  it('should reject non-object notebook cells', () => {
+    expect(() =>
+      parseNotebook(JSON.stringify({ cells: [null], metadata: {} })),
+    ).toThrow('cell at index 0 is not an object');
+    expect(() =>
+      parseNotebook(JSON.stringify({ cells: ['not a cell'], metadata: {} })),
+    ).toThrow('cell at index 0 is not an object');
   });
 });

@@ -40,6 +40,7 @@ let mockGeminiClientInstance: Mocked<GeminiClient>;
 // Mock Config
 const fsService = new StandardFileSystemService();
 const fileReadCache = new FileReadCache();
+const mockFileHistoryService = { trackEdit: vi.fn() };
 const mockConfigInternal = {
   getTargetDir: () => rootDir,
   getProjectRoot: () => rootDir,
@@ -72,6 +73,7 @@ const mockConfigInternal = {
   getDefaultFileEncoding: () => 'utf-8',
   getFileReadCache: () => fileReadCache,
   getFileReadCacheDisabled: () => false,
+  getFileHistoryService: () => mockFileHistoryService,
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -351,6 +353,7 @@ describe('WriteFileTool', () => {
       expect(result.llmContent).toMatch(
         /Successfully created and wrote to new file/,
       );
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       expect(fs.existsSync(filePath)).toBe(true);
       const { content: writtenContent } = await fsService.readTextFile({
         path: filePath,
@@ -363,6 +366,107 @@ describe('WriteFileTool', () => {
       expect(display.fileDiff).toMatch(
         proposedContent.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&'),
       );
+    });
+
+    // trackEdit is best-effort: a FileHistoryService failure (disk full,
+    // permissions, corrupted state) must never break the write_file tool.
+    it('completes the write even when trackEdit throws', async () => {
+      const filePath = path.join(rootDir, 'write_when_trackedit_fails.txt');
+      const proposedContent = 'Content that survives trackEdit failure.';
+      mockFileHistoryService.trackEdit.mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+
+      const params = { file_path: filePath, content: proposedContent };
+      const invocation = tool.build(params);
+
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
+      if (
+        typeof confirmDetails === 'object' &&
+        'onConfirm' in confirmDetails &&
+        confirmDetails.onConfirm
+      ) {
+        await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      }
+
+      const result = await invocation.execute(abortSignal);
+
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      expect(result.llmContent).toMatch(
+        /Successfully created and wrote to new file/,
+      );
+      expect(fs.existsSync(filePath)).toBe(true);
+      const { content: writtenContent } = await fsService.readTextFile({
+        path: filePath,
+      });
+      expect(writtenContent).toBe(proposedContent);
+    });
+
+    // Pin the upstream-aligned ordering: trackEdit MUST run before the
+    // pre-write checkPriorRead. The upstream `claude-code/src/tools/
+    // FileEditTool` comment on the equivalent block says:
+    //
+    //   "These awaits must stay OUTSIDE the critical section below — a
+    //    yield between the staleness check and writeTextContent lets
+    //    concurrent edits interleave."
+    //
+    // Without this ordering the multi-hundred-ms `trackEdit` sat
+    // between checkPriorRead and writeTextFile, widening the
+    // already-acknowledged stat-then-write race window.
+    //
+    // Test strategy: install a `trackEdit` mock that mutates the file
+    // on disk before returning. That mutation must be detected by the
+    // pre-write `checkPriorRead`. That only happens if `trackEdit`
+    // runs BEFORE the pre-write check — the broken ordering would run
+    // the pre-write check first (passing on pre-mutation stats), then
+    // trackEdit (which mutates), then write (which clobbers the
+    // external mutation silently).
+    //
+    // Asserting on `result.error` directly tests the behavioral
+    // invariant rather than the call-ordering proxy, so it survives
+    // future refactors that preserve the invariant even if they shift
+    // the number of `cache.check` calls.
+    it('backs up before the pre-write freshness check (TOCTOU ordering)', async () => {
+      const filePath = path.join(rootDir, 'toctou_ordering.txt');
+      const initialContent = 'pre-existing content';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        full: true,
+        cacheable: true,
+      });
+
+      mockFileHistoryService.trackEdit.mockImplementation(async () => {
+        // Simulate an external write that lands while trackEdit is
+        // copying the file. Bumping mtime by 5 s makes the change
+        // reliably "newer" under the cache's ~1 s comparison
+        // granularity on macOS.
+        const newTime = new Date(Date.now() + 5000);
+        fs.utimesSync(filePath, newTime, newTime);
+      });
+
+      const params = { file_path: filePath, content: 'new content' };
+      const invocation = tool.build(params);
+
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
+      if (
+        typeof confirmDetails === 'object' &&
+        'onConfirm' in confirmDetails &&
+        confirmDetails.onConfirm
+      ) {
+        await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      }
+      const result = await invocation.execute(abortSignal);
+
+      // trackEdit must have actually fired.
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      // The pre-write check must have caught the in-trackEdit mutation
+      // and rejected, proving trackEdit ran BEFORE the pre-write check.
+      expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      // The file on disk is unchanged (rejected, not overwritten).
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
     });
 
     it('should overwrite an existing file and return diff', async () => {
@@ -1012,6 +1116,7 @@ describe('WriteFileTool', () => {
         .build({ file_path: filePath, content: 'clobber' })
         .execute(abortSignal);
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      expect(result.error?.message).toContain('notebook_edit');
       // Verb in the dead-end guidance must read correctly for
       // overwrite (the WriteFile path), not "edit".
       expect(result.error?.message).toMatch(/if you need to overwrite it\./);

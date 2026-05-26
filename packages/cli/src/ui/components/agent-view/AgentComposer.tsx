@@ -43,6 +43,7 @@ import { QueuedMessageDisplay } from '../QueuedMessageDisplay.js';
 import { AgentFooter } from './AgentFooter.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { theme } from '../../semantic-colors.js';
+import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { t } from '../../../i18n/index.js';
 
 // ─── Types ──────────────────────────────────────────────────
@@ -65,6 +66,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   const interactiveAgent = agent?.interactiveAgent;
 
   const config = useConfig();
+  const preferredEditor = usePreferredEditor();
   const { columns: terminalWidth } = useTerminalSize();
   const { inputWidth } = calculatePromptWidths(terminalWidth);
   const { stdin, setRawMode } = useStdin();
@@ -127,6 +129,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     stdin,
     setRawMode,
     isValidPath,
+    preferredEditor,
   });
 
   // Sync agent buffer text to context so AgentTabBar can guard tab switching

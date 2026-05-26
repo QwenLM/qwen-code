@@ -476,6 +476,35 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
 
     try {
+      // Backup the pre-edit content BEFORE the final freshness check.
+      // Mirrors the upstream `claude-code/src/tools/FileEditTool` ordering,
+      // which has an explicit comment on the equivalent block:
+      //
+      //   "These awaits must stay OUTSIDE the critical section below — a
+      //    yield between the staleness check and writeTextContent lets
+      //    concurrent edits interleave."
+      //
+      // `trackEdit` does `stat` + `copyFile` and on large files can take
+      // hundreds of milliseconds. The previous ordering ran it AFTER
+      // `checkPriorRead` and before `writeTextFile`, which widened the
+      // already-acknowledged stat-then-write window from "two adjacent
+      // syscalls" to "freshness check → potentially-multi-second backup →
+      // write". An external mutation landing inside the backup window was
+      // therefore no longer detected before the write clobbered it.
+      //
+      // Backing up first is safe: backups are idempotent (deterministic
+      // `{hash}@v{version}` filename) and per-snapshot. If the freshness
+      // check below then rejects the edit, we keep an unused-but-correct
+      // backup of the pre-edit state — not corrupt state. The next
+      // makeSnapshot will reuse it if the file is unchanged.
+      try {
+        await this.config
+          .getFileHistoryService()
+          .trackEdit(this.params.file_path);
+      } catch {
+        // File history is best-effort; never block core tool operations.
+      }
+
       // Final pre-write freshness check. calculateEdit() ran a
       // post-read check, but execute() can be called arbitrarily
       // long after that (user approval, modify-and-confirm, etc.).
@@ -768,6 +797,29 @@ Expectation for required parameters:
     params: EditToolParams,
   ): ToolInvocation<EditToolParams, ToolResult> {
     return new EditToolInvocation(this.config, params);
+  }
+
+  override toAutoClassifierInput(
+    params: EditToolParams,
+  ): Record<string, unknown> {
+    const oldStr = params.old_string ?? '';
+    const newStr = params.new_string ?? '';
+    // 300 chars is enough headroom for the classifier to spot a malicious
+    // registry / shell / env line that hides behind a benign-looking
+    // prefix (~80 chars). In-workspace edits take the acceptEdits fast-
+    // path and never reach this projection; the preview is therefore
+    // only consulted for the smaller set of out-of-workspace writes
+    // (~/.npmrc, /etc/hosts, etc.) — exactly the case where the
+    // classifier needs the longer window.
+    return {
+      file_path: params.file_path,
+      old_string_preview: oldStr.slice(0, 300),
+      new_string_preview: newStr.slice(0, 300),
+      old_string_truncated: oldStr.length > 300,
+      new_string_truncated: newStr.length > 300,
+      lines_changed:
+        (newStr.match(/\n/g)?.length ?? 0) - (oldStr.match(/\n/g)?.length ?? 0),
+    };
   }
 
   getModifyContext(_: AbortSignal): ModifyContext<EditToolParams> {

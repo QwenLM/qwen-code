@@ -6,6 +6,8 @@
 
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
+import { existsSync } from 'node:fs';
+import * as path from 'node:path';
 import { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import { ConversationStore } from '../../services/conversationStore.js';
 import type {
@@ -28,12 +30,17 @@ import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
+  applyProviderInstallPlanToFile,
+  snapshotSettingsForRollback,
+  restoreSettingsSnapshot,
   writeCodingPlanConfig,
-  writeModelProvidersConfig,
   readQwenSettingsForVSCode,
   clearPersistedAuth,
 } from '../../services/settingsWriter.js';
-import { parseInsightMessage } from '@qwen-code/qwen-code-core';
+import {
+  buildInstallPlan,
+  parseInsightMessage,
+} from '@qwen-code/qwen-code-core';
 
 /** Threshold (ms) before a completed task triggers a notification. */
 const LONG_TASK_THRESHOLD_MS = 20_000;
@@ -59,6 +66,26 @@ const AUTH_RELATED_QWEN_SETTINGS = [
   'qwen-code.apiKey',
   'qwen-code.codingPlanRegion',
 ] as const;
+
+export function resolveQwenCliEntryPath(
+  extensionUri: vscode.Uri,
+  extensionMode: vscode.ExtensionMode | undefined,
+): string {
+  if (extensionMode === vscode.ExtensionMode.Development) {
+    const devCliEntry = path.resolve(
+      extensionUri.fsPath,
+      '..',
+      '..',
+      'scripts',
+      'dev.js',
+    );
+    if (existsSync(devCliEntry)) {
+      return devCliEntry;
+    }
+  }
+
+  return vscode.Uri.joinPath(extensionUri, 'dist', 'qwen-cli', 'cli.js').fsPath;
+}
 
 function isInsightCommand(command: string): boolean {
   const [firstToken = ''] = command.trim().split(/\s+/, 1);
@@ -151,15 +178,8 @@ export class WebViewProvider {
 
     // Set auth interactive handler — interactive auth flow (QuickPick → InputBox → write settings → reconnect)
     this.messageHandler.setAuthInteractiveHandler(
-      async (provider, region, apiKey, baseUrl, model, modelIds) => {
-        await this.handleAuthInteractive(
-          provider,
-          region,
-          apiKey,
-          baseUrl,
-          model,
-          modelIds,
-        );
+      async (providerConfig, inputs) => {
+        await this.handleAuthInteractive(providerConfig, inputs);
       },
     );
 
@@ -1206,12 +1226,10 @@ export class WebViewProvider {
         `[WebViewProvider] Using CLI-managed authentication (autoAuth=${autoAuthenticate})`,
       );
 
-      const bundledCliEntry = vscode.Uri.joinPath(
+      const cliEntry = resolveQwenCliEntryPath(
         this.extensionUri,
-        'dist',
-        'qwen-cli',
-        'cli.js',
-      ).fsPath;
+        this.context.extensionMode,
+      );
 
       try {
         console.log('[WebViewProvider] Connecting to agent...');
@@ -1219,7 +1237,7 @@ export class WebViewProvider {
         // Pass the detected CLI path to ensure we use the correct installation
         const connectResult = await this.agentManager.connect(
           workingDir,
-          bundledCliEntry,
+          cliEntry,
           options,
         );
         console.log('[WebViewProvider] Agent connected successfully');
@@ -1305,14 +1323,10 @@ export class WebViewProvider {
    * Mirrors the CLI's `qwen auth coding-plan` / `qwen auth` flow.
    */
   private async handleAuthInteractive(
-    provider: string,
-    region?: string,
-    apiKey?: string,
-    baseUrl?: string,
-    model?: string,
-    modelIds?: string,
+    providerConfig: import('@qwen-code/qwen-code-core').ProviderConfig,
+    inputs: import('@qwen-code/qwen-code-core').ProviderSetupInputs,
   ): Promise<void> {
-    if (!apiKey) {
+    if (!inputs.apiKey) {
       this.sendMessageToWebView({
         type: 'authError',
         data: { message: 'API key is required.' },
@@ -1320,40 +1334,57 @@ export class WebViewProvider {
       return;
     }
 
+    // Log only the host so we don't leak credentials embedded in user-info
+    // (`https://user:sk-secret@host/v1`) or query strings into extension-host
+    // logs / diagnostic bundles.
+    const baseUrlHost = (() => {
+      try {
+        return new URL(inputs.baseUrl).hostname;
+      } catch {
+        return '[invalid]';
+      }
+    })();
     console.log(
-      `[WebViewProvider] authInteractive: provider=${provider}, region=${region}, model=${model}`,
+      `[WebViewProvider] authInteractive: provider=${providerConfig.id}, host=${baseUrlHost}`,
     );
 
-    try {
-      if (provider === 'coding-plan') {
-        writeCodingPlanConfig(region === 'global' ? 'global' : 'china', apiKey);
-      } else if (provider === 'alibaba-standard') {
-        // Alibaba Standard — multiple models sharing the same base URL
-        const modelBaseUrl =
-          baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-        const ids = (modelIds || model || 'qwen3.5-plus')
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean);
-        const providers: Record<string, string> = {};
-        for (const id of ids) {
-          providers[id] = modelBaseUrl;
-        }
-        writeModelProvidersConfig({
-          apiKey,
-          modelProviders: providers,
-          activeModel: ids[0] || 'qwen3.5-plus',
-        });
-      } else {
-        // Custom API Key — single model entry
-        const modelId = model || 'default';
-        const modelBaseUrl = baseUrl || 'https://api.openai.com/v1';
-        writeModelProvidersConfig({
-          apiKey,
-          modelProviders: { [modelId]: modelBaseUrl },
-          activeModel: modelId,
-        });
+    // Snapshot the pre-write settings so we can roll back bad credentials if
+    // the reconnect below rejects them. applyProviderInstallPlanToFile's own
+    // backup/restore only covers failures *inside* the plan; the
+    // disconnect/reconnect runs after the plan commits (cleanupBackup), so
+    // without this a rejected key would persist and every VS Code restart
+    // would keep retrying it.
+    const rollbackSnapshot = snapshotSettingsForRollback();
+    // restoreSettingsSnapshot → writeSettings can itself throw (EPERM on
+    // Windows renameSync, disk full, EACCES). Never let a rollback failure
+    // mask the original auth error or skip the user-facing error message.
+    const safeRollback = () => {
+      try {
+        restoreSettingsSnapshot(rollbackSnapshot);
+      } catch (rollbackErr) {
+        console.error(
+          '[WebViewProvider] settings rollback failed:',
+          rollbackErr,
+        );
       }
+    };
+    // Tear down an agent left holding rejected/partial credentials in memory
+    // so a subsequent chat message doesn't hit a stale-credential error that
+    // looks unrelated to this auth failure; the next /auth reconnects clean.
+    const disconnectStaleAgent = () => {
+      if (!this.agentInitialized) return;
+      try {
+        this.agentManager.disconnect();
+      } catch (e) {
+        console.log('[WebViewProvider] Error disconnecting after rollback:', e);
+      }
+      this.agentInitialized = false;
+    };
+    try {
+      // Use core's buildInstallPlan to create a standardized install plan,
+      // then apply it via the VSCode settings adapter.
+      const plan = buildInstallPlan(providerConfig, inputs);
+      await applyProviderInstallPlanToFile(plan);
 
       // Disconnect + reconnect
       if (this.agentInitialized) {
@@ -1369,15 +1400,20 @@ export class WebViewProvider {
       await this.doInitializeAgentConnection({ autoAuthenticate: false });
 
       // Only emit authSuccess when the reconnection actually authenticated.
-      // doInitializeAgentConnection updates this.authState via sendMessageToWebView;
-      // if credentials were rejected, authState will be false and we should not
-      // claim success (which would briefly show a success toast then re-open auth).
+      // doInitializeAgentConnection sets this.authState via sendMessageToWebView
+      // — when credentials are rejected (wrong key / bad endpoint) it stays
+      // false, and showing a success toast then would mislead the user.
       if (this.authState === true) {
         this.sendMessageToWebView({
           type: 'authSuccess',
           data: { message: 'Provider configured successfully!' },
         });
       } else {
+        // Auth failed against the live backend — roll the bad credentials
+        // back off disk so a restart doesn't keep retrying them, and tear
+        // down the agent still holding the rejected key in memory.
+        safeRollback();
+        disconnectStaleAgent();
         this.sendMessageToWebView({
           type: 'authError',
           data: {
@@ -1389,6 +1425,17 @@ export class WebViewProvider {
     } catch (error) {
       const errorMsg = getErrorMessage(error);
       console.error('[WebViewProvider] authInteractive failed:', error);
+      // A throw can land here after the plan committed but before/while
+      // reconnecting — restore the snapshot so partial/bad state doesn't
+      // linger. (Redundant but harmless if the plan's own rollback already
+      // ran: it just rewrites the same pre-state.) safeRollback swallows a
+      // rollback throw so it can't pre-empt the authError message below.
+      // doInitializeAgentConnection may have partially initialized the agent
+      // (agentInitialized=true) before throwing, so disconnect it too —
+      // mirrors the else-branch so a half-connected stale-credential agent
+      // doesn't linger.
+      safeRollback();
+      disconnectStaleAgent();
       this.sendMessageToWebView({
         type: 'authError',
         data: { message: `Configuration failed: ${errorMsg}` },

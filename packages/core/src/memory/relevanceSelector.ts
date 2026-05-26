@@ -91,13 +91,20 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     purpose: 'auto-memory-recall',
     contents,
     schema: RESPONSE_SCHEMA,
+    // Caller (`GeminiClient.MemoryPrefetchHandle`) owns lifecycle and aborts
+    // via its controller on cleanup paths. The 30 s ceiling is a generous
+    // safety net that only fires if the model API hangs (network partition,
+    // server stall, runaway retry) AND the caller never aborts. Normal
+    // recalls take ~1 s; 30 s is far above the long tail so this doesn't
+    // re-introduce the 1 s timeout regression that motivated this redesign.
+    // Without this ceiling, a callerless invocation would use an
+    // unsignalled AbortController and run indefinitely.
     abortSignal: callerAbortSignal
-      ? AbortSignal.any([AbortSignal.timeout(1_000), callerAbortSignal])
-      : AbortSignal.timeout(1_000),
+      ? AbortSignal.any([AbortSignal.timeout(30_000), callerAbortSignal])
+      : AbortSignal.timeout(30_000),
 
-    // Use the fast model for this background side-query to reduce latency and
-    // cost. Falls back to the main session model if no fast model is configured.
-    model: config.getFastModel(),
+    // Uses runSideQuery's default side-query model policy: fast model first,
+    // then main session model when no fast model is configured.
     systemInstruction: SELECT_MEMORIES_SYSTEM_PROMPT,
     config: {
       temperature: 0,

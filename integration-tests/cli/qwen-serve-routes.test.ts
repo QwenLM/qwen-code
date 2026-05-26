@@ -20,6 +20,7 @@
  * in `qwen-serve-streaming.test.ts` and skip when no auth is set.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -60,6 +61,14 @@ beforeAll(async () => {
       TOKEN,
       '--hostname',
       '127.0.0.1',
+      // Per #3803 §02 (1 daemon = 1 workspace), pin the bound
+      // workspace so test assertions that POST `workspaceCwd:
+      // REPO_ROOT` succeed regardless of where the test runner
+      // happens to be cwd'd. Without this the daemon would inherit
+      // the test runner's cwd, which is brittle across CI / local
+      // / IDE-launcher environments.
+      '--workspace',
+      REPO_ROOT,
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
@@ -171,20 +180,52 @@ describe('qwen serve — CORS browser-origin denial', () => {
 });
 
 describe('qwen serve — capabilities envelope', () => {
-  it('advertises all 9 Stage 1 features', async () => {
+  it('advertises all baseline capabilities', async () => {
     const caps = await client.capabilities();
     expect(caps.v).toBe(1);
     expect(caps.mode).toBe('http-bridge');
+    // Order must match `SERVE_CAPABILITY_REGISTRY` in
+    // `packages/cli/src/serve/capabilities.ts` and the unit-level
+    // baseline features in `packages/cli/src/serve/server.test.ts`.
     expect(caps.features).toEqual([
       'health',
       'capabilities',
       'session_create',
+      'session_scope_override',
+      'session_load',
+      'unstable_session_resume',
       'session_list',
       'session_prompt',
       'session_cancel',
       'session_events',
+      'slow_client_warning',
+      'typed_event_schema',
       'session_set_model',
+      'client_identity',
+      'client_heartbeat',
+      'session_permission_vote',
       'permission_vote',
+      'workspace_mcp',
+      'workspace_skills',
+      'workspace_providers',
+      'workspace_memory',
+      'workspace_agents',
+      'workspace_env',
+      'workspace_preflight',
+      'session_context',
+      'session_supported_commands',
+      'session_close',
+      'session_metadata',
+      'mcp_guardrails',
+      'mcp_guardrail_events',
+      'workspace_file_read',
+      'workspace_file_bytes',
+      'workspace_file_write',
+      'session_approval_mode_control',
+      'workspace_tool_toggle',
+      'workspace_init',
+      'workspace_mcp_restart',
+      'auth_device_flow',
     ]);
   });
 });
@@ -221,20 +262,82 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
     // Tearing the session down on model-switch failure would force
     // the caller into a 500 with no way to recover. The
     // `model_switch_failed` SSE event is the visible failure signal.
-    const cwd = '/tmp';
+    //
+    // Use REPO_ROOT (the daemon's bound workspace) — under #3803 §02
+    // any other cwd would return 400 workspace_mismatch before the
+    // session is even spawned.
+    const cwd = REPO_ROOT;
     const session = await client.createOrAttachSession({
       workspaceCwd: cwd,
       modelServiceId: 'definitely-not-a-real-model',
     });
     expect(session.sessionId).toBeTypeOf('string');
-    expect(session.attached).toBe(false);
+    // `attached` may be true or false depending on whether earlier
+    // tests in this file already created a REPO_ROOT session. The
+    // shape of the response is what matters here (sessionId present,
+    // listWorkspaceSessions sees it).
+    expect(typeof session.attached).toBe('boolean');
     const sessions = await client.listWorkspaceSessions(cwd);
-    expect(sessions).toHaveLength(1);
-    expect(sessions[0]?.sessionId).toBe(session.sessionId);
+    expect(sessions.some((s) => s.sessionId === session.sessionId)).toBe(true);
     // No teardown — Stage 1 has no DELETE /session route, and the
-    // session persists in `byId` until daemon shutdown. The other
-    // tests in this file use unique workspace cwds so the surviving
-    // session here doesn't interfere.
+    // session persists in `byId` until daemon shutdown.
+  });
+
+  it('rejects cross-workspace cwd with 400 workspace_mismatch (#3803 §02)', async () => {
+    // The daemon is bound to REPO_ROOT (via `--workspace` in beforeAll).
+    // A POST /session with `cwd: '/tmp'` (or any other absolute path
+    // that doesn't canonicalize to REPO_ROOT) must reject with 400
+    // `workspace_mismatch`, carrying both paths in the body so an
+    // orchestrator-aware client can spawn / route to the right
+    // daemon.
+    const res = await fetch(`${base}/session`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ cwd: '/tmp' }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      code?: string;
+      boundWorkspace?: string;
+      requestedWorkspace?: string;
+    };
+    expect(body.code).toBe('workspace_mismatch');
+    expect(body.boundWorkspace).toBe(REPO_ROOT);
+    // The bridge canonicalizes the requested cwd via `realpathSync.native`
+    // so the response carries the on-disk canonical form, NOT the literal
+    // we POSTed. On macOS `/tmp` is a symlink to `/private/tmp`, so the
+    // hardcoded `/tmp` literal would diverge there. Resolve the same way
+    // the bridge does to keep the assertion portable.
+    expect(body.requestedWorkspace).toBe(realpathSync.native('/tmp'));
+  });
+
+  it('omits cwd → falls back to bound workspace (#3803 §02)', async () => {
+    // The route accepts an empty body and falls back to the daemon's
+    // bound workspace. Asserting this end-to-end through a real
+    // daemon process verifies the runQwenServe → createServeApp →
+    // bridge plumbing for the fallback path.
+    const res = await fetch(`${base}/session`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const session = (await res.json()) as {
+      sessionId?: string;
+      workspaceCwd?: string;
+    };
+    expect(session.workspaceCwd).toBe(REPO_ROOT);
+  });
+
+  it('GET /capabilities surfaces workspaceCwd (#3803 §02)', async () => {
+    const caps = await client.capabilities();
+    expect(caps.workspaceCwd).toBe(REPO_ROOT);
   });
 });
 
@@ -331,17 +434,77 @@ describe('qwen serve — cancel + list', () => {
     await client.cancel(session.sessionId);
   });
 
-  it('listWorkspaceSessions returns the live session', async () => {
+  it('listWorkspaceSessions returns the live session with metadata', async () => {
     await client.createOrAttachSession({ workspaceCwd: REPO_ROOT });
     const sessions = await client.listWorkspaceSessions(REPO_ROOT);
     expect(sessions.length).toBeGreaterThanOrEqual(1);
-    // Explicit `s` type because the reviewer's tsc run resolves
-    // `@qwen-code/sdk` against a possibly-stale dist .d.ts (per
-    // integration-tests/tsconfig.json `paths` mapping); without
-    // the annotation `s` widens to `any` in that environment and
-    // trips strict-mode TS7006.
     expect(
       sessions.every((s: DaemonSessionSummary) => s.workspaceCwd === REPO_ROOT),
     ).toBe(true);
+    const first = sessions[0]!;
+    expect(first.createdAt).toBeDefined();
+    expect(typeof first.createdAt).toBe('string');
+    expect(typeof first.clientCount).toBe('number');
+    expect(typeof first.hasActivePrompt).toBe('boolean');
+  });
+});
+
+describe('qwen serve — DELETE /session/:id', () => {
+  it('204 on explicit close', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    await client.closeSession(session.sessionId);
+    const sessions = await client.listWorkspaceSessions(REPO_ROOT);
+    expect(
+      sessions.some(
+        (s: DaemonSessionSummary) => s.sessionId === session.sessionId,
+      ),
+    ).toBe(false);
+  });
+
+  it('204 on double close (idempotent via 404 absorption)', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    await client.closeSession(session.sessionId);
+    await client.closeSession(session.sessionId);
+  });
+});
+
+describe('qwen serve — PATCH /session/:id/metadata', () => {
+  it('updates displayName', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    await client.updateSessionMetadata(session.sessionId, {
+      displayName: 'Integration Test Session',
+    });
+    const sessions = await client.listWorkspaceSessions(REPO_ROOT);
+    const updated = sessions.find(
+      (s: DaemonSessionSummary) => s.sessionId === session.sessionId,
+    );
+    expect(updated?.displayName).toBe('Integration Test Session');
+    await client.closeSession(session.sessionId);
+  });
+
+  it('400 on non-string displayName', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    const res = await fetch(`${base}/session/${session.sessionId}/metadata`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ displayName: 42 }),
+    });
+    expect(res.status).toBe(400);
+    await client.closeSession(session.sessionId);
   });
 });

@@ -379,6 +379,7 @@ describe('BaseLlmClient', () => {
         { includeThought: true },
       );
       mockGenerateContent.mockResolvedValue(mockResponse);
+
       vi.mocked(getFunctionCalls).mockReturnValue(undefined);
 
       const result = await client.generateJson(defaultOptions);
@@ -389,6 +390,19 @@ describe('BaseLlmClient', () => {
       expect(mockDebugWarn).toHaveBeenCalledWith(
         expect.stringContaining('generateJson used text-channel fallback'),
       );
+    });
+
+    it('should parse a loose JSON object from text when no function call is returned', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockResponseWithText(
+          'Result:\n{"color":"purple","count":2}\nDone.',
+        ),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'purple', count: 2 });
     });
 
     it('should parse a fenced JSON object from text when no function call is returned', async () => {
@@ -473,6 +487,21 @@ describe('BaseLlmClient', () => {
       expect(warnMessages).not.toContain('broken json');
     });
 
+    it('should ignore malformed fenced JSON text', async () => {
+      const mockResponse = createMockResponseWithText(
+        '```json\n{"color":\n```',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
+    });
+
     it('should return empty object when text has no valid JSON', async () => {
       const mockResponse = createMockResponseWithText('Not a JSON response');
       mockGenerateContent.mockResolvedValue(mockResponse);
@@ -501,6 +530,19 @@ describe('BaseLlmClient', () => {
 
     it('should return empty object when text contains a JSON array', async () => {
       const mockResponse = createMockResponseWithText('[1,2,3]');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
+    });
+
+    it('should reject loose JSON arrays containing objects', async () => {
+      const mockResponse = createMockResponseWithText('[{"color":"blue"}]');
       mockGenerateContent.mockResolvedValue(mockResponse);
       vi.mocked(getFunctionCalls).mockReturnValue(undefined);
 
@@ -703,6 +745,17 @@ describe('BaseLlmClient', () => {
           .mockReturnValue({ authType: AuthType.QWEN_OAUTH }),
         getEmbeddingModel: vi.fn().mockReturnValue('test-embedding-model'),
         getModel: vi.fn().mockReturnValue('main-model'),
+        getFastModel: vi.fn().mockReturnValue(undefined),
+        getAllConfiguredModels: vi.fn((authTypes?: AuthType[]) =>
+          authTypes?.includes(AuthType.QWEN_OAUTH)
+            ? []
+            : [
+                {
+                  id: fastModel,
+                  authType: AuthType.USE_ANTHROPIC,
+                },
+              ],
+        ),
         getModelsConfig: vi.fn().mockReturnValue({ getResolvedModel }),
       } as unknown as Mocked<Config>;
     });
@@ -714,6 +767,29 @@ describe('BaseLlmClient', () => {
 
       expect(resolved.contentGenerator).toBe(mockContentGenerator);
       expect(resolved.retryAuthType).toBe(AuthType.QWEN_OAUTH);
+      expect(getResolvedModel).not.toHaveBeenCalled();
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('returns the active runtime generator when model matches the runtime view', async () => {
+      const runtimeContentGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      crossProviderConfig.getContentGenerator = vi
+        .fn()
+        .mockReturnValue(runtimeContentGenerator);
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'runtime-model',
+      });
+      vi.mocked(crossProviderConfig.getModel).mockReturnValue('runtime-model');
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const resolved = await c.resolveForModel('runtime-model');
+
+      expect(resolved.contentGenerator).toBe(runtimeContentGenerator);
+      expect(resolved.retryAuthType).toBe(AuthType.USE_OPENAI);
       expect(getResolvedModel).not.toHaveBeenCalled();
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
@@ -789,6 +865,38 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
+    it('does not cache the unregistered-model fallback across runtime-view changes', async () => {
+      // Unregistered selector: createContentGeneratorForModel falls back to
+      // getCurrentContentGenerator(). The runtime view changes between calls
+      // — caching would pin the first call's generator under the selector
+      // key and return it on the second call after the view has unwound.
+      getResolvedModel.mockReturnValue(undefined);
+
+      const firstRuntimeGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      const secondRuntimeGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      const getContentGenerator = vi
+        .fn()
+        .mockReturnValueOnce(firstRuntimeGenerator)
+        .mockReturnValueOnce(secondRuntimeGenerator);
+      crossProviderConfig.getContentGenerator = getContentGenerator;
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const first = await c.resolveForModel('unknown-model');
+      const second = await c.resolveForModel('unknown-model');
+
+      expect(first.contentGenerator).toBe(firstRuntimeGenerator);
+      expect(second.contentGenerator).toBe(secondRuntimeGenerator);
+      expect(getContentGenerator).toHaveBeenCalledTimes(2);
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
     it('falls back to the main generator when createContentGenerator throws', async () => {
       getResolvedModel.mockReturnValue({
         authType: AuthType.USE_ANTHROPIC,
@@ -834,6 +942,93 @@ describe('BaseLlmClient', () => {
       expect(retryWithBackoff).toHaveBeenCalledWith(
         expect.any(Function),
         expect.objectContaining({ authType: AuthType.USE_ANTHROPIC }),
+      );
+    });
+
+    it('generateJson accepts authType-qualified selectors and sends the bare model id', async () => {
+      getResolvedModel.mockImplementation((authType: string, model: string) => {
+        if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
+          return {
+            id: 'shared-model',
+            authType: AuthType.USE_OPENAI,
+            envKey: 'OPENAI_API_KEY',
+          };
+        }
+        return undefined;
+      });
+      fastGenerateContent.mockResolvedValue(
+        createMockResponseWithFunctionCall({ ok: true }),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { ok: true } },
+      ]);
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await c.generateJson({
+        contents: [{ role: 'user', parts: [{ text: 'go' }] }],
+        schema: { type: 'object' },
+        model: 'openai:shared-model',
+        abortSignal: new AbortController().signal,
+        promptId: 'test',
+      });
+
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'shared-model',
+      );
+      expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
+        crossProviderConfig,
+        'shared-model',
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+      );
+      expect(fastGenerateContent).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'shared-model' }),
+        'test',
+      );
+    });
+
+    it('generateJson resolves fast selectors through the configured fast model', async () => {
+      crossProviderConfig.getFastModel.mockReturnValue('openai:shared-model');
+      getResolvedModel.mockImplementation((authType: string, model: string) => {
+        if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
+          return {
+            id: 'shared-model',
+            authType: AuthType.USE_OPENAI,
+            envKey: 'OPENAI_API_KEY',
+          };
+        }
+        return undefined;
+      });
+      fastGenerateContent.mockResolvedValue(
+        createMockResponseWithFunctionCall({ ok: true }),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { ok: true } },
+      ]);
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await c.generateJson({
+        contents: [{ role: 'user', parts: [{ text: 'go' }] }],
+        schema: { type: 'object' },
+        model: 'fast',
+        abortSignal: new AbortController().signal,
+        promptId: 'test',
+      });
+
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'shared-model',
+      );
+      expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
+        crossProviderConfig,
+        'shared-model',
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+      );
+      expect(fastGenerateContent).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'shared-model' }),
+        'test',
       );
     });
 

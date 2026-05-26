@@ -216,6 +216,91 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('should apply provider request context overrides', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'test-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({
+        splitToolMedia: true,
+      });
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          splitToolMedia: true,
+        }),
+      );
+    });
+
+    it('should let provider request context overrides take precedence over content generator config', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'test-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      mockContentGeneratorConfig.splitToolMedia = true;
+      mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({
+        splitToolMedia: false,
+      });
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          splitToolMedia: false,
+        }),
+      );
+    });
+
     it('should fall back to configured model when request.model is empty', async () => {
       // Arrange — empty model string is falsy, should fall back to contentGeneratorConfig.model
       const request: GenerateContentParameters = {
@@ -686,6 +771,33 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('should redact proxy credentials before request errors reach the error handler', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const testError = new Error(
+        'connect ECONNREFUSED token@proxy.local:8080',
+      );
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockRejectedValue(testError);
+
+      await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
+        'connect ECONNREFUSED <redacted>@proxy.local:8080',
+      );
+
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'connect ECONNREFUSED <redacted>@proxy.local:8080',
+        }),
+        expect.any(Object),
+        request,
+      );
+      expect(testError.message).not.toContain('token@');
+    });
+
     it('should pass abort signal to OpenAI client when provided', async () => {
       const abortController = new AbortController();
       const request: GenerateContentParameters = {
@@ -901,6 +1013,73 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('should redact proxy credentials from stream creation errors', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const testError = new Error('407 via http://user:pass@proxy.local');
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockRejectedValue(testError);
+
+      await expect(
+        pipeline.executeStream(request, userPromptId),
+      ).rejects.toThrow('407 via http://<redacted>@proxy.local');
+
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: '407 via http://<redacted>@proxy.local',
+        }),
+        expect.any(Object),
+        request,
+      );
+      expect(testError.message).not.toContain('user:pass');
+    });
+
+    it('should redact proxy credentials before stream errors reach the error handler', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const testError = new Error(
+        'connect ECONNREFUSED token@proxy.local:8080',
+      );
+
+      const mockStream = {
+        [Symbol.asyncIterator]: () => ({
+          next: vi.fn().mockRejectedValue(testError),
+        }),
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // consume stream
+        }
+      }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
+
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'connect ECONNREFUSED <redacted>@proxy.local:8080',
+        }),
+        expect.any(Object),
+        request,
+      );
+      expect(testError.message).not.toContain('token@');
+    });
+
     it('should throw StreamContentError when stream chunk contains error_finish', async () => {
       const request: GenerateContentParameters = {
         model: 'test-model',
@@ -944,6 +1123,45 @@ describe('ContentGenerationPipeline', () => {
 
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
       expect(mockConverter.convertOpenAIChunkToGemini).not.toHaveBeenCalled();
+    });
+
+    it('should redact proxy credentials from StreamContentError messages', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            choices: [
+              {
+                delta: {
+                  content: 'connect ECONNREFUSED token@proxy.local:8080',
+                },
+                finish_reason: 'error_finish',
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'prompt-id',
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // consume stream
+        }
+      }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
+
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
     it('should pass abort signal to OpenAI client for streaming requests', async () => {

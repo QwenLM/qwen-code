@@ -18,6 +18,7 @@ import type {
   ToolListUnion,
 } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
+import { buildAnthropicUsageMetadata } from './usage.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import {
@@ -325,13 +326,12 @@ export class AnthropicContentConverter {
     geminiResponse.promptFeedback = { safetyRatings: [] };
 
     if (response.usage) {
-      const promptTokens = response.usage.input_tokens || 0;
-      const completionTokens = response.usage.output_tokens || 0;
-      geminiResponse.usageMetadata = {
-        promptTokenCount: promptTokens,
-        candidatesTokenCount: completionTokens,
-        totalTokenCount: promptTokens + completionTokens,
-      };
+      geminiResponse.usageMetadata = buildAnthropicUsageMetadata({
+        inputTokens: response.usage.input_tokens || 0,
+        cacheReadTokens: response.usage.cache_read_input_tokens || 0,
+        cacheCreationTokens: response.usage.cache_creation_input_tokens || 0,
+        outputTokens: response.usage.output_tokens || 0,
+      });
     }
 
     return geminiResponse;
@@ -807,7 +807,14 @@ export class AnthropicContentConverter {
    * `scope: 'global'` instead.
    */
   private addCacheControlToMessages(messages: Anthropic.MessageParam[]): void {
-    // Find the last user message to add cache_control
+    // Find the last user message to add cache_control. The Anthropic docs
+    // (https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
+    // explicitly list both `text` and `tool_result` blocks as cacheable in
+    // `messages.content`. In agentic loops the last user message after
+    // turn 1 is typically a tool_result-only message, so accepting both
+    // types keeps the per-turn breakpoint moving forward as the
+    // conversation grows (otherwise the cacheable region collapses back
+    // to system+tools and turn-over-turn history never gets cached).
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       if (msg.role === 'user') {
@@ -817,19 +824,18 @@ export class AnthropicContentConverter {
 
         if (content.length > 0) {
           const lastContent = content[content.length - 1];
-          // Only add cache_control if the last block is a non-empty text block
-          if (
-            typeof lastContent === 'object' &&
-            'type' in lastContent &&
-            lastContent.type === 'text' &&
-            'text' in lastContent &&
-            lastContent.text
-          ) {
-            lastContent.cache_control = {
-              type: 'ephemeral',
-            };
+          if (typeof lastContent === 'object' && 'type' in lastContent) {
+            const type = lastContent.type;
+            // Empty text blocks cannot be cached (per Anthropic docs).
+            const isEmptyText =
+              type === 'text' &&
+              (!('text' in lastContent) || !lastContent.text);
+            if ((type === 'text' || type === 'tool_result') && !isEmptyText) {
+              lastContent.cache_control = {
+                type: 'ephemeral',
+              };
+            }
           }
-          // If last block is not text or is empty, don't add cache_control
           msg.content = content;
         }
         break;
