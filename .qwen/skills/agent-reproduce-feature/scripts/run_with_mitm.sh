@@ -83,6 +83,8 @@ redacted_command="$(
   printf '%q ' "$@" |
     sed -E \
       -e 's/sk-[A-Za-z0-9_-]{12,}/sk-<redacted>/g' \
+      -e 's/AKIA[0-9A-Z]{16}/AKIA<redacted>/g' \
+      -e 's/AIza[0-9A-Za-z_-]{20,}/AIza<redacted>/g' \
       -e 's/(ghp|gho|ghu|ghs)_[A-Za-z0-9_]{20,}/gh_<redacted>/g' \
       -e 's/github_pat_[A-Za-z0-9_]{20,}/github_pat_<redacted>/g' \
       -e 's/([A-Za-z0-9_.-]*(api[-_]?key|token|secret|credential)[A-Za-z0-9_.-]*=)[^[:space:]]+/\1<redacted>/Ig'
