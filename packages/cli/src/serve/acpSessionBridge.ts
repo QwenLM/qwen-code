@@ -7,19 +7,23 @@
 /**
  * Stage 1 HTTP→ACP bridge — backward-compat re-export shim.
  *
- * The bridge core was lifted to `@qwen-code/acp-bridge`. This shim
- * preserves every existing relative import path (`./httpAcpBridge.js`)
- * so call-sites resolve without changes.
+ * #4175 PR F1 lifted the bridge core (`BridgeClient`,
+ * `defaultSpawnChannelFactory`, `createAcpSessionBridge` factory closure,
+ * plus the supporting types/errors/options/status) to
+ * `@qwen-code/acp-bridge`. This shim preserves every existing relative
+ * import path (`./acpSessionBridge.js`) so `server.ts`, `runQwenServe.ts`,
+ * `workspaceAgents.ts`, `workspaceMemory.ts`, `index.ts`, plus the
+ * bridge test suite, keep resolving without any call-site changes.
  *
  * The implementation now lives at:
- *   - `@qwen-code/acp-bridge/bridge` — `createHttpAcpBridge` factory
+ *   - `@qwen-code/acp-bridge/bridge` — `createAcpSessionBridge` factory
  *   - `@qwen-code/acp-bridge/bridgeClient` — `BridgeClient` class +
  *     permission record types
  *   - `@qwen-code/acp-bridge/spawnChannel` — `defaultSpawnChannelFactory`
  *   - `@qwen-code/acp-bridge/bridgeOptions` — `BridgeOptions` +
  *     `DaemonStatusProvider` interfaces
  *   - `@qwen-code/acp-bridge/bridgeTypes` — bridge session + heartbeat
- *     types + `HttpAcpBridge` interface
+ *     types + `AcpSessionBridge` interface
  *   - `@qwen-code/acp-bridge/bridgeErrors` — typed bridge error classes
  *   - `@qwen-code/acp-bridge/workspacePaths` — `canonicalizeWorkspace`
  *     + `MAX_WORKSPACE_PATH_LENGTH`
@@ -33,7 +37,7 @@
  * in the lifted package for the full Stage 1/Stage 2 contract.
  */
 
-export { createHttpAcpBridge } from '@qwen-code/acp-bridge/bridge';
+export { createAcpSessionBridge, createHttpAcpBridge } from '@qwen-code/acp-bridge/bridge';
 export { defaultSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 // `MAX_RESOLVED_PERMISSION_RECORDS`, `PendingPermission`,
 // `PermissionResolutionRecord` re-exports were removed alongside the
@@ -65,6 +69,7 @@ export type {
   BridgeClientRequestContext,
   BridgeHeartbeatResult,
   BridgeHeartbeatState,
+  AcpSessionBridge,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 

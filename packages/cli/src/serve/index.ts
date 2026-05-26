@@ -93,11 +93,15 @@ export {
   type MutationGateOptions,
 } from './auth.js';
 export {
+  createAcpSessionBridge,
   createHttpAcpBridge,
   defaultSpawnChannelFactory,
-  // Export every typed error class that `sendBridgeError` matches via
-  // `instanceof` so external embeds can recognize them without
-  // deep-importing `./httpAcpBridge.js`.
+  // #4297 fold-in 1 (16:32:44-round S2): export every typed error
+  // class that `sendBridgeError` matches via `instanceof`. External
+  // embeds that want to recognize these errors (parallel to how
+  // they already match `WorkspaceInitConflictError` /
+  // `SessionNotFoundError`) need them on the public barrel; without
+  // this they have to deep-import `./acpSessionBridge.js`.
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionNotFoundError,
@@ -106,12 +110,13 @@ export {
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
   type AcpChannel,
+  type AcpSessionBridge,
   type BridgeOptions,
   type BridgeSession,
   type BridgeSpawnRequest,
   type ChannelFactory,
   type HttpAcpBridge,
-} from './httpAcpBridge.js';
+} from './acpSessionBridge.js';
 export {
   EventBus,
   EVENT_SCHEMA_VERSION,

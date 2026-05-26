@@ -15,12 +15,12 @@
  * intentionally separate channels per the F3 plan.
  *
  * v1 does not expose a `GET /workspace/permission/audit` route — the
- * ring is held inside `createHttpAcpBridge`'s closure for future query
+ * ring is held inside `createAcpSessionBridge`'s closure for future query
  * infrastructure. This file provides the writer; the bridge factory
  * constructs the ring (only when `BridgeOptions.permissionAudit` is
  * omitted; a host-supplied publisher takes the ring's place) and
  * wires it to the publisher. The ring is NOT exposed on the
- * `HttpAcpBridge` interface today — a follow-up PR adding
+ * `AcpSessionBridge` interface today — a follow-up PR adding
  * `GET /workspace/permission/audit` will need to surface it via a new
  * accessor or pass it through `BridgeOptions`.
  *

@@ -20,7 +20,7 @@ import {
 } from 'vitest';
 import { Storage, QWEN_DIR } from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
-import type { HttpAcpBridge } from './httpAcpBridge.js';
+import type { AcpSessionBridge } from './acpSessionBridge.js';
 import type { BridgeEvent } from './eventBus.js';
 import { mountWorkspaceAgentsRoutes } from './workspaceAgents.js';
 
@@ -28,7 +28,7 @@ type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;
 
 function buildBridgeStub(
   opts: { knownIds?: Iterable<string> } = {},
-): HttpAcpBridge & {
+): AcpSessionBridge & {
   events: RecordedEvent[];
 } {
   const events: RecordedEvent[] = [];
@@ -103,11 +103,11 @@ function buildBridgeStub(
     killAllSync: () => {},
     shutdown: async () => {},
     preheat: async () => {},
-  } as unknown as HttpAcpBridge & { events: RecordedEvent[] };
+  } as unknown as AcpSessionBridge & { events: RecordedEvent[] };
 }
 
 function buildApp(opts: {
-  bridge: HttpAcpBridge;
+  bridge: AcpSessionBridge;
   boundWorkspace: string;
   strictNoToken?: boolean;
 }) {

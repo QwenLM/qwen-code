@@ -68,7 +68,7 @@ import type {
   BridgeSessionState,
   BridgeRestoredSession,
   BridgeSessionSummary,
-  HttpAcpBridge,
+  AcpSessionBridge,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
@@ -134,7 +134,7 @@ const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
  *     the ACP layer demultiplexes by sessionId.
  *
  * Stage 2 replaces the spawn step with an in-process call into core's
- * ACP-equivalent API. The `HttpAcpBridge` interface stays the same so HTTP
+ * ACP-equivalent API. The `AcpSessionBridge` interface stays the same so HTTP
  * route handlers don't need to change.
  */
 
@@ -649,7 +649,7 @@ const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 // `BridgeOptions.maxPendingPermissionsPerSession`.
 const DEFAULT_MAX_PENDING_PER_SESSION = 64;
 
-export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
+export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const defaultSessionScope = opts.sessionScope ?? 'single';
   // `undefined` → default 20 (intentionally tight to avoid resource cliffs).
   // `0` → explicitly unlimited (operator opt-out).
@@ -1234,7 +1234,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (shuttingDown) {
         info.isDying = true;
         await channel.kill().catch(() => {});
-        throw new Error('HttpAcpBridge is shutting down');
+        throw new Error('AcpSessionBridge is shutting down');
       }
 
       // Handshake succeeded — now publish the channel as the
@@ -1319,7 +1319,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     // while we were in `connection.newSession` (~1s on cold start).
     if (shuttingDown) {
       // Don't kill the channel — see comment above. Just throw.
-      throw new Error('HttpAcpBridge is shutting down');
+      throw new Error('AcpSessionBridge is shutting down');
     }
 
     const entry = createSessionEntry(
@@ -1777,7 +1777,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     req: BridgeRestoreSessionRequest,
   ): Promise<BridgeRestoredSession> {
     if (shuttingDown) {
-      throw new Error('HttpAcpBridge is shutting down');
+      throw new Error('AcpSessionBridge is shutting down');
     }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
 
@@ -1951,7 +1951,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
 
       if (shuttingDown) {
         restoreEvents.close();
-        throw new Error('HttpAcpBridge is shutting down');
+        throw new Error('AcpSessionBridge is shutting down');
       }
       if (ci.isDying || !aliveChannels.has(ci)) {
         restoreEvents.close();
@@ -2065,7 +2065,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // connections can still hit `POST /session`. Refuse here so
         // late-arrivers don't spawn children the shutdown path won't
         // see — they'd otherwise leak past `process.exit(0)`.
-        throw new Error('HttpAcpBridge is shutting down');
+        throw new Error('AcpSessionBridge is shutting down');
       }
       // Fast-path the common case: clients pre-flight `caps.workspaceCwd`
       // and post back the exact same string, so the equality check
@@ -3944,3 +3944,6 @@ async function withTimeout<T>(
     if (timer) clearTimeout(timer);
   }
 }
+
+/** @deprecated Use `createAcpSessionBridge` instead. */
+export const createHttpAcpBridge = createAcpSessionBridge;

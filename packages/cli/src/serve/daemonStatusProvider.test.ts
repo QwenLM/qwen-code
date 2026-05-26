@@ -16,7 +16,7 @@
  * tests exercise the no-provider / throwing-provider fallback paths
  * instead.
  *
- * Importing `createHttpAcpBridge` via the `./httpAcpBridge.js`
+ * Importing `createAcpSessionBridge` via the `./acpSessionBridge.js`
  * re-export shim (rather than directly from `@qwen-code/acp-bridge`)
  * also acts as a smoke check that the shim's surface stays in sync
  * with the lifted factory.
@@ -24,10 +24,10 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  createHttpAcpBridge,
+  createAcpSessionBridge,
   type BridgeOptions,
-  type HttpAcpBridge,
-} from './httpAcpBridge.js';
+  type AcpSessionBridge,
+} from './acpSessionBridge.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import {
   type ChannelHandle,
@@ -45,15 +45,15 @@ import {
  */
 function makeBridgeWithDaemonStatusProvider(
   opts: Partial<BridgeOptions> = {},
-): HttpAcpBridge {
-  return createHttpAcpBridge({
+): AcpSessionBridge {
+  return createAcpSessionBridge({
     boundWorkspace: WS_A,
     statusProvider: createDaemonStatusProvider(),
     ...opts,
   });
 }
 
-describe('createHttpAcpBridge — daemon-host status provider integration', () => {
+describe('createAcpSessionBridge — daemon-host status provider integration', () => {
   it('answers /workspace/env from process state without consulting ACP, idle or live', async () => {
     const handles: ChannelHandle[] = [];
     const bridge = makeBridgeWithDaemonStatusProvider({

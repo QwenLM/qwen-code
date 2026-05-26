@@ -18,7 +18,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debugMode.js';
-import { InvalidClientIdError, type HttpAcpBridge } from './httpAcpBridge.js';
+import { InvalidClientIdError, type AcpSessionBridge } from './acpSessionBridge.js';
 
 /**
  * Pattern for the route-layer `:agentType` URL parameter. Matches the
@@ -90,7 +90,7 @@ import {
  */
 
 export interface WorkspaceAgentsRouteDeps {
-  bridge: HttpAcpBridge;
+  bridge: AcpSessionBridge;
   boundWorkspace: string;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;
@@ -1367,5 +1367,5 @@ export function createDaemonSubagentManager(
 
 // Re-export the bridge error type used by route helpers so test files
 // can import it from a single module without reaching into
-// httpAcpBridge directly.
+// acpSessionBridge directly.
 export { InvalidClientIdError };
