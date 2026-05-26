@@ -12,7 +12,6 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   createDebugLogger,
   unescapePath,
-  escapePath,
   getExternalEditorCommand,
   type EditorType,
 } from '@qwen-code/qwen-code-core';
@@ -1903,12 +1902,33 @@ export function textBufferReducer(
 // --- Path extraction helpers (pure functions, outside useTextBuffer) ---
 
 /**
+ * Check if a string looks like a path prefix (starts with /, ./, ~/, or drive letter).
+ * Strips surrounding quotes first to handle quoted paths.
+ * Used to pre-filter tokens before expensive fs calls.
+ */
+function looksLikePath(str: string): boolean {
+  // Strip surrounding quotes first to handle quoted paths
+  const unquoted = str.replace(/^'(.*)'$/, '$1');
+  return (
+    unquoted.startsWith('/') ||
+    unquoted.startsWith('./') ||
+    unquoted.startsWith('../') ||
+    unquoted.startsWith('~/') ||
+    /^[A-Za-z]:/.test(unquoted)
+  );
+}
+
+/**
  * Extract file paths from content and prepend @ prefix.
  * Handles quoted paths, unquoted paths, whitespace-separated, and newline-separated.
  * Supports file paths with spaces using greedy matching.
- * IMPORTANT: Escapes spaces in paths with backslash so that the downstream
- * `parseAllAtCommands` parser (which terminates at unescaped whitespace)
- * correctly includes the entire path.
+ * IMPORTANT: Escapes spaces and commas in paths with backslash so that the
+ * downstream `parseAllAtCommands` parser (which terminates at unescaped
+ * whitespace and commas) correctly includes the entire path.
+ *
+ * Only transforms when ALL non-whitespace tokens are valid paths. If any
+ * non-path, non-separator token exists, returns null to preserve original
+ * content (prevents silent data loss).
  */
 function tryExtractFilePaths(
   content: string,
@@ -1918,9 +1938,12 @@ function tryExtractFilePaths(
   const lines = normalized.split(/\n/).filter((s) => s.trim().length > 0);
 
   const validPaths: string[] = [];
+  const hadNonPathToken = { value: false };
 
   for (const line of lines) {
-    const quotedPathRegex = /'([^']*)'/g;
+    // Use a regex that only matches quoted content starting with path-like chars
+    // to avoid false matches on English contractions (e.g., "don't").
+    const quotedPathRegex = /'([~/.][^']*)'/g;
     let lastIndex = 0;
     let match;
     let hasQuotedPaths = false;
@@ -1928,12 +1951,19 @@ function tryExtractFilePaths(
     while ((match = quotedPathRegex.exec(line)) !== null) {
       const gap = line.slice(lastIndex, match.index).trim();
       if (gap) {
-        const gapPaths = extractPathsFromSegment(gap, isValidPath);
+        const gapPaths = extractPathsFromSegment(
+          gap,
+          isValidPath,
+          hadNonPathToken,
+        );
         validPaths.push(...gapPaths);
       }
       const unescaped = unescapePath(match[1]);
       if (isValidPath(unescaped)) {
-        validPaths.push(`@${escapePath(unescaped)}`);
+        validPaths.push(`@${escapePathAndCommas(unescaped)}`);
+      } else {
+        // Quoted path found but not a valid path — mark as non-path
+        hadNonPathToken.value = true;
       }
       lastIndex = quotedPathRegex.lastIndex;
       hasQuotedPaths = true;
@@ -1942,30 +1972,62 @@ function tryExtractFilePaths(
     if (hasQuotedPaths) {
       const trailing = line.slice(lastIndex).trim();
       if (trailing) {
-        const trailingPaths = extractPathsFromSegment(trailing, isValidPath);
+        const trailingPaths = extractPathsFromSegment(
+          trailing,
+          isValidPath,
+          hadNonPathToken,
+        );
         validPaths.push(...trailingPaths);
       }
     } else {
-      const linePaths = extractPathsFromSegment(line.trim(), isValidPath);
+      const linePaths = extractPathsFromSegment(
+        line.trim(),
+        isValidPath,
+        hadNonPathToken,
+      );
       validPaths.push(...linePaths);
     }
   }
 
-  return validPaths.length > 0 ? validPaths : null;
+  // Only return paths if we extracted at least one AND the content looks like
+  // a pure list of paths (all non-whitespace tokens are valid paths).
+  // This prevents silent data loss when pasting prose mixed with paths.
+  if (validPaths.length > 0 && !hadNonPathToken.value) {
+    return validPaths;
+  }
+
+  return null;
+}
+
+/**
+ * Escape spaces and commas so that downstream @-path parsing doesn't truncate.
+ * parseAllAtCommands terminates at unescaped whitespace and commas.
+ */
+function escapePathAndCommas(path: string): string {
+  return path.replace(/([ \t,])/g, '\\$1');
 }
 
 /**
  * Extract file paths from a whitespace-separated segment.
  * Tries shortest possible path first to handle paths with spaces.
+ * Pre-filters tokens that don't look like paths to avoid O(n²) fs calls.
+ * Sets `hadNonPathToken` to true if any token was skipped (not a valid path).
  */
 function extractPathsFromSegment(
   segment: string,
   isValidPath: (p: string) => boolean,
+  hadNonPathToken: { value: boolean },
 ): string[] {
   const tokens = segment.split(/\s+/).filter(Boolean);
   const paths: string[] = [];
   let i = 0;
   while (i < tokens.length) {
+    // Pre-filter: skip tokens that can't possibly be paths
+    if (!looksLikePath(tokens[i])) {
+      hadNonPathToken.value = true;
+      i++;
+      continue;
+    }
     let found = false;
     for (let j = i + 1; j <= tokens.length; j++) {
       const candidate = tokens.slice(i, j).join(' ');
@@ -1976,13 +2038,15 @@ function extractPathsFromSegment(
       }
       const unescaped = unescapePath(unquoted);
       if (isValidPath(unescaped)) {
-        paths.push(`@${escapePath(unescaped)}`);
+        paths.push(`@${escapePathAndCommas(unescaped)}`);
         i = j;
         found = true;
         break;
       }
     }
     if (!found) {
+      // Token looked like a path but isn't valid — mark as non-path
+      hadNonPathToken.value = true;
       i++;
     }
   }
@@ -2097,12 +2161,7 @@ export function useTextBuffer({
         const validPaths = tryExtractFilePaths(ch, isValidPath);
         if (validPaths) {
           ch = `${validPaths.join(' ')} `;
-          // Insert the transformed content and return early to avoid
-          // re-processing the already-transformed paths below.
-          dispatch({ type: 'insert', payload: ch });
-          return;
         }
-        // No valid paths found, proceed with normal newline handling
         dispatch({ type: 'insert', payload: ch });
         return;
       }
