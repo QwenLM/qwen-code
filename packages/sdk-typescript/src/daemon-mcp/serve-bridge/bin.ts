@@ -23,9 +23,9 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createServeBridgeMcpServer } from './createServeBridgeMcpServer.js';
 
 const server = createServeBridgeMcpServer({
-  daemonUrl: process.env.QWEN_DAEMON_URL ?? 'http://127.0.0.1:4170',
-  token: process.env.QWEN_DAEMON_TOKEN,
-  workspaceCwd: process.env.QWEN_WORKSPACE_CWD,
+  daemonUrl: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
+  token: process.env['QWEN_DAEMON_TOKEN'],
+  workspaceCwd: process.env['QWEN_WORKSPACE_CWD'],
 });
 
 const transport = new StdioServerTransport();
