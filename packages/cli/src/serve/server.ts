@@ -91,6 +91,11 @@ import {
 } from './fs/index.js';
 import { registerWorkspaceFileReadRoutes } from './routes/workspaceFileRead.js';
 import { registerWorkspaceFileWriteRoutes } from './routes/workspaceFileWrite.js';
+import {
+  createDaemonWorkspaceService,
+  type DaemonWorkspaceService,
+  type WorkspaceRequestContext,
+} from './workspace-service/index.js';
 
 /**
  * Build a no-op fs-audit emitter that logs a warning every
@@ -275,12 +280,16 @@ export interface ServeAppDeps {
    */
   deviceFlowProviders?: DeviceFlowProvider[];
   /**
-   * Optional daemon logger. When provided, `sendBridgeError` routes
-   * each 5xx error through `daemonLog.error(...)` (which tees to stderr +
-   * the daemon log file). When omitted, falls back to existing
-   * stderr-only behavior.
+   * Optional daemon logger.
    */
   daemonLog?: DaemonLogger;
+  workspace?: DaemonWorkspaceService;
+  persistDisabledTools?: (
+    workspace: string,
+    toolName: string,
+    enabled: boolean,
+  ) => Promise<void>;
+  contextFilename?: string;
 }
 
 function resolveDaemonTelemetryRoute(
@@ -773,14 +782,8 @@ export function createServeApp(
   // detaching `runQwenServe`'s shutdown dispose call.
   setDeviceFlowRegistry(app, deviceFlowRegistry);
 
-  // Daemon logger — when injected via `deps.daemonLog`, 5xx errors logged
-  // by `sendBridgeError` route through the structured daemon log (which
-  // already tees to stderr). When absent (tests, direct embeds), the
-  // legacy `writeStderrLine` path is preserved.
   const { daemonLog } = deps;
 
-  // Curry `daemonLog` into the module-level error helpers so route
-  // handlers don't repeat the parameter at every call site.
   const sendBridgeError = (
     res: import('express').Response,
     err: unknown,
@@ -791,6 +794,24 @@ export function createServeApp(
     err: unknown,
     ctx: { route: string; sessionId?: string },
   ) => sendPermissionVoteErrorImpl(res, err, ctx, daemonLog);
+
+  const workspace: DaemonWorkspaceService =
+    deps.workspace ??
+    createDaemonWorkspaceService({
+      boundWorkspace,
+      contextFilename: deps.contextFilename ?? 'QWEN.md',
+      fsFactory,
+      deviceFlowRegistry,
+      subagentManager: undefined,
+      persistDisabledTools:
+        deps.persistDisabledTools ?? (async () => { /* no-op for tests */ }),
+      queryWorkspaceStatus: (method, idle) =>
+        bridge.queryWorkspaceStatus(method, idle),
+      invokeWorkspaceCommand: (method, params, invokeOpts) =>
+        bridge.invokeWorkspaceCommand(method, params, invokeOpts),
+      publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
+      knownClientIds: () => bridge.knownClientIds(),
+    });
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -1010,6 +1031,18 @@ export function createServeApp(
 
   app.use(daemonTelemetryMiddleware(boundWorkspace));
 
+  function buildWorkspaceCtx(
+    req: import('express').Request,
+    route: string,
+    clientId?: string,
+  ): WorkspaceRequestContext {
+    return {
+      originatorClientId: clientId,
+      route,
+      workspaceCwd: boundWorkspace,
+    };
+  }
+
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
@@ -1055,9 +1088,10 @@ export function createServeApp(
     res.status(200).json(envelope);
   });
 
-  app.get('/workspace/mcp', async (_req, res) => {
+  app.get('/workspace/mcp', async (req, res) => {
     try {
-      res.status(200).json(await bridge.getWorkspaceMcpStatus());
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/mcp');
+      res.status(200).json(await workspace.getWorkspaceMcpStatus(ctx));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/mcp' });
     }
@@ -1086,9 +1120,10 @@ export function createServeApp(
     }
   });
 
-  app.get('/workspace/skills', async (_req, res) => {
+  app.get('/workspace/skills', async (req, res) => {
     try {
-      res.status(200).json(await bridge.getWorkspaceSkillsStatus());
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/skills');
+      res.status(200).json(await workspace.getWorkspaceSkillsStatus(ctx));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/skills' });
     }
@@ -1102,9 +1137,10 @@ export function createServeApp(
     }
   });
 
-  app.get('/workspace/providers', async (_req, res) => {
+  app.get('/workspace/providers', async (req, res) => {
     try {
-      res.status(200).json(await bridge.getWorkspaceProvidersStatus());
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/providers');
+      res.status(200).json(await workspace.getWorkspaceProvidersStatus(ctx));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/providers' });
     }
@@ -1141,17 +1177,19 @@ export function createServeApp(
   // oversight — the audit topic does not yet exist; PR 24 lands the
   // shared `bridge.emitAudit` infrastructure that this and PR 18's
   // `fs.access` events will both use.
-  app.get('/workspace/env', async (_req, res) => {
+  app.get('/workspace/env', async (req, res) => {
     try {
-      res.status(200).json(await bridge.getWorkspaceEnvStatus());
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/env');
+      res.status(200).json(await workspace.getWorkspaceEnvStatus(ctx));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/env' });
     }
   });
 
-  app.get('/workspace/preflight', async (_req, res) => {
+  app.get('/workspace/preflight', async (req, res) => {
     try {
-      res.status(200).json(await bridge.getWorkspacePreflightStatus());
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/preflight');
+      res.status(200).json(await workspace.getWorkspacePreflightStatus(ctx));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/preflight' });
     }
@@ -2383,9 +2421,14 @@ export function createServeApp(
         entryIndex = parsed;
       }
       try {
-        const result = await bridge.restartMcpServer(
-          serverName,
+        const ctx = buildWorkspaceCtx(
+          req,
+          'POST /workspace/mcp/:server/restart',
           clientId,
+        );
+        const result = await workspace.restartMcpServer(
+          ctx,
+          serverName,
           entryIndex !== undefined ? { entryIndex } : undefined,
         );
         res.status(200).json(result);
@@ -2588,8 +2631,8 @@ export function createServeApp(
   );
 
   app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
-    // #4175 Wave 4 PR 17. Scaffold-only init: the bridge writes an
-    // empty QWEN.md without invoking the LLM. Default refuses
+    // #4175 Wave 4 PR 17. Scaffold-only init: the workspace service
+    // writes an empty QWEN.md without invoking the LLM. Default refuses
     // overwrite (409); body `{force: true}` overrides.
     const body = safeBody(req);
     const force = body['force'];
@@ -2604,10 +2647,10 @@ export function createServeApp(
     const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
     if (clientId === null) return;
     try {
-      const result = await bridge.initWorkspace(
-        { force: force === true },
-        clientId,
-      );
+      const ctx = buildWorkspaceCtx(req, 'POST /workspace/init', clientId);
+      const result = await workspace.initWorkspace(ctx, {
+        force: force === true,
+      });
       res.status(200).json(result);
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /workspace/init' });
@@ -2676,10 +2719,15 @@ export function createServeApp(
       const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
       try {
-        const result = await bridge.setWorkspaceToolEnabled(
+        const ctx = buildWorkspaceCtx(
+          req,
+          'POST /workspace/tools/:name/enable',
+          clientId,
+        );
+        const result = await workspace.setWorkspaceToolEnabled(
+          ctx,
           toolName,
           enabled,
-          clientId,
         );
         res.status(200).json(result);
       } catch (err) {
