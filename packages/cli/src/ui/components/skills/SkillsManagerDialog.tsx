@@ -605,7 +605,7 @@ export function SkillsManagerDialog({
         ) : items.length > 0 ? (
           <MultiSelect
             items={items}
-            isFocused={!query}
+            disableVimNav={!!query}
             selectedKeys={selectedKeys ?? []}
             onSelectedKeysChange={setSelectedKeys}
             // Enter == "pick" the highlighted skill: close the dialog and
