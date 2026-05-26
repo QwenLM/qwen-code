@@ -153,14 +153,44 @@ export function initDaemonLogger(opts: InitDaemonLoggerOptions): DaemonLogger {
     return NOOP_LOGGER;
   }
 
-  // Methods come in Task 4. For now stub them so file-init tests pass.
+  let pending: Promise<void> = Promise.resolve();
+  let degraded = false;
+
+  const enqueueAppend = (line: string): void => {
+    pending = pending.then(() =>
+      nodeFs.promises.appendFile(logPath, line).catch((err) => {
+        if (!degraded) {
+          degraded = true;
+          stderr(
+            `qwen serve: daemon log write failed — entering degraded mode: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }),
+    );
+  };
+
+  const teeLine = (
+    level: DaemonLogLevel,
+    message: string,
+    ctx?: DaemonLogContext,
+    err?: Error,
+  ): void => {
+    const line = buildDaemonLogLine({ level, message, now: now(), ctx, err });
+    // stderr first (synchronous, preserves human-visible order), then file.
+    stderr(line.trimEnd());
+    enqueueAppend(line);
+  };
+
   return {
-    info: () => {},
-    warn: () => {},
-    error: () => {},
-    raw: () => {},
+    info: (message, ctx) => teeLine('INFO', message, ctx),
+    warn: (message, ctx) => teeLine('WARN', message, ctx),
+    error: (message, err, ctx) =>
+      teeLine('ERROR', message, ctx, err ?? undefined),
+    raw: () => {}, // implemented in Task 5
     getLogPath: () => logPath,
     getDaemonId: () => daemonId,
-    flush: () => Promise.resolve(),
+    flush: () => pending,
   };
 }

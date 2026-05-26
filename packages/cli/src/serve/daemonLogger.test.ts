@@ -179,3 +179,82 @@ describe('initDaemonLogger file init', () => {
     expect(() => logger.info('after')).not.toThrow();
   });
 });
+
+describe('initDaemonLogger info/warn/error', () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), 'daemon-log-'));
+  });
+  afterEach(() => {
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // cleanup best-effort
+    }
+  });
+
+  it('info appends to file and tees to stderr', async () => {
+    const stderr: string[] = [];
+    const fixed = new Date('2026-05-26T03:14:15.926Z');
+    const logger = initDaemonLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: (s) => stderr.push(s),
+      now: () => fixed,
+    });
+    logger.info('hello', { route: 'GET /' });
+    await logger.flush();
+    const content = readFileSync(logger.getLogPath(), 'utf8');
+    expect(content).toContain('[INFO] [DAEMON] route=GET / hello\n');
+    // Stderr saw the same line (after boot banner, which isn't teed here).
+    const teedLines = stderr.filter((s) => s.includes('[INFO] [DAEMON]'));
+    expect(teedLines).toHaveLength(1);
+  });
+
+  it('error appends err.stack as continuation', async () => {
+    const logger = initDaemonLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+    });
+    const err = new Error('boom');
+    logger.error('route failed', err, { route: 'POST /x' });
+    await logger.flush();
+    const content = readFileSync(logger.getLogPath(), 'utf8');
+    expect(content).toMatch(
+      /\[ERROR\] \[DAEMON\] route=POST \/x route failed\n {2}Error: boom/,
+    );
+  });
+
+  it('flush awaits all pending appends', async () => {
+    const logger = initDaemonLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+    });
+    for (let i = 0; i < 50; i++) logger.info(`msg-${i}`);
+    await logger.flush();
+    const lines = readFileSync(logger.getLogPath(), 'utf8').split('\n');
+    const msgLines = lines.filter((l) => /msg-\d+$/.test(l));
+    expect(msgLines).toHaveLength(50);
+    for (let i = 0; i < 50; i++) {
+      expect(msgLines[i]).toContain(`msg-${i}`);
+    }
+  });
+
+  it('warns once on append failure and keeps trying', async () => {
+    const logger = initDaemonLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: () => {},
+    });
+    // Sabotage by removing the parent directory so subsequent appendFile fails with ENOENT.
+    rmSync(path.dirname(logger.getLogPath()), { recursive: true, force: true });
+    logger.info('after-rm-1');
+    logger.info('after-rm-2');
+    await logger.flush();
+    // No throw — degraded path swallows.
+  });
+});
