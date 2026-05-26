@@ -327,6 +327,22 @@ export interface HttpAcpBridge {
   }>;
 
   /**
+   * Generate a one-sentence "where did I leave off" recap of a live
+   * session. Forwards through `qwen/control/session/recap`, which
+   * invokes `generateSessionRecap` (`core/services/sessionRecap.ts`) in
+   * the ACP child against the per-session chat history.
+   *
+   * Best-effort: the helper returns `null` when history is too short or
+   * the underlying side-query fails — both surface as a 200 response
+   * with `recap: null`. Hard errors (unknown session, ACP transport
+   * down) throw as usual.
+   */
+  generateSessionRecap(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<{ sessionId: string; recap: string | null }>;
+
+  /**
    * Add or remove a tool name from the workspace's `tools.disabled`
    * settings list and fan-out a `tool_toggled` event to every live
    * session SSE bus.

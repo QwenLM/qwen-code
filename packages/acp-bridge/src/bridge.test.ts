@@ -4609,6 +4609,82 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('generateSessionRecap (#4175 follow-up)', () => {
+    function recapFactory(
+      respond: (
+        params: Record<string, unknown>,
+      ) => Record<string, unknown> | Promise<Record<string, unknown>>,
+    ): ChannelFactory {
+      return async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/session/recap') {
+              return Promise.resolve(respond(params));
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+    }
+
+    it('forwards through the ACP child and returns the recap verbatim', async () => {
+      const recapText =
+        'Refactoring the auth middleware. Next: regenerate the integration fixtures.';
+      let observedParams: Record<string, unknown> | undefined;
+      const bridge = makeBridge({
+        channelFactory: recapFactory((params) => {
+          observedParams = params;
+          return { sessionId: params['sessionId'], recap: recapText };
+        }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const result = await bridge.generateSessionRecap(session.sessionId);
+      expect(result).toEqual({
+        sessionId: session.sessionId,
+        recap: recapText,
+      });
+      expect(observedParams).toEqual({ sessionId: session.sessionId });
+      await bridge.shutdown();
+    });
+
+    it('preserves a null recap (best-effort failure surface)', async () => {
+      const bridge = makeBridge({
+        channelFactory: recapFactory((params) => ({
+          sessionId: params['sessionId'],
+          recap: null,
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const result = await bridge.generateSessionRecap(session.sessionId);
+      expect(result.recap).toBeNull();
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown sessionId', async () => {
+      const bridge = makeBridge({
+        channelFactory: recapFactory(() => ({
+          sessionId: 'never',
+          recap: null,
+        })),
+      });
+      await expect(
+        bridge.generateSessionRecap('does-not-exist'),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      await bridge.shutdown();
+    });
+  });
+
   describe('setWorkspaceToolEnabled (#4175 Wave 4 PR 17)', () => {
     it('throws when no persistDisabledTools callback is wired', async () => {
       const bridge = makeBridge();

@@ -29,6 +29,7 @@ export {
   type DaemonApprovalModeResult,
   type DaemonInitWorkspaceResult,
   type DaemonMcpRestartResult,
+  type DaemonSessionRecapResult,
   type DaemonMcpServerRestartedData,
   type DaemonMcpServerRestartedEvent,
   type DaemonMcpServerRestartRefusedData,

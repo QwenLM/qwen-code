@@ -423,6 +423,16 @@ const DEFAULT_INIT_TIMEOUT_MS = 10_000;
  * as long as the slowest legitimate per-server discovery.
  */
 const MCP_RESTART_TIMEOUT_MS = 300_000;
+/**
+ * Backstop timeout for `qwen/control/session/recap`. The underlying
+ * side-query is single-attempt with `maxOutputTokens: 300`, so a
+ * healthy call finishes in 1–5 seconds; we cap at 60s to absorb model-
+ * provider hiccups without inheriting the 10s `initTimeoutMs` default
+ * (which would false-fire on any GPT-style slow start). The race is a
+ * safety net against a wedged ACP channel — there is no HTTP-side
+ * disconnect cancellation in v1 (see server.ts route comment).
+ */
+const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_SESSIONS = 20;
 /**
  * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
@@ -3021,6 +3031,40 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         mode: response.current,
         previous: response.previous,
         persisted,
+      };
+    },
+
+    async generateSessionRecap(sessionId, _context) {
+      // #4175 follow-up. Thin pass-through to `qwen/control/session/
+      // recap` — the ACP child runs `generateSessionRecap` against the
+      // session's GeminiClient history and returns `{sessionId, recap}`
+      // where `recap` may be `null` for too-short histories or transient
+      // model failures. The core helper is documented to never throw,
+      // so the only paths that surface as bridge errors are: unknown
+      // sessionId (`SessionNotFoundError`), transport closed mid-flight
+      // (race against `getTransportClosedReject`), and the backstop
+      // `SESSION_RECAP_TIMEOUT_MS` race for a wedged ACP channel.
+      //
+      // `_context` carries the trusted client id for future event
+      // fan-out (e.g. a `session_recap_generated` push event), but
+      // recap is informational-only today — no SSE broadcast.
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const response = (await Promise.race([
+        withTimeout(
+          entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionRecap, {
+            sessionId,
+          }),
+          SESSION_RECAP_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.sessionRecap,
+        ),
+        getTransportClosedReject(entry),
+      ])) as { sessionId: string; recap: string | null };
+      return {
+        sessionId: entry.sessionId,
+        recap: response.recap ?? null,
       };
     },
 

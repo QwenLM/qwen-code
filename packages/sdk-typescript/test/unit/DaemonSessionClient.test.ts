@@ -357,6 +357,35 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
+  it('forwards recap through DaemonClient with the bound clientId and signal', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        recap: 'Refactoring the auth flow. Next: run the integration tests.',
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+    const ctrl = new AbortController();
+    const result = await session.recap({ signal: ctrl.signal });
+    expect(result).toEqual({
+      sessionId: 's-1',
+      recap: 'Refactoring the auth flow. Next: run the integration tests.',
+    });
+    expect(calls[0]?.url).toBe('http://daemon/session/s-1/recap');
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(calls[0]?.signal).toBe(ctrl.signal);
+  });
+
   it('forwards session-scoped operations through DaemonClient', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/prompt')) {
