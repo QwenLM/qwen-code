@@ -1484,6 +1484,7 @@ describe('createServeApp', () => {
         .set('Origin', 'https://evil.example.com');
       expect(res.status).toBe(403);
       expect(res.body).toEqual({ error: 'Request denied by CORS policy' });
+      expect(res.headers['vary']).toBe('Origin');
     });
 
     it('accepts requests with no Origin header (CLI/SDK clients)', async () => {
@@ -3742,6 +3743,38 @@ describe('runQwenServe', () => {
     ).rejects.toThrow(/--require-auth/);
   });
 
+  it("refuses to start with --allow-origin '*' on loopback when no token is configured", async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        allowOrigins: ['*'],
+      }),
+    ).rejects.toThrow(/--allow-origin '\*'/);
+  });
+
+  it("starts with --allow-origin '*' when a token is configured", async () => {
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      token: 'secret',
+      allowOrigins: ['*'],
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Origin: 'https://anywhere.example.com' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'https://anywhere.example.com',
+    );
+    expect(res.headers.get('access-control-expose-headers')).toBe(
+      'Retry-After',
+    );
+  });
+
   // PR 14 fix (review #4247): runQwenServe is the documented embedded
   // entry point, so budget validation must live here, not just in the
   // yargs CLI handler. Embedded callers (other tools wrapping the
@@ -5196,6 +5229,7 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
       /Authorization/,
     );
     expect(res.headers['access-control-max-age']).toBe('86400');
+    expect(res.headers['access-control-expose-headers']).toBe('Retry-After');
   });
 
   it('OPTIONS preflight returns 204 + CORS headers with no body', async () => {
@@ -5213,6 +5247,7 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
       'http://localhost:5173',
     );
     expect(res.headers['access-control-allow-methods']).toMatch(/POST/);
+    expect(res.headers['access-control-expose-headers']).toBe('Retry-After');
     expect(res.text).toBe('');
   });
 
@@ -5230,6 +5265,7 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
     // them anyway, but emitting them advertises the allowlist size
     // indirectly via header presence.
     expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    expect(res.headers['vary']).toBe('Origin');
   });
 
   it('CLI/SDK callers with no Origin header pass through unchanged', async () => {
@@ -5266,8 +5302,17 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
     expect(res.body.features).not.toContain('allow_origin');
   });
 
-  it('`*` pattern admits any cross-origin request', async () => {
+  it('rejects embedded `*` allowlist without a token', () => {
     const wildOpts = { ...baseOpts, allowOrigins: ['*'] };
+    expect(() =>
+      createServeApp(wildOpts, () => 4170, {
+        bridge: fakeBridge(),
+      }),
+    ).toThrow(/--allow-origin '\*'/);
+  });
+
+  it('`*` pattern with a token admits any cross-origin request', async () => {
+    const wildOpts = { ...baseOpts, token: 'secret', allowOrigins: ['*'] };
     const app = createServeApp(wildOpts, () => 4170, {
       bridge: fakeBridge(),
     });

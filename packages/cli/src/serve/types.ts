@@ -161,12 +161,13 @@ export interface ServeOptions {
    * daemon installs `allowOriginCors` instead of `denyBrowserOriginCors`
    * — matched cross-origin requests get proper CORS response headers
    * (`Access-Control-Allow-Origin: <echoed>`, `Vary: Origin`,
-   * standard methods / headers / max-age), unmatched cross-origin
-   * requests still get a 403 with the same error envelope as today.
+   * standard methods / headers / max-age, exposed `Retry-After`),
+   * unmatched cross-origin requests still get a 403 with the same error
+   * envelope as today.
    *
-   * Empty / undefined preserves bit-for-bit today's behavior (any
-   * `Origin` header → 403 from `denyBrowserOriginCors`). Boot validates
-   * each entry through `parseAllowOriginPatterns` in
+   * Empty / undefined preserves the default wall (any `Origin` header →
+   * 403 from `denyBrowserOriginCors`). Boot validates each entry through
+   * `parseAllowOriginPatterns` in
    * `packages/cli/src/serve/auth.ts`; malformed entries throw
    * `InvalidAllowOriginPatternError` and refuse to start.
    *

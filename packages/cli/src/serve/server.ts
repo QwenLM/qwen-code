@@ -519,13 +519,21 @@ export function createServeApp(
   // allowlist middleware instead of the deny-wall. The allowlist owns
   // both halves of the policy (matched → CORS headers + pass-through or
   // 204 preflight; unmatched → 403 with the same error envelope as the
-  // wall). When `--allow-origin` is empty/undefined, the install path
-  // is unchanged so today's behavior is bit-for-bit preserved. Pattern
-  // parsing happens in `runQwenServe.ts` for boot-time validation; here
-  // we just hand the already-validated arg list to `parseAllowOriginPatterns`
-  // which fast-paths a Set.
+  // wall). When `--allow-origin` is empty/undefined, the deny-wall stays
+  // installed. Pattern parsing happens in `runQwenServe.ts` for validation;
+  // here we still keep the wildcard/no-token invariant for embedded
+  // callers that construct the app directly.
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
-    app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
+    const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins);
+    if (parsedAllowOrigins.allowAny && !opts.token) {
+      throw new Error(
+        `Refusing to start with --allow-origin '*' but no bearer token ` +
+          `configured. '*' admits any cross-origin browser to the API; ` +
+          `without a token, any local page can drive the daemon. Set a ` +
+          `token or list specific origins instead of '*'.`,
+      );
+    }
+    app.use(allowOriginCors(parsedAllowOrigins));
   } else {
     app.use(denyBrowserOriginCors);
   }

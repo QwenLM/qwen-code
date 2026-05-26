@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   allowOriginCors,
   createMutationGate,
+  denyBrowserOriginCors,
   InvalidAllowOriginPatternError,
   parseAllowOriginPatterns,
 } from './auth.js';
@@ -16,13 +17,18 @@ import {
 interface GateResult {
   status?: number;
   body?: unknown;
+  headers: Map<string, string>;
   nextCalled: boolean;
 }
 
-function invokeGate(handler: RequestHandler): GateResult {
+function invokeGate(
+  handler: RequestHandler,
+  req: { headers?: Record<string, string | undefined> } = {},
+): GateResult {
   let status: number | undefined;
   let body: unknown;
   let nextCalled = false;
+  const headers = new Map<string, string>();
   const response = {} as Response;
   response.status = ((code: number): Response => {
     status = code;
@@ -32,12 +38,16 @@ function invokeGate(handler: RequestHandler): GateResult {
     body = payload;
     return response;
   }) as Response['json'];
+  response.setHeader = ((name: string, value: string | number): Response => {
+    headers.set(name.toLowerCase(), String(value));
+    return response;
+  }) as Response['setHeader'];
   const next: NextFunction = () => {
     nextCalled = true;
   };
 
-  handler({} as Request, response, next);
-  return { status, body, nextCalled };
+  handler({ headers: req.headers ?? {} } as Request, response, next);
+  return { status, body, headers, nextCalled };
 }
 
 function invokeGatedRoute(
@@ -47,6 +57,17 @@ function invokeGatedRoute(
   const gate = createMutationGate(deps);
   return invokeGate(gate(gateOpts));
 }
+
+describe('denyBrowserOriginCors', () => {
+  it('sets Vary: Origin when rejecting browser Origin requests', () => {
+    const res = invokeGate(denyBrowserOriginCors, {
+      headers: { origin: 'https://evil.example.com' },
+    });
+    expect(res.nextCalled).toBe(false);
+    expect(res.status).toBe(403);
+    expect(res.headers.get('vary')).toBe('Origin');
+  });
+});
 
 describe('createMutationGate (#4175 PR 15)', () => {
   it('passes through when --require-auth is on (global bearerAuth handles enforcement)', () => {
@@ -307,16 +328,35 @@ describe('allowOriginCors (T2.4 #4514)', () => {
       /Authorization/,
     );
     expect(res.headers.get('access-control-max-age')).toBe('86400');
+    expect(res.headers.get('access-control-expose-headers')).toBe(
+      'Retry-After',
+    );
   });
 
   it('short-circuits OPTIONS preflight with 204 + CORS headers (no chain continuation)', () => {
     const res = invokeAllowOrigin(middleware, {
       method: 'OPTIONS',
-      headers: { origin: 'http://localhost:3000' },
+      headers: {
+        origin: 'http://localhost:3000',
+        'access-control-request-method': 'POST',
+      },
     });
     expect(res.nextCalled).toBe(false);
     expect(res.ended).toBe(true);
     expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'http://localhost:3000',
+    );
+  });
+
+  it('lets plain OPTIONS requests continue after setting CORS headers', () => {
+    const res = invokeAllowOrigin(middleware, {
+      method: 'OPTIONS',
+      headers: { origin: 'http://localhost:3000' },
+    });
+    expect(res.nextCalled).toBe(true);
+    expect(res.ended).toBe(false);
+    expect(res.status).toBeUndefined();
     expect(res.headers.get('access-control-allow-origin')).toBe(
       'http://localhost:3000',
     );

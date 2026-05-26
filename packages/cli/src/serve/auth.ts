@@ -13,7 +13,8 @@ import { isLoopbackBind } from './loopbackBinds.js';
  * set Origin; only browsers do. Returning a deterministic 403 JSON keeps
  * the daemon from CSRF-ing itself (and is more useful to clients than the
  * 500 HTML default that the `cors` package's error-callback path produces
- * when no Express error middleware is registered).
+ * when no Express error middleware is registered). `Vary: Origin` keeps
+ * intermediary caches from mixing browser and CLI/SDK responses.
  */
 export const denyBrowserOriginCors: RequestHandler = (
   req: Request,
@@ -21,6 +22,7 @@ export const denyBrowserOriginCors: RequestHandler = (
   next: NextFunction,
 ) => {
   if (req.headers.origin) {
+    res.setHeader('Vary', 'Origin');
     res.status(403).json({ error: 'Request denied by CORS policy' });
     return;
   }
@@ -111,11 +113,9 @@ export function parseAllowOriginPatterns(
  * clients that parsed the wall's response don't have to special-case the
  * allowlist deployment shape.
  *
- * OPTIONS preflight short-circuits with 204 — standard CORS pattern. Safe
- * because the preflight only confirms which methods/headers the daemon
- * will accept; the actual subsequent request still runs through the full
- * chain (`hostAllowlist` → `bearerAuth` → routes), so any DNS-rebinding
- * defense or auth check still fires before state is read or mutated.
+ * OPTIONS preflight short-circuits with 204 when the browser includes a
+ * preflight request header. Plain OPTIONS requests keep flowing downstream
+ * with CORS headers attached.
  *
  * `Access-Control-Allow-Credentials` is intentionally NOT set: the
  * daemon's auth model is bearer-token-in-`Authorization`, which works
@@ -130,6 +130,7 @@ export function allowOriginCors(
   const allowedHeaders =
     'Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID';
   const maxAgeSeconds = '86400';
+  const exposedHeaders = 'Retry-After';
   return (req: Request, res: Response, next: NextFunction) => {
     const origin = req.headers.origin;
     if (!origin) {
@@ -162,7 +163,12 @@ export function allowOriginCors(
       res.setHeader('Access-Control-Allow-Methods', allowedMethods);
       res.setHeader('Access-Control-Allow-Headers', allowedHeaders);
       res.setHeader('Access-Control-Max-Age', maxAgeSeconds);
-      if (req.method === 'OPTIONS') {
+      res.setHeader('Access-Control-Expose-Headers', exposedHeaders);
+      if (
+        req.method === 'OPTIONS' &&
+        (req.headers['access-control-request-method'] ||
+          req.headers['access-control-request-headers'])
+      ) {
         res.status(204).end();
         return;
       }
