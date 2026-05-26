@@ -443,11 +443,11 @@ rem Accept bare semver (1.2.3) or with v prefix (v1.2.3).
 rem Optional pre-release/build suffix must start with '.' or '-' to match the shell installer.
 echo(!VERSION!| findstr /R /C:"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul
 if %ERRORLEVEL% EQU 0 exit /b 0
-echo(!VERSION!| findstr /R /C:"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[.-][A-Za-z0-9.-]*$" >nul
+echo(!VERSION!| findstr /R /C:"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[.-][A-Za-z0-9][A-Za-z0-9.-]*$" >nul
 if %ERRORLEVEL% EQU 0 exit /b 0
 echo(!VERSION!| findstr /R /C:"^v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul
 if %ERRORLEVEL% EQU 0 exit /b 0
-echo(!VERSION!| findstr /R /C:"^v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[.-][A-Za-z0-9.-]*$" >nul
+echo(!VERSION!| findstr /R /C:"^v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[.-][A-Za-z0-9][A-Za-z0-9.-]*$" >nul
 if %ERRORLEVEL% EQU 0 exit /b 0
 echo ERROR: --version must be 'latest' or a semver string.
 exit /b 1
@@ -1068,7 +1068,7 @@ if %PS_STATUS% EQU 2 (
     exit /b 1
 )
 if %PS_STATUS% EQU 3 (
-    echo ERROR: Archive is empty: !ARCHIVE_FILE!
+    echo ERROR: Archive is empty: %~1
     exit /b 1
 )
 echo ERROR: Archive validation failed before extraction.

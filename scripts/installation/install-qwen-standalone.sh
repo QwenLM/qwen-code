@@ -29,10 +29,20 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-BRAND_BLUE='\033[38;2;71;150;228m'
-BRAND_PURPLE='\033[38;2;132;122;206m'
 MUTED='\033[0;2m'
 NC='\033[0m'
+
+supports_truecolor() {
+    [[ "${COLORTERM:-}" == "truecolor" || "${COLORTERM:-}" == "24bit" ]]
+}
+
+if supports_truecolor; then
+    BRAND_BLUE='\033[38;2;71;150;228m'
+    BRAND_PURPLE='\033[38;2;132;122;206m'
+else
+    BRAND_BLUE='\033[38;5;68m'
+    BRAND_PURPLE='\033[38;5;140m'
+fi
 
 log_info() {
     printf '%bINFO:%b %s\n' "${BLUE}" "${NC}" "$1"
@@ -55,6 +65,7 @@ command_exists() {
 }
 
 TEMP_DIRS=()
+ACTIVE_DOWNLOAD_PID=""
 
 cleanup_temp_dirs() {
     local temp_dir
@@ -68,6 +79,17 @@ cleanup_temp_dirs() {
 register_temp_dir() {
     local temp_dir="$1"
     TEMP_DIRS+=("${temp_dir}")
+}
+
+restore_cursor() {
+    printf "\033[?25h"
+}
+
+kill_active_download() {
+    if [[ -n "${ACTIVE_DOWNLOAD_PID}" ]]; then
+        kill "${ACTIVE_DOWNLOAD_PID}" 2>/dev/null || true
+        ACTIVE_DOWNLOAD_PID=""
+    fi
 }
 
 shell_quote() {
@@ -84,8 +106,8 @@ display_install_version() {
 }
 
 trap cleanup_temp_dirs EXIT
-trap 'printf "\033[?25h" 2>/dev/null; cleanup_temp_dirs; exit 130' INT
-trap 'printf "\033[?25h" 2>/dev/null; cleanup_temp_dirs; exit 143' TERM
+trap 'restore_cursor >&2; kill_active_download; cleanup_temp_dirs; exit 130' INT
+trap 'restore_cursor >&2; kill_active_download; cleanup_temp_dirs; exit 143' TERM
 
 print_usage() {
     cat <<EOF
@@ -755,74 +777,20 @@ standalone_base_url() {
     github_base_url_for_version "${version_path}"
 }
 
-print_progress() {
-    local bytes="$1"
-    local length="$2"
-    [ "$length" -gt 0 ] 2>/dev/null || return 0
-    local width=50
-    local percent=$(( bytes * 100 / length ))
-    [ "$percent" -gt 100 ] && percent=100
-    local on=$(( percent * width / 100 ))
-    local off=$(( width - on ))
-    local filled=$(printf "%*s" "$on" "")
-    filled=${filled// /■}
-    local empty=$(printf "%*s" "$off" "")
-    empty=${empty// /･}
-    printf "\r${BRAND_PURPLE}%s%s %3d%%${NC}" "$filled" "$empty" "$percent" >&4
-}
-
 download_with_progress() {
     local url="$1"
     local output="$2"
 
-    if ! [ -t 2 ] || ! command_exists curl || ! command_exists mkfifo; then
+    if ! command_exists curl; then
         download_file_simple "$url" "$output"
         return $?
     fi
 
-    exec 4>&2
-    local tmp_dir="${TMPDIR:-/tmp}"
-    local basename="${tmp_dir}/qwen_install_$$"
-    local tracefile="${basename}.trace"
-    rm -f "$tracefile"
-    mkfifo "$tracefile" 2>/dev/null || {
-        download_file_simple "$url" "$output"
-        return $?
-    }
-
-    printf "\033[?25l" >&4
-    trap 'rm -f "$tracefile"; printf "\033[?25h" >&4' RETURN
-
-    ( curl --trace-ascii "$tracefile" -f -s -L --retry 2 --connect-timeout 15 --max-time 300 -o "$output" "$url" ) &
-    local curl_pid=$!
-
-    local content_length=0
-    local received=0
-
-    while IFS= read -r line; do
-        if [[ "$line" == *"Content-Length:"* ]] && [ "$content_length" -eq 0 ] 2>/dev/null; then
-            content_length=$(echo "$line" | grep -oi 'Content-Length: [0-9]*' | grep -o '[0-9]*' | tail -1)
-            content_length=${content_length:-0}
-        fi
-        if [[ "$line" == *"<= Recv data,"* ]]; then
-            local chunk_size
-            chunk_size=$(echo "$line" | grep -o '[0-9]* bytes' | grep -o '[0-9]*')
-            if [ -n "$chunk_size" ]; then
-                received=$(( received + chunk_size ))
-                print_progress "$received" "$content_length"
-            fi
-        fi
-    done < "$tracefile"
-
-    wait $curl_pid
+    curl -fL --retry 2 --connect-timeout 15 --max-time 300 --progress-bar "$url" -o "$output" &
+    ACTIVE_DOWNLOAD_PID=$!
+    wait "${ACTIVE_DOWNLOAD_PID}"
     local exit_code=$?
-
-    printf "\r%*s\r" 60 "" >&4
-
-    rm -f "$tracefile"
-    printf "\033[?25h" >&4
-    trap - RETURN
-    exec 4>&-
+    ACTIVE_DOWNLOAD_PID=""
     return $exit_code
 }
 
@@ -1409,6 +1377,10 @@ gradient_line() {
     local r3=$8 g3=$9 b3=${10}
     local len=${#text}
     [ "$len" -eq 0 ] && return
+    if ! supports_truecolor; then
+        printf "%b%s%b\n" "${BRAND_PURPLE}" "${text}" "${NC}"
+        return
+    fi
     local i=0
     local half=$(( len / 2 ))
     while [ $i -lt $len ]; do

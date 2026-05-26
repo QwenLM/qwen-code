@@ -132,8 +132,8 @@ async function verifyReleaseDirectory(dir, options = {}) {
     if (!fs.existsSync(assetPath)) {
       fail(`Missing release asset: ${assetName}`);
     }
-    if (!fs.statSync(assetPath).isFile()) {
-      fail(`Release asset is not a file: ${assetName}`);
+    if (!fs.lstatSync(assetPath).isFile()) {
+      fail(`Release asset is not a regular file: ${assetName}`);
     }
     const actual = await sha256File(assetPath);
     const expected = checksums.get(assetName);
@@ -170,6 +170,9 @@ function readReleaseChecksums(dir) {
   const checksumPath = path.join(dir, 'SHA256SUMS');
   if (!fs.existsSync(checksumPath)) {
     fail(`SHA256SUMS was not found at ${checksumPath}`);
+  }
+  if (!fs.lstatSync(checksumPath).isFile()) {
+    fail('SHA256SUMS is not a regular file');
   }
 
   return parseSha256Sums(fs.readFileSync(checksumPath, 'utf8'));
@@ -241,6 +244,7 @@ async function assertRemoteAssetChecksums(
 async function fetchSha256(url, fetchImpl) {
   const displayUrl = redactUrlForLog(url);
   const response = await fetchWithTimeout(fetchImpl, url);
+  assertNotRedirectResponse(response, displayUrl);
   if (!response.ok) {
     fail(
       `Failed to download ${displayUrl}: ${response.status} ${response.statusText}`,
@@ -265,6 +269,7 @@ function formatErrorReason(reason) {
 async function fetchText(url, fetchImpl) {
   const displayUrl = redactUrlForLog(url);
   const response = await fetchWithTimeout(fetchImpl, url);
+  assertNotRedirectResponse(response, displayUrl);
   if (!response.ok) {
     fail(
       `Failed to download ${displayUrl}: ${response.status} ${response.statusText}`,
@@ -276,8 +281,15 @@ async function fetchText(url, fetchImpl) {
 function fetchWithTimeout(fetchImpl, url, options = {}) {
   return fetchImpl(url, {
     ...options,
+    redirect: 'manual',
     signal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS),
   });
+}
+
+function assertNotRedirectResponse(response, displayUrl) {
+  if (response.status >= 300 && response.status < 400) {
+    fail(`Redirect responses are not allowed: ${displayUrl}`);
+  }
 }
 
 function normalizeHttpsBaseUrl(baseUrl) {
@@ -308,10 +320,11 @@ function redactUrlForLog(url) {
     parsed.username = '';
     parsed.password = '';
     parsed.search = '';
+    parsed.hash = '';
     return parsed.toString();
   } catch {
     const value = String(url);
-    return value.includes('@') || value.includes('?')
+    return value.includes('@') || value.includes('?') || value.includes('#')
       ? '<redacted URL>'
       : value;
   }
@@ -408,9 +421,16 @@ function ipv4FromMappedIpv6(value) {
     return null;
   }
 
-  // For 3 parts like "0:7f00:1", skip the leading zero segment
+  // For 3 parts like "0:7f00:1", skip the leading zero segment.
   const relevantParts =
-    hexParts.length === 3 ? hexParts.slice(-2) : hexParts;
+    hexParts.length === 3
+      ? hexParts[0] === '0'
+        ? hexParts.slice(-2)
+        : null
+      : hexParts;
+  if (!relevantParts) {
+    return null;
+  }
   const high = Number.parseInt(relevantParts[0], 16);
   const low = Number.parseInt(relevantParts[1], 16);
   return `${(high >> 8) & 255}.${high & 255}.${(low >> 8) & 255}.${low & 255}`;
