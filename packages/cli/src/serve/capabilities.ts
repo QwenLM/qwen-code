@@ -221,17 +221,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // status route (extension data on `/capabilities` would inflate the
   // descriptor shape; we keep the registry uniform).
   auth_device_flow: { since: 'v1' },
-  // #4175 F3 (Commit 6). Daemon advertises which permission mediation
-  // policies it can run. Clients introspect `modes` to discover the
-  // closed set of strategies before relying on `permission_partial_vote`
-  // / `permission_forbidden` SSE events. The active policy for THIS
-  // daemon is exposed in the `/capabilities` envelope's
-  // `policy.permission` field — the mode list here is the
-  // build-supported set, distinct from runtime configuration.
   permission_mediation: {
     since: 'v1',
     modes: ['first-responder', 'designated', 'consensus', 'local-only'],
   },
+  prompt_absolute_deadline: { since: 'v1' },
+  writer_idle_timeout: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -239,24 +234,14 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
 /**
  * Per-deployment feature toggles surfaced through `/capabilities`.
  *
- * `requireAuth` controls whether the conditional `require_auth` tag is
- * advertised. `mcpPoolActive` (F2 #4175 commit 5) advertises
- * `mcp_workspace_pool` + `mcp_pool_restart` together when the daemon
- * runs with the pool enabled (default; off only with
- * `QWEN_SERVE_NO_MCP_POOL=1`). Other Wave 4 follow-ups can extend
- * this object as more deployment-shape capability tags appear (e.g.
- * `redact_errors`).
+ * advertised.
  */
 export interface AdvertiseFeatureToggles {
   requireAuth?: boolean;
   mcpPoolActive?: boolean;
-  /**
-   * T2.4 (issue #4514). `true` iff the daemon booted with at least one
-   * `--allow-origin <pattern>` entry. Drives advertisement of the
-   * `allow_origin` capability tag so SDK / webui clients can pre-flight
-   * the cross-origin path.
-   */
   allowOriginActive?: boolean;
+  promptDeadlineMs?: number;
+  writerIdleTimeoutMs?: number;
 }
 
 /**
@@ -296,18 +281,21 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['require_auth', (toggles) => toggles.requireAuth === true],
-  // F2 (#4175 commit 5): pool tags advertise as a unit. Both keys
-  // share the same predicate so SDK clients can rely on
-  // `mcp_workspace_pool ⇒ entryCount/entrySummary fields present`
-  // and `mcp_pool_restart ⇒ ?entryIndex= + entries[] response shape
-  // valid` without per-tag pre-flighting.
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
-  // T2.4 (issue #4514): the `allow_origin` tag tracks whether the
-  // daemon was booted with at least one `--allow-origin` pattern. SDK
-  // clients pre-flight on it before issuing a cross-origin request
-  // they would otherwise expect to be 403'd by `denyBrowserOriginCors`.
   ['allow_origin', (toggles) => toggles.allowOriginActive === true],
+  [
+    'prompt_absolute_deadline',
+    (toggles) =>
+      typeof toggles.promptDeadlineMs === 'number' &&
+      toggles.promptDeadlineMs > 0,
+  ],
+  [
+    'writer_idle_timeout',
+    (toggles) =>
+      typeof toggles.writerIdleTimeoutMs === 'number' &&
+      toggles.writerIdleTimeoutMs > 0,
+  ],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(
