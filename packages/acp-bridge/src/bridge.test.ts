@@ -5997,6 +5997,293 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('extNotification — in-session model update (A1, #4511)', () => {
+    it('promotes current_model_update to model_switched when no bridge roundtrip is in flight', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      void capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModelId: 'qwen-max',
+      });
+
+      const collected: Array<{ type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      // Promoted to model_switched with currentModelId mapped to modelId.
+      expect(collected[0]?.type).toBe('model_switched');
+      expect(collected[0]?.data).toEqual({
+        sessionId: session.sessionId,
+        modelId: 'qwen-max',
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('suppresses current_model_update while a bridge model roundtrip is in flight', async () => {
+      // Hang the agent's unstable_setSessionModel so the bridge roundtrip
+      // stays in flight (modelRoundtripInFlight = true). The concurrent
+      // in-session current_model_update must be suppressed; only the bridge's
+      // own model_switched (after the roundtrip) reaches the bus.
+      let releaseModel: (() => void) | undefined;
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return () =>
+                new Promise<Record<string, never>>((res) => {
+                  releaseModel = () => res({});
+                });
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        capturedConn = new AgentSideConnection(
+          () => augmented as Agent,
+          agentStream,
+        );
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      // Start a bridge-driven model change; it hangs → roundtrip in flight.
+      const modelChange = bridge
+        .setSessionModel(
+          session.sessionId,
+          { sessionId: session.sessionId, modelId: 'qwen-max' },
+          undefined,
+        )
+        .catch(() => {});
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Concurrent in-session notification — must be SUPPRESSED.
+      void capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModelId: 'qwen-turbo',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Release the hung roundtrip → the bridge publishes its authoritative one.
+      releaseModel?.();
+      await modelChange;
+
+      const collected: Array<{ type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      // Exactly the bridge's model_switched (qwen-max) — the suppressed
+      // qwen-turbo notification did NOT produce a second model_switched.
+      expect(collected[0]?.type).toBe('model_switched');
+      expect((collected[0]?.data as { modelId?: string }).modelId).toBe(
+        'qwen-max',
+      );
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('drops malformed model-update params (non-string ids) without throwing or emitting', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capturedConn = new AgentSideConnection(
+          () => new FakeAgent(),
+          agentStream,
+        );
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const seen: string[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) seen.push(e.type);
+      })();
+
+      // Non-string currentModelId / missing sessionId → early return, no throw.
+      await capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModelId: 123 as unknown as string,
+      });
+      await capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        currentModelId: 'qwen-max',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      abort.abort();
+      await collecting;
+      expect(seen.filter((t) => t === 'model_switched')).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('drops a model-update for an unknown sessionId (no entry, no buffer)', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capturedConn = new AgentSideConnection(
+          () => new FakeAgent(),
+          agentStream,
+        );
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const seen: string[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) seen.push(e.type);
+      })();
+
+      await capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: 'nonexistent-session',
+        currentModelId: 'qwen-max',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      abort.abort();
+      await collecting;
+      // Unlike the MCP-budget path (which buffers unknown ids), model-update
+      // drops them — the real session's bus sees nothing.
+      expect(seen.filter((t) => t === 'model_switched')).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('stamps originatorClientId from the active prompt on the promoted model_switched', async () => {
+      // While a prompt with a clientId is in flight, the session entry carries
+      // activePromptOriginatorClientId; the promoted model_switched must
+      // inherit it so peers can attribute the change.
+      let releasePrompt: (() => void) | undefined;
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          promptImpl: async () => {
+            await new Promise<void>((res) => {
+              releasePrompt = res;
+            });
+            return { stopReason: 'end_turn' };
+          },
+        });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      // Hang a prompt with a clientId → activePromptOriginatorClientId set.
+      const promptDone = bridge
+        .sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'hi' }],
+          },
+          undefined,
+          { clientId: session.clientId },
+        )
+        .catch(() => {});
+      await new Promise((r) => setTimeout(r, 10));
+
+      void capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModelId: 'qwen-max',
+      });
+
+      const collected: Array<{ type: string; originatorClientId?: string }> =
+        [];
+      for await (const e of iter) {
+        if (e.type === 'model_switched') {
+          collected.push({
+            type: e.type,
+            originatorClientId: e.originatorClientId,
+          });
+          break;
+        }
+      }
+      expect(collected[0]?.originatorClientId).toBe(session.clientId);
+      releasePrompt?.();
+      await promptDone;
+      abort.abort();
+      await bridge.shutdown();
+    });
+  });
+
   describe('maxSessions cap (chiga0 Rec 3)', () => {
     it('refuses NEW spawns past the cap with SessionLimitExceededError', async () => {
       let n = 0;

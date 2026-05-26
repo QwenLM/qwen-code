@@ -217,6 +217,13 @@ export interface BridgeClientSessionEntry {
   events: EventBus;
   pendingPermissionIds: Set<string>;
   activePromptOriginatorClientId?: string;
+  /**
+   * A1 (#4511): true while the bridge drives a model roundtrip; the
+   * `current_model_update` extNotification demux reads it to suppress
+   * promotion during a bridge-driven change. Set on the full `SessionEntry`
+   * in `bridge.ts`; surfaced here for the demux.
+   */
+  modelRoundtripInFlight?: boolean;
 }
 
 /**
@@ -474,9 +481,10 @@ export class BridgeClient implements Client {
   private readonly inFlightRestoreIds = new Set<string>();
 
   /**
-   * PR 14b: handle child→bridge ACP `extNotification` calls. Only one
-   * method is recognized today — `qwen/notify/session/mcp-budget-event`
-   * — translating the McpClientManager's budget-event payload into a
+   * PR 14b: handle child→bridge ACP `extNotification` calls. Two methods
+   * are recognized — `qwen/notify/session/mcp-budget-event` (PR 14b,
+   * McpClientManager budget events) and `qwen/notify/session/model-update`
+   * (A1 #4511, in-session model switch) — each translated into a
    * session-scoped SSE frame. Unknown methods, unknown event kinds,
    * and missing sessionIds are dropped silently for forward-compat
    * (a future child can add new notification methods without breaking
@@ -492,6 +500,17 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    // A1 (#4511): demux an in-session model switch to a `model_switched`
+    // bus event. `current_model_update` is not an ACP SessionUpdate variant,
+    // so the agent emits it over this side-channel; the bridge promotes it
+    // here — except while the bridge itself is driving the change (the HTTP
+    // path also flows through Session.setModel), where it publishes
+    // `model_switched` authoritatively and this notification is suppressed to
+    // avoid a double publish.
+    if (method === 'qwen/notify/session/model-update') {
+      this.handleInSessionModelUpdate(params);
+      return;
+    }
     if (method !== 'qwen/notify/session/mcp-budget-event') return;
     const sessionId = params['sessionId'];
     if (typeof sessionId !== 'string') return;
@@ -529,6 +548,53 @@ export class BridgeClient implements Client {
     // in `createSessionEntry`; if the session never registers (spawn
     // failure), the entry is GC'd by TTL after EARLY_EVENT_TTL_MS.
     this.bufferEarlyEvent(sessionId, frame);
+  }
+
+  /**
+   * A1 (#4511): promote an in-session `current_model_update` extNotification
+   * to a `model_switched` bus event (field mapping: `currentModelId` →
+   * `data.modelId`, `sessionId` → `data.sessionId`). Suppressed while the
+   * bridge is driving its own model roundtrip (`entry.modelRoundtripInFlight`)
+   * — there the bridge publishes the authoritative `model_switched`, so
+   * promoting here too would double-publish. A structured log records the
+   * decision so the `dropped` case is observable.
+   */
+  private handleInSessionModelUpdate(params: Record<string, unknown>): void {
+    const sessionId = params['sessionId'];
+    const currentModelId = params['currentModelId'];
+    if (typeof sessionId !== 'string' || typeof currentModelId !== 'string') {
+      return;
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) {
+      // No live session — a model switch only happens on an established
+      // session, so unlike the MCP-budget path there is nothing to buffer.
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_model_update action=dropped reason=no_entry`,
+      );
+      return;
+    }
+    if (entry.modelRoundtripInFlight) {
+      // Bridge owns this change and will publish model_switched itself.
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_model_update action=suppressed reason=bridge_roundtrip_in_flight`,
+      );
+      return;
+    }
+    try {
+      entry.events.publish({
+        type: 'model_switched',
+        data: { sessionId, modelId: currentModelId },
+        ...(entry.activePromptOriginatorClientId
+          ? { originatorClientId: entry.activePromptOriginatorClientId }
+          : {}),
+      });
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_model_update action=promoted model=${currentModelId}`,
+      );
+    } catch {
+      /* bus closed */
+    }
   }
 
   /**

@@ -1607,6 +1607,26 @@ export class Session implements SessionContext {
         : undefined,
     );
 
+    // A1 (#4511): notify attached clients of an in-session model switch so a
+    // `/model` slash command or plan-mode change reaches the bus (today only
+    // the HTTP `POST /session/:id/model` path publishes `model_switched`).
+    // `current_model_update` is NOT an ACP `SessionUpdate` variant (the type
+    // is the external @agentclientprotocol/sdk union, which has
+    // `current_mode_update` but not a model equivalent), so this goes over
+    // the agent→bridge `extNotification` side-channel. The bridge demuxes it
+    // to `model_switched` and SUPPRESSES it when the bridge itself is driving
+    // the change (the HTTP path also flows through this method), avoiding a
+    // double publish. Fire-and-forget, matching the MCP-budget extNotification.
+    void this.client
+      .extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: this.sessionId,
+        currentModelId: parsed.modelId,
+      })
+      .catch(() => {
+        // Advisory only; a failed notification must not fail the model switch.
+      });
+
     if (options.persistDefault ?? true) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
       this.settings.setValue(persistScope, 'model.name', parsed.modelId);
