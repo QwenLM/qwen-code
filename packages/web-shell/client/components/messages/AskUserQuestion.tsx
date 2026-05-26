@@ -101,8 +101,13 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
   );
 
   const handleCancel = useCallback(() => {
-    const cancelOption = request.options.find((o) => o.kind === 'reject_once');
-    onConfirm(request.id, cancelOption?.id || '', undefined);
+    if (submittedRef.current) return;
+    const cancelOption = request.options.find(
+      (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
+    );
+    if (!cancelOption) return;
+    submittedRef.current = true;
+    onConfirm(request.id, cancelOption.id, undefined);
   }, [request, onConfirm]);
 
   const switchQuestion = useCallback(
