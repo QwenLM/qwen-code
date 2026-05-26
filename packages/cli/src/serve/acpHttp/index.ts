@@ -26,6 +26,8 @@ export interface MountAcpHttpOptions {
   enabled?: boolean;
   /** Mount path; defaults to `/acp`. */
   path?: string;
+  /** Concurrent-connection cap; `0` disables. Defaults to the registry default. */
+  maxConnections?: number;
 }
 
 export interface AcpHttpHandle {
@@ -71,12 +73,16 @@ export function mountAcpHttp(
         );
       });
     },
+    opts.maxConnections,
   );
 
   // ── POST /acp ──────────────────────────────────────────────────────
   app.post(path, async (req: Request, res: Response) => {
     const parsed = parseInbound(req.body);
     if (!parsed.ok) {
+      writeStderrLine(
+        `qwen serve: /acp malformed request from ${req.socket?.remoteAddress}: ${parsed.error.error.message}`,
+      );
       res.status(400).json(parsed.error);
       return;
     }
@@ -118,6 +124,10 @@ export function mountAcpHttp(
           requestedVersion,
         ),
       });
+      writeStderrLine(
+        `qwen serve: /acp connection established ${conn.connectionId.slice(0, 8)} ` +
+          `(loopback=${conn.fromLoopback}, active=${registry.size})`,
+      );
       return;
     }
 
@@ -248,7 +258,12 @@ export function mountAcpHttp(
     // connection (same posture as the REST `DELETE /session/:id`). A
     // per-connection secret would add intra-token isolation; deferred with
     // the rest of the multi-tenant hardening (design §7).
-    registry.delete(connectionId);
+    const existed = registry.delete(connectionId);
+    if (existed) {
+      writeStderrLine(
+        `qwen serve: /acp connection deleted ${connectionId.slice(0, 8)} (remaining=${registry.size})`,
+      );
+    }
     res.status(202).end();
   });
 

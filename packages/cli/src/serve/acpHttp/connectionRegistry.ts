@@ -112,6 +112,13 @@ export class AcpConnection {
    * headers (`X-Forwarded-For` etc).
    */
   readonly fromLoopback: boolean;
+  /**
+   * Set by `destroy()`. An in-flight `session/new`/`load`/`resume` whose
+   * bridge call resolves AFTER teardown checks this to kill/detach the
+   * late-registered session, so a `DELETE` (or idle sweep) racing a spawn
+   * doesn't orphan a child process / phantom clientId.
+   */
+  destroyed = false;
   lastActiveMs: number = Date.now();
   private idCounter = 0;
 
@@ -163,7 +170,7 @@ export class AcpConnection {
     if (this.connStream && !this.connStream.isClosed) {
       void this.connStream.send(frame);
     } else {
-      pushCapped(this.connBuffer, frame);
+      pushCapped(this.connBuffer, frame, `conn ${this.connectionId}`);
     }
   }
 
@@ -190,7 +197,7 @@ export class AcpConnection {
     if (binding.stream && !binding.stream.isClosed) {
       void binding.stream.send(frame);
     } else {
-      pushCapped(binding.buffer, frame);
+      pushCapped(binding.buffer, frame, `session ${sessionId}`);
     }
   }
 
@@ -232,6 +239,7 @@ export class AcpConnection {
   }
 
   destroy(): void {
+    this.destroyed = true;
     for (const binding of this.sessions.values()) {
       binding.abort.abort();
       binding.promptAbort?.abort();
@@ -260,8 +268,13 @@ export class AcpConnection {
   }
 }
 
-function pushCapped(buf: unknown[], frame: unknown): void {
-  if (buf.length >= MAX_BUFFERED_FRAMES) buf.shift();
+function pushCapped(buf: unknown[], frame: unknown, label = 'stream'): void {
+  if (buf.length >= MAX_BUFFERED_FRAMES) {
+    buf.shift();
+    writeStderrLine(
+      `qwen serve: /acp pre-attach buffer full (${label}), dropped oldest frame`,
+    );
+  }
   buf.push(frame);
 }
 

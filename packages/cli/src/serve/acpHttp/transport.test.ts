@@ -73,16 +73,23 @@ class FakeBridge {
       ) => Promise<unknown>)
     | undefined;
   lastSetModel: unknown;
+  lastSpawnScope: string | undefined;
+  closeShouldThrow = false;
+  killed: string[] = [];
 
   closedSessions: string[] = [];
 
-  async spawnOrAttach() {
+  async spawnOrAttach(req: { sessionScope?: string }) {
+    this.lastSpawnScope = req?.sessionScope;
     return {
       sessionId: 'sess-1',
       workspaceCwd: '/ws',
       attached: false,
       clientId: 'client-1',
     };
+  }
+  async killSession(sessionId: string) {
+    this.killed.push(sessionId);
   }
 
   loadShouldThrow = false;
@@ -195,6 +202,7 @@ class FakeBridge {
   async cancelSession() {}
   async closeSession(sessionId: string) {
     this.closedSessions.push(sessionId);
+    if (this.closeShouldThrow) throw new Error('bridge close failed');
   }
   async detachClient(sessionId: string, clientId?: string) {
     this.detached.push({ sessionId, clientId });
@@ -802,6 +810,121 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // session binding is gone) — not silently dropped.
     expect(frames.map((f) => f.id)).toContain(90);
     await sessStream.body?.cancel();
+  });
+
+  it('session/set_config_option rejects empty value (INVALID_PARAMS)', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 41,
+      method: 'session/set_config_option',
+      params: { sessionId: 'sess-1', configId: 'model', value: '' },
+    });
+    const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
+    expect(frame.error.code).toBe(-32602);
+  });
+
+  it('session/set_config_option rejects an invalid mode value', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 42,
+      method: 'session/set_config_option',
+      params: { sessionId: 'sess-1', configId: 'mode', value: 'bogus-mode' },
+    });
+    const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
+    expect(frame.error.code).toBe(-32602);
+    expect(bridge.lastApprovalMode).toBeUndefined();
+  });
+
+  it('session/new forwards sessionScope; rejects invalid scope', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    // invalid scope → error on conn stream
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 43,
+      method: 'session/new',
+      params: { sessionScope: 'bogus' },
+    });
+    const [bad] = (await got) as Array<{ error: { code: number } }>;
+    expect(bad.error.code).toBe(-32602);
+    // valid scope → forwarded to bridge
+    const c2 = await initialize();
+    await post(c2, {
+      jsonrpc: '2.0',
+      id: 44,
+      method: 'session/new',
+      params: { sessionScope: 'thread' },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(bridge.lastSpawnScope).toBe('thread');
+  });
+
+  it('session/prompt with empty prompt → INVALID_PARAMS', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 45,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [] },
+    });
+    const [frame] = (await got) as Array<{ error: { code: number } }>;
+    expect(frame.error.code).toBe(-32602);
+  });
+
+  it('session/close runs local cleanup even if the bridge close throws', async () => {
+    bridge.closeShouldThrow = true;
+    const connId = await initialize();
+    await newSession(connId); // creates + owns sess-1
+    await new Promise((r) => setTimeout(r, 30));
+    await post(connId, { jsonrpc: '2.0', id: 46, method: 'session/close', params: { sessionId: 'sess-1' } });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bridge.closedSessions).toContain('sess-1'); // bridge was called (then threw)
+    // Local teardown ran in `finally` despite the throw → session unowned now.
+    const after = await openStream(connId, 'sess-1');
+    expect(after.status).toBe(403);
+  });
+
+  it('connection cap → 503 on initialize', async () => {
+    const app2 = express();
+    app2.use(express.json());
+    mountAcpHttp(app2, bridge as unknown as HttpAcpBridge, {
+      boundWorkspace: '/ws',
+      enabled: true,
+      maxConnections: 1,
+    });
+    const srv = app2.listen(0, '127.0.0.1');
+    await new Promise((r) => srv.once('listening', r));
+    const port = (srv.address() as AddressInfo).port;
+    const url = `http://127.0.0.1:${port}/acp`;
+    const init = (n: number) =>
+      fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: n, method: 'initialize' }),
+      });
+    const r1 = await init(1);
+    expect(r1.status).toBe(200);
+    const r2 = await init(2);
+    expect(r2.status).toBe(503);
+    expect(r2.headers.get('retry-after')).toBe('5');
+    srv.closeAllConnections?.();
+    await new Promise<void>((r) => srv.close(() => r()));
   });
 
   it('DELETE without a connection id → 400', async () => {

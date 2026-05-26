@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { APPROVAL_MODES, type ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -57,6 +58,9 @@ const CONN_ROUTED_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
   `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
 ]);
+
+/** Mirrors the REST surface's `MAX_TOOL_NAME_LENGTH`/`MAX_SERVER_NAME_LENGTH`. */
+const MAX_NAME_LENGTH = 256;
 
 class AcpParamError extends Error {}
 
@@ -190,7 +194,10 @@ export class AcpDispatcher {
       };
       const co = ctx?.state?.configOptions;
       return Array.isArray(co) ? co : undefined;
-    } catch {
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: /acp configOptionsFor(${sessionId}) failed: ${errMsg(err)}`,
+      );
       return undefined;
     }
   }
@@ -284,6 +291,14 @@ export class AcpDispatcher {
     id: JsonRpcId | undefined,
   ): boolean {
     if (conn.ownsSession(sessionId)) return true;
+    if (id === undefined) {
+      // Notification (no id) for an unowned session: no wire response to
+      // send, so log it — otherwise "my cancel did nothing" is undebuggable.
+      writeStderrLine(
+        `qwen serve: /acp notification for unowned session ${sessionId} (dropped)`,
+      );
+      return false;
+    }
     if (id !== undefined) {
       conn.sendConn(
         error(
@@ -363,10 +378,40 @@ export class AcpDispatcher {
 
         case 'session/new': {
           const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
+          // Forward sessionScope like REST (bridge supports single|thread).
+          const rawScope = params['sessionScope'];
+          if (
+            rawScope !== undefined &&
+            rawScope !== 'single' &&
+            rawScope !== 'thread'
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`sessionScope` must be "single" or "thread"',
+                ),
+              );
+            }
+            return;
+          }
           const session = await this.bridge.spawnOrAttach({
             workspaceCwd: cwd,
             clientId: conn.clientId,
+            ...(rawScope !== undefined
+              ? { sessionScope: rawScope as 'single' | 'thread' }
+              : {}),
           });
+          // Teardown raced the spawn: the connection was destroyed while the
+          // bridge call was in flight, so nothing will tear this session down.
+          // Kill the orphan (no other client could have attached yet).
+          if (conn.destroyed) {
+            void this.bridge
+              .killSession(session.sessionId, { requireZeroAttaches: true })
+              .catch(() => undefined);
+            return;
+          }
           // Record the clientId the bridge actually stamped — later
           // per-session calls MUST echo it (see SessionBinding.clientId).
           conn.getOrCreateSession(session.sessionId).clientId =
@@ -407,6 +452,14 @@ export class AcpDispatcher {
                   workspaceCwd: cwd,
                   clientId: conn.clientId,
                 });
+          // Teardown raced the restore — detach the late-registered client
+          // so it doesn't linger in the bridge's voter/known-client sets.
+          if (conn.destroyed) {
+            void this.bridge
+              .detachClient(sessionId, restored.clientId)
+              .catch(() => undefined);
+            return;
+          }
           conn.getOrCreateSession(sessionId).clientId = restored.clientId;
           conn.ownSession(sessionId);
           this.replyConn(conn, id, restored.state ?? {});
@@ -481,8 +534,23 @@ export class AcpDispatcher {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
           const configId = String(params['configId'] ?? '');
-          const value = String(params['value'] ?? '');
+          const rawValue = params['value'];
           const ctx = this.sessionCtx(conn, sessionId, loopback);
+          // Validate value at the boundary like REST (empty/null is rejected
+          // rather than forwarded as "" to the bridge).
+          if (typeof rawValue !== 'string' || rawValue.length === 0) {
+            if (id !== undefined) {
+              this.replySession(
+                conn,
+                sessionId,
+                id,
+                undefined,
+                error(id, RPC.INVALID_PARAMS, '`value` must be a non-empty string'),
+              );
+            }
+            return;
+          }
+          const value = rawValue;
           if (configId === 'model') {
             await this.bridge.setSessionModel(
               sessionId,
@@ -490,10 +558,28 @@ export class AcpDispatcher {
               ctx,
             );
           } else if (configId === 'mode') {
+            // Validate against the closed approval-mode set, like REST.
+            if (!APPROVAL_MODES.includes(value as ApprovalMode)) {
+              if (id !== undefined) {
+                this.replySession(
+                  conn,
+                  sessionId,
+                  id,
+                  undefined,
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    `invalid mode "${value}" (expected one of: ${APPROVAL_MODES.join(', ')})`,
+                  ),
+                );
+              }
+              return;
+            }
             await this.bridge.setSessionApprovalMode(
               sessionId,
-              value as never,
-              { persist: false },
+              value as ApprovalMode,
+              // Forward the optional persist flag like REST.
+              { persist: params['persist'] === true },
               ctx,
             );
           } else {
@@ -598,10 +684,14 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}workspace/set_tool_enabled`: {
           const toolName = String(params['toolName'] ?? '');
-          if (!toolName) {
+          if (!toolName || toolName.length > MAX_NAME_LENGTH) {
             if (id !== undefined) {
               conn.sendConn(
-                error(id, RPC.INVALID_PARAMS, '`toolName` is required'),
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`toolName\` is required and must be ≤ ${MAX_NAME_LENGTH} chars`,
+                ),
               );
             }
             return;
@@ -617,10 +707,14 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}workspace/restart_mcp_server`: {
           const serverName = String(params['serverName'] ?? '');
-          if (!serverName) {
+          if (!serverName || serverName.length > MAX_NAME_LENGTH) {
             if (id !== undefined) {
               conn.sendConn(
-                error(id, RPC.INVALID_PARAMS, '`serverName` is required'),
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`serverName\` is required and must be ≤ ${MAX_NAME_LENGTH} chars`,
+                ),
               );
             }
             return;
