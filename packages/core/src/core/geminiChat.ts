@@ -49,7 +49,10 @@ import {
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
 import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
-import { estimatePromptTokens } from '../services/tokenEstimation.js';
+import {
+  estimatePromptTokens,
+  getUsageOutputTokenCountForPromptEstimate,
+} from '../services/tokenEstimation.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
@@ -2554,16 +2557,7 @@ export class GeminiChat {
             // subagents) can make its own compaction decisions.
             this.lastPromptTokenCount = lastPromptTokenCount;
             this.lastCandidatesTokenCount =
-              usageMetadata.promptTokenCount !== undefined
-                ? usageMetadata.totalTokenCount !== undefined
-                  ? Math.max(
-                      0,
-                      usageMetadata.totalTokenCount -
-                        usageMetadata.promptTokenCount,
-                    )
-                  : (usageMetadata.candidatesTokenCount ?? 0) +
-                    (usageMetadata.thoughtsTokenCount ?? 0)
-                : 0;
+              getUsageOutputTokenCountForPromptEstimate(usageMetadata);
             // Mirror to the global telemetry only when wired — subagents
             // pass `telemetryService=undefined` to keep their context usage
             // out of the main session's UI counters.

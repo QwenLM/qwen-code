@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type {
+  Content,
+  GenerateContentResponseUsageMetadata,
+} from '@google/genai';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   TOKEN_TO_CHAR_RATIO,
@@ -79,4 +82,16 @@ export function estimatePromptTokens(
   // The reactive overflow handler is the safety net if the hard-tier rescue
   // misses for that reason. See review #4168 R3.3.
   return estimateContentTokens([...history, userMessage], imageTokenEstimate);
+}
+
+export function getUsageOutputTokenCountForPromptEstimate(
+  usage: GenerateContentResponseUsageMetadata | undefined,
+): number {
+  if (usage?.promptTokenCount === undefined) {
+    return 0;
+  }
+  if (usage.totalTokenCount !== undefined) {
+    return Math.max(0, usage.totalTokenCount - usage.promptTokenCount);
+  }
+  return (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0);
 }

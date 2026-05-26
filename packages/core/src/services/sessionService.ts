@@ -10,11 +10,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
-import type {
-  Content,
-  GenerateContentResponseUsageMetadata,
-  Part,
-} from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type {
   ChatCompressionRecordPayload,
@@ -29,6 +25,7 @@ import {
   readLastJsonStringFieldSync,
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
+import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -1390,16 +1387,4 @@ export function getResumeTokenCounts(
   }
 
   return undefined;
-}
-
-function getUsageOutputTokenCountForPromptEstimate(
-  usage: GenerateContentResponseUsageMetadata | undefined,
-): number {
-  if (usage?.promptTokenCount === undefined) {
-    return 0;
-  }
-  if (usage.totalTokenCount !== undefined) {
-    return Math.max(0, usage.totalTokenCount - usage.promptTokenCount);
-  }
-  return (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0);
 }
