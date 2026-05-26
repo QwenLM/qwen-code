@@ -369,13 +369,17 @@ export class ContentGenerationPipeline {
       // `extra_body.thinking.enabled`, DeepSeek-on-DashScope uses
       // `thinking: { type: 'disabled' }`; sending `enable_thinking` to them
       // is at best a no-op, at worst forwarded upstream and rejected).
+      //
+      // `coder-model` is the QWEN_OAUTH default (DEFAULT_QWEN_MODEL in
+      // config/models.ts, aliased to Qwen 3.6 Plus hybrid) — it doesn't
+      // start with `qwen` but is the most common hybrid-thinking model
+      // for first-time users, so it must be covered.
+      const model = (this.contentGeneratorConfig.model ?? '').toLowerCase();
       if (
         DashScopeOpenAICompatibleProvider.isDashScopeProvider(
           this.contentGeneratorConfig,
         ) &&
-        (this.contentGeneratorConfig.model ?? '')
-          .toLowerCase()
-          .startsWith('qwen')
+        (model.startsWith('qwen') || model === 'coder-model')
       ) {
         typed['enable_thinking'] = false;
       }

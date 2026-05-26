@@ -846,17 +846,18 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.enable_thinking).toBe(false);
     });
 
-    it('emits enable_thinking:false on QWEN_OAUTH regardless of baseUrl', async () => {
-      // QWEN_OAUTH activates the DashScope provider regardless of baseUrl
-      // (see DashScopeOpenAICompatibleProvider.isDashScopeProvider line 47).
-      // Verify the gate fires through that path too — important because
-      // QWEN_OAUTH is the default flow for first-time users and does not
-      // go through the wizard's `extra_body` setup.
+    it('emits enable_thinking:false on QWEN_OAUTH with the default coder-model', async () => {
+      // QWEN_OAUTH is the default auth flow for first-time users and
+      // ships with `model: 'coder-model'` (DEFAULT_QWEN_MODEL in
+      // config/models.ts — aliased to Qwen 3.6 Plus hybrid). The string
+      // doesn't start with `qwen`, so the gate must special-case it;
+      // otherwise the exact regression that #4501 fixes (side-queries
+      // burning reasoning tokens on the default flow) remains live.
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         authType: AuthType.QWEN_OAUTH,
         baseUrl: 'https://some-oauth-issued-endpoint.example/v1',
-        model: 'qwen3-coder-flash',
+        model: 'coder-model',
       } as ContentGeneratorConfig;
       mockConfig = {
         ...mockConfig,
@@ -1008,6 +1009,48 @@ describe('ContentGenerationPipeline', () => {
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('emits enable_thinking:false when baseUrl is unset (DashScope default)', async () => {
+      // `isDashScopeProvider` treats a missing baseUrl as DashScope
+      // (`dashscope.ts:49` returns true for `!baseUrl`). A fresh install
+      // that hasn't run the setup wizard hits this path. All other
+      // positive tests above explicitly set baseUrl, so pin this
+      // implicit-default branch separately to detect future tightening
+      // of the `!baseUrl` early-return.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      delete (mockContentGeneratorConfig as { baseUrl?: string }).baseUrl;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
     });
 
     it('should handle errors and log them', async () => {
