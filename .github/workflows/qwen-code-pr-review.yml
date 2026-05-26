@@ -57,24 +57,17 @@ jobs:
       group: 'qwen-pr-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}'
       cancel-in-progress: true
     timeout-minutes: ${{ fromJSON(github.event.inputs.timeout_minutes || '60') }}
-    runs-on: 'ecs-qwen'
+    runs-on: [self-hosted, linux, x64, ecs-qwen]
     permissions:
       contents: 'read'
       pull-requests: 'write'
       issues: 'write'
-    env:
-      QWEN_CLI_VERSION: "${{ vars.QWEN_PR_REVIEW_CLI_VERSION || 'latest' }}"
     steps:
       - name: 'Checkout base branch'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
-
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version: '22'
 
       - name: 'Resolve PR context'
         id: 'context'
@@ -99,12 +92,6 @@ jobs:
             echo "review_mode=$REVIEW_MODE"
             echo "timeout_minutes=$TIMEOUT_MINUTES"
           } >> "$GITHUB_OUTPUT"
-
-      - name: 'Install Qwen Code'
-        run: |-
-          set -euo pipefail
-          npm install --loglevel warn --no-audit --prefer-offline --global "@qwen-code/qwen-code@${QWEN_CLI_VERSION}"
-          qwen --version
 
       - name: 'Run review'
         env:
