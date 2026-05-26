@@ -1812,6 +1812,17 @@ describe('createServeApp', () => {
       expect(bridge.calls).toHaveLength(0);
     });
 
+    it('204 detaches without client identity when X-Qwen-Client-Id is absent', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/detach')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
+      expect(res.status).toBe(204);
+      expect(bridge.detachCalls).toEqual([{ sessionId: 'session-A' }]);
+    });
+
     it('400 invalid_session_scope when `sessionScope` is not "single"/"thread"', async () => {
       // Anything outside the enum (`'user'`, `null`, a number, an object)
       // must 4xx with a typed `code` so HTTP clients can branch on the

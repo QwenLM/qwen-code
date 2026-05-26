@@ -152,6 +152,7 @@ interface ActivePrompt {
 interface PendingSessionLoad {
   id: number;
   sessionId: string;
+  timeout: ReturnType<typeof setTimeout>;
   resolve: () => void;
   reject: (error: unknown) => void;
 }
@@ -395,6 +396,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
           const pendingLoad = pendingSessionLoadRef.current;
           if (pendingLoad?.sessionId === activeSession.sessionId) {
             pendingSessionLoadRef.current = undefined;
+            clearTimeout(pendingLoad.timeout);
             pendingLoad.resolve();
           }
           if (loadWarnings.length > 0) {
@@ -487,6 +489,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               pendingLoad.sessionId === reconnectSessionId)
           ) {
             pendingSessionLoadRef.current = undefined;
+            clearTimeout(pendingLoad.timeout);
             pendingLoad.reject(error);
           }
 
@@ -549,6 +552,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       setPromptStatus('idle');
       if (pendingSessionLoadRef.current) {
+        clearTimeout(pendingSessionLoadRef.current.timeout);
         pendingSessionLoadRef.current.reject(
           new Error('Session effect disposed'),
         );
@@ -719,22 +723,26 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         }
         const loadId = pendingSessionLoadIdRef.current + 1;
         pendingSessionLoadIdRef.current = loadId;
-        pendingSessionLoadRef.current?.reject(
-          new Error('Session load superseded by a newer request'),
-        );
+        if (pendingSessionLoadRef.current) {
+          clearTimeout(pendingSessionLoadRef.current.timeout);
+          pendingSessionLoadRef.current.reject(
+            new Error('Session load superseded by a newer request'),
+          );
+        }
         const loadPromise = new Promise<void>((resolve, reject) => {
-          pendingSessionLoadRef.current = {
-            id: loadId,
-            sessionId,
-            resolve,
-            reject,
-          };
-          setTimeout(() => {
+          const timeout = setTimeout(() => {
             if (pendingSessionLoadRef.current?.id === loadId) {
               pendingSessionLoadRef.current = undefined;
               reject(new Error('Session load timed out'));
             }
           }, 30_000);
+          pendingSessionLoadRef.current = {
+            id: loadId,
+            sessionId,
+            timeout,
+            resolve,
+            reject,
+          };
         });
         setPromptStatus('idle');
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
@@ -754,6 +762,7 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         setPromptStatus('idle');
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
         if (pendingSessionLoadRef.current) {
+          clearTimeout(pendingSessionLoadRef.current.timeout);
           pendingSessionLoadRef.current.reject(
             new Error('New session requested'),
           );

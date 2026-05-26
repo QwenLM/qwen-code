@@ -65,14 +65,19 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   const [selected, setSelected] = useState(() =>
     getSafeDefaultIndex(request.options),
   );
+  const requestRef = useRef(request);
+  requestRef.current = request;
+  const selectedRef = useRef(selected);
   const submittedRef = useRef(false);
   const interactedRef = useRef(false);
 
   useEffect(() => {
+    const safeDefaultIndex = getSafeDefaultIndex(requestRef.current.options);
     submittedRef.current = false;
     interactedRef.current = false;
-    setSelected(getSafeDefaultIndex(request.options));
-  }, [request.id, request.options]);
+    selectedRef.current = safeDefaultIndex;
+    setSelected(safeDefaultIndex);
+  }, [request.id]);
 
   const { toolName, description } = parseTitle(request.title);
   const contentText = extractContentText(request);
@@ -81,33 +86,43 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
     (optionId: string) => {
       if (submittedRef.current) return;
       submittedRef.current = true;
-      onConfirm(request.id, optionId);
+      onConfirm(requestRef.current.id, optionId);
     },
-    [request.id, onConfirm],
+    [onConfirm],
   );
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.defaultPrevented || isEditableTarget(e.target)) return;
-      const optCount = request.options.length;
+      const currentRequest = requestRef.current;
+      const optCount = currentRequest.options.length;
       if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
         interactedRef.current = true;
-        setSelected((s) => (s - 1 + optCount) % optCount);
+        setSelected((s) => {
+          const next = (s - 1 + optCount) % optCount;
+          selectedRef.current = next;
+          return next;
+        });
       } else if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
         interactedRef.current = true;
-        setSelected((s) => (s + 1) % optCount);
+        setSelected((s) => {
+          const next = (s + 1) % optCount;
+          selectedRef.current = next;
+          return next;
+        });
       } else if (e.key === 'Enter') {
         e.preventDefault();
         if (!interactedRef.current) {
           interactedRef.current = true;
           return;
         }
-        confirm(request.options[selected].id);
+        const option = currentRequest.options[selectedRef.current];
+        if (option) confirm(option.id);
       } else if (e.key === 'Escape') {
         e.preventDefault();
-        const reject = request.options.find(
+        const reject = currentRequest.options.find(
           (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
         );
         if (reject) confirm(reject.id);
@@ -116,11 +131,11 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
         if (idx < optCount) {
           e.preventDefault();
           interactedRef.current = true;
-          confirm(request.options[idx].id);
+          confirm(currentRequest.options[idx].id);
         }
       }
     },
-    [request, selected, confirm],
+    [confirm],
   );
 
   useEffect(() => {
@@ -166,7 +181,10 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
               key={option.id}
               className={`${styles.option} ${isSelected ? styles.optionActive : ''}`}
               onClick={() => confirm(option.id)}
-              onMouseEnter={() => setSelected(i)}
+              onMouseEnter={() => {
+                selectedRef.current = i;
+                setSelected(i);
+              }}
             >
               <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>
               <span className={styles.num}>{i + 1}.</span>

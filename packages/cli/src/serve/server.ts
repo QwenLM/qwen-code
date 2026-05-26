@@ -1430,7 +1430,7 @@ export function createServeApp(
       return;
     }
     const clientId = parseClientIdHeader(req, res);
-    if (clientId == null) return;
+    if (clientId === null) return;
     try {
       await bridge.detachClient(sessionId, clientId);
       res.status(204).end();
