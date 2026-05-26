@@ -2440,7 +2440,7 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
-    it('includes previous response candidate tokens in the hard-tier estimate', async () => {
+    it('includes previous response output tokens in the hard-tier estimate', async () => {
       const compressSpy = vi.spyOn(
         ChatCompressionService.prototype,
         'compress',
@@ -2502,7 +2502,7 @@ describe('GeminiChat', async () => {
       ).toBeGreaterThanOrEqual(177_000);
     });
 
-    it('does not double-count candidate tokens when prompt count falls back to total token count', async () => {
+    it('does not double-count output tokens when prompt count falls back to total token count', async () => {
       const compressSpy = vi.spyOn(
         ChatCompressionService.prototype,
         'compress',
@@ -2723,7 +2723,7 @@ describe('GeminiChat', async () => {
       ).toBeLessThan(177_000);
     });
 
-    it('resets previous response candidate tokens when seeding last prompt tokens externally', async () => {
+    it('resets previous response output tokens when seeding last prompt tokens externally', async () => {
       const compressSpy = vi
         .spyOn(ChatCompressionService.prototype, 'compress')
         .mockResolvedValue({
@@ -2770,7 +2770,7 @@ describe('GeminiChat', async () => {
       ).toBeLessThan(177_000);
     });
 
-    it('resets previous response candidate tokens after successful compression', async () => {
+    it('resets previous response output tokens after successful compression', async () => {
       const compressSpy = vi.spyOn(
         ChatCompressionService.prototype,
         'compress',
@@ -2817,7 +2817,7 @@ describe('GeminiChat', async () => {
       chat.setLastPromptTokenCount(50_000);
       const firstStream = await chat.sendMessageStream(
         'test-model',
-        { message: 'prime candidate tokens' },
+        { message: 'prime output tokens' },
         'prompt-prime-compression-reset',
       );
       for await (const _ of firstStream) {
@@ -2849,7 +2849,36 @@ describe('GeminiChat', async () => {
       ).toBeLessThan(100_000);
     });
 
-    it('ignores previous response candidate tokens when the prompt token count is zero', () => {
+    it('does not replace token counters when usage reports zero prompt tokens', async () => {
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 123_456,
+          newTokenCount: 123_456,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('zero prompt count', {
+          promptTokenCount: 0,
+          totalTokenCount: 5000,
+        }),
+      );
+
+      chat.setLastPromptTokenCount(123_456);
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'zero prompt count should not reseed' },
+        'prompt-zero-count-no-reseed',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(chat.getLastPromptTokenCount()).toBe(123_456);
+    });
+
+    it('ignores previous response output tokens when the prompt token count is zero', () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'history question' }] },
         { role: 'model', parts: [{ text: 'history answer' }] },

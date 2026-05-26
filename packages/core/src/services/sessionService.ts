@@ -1334,7 +1334,7 @@ export function replayUiTelemetryFromConversation(
 
 export interface ResumeTokenCounts {
   promptTokenCount: number;
-  candidatesTokenCount: number;
+  outputTokenCount: number;
 }
 
 /**
@@ -1351,7 +1351,7 @@ export function getResumePromptTokenCount(
 
 /**
  * Returns the prompt and previous-response output token counts used to seed a
- * resumed chat. The prompt count restores the context anchor; the candidates
+ * resumed chat. The prompt count restores the context anchor; the output
  * count preserves the output tokens appended after that prompt count was
  * reported, matching steady-state prompt estimation on the next send.
  */
@@ -1367,8 +1367,7 @@ export function getResumeTokenCounts(
       if (candidate) {
         return {
           promptTokenCount: candidate,
-          candidatesTokenCount:
-            getUsageOutputTokenCountForPromptEstimate(usage),
+          outputTokenCount: getUsageOutputTokenCountForPromptEstimate(usage),
         };
       }
     }
@@ -1380,7 +1379,7 @@ export function getResumeTokenCounts(
       if (payload?.info) {
         return {
           promptTokenCount: payload.info.newTokenCount,
-          candidatesTokenCount: 0,
+          outputTokenCount: 0,
         };
       }
     }

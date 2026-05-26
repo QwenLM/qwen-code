@@ -239,13 +239,14 @@ export class GeminiClient {
         resumedSessionData.conversation,
       );
       const chat = this.getChat();
-      chat.setLastPromptTokenCount(
-        resumeTokenCounts?.promptTokenCount ??
-          uiTelemetryService.getLastPromptTokenCount(),
-      );
       if (resumeTokenCounts) {
-        chat.setLastCandidatesTokenCount(
-          resumeTokenCounts.candidatesTokenCount,
+        chat.seedResumeTokenCounts(
+          resumeTokenCounts.promptTokenCount,
+          resumeTokenCounts.outputTokenCount,
+        );
+      } else {
+        chat.setLastPromptTokenCount(
+          uiTelemetryService.getLastPromptTokenCount(),
         );
       }
 

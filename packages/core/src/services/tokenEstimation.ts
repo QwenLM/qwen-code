@@ -55,7 +55,7 @@ export function estimateContentTokens(
  * three things: the current user message, the previous model response that
  * was appended to local history after that prompt count was reported, and
  * any initial value on the very first send. This helper closes those gaps via
- * local estimation plus `lastCandidatesTokenCount` when available.
+ * local estimation plus `lastOutputTokenCount` when available.
  *
  * WARNING: like estimateContentTokens, this is a conservative lower
  * bound. Use it to TRIGGER earlier, never to SKIP — the fallback path
@@ -66,13 +66,13 @@ export function estimatePromptTokens(
   history: Content[],
   userMessage: Content,
   lastPromptTokenCount: number,
-  lastCandidatesTokenCount: number = 0,
+  lastOutputTokenCount: number = 0,
   imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
 ): number {
   if (lastPromptTokenCount > 0) {
     return (
       lastPromptTokenCount +
-      lastCandidatesTokenCount +
+      lastOutputTokenCount +
       estimateContentTokens([userMessage], imageTokenEstimate)
     );
   }

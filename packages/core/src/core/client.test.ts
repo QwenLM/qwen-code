@@ -561,9 +561,9 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('seeds resumed chat with previous response output token count', async () => {
-      const setLastCandidatesTokenCountSpy = vi.spyOn(
+      const seedResumeTokenCountsSpy = vi.spyOn(
         GeminiChat.prototype,
-        'setLastCandidatesTokenCount',
+        'seedResumeTokenCounts',
       );
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
         conversation: {
@@ -598,7 +598,7 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(200);
-      expect(setLastCandidatesTokenCountSpy).toHaveBeenCalledWith(60);
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 60);
     });
 
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {

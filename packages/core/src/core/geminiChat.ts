@@ -1221,7 +1221,7 @@ export class GeminiChat {
    * was reported, so steady-state prompt estimates add this value to avoid
    * under-counting the next request near the hard compaction threshold.
    */
-  private lastCandidatesTokenCount = 0;
+  private lastOutputTokenCount = 0;
 
   /**
    * Number of consecutive auto-compaction failures for this chat. The
@@ -1332,17 +1332,25 @@ export class GeminiChat {
    */
   setLastPromptTokenCount(count: number): void {
     this.lastPromptTokenCount = count;
-    this.lastCandidatesTokenCount = 0;
+    this.lastOutputTokenCount = 0;
   }
 
   /**
-   * Seed the previous-response output token count for chats restored from
-   * disk. Resume restores the chat history and last prompt size separately;
-   * this carries the most recent assistant response's output tokens so the
-   * first post-resume prompt estimate matches steady-state sessions.
+   * Seed the restored prompt and previous-response output token counts in one
+   * step. Resume restores chat history plus both counters from the same
+   * assistant usage record, so callers must avoid the normal
+   * setLastPromptTokenCount() clearing behavior.
    */
-  setLastCandidatesTokenCount(count: number): void {
-    this.lastCandidatesTokenCount = Math.max(0, count);
+  seedResumeTokenCounts(
+    promptTokenCount: number,
+    outputTokenCount: number,
+  ): void {
+    this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
+      ? Math.max(0, promptTokenCount)
+      : 0;
+    this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
+      ? Math.max(0, outputTokenCount)
+      : 0;
   }
 
   /**
@@ -1385,7 +1393,7 @@ export class GeminiChat {
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       this.lastPromptTokenCount = info.newTokenCount;
-      this.lastCandidatesTokenCount = 0;
+      this.lastOutputTokenCount = 0;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
@@ -1535,7 +1543,7 @@ export class GeminiChat {
       ).imageTokenEstimate;
       // When lastPromptTokenCount > 0, estimatePromptTokens uses the
       // API-authoritative previous prompt count + the previous response's
-      // candidatesTokenCount + a tiny estimate of just the new user message.
+      // output token count + a tiny estimate of just the new user message.
       // It does NOT touch the history at all in that branch, so skip the
       // costly `getHistory(true)` clone on the steady-state path.
       // The lastPromptTokenCount=0 branch (first send after --continue
@@ -1549,7 +1557,7 @@ export class GeminiChat {
         this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
         userContent,
         this.lastPromptTokenCount,
-        this.lastCandidatesTokenCount,
+        this.lastOutputTokenCount,
         imageTokenEstimate,
       );
       const shouldForceFromHard = effectiveTokens >= hard;
@@ -2556,7 +2564,7 @@ export class GeminiChat {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
             this.lastPromptTokenCount = lastPromptTokenCount;
-            this.lastCandidatesTokenCount =
+            this.lastOutputTokenCount =
               getUsageOutputTokenCountForPromptEstimate(usageMetadata);
             // Mirror to the global telemetry only when wired — subagents
             // pass `telemetryService=undefined` to keep their context usage

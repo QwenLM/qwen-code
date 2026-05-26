@@ -896,7 +896,7 @@ describe('SessionService', () => {
       ).toBe(450);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 450, candidatesTokenCount: 0 });
+      ).toEqual({ promptTokenCount: 450, outputTokenCount: 0 });
     });
 
     it('should prefer promptTokenCount over totalTokenCount when both are present', () => {
@@ -914,7 +914,7 @@ describe('SessionService', () => {
       ).toBe(200);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 200, candidatesTokenCount: 250 });
+      ).toEqual({ promptTokenCount: 200, outputTokenCount: 250 });
     });
 
     it('should restore disjoint candidate and thought output tokens when total is unavailable', () => {
@@ -931,7 +931,7 @@ describe('SessionService', () => {
       };
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 200, candidatesTokenCount: 100 });
+      ).toEqual({ promptTokenCount: 200, outputTokenCount: 100 });
     });
 
     it('should fall back to compression when latest assistant has zero usage', () => {
@@ -949,7 +949,7 @@ describe('SessionService', () => {
       ).toBe(300);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 300, candidatesTokenCount: 0 });
+      ).toEqual({ promptTokenCount: 300, outputTokenCount: 0 });
     });
   });
 
