@@ -344,6 +344,10 @@ describe('installation scripts', () => {
     expect(script).toContain('Archive contains symlinks or reparse points');
     expect(script).toContain('unsafe path with control character');
     expect(script).toContain('Failed to update user PATH');
+    expect(script).toContain('PRE_INSTALL_QWENS_LIST');
+    expect(script).toContain("Other 'qwen' executables exist");
+    expect(script).toContain('restart your command prompt');
+    expect(script).toContain('Or invoke directly: "!INSTALLED_BIN!"');
     expect(script).toContain('QWEN_INSTALL_ROOT');
     expect(script).toContain('npm fallback also failed');
     expect(script).toContain('echo Downloading !ARCHIVE_NAME!');
@@ -2443,6 +2447,70 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
         expect(readScript(rcFile)).toBe(
           ['before', 'middle', 'echo keep-me', 'after'].join('\n') + '\n',
         );
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        restoreMinimalDist(createdDist);
+      }
+    },
+  );
+
+  itOnUnix(
+    'warns when an existing qwen could shadow the standalone install',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const fakeBin = path.join(tmpDir, 'old-bin');
+        const existingQwen = path.join(fakeBin, 'qwen');
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+
+        mkdirSync(fakeBin, { recursive: true });
+        writeFileSync(existingQwen, '#!/usr/bin/env sh\necho old-qwen\n');
+        chmodSync(existingQwen, 0o755);
+
+        const output = runUnixInstaller(
+          archive,
+          installRoot,
+          home,
+          'standalone',
+          {
+            PATH: `${fakeBin}:${process.env.PATH}`,
+            SHELL: '/bin/bash',
+          },
+        ).toString();
+
+        const installedBin = path.join(installRoot, 'bin', 'qwen');
+        const bashrc = readScript(path.join(home, '.bashrc'));
+
+        expect(output).toContain("Other 'qwen' executables exist");
+        expect(output).toContain(existingQwen);
+        expect(output).toContain(
+          'To make this install take priority, restart your terminal.',
+        );
+        expect(output).toContain(`Or invoke directly: ${installedBin}`);
+        expect(bashrc).toContain('# Qwen Code PATH block begin');
+        expect(bashrc).toContain(
+          `export PATH='${path.join(installRoot, 'bin')}':$PATH`,
+        );
+
+        const resolvedQwen = execFileSync(
+          'bash',
+          ['-c', 'source "${HOME}/.bashrc"; command -v qwen'],
+          {
+            env: {
+              ...process.env,
+              HOME: home,
+              PATH: `${fakeBin}:${process.env.PATH}`,
+              SHELL: '/bin/bash',
+            },
+          },
+        )
+          .toString()
+          .trim();
+        expect(resolvedQwen).toBe(installedBin);
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
         restoreMinimalDist(createdDist);
