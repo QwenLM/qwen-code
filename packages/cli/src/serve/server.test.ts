@@ -138,6 +138,9 @@ const EXPECTED_STAGE1_FEATURES = [
   // MCP budget state crossings (`mcp_budget_warning` with hysteresis,
   // `mcp_child_refused_batch` coalesced per pass).
   'mcp_guardrail_events',
+  // T2.8 (#4514). Always-on. Daemon supports runtime MCP server
+  // mutation (add / remove) via POST/DELETE /workspace/mcp/servers.
+  'mcp_server_runtime_mutation',
   // Issue #4175 PR 19. Always-on. Daemon exposes the read-only file
   // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`.
   'workspace_file_read',
@@ -1172,6 +1175,18 @@ describe('createServeApp', () => {
       expect(SERVE_CAPABILITY_REGISTRY['mcp_guardrail_events']).toEqual({
         since: 'v1',
       });
+    });
+
+    it('registers mcp_server_runtime_mutation as a baseline tag (T2.8 #4514)', () => {
+      // Always-on tag. SDK clients pre-flight
+      // `caps.features.includes('mcp_server_runtime_mutation')` before
+      // calling `POST /workspace/mcp/servers` — older daemons silently 404.
+      expect(SERVE_CAPABILITY_REGISTRY['mcp_server_runtime_mutation']).toEqual({
+        since: 'v1',
+      });
+      expect(getAdvertisedServeFeatures()).toContain(
+        'mcp_server_runtime_mutation',
+      );
     });
 
     it('returns protocol version metadata with a fresh supported array', () => {

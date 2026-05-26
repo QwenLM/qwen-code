@@ -109,6 +109,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // surface). Listed alongside `mcp_guardrails` to keep the MCP-related
   // tags grouped.
   mcp_guardrail_events: { since: 'v1' },
+  // T2.8 (#4514). Always-on. Daemon supports runtime MCP server
+  // mutation via `POST /workspace/mcp/servers` (add) and
+  // `DELETE /workspace/mcp/servers/:name` (remove). SDK clients
+  // pre-flight this tag before calling those routes — older daemons
+  // without T2.8 silently 404.
+  mcp_server_runtime_mutation: { since: 'v1' },
   // Issue #4175 PR 19. Daemon supports the read-only workspace file
   // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`. The
   // four routes are gated as a single feature because they share the
