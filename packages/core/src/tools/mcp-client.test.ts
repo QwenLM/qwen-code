@@ -12,6 +12,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthProviderType, type Config } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
+import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
@@ -317,6 +318,25 @@ describe('mcp-client', () => {
         expect(response.status).toBe(405);
       });
 
+      it('treats parameterized GET SSE Accept headers as unsupported', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('bad method', { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'spring-ai',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json, text/event-stream; charset=utf-8',
+          },
+        });
+
+        expect(response.status).toBe(405);
+      });
+
       it('does not hide Streamable HTTP GET SSE server errors', async () => {
         const fetchFn = vi
           .fn<typeof fetch>()
@@ -346,6 +366,23 @@ describe('mcp-client', () => {
         const response = await fetchWithFallback('http://test-server/mcp', {
           method: 'GET',
           headers: { Accept: 'application/json' },
+        });
+
+        expect(response.status).toBe(400);
+      });
+
+      it('does not rewrite POST responses', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('bad request', { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'post-test',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
         });
 
         expect(response.status).toBe(400);
@@ -531,6 +568,8 @@ describe('mcp-client', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const authProvider = (transport as any)._authProvider;
         expect(authProvider).toBeInstanceOf(GoogleCredentialProvider);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._fetch).toEqual(expect.any(Function));
       });
 
       it('should use GoogleCredentialProvider with SSE transport', async () => {
@@ -567,6 +606,56 @@ describe('mcp-client', () => {
         ).rejects.toThrow(
           'URL must be provided in the config for Google Credentials provider',
         );
+      });
+    });
+
+    describe('authenticated Streamable HTTP compatibility fetch', () => {
+      it('wires the compatibility fetch for OAuth httpUrl transports', async () => {
+        const getValidToken = vi.fn().mockResolvedValue('oauth-token');
+        vi.mocked(MCPOAuthProvider).mockImplementation(
+          () =>
+            ({
+              getValidToken,
+            }) as unknown as MCPOAuthProvider,
+        );
+
+        const transport = await createTransport(
+          'oauth-test-server',
+          {
+            httpUrl: 'http://test-server',
+            oauth: {
+              enabled: true,
+              clientId: 'client-id',
+            },
+          },
+          false,
+        );
+
+        expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
+        expect(getValidToken).toHaveBeenCalledWith('oauth-test-server', {
+          enabled: true,
+          clientId: 'client-id',
+        });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._fetch).toEqual(expect.any(Function));
+      });
+
+      it('wires the compatibility fetch for service account httpUrl transports', async () => {
+        const transport = await createTransport(
+          'service-account-test-server',
+          {
+            httpUrl: 'http://test-server',
+            authProviderType: AuthProviderType.SERVICE_ACCOUNT_IMPERSONATION,
+            targetAudience: 'client.apps.googleusercontent.com',
+            targetServiceAccount:
+              'service-account@example-project.iam.gserviceaccount.com',
+          },
+          false,
+        );
+
+        expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._fetch).toEqual(expect.any(Function));
       });
     });
   });

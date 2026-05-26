@@ -73,9 +73,18 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
   const accept = new Headers(init?.headers).get('accept') ?? '';
   return accept
     .split(',')
-    .some((value) => value.trim().toLowerCase() === 'text/event-stream');
+    .map((value) => value.split(';')[0].trim().toLowerCase())
+    .some((type) => type === 'text/event-stream');
 }
 
+/**
+ * Wraps fetch to normalize Spring AI-style 400 responses to the SDK's
+ * unsupported sentinel for the optional Streamable HTTP GET SSE request.
+ *
+ * SDK coupling: `StreamableHTTPClientTransport._startOrAuthSse()` treats a
+ * 405 response as "GET SSE unsupported" and continues in POST-only mode.
+ * If the SDK changes that non-OK handling, update this wrapper in lockstep.
+ */
 export function createStreamableHttpCompatibilityFetch(
   mcpServerName: string,
   fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
