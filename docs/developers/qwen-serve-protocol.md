@@ -1107,6 +1107,36 @@ Response:
 
 On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler.
 
+### `POST /session/:id/recap`
+
+Capability tag: `session_recap`. Bridge → ACP extMethod `qwen/control/session/recap`.
+
+Generate a one-sentence "where did I leave off" summary of the session. Wraps core's `generateSessionRecap` (`packages/core/src/services/sessionRecap.ts`), which runs a side-query against the fast model with tools disabled, `maxOutputTokens: 300`, and a strict `<recap>...</recap>` output format. The side-query reads the session's existing GeminiClient chat history and does **not** add to it.
+
+Request body is ignored (send `{}` or empty). Non-strict mutation gate — posture mirrors `/session/:id/prompt` (the call costs tokens but mutates no state). No SSE event is published.
+
+Response (200):
+
+```json
+{
+  "sessionId": "sess:42",
+  "recap": "Debugging the auth retry race. Next: add deterministic timing to the integration test."
+}
+```
+
+`recap` is `null` (a normal 200, not an error) when:
+
+- the session has fewer than two dialog turns yet,
+- the side-query returned no extractable `<recap>...</recap>` payload,
+- or any underlying model error occurred (the core helper is best-effort and never throws).
+
+Errors:
+
+- `400 {code: 'invalid_client_id'}` — malformed `X-Qwen-Client-Id` header.
+- `404` — session unknown.
+
+Cancellation: **none in v1**. The route does not listen for HTTP client disconnect, no `AbortSignal` is plumbed into the bridge, and the ACP child runs the side-query to completion regardless of whether the caller has disconnected. The only ceilings are the bridge's 60s backstop timeout (`SESSION_RECAP_TIMEOUT_MS`) and the transport-closed race against ACP channel death. This is acceptable because recap is short (single-attempt, `maxOutputTokens: 300`, ~1–5s typical); a request-id-based cancel ext-method can plumb full end-to-end cancellation in a future release if the bandwidth cost ever justifies it.
+
 ### Mutation: approval, tools, init, MCP restart
 
 Issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) Wave 4 PR 17 adds four mutation control routes that let remote clients change runtime posture without touching the daemon host's CLI. All four:

@@ -30,6 +30,7 @@ import type {
   DaemonSessionDiedData,
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
+  DaemonSessionRecapResult,
   DaemonSessionUpdateData,
   DaemonSessionUpdateEvent,
   DaemonSessionViewState,
@@ -106,6 +107,11 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonClientEvictedData>().not.toBeNever();
     expectTypeOf<DaemonStreamErrorData>().not.toBeNever();
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();
+    // #4175 follow-up: the recap result type lives under the daemon
+    // sub-barrel and is re-exported at the top-level. Without this
+    // assertion a future barrel reshuffle could silently drop the
+    // result type SDK consumers need to type `client.recapSession`.
+    expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
   });
 
   it('exposes the PR 21 auth device-flow surface at the public entry', () => {

@@ -162,6 +162,15 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `'in_flight'` (concurrent discovery in progress), `'disabled'`
   // (server is configured but explicitly disabled).
   workspace_mcp_restart: { since: 'v1' },
+  // #4175 follow-up. Daemon hosts `POST /session/:id/recap`, which
+  // generates a one-sentence "where did I leave off" summary by
+  // running `generateSessionRecap` (`core/services/sessionRecap.ts`) as
+  // a side-query against the fast model. Non-strict mutation gate —
+  // posture mirrors `/session/:id/prompt` (token cost, not state
+  // mutation). The route returns `{sessionId, recap}` where `recap`
+  // may be `null` for too-short histories or transient model failures
+  // (best-effort, never throws). SDK helper: `DaemonClient.recapSession`.
+  session_recap: { since: 'v1' },
   // F2 (#4175 commit 5). Daemon hosts a workspace-shared MCP transport
   // pool (`QwenAgent.mcpPool`); `GET /workspace/mcp` reflects pool-level
   // accounting (`entryCount`, `entrySummary` on each per-server cell).

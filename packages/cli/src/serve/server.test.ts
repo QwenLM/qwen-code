@@ -134,6 +134,9 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_tool_toggle',
   'workspace_init',
   'workspace_mcp_restart',
+  // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
+  // core's `generateSessionRecap` for one-sentence session summaries).
+  'session_recap',
   // Issue #4175 PR 21 — auth device-flow surface advertised unconditionally.
   // Registry order on origin/main has PR 21 appended last, so the
   // baseline assertion below mirrors that even though PR 21 landed
@@ -248,6 +251,10 @@ interface FakeBridgeOpts {
     previous: ApprovalMode;
     persisted: boolean;
   }>;
+  generateSessionRecapImpl?: (
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ sessionId: string; recap: string | null }>;
   setToolEnabledImpl?: (
     toolName: string,
     enabled: boolean,
@@ -334,6 +341,10 @@ interface FakeBridge extends HttpAcpBridge {
     sessionId: string;
     mode: ApprovalMode;
     opts: { persist: boolean };
+    context?: BridgeClientRequestContext;
+  }>;
+  generateSessionRecapCalls: Array<{
+    sessionId: string;
     context?: BridgeClientRequestContext;
   }>;
   setToolEnabledCalls: Array<{
@@ -499,6 +510,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       previous: ApprovalMode.DEFAULT,
       persisted: o.persist,
     }));
+  const generateSessionRecapCalls: FakeBridge['generateSessionRecapCalls'] = [];
+  const generateSessionRecapImpl =
+    opts.generateSessionRecapImpl ??
+    (async (sessionId: string) => ({
+      sessionId,
+      recap: 'Default fake recap.',
+    }));
   const setToolEnabledCalls: FakeBridge['setToolEnabledCalls'] = [];
   const setToolEnabledImpl =
     opts.setToolEnabledImpl ??
@@ -562,6 +580,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionSupportedCommandsCalls,
     setModelCalls,
     setApprovalModeCalls,
+    generateSessionRecapCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
@@ -696,6 +715,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return setApprovalModeImpl(sessionId, mode, o, context);
+    },
+    async generateSessionRecap(sessionId, context) {
+      generateSessionRecapCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return generateSessionRecapImpl(sessionId, context);
     },
     async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
       setToolEnabledCalls.push({
@@ -2350,6 +2376,107 @@ describe('createServeApp', () => {
         .send({ modelId: 'qwen3-coder' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/recap (#4175 follow-up)', () => {
+    it('200 with the recap on success and forwards no body', async () => {
+      const bridge = fakeBridge({
+        generateSessionRecapImpl: async (sessionId) => ({
+          sessionId,
+          recap:
+            'Refactoring the auth retry. Next: regenerate the snapshot tests.',
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/recap')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        recap:
+          'Refactoring the auth retry. Next: regenerate the snapshot tests.',
+      });
+      expect(bridge.generateSessionRecapCalls).toHaveLength(1);
+      expect(bridge.generateSessionRecapCalls[0]?.sessionId).toBe('session-A');
+    });
+
+    it('200 with recap:null is a valid best-effort response', async () => {
+      // The core helper `generateSessionRecap` is documented to return
+      // `null` when history is too short or the side-query fails. That
+      // must surface as a normal 200 — a 5xx here would force daemon
+      // clients to special-case "we have no recap yet" as an error.
+      const bridge = fakeBridge({
+        generateSessionRecapImpl: async (sessionId) => ({
+          sessionId,
+          recap: null,
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/recap')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
+      expect(res.status).toBe(200);
+      expect(res.body.recap).toBeNull();
+    });
+
+    it('passes client identity context into the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      await request(app)
+        .post('/session/session-A/recap')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send();
+      expect(bridge.generateSessionRecapCalls[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
+    it('404 when bridge throws SessionNotFoundError', async () => {
+      const bridge = fakeBridge({
+        generateSessionRecapImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/missing/recap')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('400 on malformed X-Qwen-Client-Id header', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/recap')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'bad client id with spaces')
+        .send();
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+      expect(bridge.generateSessionRecapCalls).toHaveLength(0);
+    });
+
+    it('non-strict gate: works on no-token loopback default', async () => {
+      // Posture mirrors /session/:id/prompt — the route costs tokens
+      // but mutates no state, so it should NOT require operators to
+      // configure a token. This pins the contract so a future cleanup
+      // that mass-flips session-scoped routes to strict catches the
+      // regression.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/recap')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
+      expect(res.status).toBe(200);
     });
   });
 

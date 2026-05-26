@@ -10,6 +10,7 @@ import {
   AuthType,
   clearCachedCredentialFile,
   createDebugLogger,
+  generateSessionRecap,
   QwenOAuth2Event,
   qwenOAuth2Events,
   MCP_BUDGET_WARN_FRACTION,
@@ -2242,6 +2243,38 @@ class QwenAgent implements Agent {
         }
         const current = config.getApprovalMode();
         return { previous, current };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionRecap: {
+        // #4175 follow-up. Generate a one-sentence "where did I leave
+        // off" summary by running `generateSessionRecap` against the
+        // session's GeminiClient history. Best-effort: the core helper
+        // is documented to return `null` on any failure (short history,
+        // transient model error, etc.) and never throws — we surface
+        // that null verbatim so the daemon route returns a 200 with
+        // `recap: null` rather than a 5xx.
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        // v1: no cross-process abort plumbing. The bridge does not listen
+        // for HTTP client disconnect and no AbortSignal is threaded through
+        // the ext-method, so the LLM call in this child always runs to
+        // completion. The only ceilings are the bridge's 60s
+        // `SESSION_RECAP_TIMEOUT_MS` backstop and the transport-closed race
+        // against ACP channel death. Acceptable because recap is short
+        // (single-attempt side-query, `maxOutputTokens: 300`). A future
+        // request-id-based cancel ext-method can plumb a real signal
+        // end-to-end if the bandwidth cost ever becomes an issue.
+        const recap = await generateSessionRecap(
+          config,
+          new AbortController().signal,
+        );
+        return { sessionId, recap };
       }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
