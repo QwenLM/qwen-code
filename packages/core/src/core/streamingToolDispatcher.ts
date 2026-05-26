@@ -471,7 +471,8 @@ export function isEarlyDispatchSafe(
         const idx = trimmed.lastIndexOf(stripped);
         if (idx < 0) return false;
         const after = trimmed.slice(idx + stripped.length);
-        if (!/^\s*['"]?\s*$/.test(after)) return false;
+        const trailer = after.trim();
+        if (trailer !== '' && trailer !== "'" && trailer !== '"') return false;
       }
       return isShellCommandReadOnly(stripped);
     } catch {
