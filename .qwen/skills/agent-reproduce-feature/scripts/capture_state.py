@@ -138,8 +138,28 @@ def sha256_file(path: Path, max_bytes: int) -> str | None:
 
 
 def is_sensitive_path(rel_path: str) -> bool:
-    parts = re.split(r"[/._ -]+", rel_path.lower())
-    return any(part in SENSITIVE_PATH_PARTS for part in parts)
+    # Match whole path segments (split on `/`) and check the full basename so
+    # composite filenames keep their identity. The previous regex split on
+    # `[/._ -]+`, which produced both false negatives (`id_rsa` -> `["id",
+    # "rsa"]` missed `id_rsa`) and false positives (`tokenizer.json` ->
+    # `["token", "izer", "json"]` matched `token`). Hidden directories like
+    # `.ssh` / `.gnupg` are still matched via their non-dot equivalent, and
+    # basenames are also checked with their suffix stripped so files like
+    # `credentials.json` continue to match `credentials`.
+    lower = rel_path.lower()
+    parts = lower.split("/")
+    basename = parts[-1] if parts else lower
+    if basename in SENSITIVE_PATH_PARTS:
+        return True
+    stem = basename.rsplit(".", 1)[0] if "." in basename else basename
+    if stem and stem in SENSITIVE_PATH_PARTS:
+        return True
+    for part in parts:
+        if part in SENSITIVE_PATH_PARTS:
+            return True
+        if part.startswith(".") and part[1:] in SENSITIVE_PATH_PARTS:
+            return True
+    return False
 
 
 def looks_like_text_path(path: Path) -> bool:
