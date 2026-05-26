@@ -21,6 +21,18 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/internal/testUtils.ts',
       ),
+      // Same rationale as above: bridgeErrors and status subpaths
+      // resolve to dist/ via package.json exports, but tests in the
+      // monorepo worktree need the live source (dist may be stale or
+      // absent during development).
+      '@qwen-code/acp-bridge/bridgeErrors': path.resolve(
+        __dirname,
+        '../acp-bridge/src/bridgeErrors.ts',
+      ),
+      '@qwen-code/acp-bridge/status': path.resolve(
+        __dirname,
+        '../acp-bridge/src/status.ts',
+      ),
     },
   },
   test: {
