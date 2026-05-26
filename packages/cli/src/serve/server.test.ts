@@ -32,6 +32,7 @@ import type {
 import { ApprovalMode, TrustGateError } from '@qwen-code/qwen-code-core';
 import {
   CompactionInFlightError,
+  CompressFailedError,
   InvalidClientIdError,
   InvalidMetaKeyError,
   InvalidPermissionOptionError,
@@ -2705,6 +2706,37 @@ describe('createServeApp', () => {
         .send({});
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('500 compress_failed when bridge throws CompressFailedError (PR #4516 round-2 review R2-1)', async () => {
+      // The bridge reconstructs the agent's typed compress_failed
+      // error into `CompressFailedError`; this test verifies the
+      // server route then maps it to a stable
+      // `500 {code: 'compress_failed', sessionId, compressionStatus}`
+      // body. Without this end-to-end test, an accidental deletion
+      // of the `sendBridgeError` mapping arm would silently route
+      // through the catch-all 500 with JSON-RPC `code: -32603`,
+      // breaking SDK consumers that branch on
+      // `body.code === 'compress_failed'` per the docs.
+      const bridge = fakeBridge({
+        compressSessionImpl: async (sessionId) => {
+          throw new CompressFailedError(
+            sessionId,
+            'COMPRESSION_FAILED_INFLATED_TOKEN_COUNT',
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/compress')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(500);
+      expect(res.body).toMatchObject({
+        code: 'compress_failed',
+        sessionId: 'session-A',
+        compressionStatus: 'COMPRESSION_FAILED_INFLATED_TOKEN_COUNT',
+      });
     });
   });
 

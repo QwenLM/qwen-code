@@ -3177,8 +3177,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // underlying extMethod settlement, NOT the outer Promise.race
       // settlement. `withTimeout` rejects the race after 180s but does
       // NOT cancel the underlying `entry.connection.extMethod(...)` call
-      // (ACP has no cancel surface today; same FIXME as `setSessionModel`
-      // at line ~2904). If we cleared the flag in a `finally { }` on the
+      // (ACP has no cancel surface today; same FIXME as
+      // `setSessionModel` elsewhere in this file — grep
+      // `FIXME(stage-2)` for the canonical write-up). If we cleared
+      // the flag in a `finally { }` on the
       // outer race, a second compress could start, run its own
       // `tryCompressChat`, and race the first call's still-pending
       // `setHistory` write — the exact data corruption the flag was

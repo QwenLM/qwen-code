@@ -4803,6 +4803,37 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('CompressFailedError reconstruction falls back to UNKNOWN when compressionStatus is missing (PR #4516 round-2 review R2-2)', async () => {
+      // The agent's outer catch at `acpAgent.ts:2333` throws
+      // `RequestError(-32004, message, {errorKind: 'compress_failed'})`
+      // WITHOUT a `compressionStatus` field whenever `tryCompressChat`
+      // raises a non-RequestError (transport / auth / OOM mid-side-
+      // query). The bridge's reconstruction must still produce a
+      // typed `CompressFailedError` so the route's 500 mapping
+      // applies — falling back to `'UNKNOWN'` for the status. Without
+      // this test, a regression in the fallback would route through
+      // the catch-all 500 with JSON-RPC code -32603.
+      const bridge = makeBridge({
+        channelFactory: compressFactory({
+          shouldThrow: () =>
+            new RequestError(-32004, 'compress failed mid-side-query', {
+              errorKind: 'compress_failed',
+              // No compressionStatus — exercises the UNKNOWN fallback.
+            }),
+        }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const reject = await bridge
+        .compressSession(session.sessionId)
+        .catch((e) => e as unknown);
+      expect(reject).toBeInstanceOf(CompressFailedError);
+      expect((reject as CompressFailedError).compressionStatus).toBe('UNKNOWN');
+      expect((reject as CompressFailedError).message).toContain(
+        'compress failed mid-side-query',
+      );
+      await bridge.shutdown();
+    });
+
     it('clears compressInFlight in finally even on extMethod error', async () => {
       // Without the `finally` clause, a thrown extMethod (transport
       // close, agent crash) would strand the flag set and every
@@ -5106,10 +5137,21 @@ describe('createHttpAcpBridge', () => {
       // Bad X-Qwen-Client-Id throws InvalidClientIdError. The fix
       // moves resolveTrustedClientId BEFORE entry.meta = next. Without
       // it, the bag would change, no event would fire, and the caller
-      // would see a 400 — silent state mutation. We assert the bag
-      // remains the prior state (here `{}`) after a failed write.
+      // would see a 400 — silent state mutation. We assert (a) the
+      // bag remains the prior state (here `{}`), AND (b) no
+      // `session_meta_changed` event fires — PR #4516 round-2 review
+      // R2-S3 caught that the original C1 test only checked (a),
+      // missing a regression where the event publish ran before the
+      // throw and an exception-rolled-back mutation left the bag
+      // unchanged but the event in subscriber queues.
       const bridge = metaBridge();
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const collect = (async () => {
+        for await (const e of sub) events.push(e);
+      })();
+      await new Promise((r) => setImmediate(r));
       expect(() =>
         bridge.setSessionMeta(
           session.sessionId,
@@ -5119,7 +5161,13 @@ describe('createHttpAcpBridge', () => {
       ).toThrow(InvalidClientIdError);
       // Bag must remain empty — the throw happened before any mutation.
       expect(bridge.getSessionMeta(session.sessionId).meta).toEqual({});
+      // And no session_meta_changed event must have fired.
+      await new Promise((r) => setImmediate(r));
+      expect(
+        events.filter((e) => e.type === 'session_meta_changed'),
+      ).toHaveLength(0);
       await bridge.shutdown();
+      await collect.catch(() => {});
     });
 
     it('emits session_meta_changed with envelope-level originatorClientId', async () => {

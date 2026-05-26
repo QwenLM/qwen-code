@@ -2295,12 +2295,25 @@ class QwenAgent implements Agent {
           // (the bridge publishes for anything `!== 'NOOP'`).
           const statusName = CompressionStatus[info.compressionStatus];
           if (statusName === undefined) {
+            // PR #4516 round-2 review R2-S1: tighten the diagnostic
+            // surface. The contract says `info.compressionStatus` is
+            // a `CompressionStatus` numeric enum, but defensive code
+            // here accepts that core could return off-contract values.
+            // `String(null) === 'null'`, `String({}) === '[object
+            // Object]'` — those literals on the wire are useless to
+            // operators reading the daemon log. Distinguish the
+            // typeof so the failure shape carries actionable info.
+            const rawStatus = info.compressionStatus;
+            const safeStatus =
+              typeof rawStatus === 'number'
+                ? String(rawStatus)
+                : `(non-numeric: ${typeof rawStatus})`;
             throw new RequestError(
               -32004,
-              `Compress returned unknown status ${info.compressionStatus}`,
+              `Compress returned unknown status ${safeStatus}`,
               {
                 errorKind: 'compress_failed',
-                compressionStatus: String(info.compressionStatus),
+                compressionStatus: safeStatus,
               },
             );
           }
