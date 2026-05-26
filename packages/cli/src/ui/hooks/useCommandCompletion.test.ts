@@ -215,6 +215,50 @@ describe('useCommandCompletion', () => {
         });
       });
 
+      it('should not trigger AT completion when @ is not preceded by whitespace', async () => {
+        const text = 'cici@192.168.0.160';
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(text),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+      });
+
+      it('should not trigger AT completion for email-like patterns', async () => {
+        const text = 'user@example.com';
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(text),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+      });
+
       it('should correctly identify the completion context with multiple @ symbols', async () => {
         const text = '@file1 @file2';
         const cursorOffset = 3; // @fi|le1 @file2

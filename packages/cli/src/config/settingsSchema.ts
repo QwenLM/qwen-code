@@ -8,6 +8,7 @@ import type {
   MCPServerConfig,
   BugCommandSettings,
   TelemetrySettings,
+  OutboundCorrelationSettings,
   AuthType,
   ChatCompressionSettings,
   ModelProvidersConfig,
@@ -1037,6 +1038,29 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  outboundCorrelation: {
+    type: 'object',
+    label: 'Outbound Correlation',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: undefined as OutboundCorrelationSettings | undefined,
+    description:
+      "SECURITY-RELEVANT. Controls what client-side correlation data qwen-code writes into outbound LLM API requests (DashScope, OpenAI, Anthropic, etc.) — separate from `telemetry.*` which governs data flow into the operator's OWN OTLP collector. All values default to off. Opt in only when the LLM provider also reports into your OTel collector for cross-process trace stitching (e.g. ARMS Tracing + DashScope).",
+    showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'object',
+      properties: {
+        propagateTraceContext: {
+          description:
+            "Requires `telemetry.enabled: true`. Inject W3C `traceparent` header on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...). Default: false — trace context stays internal to the operator's OTLP collector and is NOT written onto third-party request streams. Set true only when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope). Client HTTP spans are still emitted in either case; this flag only governs the wire `traceparent` header.",
+          type: 'boolean',
+          default: false,
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+
   fastModel: {
     type: 'string',
     label: 'Fast Model',
@@ -1076,6 +1100,26 @@ const SETTINGS_SCHEMA = {
           'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
         showInDialog: false,
       },
+      maxWallTimeSeconds: {
+        type: 'number',
+        label: 'Max Wall-Clock Time (seconds)',
+        category: 'Model',
+        requiresRestart: false,
+        default: -1,
+        description:
+          'Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).',
+        showInDialog: false,
+      },
+      maxToolCalls: {
+        type: 'number',
+        label: 'Max Tool Calls',
+        category: 'Model',
+        requiresRestart: false,
+        default: -1,
+        description:
+          'Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.',
+        showInDialog: false,
+      },
       chatCompression: {
         type: 'object',
         label: 'Chat Compression',
@@ -1109,7 +1153,8 @@ const SETTINGS_SCHEMA = {
         category: 'Model',
         requiresRestart: false,
         default: true,
-        description: 'Disable all loop detection checks (streaming and LLM).',
+        description:
+          'Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.',
         showInDialog: false,
       },
       skipStartupContext: {

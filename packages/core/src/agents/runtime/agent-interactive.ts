@@ -11,6 +11,10 @@
  * state (messages, pending approvals, live outputs) that the UI reads.
  */
 
+import {
+  createAbortController,
+  createChildAbortController,
+} from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
@@ -57,7 +61,7 @@ export class AgentInteractive {
   private error: string | undefined;
   private lastRoundError: string | undefined;
   private executionPromise: Promise<void> | undefined;
-  private masterAbortController = new AbortController();
+  private masterAbortController = createAbortController();
   private roundAbortController: AbortController | undefined;
   private chat: GeminiChat | undefined;
   private toolsList: FunctionDeclaration[] = [];
@@ -150,14 +154,9 @@ export class AgentInteractive {
     this.setStatus(AgentStatus.RUNNING);
     this.lastRoundError = undefined;
     this.roundCancelledByUser = false;
-    this.roundAbortController = new AbortController();
-
-    // Propagate master abort to round
-    const onMasterAbort = () => this.roundAbortController?.abort();
-    this.masterAbortController.signal.addEventListener('abort', onMasterAbort);
-    if (this.masterAbortController.signal.aborted) {
-      this.roundAbortController.abort();
-    }
+    this.roundAbortController = createChildAbortController(
+      this.masterAbortController,
+    );
 
     try {
       const initialMessages = [
@@ -196,10 +195,10 @@ export class AgentInteractive {
       debugLogger.error('AgentInteractive round error:', err);
       this.addMessage('info', errorMessage, { metadata: { level: 'error' } });
     } finally {
-      this.masterAbortController.signal.removeEventListener(
-        'abort',
-        onMasterAbort,
-      );
+      // Helper's reverse-cleanup detaches the parent listener automatically
+      // when the round controller aborts; abort here so cleanup fires whether
+      // or not the round was already cancelled.
+      this.roundAbortController?.abort();
       this.roundAbortController = undefined;
     }
   }

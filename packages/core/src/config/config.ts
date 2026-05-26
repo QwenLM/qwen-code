@@ -268,7 +268,6 @@ export interface BugCommandSettings {
 }
 
 export interface ChatCompressionSettings {
-  contextPercentageThreshold?: number;
   /**
    * Estimated tokens for a single inline image / document part when
    * apportioning chars across history in `findCompressSplitPoint`.
@@ -335,6 +334,42 @@ export interface TelemetryMetricsSettings {
    * short-term debugging — spans and logs still carry session.id.
    */
   includeSessionId?: boolean;
+}
+
+/**
+ * Security-relevant settings controlling what client-side correlation
+ * data qwen-code writes into outbound LLM API requests.
+ *
+ * **Why this is a separate namespace from `telemetry.*`:** telemetry
+ * controls data flow into the user's OWN observability backend (OTLP
+ * collector / file outfile). The settings here control data flow OUT of
+ * the qwen-code process and INTO third-party LLM provider request
+ * streams (DashScope, OpenAI, Anthropic, etc.). Different recipients =
+ * different consent decision, so a different settings tree. See PR
+ * #4390 review (LaZzyMan) for the framing rationale.
+ *
+ * All values default to off / no propagation. Operators who want to
+ * propagate trace context for server-side trace stitching (e.g. ARMS
+ * Tracing + DashScope) opt in explicitly.
+ */
+export interface OutboundCorrelationSettings {
+  /**
+   * Inject W3C `traceparent` header on outbound HTTP requests
+   * originated by undici / global `fetch` (LLM SDK calls, MCP
+   * StreamableHTTP clients, WebFetch tool, etc.). Default: `false`.
+   *
+   * When `false`, the SDK is configured with a no-op
+   * `TextMapPropagator` so trace context stays internal to the user's
+   * OTLP collector (operator still gets client HTTP spans, but the
+   * trace id is not written onto third-party request streams).
+   *
+   * When `true`, the OTel default W3C composite propagator
+   * (`tracecontext` + `baggage`) is installed and `traceparent` is
+   * written on every outbound `fetch`. Useful when the LLM provider
+   * also reports into the operator's OTel collector — e.g. ARMS
+   * Tracing + DashScope — for cross-process trace stitching.
+   */
+  propagateTraceContext?: boolean;
 }
 
 export interface OutputSettings {
@@ -565,6 +600,7 @@ export interface ConfigParameters {
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
+  outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
   /**
@@ -593,6 +629,19 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  /**
+   * Wall-clock budget for an unattended run, in seconds. `-1` (default)
+   * means no limit. Enforced by the CLI's non-interactive run loop —
+   * see `RunBudgetEnforcer` in `packages/cli/src/utils/runBudget.ts`.
+   * Issue: QwenLM/qwen-code#4103.
+   */
+  maxWallTimeSeconds?: number;
+  /**
+   * Cumulative tool-call budget across the entire run. `-1` means no
+   * limit. Counts every `executeToolCall` invocation (incl. failed
+   * tools, since the model is still consuming tokens reading the error).
+   */
+  maxToolCalls?: number;
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
@@ -854,6 +903,7 @@ export class Config {
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
+  private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
@@ -884,6 +934,8 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly maxWallTimeSeconds: number;
+  private readonly maxToolCalls: number;
   private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
@@ -1022,6 +1074,10 @@ export class Config {
       metrics: params.telemetry?.metrics,
       resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
+    this.outboundCorrelationSettings = {
+      propagateTraceContext:
+        params.outboundCorrelation?.propagateTraceContext ?? false,
+    };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
       name: 'Qwen-Coder',
@@ -1047,6 +1103,8 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
+    this.maxToolCalls = params.maxToolCalls ?? -1;
     this.clearContextOnIdle = {
       toolResultsThresholdMinutes:
         params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
@@ -1072,6 +1130,24 @@ export class Config {
     this.loadMemoryFromIncludeDirectories =
       params.loadMemoryFromIncludeDirectories ?? false;
     this.importFormat = params.importFormat ?? 'tree';
+    // Auto-compaction threshold moved to built-in constants (computeThresholds
+    // in chatCompressionService.ts). The old `contextPercentageThreshold`
+    // field is deprecated; if present in user settings, emit a one-time
+    // warning and ignore the value.
+    if (
+      params.chatCompression &&
+      typeof (params.chatCompression as Record<string, unknown>)[
+        'contextPercentageThreshold'
+      ] !== 'undefined'
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[qwen-code] chatCompression.contextPercentageThreshold has been removed ' +
+          'and is now controlled by built-in thresholds. Setting will be ignored. ' +
+          'Remove this key from your settings.json to silence this warning; ' +
+          'see docs/users/configuration/settings.md for current compaction behavior.',
+      );
+    }
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
@@ -2164,6 +2240,14 @@ export class Config {
     return this.maxSessionTurns;
   }
 
+  getMaxWallTimeSeconds(): number {
+    return this.maxWallTimeSeconds;
+  }
+
+  getMaxToolCalls(): number {
+    return this.maxToolCalls;
+  }
+
   getClearContextOnIdle(): ClearContextOnIdleSettings {
     return this.clearContextOnIdle;
   }
@@ -2851,6 +2935,15 @@ export class Config {
 
   getTelemetryResourceAttributeWarnings(): readonly string[] {
     return this.telemetrySettings.resourceAttributeWarnings ?? [];
+  }
+
+  /**
+   * Whether to inject W3C `traceparent` on outbound `fetch` requests
+   * (LLM SDKs, MCP, WebFetch, etc.). Default false — see
+   * `OutboundCorrelationSettings` for rationale.
+   */
+  getOutboundCorrelationPropagateTraceContext(): boolean {
+    return this.outboundCorrelationSettings.propagateTraceContext ?? false;
   }
 
   getTelemetryOutfile(): string | undefined {
