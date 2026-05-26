@@ -14,7 +14,7 @@ import { useStdin, useStdout, useInput } from 'ink';
 import {
   enableMouseEvents,
   disableMouseEvents,
-  parseMouseEvent,
+  parseSGRMouseEvent,
   type MouseEvent,
 } from '../utils/mouse.js';
 
@@ -44,10 +44,12 @@ export type MouseHandler = (event: MouseEvent) => void;
  * still routes the same input to the app's other `useInput` handlers, so
  * keyboard navigation is unaffected.
  *
- * Note: only SGR mode (`?1006h`, which we enable) is parsed via this path.
- * The legacy X11 encoding (`ESC [ M` + three raw bytes) is not recoverable
- * here because ink's CSI parser terminates the sequence at the `M` final
- * byte; SGR is the encoding modern terminals emit once `?1006h` is set.
+ * Note: only SGR mode (`?1006h`, which we enable) is parsed via this path —
+ * we call `parseSGRMouseEvent` directly rather than `parseMouseEvent` (which
+ * also tries the X11 fallback). X11 is unwanted here: ink's CSI parser
+ * mangles a real `ESC [ M` + 3-byte sequence anyway, and a literal X11 prefix
+ * arriving via pasted text could otherwise misfire a spurious mouse event.
+ * SGR is the encoding modern terminals emit once `?1006h` is set.
  *
  * The handler is stored in a ref so callers don't need to memoize it.
  */
@@ -92,7 +94,7 @@ export function useMouseEvents(
       // stripped — re-prepend it so the SGR mouse regex matches.
       let buffer = input.startsWith(ESC) ? input : ESC + input;
       while (buffer.length > 0) {
-        const parsed = parseMouseEvent(buffer);
+        const parsed = parseSGRMouseEvent(buffer);
         if (!parsed) break;
         handlerRef.current(parsed.event);
         buffer = buffer.slice(parsed.length);
