@@ -62,7 +62,7 @@ export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 
 const debugLogger = createDebugLogger('MCP');
 
-const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400, 405]);
+const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
 
 function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
   const method = (init?.method ?? 'GET').toUpperCase();

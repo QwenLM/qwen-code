@@ -354,6 +354,26 @@ describe('mcp-client', () => {
         expect(response.status).toBe(502);
       });
 
+      it('does not rewrite the SDK-native GET SSE unsupported sentinel', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(
+            new Response('method not allowed', { status: 405 }),
+          );
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'native-unsupported',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(response.status).toBe(405);
+        expect(await response.text()).toBe('method not allowed');
+      });
+
       it('does not rewrite non-SSE GET responses', async () => {
         const fetchFn = vi
           .fn<typeof fetch>()
