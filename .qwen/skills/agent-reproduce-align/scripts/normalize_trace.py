@@ -138,7 +138,11 @@ def summarize_messages(value: Any) -> list[dict[str, Any]]:
     messages = None
     system_messages: list[Any] = []
     if isinstance(value, dict):
-        for key in ("system", "instructions"):
+        # Provider conventions for the system prompt:
+        # - Anthropic Messages API: top-level "system"
+        # - OpenAI Responses API: top-level "instructions"
+        # - Gemini / Qwen Code: top-level "systemInstruction" (camelCase)
+        for key in ("system", "instructions", "systemInstruction"):
             if key in value:
                 system_messages.append(value[key])
         if isinstance(value.get("messages"), list):
