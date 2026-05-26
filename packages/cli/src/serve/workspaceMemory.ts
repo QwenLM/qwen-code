@@ -16,7 +16,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debugMode.js';
-import type { HttpAcpBridge } from './httpAcpBridge.js';
+import type { AcpSessionBridge } from './acpSessionBridge.js';
 import {
   createIdleWorkspaceMemoryStatus,
   STATUS_SCHEMA_VERSION,
@@ -57,7 +57,7 @@ import {
  */
 
 export interface WorkspaceMemoryRouteDeps {
-  bridge: HttpAcpBridge;
+  bridge: AcpSessionBridge;
   boundWorkspace: string;
   /**
    * `mutate({ strict: true })`-style middleware factory from PR 15.

@@ -110,7 +110,7 @@ export interface BridgeTelemetry {
 }
 
 /**
- * Construction options for `createHttpAcpBridge`. Most fields are
+ * Construction options for `createAcpSessionBridge`. Most fields are
  * tuning knobs with sensible defaults; `boundWorkspace` is the only
  * strictly-required field. See per-field JSDoc for caller contract.
  */
@@ -190,7 +190,7 @@ export interface BridgeOptions {
    * theoretically diverge from the runQwenServe canonicalize on
    * NFS-transient / mid-rename filesystems, landing the bridge with
    * one canonical form while `/capabilities` advertises another).
-   * Direct embeds / tests calling `createHttpAcpBridge` themselves
+   * Direct embeds / tests calling `createAcpSessionBridge` themselves
    * MUST canonicalize before passing.
    */
   boundWorkspace: string;

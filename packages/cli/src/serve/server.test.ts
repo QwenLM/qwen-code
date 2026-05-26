@@ -66,9 +66,9 @@ import {
   type BridgeSession,
   type BridgeSessionSummary,
   type BridgeSpawnRequest,
-  type HttpAcpBridge,
+  type AcpSessionBridge,
   type SessionMetadataUpdate,
-} from './httpAcpBridge.js';
+} from './acpSessionBridge.js';
 import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type {
   ServeSessionContextStatus,
@@ -361,7 +361,7 @@ interface FakeBridgeOpts {
   heartbeatStateImpl?: (sessionId: string) => BridgeHeartbeatState | undefined;
 }
 
-interface FakeBridge extends HttpAcpBridge {
+interface FakeBridge extends AcpSessionBridge {
   calls: BridgeSpawnRequest[];
   loadCalls: BridgeRestoreSessionRequest[];
   resumeCalls: BridgeRestoreSessionRequest[];
@@ -725,7 +725,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       clientLastSeenAt: new Map<string, number>(),
     }));
   return {
-    // F3 Commit 6 — `HttpAcpBridge.permissionPolicy` is required so
+    // F3 Commit 6 — `AcpSessionBridge.permissionPolicy` is required so
     // `/capabilities` can expose `policy.permission`. Tests don't
     // exercise mediation; pin to the pre-F3 default ('first-responder')
     // so existing assertions stay shape-compatible.
@@ -6250,7 +6250,7 @@ describe('GET /session/:id/events (SSE)', () => {
         yield { id: 1, v: 1, type: 'session_update', data: 'first' };
         // `BridgeTimeoutError(label, timeoutMs)` — 2 positional args
         // (wenshao #4360 review). The resulting message is
-        // `"HttpAcpBridge initialize timed out after 5000ms"` which
+        // `"AcpSessionBridge initialize timed out after 5000ms"` which
         // satisfies the `.toContain('timed out')` assertion below.
         throw new BridgeTimeoutError('initialize', 5000);
       },

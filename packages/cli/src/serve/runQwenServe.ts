@@ -13,9 +13,9 @@ import { getDeviceFlowRegistry } from './auth/deviceFlow.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import {
   canonicalizeWorkspace,
-  createHttpAcpBridge,
-  type HttpAcpBridge,
-} from './httpAcpBridge.js';
+  createAcpSessionBridge,
+  type AcpSessionBridge,
+} from './acpSessionBridge.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -333,14 +333,14 @@ function withSettingsLock<T>(
 export interface RunHandle {
   server: Server;
   url: string;
-  bridge: HttpAcpBridge;
+  bridge: AcpSessionBridge;
   /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
 }
 
 export interface RunQwenServeDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
-  bridge?: HttpAcpBridge;
+  bridge?: AcpSessionBridge;
   /**
    * Workspace filesystem factory (#4175 PR 19). When omitted,
    * `runQwenServe` constructs one using `boundWorkspace`,
@@ -756,7 +756,7 @@ export async function runQwenServe(
 
   const bridge =
     deps.bridge ??
-    createHttpAcpBridge({
+    createAcpSessionBridge({
       maxSessions: opts.maxSessions,
       ...(opts.eventRingSize !== undefined
         ? { eventRingSize: opts.eventRingSize }
