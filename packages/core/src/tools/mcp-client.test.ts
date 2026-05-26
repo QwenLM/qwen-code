@@ -9,7 +9,7 @@ import * as ClientLib from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProviderType, type Config } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
@@ -33,6 +33,12 @@ import {
 import type { ToolRegistry } from './tool-registry.js';
 
 const mockExistsSync = vi.hoisted(() => vi.fn(() => true));
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+}));
 const ORIGINAL_ENV = process.env;
 
 vi.mock('node:fs', () => ({
@@ -43,8 +49,15 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js');
 vi.mock('@google/genai');
 vi.mock('../mcp/oauth-provider.js');
 vi.mock('../mcp/oauth-token-storage.js');
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
 
 describe('mcp-client', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     process.env = ORIGINAL_ENV;
@@ -316,6 +329,53 @@ describe('mcp-client', () => {
 
         expect(fetchFn).toHaveBeenCalledTimes(1);
         expect(response.status).toBe(405);
+        expect(response.statusText).toBe('Method Not Allowed');
+        expect(await response.text()).toBe('');
+      });
+
+      it('omits response body diagnostics when the fallback body is empty', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response(null, { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'empty-body',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(response.status).toBe(405);
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.not.stringContaining('Response body:'),
+        );
+      });
+
+      it('truncates Streamable HTTP GET SSE error body diagnostics', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('x'.repeat(1024), { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'large-error-body',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(response.status).toBe(405);
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `Response body: ${JSON.stringify(`${'x'.repeat(512)}...`)}`,
+          ),
+        );
+        expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('x'.repeat(600)),
+        );
       });
 
       it('treats parameterized GET SSE Accept headers as unsupported', async () => {
@@ -372,6 +432,29 @@ describe('mcp-client', () => {
 
         expect(response.status).toBe(405);
         expect(await response.text()).toBe('method not allowed');
+      });
+
+      it('does not rewrite resumable GET SSE errors with Last-Event-ID', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(
+            new Response('{"error":"invalid cursor"}', { status: 400 }),
+          );
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'resume-error',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: {
+            Accept: 'text/event-stream',
+            'Last-Event-ID': 'event-123',
+          },
+        });
+
+        expect(response.status).toBe(400);
+        expect(await response.text()).toBe('{"error":"invalid cursor"}');
       });
 
       it('does not rewrite non-SSE GET responses', async () => {
