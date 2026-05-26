@@ -15,7 +15,7 @@ source "$HERE/lib.sh"
 
 scenarios=()
 if [[ $# -eq 0 ]]; then
-  scenarios=(baseline json-schema shell-bypass abort perf)
+  scenarios=(baseline json-schema shell-bypass abort perf perf8)
 else
   scenarios=("$@")
 fi

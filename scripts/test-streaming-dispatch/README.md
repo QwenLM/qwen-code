@@ -22,6 +22,7 @@ scripts/test-streaming-dispatch/
 ├── scenario-shell-bypass.sh    # classifier rejects wrapper-trailing-content bypass
 ├── scenario-abort.sh           # SIGINT must not leave orphan tool subprocesses
 ├── scenario-perf.sh            # 4 slow shell tools — regression guard for speedup claim
+├── scenario-perf8.sh           # 8 slow shell tools — cumulative-spread hypothesis test
 └── test-results/<stamp>/       # per-run logs (gitignored)
 ```
 
@@ -139,6 +140,50 @@ single-turn parallel-call wall time:
 The `perf` scenario stays in the harness as a regression guard:
 flag-on must never run materially slower than flag-off, and outputs
 must remain byte-identical.
+
+### `perf8`
+
+Doubles the tool count to 8 to test the cumulative-spread hypothesis
+(more parallel tool calls → wider `tool_call` spread in the stream
+→ bigger early-dispatch window). Eight independent read-only shell
+commands ranging 0.4–2.0s locally; sum serial ≈10s, parallel ≈2s.
+
+**Empirical finding (N=5, idealab qwen3.7-max, 2026-05-26):**
+
+|                                | flag off                         | flag on                           |
+| ------------------------------ | -------------------------------- | --------------------------------- |
+| samples (s)                    | 66.6 / 42.7 / 32.8 / 43.2 / 32.7 | 41.1 / 39.9 / 110.8 / 36.9 / 37.2 |
+| min                            | 32.7                             | 36.9                              |
+| median (N=5)                   | 42.7                             | 39.9 (Δ +2.85s, **+6.7%**)        |
+| median trimmed (drop max each) | 37.77                            | 38.54 (Δ -0.77s, **-2.0%**)       |
+| winsorized mean (N=3)          | 39.56                            | 39.38 (Δ +0.18s)                  |
+
+**The result inverts depending on trim strategy** — N=5 raw median
+shows flag-on 2.8s faster, but trimming the highest outlier flips it
+to 0.8s slower. That's the textbook signature of a signal smaller
+than the noise floor: ±20s API variance (one 110.8s outlier on, one
+66.6s outlier off) swamps any 1-2s feature benefit the cumulative
+spread might deliver.
+
+The conclusion stands across both perf scenarios: **the wall-time
+saving from streaming-tool-dispatch on OpenAI-style providers is
+below the noise floor for parallel-tool-calls-in-single-response
+workloads**, regardless of tool count. This is structural — the
+provider batches tool_calls at stream end, and the post-stream
+scheduler already runs them in parallel.
+
+To measurably demonstrate the feature's speedup you would need:
+
+- An Anthropic-style provider (mid-stream tool_use emission), or
+- A multi-turn workflow where each turn's tool result overlaps with
+  the next turn's stream, or
+- A workload with a single very long tool (~10s+) plus continued
+  model generation, where the tool finishes during the stream tail.
+
+None of those map cleanly onto the OpenAI-compatible qwen3.7-max
+provider in this codebase, so we don't try to fabricate a synthetic
+win. The harness's value is the regression guard + the abort
+verification + the safety guarantees, not a perf demo.
 
 ### `abort`
 
