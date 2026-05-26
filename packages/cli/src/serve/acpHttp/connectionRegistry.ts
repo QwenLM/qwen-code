@@ -100,6 +100,13 @@ export class AcpConnection {
    * connection can't drive or eavesdrop on a session it never claimed.
    */
   readonly ownedSessions = new Set<string>();
+  /**
+   * Sessions with an in-flight `session/close` (between the synchronous
+   * ownership-revoke and the bridge close + local teardown). `session/load`
+   * / `resume` reject for an id in this set so a close racing a re-load
+   * can't have its `finally` teardown destroy the freshly-loaded session.
+   */
+  readonly closingSessions = new Set<string>();
   /** Agent→client requests awaiting a client response, keyed by JSON-RPC id. */
   readonly pending = new Map<string, PendingClientRequest>();
   /** Daemon-issued client id reused across this connection's bridge calls. */

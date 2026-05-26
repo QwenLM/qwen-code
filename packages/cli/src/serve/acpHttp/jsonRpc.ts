@@ -108,8 +108,21 @@ export function isResponse(m: unknown): m is JsonRpcResponse {
     m['jsonrpc'] === '2.0' &&
     !('method' in m) &&
     'id' in m &&
-    ('result' in m || 'error' in m)
+    // JSON-RPC 2.0 §5: EXACTLY one of result/error (XOR). Accepting both
+    // would let a buggy client's approval (result + error) be misread as a
+    // cancellation by the `'error' in msg` check downstream.
+    'result' in m !== 'error' in m
   );
+}
+
+/**
+ * Strip C0 control chars + DEL from values interpolated into operator-facing
+ * stderr logs, so a client-controlled `sessionId`/`method`/error string can't
+ * forge or split log lines (log injection). Shared by the transport modules.
+ */
+export function logSafe(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u001f\u007f]/g, " ");
 }
 
 export function success(id: JsonRpcId, result: unknown): JsonRpcSuccess {

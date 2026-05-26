@@ -20,6 +20,7 @@ import {
   isObject,
   isRequest,
   isResponse,
+  logSafe,
   notification,
   request,
   success,
@@ -33,18 +34,6 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/**
- * Strip CR/LF (and other control chars) from values interpolated into
- * operator-facing stderr logs. Without this, a client-controlled `sessionId`
- * / `method` / bridge error text containing `\n` could forge or split log
- * lines (log injection). Applied to every interpolated dynamic value.
- */
-function logSafe(s: string): string {
-  // Replace C0 control chars + DEL (covers CR/LF, TAB, ANSI ESC) so a
-  // client-controlled value cannot forge/split operator log lines.
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/[\u0000-\u001f\u007f]/g, " ");
-}
 
 /**
  * Method names whose responses ride the CONNECTION-scoped stream (the
@@ -237,8 +226,16 @@ export class AcpDispatcher {
         >[2],
         clientId !== undefined ? { clientId } : undefined,
       );
-    } catch {
-      // Session already gone — nothing to cancel.
+    } catch (err) {
+      // "Session already gone" is the common, expected path (no-op). Any
+      // OTHER failure means the mediator may be stuck with no operator
+      // signal — log it so a stuck permission is diagnosable.
+      const msg = errMsg(err);
+      if (!/not found|unknown session/i.test(msg)) {
+        writeStderrLine(
+          `qwen serve: /acp cancelAbandonedPermission(${logSafe(req.sessionId)}) failed: ${logSafe(msg)}`,
+        );
+      }
     }
   }
 
@@ -462,6 +459,21 @@ export class AcpDispatcher {
             }
             return;
           }
+          // Reject if a session/close for this id is in flight — otherwise the
+          // close's `finally` teardown would destroy the session we're about
+          // to load (TOCTOU). Client should retry after the close settles.
+          if (conn.closingSessions.has(sessionId)) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `session ${sessionId} is being closed; retry`,
+                ),
+              );
+            }
+            return;
+          }
           const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
           const restored =
             method === 'session/load'
@@ -517,6 +529,10 @@ export class AcpDispatcher {
           // the second would otherwise send a misleading error and trigger a
           // redundant bridge close.
           conn.ownedSessions.delete(sessionId);
+          // Mark closing so a concurrent session/load|resume of the SAME id
+          // can't grant fresh ownership + create a new binding that this
+          // close's `finally` teardown would then destroy (TOCTOU).
+          conn.closingSessions.add(sessionId);
           try {
             await this.bridge.closeSession(
               sessionId,
@@ -527,6 +543,7 @@ export class AcpDispatcher {
             // otherwise the SSE stream, abort controller, buffered frames and
             // pending permissions leak until idle TTL.
             conn.closeSessionStream(sessionId);
+            conn.closingSessions.delete(sessionId);
           }
           this.replyConn(conn, id, {});
           return;
@@ -860,12 +877,15 @@ export class AcpDispatcher {
           toolCall: unknown;
           options: unknown;
         };
-        // Race guard: if the session was torn down between the bridge
-        // emitting this and now, `sendSession` is lookup-only and would
-        // SILENTLY DROP the request frame — leaving an orphaned `pending`
-        // entry and a permission mediator the agent's prompt blocks on
-        // forever. Cancel the permission instead of registering it.
-        if (!conn.sessions.has(sessionId)) {
+        // A permission request MUST reach a LIVE session stream. Going
+        // through `sendSession` would (a) silently drop the frame if the
+        // session was torn down (lookup-only), or (b) buffer it pre-attach
+        // where `pushCapped` could evict it under event throughput — either
+        // way the `pending` entry is orphaned and the agent's prompt blocks
+        // on a vote forever. So deliver DIRECTLY to a live stream, and if
+        // there is none, cancel (deny-safe) rather than register+stall.
+        const binding = conn.sessions.get(sessionId);
+        if (!binding?.stream || binding.stream.isClosed) {
           this.cancelAbandonedPermission(
             { sessionId, bridgeRequestId: data.requestId },
             undefined,
@@ -878,8 +898,7 @@ export class AcpDispatcher {
           bridgeRequestId: data.requestId,
           kind: 'permission',
         });
-        conn.sendSession(
-          sessionId,
+        void binding.stream.send(
           request(id, 'session/request_permission', {
             sessionId: data.sessionId,
             toolCall: data.toolCall,
@@ -931,7 +950,10 @@ export class AcpDispatcher {
     if (typeof id !== 'string') return;
     const pending = conn.pending.get(id);
     if (!pending) return;
-    conn.pending.delete(id);
+    // NOTE: do NOT delete the pending entry yet. Keep it until either the
+    // bridge vote OR the cancel fallback runs — if both somehow fail, the
+    // entry survives so a later session/connection teardown
+    // (`abandonPendingForSession`) can still release the mediator.
 
     // A client error response is a cancellation; otherwise pass the result
     // through. The cast defers shape validation to the bridge, so a
@@ -954,7 +976,9 @@ export class AcpDispatcher {
         >[2],
         this.sessionCtx(conn, pending.sessionId, fromLoopback),
       );
+      conn.pending.delete(id); // vote landed — safe to drop
     } catch (err) {
+      conn.pending.delete(id);
       writeStderrLine(
         `qwen serve: /acp permission vote failed (${logSafe(pending.sessionId)}): ${logSafe(errMsg(err))}`,
       );

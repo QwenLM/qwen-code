@@ -1004,6 +1004,51 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(false);
   });
 
+  it('_qwen/* introspection methods reach the bridge (conn-routed)', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    // 4 frames: buffered session/new reply (id 99) + the 3 below.
+    const got = takeFrames(connStream, 4);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, { jsonrpc: '2.0', id: 200, method: '_qwen/session/context', params: { sessionId: 'sess-1' } });
+    await post(connId, { jsonrpc: '2.0', id: 201, method: '_qwen/session/heartbeat', params: { sessionId: 'sess-1' } });
+    await post(connId, { jsonrpc: '2.0', id: 202, method: '_qwen/workspace/skills' });
+    const ids = ((await got) as Array<{ id?: number }>).map((f) => f.id);
+    expect(ids).toEqual(expect.arrayContaining([200, 201, 202]));
+  });
+
+  it('_qwen/workspace/set_tool_enabled + restart_mcp_server validate name', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 3);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, { jsonrpc: '2.0', id: 210, method: '_qwen/workspace/set_tool_enabled', params: { toolName: '', enabled: true } });
+    await post(connId, { jsonrpc: '2.0', id: 211, method: '_qwen/workspace/restart_mcp_server', params: { serverName: '' } });
+    await post(connId, { jsonrpc: '2.0', id: 212, method: '_qwen/workspace/set_tool_enabled', params: { toolName: 'shell', enabled: false } });
+    const frames = (await got) as Array<{ id: number; error?: { code: number }; result?: unknown }>;
+    const byId = Object.fromEntries(frames.map((f) => [f.id, f]));
+    expect(byId[210].error?.code).toBe(-32602);
+    expect(byId[211].error?.code).toBe(-32602);
+    expect(byId[212].result).toBeDefined();
+  });
+
+  it('translateEvent: stream_error + client_evicted → _qwen/notify with kind', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sess = await openStream(connId, 'sess-1');
+    const got = takeFrames(sess, 2);
+    await new Promise((r) => setTimeout(r, 50));
+    const q = bridge.queues.get('sess-1');
+    q?.push({ type: 'stream_error', data: { error: 'boom' } });
+    q?.push({ type: 'client_evicted', data: { reason: 'slow' } });
+    const frames = (await got) as Array<{ method: string; params: { kind: string } }>;
+    expect(frames.every((f) => f.method === '_qwen/notify')).toBe(true);
+    const kinds = frames.map((f) => f.params.kind);
+    expect(kinds).toEqual(expect.arrayContaining(['stream_error', 'client_evicted']));
+    // (takeFrames already locked + aborted `sess`; afterEach force-closes.)
+  });
+
   it('DELETE without a connection id → 400', async () => {
     const res = await fetch(`${base}/acp`, { method: 'DELETE' });
     expect(res.status).toBe(400);
