@@ -3125,23 +3125,22 @@ describe('Session', () => {
 
     it('aborts the in-flight generator when a new prompt arrives', async () => {
       let capturedSignal: AbortSignal | undefined;
-      generateMock.mockImplementation(
-        async (
-          _config: unknown,
-          _history: unknown,
-          signal: AbortSignal,
-        ): Promise<{ suggestion: string | null }> => {
-          capturedSignal = signal;
-          // Never resolves — represents an in-flight generation. The
-          // test asserts that the abort signal is fired when the next
-          // prompt arrives.
-          return new Promise((resolve) => {
-            signal.addEventListener('abort', () =>
-              resolve({ suggestion: null }),
-            );
-          });
-        },
-      );
+      generateMock
+        .mockImplementationOnce(
+          async (
+            _config: unknown,
+            _history: unknown,
+            signal: AbortSignal,
+          ): Promise<{ suggestion: string | null }> => {
+            capturedSignal = signal;
+            return new Promise((resolve) => {
+              signal.addEventListener('abort', () =>
+                resolve({ suggestion: null }),
+              );
+            });
+          },
+        )
+        .mockResolvedValue({ suggestion: null });
 
       await session.prompt({
         sessionId: 'test-session-id',
@@ -3165,20 +3164,22 @@ describe('Session', () => {
 
     it('aborts the in-flight generator when cancelPendingPrompt is called', async () => {
       let capturedSignal: AbortSignal | undefined;
-      generateMock.mockImplementation(
-        async (
-          _config: unknown,
-          _history: unknown,
-          signal: AbortSignal,
-        ): Promise<{ suggestion: string | null }> => {
-          capturedSignal = signal;
-          return new Promise((resolve) => {
-            signal.addEventListener('abort', () =>
-              resolve({ suggestion: null }),
-            );
-          });
-        },
-      );
+      generateMock
+        .mockImplementationOnce(
+          async (
+            _config: unknown,
+            _history: unknown,
+            signal: AbortSignal,
+          ): Promise<{ suggestion: string | null }> => {
+            capturedSignal = signal;
+            return new Promise((resolve) => {
+              signal.addEventListener('abort', () =>
+                resolve({ suggestion: null }),
+              );
+            });
+          },
+        )
+        .mockResolvedValue({ suggestion: null });
 
       await session.prompt({
         sessionId: 'test-session-id',
@@ -3186,9 +3187,9 @@ describe('Session', () => {
       });
       await vi.waitFor(() => expect(capturedSignal).toBeDefined());
 
-      // Install a fake pending prompt so cancelPendingPrompt has work
-      // to do (it throws if NEITHER prompt nor cron is active). Our
-      // followup-abort logic runs unconditionally inside.
+      // followupAbort cleanup now runs unconditionally before the
+      // prompt/cron guard — inject a fake pendingPrompt so the call
+      // doesn't throw, but the real assertion is the signal abort.
       (
         session as unknown as { pendingPrompt: AbortController }
       ).pendingPrompt = new AbortController();

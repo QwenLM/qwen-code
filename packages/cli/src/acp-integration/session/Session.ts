@@ -479,6 +479,11 @@ export class Session implements SessionContext {
     const hadPrompt = !!this.pendingPrompt;
     const hadCron = !!this.cronAbortController;
 
+    if (this.followupAbort) {
+      this.followupAbort.abort();
+      this.followupAbort = null;
+    }
+
     if (!hadPrompt && !hadCron) {
       throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
     }
@@ -486,14 +491,6 @@ export class Session implements SessionContext {
     if (this.pendingPrompt) {
       this.pendingPrompt.abort();
       this.pendingPrompt = null;
-    }
-
-    // Drop any in-flight follow-up suggestion generation; a cancel is
-    // an explicit "the user moved on" signal, so a late-arriving
-    // suggestion would be stale ghost-text in the input.
-    if (this.followupAbort) {
-      this.followupAbort.abort();
-      this.followupAbort = null;
     }
 
     // Cancel any in-progress cron execution
@@ -657,9 +654,11 @@ export class Session implements SessionContext {
           );
         }
       } catch (error) {
-        // Best-effort UX — swallow. A failed suggestion is silently
-        // dropped; the prompt response already returned successfully.
-        debugLogger.debug('Follow-up suggestion generation failed', error);
+        if (ac.signal.aborted) {
+          debugLogger.debug('Follow-up suggestion generation aborted');
+        } else {
+          debugLogger.warn('Follow-up suggestion generation failed', error);
+        }
       } finally {
         if (this.followupAbort === ac) {
           this.followupAbort = null;
