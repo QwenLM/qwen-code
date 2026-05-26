@@ -43,6 +43,8 @@ export interface EndInteractionOptions {
   errorMessage?: string;
 }
 
+export type InteractionSpanResultStatus = 'ok' | 'cancelled';
+
 export interface LLMRequestMetadata {
   inputTokens?: number;
   outputTokens?: number;
@@ -343,6 +345,83 @@ export function endInteractionSpan(
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
   interactionContext.enterWith(undefined);
+}
+
+export async function withInteractionSpan<T>(
+  config: Config,
+  options: StartInteractionOptions & { parentContext?: Context },
+  fn: () => Promise<T>,
+  getResultStatus?: (result: T) => InteractionSpanResultStatus,
+): Promise<T> {
+  if (!isTelemetrySdkInitialized()) return await fn();
+
+  ensureCleanupInterval();
+  interactionSequence++;
+
+  const attributes: Attributes = {
+    'session.id': config.getSessionId(),
+    'qwen-code.prompt_id': options.promptId,
+    'qwen-code.message_type': options.messageType,
+    'qwen-code.model': options.model,
+    'qwen-code.approval_mode': config.getApprovalMode(),
+    'interaction.sequence': interactionSequence,
+  };
+
+  const parentContext =
+    options.parentContext ?? resolveParentContext(undefined);
+  const span = getTracer().startSpan(
+    SPAN_INTERACTION,
+    {
+      kind: SpanKind.INTERNAL,
+      attributes,
+    },
+    parentContext,
+  );
+  const spanId = getSpanId(span);
+  const spanContextObj: SpanContext = {
+    span,
+    startTime: Date.now(),
+    attributes: attributes as Record<string, string | number | boolean>,
+    type: 'interaction',
+  };
+  activeSpans.set(spanId, new WeakRef(spanContextObj));
+  strongSpans.set(spanId, spanContextObj);
+
+  const activeContext = trace.setSpan(parentContext, span);
+  return await otelContext.with(activeContext, async () =>
+    interactionContext.run(spanContextObj, async () => {
+      let terminalStatus: InteractionStatus = 'ok';
+      try {
+        const result = await fn();
+        terminalStatus = getResultStatus?.(result) ?? 'ok';
+        return result;
+      } catch (error) {
+        terminalStatus = 'error';
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: truncateSpanError(
+            error instanceof Error ? error.message : String(error),
+          ),
+        });
+        throw error;
+      } finally {
+        if (!spanContextObj.ended) {
+          spanContextObj.ended = true;
+          const duration = Date.now() - spanContextObj.startTime;
+          span.setAttributes({
+            'interaction.duration_ms': duration,
+            'qwen-code.turn_status': terminalStatus,
+          });
+          if (terminalStatus !== 'error') {
+            span.setStatus({ code: SpanStatusCode.OK });
+          }
+          span.end();
+          activeSpans.delete(spanId);
+          strongSpans.delete(spanId);
+        }
+      }
+    }),
+  );
 }
 
 // --- LLM Request Spans ---

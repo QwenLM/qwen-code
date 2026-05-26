@@ -139,6 +139,7 @@ export { sanitizeHookName } from './sanitize.js';
 export {
   startInteractionSpan,
   endInteractionSpan,
+  withInteractionSpan,
   startLLMRequestSpan,
   endLLMRequestSpan,
   startToolSpan,
@@ -156,6 +157,7 @@ export {
 export type {
   StartInteractionOptions,
   EndInteractionOptions,
+  InteractionSpanResultStatus,
   LLMRequestMetadata,
   ToolSpanMetadata,
   ToolBlockedDecision,
@@ -164,6 +166,23 @@ export type {
   StartHookSpanOptions,
   HookSpanMetadata,
 } from './session-tracing.js';
+export type { TelemetryRuntimeConfig } from './runtime-config.js';
+export {
+  DAEMON_TRACEPARENT_META_KEY,
+  DAEMON_TRACESTATE_META_KEY,
+  captureDaemonTelemetryContext,
+  createDaemonBridgeTelemetry,
+  emitDaemonLog,
+  extractDaemonTraceContext,
+  hashDaemonWorkspace,
+  injectDaemonTraceContext,
+  recordDaemonError,
+  recordDaemonHttpResponse,
+  runWithDaemonTelemetryContext,
+  withDaemonBridgeSpan,
+  withDaemonRequestSpan,
+  withDaemonSpan,
+} from './daemon-tracing.js';
 export {
   addUserPromptAttributes,
   addSystemPromptAttributes,

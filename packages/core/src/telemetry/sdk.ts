@@ -20,7 +20,7 @@ import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
 import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
-import type { Config } from '../config/config.js';
+import type { TelemetryRuntimeConfig } from './runtime-config.js';
 import { SERVICE_NAME } from './constants.js';
 import { initializeMetrics } from './metrics.js';
 import {
@@ -147,7 +147,7 @@ function validateUrl(url: string | undefined): string | undefined {
   }
 }
 
-export function initializeTelemetry(config: Config): void {
+export function initializeTelemetry(config: TelemetryRuntimeConfig): void {
   if (telemetryInitialized || !config.getTelemetryEnabled()) {
     return;
   }
