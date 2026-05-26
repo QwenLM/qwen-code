@@ -11,7 +11,7 @@ import type {
   PermissionOutcome,
 } from './types.js';
 
-const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
+export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_update',
   'permission_request',
   'permission_resolved',
@@ -64,6 +64,10 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'workspace_initialized',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
+  // T2.8 (#4514) — runtime MCP server add/remove events. Fired by
+  // `POST /workspace/mcp/servers` on success (including replace and
+  // same-fingerprint no-op).
+  'mcp_server_added',
   // #4175 F3 (Commit 7) — multi-client permission coordination events.
   // `permission_partial_vote` only fires under `consensus` policy;
   // `permission_forbidden` fires under `designated` (originator
@@ -639,6 +643,26 @@ export interface DaemonTurnErrorData {
   [key: string]: unknown;
 }
 
+/**
+ * T2.8 (#4514). Fired when `POST /workspace/mcp/servers` succeeds,
+ * including both fresh additions and replace-on-existing-name. The
+ * event fans out to every active session SSE bus.
+ */
+export interface DaemonMcpServerAddedData {
+  readonly name: string;
+  readonly transport: DaemonMcpTransport;
+  readonly replaced: boolean;
+  readonly shadowedSettings: boolean;
+  readonly toolCount: number;
+  readonly originatorClientId: string;
+  [key: string]: unknown;
+}
+
+export type DaemonMcpServerAddedEvent = DaemonEventEnvelope<
+  'mcp_server_added',
+  DaemonMcpServerAddedData
+>;
+
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -796,7 +820,8 @@ export type DaemonControlEvent =
   | DaemonToolToggledEvent
   | DaemonWorkspaceInitializedEvent
   | DaemonMcpServerRestartedEvent
-  | DaemonMcpServerRestartRefusedEvent;
+  | DaemonMcpServerRestartRefusedEvent
+  | DaemonMcpServerAddedEvent;
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
@@ -1291,6 +1316,9 @@ export function asKnownDaemonEvent(
     case 'followup_suggestion':
       return isFollowupSuggestionData(event.data)
         ? (event as DaemonFollowupSuggestionEvent)
+    case 'mcp_server_added':
+      return isMcpServerAddedData(event.data)
+        ? (event as DaemonMcpServerAddedEvent)
         : undefined;
     case 'turn_complete':
       return isTurnCompleteData(event.data)
@@ -1659,6 +1687,8 @@ export function reduceDaemonSessionEvent(
         ...base,
         lastTurnError: event.data,
       };
+    case 'mcp_server_added':
+      return base;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;
@@ -2358,6 +2388,25 @@ function isFollowupSuggestionData(
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['suggestion']) &&
     isNonEmptyString(value['promptId'])
+function isMcpServerAddedData(
+  value: unknown,
+): value is DaemonMcpServerAddedData {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['name'])) return false;
+  if (typeof value['replaced'] !== 'boolean') return false;
+  if (typeof value['shadowedSettings'] !== 'boolean') return false;
+  if (!isFiniteNumber(value['toolCount'])) return false;
+  if (!isNonEmptyString(value['originatorClientId'])) return false;
+  // Transport family must be one of the known kinds. Reject silently
+  // for forward-compat (mirrors `isMcpRefusedServerEntry`).
+  const transport = value['transport'];
+  return (
+    transport === 'stdio' ||
+    transport === 'sse' ||
+    transport === 'http' ||
+    transport === 'websocket' ||
+    transport === 'sdk' ||
+    transport === 'unknown'
   );
 }
 

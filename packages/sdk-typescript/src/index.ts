@@ -7,6 +7,7 @@ export { SdkLogger } from './utils/logger.js';
 export {
   DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
+  DAEMON_KNOWN_EVENT_TYPE_VALUES,
   DaemonCapabilityMissingError,
   DaemonClient,
   DaemonHttpError,
@@ -31,6 +32,8 @@ export {
   type DaemonMcpRestartResult,
   type DaemonSessionRecapResult,
   type DaemonShellCommandResult,
+  type DaemonMcpServerAddedData,
+  type DaemonMcpServerAddedEvent,
   type DaemonMcpServerRestartedData,
   type DaemonMcpServerRestartedEvent,
   type DaemonMcpServerRestartRefusedData,
