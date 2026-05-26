@@ -34,6 +34,19 @@ function errMsg(err: unknown): string {
 }
 
 /**
+ * Strip CR/LF (and other control chars) from values interpolated into
+ * operator-facing stderr logs. Without this, a client-controlled `sessionId`
+ * / `method` / bridge error text containing `\n` could forge or split log
+ * lines (log injection). Applied to every interpolated dynamic value.
+ */
+function logSafe(s: string): string {
+  // Replace C0 control chars + DEL (covers CR/LF, TAB, ANSI ESC) so a
+  // client-controlled value cannot forge/split operator log lines.
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u001f\u007f]/g, " ");
+}
+
+/**
  * Method names whose responses ride the CONNECTION-scoped stream (the
  * session stream may not exist yet / ownership not granted on failure).
  * Error frames must route the same way as their success path.
@@ -59,7 +72,11 @@ const CONN_ROUTED_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
 ]);
 
-/** Mirrors the REST surface's `MAX_TOOL_NAME_LENGTH`/`MAX_SERVER_NAME_LENGTH`. */
+// SYNC: server.ts MAX_TOOL_NAME_LENGTH / MAX_SERVER_NAME_LENGTH (both 256).
+// Keep in lockstep with the REST surface — a divergence means ACP clients get
+// INVALID_PARAMS for names REST accepts (or vice versa). (Not extracted to a
+// shared module to avoid churning the 2987-line server.ts near merge; a
+// follow-up may lift all three to a `serve/limits.ts`.)
 const MAX_NAME_LENGTH = 256;
 
 class AcpParamError extends Error {}
@@ -196,7 +213,7 @@ export class AcpDispatcher {
       return Array.isArray(co) ? co : undefined;
     } catch (err) {
       writeStderrLine(
-        `qwen serve: /acp configOptionsFor(${sessionId}) failed: ${errMsg(err)}`,
+        `qwen serve: /acp configOptionsFor(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
       );
       return undefined;
     }
@@ -297,7 +314,7 @@ export class AcpDispatcher {
       // Notification (no id) for an unowned session: no wire response to
       // send, so log it — otherwise "my cancel did nothing" is undebuggable.
       writeStderrLine(
-        `qwen serve: /acp notification for unowned session ${sessionId} (dropped)`,
+        `qwen serve: /acp notification for unowned session ${logSafe(sessionId)} (dropped)`,
       );
       return false;
     }
@@ -337,7 +354,7 @@ export class AcpDispatcher {
       try {
         this.resolveClientResponse(conn, msg, loopback);
       } catch (err) {
-        writeStderrLine(`qwen serve: /acp response handling error: ${errMsg(err)}`);
+        writeStderrLine(`qwen serve: /acp response handling error: ${logSafe(errMsg(err))}`);
       }
       return;
     }
@@ -411,7 +428,11 @@ export class AcpDispatcher {
           if (conn.destroyed) {
             void this.bridge
               .killSession(session.sessionId, { requireZeroAttaches: true })
-              .catch(() => undefined);
+              .catch((err) =>
+                writeStderrLine(
+                  `qwen serve: /acp orphan killSession(${logSafe(session.sessionId)}) failed: ${logSafe(errMsg(err))}`,
+                ),
+              );
             return;
           }
           // Record the clientId the bridge actually stamped — later
@@ -454,12 +475,24 @@ export class AcpDispatcher {
                   workspaceCwd: cwd,
                   clientId: conn.clientId,
                 });
-          // Teardown raced the restore — detach the late-registered client
-          // so it doesn't linger in the bridge's voter/known-client sets.
+          // Teardown raced the restore. Cleanup depends on what restore did:
+          //  - attached:true  → we attached to an already-live session;
+          //    detachClient rolls back just our attach.
+          //  - attached:false → restore SPAWNED a fresh session from disk;
+          //    detachClient only decrements attachCount and does NOT reap
+          //    (reaping is the spawn-owner's job) — so kill it, like
+          //    session/new does, or the child leaks until shutdown.
           if (conn.destroyed) {
-            void this.bridge
-              .detachClient(sessionId, restored.clientId)
-              .catch(() => undefined);
+            const cleanup = restored.attached
+              ? this.bridge.detachClient(sessionId, restored.clientId)
+              : this.bridge.killSession(sessionId, {
+                  requireZeroAttaches: true,
+                });
+            void cleanup.catch((err) =>
+              writeStderrLine(
+                `qwen serve: /acp orphan ${restored.attached ? 'detach' : 'kill'}(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
+              ),
+            );
             return;
           }
           conn.getOrCreateSession(sessionId).clientId = restored.clientId;
@@ -746,7 +779,7 @@ export class AcpDispatcher {
     } catch (err) {
       // Full detail to stderr for the operator; a coded, client-safe shape
       // on the wire (raw bridge messages may carry internal paths/details).
-      writeStderrLine(`qwen serve: /acp dispatch error (${method}): ${errMsg(err)}`);
+      writeStderrLine(`qwen serve: /acp dispatch error (${logSafe(method)}): ${logSafe(errMsg(err))}`);
       if (id !== undefined) {
         const { code, message } = toRpcError(err);
         const frame = error(id, code, message);
@@ -827,6 +860,18 @@ export class AcpDispatcher {
           toolCall: unknown;
           options: unknown;
         };
+        // Race guard: if the session was torn down between the bridge
+        // emitting this and now, `sendSession` is lookup-only and would
+        // SILENTLY DROP the request frame — leaving an orphaned `pending`
+        // entry and a permission mediator the agent's prompt blocks on
+        // forever. Cancel the permission instead of registering it.
+        if (!conn.sessions.has(sessionId)) {
+          this.cancelAbandonedPermission(
+            { sessionId, bridgeRequestId: data.requestId },
+            undefined,
+          );
+          return;
+        }
         const id = conn.nextId();
         conn.pending.set(id, {
           sessionId,
@@ -911,7 +956,7 @@ export class AcpDispatcher {
       );
     } catch (err) {
       writeStderrLine(
-        `qwen serve: /acp permission vote failed (${pending.sessionId}): ${errMsg(err)}`,
+        `qwen serve: /acp permission vote failed (${logSafe(pending.sessionId)}): ${logSafe(errMsg(err))}`,
       );
       this.cancelAbandonedPermission(
         pending,
@@ -942,6 +987,12 @@ export class AcpDispatcher {
     try {
       const result = await this.bridge.sendPrompt(
         sessionId,
+        // SECURITY NOTE: `params.sessionId` already equals the routing
+        // `sessionId` (both from the same params), so there's no routing
+        // divergence today. If the bridge ever trusts an additional
+        // `sendPrompt` field by name (e.g. a priority/temperature override),
+        // force-stamp it here like the REST surface does (`{ ...body,
+        // sessionId, prompt }`) so it can't become client-controlled.
         params as unknown as Parameters<HttpAcpBridge['sendPrompt']>[1],
         abort.signal,
         this.sessionCtx(conn, sessionId, fromLoopback),
@@ -961,7 +1012,7 @@ export class AcpDispatcher {
         // Notification-form prompt (no id): no response frame to send, so a
         // failure would vanish silently — log it for the operator.
         writeStderrLine(
-          `qwen serve: /acp prompt error (${sessionId}, notification): ${errMsg(err)}`,
+          `qwen serve: /acp prompt error (${logSafe(sessionId)}, notification): ${logSafe(errMsg(err))}`,
         );
       }
     } finally {
@@ -995,6 +1046,13 @@ export class AcpDispatcher {
     if (conn.sessions.has(sessionId)) {
       conn.sendSession(sessionId, frame);
     } else {
+      // Fallback fired — log it so an operator can correlate "reply arrived on
+      // the connection stream, not the session stream" with a mid-flight
+      // session teardown.
+      writeStderrLine(
+        `qwen serve: /acp replySession(${logSafe(sessionId)}) binding gone mid-flight, ` +
+          `reply routed to connection stream ${conn.connectionId.slice(0, 8)}`,
+      );
       conn.sendConn(frame);
     }
   }

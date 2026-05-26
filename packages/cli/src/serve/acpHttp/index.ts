@@ -20,6 +20,14 @@ import {
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
 export const ACP_SESSION_HEADER = 'acp-session-id';
 
+/**
+ * Grace window after the connection-scoped SSE stream closes before the
+ * connection is reaped (if not reconnected and no session stream is live).
+ * Long enough to ride out a transient blip / reconnect, short enough to free
+ * `ownedSessions` + a `maxConnections` slot well before the 30-min idle TTL.
+ */
+const CONN_GRACE_MS = 10_000;
+
 export interface MountAcpHttpOptions {
   boundWorkspace: string;
   /** Defaults to `process.env.QWEN_SERVE_ACP_HTTP !== '0'`. */
@@ -179,8 +187,28 @@ export function mountAcpHttp(
         res,
         () => {
           writeStderrLine(
-            `qwen serve: /acp connection stream closed (${connId})`,
+            `qwen serve: /acp connection stream closed (${connId.slice(0, 8)})`,
           );
+          // Grace-period reap: a dead connection otherwise locks its
+          // ownedSessions + counts against maxConnections for the full 30-min
+          // idle TTL. After the grace window, reap UNLESS a reconnect
+          // re-attached the conn stream (clears the timer) OR a session
+          // stream is still live (client is active — only the conn stream
+          // blipped, don't kill its sessions/prompts).
+          conn.clearGraceTimer();
+          conn.connGraceTimer = setTimeout(() => {
+            if (
+              registry.get(connId) === conn &&
+              conn.connStream === stream &&
+              !conn.hasLiveSessionStream()
+            ) {
+              writeStderrLine(
+                `qwen serve: /acp reaping connection ${connId.slice(0, 8)} (conn stream gone, no live session stream)`,
+              );
+              registry.delete(connId);
+            }
+          }, CONN_GRACE_MS);
+          conn.connGraceTimer.unref?.();
         },
         () => conn.touch(),
       );
@@ -211,7 +239,9 @@ export function mountAcpHttp(
         ac.abort();
         // BUT only abort the prompt when THIS is still the session's live
         // stream. A reconnect already installed a newer stream — the prompt
-        // must survive the old stream's close.
+        // must survive the old stream's close. CONTRACT: this identity guard
+        // pairs with `attachSessionStream`'s install-before-close ordering
+        // (connectionRegistry.ts) — keep both in lockstep.
         if (conn.sessions.get(sessionId)?.stream === stream) {
           conn.sessions.get(sessionId)?.promptAbort?.abort();
         }

@@ -76,11 +76,17 @@ class FakeBridge {
   lastSpawnScope: string | undefined;
   closeShouldThrow = false;
   killed: string[] = [];
+  cancelled: string[] = [];
+  /** When set, spawnOrAttach/loadSession await it (to simulate a slow bridge). */
+  gate: Promise<void> | undefined;
+  /** `attached` value loadSession returns (false = spawned-from-disk). */
+  loadAttached = true;
 
   closedSessions: string[] = [];
 
   async spawnOrAttach(req: { sessionScope?: string }) {
     this.lastSpawnScope = req?.sessionScope;
+    if (this.gate) await this.gate;
     return {
       sessionId: 'sess-1',
       workspaceCwd: '/ws',
@@ -96,10 +102,11 @@ class FakeBridge {
 
   async loadSession(req: { sessionId: string }) {
     if (this.loadShouldThrow) throw new Error('load failed');
+    if (this.gate) await this.gate;
     return {
       sessionId: req.sessionId,
       workspaceCwd: '/ws',
-      attached: true,
+      attached: this.loadAttached,
       clientId: 'client-load',
       state: { replayed: true },
     };
@@ -199,7 +206,9 @@ class FakeBridge {
 
   detached: Array<{ sessionId: string; clientId?: string }> = [];
 
-  async cancelSession() {}
+  async cancelSession(sessionId: string) {
+    this.cancelled.push(sessionId);
+  }
   async closeSession(sessionId: string) {
     this.closedSessions.push(sessionId);
     if (this.closeShouldThrow) throw new Error('bridge close failed');
@@ -769,10 +778,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
     });
     await new Promise((r) => setTimeout(r, 40));
-    // Client reconnects the session stream (drop s1, open s2).
-    await s1.body?.cancel();
+    // Reconnect: install the NEW stream and let it attach FIRST, then drop the
+    // old one. This deterministically exercises the invariant under test —
+    // the old (now-stale) stream's close must NOT abort the prompt because a
+    // newer stream is already the session's current one (install-before-close
+    // + identity-guarded onClose). (Attaching s2 before dropping s1 avoids a
+    // test-only race between s1.close and s2.attach under full-suite load.)
     const s2 = await openStream(connId, 'sess-1');
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, 40));
+    await s1.body?.cancel();
+    await new Promise((r) => setTimeout(r, 40));
     // The prompt must survive the reconnect.
     expect(promptSignal?.aborted).toBe(false);
     await s2.body?.cancel();
@@ -925,6 +940,68 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(r2.headers.get('retry-after')).toBe('5');
     srv.closeAllConnections?.();
     await new Promise<void>((r) => srv.close(() => r()));
+  });
+
+  it('session/cancel aborts the in-flight prompt and calls the bridge', async () => {
+    let promptSignal: AbortSignal | undefined;
+    bridge.promptBehavior = async (_s, _q, signal) => {
+      promptSignal = signal;
+      await new Promise((r) => setTimeout(r, 300));
+      return { stopReason: 'cancelled' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sess = await openStream(connId, 'sess-1');
+    await new Promise((r) => setTimeout(r, 40));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 50,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    await new Promise((r) => setTimeout(r, 40));
+    await post(connId, { jsonrpc: '2.0', id: 51, method: 'session/cancel', params: { sessionId: 'sess-1' } });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(promptSignal?.aborted).toBe(true);
+    expect(bridge.cancelled).toContain('sess-1');
+    await sess.body?.cancel();
+  });
+
+  it('session/new rejects bad cwd (non-string + relative) → INVALID_PARAMS', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 2);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, { jsonrpc: '2.0', id: 60, method: 'session/new', params: { cwd: 123 } });
+    await post(connId, { jsonrpc: '2.0', id: 61, method: 'session/new', params: { cwd: 'rel/path' } });
+    const frames = (await got) as Array<{ id: number; error?: { code: number } }>;
+    for (const f of frames) expect(f.error?.code).toBe(-32602);
+  });
+
+  it('session/new orphan: DELETE before spawn resolves → bridge.killSession', async () => {
+    let release: () => void = () => {};
+    bridge.gate = new Promise<void>((r) => (release = r));
+    const connId = await initialize();
+    await post(connId, { jsonrpc: '2.0', id: 70, method: 'session/new', params: {} });
+    await new Promise((r) => setTimeout(r, 30)); // spawnOrAttach now awaiting the gate
+    await fetch(`${base}/acp`, { method: 'DELETE', headers: { 'acp-connection-id': connId } });
+    release(); // spawn resolves AFTER destroy
+    await new Promise((r) => setTimeout(r, 40));
+    expect(bridge.killed).toContain('sess-1');
+  });
+
+  it('session/load orphan (attached:false) → killSession, not detach', async () => {
+    let release: () => void = () => {};
+    bridge.gate = new Promise<void>((r) => (release = r));
+    bridge.loadAttached = false; // restore SPAWNED from disk → must be killed
+    const connId = await initialize();
+    await post(connId, { jsonrpc: '2.0', id: 80, method: 'session/load', params: { sessionId: 'sess-1' } });
+    await new Promise((r) => setTimeout(r, 30));
+    await fetch(`${base}/acp`, { method: 'DELETE', headers: { 'acp-connection-id': connId } });
+    release();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(bridge.killed).toContain('sess-1');
+    expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(false);
   });
 
   it('DELETE without a connection id → 400', async () => {

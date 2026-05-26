@@ -119,6 +119,13 @@ export class AcpConnection {
    * doesn't orphan a child process / phantom clientId.
    */
   destroyed = false;
+  /**
+   * Grace-period reap timer armed when the connection-scoped SSE stream
+   * closes; cleared on reconnect (`attachConnStream`) or teardown. Avoids a
+   * dead connection locking its `ownedSessions` (and counting against
+   * `maxConnections`) for the full 30-min idle TTL.
+   */
+  connGraceTimer?: ReturnType<typeof setTimeout>;
   lastActiveMs: number = Date.now();
   private idCounter = 0;
 
@@ -174,8 +181,26 @@ export class AcpConnection {
     }
   }
 
+  /** True if any session currently has a live (open) SSE stream. */
+  hasLiveSessionStream(): boolean {
+    for (const b of this.sessions.values()) {
+      if (b.stream && !b.stream.isClosed) return true;
+    }
+    return false;
+  }
+
+  /** Cancel a pending grace-period reap (e.g. on conn-stream reconnect). */
+  clearGraceTimer(): void {
+    if (this.connGraceTimer) {
+      clearTimeout(this.connGraceTimer);
+      this.connGraceTimer = undefined;
+    }
+  }
+
   /** Attach the connection-scoped stream and flush any buffered frames. */
   attachConnStream(stream: SseStream): void {
+    // A reconnect cancels any pending grace-period reap.
+    this.clearGraceTimer();
     // Close any prior connection stream so its heartbeat interval + socket
     // don't leak when a client reconnects the connection-scoped GET.
     if (this.connStream && this.connStream !== stream) this.connStream.close();
@@ -217,9 +242,12 @@ export class AcpConnection {
     binding.abort.abort();
     binding.abort = abort;
     // Install the NEW stream BEFORE closing the old one. The old stream's
-    // `onClose` is identity-guarded on `binding.stream`, so installing first
-    // means a reconnect's close can't abort the in-flight prompt (the client
-    // is reconnecting, not leaving — the prompt must survive).
+    // `onClose` is identity-guarded on `binding.stream` (see the session-GET
+    // handler in `index.ts` — `if (conn.sessions.get(sessionId)?.stream ===
+    // stream) ...promptAbort?.abort()`), so installing first means a
+    // reconnect's close can't abort the in-flight prompt (the client is
+    // reconnecting, not leaving — the prompt must survive). CONTRACT: that
+    // identity guard and this ordering must stay in lockstep.
     binding.stream = stream;
     if (prevStream && prevStream !== stream) prevStream.close();
     for (const frame of binding.buffer.splice(0)) void stream.send(frame);
@@ -240,6 +268,7 @@ export class AcpConnection {
 
   destroy(): void {
     this.destroyed = true;
+    this.clearGraceTimer();
     for (const binding of this.sessions.values()) {
       binding.abort.abort();
       binding.promptAbort?.abort();
