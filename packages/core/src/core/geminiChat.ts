@@ -2541,8 +2541,14 @@ export class GeminiChat {
             usageMetadata.promptTokenCount ?? usageMetadata.totalTokenCount;
           this.lastCandidatesTokenCount =
             usageMetadata.promptTokenCount !== undefined
-              ? (usageMetadata.candidatesTokenCount ?? 0) +
-                (usageMetadata.thoughtsTokenCount ?? 0)
+              ? usageMetadata.totalTokenCount !== undefined
+                ? Math.max(
+                    0,
+                    usageMetadata.totalTokenCount -
+                      usageMetadata.promptTokenCount,
+                  )
+                : (usageMetadata.candidatesTokenCount ?? 0) +
+                  (usageMetadata.thoughtsTokenCount ?? 0)
               : 0;
           if (lastPromptTokenCount) {
             // Always update the per-chat counter so this chat (including

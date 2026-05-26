@@ -2608,6 +2608,56 @@ describe('GeminiChat', async () => {
       ).toBeGreaterThanOrEqual(177_000);
     });
 
+    it('does not double-count OpenAI-compatible reasoning tokens already included in candidates', async () => {
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy.mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 176_400,
+          newTokenCount: 176_400,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          makeStreamResponse('first', {
+            promptTokenCount: 175_400,
+            candidatesTokenCount: 1_000,
+            thoughtsTokenCount: 500,
+            totalTokenCount: 176_400,
+          }),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('second'));
+
+      chat.setLastPromptTokenCount(50_000);
+      const firstStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'prime OpenAI-compatible reasoning token counters' },
+        'prompt-prime-openai-reasoning-tokens',
+      );
+      for await (const _ of firstStream) {
+        /* consume */
+      }
+
+      const secondStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'small follow-up' },
+        'prompt-openai-reasoning-follow-up',
+      );
+      for await (const _ of secondStream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].force).toBe(false);
+      expect(
+        compressSpy.mock.calls[1][1].precomputedEffectiveTokens,
+      ).toBeLessThan(177_000);
+    });
+
     it('resets previous response candidate tokens when seeding last prompt tokens externally', async () => {
       const compressSpy = vi
         .spyOn(ChatCompressionService.prototype, 'compress')
