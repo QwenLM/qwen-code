@@ -14,7 +14,7 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 - **Reconnect-safe streaming** — SSE with `Last-Event-ID` reconnect lets a client drop and pick up exactly where it left off (within the ring's replay window).
 - **First-responder permissions** — when the agent asks for permission to run a tool, every connected client sees the request; whichever client answers first wins.
 - **One daemon, one workspace** — each `qwen serve` process binds to exactly one workspace at boot (per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02). Multi-workspace deployments run one daemon per workspace on separate ports (or behind an orchestrator).
-- **Remote runtime control** ([#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 17) — change a session's approval mode (`POST /session/:id/approval-mode`), toggle a tool per workspace (`POST /workspace/tools/:name/enable`), scaffold an empty `QWEN.md` (`POST /workspace/init`, mechanical only — does NOT call the model; for AI-fill, follow up with `POST /session/:id/prompt`), or restart a single MCP server with a budget pre-check (`POST /workspace/mcp/:server/restart`). All four are strict-gated — configure `--token` first.
+- **Remote runtime control** ([#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 17) — change a session's approval mode (`POST /session/:id/approval-mode`), toggle a tool per workspace (`POST /workspace/tools/:name/enable`), scaffold an empty `QWEN.md` (`POST /workspace/init`, mechanical only — does NOT call the model; for AI-fill, follow up with `POST /session/:id/prompt`), restart a single MCP server with a budget pre-check (`POST /workspace/mcp/:server/restart`), or add/remove MCP servers at runtime without a daemon restart (`POST /workspace/mcp/servers`, `DELETE /workspace/mcp/servers/:name`). All strict-gated — configure `--token` first.
 - **Session recap** ([#4175](https://github.com/QwenLM/qwen-code/issues/4175) follow-up) — fetch a one-sentence "where did I leave off" summary of an active session (`POST /session/:id/recap`). Wraps core's `generateSessionRecap` as a side-query against the fast model; pollutes neither the main chat history nor the SSE stream. Non-strict gate (same posture as `/prompt`); SDK helper `client.recapSession(sessionId)`.
   - **Known limit — token-cost amplification:** the route is a pure-cost endpoint (each call is an LLM side-query, no state benefit) and the daemon has no per-route rate limit in v1. On a no-token loopback default a buggy or malicious local client can spam it to burn tokens. Configure `--token` (and optionally `--require-auth`) on shared dev hosts before exposing the daemon.
   - **Concurrent recap safety:** two simultaneous `/recap` calls on the same session run two independent side-queries. `generateSessionRecap` reads a snapshot of the chat history via `GeminiClient.getChat().getHistory()` and feeds it to a separate `BaseLlmClient.generateText` call (via `runSideQuery`); it never appends to or mutates the session's `GeminiChat`. Safe to call from multiple clients without coordination.
@@ -391,10 +391,10 @@ The Stage 1.5 plan describes TUI as an in-process EventBus subscriber. In practi
 
 No TUI shell runs inside the daemon. The slash commands listed above **don't exist** in this mode — there's no terminal UI to issue them from. Session state is therefore:
 
-- **Boot-time-frozen** for `approval-mode` / `memory` / `mcp servers` / `agents` / `tools` allowlist / `auth` — all loaded from settings + disk when the daemon's `qwen --acp` child starts; immutable for the session's lifetime.
-- **Mutable over HTTP** only via the routes this PR exposes — primarily `POST /session/:id/model` (publishes `model_switched`). Permission votes (`POST /permission/:requestId`) are per-request, not per-session-state.
+- **Boot-time-frozen** for `approval-mode` / `memory` / `agents` / `tools` allowlist / `auth` — all loaded from settings + disk when the daemon's `qwen --acp` child starts; immutable for the session's lifetime. Settings-defined MCP servers are likewise frozen at boot, but **runtime-added servers** (via `POST /workspace/mcp/servers`) can be added or removed without restart.
+- **Mutable over HTTP** via `POST /session/:id/model` (publishes `model_switched`), `POST /workspace/mcp/servers` / `DELETE /workspace/mcp/servers/:name` (publishes `mcp_server_added` / `mcp_server_removed`), and permission votes (`POST /permission/:requestId`).
 
-**Consequence:** remote clients in headless mode see the **full session state**. No TUI hides additional state; no drift is possible. If you want to change `approval-mode` or add an MCP server, restart the daemon with new settings — the daemon doesn't expose runtime mutation for those today.
+**Consequence:** remote clients in headless mode see the **full session state**. No TUI hides additional state; no drift is possible. If you want to change `approval-mode`, restart the daemon with new settings. MCP servers can now be added/removed at runtime via the mutation routes (`POST /workspace/mcp/servers`, `DELETE /workspace/mcp/servers/:name`) — see [Runtime MCP server management](#runtime-mcp-server-management-issue-4514).
 
 #### Mode 2 — Stage 1.5 `qwen --serve` co-hosted TUI (not in this PR)
 
@@ -504,6 +504,135 @@ Session-scoped debug logs (`~/.qwen/debug/<sessionId>.txt` and the `~/.qwen/debu
 ### No rotation
 
 The daemon log appends indefinitely. Rotate manually if it grows large. A future enhancement may add automatic rotation; track via [#4548](https://github.com/QwenLM/qwen-code/issues/4548) follow-ups.
+
+## Runtime MCP server management (issue [#4514](https://github.com/QwenLM/qwen-code/issues/4514))
+
+Add or remove MCP servers at runtime without restarting the daemon. Runtime entries live in an ephemeral overlay that **shadows** settings-defined servers of the same name; the underlying `settings.json` / `mcpServers` config is never written to.
+
+**Pre-flight:** check `caps.features` for `mcp_server_runtime_mutation` before calling either route. Older daemons without this tag return `404`.
+
+### `POST /workspace/mcp/servers` — add a runtime MCP server
+
+Strict-gated (bearer token required). Connects the server immediately via the live `McpClientManager` and discovers its tools.
+
+Request:
+
+```json
+{
+  "name": "my-server",
+  "config": {
+    "command": "npx",
+    "args": ["-y", "@my-org/mcp-server"],
+    "env": { "TOKEN": "..." }
+  }
+}
+```
+
+`name` must be alphanumeric plus `_` and `-` (max 256 characters). `config` is the same MCP server configuration object used in `settings.json` `mcpServers` entries (transport-dependent fields: `command`/`args`/`env` for stdio, `url` for SSE/HTTP).
+
+Response (200) — success:
+
+```json
+{
+  "name": "my-server",
+  "transport": "stdio",
+  "replaced": false,
+  "shadowedSettings": false,
+  "toolCount": 3,
+  "originatorClientId": "client-1"
+}
+```
+
+- `replaced: true` — a runtime entry with the same name already existed and was replaced (old connection torn down, new one established).
+- `shadowedSettings: true` — a settings-defined server with the same name exists; the runtime entry now shadows it. The settings entry is untouched and re-emerges if the runtime entry is later removed.
+- `toolCount` — number of tools discovered on the newly connected server.
+
+Response (200) — soft refuse (budget warning mode):
+
+```json
+{
+  "name": "my-server",
+  "skipped": true,
+  "reason": "budget_warning_only"
+}
+```
+
+Returned when `--mcp-budget-mode=warn` and adding the server would exceed the configured `--mcp-client-budget`. The server is NOT connected. Callers should surface the budget pressure to the user.
+
+Errors:
+
+| Status | Code                      | When                                                                                               |
+| ------ | ------------------------- | -------------------------------------------------------------------------------------------------- |
+| `400`  | `invalid_server_name`     | Name empty, exceeds 256 chars, or contains characters outside `[A-Za-z0-9_-]`                      |
+| `400`  | `missing_required_field`  | `config` missing or not a non-null object                                                          |
+| `400`  | `invalid_client_id`       | `X-Qwen-Client-Id` header present but not registered for this workspace                            |
+| `400`  | `invalid_config`          | Config shape rejected by the MCP transport validator                                               |
+| `401`  | `token_required`          | No bearer token configured (strict gate)                                                           |
+| `409`  | `mcp_budget_would_exceed` | `--mcp-budget-mode=enforce` and budget is full                                                     |
+| `502`  | `mcp_server_spawn_failed` | Server process exited or timed out during connect; body carries `serverName`, `exitCode`, `stderr` |
+| `503`  | `acp_channel_unavailable` | No live ACP child (no session has been created yet)                                                |
+
+### `DELETE /workspace/mcp/servers/:name` — remove a runtime MCP server
+
+Strict-gated. Disconnects the server and removes it from the runtime overlay. Idempotent — removing a name that was never added returns a skip response (not an error).
+
+The `:name` path parameter is the URL-encoded server name.
+
+Response (200) — success:
+
+```json
+{
+  "name": "my-server",
+  "removed": true,
+  "wasShadowingSettings": false,
+  "originatorClientId": "client-1"
+}
+```
+
+- `wasShadowingSettings: true` — the removed runtime entry was shadowing a settings-defined server of the same name. That settings entry is now un-shadowed and will be used on next discovery/restart.
+
+Response (200) — idempotent skip:
+
+```json
+{
+  "name": "ghost",
+  "skipped": true,
+  "reason": "not_present"
+}
+```
+
+Returned when the name was not in the runtime overlay (it may still exist in settings — settings entries cannot be removed via this route).
+
+Errors:
+
+| Status | Code                      | When                                                                          |
+| ------ | ------------------------- | ----------------------------------------------------------------------------- |
+| `400`  | `invalid_server_name`     | Name empty, exceeds 256 chars, or contains characters outside `[A-Za-z0-9_-]` |
+| `400`  | `invalid_client_id`       | `X-Qwen-Client-Id` header present but not registered for this workspace       |
+| `401`  | `token_required`          | No bearer token configured (strict gate)                                      |
+| `503`  | `acp_channel_unavailable` | No live ACP child                                                             |
+
+### Shadow semantics
+
+Runtime entries form an ephemeral overlay on top of settings-defined MCP servers:
+
+- **Adding** a runtime server with the same name as a settings entry **shadows** it — the runtime config takes precedence. The original settings entry is not modified.
+- **Removing** a runtime server that was shadowing a settings entry **un-shadows** it — the settings-defined config becomes active again on next connection.
+- **Daemon restart** loses all runtime entries. Only settings-defined servers survive across restarts. Runtime servers are session-lifetime scoped.
+- **`GET /workspace/mcp`** reports the merged view — both settings-defined and runtime servers appear in the `servers[]` array. There is no wire-level distinction between the two origins in the snapshot today.
+
+### Events
+
+Both routes emit **workspace-scoped** SSE events (all active session buses receive them):
+
+| Event                | Emitted when                    | Payload fields                                                                         |
+| -------------------- | ------------------------------- | -------------------------------------------------------------------------------------- |
+| `mcp_server_added`   | `POST` succeeds (not skipped)   | `name`, `transport`, `replaced`, `shadowedSettings`, `toolCount`, `originatorClientId` |
+| `mcp_server_removed` | `DELETE` succeeds (not skipped) | `name`, `wasShadowingSettings`, `originatorClientId`                                   |
+
+Skipped responses (`budget_warning_only`, `not_present`) do NOT emit events.
+
+Budget-related events from the existing `mcp_guardrail_events` surface (`mcp_budget_warning`, `mcp_child_refused_batch`) also fire when runtime additions cross the budget threshold.
 
 ## What's next
 
