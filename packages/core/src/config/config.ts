@@ -862,6 +862,7 @@ export class Config {
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
   private mcpServers: Record<string, MCPServerConfig> | undefined;
+  private readonly runtimeMcpServers = new Map<string, MCPServerConfig>();
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
   private lspInitializationError?: string;
@@ -2509,6 +2510,26 @@ export class Config {
       throw new Error('Cannot modify mcpServers after initialization');
     }
     this.mcpServers = { ...this.mcpServers, ...servers };
+  }
+
+  /**
+   * Add a runtime-only MCP server. Unlike `addMcpServers`, this does NOT
+   * touch `this.mcpServers` (settings layer) and intentionally bypasses
+   * the `initialized` guard — the whole point is post-init mutation from
+   * the daemon surface.  `getMcpServers()` will overlay these entries on
+   * top of the settings layer (Task 5).
+   */
+  addRuntimeMcpServer(name: string, config: MCPServerConfig): void {
+    this.runtimeMcpServers.set(name, config);
+  }
+
+  /**
+   * Remove a runtime-only MCP server previously added via
+   * `addRuntimeMcpServer`.  Returns `true` if the entry existed and was
+   * removed, `false` otherwise.
+   */
+  removeRuntimeMcpServer(name: string): boolean {
+    return this.runtimeMcpServers.delete(name);
   }
 
   isLspEnabled(): boolean {
