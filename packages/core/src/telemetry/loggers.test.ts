@@ -1264,7 +1264,7 @@ describe('loggers', () => {
           truncated_content_length: 100,
           threshold: 500,
           lines: 10,
-          output_file: '/tmp/test-tool.output',
+          output_file: 'test-tool.output',
         },
       });
     });

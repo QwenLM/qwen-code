@@ -6,6 +6,7 @@
 
 import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
 import { logs } from '@opentelemetry/api-logs';
+import path from 'node:path';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
@@ -268,6 +269,7 @@ export function logToolOutputTruncated(
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
+    output_file: path.basename(event.output_file),
     'event.name': 'tool_output_truncated',
     'event.timestamp': new Date().toISOString(),
   };
