@@ -16,27 +16,48 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Type definition for the result of parsing a JSON chunk in tool calls
+ * Result of parsing a JSON chunk for a streaming tool call.
+ *
+ * Modelled as a discriminated union on `complete` so consumers can use
+ * `result.value` without a non-null assertion: the type system guarantees
+ * `value` is present iff `complete === true`. Previously this was a single
+ * interface with `value?` optional and `complete: boolean`, which forced
+ * callers to write `result.value!` at every emit site and relied on the
+ * undocumented invariant that every successful parse populates `value`.
  */
-export interface ToolCallParseResult {
-  /** Whether the JSON parsing is complete */
-  complete: boolean;
-  /** The parsed JSON value (only present when complete is true) */
-  value?: Record<string, unknown>;
-  /** Error information if parsing failed */
-  error?: Error;
-  /** Whether the JSON was repaired (e.g., auto-closed unclosed strings) */
-  repaired?: boolean;
-  /**
-   * The actual storage index this chunk was routed to. May differ from the
-   * caller-supplied index when collision handling reassigned the chunk.
-   */
-  index: number;
-  /** Tool call ID known at this point (mirrors metadata for convenience) */
-  id?: string;
-  /** Tool call function name known at this point (mirrors metadata) */
-  name?: string;
-}
+export type ToolCallParseResult =
+  | {
+      /** JSON parsing is complete — `value` is guaranteed present. */
+      complete: true;
+      /** The parsed JSON object (always a Record per the args contract). */
+      value: Record<string, unknown>;
+      /** Always absent on the success branch — kept for type symmetry only. */
+      error?: undefined;
+      /** Whether the JSON was repaired (e.g., auto-closed unclosed strings). */
+      repaired?: boolean;
+      /** Storage index this chunk was routed to; may differ from request index. */
+      index: number;
+      /** Tool call ID known at this point (mirrors metadata for convenience). */
+      id?: string;
+      /** Tool call function name known at this point (mirrors metadata). */
+      name?: string;
+    }
+  | {
+      /** JSON parsing is not yet complete — `value` is intentionally absent. */
+      complete: false;
+      /** Always absent on the not-complete branch — typed for symmetry. */
+      value?: undefined;
+      /** Error information if parsing failed; absent while args are still streaming. */
+      error?: Error;
+      /** Always absent on the not-complete branch — typed for symmetry. */
+      repaired?: undefined;
+      /** Storage index this chunk was routed to; may differ from request index. */
+      index: number;
+      /** Tool call ID known at this point (mirrors metadata for convenience). */
+      id?: string;
+      /** Tool call function name known at this point (mirrors metadata). */
+      name?: string;
+    };
 
 /**
  * StreamingToolCallParser - Handles streaming tool call objects with inconsistent chunk formats

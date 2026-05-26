@@ -235,6 +235,103 @@ describe('isEarlyDispatchSafe', () => {
       expect(() => isEarlyDispatchSafe(config, bad)).not.toThrow();
       expect(isEarlyDispatchSafe(config, bad)).toBe(false);
     });
+
+    describe('wrapper-trailing-content guard', () => {
+      // Regression for the silent-bypass via `bash -c "..."` wrappers:
+      // `stripShellWrapper` returns ONLY the inner -c argument, so
+      // anything after the closing quote (&&, ||, ;, |, redirection)
+      // is dropped before the read-only classifier sees it. Without
+      // the explicit trailing-content guard the inner command's
+      // safety would falsely green-light running the FULL original
+      // command — bypassing user confirmation entirely.
+      it('returns true for a plain wrapper around a read-only inner', () => {
+        const { config } = buildConfig([
+          { name: ToolNames.SHELL, kind: Kind.Execute },
+        ]);
+        expect(
+          isEarlyDispatchSafe(
+            config,
+            req('a', ToolNames.SHELL, { command: 'bash -c "ls"' }),
+          ),
+        ).toBe(true);
+      });
+
+      it('returns false for a wrapper with trailing && side-effect', () => {
+        const { config } = buildConfig([
+          { name: ToolNames.SHELL, kind: Kind.Execute },
+        ]);
+        expect(
+          isEarlyDispatchSafe(
+            config,
+            req('a', ToolNames.SHELL, {
+              command: 'bash -c "cat x" && rm -rf /tmp/junk',
+            }),
+          ),
+        ).toBe(false);
+      });
+
+      it('returns false for a wrapper piped into a destructive command', () => {
+        const { config } = buildConfig([
+          { name: ToolNames.SHELL, kind: Kind.Execute },
+        ]);
+        expect(
+          isEarlyDispatchSafe(
+            config,
+            req('a', ToolNames.SHELL, {
+              command: 'bash -c "ls" | tee out.txt',
+            }),
+          ),
+        ).toBe(false);
+      });
+
+      it('returns false for a wrapper followed by `;` chained command', () => {
+        const { config } = buildConfig([
+          { name: ToolNames.SHELL, kind: Kind.Execute },
+        ]);
+        expect(
+          isEarlyDispatchSafe(
+            config,
+            req('a', ToolNames.SHELL, {
+              command: 'sh -c "grep foo bar" ; chmod -R 777 /tmp',
+            }),
+          ),
+        ).toBe(false);
+      });
+
+      it('returns false for a wrapper followed by git push --force', () => {
+        const { config } = buildConfig([
+          { name: ToolNames.SHELL, kind: Kind.Execute },
+        ]);
+        expect(
+          isEarlyDispatchSafe(
+            config,
+            req('a', ToolNames.SHELL, {
+              command: 'bash -c "git log" ; git push --force',
+            }),
+          ),
+        ).toBe(false);
+      });
+
+      it("handles single-quoted wrappers (sh -c '...')", () => {
+        const { config } = buildConfig([
+          { name: ToolNames.SHELL, kind: Kind.Execute },
+        ]);
+        expect(
+          isEarlyDispatchSafe(
+            config,
+            req('a', ToolNames.SHELL, { command: "sh -c 'ls'" }),
+          ),
+        ).toBe(true);
+        expect(
+          isEarlyDispatchSafe(
+            config,
+            req('a', ToolNames.SHELL, {
+              command: "sh -c 'ls' && rm -rf /tmp/junk",
+            }),
+          ),
+        ).toBe(false);
+      });
+    });
   });
 
   it('canonicalises legacy tool names before classification', () => {

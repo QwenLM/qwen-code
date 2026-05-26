@@ -212,14 +212,8 @@ export class StreamingToolExecutor {
   discard(reason?: StreamingToolExecutorDiscardReason): void {
     if (this.discarded) return;
     this.discarded = true;
-    this.closed = false;
     this.discardReason = reason;
-    this.requests.length = 0;
-    this.order.length = 0;
-    this.responses.clear();
-    this.acceptedIds.clear();
-    this.rejectPending(reason);
-    this.notifyCancellation(reason);
+    this.wipeBuffer(reason);
   }
 
   /**
@@ -232,6 +226,20 @@ export class StreamingToolExecutor {
    */
   reset(reason?: StreamingToolExecutorDiscardReason): void {
     if (this.discarded) return;
+    this.wipeBuffer(reason);
+  }
+
+  /**
+   * Shared buffer-wipe used by both `discard()` and `reset()`. Clears every
+   * field that represents accepted-but-not-yet-drained work, rejects any
+   * pending `getRemainingResults()` consumer, and fires the cancellation
+   * listeners — keeps the two lifecycle paths in lockstep so a future field
+   * added here cannot silently survive one path while being cleared by the
+   * other. `discard()` additionally sets `discarded` / `discardReason`
+   * before calling this; `reset()` calls it as-is (leaving the executor
+   * Open for the next batch).
+   */
+  private wipeBuffer(reason?: StreamingToolExecutorDiscardReason): void {
     this.closed = false;
     this.requests.length = 0;
     this.order.length = 0;

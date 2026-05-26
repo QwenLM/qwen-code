@@ -920,6 +920,21 @@ export async function runNonInteractive(
             }
             // Use adapter for all event processing
             adapter.processEvent(event);
+            if (event.type === GeminiEventType.Retry) {
+              // Mirror useGeminiStream.ts: discard tool-call requests
+              // from the truncated/failed attempt. Turn has already
+              // fired executor.reset('retry'), which made the
+              // dispatcher abort its in-flight safe tools and cleared
+              // their early results. If we keep the stale entries in
+              // `toolCallRequests`, the post-stream
+              // processToolCallBatch would (a) re-execute every safe
+              // tool because getEarlyResult returns undefined after
+              // cancelInFlight, and (b) submit functionResponses with
+              // no matching functionCall in the retried turn,
+              // corrupting history. Drop them so the retry attempt's
+              // ToolCallRequest events repopulate from scratch.
+              toolCallRequests.length = 0;
+            }
             if (event.type === GeminiEventType.ToolCallRequest) {
               toolCallRequests.push(event.value);
               // Kick off the early dispatch (no-op if the tool isn't

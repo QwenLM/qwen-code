@@ -1266,7 +1266,7 @@ export function convertOpenAIChunkToGemini(
             functionCall: {
               id: result.id,
               name: result.name,
-              args: result.value!,
+              args: result.value,
             },
           });
           toolCallParser.markEmitted(result.index);

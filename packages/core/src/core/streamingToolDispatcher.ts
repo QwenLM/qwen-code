@@ -453,7 +453,27 @@ export function isEarlyDispatchSafe(
     const command = args?.command;
     if (typeof command !== 'string') return false;
     try {
-      return isShellCommandReadOnly(stripShellWrapper(command));
+      const stripped = stripShellWrapper(command);
+      // SECURITY: `stripShellWrapper` returns ONLY the inner argument
+      // of a `bash -c "..."` / `sh -c '...'` wrapper, silently dropping
+      // anything that follows the closing quote. Without an explicit
+      // check the classifier would approve safe-looking inner commands
+      // while `executeToolCall` still runs the full original — e.g.
+      // `bash -c "ls" && rm -rf /` strips to `ls` and would be
+      // green-lit. The post-stream permission path catches this via
+      // its own confirmation flow, but the early-dispatch path bypasses
+      // confirmation entirely, so we must refuse the request here.
+      // Allow only the closing wrapper quote + whitespace after the
+      // inner command; any operator (&&, ||, ;, |, redirection) means
+      // trailing content was dropped and the early path is unsafe.
+      if (stripped !== command.trim()) {
+        const trimmed = command.trim();
+        const idx = trimmed.lastIndexOf(stripped);
+        if (idx < 0) return false;
+        const after = trimmed.slice(idx + stripped.length);
+        if (!/^\s*['"]?\s*$/.test(after)) return false;
+      }
+      return isShellCommandReadOnly(stripped);
     } catch {
       return false;
     }
