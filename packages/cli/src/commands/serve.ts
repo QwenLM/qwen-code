@@ -41,6 +41,7 @@ interface ServeArgs {
   'http-bridge': boolean;
   'mcp-client-budget'?: number;
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
+  'allow-origin'?: string[];
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -144,6 +145,22 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'refused (`disabledReason: "budget"`, deterministic by mcpServers ' +
           'declaration order). `off`: pure observability. Boot rejects ' +
           '`enforce` without a budget.',
+      })
+      .option('allow-origin', {
+        type: 'string',
+        array: true,
+        description:
+          'T2.4 (#4514). Cross-origin allowlist for browser webui clients. ' +
+          'Repeatable; each value must be a canonical URL origin ' +
+          '(`<scheme>://<host>[:<port>]`, no trailing slash) or `*` for any ' +
+          'origin (loud warning; boot refuses if no bearer token is ' +
+          'configured. Recommended: pair with --require-auth on loopback so ' +
+          '/health and /demo are also bearer-gated). When unset, ' +
+          'the daemon rejects every request carrying an `Origin` header with ' +
+          "403 (today's behavior). Matched origins receive proper CORS " +
+          'response headers; unmatched still 403. Example: `--allow-origin ' +
+          'http://localhost:3000 --allow-origin http://localhost:5173`. ' +
+          'Pre-flight via `caps.features.allow_origin`.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
     if (!argv['http-bridge']) {
@@ -219,6 +236,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requireAuth: argv['require-auth'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
+        // T2.4 (#4514). Pass through verbatim; runQwenServe re-runs
+        // `parseAllowOriginPatterns` at boot so a malformed entry is
+        // rejected before the listener binds.
+        ...(argv['allow-origin'] && argv['allow-origin'].length > 0
+          ? { allowOrigins: argv['allow-origin'] }
+          : {}),
       });
     } catch (err) {
       writeStderrLine(
