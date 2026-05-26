@@ -2428,6 +2428,111 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
+    it('stops pre-send hard-rescue after repeated failed hard-tier compactions', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 178_000,
+            newTokenCount: 178_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => makeStreamResponse('after failed rescue'),
+      );
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES + 1; i++) {
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: `hard-rescue-${i}` },
+          `prompt-hard-rescue-bound-${i}`,
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
+      expect(compressSpy.mock.calls.map(([, opts]) => opts.force)).toEqual(
+        Array(MAX_CONSECUTIVE_FAILURES).fill(true),
+      );
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        MAX_CONSECUTIVE_FAILURES + 1,
+      );
+    });
+
+    it('counts thrown hard-rescue attempts toward the retry bound', async () => {
+      const compressionError = new Error('compression side-query failed');
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockRejectedValue(compressionError);
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => makeStreamResponse('after bounded throws'),
+      );
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: `throwing-hard-rescue-${i}` },
+            `prompt-hard-rescue-throw-${i}`,
+          ),
+        ).rejects.toThrow(compressionError);
+      }
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'send after bounded hard-rescue throws' },
+        'prompt-hard-rescue-after-throws',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+    });
+
+    it('refunds hard-rescue NOOP results so history-too-small does not trip the retry bound', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 178_000,
+            newTokenCount: 178_000,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => makeStreamResponse('after noop rescue'),
+      );
+
+      chat.setLastPromptTokenCount(176_999);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES + 1; i++) {
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: `noop-hard-rescue-${i}` },
+          `prompt-hard-rescue-noop-${i}`,
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES + 1);
+      expect(compressSpy.mock.calls.map(([, opts]) => opts.force)).toEqual(
+        Array(MAX_CONSECUTIVE_FAILURES + 1).fill(true),
+      );
+    });
+
     it('forwards latched consecutiveFailures into hard-rescue (no pre-call reset); success recovers via the post-call branch', async () => {
       // Hard-rescue uses force=true, which already bypasses the
       // chatCompressionService breaker (the `!force` check in compress's

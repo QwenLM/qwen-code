@@ -1224,24 +1224,24 @@ export class GeminiChat {
    *   - Auto-compaction failures (cheap-gate path): increment by 1.
    *   - Manual `/compress` failures: skipped (`force=true` → `!force`
    *     guard in the failure branch).
-   *   - Hard-tier rescue failures: skipped (force=true → `!force` guard
-   *     in tryCompress's failure branch). The counter is NOT pre-reset
-   *     before the rescue call — force=true already bypasses the breaker
-   *     check in compress's cheap-gate, and pre-resetting would in fact
-   *     defeat the breaker entirely (hard-rescue failures don't increment
-   *     via tryCompress, and a pre-reset every send would wipe the
-   *     reactive-overflow increment). The forwarded counter value is
-   *     whatever the chat carried; on COMPRESSED success the post-call
-   *     branch in tryCompress's COMPRESSED handler resets to 0, which is
-   *     the correct recovery path for a previously-latched session.
-   *     Reactive overflow remains the explicit-increment safety net for
-   *     the force=true path — its handler bumps the counter by +1 so N
-   *     reactive failures will still trip the breaker.
+   *   - Hard-tier rescue failures: skipped here because force=true bypasses
+   *     this breaker; bounded separately by hardRescueFailureCount.
+   *   - Reactive overflow failures: explicitly incremented in the overflow
+   *     handler so N repeated reactive failures still trip this breaker.
    *
    * If you're debugging "why is hard-rescue firing but the counter is 0",
    * that's by design.
    */
   private consecutiveFailures = 0;
+
+  /**
+   * Number of failed hard-tier rescue attempts for this chat. Hard rescue is
+   * forced and therefore bypasses the cheap-gate breaker, so it needs its own
+   * bound to avoid spending one compression side-query on every send when
+   * history repeatedly cannot shrink. NOOP is refunded because a too-small
+   * history slice is not a broken rescue mechanism; COMPRESSED resets this.
+   */
+  private hardRescueFailureCount = 0;
 
   /**
    * Partial-push markers — index of the in-memory `model[partial fc]`
@@ -1365,6 +1365,7 @@ export class GeminiChat {
       // (or any successful compaction) recovers a chat whose breaker had
       // tripped.
       this.consecutiveFailures = 0;
+      this.hardRescueFailureCount = 0;
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
       // Track failed attempts (only count if not forced) so we stop spending
       // compression-API calls on a chat that can't shrink after
@@ -1488,18 +1489,10 @@ export class GeminiChat {
       // cheap-gate inside tryCompress used the user's resolved value.
       // (review #4168 R1.3 + R1.4)
       //
-      // The consecutive-failure counter is NOT pre-reset here. force=true
-      // already bypasses the breaker (the `!force` check in
-      // `chatCompressionService.compress`'s cheap-gate), so a latched session
-      // can still attempt hard-rescue; pre-resetting would defeat the breaker
-      // entirely because hard-rescue failures don't increment via tryCompress
-      // (force=true skips the `if (!force)` increment in the failure branch),
-      // and only the reactive overflow handler explicitly increments. With a
-      // pre-reset the counter would oscillate 0↔1 across sends and never trip.
-      // On COMPRESSED success, the post-call branch in `tryCompress` (the
-      // `consecutiveFailures = 0` line in the COMPRESSED handler) still resets
-      // to 0, which is the correct recovery path for a previously-latched
-      // session.
+      // The cheap-gate consecutive-failure counter is NOT pre-reset here.
+      // force=true already bypasses that breaker, while hard-rescue itself is
+      // bounded by hardRescueFailureCount so persistent pre-send rescue
+      // failures fall through to reactive overflow after a few strikes.
       const contextLimit =
         this.config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
@@ -1524,31 +1517,55 @@ export class GeminiChat {
         this.lastPromptTokenCount,
         imageTokenEstimate,
       );
-      const shouldForceFromHard = effectiveTokens >= hard;
+      const isHardTier = effectiveTokens >= hard;
+      const shouldForceFromHard =
+        isHardTier && this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
       if (shouldForceFromHard) {
+        this.hardRescueFailureCount += 1;
         debugLogger.warn(
-          `[compaction] hard-tier rescue triggered: effectiveTokens=${effectiveTokens}, hard=${hard}, consecutiveFailures=${this.consecutiveFailures}.`,
+          `[compaction] hard-tier rescue triggered: effectiveTokens=${effectiveTokens}, hard=${hard}, hardRescueFailureCount=${this.hardRescueFailureCount}, consecutiveFailures=${this.consecutiveFailures}.`,
+        );
+      } else if (isHardTier) {
+        debugLogger.warn(
+          `[compaction] hard-tier rescue skipped after ${this.hardRescueFailureCount} failed attempts; relying on reactive overflow recovery. effectiveTokens=${effectiveTokens}, hard=${hard}.`,
         );
       }
 
-      compressionInfo = await this.tryCompress(
-        prompt_id,
-        model,
-        shouldForceFromHard,
-        params.config?.abortSignal,
-        {
-          pendingUserMessage: userContent,
-          precomputedEffectiveTokens: effectiveTokens,
-          // Hard-rescue is force=true to bypass the cheap-gate breaker
-          // but it's an AUTOMATIC trigger. Explicit trigger='auto' tells
-          // the service to skip the manual-only orphan-strip that would
-          // otherwise drop the active funcCall whose matching
-          // funcResponse is sitting in `pendingUserMessage` waiting to
-          // be pushed. Without this, hard-rescue mid tool-use loop
-          // corrupts the next API request's tool-call/response pairing.
-          trigger: shouldForceFromHard ? 'auto' : undefined,
-        },
-      );
+      if (isHardTier && !shouldForceFromHard) {
+        compressionInfo = {
+          originalTokenCount: effectiveTokens,
+          newTokenCount: effectiveTokens,
+          compressionStatus: CompressionStatus.NOOP,
+        };
+      } else {
+        compressionInfo = await this.tryCompress(
+          prompt_id,
+          model,
+          shouldForceFromHard,
+          params.config?.abortSignal,
+          {
+            pendingUserMessage: userContent,
+            precomputedEffectiveTokens: effectiveTokens,
+            // Hard-rescue is force=true to bypass the cheap-gate breaker
+            // but it's an AUTOMATIC trigger. Explicit trigger='auto' tells
+            // the service to skip the manual-only orphan-strip that would
+            // otherwise drop the active funcCall whose matching
+            // funcResponse is sitting in `pendingUserMessage` waiting to
+            // be pushed. Without this, hard-rescue mid tool-use loop
+            // corrupts the next API request's tool-call/response pairing.
+            trigger: shouldForceFromHard ? 'auto' : undefined,
+          },
+        );
+        if (
+          shouldForceFromHard &&
+          compressionInfo.compressionStatus === CompressionStatus.NOOP
+        ) {
+          this.hardRescueFailureCount = Math.max(
+            0,
+            this.hardRescueFailureCount - 1,
+          );
+        }
+      }
 
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
