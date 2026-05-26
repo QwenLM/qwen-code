@@ -417,6 +417,22 @@ describe('BaseLlmClient', () => {
       expect(result).toEqual({ color: 'violet' });
     });
 
+    it('should treat an empty JSON object from text as a successful fallback parse', async () => {
+      const mockResponse = createMockResponseWithText('{}');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('generateJson used text-channel fallback'),
+      );
+      expect(mockDebugWarn).not.toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
+    });
+
     it('should parse a JSON object with braces inside string values', async () => {
       const mockResponse = createMockResponseWithText(
         '{"message":"a } b","color":"green"}',
@@ -427,6 +443,21 @@ describe('BaseLlmClient', () => {
       const result = await client.generateJson(defaultOptions);
 
       expect(result).toEqual({ message: 'a } b', color: 'green' });
+    });
+
+    it('should parse a JSON object with escaped quotes inside string values', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{"explanation":"use \\"quotes\\" safely","color":"green"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({
+        explanation: 'use "quotes" safely',
+        color: 'green',
+      });
     });
 
     it('should parse the first valid JSON object candidate from text', async () => {
