@@ -24,12 +24,14 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   CompactionInFlightError,
+  CompressFailedError,
   InvalidClientIdError,
   InvalidMetaKeyError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
   MetaTooLargeError,
+  PromptInFlightError,
   ReservedMetaKeyError,
   RestoreInProgressError,
   SessionNotFoundError,
@@ -4618,7 +4620,10 @@ describe('createHttpAcpBridge', () => {
      * Build a channel factory that answers `qwen/control/session/compress`
      * with a configurable response. `delayMs` lets us pause mid-call so
      * collision tests can fire a second compress while the first is
-     * still on the extMethod await.
+     * still on the extMethod await. `pendingPrompt: true` makes the
+     * agent's `prompt` handler hang indefinitely so the bridge keeps
+     * `activePromptOriginatorClientId` set — needed for the
+     * PromptInFlight guard test.
      */
     function compressFactory(opts: {
       response?: {
@@ -4629,10 +4634,20 @@ describe('createHttpAcpBridge', () => {
       };
       delayMs?: number;
       shouldThrow?: () => unknown;
+      pendingPrompt?: boolean;
     }): ChannelFactory {
       return async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
         const agent = new FakeAgent({
+          ...(opts.pendingPrompt
+            ? {
+                // Hang forever — the bridge's sendPrompt then keeps
+                // `activePromptOriginatorClientId` set on the entry,
+                // which is the precondition for PromptInFlightError.
+                promptImpl: () =>
+                  new Promise<{ stopReason: 'end_turn' }>(() => {}),
+              }
+            : {}),
           extMethodImpl: async (method, _params) => {
             if (method === 'qwen/control/session/compress') {
               if (opts.shouldThrow) throw opts.shouldThrow();
@@ -4751,6 +4766,43 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('reconstructs CompressFailedError from agent JSON-RPC errorKind (PR #4516 review I1)', async () => {
+      // The agent throws `RequestError(-32004, …, {errorKind:
+      // 'compress_failed', compressionStatus: 'COMPRESSION_FAILED_X'})`.
+      // The bridge MUST detect this shape on the wire and re-throw as
+      // a typed `CompressFailedError` so `sendBridgeError` can map to
+      // a stable `500 {code: 'compress_failed', compressionStatus}`
+      // response. Without the reconstruction, the catch-all 500 leaks
+      // the JSON-RPC `code: -32004` and breaks SDK consumers that
+      // pattern-match on `body.code === 'compress_failed'` per the
+      // docs. Mirrors the TrustGateError reconstruction at
+      // setSessionApprovalMode.
+      const bridge = makeBridge({
+        channelFactory: compressFactory({
+          // Throw a real ACP `RequestError` so the protocol layer
+          // serializes the `data` field across the wire. A plain
+          // `Error` would be wrapped into `-32603 Internal Error`
+          // with no `data`, breaking the bridge's reconstruction
+          // path. Mirrors the agent's actual throw in `acpAgent.ts`.
+          shouldThrow: () =>
+            new RequestError(-32004, 'compress failed', {
+              errorKind: 'compress_failed',
+              compressionStatus: 'COMPRESSION_FAILED_INFLATED_TOKEN_COUNT',
+            }),
+        }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const reject = await bridge
+        .compressSession(session.sessionId)
+        .catch((e) => e as unknown);
+      expect(reject).toBeInstanceOf(CompressFailedError);
+      expect((reject as CompressFailedError).compressionStatus).toBe(
+        'COMPRESSION_FAILED_INFLATED_TOKEN_COUNT',
+      );
+      expect((reject as CompressFailedError).sessionId).toBe(session.sessionId);
+      await bridge.shutdown();
+    });
+
     it('clears compressInFlight in finally even on extMethod error', async () => {
       // Without the `finally` clause, a thrown extMethod (transport
       // close, agent crash) would strand the flag set and every
@@ -4786,6 +4838,143 @@ describe('createHttpAcpBridge', () => {
       await expect(bridge.compressSession('unknown')).rejects.toBeInstanceOf(
         SessionNotFoundError,
       );
+    });
+
+    it('throws PromptInFlightError when activePromptOriginatorClientId is set (PR #4516 review I3)', async () => {
+      // Bridge-level coverage for the prompt-vs-compress race guard.
+      // The two-tier 409 (compaction_in_flight vs prompt_in_flight) is
+      // a wire contract; this test fences the latter at the bridge
+      // layer so a future refactor that renames
+      // `activePromptOriginatorClientId` or moves the check can't
+      // silently break the route's 409 path. We use `pendingPrompt: true`
+      // on the factory to make the agent's prompt impl hang
+      // indefinitely so the bridge keeps the field set.
+      const bridge = makeBridge({
+        channelFactory: compressFactory({ pendingPrompt: true }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const promptStarted = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'long-running' }],
+        },
+        undefined,
+        session.clientId ? { clientId: session.clientId } : undefined,
+      );
+      // Yield repeatedly so the bridge's sendPrompt advances through
+      // its synchronous setup and into the awaiting `connection.prompt`
+      // call — at which point `activePromptOriginatorClientId` is set.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      await expect(
+        bridge.compressSession(session.sessionId),
+      ).rejects.toBeInstanceOf(PromptInFlightError);
+      // Don't await the prompt — it would hang forever. Suppress the
+      // unhandled-rejection warning when shutdown tears the channel down.
+      promptStarted.catch(() => {});
+      await bridge.shutdown();
+    });
+
+    it('echoes state.meta on getSessionContextStatus (PR #4516 review I2)', async () => {
+      // The always-present `state.meta` contract is load-bearing for
+      // SDK consumers' "old daemon vs empty bag" detection. Without
+      // this assertion an accidental drop of the splice in
+      // `getSessionContextStatus` ships green. We use the
+      // `compressFactory` (which also responds to `qwen/status/session/context`
+      // — verify) … actually it doesn't, so spin a dedicated factory
+      // that answers context.
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const { clientStream, agentStream } = createInMemoryChannel();
+          const agent = new FakeAgent({
+            extMethodImpl: (method, params) => {
+              if (method === 'qwen/status/session/context') {
+                return Promise.resolve({
+                  v: 1,
+                  sessionId: (params as { sessionId: string }).sessionId,
+                  workspaceCwd: WS_A,
+                  state: { models: {} },
+                });
+              }
+              return Promise.resolve({});
+            },
+          });
+          new AgentSideConnection(() => agent as Agent, agentStream);
+          return {
+            stream: clientStream,
+            exited: new Promise<
+              | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+              | undefined
+            >(() => {}),
+            kill: async () => {},
+            killSync: () => {},
+          };
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      // Fresh session: state.meta must be exactly `{}`, NOT undefined.
+      const before = await bridge.getSessionContextStatus(session.sessionId);
+      expect((before.state as { meta?: unknown }).meta).toEqual({});
+      // After a write, the same route must reflect the stored bag.
+      bridge.setSessionMeta(session.sessionId, {
+        meta: { chat_id: 'c-9' },
+      });
+      const after = await bridge.getSessionContextStatus(session.sessionId);
+      expect((after.state as { meta?: unknown }).meta).toEqual({
+        chat_id: 'c-9',
+      });
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError on getSessionContextStatus race after session death (PR #4516 review I6)', async () => {
+      // Defensive `?? {}` would silently mask a session-died race
+      // between the ACP roundtrip and the meta splice. The fix throws
+      // SessionNotFoundError so race-aware reducers don't record a
+      // bogus "meta was cleared" transition. We exercise this by
+      // killing the session DURING the ACP call — the factory's
+      // context handler waits on a controllable promise so we can
+      // `killSession` between fire and resolve.
+      let releaseContext: () => void = () => {};
+      const contextHeld = new Promise<void>((r) => {
+        releaseContext = r;
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const { clientStream, agentStream } = createInMemoryChannel();
+          const agent = new FakeAgent({
+            extMethodImpl: async (method, params) => {
+              if (method === 'qwen/status/session/context') {
+                await contextHeld;
+                return {
+                  v: 1,
+                  sessionId: (params as { sessionId: string }).sessionId,
+                  workspaceCwd: WS_A,
+                  state: {},
+                };
+              }
+              return {};
+            },
+          });
+          new AgentSideConnection(() => agent as Agent, agentStream);
+          return {
+            stream: clientStream,
+            exited: new Promise<
+              | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+              | undefined
+            >(() => {}),
+            kill: async () => {},
+            killSync: () => {},
+          };
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const ctxPromise = bridge.getSessionContextStatus(session.sessionId);
+      // Kill the session mid-call, THEN release the held context call.
+      await bridge.killSession(session.sessionId);
+      releaseContext();
+      await expect(ctxPromise).rejects.toBeInstanceOf(SessionNotFoundError);
+      await bridge.shutdown();
     });
   });
 
@@ -4879,6 +5068,57 @@ describe('createHttpAcpBridge', () => {
       expect(() =>
         bridge.setSessionMeta(session.sessionId, { meta: { big: oversized } }),
       ).toThrow(MetaTooLargeError);
+      await bridge.shutdown();
+    });
+
+    it('skips publish when a write is identical to the existing bag (PR #4516 review I7)', async () => {
+      // Identity writes (post the same bag twice) must NOT fan out
+      // duplicate `session_meta_changed` events to subscribers — that
+      // would spam the SDK reducer's `sessionMetaChangedCount`.
+      // Mirrors `updateSessionMetadata`'s no-op gate.
+      const bridge = metaBridge();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const collect = (async () => {
+        for await (const e of sub) events.push(e);
+      })();
+      await new Promise((r) => setImmediate(r));
+      bridge.setSessionMeta(session.sessionId, {
+        meta: { chat_id: 'c-1' },
+      });
+      bridge.setSessionMeta(session.sessionId, {
+        meta: { chat_id: 'c-1' },
+      });
+      bridge.setSessionMeta(session.sessionId, {
+        meta: { chat_id: 'c-1' },
+      });
+      await new Promise((r) => setImmediate(r));
+      const metaEvents = events.filter(
+        (e) => e.type === 'session_meta_changed',
+      );
+      expect(metaEvents).toHaveLength(1);
+      await bridge.shutdown();
+      await collect.catch(() => {});
+    });
+
+    it('also resolves clientId BEFORE mutation so a bad header rejects without state change (PR #4516 review C1)', async () => {
+      // Bad X-Qwen-Client-Id throws InvalidClientIdError. The fix
+      // moves resolveTrustedClientId BEFORE entry.meta = next. Without
+      // it, the bag would change, no event would fire, and the caller
+      // would see a 400 — silent state mutation. We assert the bag
+      // remains the prior state (here `{}`) after a failed write.
+      const bridge = metaBridge();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(() =>
+        bridge.setSessionMeta(
+          session.sessionId,
+          { meta: { chat_id: 'c-1' } },
+          { clientId: 'not-a-registered-client-id' },
+        ),
+      ).toThrow(InvalidClientIdError);
+      // Bag must remain empty — the throw happened before any mutation.
+      expect(bridge.getSessionMeta(session.sessionId).meta).toEqual({});
       await bridge.shutdown();
     });
 

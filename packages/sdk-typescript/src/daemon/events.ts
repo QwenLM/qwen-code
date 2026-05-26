@@ -529,8 +529,16 @@ export interface DaemonSessionCompactedData {
   sessionId: string;
   originalTokenCount: number;
   newTokenCount: number;
-  /** String name of the core `CompressionStatus` enum; see `DaemonCompressSessionResult`. */
-  compressionStatus: string;
+  /**
+   * String name of the core `CompressionStatus` enum. NOTE: `'NOOP'`
+   * never appears on this event payload by daemon design — the bridge
+   * suppresses the event when the status is NOOP because history is
+   * unchanged. The literal is still in the union so consumers can
+   * pattern-match against `DaemonCompressSessionResult.compressionStatus`
+   * (where NOOP IS expected) without re-typing per call site. See
+   * `DaemonCompressSessionResult` for the full literal contract.
+   */
+  compressionStatus: 'COMPRESSED' | 'NOOP' | (string & {});
   durationMs: number;
   /**
    * #4282 fold-in 2 (gpt-5.5 SV3) pattern — envelope-level

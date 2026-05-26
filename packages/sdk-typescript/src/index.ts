@@ -28,11 +28,16 @@ export {
   type DaemonApprovalModeChangedEvent,
   type DaemonApprovalModeResult,
   // T1.3 / T1.4 (#4514) — session compress + per-session _meta types.
+  // I9 review-fix: meta result split into Snapshot + WriteResult; the
+  // legacy `DaemonSessionMetaResult` union alias is retained but
+  // deprecated for one SDK major.
   type DaemonCompressSessionResult,
   type DaemonSessionCompactedData,
   type DaemonSessionCompactedEvent,
   type DaemonSessionMetaChangedData,
   type DaemonSessionMetaChangedEvent,
+  type DaemonSessionMetaSnapshot,
+  type DaemonSessionMetaWriteResult,
   type DaemonSessionMetaResult,
   type DaemonInitWorkspaceResult,
   type DaemonMcpRestartResult,

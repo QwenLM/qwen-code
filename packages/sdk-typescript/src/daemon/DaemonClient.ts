@@ -48,7 +48,8 @@ import type {
   DaemonCompressSessionResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
-  DaemonSessionMetaResult,
+  DaemonSessionMetaSnapshot,
+  DaemonSessionMetaWriteResult,
   DaemonToolToggleResult,
 } from './types.js';
 
@@ -1044,7 +1045,7 @@ export class DaemonClient {
     sessionId: string,
     body: { meta: Record<string, unknown>; merge?: boolean },
     opts?: { clientId?: string },
-  ): Promise<DaemonSessionMetaResult> {
+  ): Promise<DaemonSessionMetaWriteResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/_meta`,
       {
@@ -1062,24 +1063,25 @@ export class DaemonClient {
         if (!res.ok) {
           throw await this.failOnError(res, 'POST /session/:id/_meta');
         }
-        return (await res.json()) as DaemonSessionMetaResult;
+        return (await res.json()) as DaemonSessionMetaWriteResult;
       },
     );
   }
 
   /**
    * T1.4 (#4514). Read the per-session metadata bag. Returns
-   * `meta: {}, byteSize: 2` for a fresh session (`changeKind` is
-   * absent on read). The same bag is also echoed on
-   * `GET /session/:id/context` (`state.meta`), so adapters that
-   * already fetch context don't need this separate round-trip.
+   * `meta: {}, byteSize: 2` for a fresh session (no `changeKind` field
+   * on the snapshot type — that's only present on write results). The
+   * same bag is also echoed on `GET /session/:id/context`
+   * (`state.meta`), so adapters that already fetch context don't need
+   * this separate round-trip.
    *
    * Pre-flight `caps.features.session_meta`.
    */
   async getSessionMeta(
     sessionId: string,
     opts?: { clientId?: string },
-  ): Promise<DaemonSessionMetaResult> {
+  ): Promise<DaemonSessionMetaSnapshot> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/_meta`,
       {
@@ -1090,7 +1092,7 @@ export class DaemonClient {
         if (!res.ok) {
           throw await this.failOnError(res, 'GET /session/:id/_meta');
         }
-        return (await res.json()) as DaemonSessionMetaResult;
+        return (await res.json()) as DaemonSessionMetaSnapshot;
       },
     );
   }

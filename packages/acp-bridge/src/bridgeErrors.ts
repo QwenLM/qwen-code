@@ -175,8 +175,9 @@ export class InvalidSessionMetadataError extends Error {
  * T1.3 (#4514). Thrown by `bridge.compressSession` when another compress
  * call is already mid-flight on the same session. The chat history is
  * single-threaded; two concurrent compress calls would race the
- * `setHistory` write inside `tryCompressChat`. Routes map this to HTTP
- * 409 with code `compaction_in_flight` so the caller can distinguish
+ * `setHistory` write inside `GeminiChat.tryCompress` (which
+ * `GeminiClient.tryCompressChat` invokes). Routes map this to HTTP 409
+ * with code `compaction_in_flight` so the caller can distinguish
  * "concurrent compress" from "concurrent prompt" (`PromptInFlightError`)
  * — both are 409 but require different remediation by the client.
  */
@@ -189,6 +190,40 @@ export class CompactionInFlightError extends Error {
     );
     this.name = 'CompactionInFlightError';
     this.sessionId = sessionId;
+  }
+}
+
+/**
+ * T1.3 (#4514, PR #4516 review I1). Thrown by `bridge.compressSession`
+ * when the ACP child reports a `*_FAILED_*` compaction status (the
+ * agent's `tryCompressChat` translates the core `CompressionStatus`
+ * enum to a string and re-raises as `RequestError(-32004, …,
+ * {errorKind: 'compress_failed'})`). The bridge catches the JSON-RPC
+ * shape on the wire and reconstructs THIS typed class so the route
+ * layer can pattern-match with `instanceof` and map to a stable
+ * `500 {code: 'compress_failed', compressionStatus}` response
+ * (mirrors the `TrustGateError` reconstruction at the same site).
+ *
+ * Without this typed reconstruction, the catch-all 500 in
+ * `sendBridgeError` would surface the JSON-RPC error verbatim
+ * (`code: -32004`), breaking the documented wire shape and SDK
+ * consumers that branch on `body.code === 'compress_failed'`.
+ *
+ * `compressionStatus` carries the specific failure flavor (e.g.,
+ * `'COMPRESSION_FAILED_INFLATED_TOKEN_COUNT'`) when the agent
+ * provides it; falls back to `'UNKNOWN'` for non-enum values.
+ */
+export class CompressFailedError extends Error {
+  readonly sessionId: string;
+  readonly compressionStatus: string;
+  constructor(sessionId: string, compressionStatus: string, message?: string) {
+    super(
+      message ??
+        `Compress on session ${sessionId} failed with status ${compressionStatus}.`,
+    );
+    this.name = 'CompressFailedError';
+    this.sessionId = sessionId;
+    this.compressionStatus = compressionStatus;
   }
 }
 

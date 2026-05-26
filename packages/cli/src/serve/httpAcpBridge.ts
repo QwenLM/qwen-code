@@ -95,6 +95,7 @@ export {
   PermissionPolicyNotImplementedError,
   // T1.3 + T1.4 (#4514) — session compress + per-session _meta bag.
   CompactionInFlightError,
+  CompressFailedError,
   PromptInFlightError,
   InvalidMetaKeyError,
   ReservedMetaKeyError,

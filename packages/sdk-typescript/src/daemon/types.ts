@@ -749,22 +749,27 @@ export interface DaemonCompressSessionResult {
   originalTokenCount: number;
   newTokenCount: number;
   /**
-   * String name of the core `CompressionStatus` numeric enum (e.g.
-   * `'COMPRESSED'`, `'NOOP'`, `'COMPRESSION_FAILED_INFLATED_TOKEN_COUNT'`).
-   * Treat any value containing `'FAILED'` as an error; the bridge
-   * surfaces such cases as HTTP 500 with `errorKind: 'compress_failed'`,
-   * but a future daemon may return the status verbatim on a 200 if the
-   * failure mode shifts category — branch defensively.
+   * String name of the core `CompressionStatus` numeric enum.
+   * Documented values: `'COMPRESSED'` (history rewritten) and
+   * `'NOOP'` (below threshold, history unchanged). Open-string-union
+   * shape (`literal | (string & {})`) matches the existing
+   * `DaemonAuthProviderId` / `scope` pattern so IDE completion still
+   * surfaces the load-bearing literals — `'NOOP'` in particular is
+   * the gate the bridge uses to suppress the `session_compacted`
+   * event — while a future daemon adding a new enum value doesn't
+   * crash older SDK consumers. Failures surface separately as HTTP
+   * 500 with `errorKind: 'compress_failed'`, so success responses
+   * normally carry only the two literals.
    */
-  compressionStatus: string;
+  compressionStatus: 'COMPRESSED' | 'NOOP' | (string & {});
   /** Wall-clock duration of the underlying side-query, in ms. */
   durationMs: number;
 }
 
 /**
- * T1.4 (#4514). Result body of `POST /session/:id/_meta` and
- * `GET /session/:id/_meta`. The bag is daemon-side only — NOT injected
- * into LLM prompt context in v1 — and echoed on
+ * T1.4 (#4514). Snapshot of the per-session metadata bag — returned by
+ * `GET /session/:id/_meta`. Daemon-side only; NOT injected into LLM
+ * prompt context in v1. The same shape is echoed on
  * `GET /session/:id/context` (`state.meta`) when the daemon advertises
  * the `session_meta` capability tag.
  *
@@ -772,18 +777,43 @@ export interface DaemonCompressSessionResult {
  * counts toward the per-session 8 KB cap. A fresh session has
  * `meta: {}` and `byteSize: 2` (the empty object serializes to `"{}"`).
  *
- * `changeKind` is only present on the POST result (read responses
- * omit it). `'replace'` is the default; `'merge'` is set when the
- * request carried `merge: true`. `null` values under merge SET the
- * key to null — they do NOT delete it; per-key DELETE is deferred to
- * a follow-up. To delete a key, post a replacement bag without it.
+ * PR #4516 review I9: split from a single `changeKind?: ...` optional
+ * type into two distinct types so the GET shape can omit `changeKind`
+ * entirely (it has no meaning on reads) and the POST shape can require
+ * it. Mirrors the bridge interface's inline return types and prevents
+ * consumers from having to handle an impossible `changeKind: undefined`
+ * branch when reading the result of a write.
  */
-export interface DaemonSessionMetaResult {
+export interface DaemonSessionMetaSnapshot {
   sessionId: string;
   meta: Record<string, unknown>;
   byteSize: number;
-  changeKind?: 'replace' | 'merge';
 }
+
+/**
+ * T1.4 (#4514). Result body of `POST /session/:id/_meta`. Extends
+ * `DaemonSessionMetaSnapshot` with a required `changeKind` that
+ * discriminates between full-replace and shallow-merge writes.
+ *
+ * `'replace'` is the default; `'merge'` is set when the request carried
+ * `merge: true`. `null` values under merge SET the key to null — they
+ * do NOT delete it; per-key DELETE is deferred to a follow-up. To
+ * delete a key, post a replacement bag without it.
+ */
+export interface DaemonSessionMetaWriteResult
+  extends DaemonSessionMetaSnapshot {
+  changeKind: 'replace' | 'merge';
+}
+
+/**
+ * @deprecated Use `DaemonSessionMetaSnapshot` (GET) or
+ * `DaemonSessionMetaWriteResult` (POST). Retained as a transitional
+ * alias so consumers built against the initial T1.4 shape don't
+ * break at compile time; will be removed in the next SDK major.
+ */
+export type DaemonSessionMetaResult =
+  | DaemonSessionMetaSnapshot
+  | DaemonSessionMetaWriteResult;
 
 /**
  * #4175 Wave 4 PR 17. Result body of `POST /workspace/tools/:name/

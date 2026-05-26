@@ -329,11 +329,15 @@ export interface ServeSessionContextStatus {
     configOptions?: unknown[] | null;
     /**
      * T1.4 (#4514). Daemon-side per-session metadata bag set via
-     * `POST /session/:id/_meta`. Always present (even `{}`) on daemons
-     * that advertise the `session_meta` capability tag so adapters
+     * `POST /session/:id/_meta`.
+     *
+     * The optional `?` sigil exists only for **pre-T1.4 daemons** (which
+     * omit the field entirely). On any daemon that advertises the
+     * `session_meta` capability tag, this field is **always populated**
+     * (with `{}` if the session has had no meta writes) so adapters
      * cannot mistake "old daemon without support" for "new daemon with
-     * empty bag". Pre-T1.4 daemons omit the field; SDK consumers gate
-     * on the capability tag, not field absence.
+     * empty bag". SDK consumers should gate on the capability tag, not
+     * field absence.
      */
     meta?: Record<string, unknown>;
     [key: string]: unknown;

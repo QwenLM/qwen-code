@@ -127,9 +127,15 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // — `src/index.ts` is what npm consumers actually import. The
     // type-only imports below would fail to compile if any of these
     // names were absent from `src/index.ts`, which is the regression
-    // fence for the published-barrel-drift bug. These six names are
-    // the wire-shape contract for compress + _meta.
+    // fence for the published-barrel-drift bug. PR #4516 review I9
+    // bumped the surface from 6 to 8 names: meta result was split
+    // into Snapshot (GET) + WriteResult (POST); the legacy
+    // `DaemonSessionMetaResult` union alias is retained but
+    // deprecated and still pinned here so the deprecation is visible
+    // to consumers.
     expectTypeOf<T14.DaemonCompressSessionResult>().not.toBeNever();
+    expectTypeOf<T14.DaemonSessionMetaSnapshot>().not.toBeNever();
+    expectTypeOf<T14.DaemonSessionMetaWriteResult>().not.toBeNever();
     expectTypeOf<T14.DaemonSessionMetaResult>().not.toBeNever();
     expectTypeOf<T14.DaemonSessionCompactedData>().not.toBeNever();
     expectTypeOf<T14.DaemonSessionCompactedEvent>().not.toBeNever();

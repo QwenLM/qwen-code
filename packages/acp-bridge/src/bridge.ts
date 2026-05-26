@@ -63,6 +63,7 @@ import {
   McpServerNotFoundError,
   McpServerRestartFailedError,
   CompactionInFlightError,
+  CompressFailedError,
   PromptInFlightError,
   InvalidMetaKeyError,
   ReservedMetaKeyError,
@@ -293,9 +294,15 @@ interface SessionEntry {
    * extMethod call so a second concurrent compress on the same session
    * fails fast with `CompactionInFlightError` (HTTP 409
    * `compaction_in_flight`) rather than racing the `setHistory` write
-   * inside `tryCompressChat`. Cleared in `finally` so a thrown
-   * extMethod (timeout, transport close, agent-side compress_failed)
-   * never strands the flag.
+   * inside `GeminiChat.tryCompress` (which `GeminiClient.tryCompressChat`
+   * invokes). PR #4516 review C2: the flag is cleared by
+   * `extPromise.finally` (NOT by the outer `Promise.race` settlement)
+   * so timeout / transport-close rejections of the outer race leave the
+   * flag set until the underlying agent op truly settles — otherwise a
+   * second compress could start while the first's `setHistory` is
+   * still pending. The trade-off is that a wedged extPromise (agent
+   * gone forever) leaves the flag set permanently; recover via
+   * `killSession`.
    */
   compressInFlight: boolean;
   /**
@@ -2871,16 +2878,22 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         SERVE_STATUS_EXT_METHODS.sessionContext,
       );
       const entry = byId.get(sessionId);
-      // Defensive: a session can have been killed between the ACP
-      // call returning and us splicing meta. If `entry` is gone we
-      // can still return the ACP-sourced shape but with an empty
-      // meta — the consumer's next request will get a clean 404.
-      const meta = entry?.meta ?? {};
+      // PR #4516 review I6: if the session was killed between the ACP
+      // roundtrip returning and this entry lookup, fail honestly with
+      // `SessionNotFoundError` instead of papering over the race with
+      // an empty meta bag. A success response with `state.meta: {}`
+      // would lie to a race-aware consumer's reducer (it would record
+      // "meta was just cleared" then "session disappeared"). Caller
+      // sees a 404 from the route layer, retries against a fresh
+      // session, gets a clean signal.
+      if (!entry) {
+        throw new SessionNotFoundError(sessionId);
+      }
       return {
         ...status,
         state: {
           ...status.state,
-          meta,
+          meta: entry.meta,
         },
       };
     },
@@ -3131,7 +3144,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       //      compresses (`CompactionInFlightError → 409`).
       //   2. `activePromptOriginatorClientId` — refuses while a prompt
       //      is on the wire (`PromptInFlightError → 409`); the agent's
-      //      own pre-send `tryCompress` inside `sendMessageStream`
+      //      own pre-send `tryCompress` inside `GeminiChat.sendMessage`
       //      would race the daemon-driven call on the same chat
       //      history. v1 only fences at compress START — a prompt that
       //      ARRIVES after we set `compressInFlight` can still trigger
@@ -3160,54 +3173,109 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       );
       entry.compressInFlight = true;
       const startedAt = Date.now();
+      // PR #4516 review C2: the flag clear MUST be coupled to the
+      // underlying extMethod settlement, NOT the outer Promise.race
+      // settlement. `withTimeout` rejects the race after 180s but does
+      // NOT cancel the underlying `entry.connection.extMethod(...)` call
+      // (ACP has no cancel surface today; same FIXME as `setSessionModel`
+      // at line ~2904). If we cleared the flag in a `finally { }` on the
+      // outer race, a second compress could start, run its own
+      // `tryCompressChat`, and race the first call's still-pending
+      // `setHistory` write — the exact data corruption the flag was
+      // designed to prevent. Attaching the clear to `extPromise.finally`
+      // keeps the flag set until the agent op truly settles. The
+      // `.catch(() => {})` defuses unhandled-rejection noise if the
+      // extPromise rejects after the outer race already rejected.
+      const extPromise = entry.connection.extMethod(
+        SERVE_CONTROL_EXT_METHODS.sessionCompress,
+        { sessionId },
+      );
+      extPromise
+        .finally(() => {
+          entry.compressInFlight = false;
+        })
+        .catch(() => {});
+      let response: {
+        sessionId: string;
+        originalTokenCount: number;
+        newTokenCount: number;
+        compressionStatus: string;
+      };
       try {
-        const response = (await Promise.race([
+        response = (await Promise.race([
           withTimeout(
-            entry.connection.extMethod(
-              SERVE_CONTROL_EXT_METHODS.sessionCompress,
-              { sessionId },
-            ),
+            extPromise,
             SESSION_COMPRESS_TIMEOUT_MS,
             SERVE_CONTROL_EXT_METHODS.sessionCompress,
           ),
           getTransportClosedReject(entry),
-        ])) as {
-          sessionId: string;
-          originalTokenCount: number;
-          newTokenCount: number;
-          compressionStatus: string;
-        };
-        const durationMs = Date.now() - startedAt;
-        const result = {
-          sessionId: entry.sessionId,
-          originalTokenCount: response.originalTokenCount,
-          newTokenCount: response.newTokenCount,
-          compressionStatus: response.compressionStatus,
-          durationMs,
-        };
-        // NOOP = below-threshold, history identical — do NOT publish.
-        // See JSDoc on the interface method for the rationale.
-        if (response.compressionStatus !== 'NOOP') {
-          entry.events.publish({
-            type: 'session_compacted',
-            data: result,
-            ...(originatorClientId ? { originatorClientId } : {}),
-          });
+        ])) as typeof response;
+      } catch (err) {
+        // PR #4516 review I1: detect the agent's `compress_failed`
+        // errorKind on the wire (JSON-RPC `{code, data: {errorKind}}`
+        // shape) and reconstruct as a typed `CompressFailedError` so
+        // `sendBridgeError` can map to a stable
+        // `500 {code: 'compress_failed', compressionStatus}` body
+        // matching the documented wire shape. Mirrors the
+        // `TrustGateError` reconstruction in `setSessionApprovalMode`.
+        const data = (err as { data?: unknown })?.data;
+        if (
+          data &&
+          typeof data === 'object' &&
+          'errorKind' in data &&
+          (data as { errorKind?: unknown }).errorKind === 'compress_failed'
+        ) {
+          const compressionStatus = (data as { compressionStatus?: unknown })
+            .compressionStatus;
+          const rawMessage = (err as { message?: unknown })?.message;
+          throw new CompressFailedError(
+            sessionId,
+            typeof compressionStatus === 'string'
+              ? compressionStatus
+              : 'UNKNOWN',
+            typeof rawMessage === 'string' ? rawMessage : undefined,
+          );
         }
-        return result;
-      } finally {
-        entry.compressInFlight = false;
+        throw err;
       }
+      const durationMs = Date.now() - startedAt;
+      const result = {
+        sessionId: entry.sessionId,
+        originalTokenCount: response.originalTokenCount,
+        newTokenCount: response.newTokenCount,
+        compressionStatus: response.compressionStatus,
+        durationMs,
+      };
+      // NOOP = below-threshold, history identical — do NOT publish.
+      // See JSDoc on the interface method for the rationale.
+      if (response.compressionStatus !== 'NOOP') {
+        entry.events.publish({
+          type: 'session_compacted',
+          data: result,
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      }
+      return result;
     },
 
     setSessionMeta(sessionId, req, context) {
       // T1.4 (#4514). Pure daemon-side per-session KV bag — no ACP
-      // roundtrip. Validation order (fail-fast, before any mutation):
+      // roundtrip. Validation order (fail-fast, before any mutation
+      // and before any event publish):
       //   1. Body shape (object + meta object + merge boolean): caller's
       //      responsibility, enforced at the HTTP route layer.
-      //   2. Per-key regex + reserved-prefix check (here).
-      //   3. Serialized size cap (here, AFTER the merge so the cap
-      //      reflects the post-write byte count).
+      //   2. Session existence.
+      //   3. Per-key regex + reserved-prefix check.
+      //   4. Trusted clientId resolution. PR #4516 review C1: this MUST
+      //      happen BEFORE the entry mutation below. `resolveTrustedClientId`
+      //      throws `InvalidClientIdError` when the header carries an
+      //      unregistered id; doing it after `entry.meta = next` would
+      //      leave the bag changed, no event fired, and a 400 on the
+      //      wire — silent state mutation. `setSessionApprovalMode` and
+      //      `updateSessionMetadata` both resolve clientId first; the
+      //      pattern is established.
+      //   5. Serialized size cap (after merge so the cap reflects the
+      //      post-write byte count).
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const incoming = req.meta;
@@ -3223,6 +3291,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           throw new ReservedMetaKeyError(sessionId, key);
         }
       }
+      // C1 fix: resolve trusted clientId BEFORE any mutation. Throws
+      // `InvalidClientIdError` on bad header; the route maps to 400.
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
       const next: Record<string, unknown> = merge
         ? { ...entry.meta, ...incoming }
         : { ...incoming };
@@ -3235,23 +3309,31 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           SESSION_META_MAX_BYTES,
         );
       }
+      // PR #4516 review I7: skip the event publish when the write would
+      // be a no-op (same byteSize AND same serialized payload). Mirrors
+      // `updateSessionMetadata`'s gate so identity writes don't spam
+      // `session_meta_changed` to all subscribers and bump the SDK
+      // reducer's `sessionMetaChangedCount` for nothing. The cheap
+      // byteSize check filters most non-changes; serialized equality
+      // catches the rare same-size-different-shape case.
+      const isNoChange =
+        byteSize === entry.metaSerializedByteSize &&
+        serialized === JSON.stringify(entry.meta);
       entry.meta = next;
       entry.metaSerializedByteSize = byteSize;
-      const originatorClientId = resolveTrustedClientId(
-        entry,
-        context?.clientId,
-      );
       const changeKind: 'replace' | 'merge' = merge ? 'merge' : 'replace';
-      entry.events.publish({
-        type: 'session_meta_changed',
-        data: {
-          sessionId: entry.sessionId,
-          meta: next,
-          byteSize,
-          changeKind,
-        },
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
+      if (!isNoChange) {
+        entry.events.publish({
+          type: 'session_meta_changed',
+          data: {
+            sessionId: entry.sessionId,
+            meta: next,
+            byteSize,
+            changeKind,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      }
       return {
         sessionId: entry.sessionId,
         meta: next,

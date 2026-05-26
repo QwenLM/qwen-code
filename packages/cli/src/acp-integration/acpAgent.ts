@@ -2287,18 +2287,30 @@ class QwenAgent implements Agent {
           // SDK / bridge can pattern-match on stable identifiers
           // (`'NOOP'`, `'COMPRESSED'`, `'COMPRESSION_FAILED_*'`)
           // instead of magic numbers. Reverse-lookup on a numeric enum
-          // returns the member name; defensive `?? 'UNKNOWN'` keeps a
-          // future enum extension from crashing the route — the bridge
-          // treats anything other than `'NOOP'` as "history changed,
-          // emit event" and the route returns it verbatim.
-          const statusName =
-            CompressionStatus[info.compressionStatus] ?? 'UNKNOWN';
-          // `tryCompressChat` may report failure via
-          // `compressionStatus` rather than throwing. Surface those as
-          // structured failures so the bridge / route can return 500
-          // with `errorKind: compress_failed`. We check by prefix so
-          // any future `COMPRESSION_FAILED_*` flavor stays caught.
-          if (statusName.includes('FAILED')) {
+          // returns the member name. PR #4516 review I5: an unknown
+          // numeric value (future enum extension OR malformed core
+          // response) reverse-lookups to `undefined` — we treat that
+          // as a structured failure rather than letting it slip through
+          // as success and emit a misleading `session_compacted` event
+          // (the bridge publishes for anything `!== 'NOOP'`).
+          const statusName = CompressionStatus[info.compressionStatus];
+          if (statusName === undefined) {
+            throw new RequestError(
+              -32004,
+              `Compress returned unknown status ${info.compressionStatus}`,
+              {
+                errorKind: 'compress_failed',
+                compressionStatus: String(info.compressionStatus),
+              },
+            );
+          }
+          // PR #4516 review S1: tighten from `.includes('FAILED')` to
+          // `.startsWith('COMPRESSION_FAILED_')`. The substring check
+          // would falsely match a hypothetical future `IS_FAILSAFE_OK`
+          // or `RECOVERED_FROM_FAILED`. Prefix locks against the
+          // documented `COMPRESSION_FAILED_*` enum contract from
+          // `core/turn.ts`.
+          if (statusName.startsWith('COMPRESSION_FAILED_')) {
             throw new RequestError(-32004, 'Compress failed', {
               errorKind: 'compress_failed',
               compressionStatus: statusName,

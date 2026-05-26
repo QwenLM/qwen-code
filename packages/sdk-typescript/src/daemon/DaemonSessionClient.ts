@@ -17,7 +17,8 @@ import type {
   DaemonSessionState,
   DaemonCompressSessionResult,
   DaemonSession,
-  DaemonSessionMetaResult,
+  DaemonSessionMetaSnapshot,
+  DaemonSessionMetaWriteResult,
   DaemonSessionSupportedCommandsStatus,
   HeartbeatResult,
   PermissionResponse,
@@ -290,7 +291,7 @@ export class DaemonSessionClient {
   async setMeta(
     meta: Record<string, unknown>,
     opts?: { merge?: boolean },
-  ): Promise<DaemonSessionMetaResult> {
+  ): Promise<DaemonSessionMetaWriteResult> {
     return await this.client.setSessionMeta(
       this.sessionId,
       { meta, ...(opts?.merge === true ? { merge: true } : {}) },
@@ -303,7 +304,7 @@ export class DaemonSessionClient {
    * for a fresh session; same bag is also echoed on
    * `GET /session/:id/context` (`state.meta`).
    */
-  async getMeta(): Promise<DaemonSessionMetaResult> {
+  async getMeta(): Promise<DaemonSessionMetaSnapshot> {
     return await this.client.getSessionMeta(
       this.sessionId,
       this.clientId ? { clientId: this.clientId } : undefined,

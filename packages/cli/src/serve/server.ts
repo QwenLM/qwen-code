@@ -37,6 +37,7 @@ import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
   CompactionInFlightError,
+  CompressFailedError,
   createHttpAcpBridge,
   InvalidClientIdError,
   InvalidMetaKeyError,
@@ -3010,6 +3011,20 @@ function sendBridgeError(
       error: err.message,
       code: 'prompt_in_flight',
       sessionId: err.sessionId,
+    });
+    return;
+  }
+  // PR #4516 review I1. Map the agent-reported compress failure to a
+  // stable wire shape so SDK consumers can branch on
+  // `body.code === 'compress_failed'` per the protocol docs. Without
+  // this mapping the catch-all 500 below would leak the JSON-RPC
+  // error shape (`code: -32004, data: {errorKind, compressionStatus}`).
+  if (err instanceof CompressFailedError) {
+    res.status(500).json({
+      error: err.message,
+      code: 'compress_failed',
+      sessionId: err.sessionId,
+      compressionStatus: err.compressionStatus,
     });
     return;
   }
