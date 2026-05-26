@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { buildDaemonLogLine } from './daemonLogger.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import { buildDaemonLogLine, initDaemonLogger } from './daemonLogger.js';
 
 describe('buildDaemonLogLine', () => {
   const FIXED = new Date('2026-05-26T03:14:15.926Z');
@@ -95,4 +95,31 @@ describe('buildDaemonLogLine', () => {
         '  Plain: no stack\n',
     );
   });
+});
+
+describe('initDaemonLogger opt-out', () => {
+  const originalEnv = process.env['QWEN_DAEMON_LOG_FILE'];
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env['QWEN_DAEMON_LOG_FILE'];
+    else process.env['QWEN_DAEMON_LOG_FILE'] = originalEnv;
+  });
+
+  for (const val of ['0', 'false', 'off', 'no', 'False', ' OFF ']) {
+    it(`returns no-op logger when QWEN_DAEMON_LOG_FILE=${JSON.stringify(val)}`, () => {
+      process.env['QWEN_DAEMON_LOG_FILE'] = val;
+      const stderr: string[] = [];
+      const logger = initDaemonLogger({
+        boundWorkspace: '/tmp/ws',
+        baseDir: '/tmp/nonexistent-should-not-touch',
+        stderr: (s) => stderr.push(s),
+      });
+      logger.info('hello');
+      logger.warn('there');
+      logger.error('boom');
+      logger.raw('raw');
+      expect(stderr).toEqual([]); // no-op = nothing
+      expect(logger.getLogPath()).toBe('');
+      expect(logger.getDaemonId()).toBe('');
+    });
+  }
 });

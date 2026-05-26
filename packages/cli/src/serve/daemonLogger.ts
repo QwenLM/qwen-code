@@ -74,3 +74,42 @@ export function buildDaemonLogLine(args: BuildDaemonLogLineArgs): string {
   const ctxStr = renderCtx(args.ctx);
   return `${ts} [${args.level}] [DAEMON] ${ctxStr}${args.message}\n${renderErr(args.err)}`;
 }
+
+export interface DaemonLogger {
+  info(message: string, ctx?: DaemonLogContext): void;
+  warn(message: string, ctx?: DaemonLogContext): void;
+  error(message: string, err?: Error | null, ctx?: DaemonLogContext): void;
+  raw(line: string, level?: 'info' | 'warn' | 'error'): void;
+  getLogPath(): string;
+  getDaemonId(): string;
+  flush(): Promise<void>;
+}
+
+export interface InitDaemonLoggerOptions {
+  boundWorkspace: string;
+  pid?: number;
+  now?: () => Date;
+  stderr?: (line: string) => void;
+  baseDir?: string;
+}
+
+const NOOP_LOGGER: DaemonLogger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  raw: () => {},
+  getLogPath: () => '',
+  getDaemonId: () => '',
+  flush: () => Promise.resolve(),
+};
+
+function isOptedOut(): boolean {
+  const raw = process.env['QWEN_DAEMON_LOG_FILE'];
+  if (!raw) return false;
+  return ['0', 'false', 'off', 'no'].includes(raw.trim().toLowerCase());
+}
+
+export function initDaemonLogger(_opts: InitDaemonLoggerOptions): DaemonLogger {
+  if (isOptedOut()) return NOOP_LOGGER;
+  throw new Error('initDaemonLogger: file path not implemented yet');
+}
