@@ -19,6 +19,7 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { escapeXml } from '../utils/xml.js';
 
@@ -297,21 +298,23 @@ export class BackgroundShellRegistry {
         : entry.status === 'failed'
           ? 'failed'
           : 'was cancelled';
-    const displayLine = `Background shell "${this.stripDisplayControlChars(entry.command)}" ${statusText}.`;
+    const displayLine = `Background shell "${stripDisplayControlChars(entry.command)}" ${statusText}.`;
 
     const xmlParts = [
       '<task-notification>',
       `<task-id>${escapeXml(entry.shellId)}</task-id>`,
       '<kind>shell</kind>',
       `<status>${escapeXml(entry.status)}</status>`,
-      `<summary>Shell "${escapeXml(this.stripDisplayControlChars(entry.command))}" ${statusText}.</summary>`,
+      `<summary>Shell "${escapeXml(stripDisplayControlChars(entry.command))}" ${statusText}.</summary>`,
       `<output-file>${escapeXml(entry.outputFile)}</output-file>`,
     ];
     if (entry.exitCode !== undefined) {
       xmlParts.push(`<exit-code>${entry.exitCode}</exit-code>`);
     }
     if (entry.error) {
-      xmlParts.push(`<result>Error: ${escapeXml(this.stripDisplayControlChars(entry.error))}</result>`);
+      xmlParts.push(
+        `<result>Error: ${escapeXml(stripDisplayControlChars(entry.error))}</result>`,
+      );
     }
     xmlParts.push('</task-notification>');
 
@@ -323,26 +326,6 @@ export class BackgroundShellRegistry {
     } catch (error) {
       debugLogger.error('notification callback failed:', error);
     }
-  }
-
-  private stripDisplayControlChars(text: string): string {
-    let out = '';
-    for (let i = 0; i < text.length; i++) {
-      const code = text.charCodeAt(i);
-      if (code === 0x09) {
-        out += text[i];
-        continue;
-      }
-      if (code < 0x20) continue;
-      if (code >= 0x80 && code <= 0x9f) continue;
-      // Strip Unicode bidirectional override characters (U+202A-U+202E,
-      // U+2066-U+2069) to prevent shell output from reordering surrounding
-      // text in terminals and IDEs that render bidi control chars.
-      if (code >= 0x202a && code <= 0x202e) continue;
-      if (code >= 0x2066 && code <= 0x2069) continue;
-      out += text[i];
-    }
-    return out;
   }
 
   /**
