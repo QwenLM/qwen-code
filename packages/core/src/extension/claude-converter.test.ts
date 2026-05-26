@@ -389,7 +389,10 @@ describe('convertClaudePluginPackage', () => {
     const pluginSourceDir = path.join(testDir, 'plugin-crlf-agents');
     fs.mkdirSync(pluginSourceDir, { recursive: true });
 
-    // Create source agents directory (renamed to src-agents to avoid skip-logic bug)
+    // Create source agents directory.
+    // (Previously named `src-agents` to dodge a skip-logic bug in
+    // collectResources where file entries like `./agents/foo.md` would be
+    // silently dropped — fixed; the directory name is now incidental.)
     const agentsDir = path.join(pluginSourceDir, 'src-agents');
     fs.mkdirSync(agentsDir, { recursive: true });
 
@@ -446,6 +449,145 @@ describe('convertClaudePluginPackage', () => {
     expect(convertedContent).toContain('name: cool-agent');
 
     // Clean up
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('should populate commands/skills/agents when marketplace references the whole folder (deep-wiki shape)', async () => {
+    // Regression test for https://github.com/QwenLM/qwen-code/issues/4452.
+    //
+    // microsoft/skills/.../deep-wiki declares its resources as
+    //   commands: ["./commands/"]
+    //   skills:   ["./skills/"]
+    //   agents:   ["./agents/wiki-architect.md", ...]
+    // i.e. references the *whole* resource folder, with file paths sitting
+    // directly under `agents/`. An earlier skip-branch in collectResources
+    // dropped both shapes silently, leaving empty directories.
+    const pluginSourceDir = path.join(testDir, 'deep-wiki-shape');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+
+    // commands/ with two files
+    const commandsDir = path.join(pluginSourceDir, 'commands');
+    fs.mkdirSync(commandsDir, { recursive: true });
+    fs.writeFileSync(path.join(commandsDir, 'wiki.md'), '# wiki', 'utf-8');
+    fs.writeFileSync(path.join(commandsDir, 'index.md'), '# index', 'utf-8');
+
+    // skills/ with one sub-skill
+    const skillsDir = path.join(pluginSourceDir, 'skills');
+    const subSkillDir = path.join(skillsDir, 'wiki-skill');
+    fs.mkdirSync(subSkillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(subSkillDir, 'SKILL.md'),
+      '# wiki-skill',
+      'utf-8',
+    );
+
+    // agents/ with file entries referenced individually
+    const agentsDir = path.join(pluginSourceDir, 'agents');
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(agentsDir, 'wiki-architect.md'),
+      '---\nname: wiki-architect\ndescription: Architect\n---\nbody',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(agentsDir, 'wiki-writer.md'),
+      '---\nname: wiki-writer\ndescription: Writer\n---\nbody',
+      'utf-8',
+    );
+
+    // marketplace.json mirroring the microsoft/skills shape
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'deep-wiki',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          commands: ['./commands/'],
+          skills: ['./skills/'],
+          agents: ['./agents/wiki-architect.md', './agents/wiki-writer.md'],
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'deep-wiki',
+    );
+
+    // commands/ should be populated (flattened, not nested as commands/commands)
+    const convertedCommands = path.join(result.convertedDir, 'commands');
+    expect(fs.existsSync(convertedCommands)).toBe(true);
+    expect(fs.readdirSync(convertedCommands).sort()).toEqual([
+      'index.md',
+      'wiki.md',
+    ]);
+    expect(fs.existsSync(path.join(convertedCommands, 'commands'))).toBe(false);
+
+    // skills/ should contain wiki-skill/SKILL.md
+    const convertedSkills = path.join(result.convertedDir, 'skills');
+    expect(
+      fs.existsSync(path.join(convertedSkills, 'wiki-skill', 'SKILL.md')),
+    ).toBe(true);
+    expect(fs.existsSync(path.join(convertedSkills, 'skills'))).toBe(false);
+
+    // agents/ should contain the two referenced files at the root
+    const convertedAgents = path.join(result.convertedDir, 'agents');
+    expect(fs.readdirSync(convertedAgents).sort()).toEqual([
+      'wiki-architect.md',
+      'wiki-writer.md',
+    ]);
+    expect(fs.existsSync(path.join(convertedAgents, 'agents'))).toBe(false);
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('should populate resources when marketplace references whole folder with trailing slash variants', async () => {
+    // `./commands/` (with trailing slash) and `./commands` (without) should
+    // both resolve identically — the bug fix shouldn't be sensitive to the
+    // exact form marketplace authors write.
+    const pluginSourceDir = path.join(testDir, 'trailing-slash');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+    const commandsDir = path.join(pluginSourceDir, 'commands');
+    fs.mkdirSync(commandsDir, { recursive: true });
+    fs.writeFileSync(path.join(commandsDir, 'a.md'), '# a', 'utf-8');
+
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'no-slash',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          commands: ['./commands'], // no trailing slash
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'no-slash',
+    );
+    const convertedCommands = path.join(result.convertedDir, 'commands');
+    expect(fs.existsSync(path.join(convertedCommands, 'a.md'))).toBe(true);
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
