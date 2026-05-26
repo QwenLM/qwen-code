@@ -1438,4 +1438,230 @@ describe('Turn', () => {
       });
     });
   });
+
+  /**
+   * Phase 4 of #4387 — orphan prevention across the full pipeline.
+   *
+   * These tests pair {@link Turn} with a real {@link StreamingToolExecutor}
+   * AND a real cancellation listener (the same hook
+   * {@link StreamingToolDispatcher} uses) to verify that Turn's lifecycle
+   * transitions reach an out-of-band dispatcher even when nothing in
+   * `Turn` knows about it. The invariant under test is:
+   *
+   *   for every functionCall the Turn ever observed, either
+   *     (a) its functionResponse will be produced and delivered, or
+   *     (b) the dispatcher was notified to drop its in-flight work
+   *
+   * (b) is what these tests check — (a) is the post-stream consumer's
+   * responsibility and is covered in the headless integration tests.
+   */
+  describe('Phase 4: dispatcher cancellation reaches out-of-band listeners', () => {
+    it('mid-stream retry: cancellation listener fires with reason "retry"', async () => {
+      const executor = new StreamingToolExecutor();
+      const notifications: Array<string | undefined> = [];
+      executor.addCancellationListener((r) => notifications.push(r));
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      mockSendMessageStream.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'fc1', name: 'tool1', args: {} }],
+            } as unknown as GenerateContentResponse,
+          };
+          yield { type: StreamEventType.RETRY, retryInfo: undefined };
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'fc2', name: 'tool2', args: {} }],
+            } as unknown as GenerateContentResponse,
+          };
+        })(),
+      );
+
+      for await (const _ of t.run(
+        'test-model',
+        [{ text: 'hi' }],
+        new AbortController().signal,
+      )) {
+        // consume
+      }
+      // Exactly one cancellation: the retry. The post-stream `close()`
+      // does NOT fire a cancellation (state is preserved).
+      expect(notifications).toEqual(['retry']);
+    });
+
+    it('signal abort mid-stream: cancellation listener fires with reason "aborted"', async () => {
+      const executor = new StreamingToolExecutor();
+      const notifications: Array<string | undefined> = [];
+      executor.addCancellationListener((r) => notifications.push(r));
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      const ctrl = new AbortController();
+      mockSendMessageStream.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'fc1', name: 'tool1', args: {} }],
+            } as unknown as GenerateContentResponse,
+          };
+          ctrl.abort();
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [] } }],
+            } as unknown as GenerateContentResponse,
+          };
+        })(),
+      );
+
+      for await (const _ of t.run(
+        'test-model',
+        [{ text: 'hi' }],
+        ctrl.signal,
+      )) {
+        // consume
+      }
+      expect(notifications).toEqual(['aborted']);
+    });
+
+    it('stream error: cancellation listener fires with reason "stream-error"', async () => {
+      const executor = new StreamingToolExecutor();
+      const notifications: Array<string | undefined> = [];
+      executor.addCancellationListener((r) => notifications.push(r));
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      mockSendMessageStream.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'fc1', name: 'tool1', args: {} }],
+            } as unknown as GenerateContentResponse,
+          };
+          throw new Error('transport boom');
+        })(),
+      );
+
+      for await (const _ of t.run(
+        'test-model',
+        [{ text: 'hi' }],
+        new AbortController().signal,
+      )) {
+        // consume
+      }
+      expect(notifications).toEqual(['stream-error']);
+    });
+
+    it('unauthorized: cancellation listener fires with reason "unauthorized"', async () => {
+      const executor = new StreamingToolExecutor();
+      const notifications: Array<string | undefined> = [];
+      executor.addCancellationListener((r) => notifications.push(r));
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      mockSendMessageStream.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'fc1', name: 'tool1', args: {} }],
+            } as unknown as GenerateContentResponse,
+          };
+          throw new UnauthorizedError('no creds');
+        })(),
+      );
+
+      await expect(async () => {
+        for await (const _ of t.run(
+          'test-model',
+          [{ text: 'hi' }],
+          new AbortController().signal,
+        )) {
+          // consume
+        }
+      }).rejects.toBeInstanceOf(UnauthorizedError);
+      expect(notifications).toEqual(['unauthorized']);
+    });
+
+    it('normal completion: cancellation listener does NOT fire', async () => {
+      const executor = new StreamingToolExecutor();
+      const notifications: Array<string | undefined> = [];
+      executor.addCancellationListener((r) => notifications.push(r));
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      mockSendMessageStream.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'fc1', name: 'tool1', args: {} }],
+            } as unknown as GenerateContentResponse,
+          };
+        })(),
+      );
+
+      for await (const _ of t.run(
+        'test-model',
+        [{ text: 'hi' }],
+        new AbortController().signal,
+      )) {
+        // consume
+      }
+      // Stream ended normally — Turn calls executor.close(), which is
+      // explicitly NOT a cancellation (buffered state is preserved for
+      // the post-stream consumer).
+      expect(notifications).toEqual([]);
+      expect(executor.isClosed()).toBe(true);
+      expect(executor.isDiscarded()).toBe(false);
+    });
+
+    it('retry-then-error: listener fires twice, in order (retry, then stream-error)', async () => {
+      const executor = new StreamingToolExecutor();
+      const notifications: Array<string | undefined> = [];
+      executor.addCancellationListener((r) => notifications.push(r));
+      const t = new Turn(
+        mockChatInstance as unknown as GeminiChat,
+        'prompt-id-1',
+        executor,
+      );
+      mockSendMessageStream.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'fc1', name: 'tool1', args: {} }],
+            } as unknown as GenerateContentResponse,
+          };
+          yield { type: StreamEventType.RETRY, retryInfo: undefined };
+          throw new Error('transport gave up');
+        })(),
+      );
+
+      for await (const _ of t.run(
+        'test-model',
+        [{ text: 'hi' }],
+        new AbortController().signal,
+      )) {
+        // consume
+      }
+      expect(notifications).toEqual(['retry', 'stream-error']);
+    });
+  });
 });
