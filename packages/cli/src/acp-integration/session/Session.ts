@@ -361,6 +361,13 @@ export class Session implements SessionContext {
     this.notificationAbortController = null;
     this.notificationProcessing = false;
 
+    if (this.cronAbortController) {
+      this.cronAbortController.abort();
+      this.cronAbortController = null;
+    }
+    this.cronProcessing = false;
+    this.cronCompletion = null;
+
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);

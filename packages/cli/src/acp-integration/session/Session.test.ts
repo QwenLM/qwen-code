@@ -3604,6 +3604,26 @@ describe('Session', () => {
       expect(internals.notificationAbortController).toBeNull();
     });
 
+    it('aborts cronAbortController and resets cron state on dispose', () => {
+      type CronInternals = {
+        cronAbortController: AbortController | null;
+        cronProcessing: boolean;
+        cronCompletion: Promise<void> | null;
+      };
+      const internals = session as unknown as CronInternals;
+      const ac = new AbortController();
+      internals.cronAbortController = ac;
+      internals.cronProcessing = true;
+      internals.cronCompletion = Promise.resolve();
+
+      session.dispose();
+
+      expect(ac.signal.aborted).toBe(true);
+      expect(internals.cronAbortController).toBeNull();
+      expect(internals.cronProcessing).toBe(false);
+      expect(internals.cronCompletion).toBeNull();
+    });
+
     it('is idempotent — repeated dispose() calls do not throw or re-register', () => {
       const internals = session as unknown as SessionInternals;
       session.dispose();

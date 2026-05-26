@@ -28,11 +28,7 @@ const debugLogger = createDebugLogger('MESSAGE_REWRITE');
  *   4. Rewritten text is emitted as agent_message_chunk with _meta.rewritten=true
  */
 const DEFAULT_REWRITE_TIMEOUT_MS = 30_000;
-const REWRITE_META_EXCLUDED_KEYS = new Set([
-  'backgroundTask',
-  'qwenDiscreteMessage',
-  'source',
-]);
+const REWRITE_META_EXCLUDED_KEYS = new Set<string>([]);
 
 export class MessageRewriteMiddleware {
   private readonly turnBuffer: TurnBuffer;
