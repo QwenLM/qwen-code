@@ -1246,6 +1246,7 @@ describe('loggers', () => {
         truncatedContentLength: 100,
         threshold: 500,
         lines: 10,
+        outputFile: '/tmp/test-tool.output',
       });
 
       logToolOutputTruncated(mockConfig, event);
@@ -1263,6 +1264,7 @@ describe('loggers', () => {
           truncated_content_length: 100,
           threshold: 500,
           lines: 10,
+          output_file: '/tmp/test-tool.output',
         },
       });
     });

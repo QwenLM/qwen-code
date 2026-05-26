@@ -11,10 +11,16 @@ import { ReadFileTool } from '../tools/read-file.js';
 import type { Config } from '../config/config.js';
 import { logToolOutputTruncated } from '../telemetry/loggers.js';
 import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('TRUNCATION');
+
+export const TOOL_OUTPUT_TRUNCATED_PREFIX =
+  'Tool output was too large and has been truncated.';
 
 /**
  * Truncates large tool output and saves the full content to a temp file.
- * Used by the shell tool to prevent excessively large outputs from being
+ * Used to prevent excessively large outputs from being
  * sent to the LLM context.
  *
  * If content length is within the threshold, returns it unchanged.
@@ -85,11 +91,21 @@ export async function truncateAndSaveToFile(
   const safeFileName = `${path.basename(fileName)}.output`;
   const outputFile = path.join(projectTempDir, safeFileName);
   try {
-    await fs.mkdir(projectTempDir, { recursive: true });
-    await fs.writeFile(outputFile, content);
+    await fs.mkdir(projectTempDir, { recursive: true, mode: 0o700 });
+    try {
+      await fs.chmod(projectTempDir, 0o700);
+    } catch (chmodError) {
+      debugLogger.warn(
+        `Failed to enforce private permissions on ${projectTempDir}: ` +
+          (chmodError instanceof Error
+            ? chmodError.message
+            : String(chmodError)),
+      );
+    }
+    await fs.writeFile(outputFile, content, { mode: 0o600 });
 
     return {
-      content: `Tool output was too large and has been truncated.
+      content: `${TOOL_OUTPUT_TRUNCATED_PREFIX}
 The full output has been saved to: ${outputFile}
 To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
 The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
@@ -98,7 +114,11 @@ Truncated part of the output:
 ${truncatedContent}`,
       outputFile,
     };
-  } catch (_error) {
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to save truncated tool output to ${outputFile}: ` +
+        (error instanceof Error ? error.message : String(error)),
+    );
     return {
       content:
         truncatedContent + `\n[Note: Could not save full output to file]`,
@@ -114,11 +134,16 @@ ${truncatedContent}`,
  *
  * Callers no longer need to duplicate config extraction, file naming,
  * or telemetry logging.
+ *
+ * @param promptId Optional prompt id for telemetry. Scheduler-level callers
+ * should pass the tool request prompt id when available; direct tool
+ * implementations that do not receive scheduler context may omit it.
  */
 export async function truncateToolOutput(
   config: Config,
   toolName: string,
   content: string,
+  promptId = '',
 ): Promise<{ content: string; outputFile?: string }> {
   const threshold = config.getTruncateToolOutputThreshold();
   const lines = config.getTruncateToolOutputLines();
@@ -140,12 +165,13 @@ export async function truncateToolOutput(
   if (result.outputFile) {
     logToolOutputTruncated(
       config,
-      new ToolOutputTruncatedEvent('', {
+      new ToolOutputTruncatedEvent(promptId, {
         toolName,
         originalContentLength: originalLength,
         truncatedContentLength: result.content.length,
         threshold,
         lines,
+        outputFile: result.outputFile,
       }),
     );
   }

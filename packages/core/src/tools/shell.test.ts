@@ -1395,62 +1395,21 @@ describe('ShellTool', () => {
         expect(result.llmContent).not.toContain('foreground command ran for');
       });
 
-      it('appends the hint AFTER truncation (so it survives `truncateToolOutput`)', async () => {
-        // `truncateToolOutput` wraps over-budget output in a "Truncated
-        // part of the output:" envelope. If the hint were appended
-        // inside that envelope (i.e. before truncation), the LLM might
-        // read the advisory as part of the command's own output. Pin
-        // the post-truncation insertion order: the hint must appear
-        // outside the truncation marker.
-        //
-        // Mock `truncateToolOutput` directly rather than driving real
-        // truncation — the real path needs `fs.writeFile` to actually
-        // succeed (the catch fallback returns no `outputFile`, so the
-        // shell.ts replacement branch never fires). Mocking here pins
-        // ordering, which is all this test cares about.
-        const truncationModule = await import('../utils/truncation.js');
-        const spy = vi
-          .spyOn(truncationModule, 'truncateToolOutput')
-          .mockResolvedValue({
-            content:
-              'Tool output was too large and has been truncated.\n[mocked truncated body]',
-            outputFile: '/tmp/qwen-temp/shell_mocked.output',
-          });
+      it('appends the hint after command output is assembled', async () => {
+        const invocation = shellTool.build({
+          command: 'long-output-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(60_000);
+        resolveShellExecution({ output: 'A'.repeat(500), exitCode: 0 });
+        const result = await promise;
 
-        try {
-          const invocation = shellTool.build({
-            command: 'long-output-cmd',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          await vi.advanceTimersByTimeAsync(60_000);
-          resolveShellExecution({ output: 'A'.repeat(500), exitCode: 0 });
-          const result = await promise;
-
-          const content = result.llmContent as string;
-          // Hint present.
-          expect(content).toContain('foreground command ran for 60s');
-          // Truncation envelope present (proves the truncation branch
-          // actually ran in shell.ts — `outputFile` was set so the
-          // replacement happened).
-          expect(content).toContain(
-            'Tool output was too large and has been truncated.',
-          );
-          // Hint comes AFTER the truncation marker — pins the
-          // post-truncation insertion order so a regression that
-          // moves the append back inside the non-aborted llmContent
-          // builder (where it'd get wrapped by the truncation
-          // envelope on long output) would fail loudly.
-          const truncIdx = content.indexOf(
-            'Tool output was too large and has been truncated.',
-          );
-          const hintIdx = content.indexOf('foreground command ran for');
-          expect(hintIdx).toBeGreaterThan(truncIdx);
-        } finally {
-          // Restore even if assertions throw — otherwise the
-          // truncateToolOutput spy leaks into subsequent tests.
-          spy.mockRestore();
-        }
+        const content = result.llmContent as string;
+        const outputIdx = content.indexOf('A'.repeat(20));
+        const hintIdx = content.indexOf('foreground command ran for');
+        expect(outputIdx).toBeGreaterThanOrEqual(0);
+        expect(hintIdx).toBeGreaterThan(outputIdx);
       });
 
       it('threshold scales with the user-supplied timeout (not the default)', async () => {

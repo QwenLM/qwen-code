@@ -5,21 +5,47 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { truncateAndSaveToFile } from './truncation.js';
+import { truncateAndSaveToFile, truncateToolOutput } from './truncation.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import type { Config } from '../config/config.js';
 
 vi.mock('node:fs/promises');
+
+const toolOutputTruncatedEvents = vi.hoisted(
+  (): Array<{ prompt_id: string; output_file?: string }> => [],
+);
+const debugWarnMessages = vi.hoisted((): string[] => []);
+
+vi.mock('../telemetry/loggers.js', () => ({
+  logToolOutputTruncated: vi.fn(
+    (_config: Config, event: { prompt_id: string }) => {
+      toolOutputTruncatedEvents.push(event);
+    },
+  ),
+}));
+
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    warn: (message: string) => {
+      debugWarnMessages.push(message);
+    },
+  }),
+}));
 
 describe('truncateAndSaveToFile', () => {
   const mockWriteFile = vi.mocked(fs.writeFile);
   const mockMkdir = vi.mocked(fs.mkdir);
+  const mockChmod = vi.mocked(fs.chmod);
   const THRESHOLD = 40_000;
   const TRUNCATE_LINES = 1000;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    toolOutputTruncatedEvents.length = 0;
+    debugWarnMessages.length = 0;
     mockMkdir.mockResolvedValue(undefined);
+    mockChmod.mockResolvedValue(undefined);
   });
 
   it('should return content unchanged if below both threshold and line limit', async () => {
@@ -64,7 +90,9 @@ describe('truncateAndSaveToFile', () => {
     );
     expect(mockMkdir).toHaveBeenCalledWith(projectTempDir, {
       recursive: true,
+      mode: 0o700,
     });
+    expect(mockChmod).toHaveBeenCalledWith(projectTempDir, 0o700);
 
     const head = Math.floor(TRUNCATE_LINES / 5);
     const beginning = lines.slice(0, head);
@@ -141,10 +169,12 @@ describe('truncateAndSaveToFile', () => {
     );
     expect(mockMkdir).toHaveBeenCalledWith(projectTempDir, {
       recursive: true,
+      mode: 0o700,
     });
     expect(mockWriteFile).toHaveBeenCalledWith(
       path.join(projectTempDir, `${fileName}.output`),
       content,
+      { mode: 0o600 },
     );
 
     // Effective lines = min(1000, 40000/5) = 1000 (line limit is binding)
@@ -185,6 +215,7 @@ describe('truncateAndSaveToFile', () => {
     expect(mockWriteFile).toHaveBeenCalledWith(
       path.join(projectTempDir, `${fileName}.output`),
       content,
+      { mode: 0o600 },
     );
 
     expect(result.content).toContain(
@@ -249,6 +280,42 @@ describe('truncateAndSaveToFile', () => {
       '[Note: Could not save full output to file]',
     );
     expect(mockWriteFile).toHaveBeenCalled();
+    expect(debugWarnMessages).toEqual([
+      expect.stringContaining(
+        `Failed to save truncated tool output to ${path.join(
+          projectTempDir,
+          `${fileName}.output`,
+        )}: File write failed`,
+      ),
+    ]);
+  });
+
+  it('should still save output if directory chmod fails', async () => {
+    const content = 'a'.repeat(2_000_000);
+    const fileName = 'test-file';
+    const projectTempDir = '/tmp';
+
+    mockChmod.mockRejectedValue(new Error('chmod failed'));
+    mockWriteFile.mockResolvedValue(undefined);
+
+    const result = await truncateAndSaveToFile(
+      content,
+      fileName,
+      projectTempDir,
+      THRESHOLD,
+      TRUNCATE_LINES,
+    );
+
+    const expectedPath = path.join(projectTempDir, `${fileName}.output`);
+    expect(result.outputFile).toBe(expectedPath);
+    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content, {
+      mode: 0o600,
+    });
+    expect(debugWarnMessages).toEqual([
+      expect.stringContaining(
+        `Failed to enforce private permissions on ${projectTempDir}: chmod failed`,
+      ),
+    ]);
   });
 
   it('should save to correct file path with file name', async () => {
@@ -268,7 +335,9 @@ describe('truncateAndSaveToFile', () => {
 
     const expectedPath = path.join(projectTempDir, `${fileName}.output`);
     expect(result.outputFile).toBe(expectedPath);
-    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content);
+    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content, {
+      mode: 0o600,
+    });
   });
 
   it('should include helpful instructions in truncated message', async () => {
@@ -314,6 +383,39 @@ describe('truncateAndSaveToFile', () => {
     );
 
     const expectedPath = path.join(projectTempDir, 'passwd.output');
-    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content);
+    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content, {
+      mode: 0o600,
+    });
+  });
+
+  it('should log truncation telemetry with the caller prompt id and output file', async () => {
+    const content = 'a'.repeat(200_000);
+    const config = {
+      getTruncateToolOutputThreshold: () => 100,
+      getTruncateToolOutputLines: () => 10,
+      storage: { getProjectTempDir: () => '/tmp/safe_dir' },
+    } as unknown as Config;
+
+    mockWriteFile.mockResolvedValue(undefined);
+
+    await truncateToolOutput(
+      config,
+      'largeOutputTool',
+      content,
+      'prompt-large-1',
+    );
+
+    expect(toolOutputTruncatedEvents).toContainEqual(
+      expect.objectContaining({
+        prompt_id: 'prompt-large-1',
+        output_file: expect.stringMatching(
+          new RegExp(
+            `${path
+              .join('/tmp/safe_dir', 'largeOutputTool_')
+              .replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}[a-f0-9]+\\.output$`,
+          ),
+        ),
+      }),
+    );
   });
 });

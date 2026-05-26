@@ -24,7 +24,6 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { truncateToolOutput } from '../utils/truncation.js';
 import {
   CommitAttributionService,
   type StagedFileInfo,
@@ -1924,8 +1923,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `Process Group PGID: ${result.pid ?? '(none)'}`,
       ].join('\n');
 
-      // (Long-run advisory append happens AFTER `truncateToolOutput`
-      // below — see the explanation there for why post-truncation.)
+      // (Long-run advisory append happens after command output is assembled
+      // below, so the hint remains metadata rather than command output.)
     }
 
     // Run attribution outside the aborted/non-aborted branch: a
@@ -1979,13 +1978,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //         so external signals fall through to the non-aborted
     //         branch — same rationale as timeout.
     //   - Wall-clock duration ≥ threshold. Measured spawn → resultPromise
-    //     settle, intentionally BEFORE the post-processing block below
-    //     (truncation I/O, output-file write). The hint reports how long
+    //     settle, intentionally BEFORE post-processing (attribution,
+    //     returnDisplay build, hint append). The hint reports how long
     //     the COMMAND blocked the agent, not how long the tool call
-    //     spent including post-processing — that's the number the agent
-    //     should be reasoning about when deciding whether to background
-    //     next time. Truncation time is bounded by the temp-dir backend
-    //     and isn't representative of the command's actual wait.
+    //     spent including post-processing.
     // Fires on both successful and naturally-failed completions since
     // the advice ("next time, background it") is the same in both.
     const elapsedMs = performance.now() - executionStartTime;
@@ -2005,19 +2001,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
     );
 
     // returnDisplayMessage build order — chronologically:
-    //   1. Initial value: in debug mode, snapshot of pre-truncation
+    //   1. Initial value: in debug mode, snapshot of command output
     //      `llmContent`; in non-debug mode, terse output-or-status.
-    //   2. Truncation block (below) appends `Output too long and was
-    //      saved to: <path>` if truncation fired (BOTH modes).
-    //   3. Long-run hint append (further below) appends the hint
+    //   2. Long-run hint append (further below) appends the hint
     //      itself with append-style re-sync (BOTH modes), so the user
     //      sees the same advisory the agent does — otherwise the
     //      agent would suddenly suggest `is_background: true` with no
     //      visible trigger in the TUI.
-    // The pre-existing debug snapshot is captured here (pre-truncation,
-    // pre-hint); both subsequent steps APPEND to it rather than
-    // replacing, so all information accumulates rather than being lost
-    // when later steps fire.
+    // The pre-existing debug snapshot is captured here before the hint is
+    // appended, so all information accumulates rather than being lost.
     let returnDisplayMessage = '';
     if (this.config.getDebugMode()) {
       returnDisplayMessage = llmContent;
@@ -2057,27 +2049,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     }
 
-    // Truncate large output and save full content to a temp file.
-    if (typeof llmContent === 'string') {
-      const truncatedResult = await truncateToolOutput(
-        this.config,
-        ShellTool.Name,
-        llmContent,
-      );
-
-      if (truncatedResult.outputFile) {
-        llmContent = truncatedResult.content;
-        returnDisplayMessage +=
-          (returnDisplayMessage ? '\n' : '') +
-          `Output too long and was saved to: ${truncatedResult.outputFile}`;
-      }
-    }
-
-    // Append the long-run advisory AFTER truncation so the hint isn't
-    // wrapped in `truncateToolOutput`'s "Truncated part of the output"
-    // header (which the LLM might misread as part of the command's own
-    // output). The hint is process metadata about the command, not
-    // command output, so it belongs outside the truncation envelope.
+    // Append the long-run advisory after command output is assembled. The
+    // scheduler owns model-facing output truncation; because this hint is part
+    // of the shell tool result, it is intentionally subject to that truncation
+    // on the model-facing path. The user-facing returnDisplay still receives
+    // the complete hint below.
     const longRunHint = shouldAppendLongRunHint
       ? buildLongRunningForegroundHint(elapsedMs)
       : null;
@@ -2087,10 +2063,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // Surface the hint in the user-facing TUI too — the user is
         // the one waiting for long commands and benefits from the
         // same "consider backgrounding next time" cue the agent sees.
-        // Append (not replace) in BOTH modes so the truncation marker
-        // line ("Output too long and was saved to: ...") and any
-        // pre-existing returnDisplayMessage content (debug snapshot,
-        // status line, command output) are preserved.
+        // Append (not replace) in BOTH modes so any pre-existing
+        // returnDisplayMessage content (debug snapshot, status line,
+        // command output) is preserved.
         returnDisplayMessage +=
           (returnDisplayMessage ? '\n\n' : '') + longRunHint;
       }
@@ -2110,7 +2085,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // git note didn't land. Without this, the only signal is a
     // QWEN_DEBUG_LOG_FILE entry the user has likely never set up.
     // Appended to BOTH llmContent (so the agent can react / report) and
-    // returnDisplayMessage (so the human sees it in the TUI). Skipped
+    // returnDisplayMessage (so the human sees it in the TUI). Like the
+    // long-run advisory, the model-facing copy is intentionally subject to
+    // scheduler truncation while the user-facing returnDisplay keeps it
+    // intact. Skipped
     // when null (intentional skips like a bare `git commit` with no
     // tracked AI edits don't need user-visible feedback).
     if (attributionWarning) {

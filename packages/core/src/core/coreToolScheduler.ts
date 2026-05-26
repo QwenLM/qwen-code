@@ -108,7 +108,10 @@ import {
   type HookSpanMetadata,
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
-import { truncateToolOutput } from '../utils/truncation.js';
+import {
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+  truncateToolOutput,
+} from '../utils/truncation.js';
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
@@ -2792,8 +2795,7 @@ export class CoreToolScheduler {
 
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
-        let contentLength =
-          typeof content === 'string' ? content.length : undefined;
+        let postToolUseAdditionalContext: string | undefined;
 
         // PostToolUse Hook
         if (hooksEnabled && messageBus) {
@@ -2833,12 +2835,11 @@ export class CoreToolScheduler {
                   },
           );
 
-          // Append additional context from hook if provided
+          // Defer appending hook context until after raw tool-output
+          // truncation, so the structure-blind head/tail truncator cannot
+          // bisect hook-injected metadata or reminders.
           if (postHookResult.additionalContext) {
-            content = appendAdditionalContext(
-              content,
-              postHookResult.additionalContext,
-            );
+            postToolUseAdditionalContext = postHookResult.additionalContext;
           }
 
           // Check if hook requested to stop execution
@@ -2864,6 +2865,45 @@ export class CoreToolScheduler {
             );
             return;
           }
+        }
+
+        if (
+          typeof content === 'string' &&
+          !content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)
+        ) {
+          try {
+            const truncated = await truncateToolOutput(
+              this.config,
+              toolName,
+              content,
+              scheduledCall.request.prompt_id,
+            );
+            content = truncated.content;
+            if (
+              truncated.outputFile &&
+              typeof toolResult.returnDisplay === 'string'
+            ) {
+              const separator = toolResult.returnDisplay.length > 0 ? '\n' : '';
+              toolResult.returnDisplay =
+                `${toolResult.returnDisplay}${separator}` +
+                `Output too long and was saved to: ${truncated.outputFile}`;
+            }
+          } catch (truncationError) {
+            debugLogger.warn(
+              `Tool output truncation failed for ${toolName} ` +
+                `(callId=${scheduledCall.request.callId}, prompt_id=${scheduledCall.request.prompt_id}): ` +
+                (truncationError instanceof Error
+                  ? truncationError.message
+                  : String(truncationError)),
+            );
+          }
+        }
+
+        if (postToolUseAdditionalContext) {
+          content = appendAdditionalContext(
+            content,
+            postToolUseAdditionalContext,
+          );
         }
 
         // Collect filesystem paths the tool just touched. Different tools
@@ -2946,16 +2986,8 @@ export class CoreToolScheduler {
             );
           }
         }
-
-        if (typeof content === 'string') {
-          const truncated = await truncateToolOutput(
-            this.config,
-            toolName,
-            content,
-          );
-          content = truncated.content;
-          contentLength = content.length;
-        }
+        const contentLength =
+          typeof content === 'string' ? content.length : undefined;
 
         // Guard the JSON serialization for non-string content. Tool
         // results can contain Part[] with large inlineData/media payloads
