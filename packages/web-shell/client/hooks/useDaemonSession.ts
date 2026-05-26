@@ -729,6 +729,12 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
             resolve,
             reject,
           };
+          setTimeout(() => {
+            if (pendingSessionLoadRef.current?.id === loadId) {
+              pendingSessionLoadRef.current = undefined;
+              reject(new Error('Session load timed out'));
+            }
+          }, 30_000);
         });
         setPromptStatus('idle');
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
@@ -797,14 +803,19 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
             })),
             errors: result.errors,
           };
-        } catch {
+        } catch (error) {
+          const isNotImplemented =
+            error instanceof DaemonHttpError &&
+            (error.status === 404 || error.status === 501);
           return {
             v: 1,
             serverName,
             tools: [],
             errors: [
               {
-                error: 'The connected daemon does not expose MCP tool details.',
+                error: isNotImplemented
+                  ? 'The connected daemon does not expose MCP tool details.'
+                  : `Failed to load MCP tools: ${error instanceof Error ? error.message : String(error)}`,
               },
             ],
           };
@@ -922,6 +933,12 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               cur.status === 'connected'
                 ? cur
                 : { ...cur, status: 'connected', error: undefined },
+            );
+          } else {
+            setConnection((cur) =>
+              cur.error
+                ? { ...cur, status: 'connected', error: undefined }
+                : cur,
             );
           }
           consecutiveFailures = 0;

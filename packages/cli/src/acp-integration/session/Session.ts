@@ -573,14 +573,6 @@ export class Session implements SessionContext {
           .map((block) => (block.type === 'text' ? block.text : ''))
           .join(' ');
 
-        const hasImageBlocks = params.prompt.some(
-          (block) => block.type === 'image',
-        );
-        const messageText = promptText || (hasImageBlocks ? '[image]' : '');
-        if (messageText) {
-          await this.messageEmitter.emitUserMessage(messageText);
-        }
-
         // Log user prompt
         logUserPrompt(
           this.config,

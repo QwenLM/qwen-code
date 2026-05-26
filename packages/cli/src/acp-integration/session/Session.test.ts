@@ -774,25 +774,6 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
-    it('emits the submitted user prompt to ACP session updates', async () => {
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'hello' }],
-      });
-
-      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
-        sessionId: 'test-session-id',
-        update: {
-          sessionUpdate: 'user_message_chunk',
-          content: { type: 'text', text: 'hello' },
-        },
-      });
-    });
-
     it('continues ACP prompt ids after replaying resumed history', async () => {
       mockChat.sendMessageStream = vi
         .fn()

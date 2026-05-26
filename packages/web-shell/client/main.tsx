@@ -2,9 +2,12 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useState } from 'react';
 import { App } from './App';
+import { removeDaemonTokenFromUrl } from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
+
+removeDaemonTokenFromUrl();
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';

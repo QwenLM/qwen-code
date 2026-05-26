@@ -253,9 +253,13 @@ function CodeBlock({
   }, [code, lang, resolvedLang]);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    navigator.clipboard.writeText(code).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      },
+      () => {},
+    );
   };
 
   if (lang === 'mermaid') {

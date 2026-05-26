@@ -30,11 +30,7 @@ import {
 } from './components/dialogs/ThemeDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { getLocalCommands } from './constants/localCommands';
-import {
-  getDaemonBaseUrl,
-  getDaemonToken,
-  removeDaemonTokenFromUrl,
-} from './config/daemon';
+import { getDaemonBaseUrl, getDaemonToken } from './config/daemon';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import {
@@ -58,7 +54,6 @@ import styles from './App.module.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
 const DAEMON_TOKEN = getDaemonToken();
-removeDaemonTokenFromUrl();
 const WEB_SHELL_VERSION = __WEB_SHELL_VERSION__;
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
@@ -701,7 +696,7 @@ export function App({
               store.dispatch([
                 {
                   type: 'error',
-                  text: 'Please enter a session name, for example /rename project debugging, or use /rename --auto.',
+                  text: t('rename.empty'),
                 },
               ]);
               return true;
@@ -712,7 +707,7 @@ export function App({
                 store.dispatch([
                   {
                     type: 'status',
-                    text: `Session renamed to ${displayName}`,
+                    text: t('rename.success', { name: displayName }),
                   },
                 ]);
               })

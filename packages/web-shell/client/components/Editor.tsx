@@ -174,8 +174,12 @@ export function Editor({
         () => languageRef.current,
       ),
       createAtCompletionSource({
-        baseUrl: daemonBaseUrlRef.current,
-        token: daemonTokenRef.current,
+        get baseUrl() {
+          return daemonBaseUrlRef.current;
+        },
+        get token() {
+          return daemonTokenRef.current;
+        },
       }),
     ];
 

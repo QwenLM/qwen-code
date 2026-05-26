@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import styles from './AskUserQuestion.module.css';
@@ -36,8 +36,10 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
     {},
   );
   const [customFocused, setCustomFocused] = useState(false);
+  const submittedRef = useRef(false);
 
   useEffect(() => {
+    submittedRef.current = false;
     setCurrentIdx(0);
     setSelectedIdx(0);
     setAnswers({});
@@ -52,6 +54,10 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
   const otherOptionIdx = current?.options.length ?? 0;
 
   const handleSubmit = useCallback(() => {
+    if (submittedRef.current) return;
+    const submitOption = request.options.find((o) => o.kind === 'allow_once');
+    if (!submitOption) return;
+    submittedRef.current = true;
     const result: Record<string, string> = {};
     for (let i = 0; i < questions.length; i++) {
       const q = questions[i];
@@ -65,16 +71,15 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
         result[q.question] = answers[i] || customInputs[i] || '';
       }
     }
-    const submitOption = request.options.find((o) => o.kind === 'allow_once');
-    onConfirm(
-      request.id,
-      submitOption?.id || request.options[0]?.id || '',
-      result,
-    );
+    onConfirm(request.id, submitOption.id, result);
   }, [questions, selectedMulti, customInputs, answers, request, onConfirm]);
 
   const submitWithAnswer = useCallback(
     (questionIdx: number, answer: string) => {
+      if (submittedRef.current) return;
+      const submitOption = request.options.find((o) => o.kind === 'allow_once');
+      if (!submitOption) return;
+      submittedRef.current = true;
       const result: Record<string, string> = {};
       for (let i = 0; i < questions.length; i++) {
         const q = questions[i];
@@ -90,12 +95,7 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
           result[q.question] = answers[i] || customInputs[i] || '';
         }
       }
-      const submitOption = request.options.find((o) => o.kind === 'allow_once');
-      onConfirm(
-        request.id,
-        submitOption?.id || request.options[0]?.id || '',
-        result,
-      );
+      onConfirm(request.id, submitOption.id, result);
     },
     [questions, selectedMulti, customInputs, answers, request, onConfirm],
   );

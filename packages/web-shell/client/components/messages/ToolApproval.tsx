@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
+import { useI18n } from '../../i18n';
 import { isEditableTarget } from '../../utils/dom';
 import styles from './ToolApproval.module.css';
 
@@ -46,14 +47,32 @@ function getCommandFromRawInput(request: PermissionRequest): string | null {
   return null;
 }
 
+function getSafeDefaultIndex(options: PermissionRequest['options']): number {
+  if (
+    options.length > 1 &&
+    (options[0].kind === 'allow_always' || options[0].kind === 'reject_always')
+  ) {
+    const saferIdx = options.findIndex(
+      (o) => o.kind === 'allow_once' || o.kind === 'reject_once',
+    );
+    return saferIdx >= 0 ? saferIdx : 1;
+  }
+  return 0;
+}
+
 export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
-  const [selected, setSelected] = useState(0);
+  const { t } = useI18n();
+  const [selected, setSelected] = useState(() =>
+    getSafeDefaultIndex(request.options),
+  );
   const submittedRef = useRef(false);
+  const interactedRef = useRef(false);
 
   useEffect(() => {
     submittedRef.current = false;
-    setSelected(0);
-  }, [request.id]);
+    interactedRef.current = false;
+    setSelected(getSafeDefaultIndex(request.options));
+  }, [request.id, request.options]);
 
   const { toolName, description } = parseTitle(request.title);
   const contentText = extractContentText(request);
@@ -73,12 +92,18 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
       const optCount = request.options.length;
       if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
+        interactedRef.current = true;
         setSelected((s) => (s - 1 + optCount) % optCount);
       } else if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
+        interactedRef.current = true;
         setSelected((s) => (s + 1) % optCount);
       } else if (e.key === 'Enter') {
         e.preventDefault();
+        if (!interactedRef.current) {
+          interactedRef.current = true;
+          return;
+        }
         confirm(request.options[selected].id);
       } else if (e.key === 'Escape') {
         e.preventDefault();
@@ -90,6 +115,7 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
         const idx = parseInt(e.key) - 1;
         if (idx < optCount) {
           e.preventDefault();
+          interactedRef.current = true;
           confirm(request.options[idx].id);
         }
       }
@@ -100,7 +126,7 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   useEffect(() => {
     const timer = setTimeout(() => {
       window.addEventListener('keydown', handleKeyDown);
-    }, 50);
+    }, 250);
     return () => {
       clearTimeout(timer);
       window.removeEventListener('keydown', handleKeyDown);
@@ -127,7 +153,9 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
       ) : null}
 
       <div className={styles.question}>
-        {isExec ? `Allow execution of: '${toolName}'?` : 'Apply this change?'}
+        {isExec
+          ? t('approval.execQuestion', { tool: toolName })
+          : t('approval.changeQuestion')}
       </div>
 
       <div className={styles.options}>
