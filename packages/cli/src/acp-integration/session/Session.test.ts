@@ -427,6 +427,28 @@ describe('Session', () => {
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
+    it('rejects rewinds while a notification prompt is processing', () => {
+      (
+        session as unknown as { notificationProcessing: boolean }
+      ).notificationProcessing = true;
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects rewinds while a notification abort controller is active', () => {
+      (
+        session as unknown as { notificationAbortController: AbortController }
+      ).notificationAbortController = new AbortController();
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
     it('restores a captured history snapshot', () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
@@ -464,6 +486,28 @@ describe('Session', () => {
       (
         session as unknown as { cronAbortController: AbortController }
       ).cronAbortController = new AbortController();
+
+      expect(() => session.restoreHistory([])).toThrow(
+        'Cannot restore history while a prompt is running',
+      );
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects history restore while a notification prompt is processing', () => {
+      (
+        session as unknown as { notificationProcessing: boolean }
+      ).notificationProcessing = true;
+
+      expect(() => session.restoreHistory([])).toThrow(
+        'Cannot restore history while a prompt is running',
+      );
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects history restore while a notification abort controller is active', () => {
+      (
+        session as unknown as { notificationAbortController: AbortController }
+      ).notificationAbortController = new AbortController();
 
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
@@ -3546,6 +3590,20 @@ describe('Session', () => {
       ).toHaveBeenLastCalledWith(undefined);
     });
 
+    it('aborts an active notificationAbortController and nulls the reference', () => {
+      type NotificationInternals = {
+        notificationAbortController: AbortController | null;
+      };
+      const internals = session as unknown as NotificationInternals;
+      const ac = new AbortController();
+      internals.notificationAbortController = ac;
+
+      session.dispose();
+
+      expect(ac.signal.aborted).toBe(true);
+      expect(internals.notificationAbortController).toBeNull();
+    });
+
     it('is idempotent — repeated dispose() calls do not throw or re-register', () => {
       const internals = session as unknown as SessionInternals;
       session.dispose();
@@ -3564,6 +3622,24 @@ describe('Session', () => {
       expect(
         mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.length,
       ).toBeGreaterThanOrEqual(callsAfterFirst);
+    });
+
+    it('guards #drainNotificationQueue from processing after dispose', () => {
+      type DrainInternals = {
+        disposed: boolean;
+        notificationQueue: unknown[];
+        notificationProcessing: boolean;
+      };
+      const internals = session as unknown as DrainInternals;
+
+      // Simulate a queued notification, then dispose before drain runs
+      internals.notificationQueue.push({ taskId: 'late-arrival' });
+      session.dispose();
+
+      // After dispose, the queue is cleared and processing is stopped
+      expect(internals.notificationQueue).toHaveLength(0);
+      expect(internals.notificationProcessing).toBe(false);
+      expect(internals.disposed).toBe(true);
     });
   });
 });

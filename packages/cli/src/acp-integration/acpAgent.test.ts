@@ -2718,6 +2718,37 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('loadSession disposes the existing session when reloading the same sessionId', async () => {
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [{ role: 'user', parts: [{ text: 'first' }] }],
+      },
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    // First loadSession creates a session
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    const firstSession = lastSessionMock;
+    expect(firstSession).toBeDefined();
+    expect(firstSession!.dispose).not.toHaveBeenCalled();
+
+    // Second loadSession with the same sessionId should dispose the first
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    expect(firstSession!.dispose).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('unstable_resumeSession throws resourceNotFound when the persisted session is missing', async () => {
     bindRestoreMocks({ sessionExists: false });
     const { agent, agentPromise } = await spawnAgent();
