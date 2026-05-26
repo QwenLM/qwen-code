@@ -153,7 +153,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'T2.4 (#4514). Cross-origin allowlist for browser webui clients. ' +
           'Repeatable; each value must be a canonical URL origin ' +
           '(`<scheme>://<host>[:<port>]`, no trailing slash) or `*` for any ' +
-          'origin (loud warning, only safe with --require-auth). When unset, ' +
+          'origin (loud warning; boot refuses if no bearer token is ' +
+          'configured. Recommended: pair with --require-auth on loopback so ' +
+          '/health and /demo are also bearer-gated). When unset, ' +
           'the daemon rejects every request carrying an `Origin` header with ' +
           "403 (today's behavior). Matched origins receive proper CORS " +
           'response headers; unmatched still 403. Example: `--allow-origin ' +

@@ -394,7 +394,8 @@ export async function runQwenServe(
       `qwen serve: --allow-origin: ${opts.allowOrigins.join(', ')}` +
         (parsed.allowAny
           ? ' (WARNING: `*` admits any cross-origin browser — bearer ' +
-            'token gates every request)'
+            'token gates API routes; /health and /demo remain pre-auth ' +
+            'on loopback unless --require-auth is set)'
           : ''),
     );
   }
