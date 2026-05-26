@@ -196,6 +196,15 @@ def normalize(path: Path) -> dict[str, Any]:
                 file=sys.stderr,
             )
             continue
+        # Valid JSONL lines may decode to non-objects (`[]`, `"hello"`, `42`,
+        # `null`); those do not have `.get()` and would crash the entire
+        # normalization with an AttributeError. Skip with a warning instead.
+        if not isinstance(raw, dict):
+            print(
+                f"Warning: skipping non-object line {line_num} in {path}",
+                file=sys.stderr,
+            )
+            continue
         req = raw.get("request") or {}
         resp = raw.get("response") or {}
         parsed = urlparse(req.get("url", ""))
