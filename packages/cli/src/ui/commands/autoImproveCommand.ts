@@ -406,7 +406,11 @@ function buildTickPrompt(state: AutoImproveLoopState): string {
     `Target branch:\n${state.targetBranch}`,
   ]
     .filter(Boolean)
-    .join('\n\n');
+    .join('\n\n')
+    // Neutralize boundary markers to prevent prompt breakout
+    .replace(/---(?:BEGIN|END) USER-PROVIDED DATA---/g, (m) =>
+      m.replace(/---/g, '–––'),
+    );
   return `You are running one tick of the built-in /auto-improve loop.
 
 Loop state:
@@ -710,7 +714,12 @@ async function stopAutoImprove(config: Config): Promise<MessageActionReturn> {
   state.status = hasActiveRun ? 'stopping' : 'stopped';
   await writeAutoImproveLoopState(repoRoot, state);
   if (state.cronJobId && config.isCronEnabled()) {
-    config.getCronScheduler().delete(state.cronJobId);
+    try {
+      config.getCronScheduler().delete(state.cronJobId);
+    } catch {
+      // Best-effort: ensure clearActiveAutoImproveLoop runs even if
+      // the scheduler throws (e.g. unknown job ID).
+    }
   }
   await clearActiveAutoImproveLoop(repoRoot);
 

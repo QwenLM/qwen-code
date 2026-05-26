@@ -1526,10 +1526,7 @@ export class Session implements SessionContext {
             }
           }
         } catch (error) {
-          // Mark as errored unless this was a user-initiated cancellation
-          if (!ac.signal.aborted) {
-            slashOnCompleteErrored = true;
-          }
+          slashOnCompleteErrored = true;
           if (ac.signal.aborted) return;
           debugLogger.error('Error processing cron prompt:', error);
           const msg = error instanceof Error ? error.message : String(error);
