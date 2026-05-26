@@ -582,13 +582,7 @@ describe('DaemonClient', () => {
       expect(result.filename).toBe('qwen-session-sess-x.jsonl');
     });
 
-    // Copilot review fold-in (#4515 review comment id 3299346707): the
-    // derived fallback used a raw `sessionId`, so a non-qwen daemon (or
-    // a future qwen daemon with looser session ids) that emits an id
-    // containing `/` would produce an unsafe `qwen-session-with/slash.md`
-    // that breaks Blob/a.download and could traverse upward in legacy
-    // file pickers. The SDK now strips non-`[A-Za-z0-9._-]` characters
-    // before interpolating.
+    // Regression: fallback used raw sessionId; should strip non-[A-Za-z0-9._-].
     it('sanitizes unsafe characters out of the derived fallback filename', async () => {
       const { fetch } = recordingFetch(
         () =>

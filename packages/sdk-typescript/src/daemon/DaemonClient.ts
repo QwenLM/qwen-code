@@ -183,18 +183,12 @@ function parseAttachmentFilename(
 }
 
 /**
- * Issue #4514 T2.6 (Copilot review fold-in). Strips characters that
- * would produce an unsafe filename when the daemon omits a
- * Content-Disposition header and the SDK has to derive one from the
- * session id. The qwen daemon's `SESSION_ID_RE` accepts only
- * `[0-9a-fA-F-]`, so this is theoretical against a real qwen serve
- * deployment — but the SDK can in principle talk to any non-qwen
- * daemon that re-uses the same wire shape, and a session id with a
- * literal `/` would otherwise produce a filename like
- * `qwen-session-with/slash.md` that breaks `Blob` / `a.download`
- * and could traverse upward in some legacy file pickers. Conservative
- * allowlist: letters, digits, dot, underscore, dash. Everything else
- * collapses to `_`.
+ * Defense-in-depth for the `Content-Disposition`-missing fallback path.
+ * Qwen's own daemon enforces `[0-9a-fA-F-]` session ids, but other
+ * daemons reusing this wire shape might not. (Near-twin
+ * `sanitizeFilenameComponent` lives in
+ * `packages/core/src/agents/agent-transcript.ts` for non-SDK callers —
+ * the SDK can't import core without inverting the package boundary.)
  */
 function sanitizeSessionIdForFilename(sessionId: string): string {
   return sessionId.replace(/[^A-Za-z0-9._-]/g, '_');
