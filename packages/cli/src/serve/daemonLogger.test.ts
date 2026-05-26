@@ -12,6 +12,8 @@ import {
   existsSync,
   writeFileSync,
   rmSync,
+  realpathSync,
+  lstatSync,
 } from 'node:fs';
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { buildDaemonLogLine, initDaemonLogger } from './daemonLogger.js';
@@ -293,5 +295,43 @@ describe('initDaemonLogger info/warn/error', () => {
     logger.info('after-rm-2');
     await logger.flush();
     // No throw — degraded path swallows.
+  });
+});
+
+describe('initDaemonLogger latest symlink', () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), 'daemon-log-'));
+  });
+  afterEach(() => {
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // cleanup best-effort
+    }
+  });
+
+  it('creates daemon/latest pointing to the current log', async () => {
+    const logger = initDaemonLogger({
+      boundWorkspace: '/w',
+      pid: 42,
+      baseDir: tmp,
+    });
+    // Allow the async symlink to settle.
+    await new Promise((r) => setTimeout(r, 50));
+    const linkPath = path.join(tmp, 'daemon', 'latest');
+    expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+    expect(realpathSync(linkPath)).toBe(realpathSync(logger.getLogPath()));
+  });
+
+  it('updates latest on subsequent init in same dir', async () => {
+    const a = initDaemonLogger({ boundWorkspace: '/w', pid: 1, baseDir: tmp });
+    await new Promise((r) => setTimeout(r, 50));
+    const b = initDaemonLogger({ boundWorkspace: '/w', pid: 2, baseDir: tmp });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(realpathSync(path.join(tmp, 'daemon', 'latest'))).toBe(
+      realpathSync(b.getLogPath()),
+    );
+    expect(realpathSync(a.getLogPath())).not.toBe(realpathSync(b.getLogPath()));
   });
 });

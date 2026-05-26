@@ -8,7 +8,7 @@ import * as nodeFs from 'node:fs';
 import * as nodePath from 'node:path';
 import * as crypto from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { Storage, updateSymlink } from '@qwen-code/qwen-code-core';
 
 export type DaemonLogLevel = 'INFO' | 'WARN' | 'ERROR';
 
@@ -151,6 +151,17 @@ export function initDaemonLogger(opts: InitDaemonLoggerOptions): DaemonLogger {
       }`,
     );
     return NOOP_LOGGER;
+  }
+
+  try {
+    const aliasPath = nodePath.join(daemonDir, 'latest');
+    void updateSymlink(aliasPath, logPath, { fallbackCopy: false }).catch(
+      () => {
+        // Best-effort. Symlink failure must not degrade primary writes.
+      },
+    );
+  } catch {
+    // Defensive: any sync throw is ignored.
   }
 
   let pending: Promise<void> = Promise.resolve();
