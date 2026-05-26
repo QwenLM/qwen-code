@@ -973,6 +973,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
   }
 
+  // Some Anthropic-compatible gateways close the SSE stream with HTTP 200
+  // but emit no assistant content or stop reason (e.g. billing / quota
+  // limits hit mid-proxy). When that happens we probe once with the same
+  // request in non-streaming mode so the real provider error surfaces
+  // instead of the generic "stream ended without a finish reason".
   private async *processStreamWithEmptyFallback(
     stream: AsyncIterable<RawMessageStreamEvent>,
     fallbackRequest: MessageCreateParamsWithThinking,
