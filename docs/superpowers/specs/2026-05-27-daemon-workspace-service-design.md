@@ -122,11 +122,10 @@ export interface DaemonWorkspaceService {
   agents: AgentsService;
   memory: MemoryService;
   initWorkspace(opts: InitWorkspaceOpts, ctx: WorkspaceRequestContext): Promise<void>;
-  listSessions(): SessionSummary[];
-  recordHeartbeat(clientId: string): void;
-  getHeartbeatState(): HeartbeatState;
 }
 ```
+
+> `listWorkspaceSessions` / `recordHeartbeat` / `getHeartbeatState` 留在 bridge——它们访问 bridge 内部的 per-session state（`byId` map），迁出需要暴露 session 数据结构，得不偿失。
 
 ### 3.3 Facade Factory 签名
 
@@ -151,9 +150,9 @@ export function createDaemonWorkspaceService(
 
 | 子服务 | 方法 | 所需 deps | 现有来源 |
 |---|---|---|---|
-| FileService | `read`, `write`, `edit`, `glob`, `list`, `stat` | `fsFactory`, `boundWorkspace` | `serve/routes/workspaceFileRead.ts`, `workspaceFileWrite.ts`, `serve/fs/` |
-| AuthService | `startDeviceFlow`, `pollDeviceFlow`, `getAuthStatus` | `deviceFlowRegistry` | `serve/auth/deviceFlow.ts` |
-| AgentsService | `list`, `create`, `update`, `delete` | `subagentManager`, `publishWorkspaceEvent`, `knownClientIds` | `serve/workspaceAgents.ts` |
+| FileService | `read`, `readBytes`, `write`, `edit`, `glob`, `list`, `stat` | `fsFactory`, `boundWorkspace` | `serve/routes/workspaceFileRead.ts`, `workspaceFileWrite.ts`, `serve/fs/` |
+| AuthService | `startFlow`, `getFlowStatus(flowId)`, `cancelFlow(flowId)`, `getAuthStatus` | `deviceFlowRegistry` | `serve/auth/deviceFlow.ts`, `server.ts:794-966` |
+| AgentsService | `list`, `get(agentType)`, `create`, `update`, `delete` | `subagentManager`, `publishWorkspaceEvent`, `knownClientIds` | `serve/workspaceAgents.ts` |
 | MemoryService | `list`, `read`, `write`, `delete` | `fsFactory` or direct fs, `publishWorkspaceEvent`, `knownClientIds` | `serve/workspaceMemory.ts` |
 
 每个方法第一个参数都是 `ctx: WorkspaceRequestContext`，trust gate 在方法入口统一执行。
@@ -181,8 +180,8 @@ export interface WorkspaceRequestContext {
 | 方法 | 去向 | 理由 |
 |---|---|---|
 | `initWorkspace` | `workspace.initWorkspace` | 纯本地文件 I/O；附带修 FIXME（bridge 没接 fsFactory，跳过 trust gate / audit） |
-| `listWorkspaceSessions` | `workspace.listSessions` | 只遍历 byId map，纯 daemon state |
-| `recordHeartbeat` / `getHeartbeatState` | facade 顶层方法 | 纯 daemon 心跳状态 |
+
+> `listWorkspaceSessions` / `recordHeartbeat` / `getHeartbeatState` 看似"纯状态读写"，但实际访问 bridge 内部 `byId` session map 和 per-session entry 字段。迁出需要暴露 session 数据结构或额外 callback，违反最小暴露原则。保留在 bridge。
 
 ### 5.2 留在 bridge 的
 
@@ -219,18 +218,21 @@ export interface WorkspaceRequestContext {
 | method | 对应 REST | L2 调用 |
 |---|---|---|
 | `qwen/workspace/fs/read` | `GET /file?path=...` | `workspace.file.read(ctx, path)` |
+| `qwen/workspace/fs/readBytes` | `GET /file/bytes?path=...` | `workspace.file.readBytes(ctx, path)` |
 | `qwen/workspace/fs/write` | `POST /file/write` | `workspace.file.write(ctx, path, content)` |
 | `qwen/workspace/fs/edit` | `POST /file/edit` | `workspace.file.edit(ctx, path, edits)` |
 | `qwen/workspace/fs/glob` | `GET /glob?pattern=...` | `workspace.file.glob(ctx, pattern)` |
 | `qwen/workspace/fs/list` | `GET /list?path=...` | `workspace.file.list(ctx, path)` |
 | `qwen/workspace/fs/stat` | `GET /stat?path=...` | `workspace.file.stat(ctx, path)` |
-| `qwen/workspace/auth/start` | `POST /workspace/auth/start` | `workspace.auth.startDeviceFlow(ctx)` |
-| `qwen/workspace/auth/poll` | `POST /workspace/auth/poll` | `workspace.auth.pollDeviceFlow(ctx, code)` |
+| `qwen/workspace/auth/start` | `POST /workspace/auth/device-flow` | `workspace.auth.startFlow(ctx)` |
 | `qwen/workspace/auth/status` | `GET /workspace/auth/status` | `workspace.auth.getAuthStatus(ctx)` |
+| `qwen/workspace/auth/flow` | `GET /workspace/auth/device-flow/:id` | `workspace.auth.getFlowStatus(ctx, flowId)` |
+| `qwen/workspace/auth/cancel` | `POST /workspace/auth/device-flow/:id` (cancel) | `workspace.auth.cancelFlow(ctx, flowId)` |
 | `qwen/workspace/agents/list` | `GET /workspace/agents` | `workspace.agents.list(ctx)` |
+| `qwen/workspace/agents/get` | `GET /workspace/agents/:agentType` | `workspace.agents.get(ctx, agentType)` |
 | `qwen/workspace/agents/create` | `POST /workspace/agents` | `workspace.agents.create(ctx, spec)` |
-| `qwen/workspace/agents/update` | `PUT /workspace/agents/:id` | `workspace.agents.update(ctx, id, spec)` |
-| `qwen/workspace/agents/delete` | `DELETE /workspace/agents/:id` | `workspace.agents.delete(ctx, id)` |
+| `qwen/workspace/agents/update` | `POST /workspace/agents/:agentType` | `workspace.agents.update(ctx, agentType, spec)` |
+| `qwen/workspace/agents/delete` | `DELETE /workspace/agents/:agentType` | `workspace.agents.delete(ctx, agentType)` |
 | `qwen/workspace/memory/list` | `GET /workspace/memory` | `workspace.memory.list(ctx)` |
 | `qwen/workspace/memory/read` | `GET /workspace/memory/:key` | `workspace.memory.read(ctx, key)` |
 | `qwen/workspace/memory/write` | `POST /workspace/memory` | `workspace.memory.write(ctx, key, content)` |
@@ -263,8 +265,8 @@ Capabilities advertise 时在 `_meta.qwen.methods` 中声明这些方法。
 
 | 文件 | 变更 |
 |---|---|
-| `acp-bridge/src/bridge.ts` | 移除 `initWorkspace` / `listWorkspaceSessions` / heartbeat 方法；重命名工厂函数 |
-| `acp-bridge/src/bridgeTypes.ts` | 接口改名 `HttpAcpBridge` → `AcpSessionBridge`；移除迁出方法签名 |
+| `acp-bridge/src/bridge.ts` | 移除 `initWorkspace`；重命名工厂函数 |
+| `acp-bridge/src/bridgeTypes.ts` | 接口改名 `HttpAcpBridge` → `AcpSessionBridge`；移除 `initWorkspace` 方法签名 |
 | `acp-bridge/src/bridgeOptions.ts` | 更新 JSDoc 引用 |
 | `acp-bridge/src/status.ts` | 更新错误消息中的类名 |
 | `cli/src/serve/httpAcpBridge.ts` → 改名 `acpSessionBridge.ts` | re-export 更新 |
@@ -278,7 +280,29 @@ Capabilities advertise 时在 `_meta.qwen.methods` 中声明这些方法。
 
 ---
 
-## 8. 测试策略
+## 8. SDK 兼容与错误格式
+
+### 8.1 SDK backward compat
+
+REST API surface（路径、HTTP 方法、请求/响应 JSON schema）保持不变。`sdk-typescript` 中的 `DaemonClient` / `DaemonSessionClient` 无需任何改动。
+
+验证方式：现有 `packages/sdk-typescript/test/unit/DaemonClient.test.ts` 和 `DaemonSessionClient.test.ts` 在本 PR 中必须零修改通过。
+
+### 8.2 /acp trust gate 拒绝的错误格式
+
+两传输语义等价但编码不同：
+
+| 场景 | REST | /acp (JSON-RPC) |
+|---|---|---|
+| 无效/缺失 bearer token | `401 { error, code: "unauthorized" }` | `{ error: { code: -32001, message: "unauthorized" } }` |
+| 无效 clientId | `400 { error, code: "invalid_client_id" }` | `{ error: { code: -32602, message: "invalid_client_id", data: {...} } }` |
+| trust gate 拒绝（路径逃逸等） | `403 { error, code: "forbidden" }` | `{ error: { code: -32003, message: "forbidden", data: {...} } }` |
+
+> JSON-RPC error codes 遵循 [ACP error code registry](https://spec.acpprotocol.org)（标准范围 -32000 ~ -32099 为 server-defined application errors）。具体 code 值在实现时对齐 `/acp` 现有 error 映射逻辑（`acp-integration/errorCodes.ts`）。
+
+---
+
+## 9. 测试策略
 
 | 层 | 测试类型 | 覆盖目标 |
 |---|---|---|
@@ -295,29 +319,30 @@ Capabilities advertise 时在 `_meta.qwen.methods` 中声明这些方法。
 
 ---
 
-## 9. PR 形态
+## 10. PR 形态
 
 单 PR 原子提交，包含：
 - DaemonWorkspaceService 全部新建文件
 - REST route handler 改为调 service
-- bridge 瘦身 + 方法迁出
+- bridge 瘦身（迁出 `initWorkspace`）
 - `HttpAcpBridge` → `AcpSessionBridge` 改名
 - `/acp` northbound ext methods 新增
 - 全量测试（unit + integration + e2e）
 
 ---
 
-## 10. 明确不做（scope boundary）
+## 11. 明确不做（scope boundary）
 
 - workspace-scoped EventBus（PR 24 territory）
 - workspace-scoped ClientRegistry（PR 24 territory）
 - L2 ↔ L3 拆分（把 `ClientSideConnection` 从 bridge 拆出）
 - REST 做成 `/acp` compat shim（长期方向）
 - channels standalone 模式统一（独立部署形态问题）
+- `listWorkspaceSessions` / `recordHeartbeat` / `getHeartbeatState` 迁移（访问 bridge 内部 session state，保留原位）
 
 ---
 
-## 11. 待 chiga0 确认的决策点
+## 12. 待 chiga0 确认的决策点
 
 1. `/acp` northbound 命名空间：`qwen/workspace/...` vs 其他（如复用 `qwen/control/...`）
 2. 改名是否同 PR：倾向同 PR，但可按反馈拆出
