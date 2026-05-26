@@ -243,8 +243,9 @@ export class DaemonSessionClient {
 
   /**
    * Issue #4514 T2.6. Export the session conversation in one of
-   * `'md' | 'html' | 'json' | 'jsonl'` (defaults to `'md'` for parity
-   * with the `/export` slash command).
+   * `'md' | 'html' | 'json' | 'jsonl'` (defaults to `'md'`; the TUI
+   * `/export` slash command defaults to `html`, so the daemon default is
+   * intentionally different).
    */
   async export(
     format: DaemonSessionExportFormat = 'md',
