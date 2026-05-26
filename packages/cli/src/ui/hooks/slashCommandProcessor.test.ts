@@ -829,7 +829,9 @@ describe('useSlashCommandProcessor', () => {
       expect(executor).toBeDefined();
       const content = await executor?.('filecmd', 'with args');
 
-      expect(content).toBe('UserPromptExpansion blocked: Blocked by policy');
+      expect(content).toEqual({
+        error: 'UserPromptExpansion blocked: Blocked by policy',
+      });
     });
   });
 

@@ -764,6 +764,27 @@ describe('SkillTool', () => {
       expect(llmText).toContain('"mcp-prompt-a" not found');
     });
 
+    it('should return executor errors without treating them as prompt content', async () => {
+      const executor = vi.fn().mockResolvedValue({
+        error: 'UserPromptExpansion blocked: Blocked by policy',
+      });
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe('UserPromptExpansion blocked: Blocked by policy');
+      expect(result.returnDisplay).toBe(
+        'UserPromptExpansion blocked: Blocked by policy',
+      );
+    });
+
     it('should skip commandExecutor when no executor is registered', async () => {
       vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(null);
       vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);

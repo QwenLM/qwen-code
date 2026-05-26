@@ -493,9 +493,11 @@ export const useSlashCommandProcessor = (
               if (output) {
                 const blockingError = output.getBlockingError();
                 if (blockingError.blocked || output.shouldStopExecution()) {
-                  return formatUserPromptExpansionBlockedMessage(
-                    blockingError.reason || output.getEffectiveReason(),
-                  );
+                  return {
+                    error: formatUserPromptExpansionBlockedMessage(
+                      blockingError.reason || output.getEffectiveReason(),
+                    ),
+                  };
                 }
               }
               const content = appendUserPromptExpansionAdditionalContext(

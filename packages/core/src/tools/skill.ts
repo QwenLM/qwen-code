@@ -7,7 +7,10 @@
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { ToolResult, ToolResultDisplay } from './tools.js';
-import type { Config } from '../config/config.js';
+import type {
+  Config,
+  ModelInvocableCommandExecutorResult,
+} from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
@@ -346,7 +349,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     params: SkillParams,
     private readonly onSkillLoaded: (name: string) => void,
     private readonly commandExecutor:
-      | ((name: string, args?: string) => Promise<string | null>)
+      | ((
+          name: string,
+          args?: string,
+        ) => Promise<ModelInvocableCommandExecutorResult | null>)
       | null = null,
   ) {
     super(params);
@@ -381,15 +387,29 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       if (!skill) {
         // Try model-invocable command executor (e.g. MCP prompts)
         if (this.commandExecutor) {
-          const content = await this.commandExecutor(this.params.skill);
-          if (content !== null) {
+          const commandResult = await this.commandExecutor(this.params.skill);
+          if (
+            commandResult &&
+            typeof commandResult === 'object' &&
+            'error' in commandResult
+          ) {
+            logSkillLaunch(
+              this.config,
+              new SkillLaunchEvent(this.params.skill, false),
+            );
+            return {
+              llmContent: commandResult.error,
+              returnDisplay: commandResult.error,
+            };
+          }
+          if (typeof commandResult === 'string') {
             logSkillLaunch(
               this.config,
               new SkillLaunchEvent(this.params.skill, true),
             );
             this.onSkillLoaded(this.params.skill);
             return {
-              llmContent: [{ text: content }],
+              llmContent: [{ text: commandResult }],
               returnDisplay: `Executed command: ${this.params.skill}`,
             };
           }

@@ -320,7 +320,7 @@ export const handleSlashCommand = async (
       );
       if (hookResult.blockedResult) {
         return hookResult.blockedResult.type === 'message'
-          ? hookResult.blockedResult.content
+          ? { error: hookResult.blockedResult.content }
           : null;
       }
       const content = hookResult.content;
