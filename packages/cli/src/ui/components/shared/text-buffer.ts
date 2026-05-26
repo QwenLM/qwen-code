@@ -2005,9 +2005,7 @@ function tryExtractFilePaths(
  * parseAllAtCommands terminates at unescaped whitespace and commas.
  */
 function escapePathAndCommas(path: string): string {
-  // Use escapePath for whitespace, then additionally escape commas.
-  // parseAllAtCommands terminates at unescaped whitespace and commas.
-  return escapePath(path).replace(/,/g, '\\,');
+  return escapePath(path);
 }
 
 /**
