@@ -217,6 +217,24 @@ describe('isEarlyDispatchSafe', () => {
         ),
       ).toBe(false);
     });
+
+    it('returns false (no throw) when args is null', () => {
+      // Malformed provider chunks can feed `args: null` through —
+      // the classifier must reject rather than throw a TypeError that
+      // would crash the stream loop.
+      const { config } = buildConfig([
+        { name: ToolNames.SHELL, kind: Kind.Execute },
+      ]);
+      const bad: ToolCallRequestInfo = {
+        callId: 'a',
+        name: ToolNames.SHELL,
+        args: null as unknown as Record<string, unknown>,
+        isClientInitiated: false,
+        prompt_id: 'p1',
+      };
+      expect(() => isEarlyDispatchSafe(config, bad)).not.toThrow();
+      expect(isEarlyDispatchSafe(config, bad)).toBe(false);
+    });
   });
 
   it('canonicalises legacy tool names before classification', () => {
@@ -522,6 +540,218 @@ describe('StreamingToolDispatcher', () => {
       );
       await expect(pending).rejects.toMatchObject({ reason: 'unauthorized' });
       d.dispose();
+    });
+
+    it('shared-executor wiring: external discard on the executor fires the dispatcher cancellation listener', async () => {
+      // Simulates the production wiring where the consumer (CLI) passes
+      // the SAME executor to both Turn and the dispatcher. A Turn-internal
+      // executor.reset/discard must cascade to dispatcher.cancelInFlight.
+      const shared = new StreamingToolExecutor();
+      let release!: (r: ToolResult) => void;
+      const gate = new Promise<ToolResult>((r) => {
+        release = r;
+      });
+      const { config } = buildConfig([
+        {
+          name: 'read_file',
+          kind: Kind.Read,
+          execute: vi.fn(() => gate),
+        },
+      ]);
+      const d = new StreamingToolDispatcher(config, parentAbort.signal, shared);
+      // Verify the dispatcher really IS using the shared executor.
+      expect(d.getExecutor()).toBe(shared);
+
+      d.accept(req('a', 'read_file'));
+      const pending = d.getEarlyResult('a')!;
+
+      // External discard (as Turn would do on stream-error). Must wipe
+      // dispatcher.inFlight via the cancellation listener.
+      shared.discard('stream-error');
+      release({ llmContent: 'late', returnDisplay: 'late' });
+      await expect(pending).resolves.toBeUndefined();
+      expect(shared.getCompletedResults()).toEqual([]);
+      d.dispose();
+    });
+
+    it('shared-executor wiring: external reset fires the listener and re-accept after reset dispatches fresh', async () => {
+      const shared = new StreamingToolExecutor();
+      const execMock = vi.fn(async () => ({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      }));
+      const { config } = buildConfig([
+        { name: 'read_file', kind: Kind.Read, execute: execMock },
+      ]);
+      const d = new StreamingToolDispatcher(config, parentAbort.signal, shared);
+
+      d.accept(req('a', 'read_file'));
+      await d.drainInFlight();
+      expect(execMock).toHaveBeenCalledTimes(1);
+
+      // External reset (mid-stream retry). Listener fires, inFlight is
+      // cleared. Re-accept with the same callId must dispatch fresh
+      // (not silently skip on a stale alreadyAccepted check).
+      shared.reset('retry');
+      d.accept(req('a', 'read_file'));
+      await d.drainInFlight();
+      expect(execMock).toHaveBeenCalledTimes(2);
+      d.dispose();
+    });
+  });
+
+  describe('shutdown()', () => {
+    it('cancels in-flight + disposes + is idempotent', async () => {
+      let release!: (r: ToolResult) => void;
+      const gate = new Promise<ToolResult>((r) => {
+        release = r;
+      });
+      const { config } = buildConfig([
+        {
+          name: 'read_file',
+          kind: Kind.Read,
+          execute: vi.fn(() => gate),
+        },
+      ]);
+      const d = new StreamingToolDispatcher(config, parentAbort.signal);
+      d.accept(req('a', 'read_file'));
+      const pending = d.getEarlyResult('a')!;
+
+      d.shutdown('aborted');
+      expect(d.getExecutor().isDiscarded()).toBe(true);
+      expect(d.getExecutor().getDiscardReason()).toBe('aborted');
+
+      release({ llmContent: 'late', returnDisplay: 'late' });
+      await expect(pending).resolves.toBeUndefined();
+
+      // Idempotent — second shutdown is a no-op.
+      expect(() => d.shutdown('retry')).not.toThrow();
+      // First reason wins — second shutdown reason is ignored.
+      expect(d.getExecutor().getDiscardReason()).toBe('aborted');
+    });
+
+    it('shutdown after Turn-driven discard does not stomp the canonical reason', () => {
+      const shared = new StreamingToolExecutor();
+      const { config } = buildConfig([{ name: 'read_file', kind: Kind.Read }]);
+      const d = new StreamingToolDispatcher(config, parentAbort.signal, shared);
+
+      // Turn fires discard first (canonical reason).
+      shared.discard('unauthorized');
+
+      // Consumer's finally block calls shutdown() with undefined.
+      d.shutdown();
+      // First reason wins — 'unauthorized' is preserved, not overwritten
+      // by a fresh 'undefined' from the no-arg shutdown.
+      expect(shared.getDiscardReason()).toBe('unauthorized');
+    });
+
+    it('repeated shutdown with different reasons preserves the first via the `disposed` guard', () => {
+      const { config } = buildConfig([{ name: 'read_file', kind: Kind.Read }]);
+      const d = new StreamingToolDispatcher(config, parentAbort.signal);
+      d.shutdown('aborted');
+      // Second shutdown with a different reason — must NOT stomp.
+      // The dispatcher's `disposed` guard short-circuits before any
+      // executor call, so executor.discard('retry') is never invoked
+      // (and would be a no-op anyway via executor's first-reason-wins).
+      d.shutdown('retry');
+      expect(d.getExecutor().getDiscardReason()).toBe('aborted');
+    });
+
+    it('shutdown on an open executor (normal-completion path) discards with the supplied reason', () => {
+      const { config } = buildConfig([{ name: 'read_file', kind: Kind.Read }]);
+      const d = new StreamingToolDispatcher(config, parentAbort.signal);
+      // Simulates the post-close normal path: executor is closed but
+      // not discarded. shutdown() falls into the !isDiscarded branch
+      // and fires executor.discard with the (undefined) reason —
+      // matching the documented behaviour in the JSDoc.
+      d.getExecutor().close();
+      d.shutdown();
+      expect(d.getExecutor().isDiscarded()).toBe(true);
+      expect(d.getExecutor().getDiscardReason()).toBeUndefined();
+    });
+  });
+
+  describe('optionsFor factory', () => {
+    it('invokes the factory once per dispatched request with that request', async () => {
+      const { config } = buildConfig([{ name: 'read_file', kind: Kind.Read }]);
+      const seen: string[] = [];
+      const factory = vi.fn((r: ToolCallRequestInfo) => {
+        seen.push(r.callId);
+        return {};
+      });
+      const d = new StreamingToolDispatcher(
+        config,
+        parentAbort.signal,
+        undefined,
+        factory,
+      );
+      d.accept(req('a', 'read_file'));
+      d.accept(req('b', 'read_file'));
+      await d.drainInFlight();
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect(seen).toEqual(['a', 'b']);
+      d.dispose();
+    });
+
+    it('does NOT invoke the factory for unsafe-classified requests (no dispatch fired)', async () => {
+      const { config } = buildConfig([{ name: 'edit', kind: Kind.Edit }]);
+      const factory = vi.fn((_r: ToolCallRequestInfo) => ({}));
+      const d = new StreamingToolDispatcher(
+        config,
+        parentAbort.signal,
+        undefined,
+        factory,
+      );
+      d.accept(req('a', 'edit'));
+      await d.drainInFlight();
+      expect(factory).not.toHaveBeenCalled();
+      d.dispose();
+    });
+
+    it('swallows a throwing factory and dispatches with empty options', async () => {
+      const { config } = buildConfig([{ name: 'read_file', kind: Kind.Read }]);
+      const factory = vi.fn((_r: ToolCallRequestInfo) => {
+        throw new Error('factory boom');
+      });
+      const d = new StreamingToolDispatcher(
+        config,
+        parentAbort.signal,
+        undefined,
+        factory,
+      );
+      // Must not throw out of accept() — would crash the consumer's stream loop.
+      expect(() => d.accept(req('a', 'read_file'))).not.toThrow();
+      const r = await d.getEarlyResult('a');
+      expect(r?.callId).toBe('a');
+      d.dispose();
+    });
+  });
+
+  describe('listener-throw containment (executor side)', () => {
+    it('a throwing cancellation listener does not escape discard()', () => {
+      const ex = new StreamingToolExecutor();
+      ex.addCancellationListener(() => {
+        throw new Error('listener boom');
+      });
+      // Must NOT throw — the executor swallows listener throws so
+      // Turn's catch-block discard isn't turned into an unhandled
+      // rejection.
+      expect(() => ex.discard('aborted')).not.toThrow();
+      expect(ex.isDiscarded()).toBe(true);
+    });
+
+    it('a throwing listener does not skip subsequent listeners', () => {
+      const ex = new StreamingToolExecutor();
+      const ran: string[] = [];
+      ex.addCancellationListener(() => {
+        ran.push('a');
+        throw new Error('boom');
+      });
+      ex.addCancellationListener(() => {
+        ran.push('b');
+      });
+      ex.discard('aborted');
+      expect(ran).toEqual(['a', 'b']);
     });
   });
 });

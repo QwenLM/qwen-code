@@ -73,6 +73,7 @@ export {
 export {
   StreamingToolDispatcher,
   isEarlyDispatchSafe,
+  type StreamingToolDispatcherOptionsFor,
 } from './core/streamingToolDispatcher.js';
 export * from './core/tokenLimits.js';
 export * from './core/turn.js';

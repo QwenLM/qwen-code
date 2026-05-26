@@ -55,6 +55,22 @@ import type { ToolCallRequestInfo, ToolCallResponseInfo } from './turn.js';
  * dispatcher across concurrent Turns would let one Turn's abort cancel
  * the other's in-flight tools.
  */
+/**
+ * Resolve `ExecuteToolCallOptions` for a specific request when it is
+ * dispatched early. Lets the consumer wire its per-tool
+ * `outputUpdateHandler` / `onToolCallsUpdate` callbacks (progress
+ * surfacing, STREAM_JSON tool-call updates) so an early-dispatched tool
+ * gets the same UX side-effects as the post-stream scheduling path.
+ *
+ * Without a factory, early dispatches run with empty options and any
+ * `canUpdateOutput: true` tool's progress callbacks fire into a no-op
+ * — a long-running early-dispatched Fetch would look like a silent
+ * stall to the SDK consumer.
+ */
+export type StreamingToolDispatcherOptionsFor = (
+  request: ToolCallRequestInfo,
+) => ExecuteToolCallOptions;
+
 export class StreamingToolDispatcher {
   private readonly executor: StreamingToolExecutor;
   private readonly inFlight = new Map<
@@ -65,15 +81,33 @@ export class StreamingToolDispatcher {
   private readonly unsubscribe: () => void;
   private readonly parentSignal: AbortSignal;
   private readonly parentAbortHandler: () => void;
+  private readonly optionsFor: StreamingToolDispatcherOptionsFor | undefined;
   private disposed = false;
 
+  /**
+   * @param config         Tool registry + execution config.
+   * @param parentSignal   Parent abort (turn / session signal). Child
+   *                       AbortControllers are derived from this so a
+   *                       parent abort cancels every in-flight dispatch.
+   * @param executor       Optional externally-owned buffer. **Required**
+   *                       when the same executor is being handed to
+   *                       Turn via `SendMessageOptions.streamingToolExecutor`
+   *                       — otherwise the listener-driven orphan
+   *                       prevention is silently disconnected.
+   * @param optionsFor     Optional per-request {@link ExecuteToolCallOptions}
+   *                       factory. Use this to wire progress / update
+   *                       callbacks for early-dispatched tools — see
+   *                       {@link StreamingToolDispatcherOptionsFor}.
+   */
   constructor(
     private readonly config: Config,
     parentSignal: AbortSignal,
     executor?: StreamingToolExecutor,
+    optionsFor?: StreamingToolDispatcherOptionsFor,
   ) {
     this.executor = executor ?? new StreamingToolExecutor();
     this.parentSignal = parentSignal;
+    this.optionsFor = optionsFor;
     this.abortController = this.makeChildAbort();
     this.parentAbortHandler = () => this.abortController.abort();
     if (parentSignal.aborted) {
@@ -91,12 +125,35 @@ export class StreamingToolDispatcher {
     // the consumer) keeps the orphan-prevention guarantee local to this
     // class — even a future caller that forgets to thread retries through
     // the dispatcher still won't leak orphan tool runs.
+    //
+    // CRITICAL: this only works when the executor passed in here is the
+    // SAME instance Turn was constructed with (via
+    // `SendMessageOptions.streamingToolExecutor`). With separate
+    // instances Turn's lifecycle calls land on its own executor and
+    // never reach this listener.
     this.unsubscribe = this.executor.addCancellationListener(() => {
       this.cancelInFlight();
     });
   }
 
-  /** The underlying buffer / lifecycle source. Hand this to `new Turn(...)`. */
+  /**
+   * The underlying buffer / lifecycle source. Two equivalent ways to
+   * share with Turn:
+   *
+   *   - **Preferred** (current production wiring): construct the
+   *     executor first, hand it to BOTH the dispatcher constructor
+   *     and `SendMessageOptions.streamingToolExecutor`. Symmetric
+   *     and obvious at the call site.
+   *
+   *   - Alternative: construct the dispatcher first (which creates
+   *     an internal executor), then read it via `getExecutor()` and
+   *     pass that to `SendMessageOptions.streamingToolExecutor`.
+   *     Same result.
+   *
+   * What MUST NOT happen: omit the injection. Without sharing, Turn's
+   * `discard()` / `reset()` lands on a different instance and the
+   * orphan-prevention listener silently never fires.
+   */
   getExecutor(): StreamingToolExecutor {
     return this.executor;
   }
@@ -118,15 +175,19 @@ export class StreamingToolDispatcher {
   accept(request: ToolCallRequestInfo): void {
     if (this.disposed) return;
     if (this.executor.isClosed() || this.executor.isDiscarded()) return;
-    // Defer to executor for the accept-once semantics; the executor
-    // ignores duplicate callIds, but we still check here to avoid
-    // double-dispatching when accept() is called twice from a consumer
-    // that re-handles the same ToolCallRequest event.
-    const alreadyAccepted = this.executor
-      .getAcceptedRequests()
-      .some((r) => r.callId === request.callId);
+    // Forward to the executor — `accept()` there is idempotent on
+    // duplicate callIds. Note when the consumer ALSO injected this
+    // executor into Turn, Turn itself called `executor.accept()` first
+    // (see turn.ts:471). Both paths converge on the same one-slot-per-
+    // callId guarantee.
     this.executor.accept(request);
-    if (alreadyAccepted) return;
+    // Dispatch-dedupe lives on `inFlight` rather than the executor's
+    // accepted set: post-`reset()` (mid-stream retry) the executor's
+    // acceptedIds are cleared AND our cancellation listener has already
+    // cleared `inFlight`, so a retried-with-same-callId request
+    // correctly dispatches fresh. Using `inFlight.has()` keeps the
+    // dispatch dedupe internal to the dispatcher and O(1).
+    if (this.inFlight.has(request.callId)) return;
     if (!isEarlyDispatchSafe(this.config, request)) return;
     this.dispatch(request);
   }
@@ -217,9 +278,66 @@ export class StreamingToolDispatcher {
     this.parentSignal.removeEventListener('abort', this.parentAbortHandler);
   }
 
+  /**
+   * Convenience for the consumer's `finally` block: cancel any in-flight
+   * dispatch + {@link dispose}. Idempotent (via the `disposed` guard).
+   * Without this pattern, an exception escaping the consumer's
+   * processing loop can leave the parent-signal abort listener attached
+   * — accumulating one stale dispatcher per failed turn in a long-lived
+   * session.
+   *
+   * Two states matter at call time:
+   *
+   *   - Executor already discarded (Turn fired `discard('aborted' |
+   *     'unauthorized' | 'stream-error')`). The cancellation listener
+   *     already ran `cancelInFlight()`; we just `dispose()`. Any
+   *     `reason` passed here is dropped — "first reason wins" via
+   *     `executor.discard()`'s idempotency would have ignored it anyway.
+   *
+   *   - Executor open (Turn ended normally with `close()`, OR exception
+   *     escaped Turn pre-discard, OR the consumer-side catch fires
+   *     before Turn's catch). We call `discard(reason)` which fires the
+   *     cancellation listener → cancels in-flight → wipes buffered
+   *     results. **Note**: the normal-completion path lands here too,
+   *     because Turn's `finally` calls `close()` (not `discard()`).
+   *     That means `shutdown(undefined)` on a happy turn does set the
+   *     discard reason to `undefined` — harmless given no production
+   *     consumer reads `getDiscardReason()` outside tests, but worth
+   *     understanding before adding such a consumer.
+   *
+   * Idempotent: a second `shutdown()` early-returns via the `disposed`
+   * guard, so the first call's reason cannot be overwritten.
+   */
+  shutdown(reason?: StreamingToolExecutorDiscardReason): void {
+    if (this.disposed) return;
+    if (!this.executor.isDiscarded()) {
+      // Open executor (normal completion path OR mid-throw before Turn
+      // discarded). Fire discard to cascade through the listener and
+      // wipe buffered state.
+      this.executor.discard(reason);
+    } else {
+      // Already discarded by Turn — cancellation listener already ran.
+      // Belt-and-suspenders cancelInFlight() in case anything raced.
+      this.cancelInFlight();
+    }
+    this.dispose();
+  }
+
   private dispatch(request: ToolCallRequestInfo): void {
     const ctrl = this.abortController;
-    const options: ExecuteToolCallOptions = {};
+    // Resolve per-request options (progress / update callbacks) via the
+    // factory, defensively swallowing a throwing factory so a misbehaving
+    // consumer can't crash the stream loop — the early dispatch just
+    // runs with empty options and loses progress UX, matching the
+    // pre-factory behaviour.
+    let options: ExecuteToolCallOptions = {};
+    if (this.optionsFor) {
+      try {
+        options = this.optionsFor(request);
+      } catch {
+        options = {};
+      }
+    }
     const promise = executeToolCall(this.config, request, ctrl.signal, options)
       .then((response) => {
         if (this.inFlight.get(request.callId) !== promise) {
@@ -327,7 +445,12 @@ export function isEarlyDispatchSafe(
   if (!tool) return false;
 
   if (tool.kind === Kind.Execute) {
-    const command = (request.args as { command?: unknown }).command;
+    // `args` is typed `Record<string, unknown>` upstream but a malformed
+    // provider chunk could feed `null` through — guard explicitly so the
+    // classifier returns false instead of throwing a TypeError that
+    // would crash the consumer's stream loop.
+    const args = request.args as { command?: unknown } | null | undefined;
+    const command = args?.command;
     if (typeof command !== 'string') return false;
     try {
       return isShellCommandReadOnly(stripShellWrapper(command));

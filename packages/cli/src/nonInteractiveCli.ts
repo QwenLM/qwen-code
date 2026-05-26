@@ -28,6 +28,7 @@ import {
   SendMessageType,
   restoreWorktreeContext,
   StreamingToolDispatcher,
+  StreamingToolExecutor,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -823,9 +824,13 @@ export async function runNonInteractive(
         // not in --json-schema mode (sibling-suppression makes early
         // dispatch unsafe in that mode — see RFC §3.5), dispatch
         // concurrency-safe tools the moment their tool-call payload
-        // closes. The dispatcher owns its own AbortController so
-        // executor.discard/reset (driven by Turn lifecycle) cancels
-        // in-flight work without leaking orphan tool runs.
+        // closes. The dispatcher and Turn share the SAME
+        // StreamingToolExecutor so Turn's `discard()` / `reset()`
+        // (retry, abort, unauthorized, stream-error) fire the
+        // dispatcher's cancellation listener and cancel in-flight
+        // tool runs synchronously — no orphan dispatch survives a
+        // mid-stream lifecycle event.
+        //
         // Defensive against partially-stubbed `Config` in some tests —
         // these getters are recent additions; missing methods read as
         // "feature off". Production `Config` always has both.
@@ -834,31 +839,73 @@ export async function runNonInteractive(
           config.getStreamingToolDispatch() &&
           (typeof config.getJsonSchema !== 'function' ||
             !config.getJsonSchema());
-        const dispatcher = enableEarlyDispatch
-          ? new StreamingToolDispatcher(config, abortController.signal)
+        const sharedExecutor = enableEarlyDispatch
+          ? new StreamingToolExecutor()
+          : undefined;
+        // Per-request options factory: lets the early-dispatch path
+        // wire the same `outputUpdateHandler` / `onToolCallsUpdate`
+        // callbacks the post-stream scheduling path uses. Without
+        // this an early-dispatched `canUpdateOutput: true` tool's
+        // progress chunks would fire into a no-op. Agent is excluded
+        // from the safe set so we only need the generic progress
+        // handler here.
+        const optionsForEarlyDispatch = sharedExecutor
+          ? (req: ToolCallRequestInfo) => {
+              const inputFormat =
+                typeof config.getInputFormat === 'function'
+                  ? config.getInputFormat()
+                  : InputFormat.TEXT;
+              const toolCallUpdateCallback =
+                inputFormat === InputFormat.STREAM_JSON &&
+                options.controlService
+                  ? options.controlService.permission.getToolCallUpdateCallback()
+                  : undefined;
+              const { handler: outputUpdateHandler } =
+                createToolProgressHandler(req, adapter);
+              return {
+                outputUpdateHandler,
+                ...(toolCallUpdateCallback && {
+                  onToolCallsUpdate: toolCallUpdateCallback,
+                }),
+              };
+            }
+          : undefined;
+        const dispatcher = sharedExecutor
+          ? new StreamingToolDispatcher(
+              config,
+              abortController.signal,
+              sharedExecutor,
+              optionsForEarlyDispatch,
+            )
           : undefined;
         const apiStartTime = Date.now();
-        const responseStream = geminiClient.sendMessageStream(
-          currentMessages[0]?.parts || [],
-          abortController.signal,
-          prompt_id,
-          {
-            type: isFirstTurn
-              ? (options.sendMessageType ?? SendMessageType.UserQuery)
-              : SendMessageType.ToolResult,
-            modelOverride,
-            ...(isFirstTurn &&
-              options.notificationDisplayText && {
-                notificationDisplayText: options.notificationDisplayText,
-              }),
-          },
-        );
-        isFirstTurn = false;
-
-        // Start assistant message for this turn
-        adapter.startAssistantMessage();
-
         try {
+          const responseStream = geminiClient.sendMessageStream(
+            currentMessages[0]?.parts || [],
+            abortController.signal,
+            prompt_id,
+            {
+              type: isFirstTurn
+                ? (options.sendMessageType ?? SendMessageType.UserQuery)
+                : SendMessageType.ToolResult,
+              modelOverride,
+              ...(isFirstTurn &&
+                options.notificationDisplayText && {
+                  notificationDisplayText: options.notificationDisplayText,
+                }),
+              // CRITICAL: handing the SAME executor to Turn is what
+              // makes Turn's discard/reset reach the dispatcher's
+              // cancellation listener. Without this the orphan-
+              // prevention guarantee documented on the dispatcher is
+              // silently dead.
+              ...(sharedExecutor && { streamingToolExecutor: sharedExecutor }),
+            },
+          );
+          isFirstTurn = false;
+
+          // Start assistant message for this turn
+          adapter.startAssistantMessage();
+
           for await (const event of responseStream) {
             if (abortController.signal.aborted) {
               // Pair the startAssistantMessage() above so stream-json mode
@@ -877,9 +924,10 @@ export async function runNonInteractive(
               toolCallRequests.push(event.value);
               // Kick off the early dispatch (no-op if the tool isn't
               // safe-classified or the dispatcher is disabled). Turn
-              // already accepted the request into the executor; calling
-              // dispatcher.accept() here is idempotent on duplicate
-              // callIds via the executor's accept-once guard.
+              // has already accepted the request into the SHARED
+              // executor; calling dispatcher.accept() here is
+              // idempotent on the executor's accept-once guard and
+              // additionally fires the safe-tool dispatch.
               dispatcher?.accept(event.value);
             }
             if (
@@ -909,70 +957,89 @@ export async function runNonInteractive(
               throw new AlreadyReportedError(errorText);
             }
           }
-        } catch (err) {
-          // Belt-and-suspenders: the Turn already fires
-          // executor.discard('aborted' | 'unauthorized' | 'stream-error')
-          // for the cases it knows about (and the cancellation listener
-          // in the dispatcher aborts in-flight tools synchronously). But
-          // if a different exception escapes the for-await — e.g. the
-          // AlreadyReportedError we throw on text-mode API errors above
-          // — we must still cancel the early dispatcher so its in-flight
-          // tool runs don't outlive this turn. Idempotent if the Turn
-          // already discarded.
-          dispatcher?.discard('stream-error');
-          throw err;
+
+          // Finalize assistant message
+          adapter.finalizeAssistantMessage();
+          totalApiDurationMs += Date.now() - apiStartTime;
+
+          if (toolCallRequests.length > 0) {
+            // Dispatch the per-turn tool-call batch through the shared
+            // helper (see processToolCallBatch above). The helper handles
+            // the `--json-schema` pre-scan, executes each request, writes
+            // the first valid `structured_output` call's args into the
+            // session-scoped `structuredSubmission`, and synthesises
+            // tool_result events for every suppressed sibling. The
+            // `modelOverride` setter is the only call-site-specific
+            // binding — the main turn updates the session-scoped
+            // `modelOverride` so the next turn's sendMessageStream sees
+            // it; the drain turn updates a per-item `itemModelOverride`
+            // scoped to that drain item.
+            //
+            // Phase 3 of #4387: pass the dispatcher so the helper can
+            // await early-dispatched results instead of re-running safe
+            // tools. The dispatcher's `getEarlyResult()` returns a
+            // settled promise for completed early dispatches and
+            // `undefined` for tools that weren't dispatched early
+            // (unsafe kind, gated off, or aborted mid-stream — in which
+            // case the helper falls back to the normal scheduling path).
+            const toolResponseParts = await processToolCallBatch(
+              toolCallRequests,
+              (override) => {
+                modelOverride = override;
+              },
+              dispatcher,
+            );
+
+            if (structuredSubmission !== undefined) {
+              // Single-shot terminal contract; aborts in-flight background
+              // agents, holds back briefly for their terminal
+              // task_notification events to land, then emits the
+              // structured success envelope. Same helper as the drain-turn
+              // post-loop branch — see emitStructuredSuccess above.
+              return emitStructuredSuccess();
+            }
+            currentMessages = [{ role: 'user', parts: toolResponseParts }];
+            // Loop continues to next turn — fall through past the
+            // finally so the dispatcher is shut down before the next
+            // iteration constructs a fresh one.
+          } else {
+            // No tool calls — the dispatcher (if any) had nothing to
+            // dispatch. The finally below will shut it down before we
+            // enter the drain-loop branch.
+          }
+        } finally {
+          // ALWAYS shut down the dispatcher: cancels any in-flight
+          // dispatch + unsubscribes the executor listener +
+          // detaches the parent-signal abort handler. Splits by
+          // Turn-side state at shutdown time:
+          //
+          // Executor already discarded by Turn (shutdown disposes only):
+          //   - thrown AlreadyReportedError from text-mode API error
+          //     (Turn yields Error after firing
+          //     `discard('stream-error')`)
+          //   - UnauthorizedError thrown out of Turn (`discard('unauthorized')`)
+          //   - user-aborted signal mid-stream (`discard('aborted')`)
+          //
+          // Executor still open (shutdown calls discard then disposes):
+          //   - normal completion (Turn's finally calls `close()` not
+          //     `discard()` — shutdown discards with undefined; harmless
+          //     because processToolCallBatch already drained results)
+          //   - throw from finalizeAssistantMessage / adapter writes
+          //     after the stream loop exited normally
+          //   - throw from processToolCallBatch (rare but possible in
+          //     handleToolError / emitToolResult paths)
+          //   - structuredSubmission early return (siblings still
+          //     in-flight get cancelled — they're read-only by
+          //     classification so this is just resource hygiene)
+          //
+          // No `reason` arg: on the already-discarded branches
+          // Turn's canonical reason is preserved; on the open-executor
+          // branches there is no canonical reason to pass through
+          // (the throw site doesn't classify itself).
+          dispatcher?.shutdown();
         }
 
-        // Finalize assistant message
-        adapter.finalizeAssistantMessage();
-        totalApiDurationMs += Date.now() - apiStartTime;
-
-        if (toolCallRequests.length > 0) {
-          // Dispatch the per-turn tool-call batch through the shared
-          // helper (see processToolCallBatch above). The helper handles
-          // the `--json-schema` pre-scan, executes each request, writes
-          // the first valid `structured_output` call's args into the
-          // session-scoped `structuredSubmission`, and synthesises
-          // tool_result events for every suppressed sibling. The
-          // `modelOverride` setter is the only call-site-specific
-          // binding — the main turn updates the session-scoped
-          // `modelOverride` so the next turn's sendMessageStream sees
-          // it; the drain turn updates a per-item `itemModelOverride`
-          // scoped to that drain item.
-          //
-          // Phase 3 of #4387: pass the dispatcher so the helper can
-          // await early-dispatched results instead of re-running safe
-          // tools. The dispatcher's `getEarlyResult()` returns a
-          // settled promise for completed early dispatches and
-          // `undefined` for tools that weren't dispatched early
-          // (unsafe kind, gated off, or aborted mid-stream — in which
-          // case the helper falls back to the normal scheduling path).
-          const toolResponseParts = await processToolCallBatch(
-            toolCallRequests,
-            (override) => {
-              modelOverride = override;
-            },
-            dispatcher,
-          );
-          dispatcher?.dispose();
-
-          if (structuredSubmission !== undefined) {
-            // Single-shot terminal contract; aborts in-flight background
-            // agents, holds back briefly for their terminal
-            // task_notification events to land, then emits the
-            // structured success envelope. Same helper as the drain-turn
-            // post-loop branch — see emitStructuredSuccess above.
-            return emitStructuredSuccess();
-          }
-          currentMessages = [{ role: 'user', parts: toolResponseParts }];
-        } else {
-          // No tool calls — the dispatcher (if any) had nothing to
-          // dispatch. Release its executor subscription so a stale
-          // listener can't fire on a later Turn that reuses the same
-          // abort signal. The Phase 2 executor's `close()` already
-          // fired through Turn's `finally`; this just detaches the
-          // dispatcher.
-          dispatcher?.dispose();
+        if (toolCallRequests.length === 0) {
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.

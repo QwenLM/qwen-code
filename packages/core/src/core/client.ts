@@ -138,6 +138,16 @@ export interface SendMessageOptions {
   notificationDisplayText?: string;
   /** Model override from skill execution. When present, overrides the session model for this turn. */
   modelOverride?: string;
+  /**
+   * Phase 3 of #4387 — externally-owned streaming tool executor. When the
+   * consumer wants to drive early tool dispatch (via
+   * `StreamingToolDispatcher`), it must own the executor so that Turn's
+   * `discard()` / `reset()` calls fire the dispatcher's cancellation
+   * listener. Wins over the config-flag-driven internal construction below;
+   * the internal path stays as a fallback for callers that just want the
+   * Phase 2 buffer semantics without owning the lifecycle.
+   */
+  streamingToolExecutor?: StreamingToolExecutor;
 }
 
 const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
@@ -1225,9 +1235,18 @@ export class GeminiClient {
     // Phase 3 caller that inspects the returned Turn to decide dispatch
     // strategy would otherwise see `undefined` on every short-circuit path
     // regardless of config.
-    const streamingExecutor = this.config.getStreamingToolDispatch()
-      ? new StreamingToolExecutor()
-      : undefined;
+    //
+    // Phase 3 of #4387: a caller that owns a `StreamingToolDispatcher` MUST
+    // inject its executor via `options.streamingToolExecutor` so Turn's
+    // `discard()` / `reset()` lifecycle fires the dispatcher's cancellation
+    // listener. Without this hand-off the dispatcher would subscribe to a
+    // fresh internal executor that Turn never touches, and the
+    // orphan-prevention guarantee would be silently dead in production.
+    const streamingExecutor =
+      options?.streamingToolExecutor ??
+      (this.config.getStreamingToolDispatch()
+        ? new StreamingToolExecutor()
+        : undefined);
 
     if (messageType === SendMessageType.Retry) {
       this.stripOrphanedUserEntriesFromHistory();

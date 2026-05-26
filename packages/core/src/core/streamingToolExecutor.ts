@@ -305,9 +305,14 @@ export class StreamingToolExecutor {
    *
    * Listeners are invoked AFTER the buffer is wiped and AFTER pending
    * `getRemainingResults()` consumers are rejected, so a listener calling
-   * back into the executor sees the post-wipe state. Throws from a listener
-   * propagate to the caller of `discard()`/`reset()` — keep them
-   * synchronous and side-effect-light.
+   * back into the executor sees the post-wipe state. Throws from a
+   * listener are **swallowed** — the only in-tree listener
+   * (`StreamingToolDispatcher`) calls `AbortController.abort()`, which
+   * synchronously fans out to every attached `'abort'` handler
+   * (child-process kills, fetch teardowns); any of those throwing must
+   * not skip the remaining listeners or escape `discard()`/`reset()`
+   * into Turn's lifecycle code. Listeners needing observability should
+   * log inside their own body.
    *
    * Returns an unsubscribe function. Safe to call after the executor has
    * been wiped (it just removes the listener for any future events; a
@@ -329,7 +334,14 @@ export class StreamingToolExecutor {
     // Snapshot so a listener that unsubscribes itself (or another) mid-fire
     // doesn't perturb the iteration we're currently dispatching.
     const snapshot = [...this.cancellationListeners];
-    for (const fn of snapshot) fn(reason);
+    for (const fn of snapshot) {
+      try {
+        fn(reason);
+      } catch {
+        // Listener throws are intentionally swallowed — see the contract
+        // documented on addCancellationListener().
+      }
+    }
   }
 
   private maybeSettlePending(): void {
