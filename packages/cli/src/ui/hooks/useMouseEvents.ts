@@ -5,36 +5,49 @@
  *
  * Inspired by gemini-cli's MouseContext (Google LLC, Apache-2.0) but
  * collapsed for our single-consumer case: enable SGR mouse mode on
- * mount, parse stdin events, call the handler, restore on unmount.
+ * mount, parse mouse sequences out of ink's input pipeline, call the
+ * handler, restore on unmount.
  */
 
 import { useEffect, useRef } from 'react';
-import { useStdin, useStdout } from 'ink';
+import { useStdin, useStdout, useInput } from 'ink';
 import {
   enableMouseEvents,
   disableMouseEvents,
-  isIncompleteMouseSequence,
   parseMouseEvent,
   type MouseEvent,
 } from '../utils/mouse.js';
 
-const MAX_MOUSE_BUFFER_SIZE = 4096;
 // Use the `\x1b` escape so the source survives transports that strip raw
-// 0x1B bytes (terminal copies, code review tools, some linters). The
-// raw form looks identical visually but `indexOf('', 1) === 1` would
-// degrade the buffer scan to a one-byte step and the "drop garbage"
-// branch could never run.
+// 0x1B bytes (terminal copies, code review tools, some linters).
 const ESC = '\x1b';
 
 export type MouseHandler = (event: MouseEvent) => void;
 
 /**
- * Subscribes to SGR/X11 mouse events from stdin while `isActive` is true.
+ * Subscribes to SGR mouse events while `isActive` is true.
  *
  * On activation: writes `?1002h ?1006h` to enable button-event tracking and
- * SGR coordinates, attaches a stdin listener, and feeds parsed events to
- * `handler`. On cleanup (or when `isActive` flips false): removes the
- * listener and writes `?1006l ?1002l` to restore the terminal.
+ * SGR coordinates, then parses mouse sequences delivered through ink's own
+ * input pipeline. On cleanup (or when `isActive` flips false): writes
+ * `?1006l ?1002l` to restore the terminal.
+ *
+ * Why not a dedicated `stdin.on('data')` listener: attaching a `data`
+ * listener switches stdin into flowing mode, which drains the buffer before
+ * ink's `readable` + `stdin.read()` reader (App.js) can consume it — every
+ * keystroke routed through `useInput` would be silently starved while mouse
+ * mode is active. Instead we hook ink's `useInput`, which already owns the
+ * single stdin reader. ink's input parser captures a full SGR sequence
+ * (`ESC [ < … M/m`) as one CSI event and hands it to the handler with the
+ * leading ESC stripped (use-input strips a leading `\x1b`), so we re-prepend
+ * it before parsing. Non-mouse input does not match and is ignored; ink
+ * still routes the same input to the app's other `useInput` handlers, so
+ * keyboard navigation is unaffected.
+ *
+ * Note: only SGR mode (`?1006h`, which we enable) is parsed via this path.
+ * The legacy X11 encoding (`ESC [ M` + three raw bytes) is not recoverable
+ * here because ink's CSI parser terminates the sequence at the `M` final
+ * byte; SGR is the encoding modern terminals emit once `?1006h` is set.
  *
  * The handler is stored in a ref so callers don't need to memoize it.
  */
@@ -42,52 +55,18 @@ export function useMouseEvents(
   handler: MouseHandler,
   { isActive }: { isActive: boolean },
 ): void {
-  const { stdin, setRawMode, isRawModeSupported } = useStdin();
+  const { isRawModeSupported } = useStdin();
   const { stdout } = useStdout();
 
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
 
+  const enabled = isActive && isRawModeSupported;
+
   useEffect(() => {
-    if (!isActive) return;
-    if (!isRawModeSupported) return;
+    if (!enabled) return;
 
-    setRawMode(true);
     enableMouseEvents(stdout);
-
-    let buffer = '';
-    const onData = (data: Buffer | string) => {
-      buffer += typeof data === 'string' ? data : data.toString('utf-8');
-
-      // Cap buffer growth on garbage input.
-      if (buffer.length > MAX_MOUSE_BUFFER_SIZE) {
-        buffer = buffer.slice(-MAX_MOUSE_BUFFER_SIZE);
-      }
-
-      while (buffer.length > 0) {
-        const parsed = parseMouseEvent(buffer);
-        if (parsed) {
-          handlerRef.current(parsed.event);
-          buffer = buffer.slice(parsed.length);
-          continue;
-        }
-        if (isIncompleteMouseSequence(buffer)) {
-          // Wait for more bytes from stdin.
-          break;
-        }
-        // Not a valid sequence at the start and not waiting for more —
-        // skip past it to the next possible ESC, otherwise drop.
-        const nextEsc = buffer.indexOf(ESC, 1);
-        if (nextEsc !== -1) {
-          buffer = buffer.slice(nextEsc);
-        } else {
-          buffer = '';
-          break;
-        }
-      }
-    };
-
-    stdin.on('data', onData);
 
     // Belt-and-braces: if the process exits without React unmounting us
     // (Ctrl+C → exit, SIGTERM, parent killed), the React cleanup below
@@ -103,8 +82,22 @@ export function useMouseEvents(
 
     return () => {
       process.removeListener('exit', onExit);
-      stdin.removeListener('data', onData);
       disableMouseEvents(stdout);
     };
-  }, [isActive, stdin, stdout, setRawMode, isRawModeSupported]);
+  }, [enabled, stdout]);
+
+  useInput(
+    (input) => {
+      // ink hands us one escape sequence per call, with the leading ESC
+      // stripped — re-prepend it so the SGR mouse regex matches.
+      let buffer = input.startsWith(ESC) ? input : ESC + input;
+      while (buffer.length > 0) {
+        const parsed = parseMouseEvent(buffer);
+        if (!parsed) break;
+        handlerRef.current(parsed.event);
+        buffer = buffer.slice(parsed.length);
+      }
+    },
+    { isActive: enabled },
+  );
 }
