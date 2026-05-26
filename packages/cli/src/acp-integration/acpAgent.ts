@@ -1909,7 +1909,7 @@ class QwenAgent implements Agent {
   }
 
   private buildWorkspaceToolsStatus(config: Config): ServeWorkspaceToolsStatus {
-    const workspaceCwd = config.getWorkingDir() || config.getProjectRoot();
+    const workspaceCwd = this.safeWorkspaceCwd(config);
     try {
       const registry = config.getToolRegistry();
       if (!registry) {

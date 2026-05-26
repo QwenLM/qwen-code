@@ -89,10 +89,20 @@ export interface DaemonSessionConfig {
   };
 }
 
+export interface WebShellMcpToolStatus {
+  name: string;
+  serverToolName?: string;
+  description?: string;
+  isValid: boolean;
+  invalidReason?: string;
+  schema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+}
+
 export interface WebShellMcpToolsStatus {
   v: 1;
   serverName: string;
-  tools: [];
+  tools: WebShellMcpToolStatus[];
   errors?: Array<{ error?: string }>;
 }
 
@@ -697,6 +707,16 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
       },
 
       async loadSession(sessionId: string): Promise<void> {
+        const currentSession = sessionRef.current;
+        if (currentSession) {
+          const activePrompt = activePromptsRef.current.get(
+            currentSession.sessionId,
+          );
+          if (activePrompt) {
+            activePrompt.controller.abort();
+            activePromptsRef.current.delete(currentSession.sessionId);
+          }
+        }
         const loadId = pendingSessionLoadIdRef.current + 1;
         pendingSessionLoadIdRef.current = loadId;
         pendingSessionLoadRef.current?.reject(
@@ -766,7 +786,15 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
           return {
             v: 1,
             serverName: result.serverName,
-            tools: [],
+            tools: (result.tools ?? []).map((t) => ({
+              name: t.name,
+              serverToolName: t.serverToolName,
+              description: t.description,
+              isValid: t.isValid,
+              invalidReason: t.invalidReason,
+              schema: t.schema,
+              annotations: t.annotations,
+            })),
             errors: result.errors,
           };
         } catch {

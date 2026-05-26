@@ -1051,6 +1051,8 @@ export function App({
                     disabled={isDisabled}
                     commands={commands}
                     skills={connection.skills ?? []}
+                    daemonBaseUrl={DAEMON_BASE_URL}
+                    daemonToken={token ?? DAEMON_TOKEN}
                     queuedMessages={queuedPrompts.map((prompt) => prompt.text)}
                     onPopQueuedMessages={popQueuedPromptsForEdit}
                     onClearQueuedMessages={clearQueuedPrompts}

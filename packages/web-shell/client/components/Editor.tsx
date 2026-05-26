@@ -18,7 +18,7 @@ import { minimalSetup } from 'codemirror';
 import type { CommandInfo } from '../adapters/types';
 import type { PromptImage } from '../adapters/promptTypes';
 import { slashCompletionSource } from '../completions/slashCompletion';
-import { atCompletionSource } from '../completions/atCompletion';
+import { createAtCompletionSource } from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
 import { useI18n } from '../i18n';
 import {
@@ -43,6 +43,8 @@ interface EditorProps {
   currentMode?: string;
   draftText?: string;
   draftVersion?: number;
+  daemonBaseUrl?: string;
+  daemonToken?: string;
 }
 
 const editableCompartment = new Compartment();
@@ -77,6 +79,8 @@ export function Editor({
   currentMode = 'default',
   draftText,
   draftVersion,
+  daemonBaseUrl,
+  daemonToken,
 }: EditorProps) {
   const { language, t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -101,6 +105,10 @@ export function Editor({
   onClearQueuedMessagesRef.current = onClearQueuedMessages;
   const languageRef = useRef(language);
   languageRef.current = language;
+  const daemonBaseUrlRef = useRef(daemonBaseUrl);
+  daemonBaseUrlRef.current = daemonBaseUrl;
+  const daemonTokenRef = useRef(daemonToken);
+  daemonTokenRef.current = daemonToken;
   const [shellMode, setShellMode] = useState(false);
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -165,7 +173,10 @@ export function Editor({
         submitText,
         () => languageRef.current,
       ),
-      atCompletionSource,
+      createAtCompletionSource({
+        baseUrl: daemonBaseUrlRef.current,
+        token: daemonTokenRef.current,
+      }),
     ];
 
     const submitKeymap = keymap.of([

@@ -7,29 +7,16 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
+import type {
+  WebShellMcpToolStatus,
+  WebShellMcpToolsStatus,
+} from '../../hooks/useDaemonSession';
 
 interface McpDialogProps {
   loadStatus: () => Promise<DaemonWorkspaceMcpStatus>;
   loadTools: (serverName: string) => Promise<WebShellMcpToolsStatus>;
   restartServer: (serverName: string) => Promise<DaemonMcpRestartResult>;
   onClose: () => void;
-}
-
-export interface WebShellMcpToolStatus {
-  name: string;
-  serverToolName?: string;
-  description?: string;
-  isValid: boolean;
-  invalidReason?: string;
-  schema?: Record<string, unknown>;
-  annotations?: Record<string, unknown>;
-}
-
-export interface WebShellMcpToolsStatus {
-  v: 1;
-  serverName: string;
-  tools: WebShellMcpToolStatus[];
-  errors?: Array<{ error?: string }>;
 }
 
 type McpView = 'servers' | 'server' | 'tools' | 'tool';
