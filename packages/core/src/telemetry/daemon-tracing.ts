@@ -295,9 +295,25 @@ export function createDaemonBridgeTelemetry(): {
     runWithContext: runWithDaemonTelemetryContext,
     withSpan: withDaemonBridgeSpan,
     event(name, attributes) {
-      const span = trace.getSpan(otelContext.active());
       try {
-        span?.addEvent(name, attributes);
+        const activeSpan = trace.getSpan(otelContext.active());
+        if (activeSpan) {
+          activeSpan.addEvent(name, attributes);
+          return;
+        }
+        const span = trace
+          .getTracer(SERVICE_NAME)
+          .startSpan(SPAN_DAEMON_BRIDGE, {
+            kind: SpanKind.INTERNAL,
+            attributes: {
+              'event.name': name,
+              'qwen-code.daemon.operation': `event.${name}`,
+              ...attributes,
+            },
+          });
+        span.addEvent(name, attributes);
+        span.setStatus({ code: SpanStatusCode.OK });
+        span.end();
       } catch {
         // Telemetry must not affect bridge behavior.
       }
