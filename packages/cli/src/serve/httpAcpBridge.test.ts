@@ -38,6 +38,7 @@ import type {
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import {
   createHttpAcpBridge,
+  detachSessionIdFromEntryChannel,
   findChannelInfoForEntry,
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -318,6 +319,36 @@ describe('createHttpAcpBridge', () => {
         channel: channelA,
       }),
     ).toBeUndefined();
+  });
+
+  it('detaches a session from its entry channel during channel overlap', () => {
+    // Model the close/kill overlap window directly: old channel A still owns
+    // the session entry while fresh channel B is the current attach target.
+    // The detach helper used by closeSession/killSession must decrement A,
+    // not the current B channel.
+    const channelA = { name: 'A' };
+    const channelB = { name: 'B' };
+    const infoA = {
+      channel: channelA,
+      sessionIds: new Set(['session-a']),
+      label: 'old-dying-channel',
+    };
+    const infoB = {
+      channel: channelB,
+      sessionIds: new Set(['session-b']),
+      label: 'fresh-attach-channel',
+    };
+
+    const selected = detachSessionIdFromEntryChannel(
+      infoB,
+      [infoA, infoB],
+      { channel: channelA },
+      'session-a',
+    );
+
+    expect(selected).toBe(infoA);
+    expect(infoA.sessionIds.has('session-a')).toBe(false);
+    expect(Array.from(infoB.sessionIds)).toEqual(['session-b']);
   });
 
   it('accepts a valid BridgeOptions.eventRingSize at construction time', () => {

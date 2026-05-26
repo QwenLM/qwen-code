@@ -291,6 +291,20 @@ export function findChannelInfoForEntry<T extends { channel: unknown }>(
   return undefined;
 }
 
+/** @internal Visible for bridge lifecycle regression tests. */
+export function detachSessionIdFromEntryChannel<
+  T extends { channel: unknown; sessionIds: Set<string> },
+>(
+  current: T | undefined,
+  alive: Iterable<T>,
+  entry: { channel: unknown },
+  sessionId: string,
+): T | undefined {
+  const info = findChannelInfoForEntry(current, alive, entry);
+  info?.sessionIds.delete(sessionId);
+  return info;
+}
+
 interface SessionEntry {
   sessionId: string;
   workspaceCwd: string;
@@ -2893,10 +2907,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             : ''),
       );
       if (defaultEntry === entry) defaultEntry = undefined;
-      const ci = channelInfoForEntry(entry);
-      if (ci) {
-        ci.sessionIds.delete(sessionId);
-      }
+      const ci = detachSessionIdFromEntryChannel(
+        channelInfo,
+        aliveChannels,
+        entry,
+        sessionId,
+      );
       for (const id of Array.from(entry.pendingPermissionIds)) {
         resolvePending(id, { outcome: { outcome: 'cancelled' } });
       }
@@ -3723,10 +3739,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Detach from the channel. The channel dies only when its LAST
       // session leaves — other sessions on the same channel keep
       // running.
-      const ci = channelInfoForEntry(entry);
-      if (ci) {
-        ci.sessionIds.delete(sessionId);
-      }
+      const ci = detachSessionIdFromEntryChannel(
+        channelInfo,
+        aliveChannels,
+        entry,
+        sessionId,
+      );
       // PR 14b fix (codex round 5): tombstone the killed sessionId
       // so any in-flight `extNotification` from the (about-to-be-
       // killed) child can't seed the early-event buffer for a
