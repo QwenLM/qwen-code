@@ -12,7 +12,7 @@ import {
 } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
-import { isDeepSeekHostname } from './provider/deepseek.js';
+import { isDeepSeekHostname, isDeepSeekProvider } from './provider/deepseek.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
@@ -411,7 +411,7 @@ export class ContentGenerationPipeline {
     // serialized prompt prefix even when the tool set and schemas are identical.
     // Sort only for official DeepSeek endpoints to avoid surprising other
     // OpenAI-compatible providers with changed tool presentation order.
-    if (isDeepSeekHostname(this.contentGeneratorConfig)) {
+    if (isDeepSeekProvider(this.contentGeneratorConfig)) {
       sortToolsForCacheStableRequest(providerRequest);
     }
 
