@@ -28,11 +28,10 @@ import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
-import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
-import { useCompactMode } from '../../contexts/CompactModeContext.js';
+import { useEffectiveVerbose } from '../../contexts/DisplayModeContext.js';
 import {
   escapeAnsiCtrlCodes,
   getCachedStringWidth,
@@ -44,6 +43,7 @@ import {
   STATUS_INDICATOR_WIDTH,
 } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+import { SubagentSummary } from './SubagentSummary.js';
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
@@ -330,8 +330,8 @@ const SubagentExecutionRenderer: React.FC<{
       </Box>
     );
   }
-  // Terminal phase: render a single-line scrollback summary so the
-  // conversation history keeps a permanent record. Fires in BOTH
+  // Terminal phase: render a structured two-line scrollback summary so
+  // the conversation history keeps a permanent record. Fires in BOTH
   // live and committed phases — `unregisterForeground`'s post-delete
   // emit drops the panel snapshot row immediately, so without an
   // inline render here a foreground subagent that finishes
@@ -344,76 +344,9 @@ const SubagentExecutionRenderer: React.FC<{
     data.status === 'failed' ||
     data.status === 'cancelled'
   ) {
-    return <SubagentScrollbackSummary data={data} />;
+    return <SubagentSummary data={data} />;
   }
   return null;
-};
-
-/**
- * One-line summary that lands in scrollback when a subagent reaches a
- * terminal state. The verbose 15-row frame is retired (it caused
- * scrollback flicker); this single line preserves the persistent
- * record without re-introducing the flicker.
- *
- *   ✔ researcher: investigate import order · 5 tools · 12s · 2.4k tokens
- */
-const SubagentScrollbackSummary: React.FC<{
-  data: AgentResultDisplay;
-}> = ({ data }) => {
-  const { glyph, color } = (() => {
-    switch (data.status) {
-      case 'completed':
-        return { glyph: '✔', color: theme.status.success };
-      case 'failed':
-        return { glyph: '✖', color: theme.status.error };
-      case 'cancelled':
-        return { glyph: '✖', color: theme.status.warning };
-      default:
-        return { glyph: '·', color: theme.text.secondary };
-    }
-  })();
-  const stats = data.executionSummary;
-  const parts: string[] = [];
-  if (stats?.totalToolCalls !== undefined) {
-    parts.push(
-      `${stats.totalToolCalls} tool${stats.totalToolCalls === 1 ? '' : 's'}`,
-    );
-  }
-  if (stats?.totalDurationMs !== undefined) {
-    parts.push(
-      formatDuration(stats.totalDurationMs, { hideTrailingZeros: true }),
-    );
-  }
-  if (stats?.totalTokens && stats.totalTokens > 0) {
-    parts.push(`${formatTokenCount(stats.totalTokens)} tokens`);
-  }
-  // Sanitize every user/LLM-controlled string before it reaches Ink.
-  // `subagentName` is subagent config (user-authored or model-chosen),
-  // `taskDescription` is LLM-generated, `terminateReason` is whatever
-  // the agent emitted on failure. All can carry terminal control
-  // sequences that would otherwise bleed through Ink's `<Text>` and
-  // corrupt scrollback chrome — same threat model as the panel rows
-  // and HistoryItemDisplay's user-facing content.
-  const tail = parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
-  const typePrefix = data.subagentName
-    ? `${escapeAnsiCtrlCodes(data.subagentName)}: `
-    : '';
-  const safeDescription = escapeAnsiCtrlCodes(data.taskDescription ?? '');
-  const reason =
-    data.status !== 'completed' && data.terminateReason
-      ? ` · ${escapeAnsiCtrlCodes(data.terminateReason)}`
-      : '';
-  return (
-    <Box paddingLeft={1}>
-      <Text wrap="truncate-end">
-        <Text color={color}>{`${glyph} `}</Text>
-        <Text bold>{typePrefix}</Text>
-        <Text color={theme.text.secondary}>{safeDescription}</Text>
-        <Text color={theme.text.secondary}>{tail}</Text>
-        <Text color={theme.text.secondary}>{reason}</Text>
-      </Text>
-    </Box>
-  );
 };
 
 /**
@@ -653,11 +586,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   // Use the custom hook to determine the display type
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
-  const { compactMode } = useCompactMode();
+  const verbose = useEffectiveVerbose();
   const effectiveDisplayRenderer =
-    !compactMode || forceShowResult
-      ? displayRenderer
-      : { type: 'none' as const };
+    verbose || forceShowResult ? displayRenderer : { type: 'none' as const };
 
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">

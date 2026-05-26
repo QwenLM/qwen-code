@@ -35,6 +35,7 @@ import { ideCommand } from '../ui/commands/ideCommand.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { initCommand } from '../ui/commands/initCommand.js';
 import { languageCommand } from '../ui/commands/languageCommand.js';
+import { verboseCommand } from '../ui/commands/verboseCommand.js';
 import { mcpCommand } from '../ui/commands/mcpCommand.js';
 import { dreamCommand } from '../ui/commands/dreamCommand.js';
 import { forgetCommand } from '../ui/commands/forgetCommand.js';
@@ -121,6 +122,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       resolvedIdeCommand,
       initCommand,
       languageCommand,
+      verboseCommand,
       mcpCommand,
       ...(this.config?.getManagedAutoMemoryEnabled()
         ? [dreamCommand, forgetCommand]

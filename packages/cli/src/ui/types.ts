@@ -260,6 +260,20 @@ export type HistoryItemToolUseSummary = HistoryItemBase & {
   precedingToolUseIds: string[];
 };
 
+/**
+ * Per-turn wall-clock summary, rendered as a dim `⏱ 12.4s` line at the
+ * tail of every completed assistant turn. UI-only — not persisted to
+ * jsonl, never serialised by the SDK. Emitted by the streaming
+ * finaliser once the turn reaches an Idle / aborted / errored
+ * terminal state.
+ */
+export type HistoryItemTurnSummary = HistoryItemBase & {
+  type: 'turn_summary';
+  durationMs: number;
+  cancelled?: boolean;
+  failed?: boolean;
+};
+
 export type HistoryItemNotification = HistoryItemBase & {
   type: 'notification';
   text: string;
@@ -554,6 +568,7 @@ export type HistoryItemWithoutId =
   | HistoryItemHelp
   | HistoryItemToolGroup
   | HistoryItemToolUseSummary
+  | HistoryItemTurnSummary
   | HistoryItemStats
   | HistoryItemModelStats
   | HistoryItemToolStats

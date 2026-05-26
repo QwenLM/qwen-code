@@ -286,7 +286,12 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
     ) {
       const codeMatch = fullMatch.match(/^(`+)(.+?)\1$/s);
       if (codeMatch?.[2]) {
-        rendered = applyColor(codeMatch[2], theme.text.code);
+        // Drop syntax highlighting for inline code in table cells —
+        // bright tokens against the table chrome break column alignment
+        // and read as visual noise. Fall back to `theme.text.secondary`
+        // (single dim colour, equivalent to the InlineMarkdownRenderer
+        // `inTable=true` branch).
+        rendered = applyColor(codeMatch[2], theme.text.secondary);
       }
     } else if (
       fullMatch.startsWith('[') &&

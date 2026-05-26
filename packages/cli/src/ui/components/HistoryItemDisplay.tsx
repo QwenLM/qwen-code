@@ -56,7 +56,40 @@ import { BtwMessage } from './messages/BtwMessage.js';
 import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
-import { useCompactMode } from '../contexts/CompactModeContext.js';
+import { useEffectiveVerbose } from '../contexts/DisplayModeContext.js';
+import { formatDuration } from '../utils/formatters.js';
+import { t } from '../../i18n/index.js';
+
+/**
+ * Item types that start a fresh visual section and keep a 1-row top
+ * margin from the previous item. Everything else collapses to 0 so a
+ * turn's stream of thoughts / tool calls / continuations renders flush.
+ */
+const TOP_MARGIN_SET: ReadonlySet<HistoryItem['type']> = new Set<
+  HistoryItem['type']
+>([
+  'user',
+  'user_shell',
+  'notification',
+  'about',
+  'help',
+  'stats',
+  'model_stats',
+  'tool_stats',
+  'diff_stats',
+  'quit',
+  'context_usage',
+  'compression',
+  'summary',
+  'extensions_list',
+  'tools_list',
+  'skills_list',
+  'mcp_status',
+  'doctor',
+  'arena_agent_complete',
+  'arena_session_complete',
+  'away_recap',
+]);
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -102,12 +135,21 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   summaryAbsorbed = false,
   sourceCopyIndexOffsets,
 }) => {
-  const marginTop =
-    item.type === 'gemini_content' || item.type === 'gemini_thought_content'
-      ? 0
-      : 1;
+  // Display-mode preference. `verbose=true` opts back into the legacy
+  // full-detail layout (thoughts visible inline, no merging). The
+  // Ctrl+O transcript overlay forces this on for its subtree.
+  const verbose = useEffectiveVerbose();
 
-  const { compactMode } = useCompactMode();
+  // Tight default. Only items that begin a new logical section keep a
+  // leading blank line: user turns, system / status sections (about /
+  // help / stats / quit / context_usage / *list / mcp / etc.), and
+  // notifications. Streaming continuations and intra-turn artefacts
+  // (gemini_content, gemini_thought*, tool_group, tool_use_summary,
+  // info / success / warning / error, retry, turn_summary, …) sit
+  // flush against the preceding line. See
+  // `docs/design/tui-display-optimization/02-spacing-and-borders.md`.
+  const TOP_MARGIN_TYPES: ReadonlySet<HistoryItem['type']> = TOP_MARGIN_SET;
+  const marginTop = TOP_MARGIN_TYPES.has(item.type) ? 1 : 0;
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
@@ -152,7 +194,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought' && (
+      {verbose && itemForDisplay.type === 'gemini_thought' && (
         <ThinkMessage
           text={itemForDisplay.text}
           isPending={isPending}
@@ -162,7 +204,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought_content' && (
+      {verbose && itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
           text={itemForDisplay.text}
           isPending={isPending}
@@ -250,11 +292,26 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         useful ("Fixed NPE in UserService" on an errored batch).
       */}
       {itemForDisplay.type === 'tool_use_summary' &&
-        (!compactMode || !summaryAbsorbed) && (
+        (verbose || !summaryAbsorbed) && (
           <Box paddingLeft={1}>
             <Text dimColor>● {itemForDisplay.summary}</Text>
           </Box>
         )}
+      {itemForDisplay.type === 'turn_summary' && (
+        <Box paddingLeft={2}>
+          <Text dimColor>
+            {'⏱ '}
+            {formatDuration(itemForDisplay.durationMs, {
+              hideTrailingZeros: true,
+            })}
+            {itemForDisplay.cancelled
+              ? ` · ${t('ui.turnSummary.cancelled')}`
+              : itemForDisplay.failed
+                ? ` · ${t('ui.turnSummary.failed')}`
+                : ''}
+          </Text>
+        </Box>
+      )}
       {itemForDisplay.type === 'compression' && (
         <CompressionMessage compression={itemForDisplay.compression} />
       )}

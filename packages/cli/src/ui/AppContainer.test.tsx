@@ -2749,7 +2749,7 @@ describe('AppContainer State Management', () => {
       // structurally present.
       expect(abortSpy).not.toHaveBeenCalled();
     });
-    describe('Ctrl+O compact mode toggle (issue #3899)', () => {
+    describe('Ctrl+O transcript overlay (replaces issue #3899 compact toggle)', () => {
       const ctrlOKey: Key = {
         name: 'o',
         ctrl: true,
@@ -2759,8 +2759,9 @@ describe('AppContainer State Management', () => {
         sequence: '',
       };
 
-      // The global handler is the one that calls compactToggleHasVisualEffect.
-      // Mirrors the discriminator pattern used by the renderMode test above.
+      // The global handler is identified by its reference to
+      // `transcriptOverlay`, which only appears inside AppContainer's
+      // global keypress handler after the Ctrl+O rewrite.
       const findGlobalKeypressHandler = () =>
         mockedUseKeypress.mock.calls
           .map((call) => call[0])
@@ -2768,44 +2769,10 @@ describe('AppContainer State Management', () => {
           .find(
             (handler): handler is (key: Key) => void =>
               typeof handler === 'function' &&
-              handler.toString().includes('compactToggleHasVisualEffect'),
+              handler.toString().includes('transcriptOverlay'),
           );
 
-      it('skips refreshStatic on Ctrl+O when history has no tool_group/thought items', () => {
-        mockedUseHistory.mockReturnValue({
-          history: [
-            { type: 'user', id: 1, text: 'hi' },
-            { type: 'gemini', id: 2, text: 'hello' },
-          ],
-          addItem: vi.fn(),
-          updateItem: vi.fn(),
-          clearItems: vi.fn(),
-          loadHistory: vi.fn(),
-          truncateToItem: vi.fn(),
-        });
-
-        render(
-          <AppContainer
-            config={mockConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-        mockStdout.write.mockClear();
-
-        const handler = findGlobalKeypressHandler();
-        expect(handler).toBeDefined();
-        handler!(ctrlOKey);
-
-        // refreshStatic writes ansiEscapes.clearTerminal — its absence
-        // proves we took the no-op short-circuit.
-        expect(mockStdout.write).not.toHaveBeenCalledWith(
-          ansiEscapes.clearTerminal,
-        );
-      });
-
-      it('calls refreshStatic on Ctrl+O when history contains a tool_group', () => {
+      it('Ctrl+O snapshots the current history into transcriptSnapshot', () => {
         mockedUseHistory.mockReturnValue({
           history: [
             { type: 'user', id: 1, text: 'run ls' },
@@ -2831,7 +2798,7 @@ describe('AppContainer State Management', () => {
           truncateToItem: vi.fn(),
         });
 
-        render(
+        const { rerender } = render(
           <AppContainer
             config={mockConfig}
             settings={mockSettings}
@@ -2839,15 +2806,67 @@ describe('AppContainer State Management', () => {
             initializationResult={mockInitResult}
           />,
         );
-        mockStdout.write.mockClear();
+        expect(capturedUIState.transcriptSnapshot).toBeNull();
 
         const handler = findGlobalKeypressHandler();
         expect(handler).toBeDefined();
         handler!(ctrlOKey);
 
-        expect(mockStdout.write).toHaveBeenCalledWith(
-          ansiEscapes.clearTerminal,
+        rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
         );
+        expect(capturedUIState.transcriptSnapshot).not.toBeNull();
+        expect(capturedUIState.transcriptSnapshot?.historyLength).toBe(2);
+      });
+
+      it('Ctrl+O on an active overlay toggles it off (Claude Code parity)', () => {
+        mockedUseHistory.mockReturnValue({
+          history: [{ type: 'user', id: 1, text: 'hi' }],
+          addItem: vi.fn(),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: vi.fn(),
+        });
+
+        const { rerender } = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        // Open the overlay (find the latest handler, since each render
+        // produces a fresh closure that snapshots the current isActive).
+        findGlobalKeypressHandler()!(ctrlOKey);
+        rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        expect(capturedUIState.transcriptSnapshot).not.toBeNull();
+
+        // The latest handler now closes over isActive=true → toggles off.
+        findGlobalKeypressHandler()!(ctrlOKey);
+        rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        expect(capturedUIState.transcriptSnapshot).toBeNull();
       });
     });
   });

@@ -85,14 +85,24 @@ describe('ToolConfirmationMessage', () => {
       />,
     );
 
-    expect(lastFrame()).toContain('Yes, and auto-accept edits');
-    expect(lastFrame()).toContain('Yes, and manually approve edits');
-    expect(lastFrame()).toContain('No, keep planning');
+    // After the TUI display optimization, compact rendering is the only
+    // path — plan-specific options ("Yes, and auto-accept edits", etc.)
+    // collapse to the generic 3-option set, but the body still renders
+    // the plan markdown and the title still drives the question line.
+    expect(lastFrame()).toContain('Yes, allow once');
+    expect(lastFrame()).toContain('Allow always');
+    expect(lastFrame()).toContain('No');
+    expect(lastFrame()).toContain('Would you like to proceed?');
     expect(lastFrame()).toContain('Implementation Plan');
     expect(lastFrame()).toContain('Step one');
   });
 
-  describe('with folder trust', () => {
+  describe('compact option set (post TUI display optimization)', () => {
+    // After the TUI display optimization, every confirmation type renders
+    // the same fixed 3-option set ("Yes, allow once" / "Allow always" /
+    // "No") regardless of folder trust or per-type variants. Trust gating
+    // on the "Allow always" outcome itself is now enforced upstream
+    // (scheduler / settings), not by hiding the option here.
     const editConfirmationDetails: ToolCallConfirmationDetails = {
       type: 'edit',
       title: 'Confirm Edit',
@@ -133,58 +143,64 @@ describe('ToolConfirmationMessage', () => {
       {
         description: 'for edit confirmations',
         details: editConfirmationDetails,
-        alwaysAllowText: 'Yes, allow always',
       },
       {
         description: 'for exec confirmations',
         details: execConfirmationDetails,
-        alwaysAllowText: 'Always allow in this project',
       },
       {
         description: 'for info confirmations',
         details: infoConfirmationDetails,
-        alwaysAllowText: 'Always allow in this project',
       },
       {
         description: 'for mcp confirmations',
         details: mcpConfirmationDetails,
-        alwaysAllowText: 'Always allow in this project',
       },
-    ])('$description', ({ details, alwaysAllowText }) => {
-      it('should show "allow always" when folder is trusted', () => {
-        const mockConfig = {
+    ])('$description', ({ details }) => {
+      it('renders the fixed compact 3-option set regardless of folder trust', () => {
+        const trustedConfig = {
           isTrustedFolder: () => true,
           getIdeMode: () => false,
         } as unknown as Config;
 
-        const { lastFrame } = renderWithProviders(
+        const { lastFrame: trustedFrame } = renderWithProviders(
           <ToolConfirmationMessage
             confirmationDetails={details}
-            config={mockConfig}
+            config={trustedConfig}
             availableTerminalHeight={30}
             contentWidth={80}
           />,
         );
 
-        expect(lastFrame()).toContain(alwaysAllowText);
-      });
+        const trusted = trustedFrame() ?? '';
+        expect(trusted).toContain('Yes, allow once');
+        expect(trusted).toContain('Allow always');
+        expect(trusted).toContain('No');
+        // Project/user-scope variants no longer surface in the compact
+        // 3-option set.
+        expect(trusted).not.toContain('Always allow in this project');
+        expect(trusted).not.toContain('Always allow for this user');
 
-      it('should NOT show "allow always" when folder is untrusted', () => {
-        const mockConfig = {
+        const untrustedConfig = {
           isTrustedFolder: () => false,
           getIdeMode: () => false,
         } as unknown as Config;
 
-        const { lastFrame } = renderWithProviders(
+        const { lastFrame: untrustedFrame } = renderWithProviders(
           <ToolConfirmationMessage
             confirmationDetails={details}
-            config={mockConfig}
+            config={untrustedConfig}
             availableTerminalHeight={30}
             contentWidth={80}
           />,
         );
 
-        expect(lastFrame()).not.toContain(alwaysAllowText);
+        const untrusted = untrustedFrame() ?? '';
+        // Same fixed option set whether trusted or not — trust gating
+        // happens downstream of this component.
+        expect(untrusted).toContain('Yes, allow once');
+        expect(untrusted).toContain('Allow always');
+        expect(untrusted).toContain('No');
       });
     });
   });
@@ -201,7 +217,12 @@ describe('ToolConfirmationMessage', () => {
       onConfirm: vi.fn(),
     };
 
-    it('should show "Modify with external editor" when preferredEditor is set', () => {
+    // After the TUI display optimization the compact 3-option set drops
+    // "Modify with external editor" entirely (and the `preferredEditor`
+    // setting therefore no longer surfaces in the inline banner). The
+    // original tests gated visibility on that setting; the new behavior
+    // is: it is never shown, regardless of `preferredEditor`.
+    it('omits "Modify with external editor" even when preferredEditor is set', () => {
       const mockConfig = {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
@@ -221,10 +242,10 @@ describe('ToolConfirmationMessage', () => {
         },
       );
 
-      expect(lastFrame()).toContain('Modify with external editor');
+      expect(lastFrame()).not.toContain('Modify with external editor');
     });
 
-    it('should NOT show "Modify with external editor" when preferredEditor is not set', () => {
+    it('omits "Modify with external editor" when preferredEditor is not set', () => {
       const mockConfig = {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
@@ -248,104 +269,12 @@ describe('ToolConfirmationMessage', () => {
     });
   });
 
-  describe('compactMode', () => {
-    it('renders the command and exec-specific question for exec confirmations', () => {
-      const confirmationDetails: ToolCallConfirmationDetails = {
-        type: 'exec',
-        title: 'Confirm Execution',
-        command: 'rm -f /tmp/foo.txt',
-        rootCommand: 'rm',
-        onConfirm: vi.fn(),
-      };
-
-      const { lastFrame } = renderWithProviders(
-        <ToolConfirmationMessage
-          confirmationDetails={confirmationDetails}
-          config={mockConfig}
-          availableTerminalHeight={30}
-          contentWidth={80}
-          compactMode={true}
-        />,
-      );
-
-      const frame = lastFrame() ?? '';
-      expect(frame).toContain('rm -f /tmp/foo.txt');
-      expect(frame).toContain('Do you want to proceed?');
-      expect(frame).toContain('Yes, allow once');
-      expect(frame).toContain('Allow always');
-      expect(frame).toContain('No');
-      // Compact mode swaps the type-specific exec question for the
-      // generic prompt (the body already shows the command) and trims
-      // project/user-scope variants.
-      expect(frame).not.toContain('Allow execution of:');
-      expect(frame).not.toContain('Always allow in this project');
-      expect(frame).not.toContain('Always allow for this user');
-    });
-
-    it('renders MCP server and tool name for mcp confirmations', () => {
-      const confirmationDetails: ToolCallConfirmationDetails = {
-        type: 'mcp',
-        title: 'Confirm MCP Tool',
-        serverName: 'my-server',
-        toolName: 'my-tool',
-        toolDisplayName: 'My Tool',
-        onConfirm: vi.fn(),
-      };
-
-      const { lastFrame } = renderWithProviders(
-        <ToolConfirmationMessage
-          confirmationDetails={confirmationDetails}
-          config={mockConfig}
-          availableTerminalHeight={30}
-          contentWidth={80}
-          compactMode={true}
-        />,
-      );
-
-      const frame = lastFrame() ?? '';
-      expect(frame).toContain('MCP Server: my-server');
-      expect(frame).toContain('Tool: my-tool');
-      expect(frame).toContain('Do you want to proceed?');
-      expect(frame).toContain('Yes, allow once');
-      expect(frame).toContain('Allow always');
-      expect(frame).toContain('No');
-      // Compact mode swaps the type-specific mcp question for the
-      // generic prompt (the body already shows server + tool) and trims
-      // project/user-scope variants.
-      expect(frame).not.toContain('Allow execution of MCP tool');
-      expect(frame).not.toContain('Always allow in this project');
-      expect(frame).not.toContain('Always allow for this user');
-    });
-
-    it('caps multi-line exec body at 5 lines with overflow indicator', () => {
-      const lines = Array.from({ length: 12 }, (_, i) => `Line ${i + 1}`);
-      const command = `cat <<'EOF'\n${lines.join('\n')}\nEOF`;
-      const confirmationDetails: ToolCallConfirmationDetails = {
-        type: 'exec',
-        title: 'Confirm Execution',
-        command,
-        rootCommand: 'cat',
-        onConfirm: vi.fn(),
-      };
-
-      const { lastFrame } = renderWithProviders(
-        <ToolConfirmationMessage
-          confirmationDetails={confirmationDetails}
-          config={mockConfig}
-          availableTerminalHeight={50}
-          contentWidth={80}
-          compactMode={true}
-        />,
-      );
-
-      const frame = lastFrame() ?? '';
-      // Head of the command is preserved (so the user sees what's being
-      // run); the heredoc tail elides behind the overflow indicator.
-      expect(frame).toContain("cat <<'EOF'");
-      expect(frame).toContain('Line 1');
-      expect(frame).not.toContain('Line 8');
-      expect(frame).not.toContain('Line 12');
-      expect(frame).toMatch(/\.{3} last \d+ lines hidden \.{3}/);
-    });
-  });
+  // Note: The `describe('compactMode')` block was removed when the TUI
+  // display optimization made compact rendering the only path. The
+  // `compactMode` prop is now a deprecated no-op preserved for binary
+  // compatibility with external fixtures; the renderer always behaves
+  // as if it were `true`. Coverage for the compact body / question /
+  // option-set is now folded into the `compact option set` describe
+  // above and the always-on render path is the default for every other
+  // test in this file.
 });

@@ -378,8 +378,9 @@ describe('<ToolMessage />', () => {
         StreamingState.Idle,
       );
       const output = lastFrame() ?? '';
-      // One-line summary: success glyph + agent name + description.
-      expect(output).toContain('✔');
+      // Two-line structured summary: ≡ Agent header line + ✓ status line.
+      // Glyph is `✓` (matches gemini-cli SubagentGroupDisplay.tsx:235).
+      expect(output).toContain('✓');
       expect(output).toContain('committed-agent');
       expect(output).toContain('Already done');
       // No approval prompt — completed subagents don't sit on the
@@ -412,7 +413,7 @@ describe('<ToolMessage />', () => {
         StreamingState.Responding,
       );
       const output = lastFrame() ?? '';
-      expect(output).toContain('✔');
+      expect(output).toContain('✓');
       expect(output).toContain('Just finished mid-turn');
     });
 
@@ -432,7 +433,9 @@ describe('<ToolMessage />', () => {
         StreamingState.Idle,
       );
       const output = lastFrame() ?? '';
-      expect(output).toContain('✖');
+      // Failed status glyph is `✗` (matches gemini-cli
+      // SubagentGroupDisplay.tsx:239).
+      expect(output).toContain('✗');
       expect(output).toContain('failed-agent');
       expect(output).toContain('Crashed early');
       expect(output).toContain('Network timeout');

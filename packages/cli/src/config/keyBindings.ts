@@ -55,7 +55,18 @@ export enum Command {
   EXIT = 'exit',
   SHOW_MORE_LINES = 'showMoreLines',
   RETRY_LAST = 'retryLast',
+  /**
+   * @deprecated Replaced by ENTER_TRANSCRIPT (Ctrl+O now opens the
+   * frozen transcript overlay instead of toggling a global compact mode).
+   * Kept for backward compatibility with user keybinding configs that
+   * reference `toggleCompactMode`; binds to no keys by default. Legacy
+   * configs are translated to `enterTranscript` at load time.
+   */
   TOGGLE_COMPACT_MODE = 'toggleCompactMode',
+  /** Enter (or toggle off) the frozen transcript overlay. */
+  ENTER_TRANSCRIPT = 'enterTranscript',
+  /** Exit the frozen transcript overlay (when active). */
+  EXIT_TRANSCRIPT = 'exitTranscript',
   TOGGLE_RENDER_MODE = 'toggleRenderMode',
   /**
    * Promote the running foreground shell command to a background task.
@@ -214,7 +225,10 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
-  [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
+  // Retired: see Command.TOGGLE_COMPACT_MODE jsdoc.
+  [Command.TOGGLE_COMPACT_MODE]: [],
+  [Command.ENTER_TRANSCRIPT]: [{ key: 'o', ctrl: true }],
+  [Command.EXIT_TRANSCRIPT]: [{ key: 'escape' }],
   [Command.TOGGLE_RENDER_MODE]: [{ key: 'm', meta: true }],
   [Command.PROMOTE_SHELL_TO_BACKGROUND]: [{ key: 'b', ctrl: true }],
 
