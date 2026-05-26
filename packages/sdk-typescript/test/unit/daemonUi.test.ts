@@ -5081,3 +5081,55 @@ describe('cross-client event recognition (prompt_cancelled / replay_complete)', 
     expect(state.blocks.length).toBe(before);
   });
 });
+
+describe('permission_resolved voterClientId (A4)', () => {
+  it('exposes voterClientId from data', () => {
+    const [evt] = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'permission_resolved',
+      originatorClientId: 'client_B',
+      data: {
+        requestId: 'perm-1',
+        outcome: { outcome: 'selected', optionId: 'allow' },
+        voterClientId: 'client_B',
+      },
+    } as never);
+    expect(evt).toMatchObject({
+      type: 'permission.resolved',
+      requestId: 'perm-1',
+      voterClientId: 'client_B',
+    });
+  });
+
+  it('falls back to the envelope originatorClientId when data.voterClientId is absent (old daemon)', () => {
+    const [evt] = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'permission_resolved',
+      originatorClientId: 'client_B',
+      data: {
+        requestId: 'perm-1',
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      },
+    } as never);
+    expect(evt).toMatchObject({
+      type: 'permission.resolved',
+      voterClientId: 'client_B',
+    });
+  });
+
+  it('omits voterClientId for a no-voter resolution (neither field present)', () => {
+    const [evt] = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'permission_resolved',
+      data: {
+        requestId: 'perm-1',
+        outcome: { outcome: 'cancelled' },
+      },
+    } as never);
+    expect(evt).toMatchObject({ type: 'permission.resolved' });
+    expect(evt).not.toHaveProperty('voterClientId');
+  });
+});

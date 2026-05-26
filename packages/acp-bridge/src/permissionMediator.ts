@@ -1126,12 +1126,23 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       data: {
         requestId: pending.requestId,
         outcome: this.toAcpOutcome(resolution),
+        // A4 (doudouOUC #4484 follow-up): `voterClientId` is the canonical,
+        // unambiguous name for "who cast the resolving vote". The envelope
+        // `originatorClientId` below carries the SAME value for pre-F3 wire
+        // compat (it is semantically the voter on `permission_resolved`,
+        // unlike on `permission_request` where it is the prompt originator).
+        // Both are optional and omitted together for no-voter resolutions
+        // (timer expiry / session-closed / loopback voter with no clientId).
+        ...(resolverClientId !== undefined
+          ? { voterClientId: resolverClientId }
+          : {}),
       },
       // O8 — preserve pre-F3 behavior: voter's clientId is stamped
       // here (not the prompt originator's). Documented inconsistency
       // with `permission_request.originatorClientId` (which IS the
       // prompt originator); F3 does not fix the inconsistency to
-      // avoid breaking the wire shape.
+      // avoid breaking the wire shape. A4 keeps it as a deprecated
+      // alias of `data.voterClientId`.
       ...(resolverClientId !== undefined
         ? { originatorClientId: resolverClientId }
         : {}),
