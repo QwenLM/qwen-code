@@ -20,14 +20,14 @@
 
 /**
  * Vendor extension namespace. ACP reserves any `_`-prefixed method for
- * extensions and its spec example uses reverse-DNS / domain form
- * (`_zed.dev/…`), so we match that idiom: `_qwen.ai/…`. Vendor data on
- * standard messages goes under `_meta` keyed by the same domain
- * (`_meta: { "qwen.ai": … }`).
+ * extensions (the ONLY hard rule); the spec's `_zed.dev/…` example shows a
+ * domain-style segment by convention, but `qwen` is distinctive enough that
+ * we use the shorter bare form `_qwen/…`. Vendor data on standard messages
+ * goes under `_meta` keyed by the same name (`_meta: { "qwen": … }`).
  */
-export const QWEN_METHOD_NS = '_qwen.ai/';
-/** Domain key for vendor `_meta` blocks (capabilities + per-message data). */
-export const QWEN_META_KEY = 'qwen.ai';
+export const QWEN_METHOD_NS = '_qwen/';
+/** Key for vendor `_meta` blocks (capabilities + per-message data). */
+export const QWEN_META_KEY = 'qwen';
 
 export type JsonRpcId = number | string;
 

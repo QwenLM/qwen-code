@@ -253,7 +253,7 @@ export class AcpDispatcher {
         configOptions: true,
         // Vendor extensions are advertised under `_meta` keyed by domain
         // (ACP convention, e.g. `_meta: { "zed.dev": … }`). Clients
-        // feature-detect before calling `_qwen.ai/…` methods.
+        // feature-detect before calling `_qwen/…` methods.
         _meta: {
           [QWEN_META_KEY]: {
             connectionId,
@@ -529,7 +529,7 @@ export class AcpDispatcher {
 
         // STANDARD method (SDK 0.14.1, non-`unstable_`): model + mode live
         // here under categories `model`/`mode`, routed to the existing bridge
-        // setters. Replaces the old vendor `_qwen.ai/session/set_model`.
+        // setters. Replaces the old vendor `_qwen/session/set_model`.
         case 'session/set_config_option': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;

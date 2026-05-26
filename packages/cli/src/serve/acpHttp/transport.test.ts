@@ -403,7 +403,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     const [reqFrame] = (await got) as Array<{ id: number; method: string; params: { _meta: Record<string, { requestId: string }> } }>;
     expect(reqFrame.method).toBe('session/request_permission');
-    expect(reqFrame.params._meta['qwen.ai'].requestId).toBe('perm-1');
+    expect(reqFrame.params._meta['qwen'].requestId).toBe('perm-1');
     // Client answers with a JSON-RPC response echoing the issued id.
     await post(connId, {
       jsonrpc: '2.0',
@@ -447,12 +447,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(bridge.lastApprovalMode).toBe('yolo');
   });
 
-  it('_qwen.ai/workspace/mcp introspection reaches the bridge', async () => {
+  it('_qwen/workspace/mcp introspection reaches the bridge', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);
     const got = takeFrames(connStream, 1);
     await new Promise((r) => setTimeout(r, 50));
-    await post(connId, { jsonrpc: '2.0', id: 12, method: '_qwen.ai/workspace/mcp' });
+    await post(connId, { jsonrpc: '2.0', id: 12, method: '_qwen/workspace/mcp' });
     const [frame] = (await got) as Array<{ id: number; result: { ok: boolean } }>;
     expect(frame.id).toBe(12);
     expect(frame.result.ok).toBe(true);

@@ -56,6 +56,6 @@ describe('jsonRpc helpers', () => {
   });
 
   it('exposes the qwen extension namespace', () => {
-    expect(QWEN_METHOD_NS).toBe('_qwen.ai/');
+    expect(QWEN_METHOD_NS).toBe('_qwen/');
   });
 });

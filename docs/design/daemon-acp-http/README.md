@@ -510,8 +510,8 @@ Another reviewer pass (qwen3.7-max). Suite **30 tests**, live re-verified.
 - 规范保留 `_` 前缀给扩展，示例为域风格 `_zed.dev/…`；厂商数据放 `_meta` 按域名分键。
 
 落地：
-- **命名空间 `_qwen/` → 反向域名 `_qwen.ai/`**；`_meta` 统一 `_meta:{ "qwen.ai": … }`（含 `initialize` 能力广告与 `session/request_permission` 的 requestId）。
-- **模型 + 审批模式 → 标准 `session/set_config_option`**（`configId:"model"|"mode"`），路由到现有 `bridge.setSessionModel`/`setSessionApprovalMode`；`session/new` 结果**广告 `configOptions`**（取自子进程会话状态 `getSessionContextStatus().state.configOptions`，已是 ACP 形状）。**删除**厂商 `_qwen.ai/session/set_model`。
+- **命名空间 `_qwen/` → 反向域名 `_qwen/`**；`_meta` 统一 `_meta:{ "qwen": … }`（含 `initialize` 能力广告与 `session/request_permission` 的 requestId）。
+- **模型 + 审批模式 → 标准 `session/set_config_option`**（`configId:"model"|"mode"`），路由到现有 `bridge.setSessionModel`/`setSessionApprovalMode`；`session/new` 结果**广告 `configOptions`**（取自子进程会话状态 `getSessionContextStatus().state.configOptions`，已是 ACP 形状）。**删除**厂商 `_qwen/session/set_model`。
 - REST(http+sse) **无需同步修改**：两 transport 共用同一 bridge，状态天然一致。
 
 ### 17.2 本批新增的 `/acp` 方法（bridge 已支持，1:1 对齐 REST）
@@ -519,13 +519,13 @@ Another reviewer pass (qwen3.7-max). Suite **30 tests**, live re-verified.
 | REST | `/acp` | bridge |
 |---|---|---|
 | `POST /session/:id/model` / `approval-mode` | **标准** `session/set_config_option`（model/mode） | setSessionModel / setSessionApprovalMode |
-| `GET /session/:id/context` | `_qwen.ai/session/context` | getSessionContextStatus |
-| `GET /session/:id/supported-commands` | `_qwen.ai/session/supported_commands` | getSessionSupportedCommandsStatus |
-| `PATCH /session/:id/metadata` | `_qwen.ai/session/update_metadata` | updateSessionMetadata |
-| `GET /workspace/{mcp,skills,providers,env,preflight}` | `_qwen.ai/workspace/{…}` | getWorkspace*Status |
-| `POST /workspace/init` | `_qwen.ai/workspace/init` | initWorkspace |
-| `POST /workspace/tools/:name/enable` | `_qwen.ai/workspace/set_tool_enabled` | setWorkspaceToolEnabled |
-| `POST /workspace/mcp/:server/restart` | `_qwen.ai/workspace/restart_mcp_server` | restartMcpServer |
+| `GET /session/:id/context` | `_qwen/session/context` | getSessionContextStatus |
+| `GET /session/:id/supported-commands` | `_qwen/session/supported_commands` | getSessionSupportedCommandsStatus |
+| `PATCH /session/:id/metadata` | `_qwen/session/update_metadata` | updateSessionMetadata |
+| `GET /workspace/{mcp,skills,providers,env,preflight}` | `_qwen/workspace/{…}` | getWorkspace*Status |
+| `POST /workspace/init` | `_qwen/workspace/init` | initWorkspace |
+| `POST /workspace/tools/:name/enable` | `_qwen/workspace/set_tool_enabled` | setWorkspaceToolEnabled |
+| `POST /workspace/mcp/:server/restart` | `_qwen/workspace/restart_mcp_server` | restartMcpServer |
 
 （既有：session/new·load·resume·close·list·prompt·cancel、heartbeat、permission、events 已对齐。）
 
@@ -533,7 +533,7 @@ Another reviewer pass (qwen3.7-max). Suite **30 tests**, live re-verified.
 
 REST 的 **文件 I/O**（`/file /glob /list /stat /file/write /file/edit`）、**设备流登录**（`/workspace/auth/*`）、**agents CRUD**（`/workspace/agents`）、**memory CRUD**（`/workspace/memory`）目前**不在 `HttpAcpBridge` 上**——REST 路由直接调 route 级服务（`WorkspaceFileSystemFactory`、`DeviceFlowRegistry`、`SubagentManager`、`writeWorkspaceContextFile`），绕过了 bridge。
 
-**决策（采纳评审/owner 意见）**：不让 `/acp` transport 再去直连这些 route 级服务（那会复制 REST 的架构漂移、并使 transport 耦合翻倍）。**正确做法是先在 `@qwen-code/acp-bridge` 的 `HttpAcpBridge` 上补齐这些能力**（如 `readWorkspaceFile`/`writeWorkspaceFile`/`globWorkspace`、`startDeviceFlow`/`pollDeviceFlow`、`listAgents`/`upsertAgent`/`deleteAgent`、`readMemory`/`writeMemory`），让 REST 与 `/acp` 都经由 bridge。届时 `/acp` 再加 `_qwen.ai/fs/*`、`_qwen.ai/auth/*`、`_qwen.ai/workspace/agent*`、`_qwen.ai/workspace/memory*`（文件读因无标准 ACP client→agent 方法，属合法厂商扩展）。
+**决策（采纳评审/owner 意见）**：不让 `/acp` transport 再去直连这些 route 级服务（那会复制 REST 的架构漂移、并使 transport 耦合翻倍）。**正确做法是先在 `@qwen-code/acp-bridge` 的 `HttpAcpBridge` 上补齐这些能力**（如 `readWorkspaceFile`/`writeWorkspaceFile`/`globWorkspace`、`startDeviceFlow`/`pollDeviceFlow`、`listAgents`/`upsertAgent`/`deleteAgent`、`readMemory`/`writeMemory`），让 REST 与 `/acp` 都经由 bridge。届时 `/acp` 再加 `_qwen/fs/*`、`_qwen/auth/*`、`_qwen/workspace/agent*`、`_qwen/workspace/memory*`（文件读因无标准 ACP client→agent 方法，属合法厂商扩展）。
 
 **完整等价 = 本批（bridge 已有能力）+ acp-bridge 补齐缺口后的后续批**。
 
@@ -555,7 +555,14 @@ Rebased onto latest `daemon_mode_b_main` (#4473/#4483/#4484/#4500), no conflicts
 本 PR（#4472）= ACP Streamable HTTP transport + **全部 bridge-backed 能力对齐** + 官方扩展方案。已转 **ready**。达到「`/acp` 完全等价 REST+SSE」尚需：
 
 1. **Follow-up PR 1 — acp-bridge 能力补齐（前置 / bridge-first）**：`HttpAcpBridge` 新增 文件 I/O、设备流、agents CRUD、memory CRUD 方法；REST 路由改走 bridge（消除直连 route 级服务的漂移）。
-2. **Follow-up PR 2 — `/acp` 剩余对齐（依赖 PR 1）**：`_qwen.ai/fs/*`、`_qwen.ai/auth/*`、`_qwen.ai/workspace/agent*`、`_qwen.ai/workspace/memory*` → 完全等价 REST。
+2. **Follow-up PR 2 — `/acp` 剩余对齐（依赖 PR 1）**：`_qwen/fs/*`、`_qwen/auth/*`、`_qwen/workspace/agent*`、`_qwen/workspace/memory*` → 完全等价 REST。
 
 跟踪：#3803（open decisions）、#4175（Mode B roadmap）均已 comment。
 Deferred 硬化项见 PR 描述「已知 deferred」。
+
+---
+
+## 20. Extension-namespace rename + SDK-transport analysis (round 11)
+
+- **Namespace `_qwen.ai/` → `_qwen/`**: ACP's only hard rule is the leading `_`; the `_zed.dev/` domain segment is convention-by-example, not a MUST. Since `qwen` is distinctive, we use the shorter bare form. `_meta` key likewise `"qwen"`. (Survey of real agents: Zed/gemini-cli mostly use `_meta`-on-standard-methods + ACP's own `unstable_*`; bare custom `_` methods are rare — our `_qwen/*` are genuinely-new workspace/session ops with no standard equivalent, so a `_` method is the right tool.)
+- **Why hand-rolled transport (not SDK-based)**: the TS SDK ships only `ndJsonStream` (stdio); RFD #721 HTTP is SDK Phase-3 (not implemented). The SDK `Connection` is single-duplex-stream; our transport is multi-stream (POSTs + connection-SSE + per-session-SSE) and needs outbound demux by sessionId — which our dispatcher already knows at routing time. A full SDK rewrite fights that model and wouldn't remove the bulk (bridge translation, SSE lifecycle, ownership, EventBus→JSON-RPC). **Pragmatic improvement (candidate follow-up): adopt the SDK's Zod schema validators + types for param validation while keeping the hand-rolled transport.** SDK clients using `extMethod('_qwen/…')` interoperate with our handlers (identical wire shape).
