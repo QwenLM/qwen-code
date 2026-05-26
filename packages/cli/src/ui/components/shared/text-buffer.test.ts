@@ -578,6 +578,83 @@ describe('useTextBuffer', () => {
       act(() => result.current.insert(shortText, { paste: true }));
       expect(getBufferState(result).text).toBe(shortText);
     });
+
+    it('should prepend @ to multiple quoted file paths separated by spaces', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePaths =
+        "'/path/to/file1.txt' '/path/to/file2.txt' '/path/to/file3.txt'";
+      act(() => result.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt @/path/to/file3.txt ',
+      );
+    });
+
+    it('should prepend @ to multiple unquoted file paths separated by spaces', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePaths =
+        '/path/to/file1.txt /path/to/file2.txt /path/to/file3.txt';
+      act(() => result.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt @/path/to/file3.txt ',
+      );
+    });
+
+    it('should prepend @ to multiple file paths separated by newlines', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePaths =
+        '/path/to/file1.txt\n/path/to/file2.txt\n/path/to/file3.txt';
+      act(() => result.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt @/path/to/file3.txt ',
+      );
+    });
+
+    it('should prepend @ to multiple quoted file paths separated by newlines', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePaths =
+        "'/path/to/file1.txt'\n'/path/to/file2.txt'\n'/path/to/file3.txt'";
+      act(() => result.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt @/path/to/file3.txt ',
+      );
+    });
+
+    it('should handle mixed quoted and unquoted file paths separated by spaces', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePaths =
+        "'/path/to/file1.txt' /path/to/file2.txt '/path/to/file3.txt'";
+      act(() => result.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt @/path/to/file3.txt ',
+      );
+    });
+
+    it('should only prepend @ to valid paths among mixed content', () => {
+      // Mock isValidPath to return true only for specific paths
+      const { result: result2 } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (path: string) =>
+            path.includes('file1') || path.includes('file2'),
+        }),
+      );
+      const filePaths =
+        "'/path/to/file1.txt' '/path/to/invalid.txt' '/path/to/file2.txt'";
+      act(() => result2.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result2).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt ',
+      );
+    });
   });
 
   describe('Shell Mode Behavior', () => {

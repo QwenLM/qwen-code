@@ -2000,6 +2000,50 @@ export function useTextBuffer({
 
   const insert = useCallback(
     (ch: string, { paste = false }: { paste?: boolean } = {}): void => {
+      // Handle pastes that contain newlines (e.g., file paths separated by newlines).
+      // We need to process these before the newline check below, which would
+      // otherwise cause an early return and skip the @-path detection.
+      if (paste && /[\n\r]/.test(ch)) {
+        // Normalize line endings
+        const normalized = ch.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const segments = normalized
+          .split(/\n/)
+          .filter((s) => s.trim().length > 0);
+
+        // Check if all segments are valid file paths
+        const validPaths: string[] = [];
+        for (const segment of segments) {
+          // Strip surrounding quotes if present (common in drag-and-drop)
+          let trimmed = segment.trim();
+          const quoteMatch = trimmed.match(/^'(.*)'$/);
+          if (quoteMatch) {
+            trimmed = quoteMatch[1];
+          }
+          const unescaped = unescapePath(trimmed);
+          if (isValidPath(unescaped)) {
+            validPaths.push(`@${unescaped}`);
+          }
+        }
+
+        // If we found at least one valid path, use the transformed content
+        if (validPaths.length > 0) {
+          ch = `${validPaths.join(' ')} `;
+          // Insert the transformed content and return early to avoid
+          // re-processing the already-transformed paths below.
+          dispatch({ type: 'insert', payload: ch });
+          return;
+        } else {
+          // No valid paths found, proceed with normal newline handling
+          dispatch({ type: 'insert', payload: ch });
+          return;
+        }
+      }
+
+      // For single-line pastes, normalize line endings before any processing so that
+      // multi-line pastes (e.g. three file paths separated by newlines)
+      // still get the @-path auto-detection treatment.
+      const isPaste = paste && !/[\n\r]/.test(ch);
+
       if (/[\n\r]/.test(ch)) {
         dispatch({ type: 'insert', payload: ch });
         return;
@@ -2007,19 +2051,71 @@ export function useTextBuffer({
 
       const minLengthToInferAsDragDrop = 3;
       if (
+        isPaste &&
         ch.length >= minLengthToInferAsDragDrop &&
-        !shellModeActive &&
-        paste
+        !shellModeActive
       ) {
-        let potentialPath = ch.trim();
-        const quoteMatch = potentialPath.match(/^'(.*)'$/);
-        if (quoteMatch) {
-          potentialPath = quoteMatch[1];
+        const potentialPath = ch.trim();
+
+        // Try to detect multiple file paths separated by whitespace.
+        // Paths may be quoted (e.g., '/path/to/file1.png' '/path/to/file2.png')
+        // or unquoted. Use a regex to extract all quoted paths, then check
+        // remaining segments for unquoted paths.
+        const validPaths: string[] = [];
+
+        // First, extract all quoted paths (e.g., '/path/to/file.png')
+        const quotedPathRegex = /'([^']*)'/g;
+        let match;
+        let lastIndex = 0;
+        let hasQuotedPaths = false;
+        while ((match = quotedPathRegex.exec(potentialPath)) !== null) {
+          // Check if there's content between the last match and this match
+          const gap = potentialPath.slice(lastIndex, match.index).trim();
+          if (gap) {
+            // Check if the gap is a valid unquoted path
+            const unescaped = unescapePath(gap);
+            if (isValidPath(unescaped)) {
+              validPaths.push(`@${unescaped}`);
+            }
+          }
+          const unescaped = unescapePath(match[1]);
+          if (isValidPath(unescaped)) {
+            validPaths.push(`@${unescaped}`);
+          }
+          lastIndex = quotedPathRegex.lastIndex;
+          hasQuotedPaths = true;
         }
 
-        potentialPath = potentialPath.trim();
-        if (isValidPath(unescapePath(potentialPath))) {
-          ch = `@${potentialPath} `;
+        // Check for trailing content after the last quoted path
+        const trailing = potentialPath.slice(lastIndex).trim();
+        if (trailing) {
+          const unescaped = unescapePath(trailing);
+          if (isValidPath(unescaped)) {
+            validPaths.push(`@${unescaped}`);
+          }
+        }
+
+        // If no quoted paths were found, fall back to simple whitespace splitting
+        if (!hasQuotedPaths) {
+          const segments = potentialPath.split(/\s+/).filter(Boolean);
+          validPaths.length = 0;
+          for (const segment of segments) {
+            // Strip surrounding quotes if present
+            const innerQuoteMatch = segment.match(/^'(.*)'$/);
+            const unquoted = innerQuoteMatch ? innerQuoteMatch[1] : segment;
+            const unescaped = unescapePath(unquoted);
+            if (isValidPath(unescaped)) {
+              validPaths.push(`@${unescaped}`);
+            }
+          }
+        }
+
+        if (validPaths.length >= 2) {
+          // Multiple valid paths detected — use them all (add trailing space for consistency)
+          ch = `${validPaths.join(' ')} `;
+        } else if (validPaths.length === 1) {
+          // Single valid path — add trailing space
+          ch = `${validPaths[0]} `;
         }
       }
 
