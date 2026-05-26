@@ -38,6 +38,7 @@ import {
 import { createServeApp, resolveBridgeFsFactory } from './server.js';
 import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
+import { createDaemonWorkspaceService } from './workspace-service/index.js';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 import type { ServeOptions } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
@@ -753,6 +754,28 @@ export async function runQwenServe(
     onDiagnosticLine: diagnosticSink,
   });
 
+  const persistDisabledToolsFn = (
+    workspace: string,
+    toolName: string,
+    enabled: boolean,
+  ): Promise<void> =>
+    withSettingsLock(workspace, async () => {
+      const fresh = loadSettings(workspace);
+      const wsScope = fresh.forScope(SettingScope.Workspace).settings;
+      const wsDisabled = wsScope.tools?.disabled;
+      const current = Array.isArray(wsDisabled)
+        ? wsDisabled.filter((v): v is string => typeof v === 'string')
+        : [];
+      const next = new Set(current);
+      if (enabled) next.delete(toolName);
+      else next.add(toolName);
+      fresh.setValue(
+        SettingScope.Workspace,
+        'tools.disabled',
+        [...next].sort(),
+      );
+    });
+
   const bridge =
     deps.bridge ??
     createAcpSessionBridge({
@@ -825,24 +848,36 @@ export async function runQwenServe(
       // toggle. Subsequent removals at the originating scope (e.g.
       // User) would no longer take effect because the names have been
       // baked into the workspace file with no obvious source.
-      persistDisabledTools: (workspace, toolName, enabled) =>
-        withSettingsLock(workspace, async () => {
-          const fresh = loadSettings(workspace);
-          const wsScope = fresh.forScope(SettingScope.Workspace).settings;
-          const wsDisabled = wsScope.tools?.disabled;
-          const current = Array.isArray(wsDisabled)
-            ? wsDisabled.filter((v): v is string => typeof v === 'string')
-            : [];
-          const next = new Set(current);
-          if (enabled) next.delete(toolName);
-          else next.add(toolName);
-          fresh.setValue(
-            SettingScope.Workspace,
-            'tools.disabled',
-            [...next].sort(),
-          );
-        }),
+      persistDisabledTools: persistDisabledToolsFn,
     });
+
+  // Construct the DaemonWorkspaceService AFTER the bridge so it can
+  // close over the bridge's generic delegation methods. This service
+  // owns workspace-scoped status queries, tool toggle, init, and MCP
+  // restart — routes in server.ts delegate here instead of reaching
+  // into the bridge for workspace concerns.
+  const workspaceService = createDaemonWorkspaceService({
+    boundWorkspace,
+    contextFilename: contextFilenameForInit ?? 'QWEN.md',
+    fsFactory,
+    // Device-flow registry is constructed inside createServeApp (it
+    // needs provider map + event sink wiring that lives there). The
+    // workspace service's auth sub-service uses it for the auth routes
+    // — those routes are wired in a follow-up PR, so a stub registry
+    // won't be called through the routes we're wiring here. Pass
+    // undefined and let createServeApp construct the registry + inject
+    // it into the workspace service's default path.
+    deviceFlowRegistry: undefined as never,
+    subagentManager: undefined,
+    persistDisabledTools: persistDisabledToolsFn,
+    queryWorkspaceStatus: (method, idle) =>
+      bridge.queryWorkspaceStatus(method, idle),
+    invokeWorkspaceCommand: (method, params, invokeOpts) =>
+      bridge.invokeWorkspaceCommand(method, params, invokeOpts),
+    publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
+    knownClientIds: () => bridge.knownClientIds(),
+  });
+
   let actualPort = opts.port;
   // Pass the already-canonical `boundWorkspace` into `createServeApp`
   // via `deps.boundWorkspace`. That field is the pre-canonicalized
@@ -863,6 +898,9 @@ export async function runQwenServe(
     boundWorkspace,
     fsFactory,
     daemonLog,
+    workspace: workspaceService,
+    persistDisabledTools: persistDisabledToolsFn,
+    contextFilename: contextFilenameForInit ?? 'QWEN.md',
   });
   // Issue #4175 PR 21 — `createServeApp` parks the device-flow registry
   // on `app.locals` when it constructs (or accepts) one. Pull it back
