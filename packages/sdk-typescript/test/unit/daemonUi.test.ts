@@ -5132,4 +5132,44 @@ describe('permission_resolved voterClientId (A4)', () => {
     expect(evt).toMatchObject({ type: 'permission.resolved' });
     expect(evt).not.toHaveProperty('voterClientId');
   });
+
+  it('distinguishes the prompt originator (request) from the voter (resolved) when they differ', () => {
+    // The whole point of A4: client A submits the prompt that triggers the
+    // permission request; a DIFFERENT client B casts the resolving vote.
+    // The request carries A as originator; the resolution carries B as voter.
+    const [request] = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'permission_request',
+      originatorClientId: 'client_A',
+      data: {
+        requestId: 'perm-1',
+        toolCall: { name: 'Bash', command: 'rm -rf build' },
+        options: [{ optionId: 'allow', label: 'Allow', raw: null }],
+      },
+    } as never);
+    const [resolved] = normalizeDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'permission_resolved',
+      originatorClientId: 'client_B',
+      data: {
+        requestId: 'perm-1',
+        outcome: { outcome: 'selected', optionId: 'allow' },
+        voterClientId: 'client_B',
+      },
+    } as never);
+    expect(request).toMatchObject({
+      type: 'permission.request',
+      originatorClientId: 'client_A',
+    });
+    expect(resolved).toMatchObject({
+      type: 'permission.resolved',
+      voterClientId: 'client_B',
+    });
+    // The voter is NOT the prompt originator — the disambiguation A4 enables.
+    expect((resolved as { voterClientId?: string }).voterClientId).not.toBe(
+      (request as { originatorClientId?: string }).originatorClientId,
+    );
+  });
 });
