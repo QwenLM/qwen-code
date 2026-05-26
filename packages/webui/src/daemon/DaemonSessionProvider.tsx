@@ -240,6 +240,10 @@ export function DaemonSessionProvider({
             setConnection((current) => ({
               ...current,
               status: 'disconnected',
+              // Clear the catch-up indicator: if the stream ended mid-replay
+              // (before `replay_complete`), spreading `current` would leak
+              // `catchingUp: true` into the disconnected state.
+              catchingUp: false,
               error: 'SSE stream ended',
             }));
           }
@@ -302,6 +306,7 @@ export function DaemonSessionProvider({
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
+            catchingUp: false,
           }));
           return;
         }
@@ -316,6 +321,7 @@ export function DaemonSessionProvider({
         setConnection((current) => ({
           ...current,
           status: 'disconnected',
+          catchingUp: false,
           error: `Reconnecting in ${delayMs}ms`,
         }));
         await delay(delayMs, abort.signal);

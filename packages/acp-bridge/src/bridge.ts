@@ -259,9 +259,11 @@ interface SessionEntry {
    * the `sendPrompt` abort path (originator SSE drop) can both fire for
    * the same active prompt — e.g. a client POSTs /cancel then immediately
    * closes its socket. Without dedup, peers receive two `prompt_cancelled`
-   * frames for one turn. Reset to `false` when a prompt starts and when it
-   * settles (so an idle-session cancel still broadcasts, preserving the
-   * prior unconditional behavior); set `true` on the first broadcast.
+   * frames for one turn. Reset to `false` when the **next prompt starts**
+   * (the latch is per-prompt); set `true` on the first broadcast. A cancel
+   * against an already-settled / idle session may be suppressed until the
+   * next prompt starts — acceptable since an idle-session cancel is a
+   * harmless no-op (see `cancelSession`).
    */
   cancelBroadcast?: boolean;
   /**
@@ -2172,7 +2174,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         void racedPromise
           .then(
             () => {},
-            () => {
+            (err) => {
+              // Log the root cause — without this a production
+              // `prompt_cancelled{forward_failed}` has no diagnostic trail
+              // (transport death vs ACP child crash vs timeout). Matches
+              // the bridge's other `writeStderrLine` error paths.
+              writeStderrLine(
+                `sendPrompt: forward failed for session ${sessionId}: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
               broadcastPromptCancelledOnce(
                 entry,
                 sessionId,

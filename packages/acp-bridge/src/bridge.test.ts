@@ -4732,6 +4732,100 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('a failed approval-mode change does not poison the queue (A3 tail-swallow)', async () => {
+      // The approvalModeQueue tail-swallows failures so a rejected change
+      // can't wedge every subsequent one. First call rejects; the second
+      // must still run and succeed.
+      let call = 0;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: async (method, params) => {
+            if (method === 'qwen/control/session/approval_mode') {
+              call += 1;
+              if (call === 1) throw new Error('approval boom');
+              return {
+                previous: 'default',
+                current: (params as { mode: string }).mode,
+              };
+            }
+            return {};
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // The ACP layer wraps the agent-side throw as a generic JSON-RPC
+      // error; we only care that the first change rejects.
+      await expect(
+        bridge.setSessionApprovalMode(
+          session.sessionId,
+          ApprovalMode.YOLO,
+          { persist: false },
+          undefined,
+        ),
+      ).rejects.toThrow();
+
+      // Queue not poisoned — the next change still resolves.
+      const res = await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.DEFAULT,
+        { persist: false },
+        undefined,
+      );
+      expect(res.mode).toBe('default');
+      await bridge.shutdown();
+    });
+
+    it('echoPromptToSessionBus tolerates a non-array prompt (D6 guard)', async () => {
+      // The Array.isArray guard means a malformed body that slips past the
+      // type contract degrades to "no echo" rather than throwing mid-send.
+      const { factory } = approvalModeFactoryWithCallTracker();
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const userChunks: BridgeEvent[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) {
+          const u = (e.data as { update?: { sessionUpdate?: string } })?.update;
+          if (u?.sessionUpdate === 'user_message_chunk') userChunks.push(e);
+        }
+      })();
+
+      // prompt is not an array → guard returns early, no throw, no echo.
+      await bridge
+        .sendPrompt(
+          session.sessionId,
+          { sessionId: session.sessionId, prompt: undefined as never },
+          undefined,
+          { clientId: session.clientId },
+        )
+        .catch(() => {
+          // forward may resolve or reject depending on the fake agent; we
+          // only assert the echo path didn't throw / didn't emit.
+        });
+
+      await new Promise((r) => setTimeout(r, 10));
+      abort.abort();
+      await collecting;
+      expect(userChunks).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
     it('broadcasts approval_mode_changed to peer sessions when persisted (#4282 fold-in 4 S2)', async () => {
       // When `persist:true` succeeds the change becomes the workspace
       // default, so a peer session needs to know its next ACP child
