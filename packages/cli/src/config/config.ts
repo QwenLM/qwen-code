@@ -1850,10 +1850,10 @@ export async function loadCliConfig(
     enableManagedAutoMemory: bareMode
       ? false
       : (settings.memory?.enableManagedAutoMemory ?? true),
-    enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? true,
     enableAutoSkill: bareMode
       ? false
-      : (settings.memory?.enableAutoSkill ?? false),
+      : (settings.memory?.enableAutoSkill ?? true),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode

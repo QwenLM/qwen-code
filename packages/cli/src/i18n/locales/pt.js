@@ -823,6 +823,7 @@ export default {
   'Auto-memory: {{status}}': 'Memória automática: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Consolidação automática: {{status}} · {{lastDream}} · /dream para executar',
+  'Auto-skill: {{status}}': 'Habilidade automática: {{status}}',
   never: 'nunca',
   on: 'ativado',
   off: 'desativado',
