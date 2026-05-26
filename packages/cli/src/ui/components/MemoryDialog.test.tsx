@@ -43,6 +43,7 @@ describe('MemoryDialog', () => {
       getProjectRoot: vi.fn(() => '/tmp/project'),
       getManagedAutoMemoryEnabled: vi.fn(() => false),
       getManagedAutoDreamEnabled: vi.fn(() => false),
+      getAutoSkillEnabled: vi.fn(() => false),
     } as never);
 
     mockedUseSettings.mockReturnValue({ setValue: vi.fn() } as never);
