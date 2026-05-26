@@ -90,7 +90,12 @@ describe('EventBus', () => {
     expect(events.map((e) => e.data)).toEqual([
       'a',
       'b',
-      expect.objectContaining({ lastEventId: 2, replayedCount: 2 }),
+      // D4: canonical `lastReplayedEventId` + deprecated `lastEventId` alias.
+      expect.objectContaining({
+        lastReplayedEventId: 2,
+        lastEventId: 2,
+        replayedCount: 2,
+      }),
       'c',
     ]);
     abort.abort();

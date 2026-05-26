@@ -438,7 +438,7 @@ describe('DaemonSessionProvider', () => {
         yield {
           v: 1,
           type: 'replay_complete',
-          data: { replayedCount: 1, lastEventId: 6 },
+          data: { replayedCount: 1, lastReplayedEventId: 6 },
         };
         replayDrained.resolve();
         await new Promise<void>((resolve) => {
@@ -475,6 +475,31 @@ describe('DaemonSessionProvider', () => {
     const last = states[states.length - 1];
     expect(last?.status).toBe('connected');
     expect(last?.catchingUp).toBeFalsy();
+  });
+
+  it('never sets catchingUp on a fresh subscription (no Last-Event-ID)', async () => {
+    // A first-time attach has no resume cursor → the daemon emits no
+    // replay_complete → arming catchingUp would stick forever. The Provider
+    // only arms it when session.lastEventId is defined.
+    const session = createMockSession({
+      lastEventId: undefined, // fresh subscribe, live tail
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(session);
+
+    const states: DaemonConnectionState[] = [];
+    function Harness() {
+      states.push(useDaemonConnection());
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(states.some((s) => s.status === 'connected')).toBe(true);
+    expect(states.every((s) => !s.catchingUp)).toBe(true);
   });
 
   it('clears prompt state and transcript when reconnect attaches a different session', async () => {
