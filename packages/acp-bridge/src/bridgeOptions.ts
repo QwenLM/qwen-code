@@ -19,6 +19,18 @@ import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 
 /**
+ * Sink for serve-level diagnostic lines (set by the cli daemon logger).
+ * When provided, the bridge tees `writeServeDebugLine` output through
+ * this callback alongside the existing stderr write — used by
+ * runQwenServe to capture them in the daemon log file. The bridge
+ * does not own a file logger itself; this is a pure pass-through hook.
+ */
+export type DiagnosticLineSink = (
+  line: string,
+  level?: 'info' | 'warn' | 'error',
+) => void;
+
+/**
  * Optional injection seam for daemon-host-specific status cells —
  * `process.env` snapshots and the daemon-side preflight checks
  * (Node version, CLI entry path, ripgrep, git, npm, workspace dir).
@@ -320,4 +332,9 @@ export interface BridgeOptions {
    * timeouts even when the audit publisher is the no-op fallback.
    */
   permissionAudit?: PermissionAuditPublisher;
+  /**
+   * Optional: tee `writeServeDebugLine` output. See {@link DiagnosticLineSink}.
+   * No-op when omitted. Set by cli `runQwenServe` from the daemon logger.
+   */
+  onDiagnosticLine?: DiagnosticLineSink;
 }
