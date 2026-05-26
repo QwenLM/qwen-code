@@ -28,6 +28,9 @@ import {
   WorkspaceMcpBudget,
   DiscoveredMCPTool,
   restoreWorktreeContext,
+  McpBudgetWouldExceedError,
+  McpServerSpawnFailedError,
+  InvalidMcpConfigError,
 } from '@qwen-code/qwen-code-core';
 import type {
   ApprovalMode,
@@ -2490,6 +2493,100 @@ class QwenAgent implements Agent {
           ],
         });
         return { sessionId, injected: true };
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
+        const name = params['name'];
+        const config = params['config'];
+        const originatorClientId = params['originatorClientId'];
+        if (typeof name !== 'string' || name.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing name',
+          );
+        }
+        if (!config || typeof config !== 'object') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing config',
+          );
+        }
+        if (
+          typeof originatorClientId !== 'string' ||
+          originatorClientId.length === 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing originatorClientId',
+          );
+        }
+        const manager = this.config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw RequestError.internalError(
+            undefined,
+            'McpClientManager unavailable on this Config',
+          );
+        }
+        try {
+          const result = await manager.addRuntimeMcpServer(
+            name,
+            config as MCPServerConfig,
+            originatorClientId,
+          );
+          return result as unknown as Record<string, unknown>;
+        } catch (err) {
+          if (err instanceof McpBudgetWouldExceedError) {
+            throw new RequestError(-32099, err.message, {
+              errorKind: err.code,
+              serverName: err.serverName,
+            });
+          }
+          if (err instanceof McpServerSpawnFailedError) {
+            throw new RequestError(-32099, err.message, {
+              errorKind: err.code,
+              serverName: err.serverName,
+              details: err.details,
+            });
+          }
+          if (err instanceof InvalidMcpConfigError) {
+            throw new RequestError(-32099, err.message, {
+              errorKind: err.code,
+              serverName: err.serverName,
+              reason: err.reason,
+            });
+          }
+          throw err;
+        }
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove: {
+        const name = params['name'];
+        const originatorClientId = params['originatorClientId'];
+        if (typeof name !== 'string' || name.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing name',
+          );
+        }
+        if (
+          typeof originatorClientId !== 'string' ||
+          originatorClientId.length === 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing originatorClientId',
+          );
+        }
+        const manager = this.config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw RequestError.internalError(
+            undefined,
+            'McpClientManager unavailable on this Config',
+          );
+        }
+        const result = await manager.removeRuntimeMcpServer(
+          name,
+          originatorClientId,
+        );
+        return result as unknown as Record<string, unknown>;
       }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;

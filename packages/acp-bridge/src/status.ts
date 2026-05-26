@@ -120,6 +120,9 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionRecap: 'qwen/control/session/recap',
   sessionShellHistory: 'qwen/control/session/shell_history',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
+  // T2.8 (#4514): runtime MCP server mutation ext-methods
+  workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
+  workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
 } as const;
 
 export type ServeStatus =

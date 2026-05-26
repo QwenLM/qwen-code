@@ -46,6 +46,13 @@ vi.mock('@agentclientprotocol/sdk', () => ({
   })),
   ndJsonStream: vi.fn().mockReturnValue({}),
   RequestError: class RequestError extends Error {
+    code: number;
+    data: unknown;
+    constructor(code: number, message: string, data?: unknown) {
+      super(message);
+      this.code = code;
+      this.data = data;
+    }
     static authRequired = vi
       .fn()
       .mockImplementation((data: unknown, msg: string) => {
@@ -60,6 +67,18 @@ vi.mock('@agentclientprotocol/sdk', () => ({
         Object.assign(err, data);
         return err;
       });
+    static internalError = vi
+      .fn()
+      .mockImplementation((data: unknown, msg: string) => {
+        const err = new Error(msg);
+        Object.assign(err, { code: -32603, data });
+        return err;
+      });
+    static methodNotFound = vi.fn().mockImplementation((method: string) => {
+      const err = new Error(`Method not found: ${method}`);
+      Object.assign(err, { code: -32601 });
+      return err;
+    });
     static resourceNotFound = vi.fn().mockImplementation((uri: string) => {
       const err = new Error(`Resource not found: ${uri}`);
       Object.assign(err, { code: -32002, data: { uri } });
@@ -158,6 +177,38 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     PromptInputExit: 'prompt_input_exit',
     Other: 'other',
   },
+  // T2.8: error classes used by runtime MCP add/remove ext-method handlers
+  McpBudgetWouldExceedError: class McpBudgetWouldExceedError extends Error {
+    readonly code = 'mcp_budget_would_exceed' as const;
+    readonly serverName: string;
+    constructor(serverName: string) {
+      super(`Adding '${serverName}' would exceed workspace MCP budget`);
+      this.name = 'McpBudgetWouldExceedError';
+      this.serverName = serverName;
+    }
+  },
+  McpServerSpawnFailedError: class McpServerSpawnFailedError extends Error {
+    readonly code = 'mcp_server_spawn_failed' as const;
+    readonly serverName: string;
+    readonly details: Record<string, unknown>;
+    constructor(serverName: string, details: Record<string, unknown>) {
+      super(`Failed to spawn MCP server '${serverName}'`);
+      this.name = 'McpServerSpawnFailedError';
+      this.serverName = serverName;
+      this.details = details;
+    }
+  },
+  InvalidMcpConfigError: class InvalidMcpConfigError extends Error {
+    readonly code = 'invalid_config' as const;
+    readonly serverName: string;
+    readonly reason: string;
+    constructor(serverName: string, reason: string) {
+      super(`Invalid MCP server config for '${serverName}': ${reason}`);
+      this.name = 'InvalidMcpConfigError';
+      this.serverName = serverName;
+      this.reason = reason;
+    }
+  },
 }));
 
 vi.mock('./runtimeOutputDirContext.js', () => ({
@@ -213,13 +264,17 @@ import {
   getMCPDiscoveryState,
   getMCPServerStatus,
   tokenLimit,
+  McpBudgetWouldExceedError,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { loadSettings } from '../config/settings.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
-import { SERVE_STATUS_EXT_METHODS } from '../serve/status.js';
+import {
+  SERVE_STATUS_EXT_METHODS,
+  SERVE_CONTROL_EXT_METHODS,
+} from '../serve/status.js';
 
 describe('runAcpAgent shutdown cleanup', () => {
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -2925,6 +2980,197 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     // the SSE stream stays clean for clients that already have the
     // history rendered.
     expect(lastSessionMock?.replayHistory).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T2.8 (#4514): extMethod runtime-add / runtime-remove
+// ---------------------------------------------------------------------------
+
+describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
+  let capturedAgentFactory:
+    | ((conn: { closed: Promise<void> }) => {
+        initialize: (args: Record<string, unknown>) => Promise<unknown>;
+        extMethod: (
+          method: string,
+          args: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+      })
+    | undefined;
+
+  let mockConfig: Config;
+  let processExitSpy: MockInstance<typeof process.exit>;
+  let stdinDestroySpy: MockInstance<typeof process.stdin.destroy>;
+  let stdoutDestroySpy: MockInstance<typeof process.stdout.destroy>;
+
+  const mockArgv = {} as CliArgs;
+  const mockSettings = {
+    merged: { mcpServers: {} },
+  } as unknown as LoadedSettings;
+
+  let mockManager: {
+    addRuntimeMcpServer: ReturnType<typeof vi.fn>;
+    removeRuntimeMcpServer: ReturnType<typeof vi.fn>;
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConnectionState.reset();
+    capturedAgentFactory = undefined;
+
+    mockManager = {
+      addRuntimeMcpServer: vi.fn(),
+      removeRuntimeMcpServer: vi.fn(),
+    };
+
+    vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
+      capturedAgentFactory = factory as typeof capturedAgentFactory;
+      return {
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      } as unknown as InstanceType<typeof AgentSideConnection>;
+    });
+
+    mockConfig = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
+      }),
+      refreshAuth: vi.fn().mockResolvedValue(undefined),
+      getWorkspaceContext: vi.fn().mockReturnValue({}),
+      getDebugMode: vi.fn().mockReturnValue(false),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getMcpClientManager: vi.fn().mockReturnValue(mockManager),
+      }),
+    } as unknown as Config;
+
+    processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    stdinDestroySpy = vi
+      .spyOn(process.stdin, 'destroy')
+      .mockImplementation(() => process.stdin);
+    stdoutDestroySpy = vi
+      .spyOn(process.stdout, 'destroy')
+      .mockImplementation(() => process.stdout);
+  });
+
+  afterEach(() => {
+    processExitSpy.mockRestore();
+    stdinDestroySpy.mockRestore();
+    stdoutDestroySpy.mockRestore();
+  });
+
+  async function getAgent() {
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    return { agent, agentPromise };
+  }
+
+  it('runtime-add forwards to manager and returns success result', async () => {
+    mockManager.addRuntimeMcpServer.mockResolvedValue({
+      name: 'my-srv',
+      transport: 'stdio',
+      replaced: false,
+      shadowedSettings: false,
+      toolCount: 3,
+      originatorClientId: 'client-1',
+    });
+
+    const { agent, agentPromise } = await getAgent();
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
+      {
+        name: 'my-srv',
+        config: { command: 'node', args: ['server.js'] },
+        originatorClientId: 'client-1',
+      },
+    );
+
+    expect(result).toEqual({
+      name: 'my-srv',
+      transport: 'stdio',
+      replaced: false,
+      shadowedSettings: false,
+      toolCount: 3,
+      originatorClientId: 'client-1',
+    });
+    expect(mockManager.addRuntimeMcpServer).toHaveBeenCalledWith(
+      'my-srv',
+      { command: 'node', args: ['server.js'] },
+      'client-1',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('runtime-remove forwards to manager and returns success result', async () => {
+    mockManager.removeRuntimeMcpServer.mockResolvedValue({
+      name: 'my-srv',
+      removed: true,
+      wasShadowingSettings: false,
+      originatorClientId: 'client-2',
+    });
+
+    const { agent, agentPromise } = await getAgent();
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
+      {
+        name: 'my-srv',
+        originatorClientId: 'client-2',
+      },
+    );
+
+    expect(result).toEqual({
+      name: 'my-srv',
+      removed: true,
+      wasShadowingSettings: false,
+      originatorClientId: 'client-2',
+    });
+    expect(mockManager.removeRuntimeMcpServer).toHaveBeenCalledWith(
+      'my-srv',
+      'client-2',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('runtime-add propagates McpBudgetWouldExceedError with code field', async () => {
+    // Use the actual mocked class so instanceof checks pass
+    const budgetError = new McpBudgetWouldExceedError('my-srv');
+    mockManager.addRuntimeMcpServer.mockRejectedValue(budgetError);
+
+    const { agent, agentPromise } = await getAgent();
+    const err = await agent
+      .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd, {
+        name: 'my-srv',
+        config: { command: 'node', args: ['server.js'] },
+        originatorClientId: 'client-1',
+      })
+      .catch((e: unknown) => e);
+
+    // The error should be a RequestError with data.errorKind preserving
+    // the typed code for the bridge's sendBridgeError mapping
+    expect(err).toBeInstanceOf(Error);
+    const data = (err as { data?: Record<string, unknown> }).data;
+    expect(data?.errorKind).toBe('mcp_budget_would_exceed');
+    expect(data?.serverName).toBe('my-srv');
 
     mockConnectionState.resolve();
     await agentPromise;
