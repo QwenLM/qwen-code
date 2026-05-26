@@ -821,13 +821,21 @@ Expected: fail — symlink not created.
 
 - [ ] **Step 3: Implement symlink update**
 
-Add import at top of `daemonLogger.ts`:
+`updateSymlink` lives in `packages/core/src/utils/symlink.ts` but is NOT re-exported from the core barrel (confirmed via `grep -n updateSymlink packages/core/src/index.ts` → no matches at plan-write time). Add the re-export first:
+
+In `packages/core/src/index.ts`, add (near the other utils exports):
 
 ```ts
-import { updateSymlink } from '@qwen-code/qwen-code-core/internal/symlink';
+export { updateSymlink } from './utils/symlink.js';
 ```
 
-(If that path is not exported from core, expose it. If `updateSymlink` is not re-exported through the package barrel, add a re-export in `packages/core/src/index.ts` such as `export { updateSymlink } from './utils/symlink.js';`. Verify with `grep -n 'updateSymlink' packages/core/src/index.ts` before editing.)
+Then import in `daemonLogger.ts`:
+
+```ts
+import { Storage, updateSymlink } from '@qwen-code/qwen-code-core';
+```
+
+(Merge with the existing `Storage` import added in Task 3.)
 
 Inside `initDaemonLogger`, after the `appendFileSync` first-line write succeeds, add:
 
@@ -894,7 +902,7 @@ Add inside `BridgeOptions`:
 
 - [ ] **Step 2: Add failing test**
 
-In `packages/acp-bridge/src/bridge.test.ts`, add a new `describe('onDiagnosticLine', ...)` block. Find a representative test that uses `QWEN_SERVE_DEBUG=1` (search: `grep -n "QWEN_SERVE_DEBUG" packages/acp-bridge/src/bridge.test.ts`) for the env-toggle pattern. Add:
+In `packages/acp-bridge/src/bridge.test.ts`, add a new `describe('onDiagnosticLine', ...)` block. The file already imports `makeBridge` and `makeChannel` from `./internal/testUtils.js` — reuse them instead of hand-rolling a `ChannelFactory`. Confirm with `grep -n "import.*testUtils" packages/acp-bridge/src/bridge.test.ts`. To trigger `writeServeDebugLine`, pick the shortest-setup test among the 6 call sites — list them with `grep -n "writeServeDebugLine(" packages/acp-bridge/src/bridge.ts` (currently lines 1410, 1423, 2242, 2328, 2624, 2637; the cross-session permission-vote rejection around line 2242 is a small reproducible trigger).
 
 ```ts
 describe('onDiagnosticLine', () => {
@@ -907,22 +915,15 @@ describe('onDiagnosticLine', () => {
   it('receives writeServeDebugLine output when QWEN_SERVE_DEBUG=1', async () => {
     process.env['QWEN_SERVE_DEBUG'] = '1';
     const captured: Array<{ line: string; level?: string }> = [];
-    const factory: ChannelFactory = async () => ({
-      stream: new MockStream(), // use existing test helper
-      kill: async () => {},
-      killSync: () => {},
-      exited: Promise.resolve(undefined),
-    });
-    const bridge = createHttpAcpBridge({
-      boundWorkspace: '/w',
-      channelFactory: factory,
+    const bridge = makeBridge({
       onDiagnosticLine: (line, level) => captured.push({ line, level }),
     });
-    // Trigger a code path that calls writeServeDebugLine. The simplest
-    // trigger today is a permission flow with a missing voter — find an
-    // existing test that exercises one of the writeServeDebugLine call
-    // sites (bridge.ts:1410, 1423) and copy its setup. The assertion is:
-    expect(captured.some((e) => e.line.includes('qwen serve: '))).toBe(true);
+    // Trigger writeServeDebugLine via [copy harness from the closest
+    // existing test that exercises one of the 6 call sites above].
+    // ... trigger code here ...
+    expect(captured.some((e) => e.line.includes('qwen serve debug: '))).toBe(
+      true,
+    );
     expect(
       captured.every((e) => e.level === undefined || e.level === 'info'),
     ).toBe(true);
@@ -931,7 +932,7 @@ describe('onDiagnosticLine', () => {
 });
 ```
 
-(Pre-execution: read `packages/acp-bridge/src/bridge.test.ts` to grab the right `MockStream` import and the smallest-setup test that already triggers `writeServeDebugLine`; reuse its harness rather than reinventing.)
+(`makeBridge` accepts `Partial<BridgeOptions>` — once Task 7 step 1 adds `onDiagnosticLine` to `BridgeOptions`, it flows through without further edits to `testUtils.ts`.)
 
 - [ ] **Step 3: Run, confirm fail**
 
@@ -957,7 +958,7 @@ Then, in this file replace every internal `writeServeDebugLine(...)` call **insi
 grep -n "writeServeDebugLine(" packages/acp-bridge/src/bridge.ts
 ```
 
-to enumerate call sites, then edit each (they're at roughly lines 1410, 1423 in the current tree; verify before editing). Do NOT change the module-level `writeServeDebugLine` definition itself — other entry points and tests rely on it.
+to enumerate call sites — there are 6 in the current tree (lines 1410, 1423, 2242, 2328, 2624, 2637; verify with the grep). Edit each. Do NOT change the module-level `writeServeDebugLine` definition itself — other entry points and tests rely on it.
 
 (Reason for not editing the top-level definition: changes the signature for all callers including tests; the closure tee is additive and locally-scoped.)
 
@@ -1137,10 +1138,12 @@ it('sendBridgeError routes through daemonLog when provided', async () => {
       baseDir: tmp,
       stderr: (s) => stderr.push(s),
     });
-    const app = createServeApp({
-      // ... usual deps for an erroring route, copy from the closest existing test ...
-      daemonLog,
-    });
+    // createServeApp signature: (opts, getPort?, deps?). daemonLog goes in deps.
+    const app = createServeApp(
+      /* opts */ { /* ...usual ServeOptions, copy from closest existing test... */ } as ServeOptions,
+      /* getPort */ () => 0,
+      /* deps */ { /* ...usual deps that make a route throw... */, daemonLog },
+    );
     await request(app).get('/some/erroring/route').expect(500);
     await daemonLog.flush();
     const content = readFileSync(daemonLog.getLogPath(), 'utf8');
@@ -1298,11 +1301,13 @@ const bridge =
 
 (If `deps.bridge` is provided, the operator is embedding and owns their own wiring — skip the callback.)
 
-4. Update `createServeApp({...})` to forward `daemonLog`:
+4. Update the `createServeApp(...)` call (currently at `runQwenServe.ts:706`, signature is `createServeApp(opts, getPort, deps)`) to add `daemonLog` to the deps object:
 
 ```ts
-const app = createServeApp({
-  // ... existing deps ...
+const app = createServeApp(opts, () => actualPort, {
+  bridge,
+  boundWorkspace,
+  fsFactory,
   daemonLog,
 });
 ```
