@@ -361,6 +361,7 @@ export class ChatCompressionService {
                 chat.getHistoryShallow(true),
                 pendingUserMessage,
                 originalTokenCount,
+                0,
                 slimmingConfig.imageTokenEstimate,
               )
             : originalTokenCount;

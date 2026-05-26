@@ -84,6 +84,24 @@ describe('estimatePromptTokens', () => {
     expect(estimatePromptTokens(history, user, 5000)).toBe(5000 + userEst);
   });
 
+  it('includes the previous turn candidate tokens in the steady-state estimate', () => {
+    const userEst = estimateContentTokens([user]);
+    expect(estimatePromptTokens(history, user, 5000, 1200)).toBe(
+      5000 + 1200 + userEst,
+    );
+  });
+
+  it('keeps custom image-token estimates as the fifth argument', () => {
+    const imageUser: Content = {
+      role: 'user',
+      parts: [{ inlineData: { mimeType: 'image/png', data: 'xxx' } }],
+    };
+
+    expect(estimatePromptTokens(history, imageUser, 5000, 1200, 1600)).toBe(
+      5000 + 1200 + 1600,
+    );
+  });
+
   it('falls back to full estimate when lastPromptTokenCount is 0', () => {
     const fullEst = estimateContentTokens([...history, user]);
     expect(estimatePromptTokens(history, user, 0)).toBe(fullEst);

@@ -1213,6 +1213,14 @@ export class GeminiChat {
   private lastPromptTokenCount = 0;
 
   /**
+   * Per-chat output-token count from the previous model response. The
+   * previous response is appended to local history after `promptTokenCount`
+   * was reported, so steady-state prompt estimates add this value to avoid
+   * under-counting the next request near the hard compaction threshold.
+   */
+  private lastCandidatesTokenCount = 0;
+
+  /**
    * Number of consecutive auto-compaction failures for this chat. The
    * cheap-gate NOOPs once this reaches MAX_CONSECUTIVE_FAILURES (default 3)
    * until a successful compress (forced or not) resets it to 0. Replaces the
@@ -1314,10 +1322,14 @@ export class GeminiChat {
    * history (forks, subagents, speculation). Without this, the auto-compress
    * threshold check sees `0` and refuses to compress — so the first API call
    * can 400 from oversized history. Callers pass the parent chat's
-   * `getLastPromptTokenCount()` here.
+   * `getLastPromptTokenCount()` here. This also clears any remembered
+   * previous-response output token count because the seeded prompt count
+   * comes from a different chat instance and should not inherit this chat's
+   * last response size.
    */
   setLastPromptTokenCount(count: number): void {
     this.lastPromptTokenCount = count;
+    this.lastCandidatesTokenCount = 0;
   }
 
   /**
@@ -1360,6 +1372,7 @@ export class GeminiChat {
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       this.lastPromptTokenCount = info.newTokenCount;
+      this.lastCandidatesTokenCount = 0;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
@@ -1508,9 +1521,10 @@ export class GeminiChat {
         this.config.getChatCompression(),
       ).imageTokenEstimate;
       // When lastPromptTokenCount > 0, estimatePromptTokens uses the
-      // API-authoritative count + a tiny estimate of just the new user
-      // message — it does NOT touch the history at all in that branch, so
-      // skip the costly `getHistory(true)` clone on the steady-state path.
+      // API-authoritative previous prompt count + the previous response's
+      // candidatesTokenCount + a tiny estimate of just the new user message.
+      // It does NOT touch the history at all in that branch, so skip the
+      // costly `getHistory(true)` clone on the steady-state path.
       // The lastPromptTokenCount=0 branch (first send after --continue
       // restore / subagent inheritance) walks history with a char/4
       // heuristic that can under-count by ~15-20K tokens; the reactive
@@ -1522,6 +1536,7 @@ export class GeminiChat {
         this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
         userContent,
         this.lastPromptTokenCount,
+        this.lastCandidatesTokenCount,
         imageTokenEstimate,
       );
       const shouldForceFromHard = effectiveTokens >= hard;
@@ -2523,7 +2538,12 @@ export class GeminiChat {
           usageMetadata = chunk.usageMetadata;
           // Context usage tracks prompt size; output isn't in history yet.
           const lastPromptTokenCount =
-            usageMetadata.promptTokenCount || usageMetadata.totalTokenCount;
+            usageMetadata.promptTokenCount ?? usageMetadata.totalTokenCount;
+          this.lastCandidatesTokenCount =
+            usageMetadata.promptTokenCount !== undefined
+              ? (usageMetadata.candidatesTokenCount ?? 0) +
+                (usageMetadata.thoughtsTokenCount ?? 0)
+              : 0;
           if (lastPromptTokenCount) {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
