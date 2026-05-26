@@ -2514,10 +2514,10 @@ export class Config {
 
   /**
    * Add a runtime-only MCP server. Unlike `addMcpServers`, this does NOT
-   * touch `this.mcpServers` (settings layer) and intentionally bypasses
-   * the `initialized` guard — the whole point is post-init mutation from
-   * the daemon surface.  `getMcpServers()` will overlay these entries on
-   * top of the settings layer (Task 5).
+   * touch `this.mcpServers` (settings layer) and does not enforce the
+   * `initialized` guard — the whole point is post-init mutation from the
+   * daemon surface.  `getMcpServers()` will overlay these entries on top
+   * of the settings layer (Task 5).
    */
   addRuntimeMcpServer(name: string, config: MCPServerConfig): void {
     this.runtimeMcpServers.set(name, config);
