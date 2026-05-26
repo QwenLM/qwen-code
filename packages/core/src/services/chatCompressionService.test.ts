@@ -991,7 +991,7 @@ describe('ChatCompressionService', () => {
     expect(result.newHistory).toBeNull();
   });
 
-  it('should return FAILED if usage metadata is missing', async () => {
+  it('should use estimated token count if usage metadata is missing', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -1007,7 +1007,8 @@ describe('ChatCompressionService', () => {
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
-      // No usage -> keep original token count
+      // Some OpenAI-compatible providers (for example MiniMax-2.7) may omit
+      // usage on the compression side-query even when they return a summary.
       usage: undefined,
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -1023,12 +1024,11 @@ describe('ChatCompressionService', () => {
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
     });
 
-    expect(result.info.compressionStatus).toBe(
-      CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
-    );
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(result.info.originalTokenCount).toBe(800);
-    expect(result.info.newTokenCount).toBe(800);
-    expect(result.newHistory).toBeNull();
+    expect(result.info.newTokenCount).toBeLessThan(800);
+    expect(result.newHistory).not.toBeNull();
+    expect(result.newHistory![0].parts![0].text).toBe('Summary');
   });
 
   it('should return FAILED if summary is empty string', async () => {

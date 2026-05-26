@@ -20,7 +20,10 @@ import {
   resolveSlimmingConfig,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
-import { estimatePromptTokens } from './tokenEstimation.js';
+import {
+  estimateContentTokens,
+  estimatePromptTokens,
+} from './tokenEstimation.js';
 
 /**
  * The fraction of the latest chat history to keep. A value of 0.3
@@ -616,13 +619,17 @@ export class ChatCompressionService {
         ...historyToKeep,
       ];
 
-      // Best-effort token math using *only* model-reported token counts.
+      // Best-effort token math using model-reported token counts when
+      // available. Some OpenAI-compatible providers omit usage for the
+      // compression side-query; in that case, fall back to the same local
+      // content estimator used by the auto-compaction gate so a valid summary
+      // can still shrink the history instead of failing with a token-count
+      // error.
       //
       // Note: compressionInputTokenCount includes the compression prompt and
       // the extra "reason in your scratchpad" instruction(approx. 1000 tokens), and
       // compressionOutputTokenCount reflects the summary tokens only since
       // thinking is disabled.
-      // We accept these inaccuracies to avoid local token estimation.
       if (
         typeof compressionInputTokenCount === 'number' &&
         compressionInputTokenCount > 0 &&
@@ -636,6 +643,12 @@ export class ChatCompressionService {
             (compressionInputTokenCount - 1000) +
             compressionOutputTokenCount,
         );
+      } else {
+        newTokenCount = estimateContentTokens(
+          extraHistory,
+          slimmingConfig.imageTokenEstimate,
+        );
+        canCalculateNewTokenCount = newTokenCount > 0;
       }
     }
 
