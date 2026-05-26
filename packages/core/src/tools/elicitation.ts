@@ -15,6 +15,8 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MCP_ELICITATION');
+const MAX_PATTERN_LENGTH = 500;
+const MAX_PATTERN_INPUT_LENGTH = 500;
 let fallbackRequestId = 0;
 
 export type ElicitationMode = 'form' | 'url';
@@ -24,6 +26,7 @@ export interface ElicitationRequestEvent {
   requestId: string | number;
   params: ElicitRequestParams;
   signal: AbortSignal;
+  cancel?: () => void;
 }
 
 export type ElicitationHandler = (
@@ -288,12 +291,34 @@ export function validateElicitationInput(
     if (maxItems !== undefined && values.length > maxItems) {
       return { isValid: false, error: `Select at most ${maxItems}` };
     }
+    const allowedValues = new Set(
+      getMultiSelectOptions(schema).map((option) => option.value),
+    );
+    const invalidValues = values.filter((value) => !allowedValues.has(value));
+    if (invalidValues.length > 0) {
+      return {
+        isValid: false,
+        error: `Invalid selection: ${invalidValues.join(', ')}`,
+      };
+    }
     return { isValid: true, value: values };
   }
 
   const type = schema.type;
   if (type === 'boolean') {
-    return { isValid: true, value: Boolean(rawValue) };
+    if (typeof rawValue === 'boolean') {
+      return { isValid: true, value: rawValue };
+    }
+    if (typeof rawValue === 'string') {
+      const normalizedValue = rawValue.trim().toLowerCase();
+      if (normalizedValue === 'true' || normalizedValue === '1') {
+        return { isValid: true, value: true };
+      }
+      if (normalizedValue === 'false' || normalizedValue === '0') {
+        return { isValid: true, value: false };
+      }
+    }
+    return { isValid: false, error: 'Enter true or false' };
   }
 
   const stringValue = String(rawValue ?? '');
@@ -306,11 +331,15 @@ export function validateElicitationInput(
   }
 
   if (type === 'number' || type === 'integer') {
-    const numberValue =
+    const trimmedValue = stringValue.trim();
+    const numberPattern =
       type === 'integer'
-        ? Number.parseInt(stringValue, 10)
-        : Number.parseFloat(stringValue);
+        ? /^[+-]?\d+$/
+        : /^[+-]?(?:(?:\d+\.?\d*)|(?:\.\d+))(?:[eE][+-]?\d+)?$/;
+    const numberValue = Number(trimmedValue);
     if (
+      trimmedValue === '' ||
+      !numberPattern.test(trimmedValue) ||
       !Number.isFinite(numberValue) ||
       (type === 'integer' && !Number.isInteger(numberValue))
     ) {
@@ -346,16 +375,13 @@ export function validateElicitationInput(
       error: `Must be at most ${schema.maxLength} characters`,
     };
   }
-  if (
-    typeof schema.pattern === 'string' &&
-    !new RegExp(schema.pattern).test(stringValue)
-  ) {
-    return { isValid: false, error: 'Does not match the required pattern' };
+  if (typeof schema.pattern === 'string') {
+    const patternResult = validatePattern(stringValue, schema.pattern);
+    if (!patternResult.isValid) {
+      return patternResult;
+    }
   }
-  if (
-    schema.format === 'email' &&
-    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(stringValue)
-  ) {
+  if (schema.format === 'email' && !isValidEmailFormat(stringValue)) {
     return { isValid: false, error: 'Enter a valid email address' };
   }
   if (schema.format === 'uri') {
@@ -373,4 +399,64 @@ export function validateElicitationInput(
   }
 
   return { isValid: true, value: stringValue };
+}
+
+function validatePattern(
+  value: string,
+  pattern: string,
+): ElicitationValidationResult {
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    return {
+      isValid: false,
+      error: 'Pattern is too long to validate safely',
+    };
+  }
+  if (value.length > MAX_PATTERN_INPUT_LENGTH) {
+    return {
+      isValid: false,
+      error: 'Value is too long for pattern validation',
+    };
+  }
+
+  let regex: RegExp;
+  try {
+    regex = new RegExp(pattern);
+  } catch {
+    return { isValid: false, error: 'Invalid pattern' };
+  }
+
+  return regex.test(value)
+    ? { isValid: true, value }
+    : { isValid: false, error: 'Does not match the required pattern' };
+}
+
+function isValidEmailFormat(value: string): boolean {
+  const atIndex = value.indexOf('@');
+  if (
+    atIndex <= 0 ||
+    atIndex !== value.lastIndexOf('@') ||
+    atIndex === value.length - 1
+  ) {
+    return false;
+  }
+
+  const localPart = value.slice(0, atIndex);
+  const domain = value.slice(atIndex + 1);
+  if (
+    localPart.length === 0 ||
+    domain.length === 0 ||
+    domain.startsWith('.') ||
+    domain.endsWith('.') ||
+    !domain.includes('.')
+  ) {
+    return false;
+  }
+
+  for (const char of value) {
+    if (char === ' ' || char === '\t' || char === '\n' || char === '\r') {
+      return false;
+    }
+  }
+
+  return true;
 }

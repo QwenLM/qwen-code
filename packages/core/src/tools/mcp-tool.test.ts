@@ -16,6 +16,7 @@ import {
 import type { ToolResult } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import type { CallableTool, Part } from '@google/genai';
+import { UrlElicitationRequiredError } from '@modelcontextprotocol/sdk/types.js';
 import { ToolErrorType } from './tool-error.js';
 import { updateMCPServerStatus, MCPServerStatus } from './mcp-client.js';
 
@@ -31,6 +32,20 @@ const mockCallableToolInstance: Mocked<CallableTool> = {
   callTool: mockCallTool as any,
   // Add other methods if DiscoveredMCPTool starts using them
 };
+
+function createUrlElicitationRequiredError(
+  elicitation: Omit<
+    ConstructorParameters<typeof UrlElicitationRequiredError>[0][number],
+    'mode'
+  >,
+) {
+  return new UrlElicitationRequiredError([
+    {
+      mode: 'url',
+      ...elicitation,
+    },
+  ]);
+}
 
 describe('generateValidName', () => {
   it('should return a valid name for a simple function', () => {
@@ -976,18 +991,11 @@ describe('DiscoveredMCPTool', () => {
     });
 
     it('should handle URL elicitation required errors and retry direct client calls', async () => {
-      const urlError = {
-        code: -32042,
-        data: {
-          elicitations: [
-            {
-              message: 'Authorize to continue.',
-              url: 'https://example.com/auth',
-              elicitationId: 'url-1',
-            },
-          ],
-        },
-      };
+      const urlError = createUrlElicitationRequiredError({
+        message: 'Authorize to continue.',
+        url: 'https://example.com/auth',
+        elicitationId: 'url-1',
+      });
       const mockMcpClient: McpDirectClient = {
         callTool: vi
           .fn()
@@ -1042,16 +1050,13 @@ describe('DiscoveredMCPTool', () => {
 
     it('should stop URL elicitation retry when the user declines', async () => {
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn().mockRejectedValueOnce({
-          error: {
-            code: -32042,
-            data: {
-              url: 'https://example.com/auth',
-              elicitationId: 'url-2',
-              message: 'Authorize to continue.',
-            },
-          },
-        }),
+        callTool: vi.fn().mockRejectedValueOnce(
+          createUrlElicitationRequiredError({
+            url: 'https://example.com/auth',
+            elicitationId: 'url-2',
+            message: 'Authorize to continue.',
+          }),
+        ),
       };
       const retryTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
@@ -1080,14 +1085,11 @@ describe('DiscoveredMCPTool', () => {
     });
 
     it('should stop URL elicitation retry after the maximum retry count', async () => {
-      const urlError = {
-        code: -32042,
-        data: {
-          url: 'https://example.com/auth',
-          elicitationId: 'url-max-retry',
-          message: 'Authorize to continue.',
-        },
-      };
+      const urlError = createUrlElicitationRequiredError({
+        url: 'https://example.com/auth',
+        elicitationId: 'url-max-retry',
+        message: 'Authorize to continue.',
+      });
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn().mockRejectedValue(urlError),
       };
@@ -1124,14 +1126,13 @@ describe('DiscoveredMCPTool', () => {
 
     it('should return an error when URL elicitation completion times out', async () => {
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn().mockRejectedValueOnce({
-          code: -32042,
-          data: {
+        callTool: vi.fn().mockRejectedValueOnce(
+          createUrlElicitationRequiredError({
             url: 'https://example.com/auth',
             elicitationId: 'url-timeout',
             message: 'Authorize to continue.',
-          },
-        }),
+          }),
+        ),
       };
       const retryTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
@@ -1161,16 +1162,59 @@ describe('DiscoveredMCPTool', () => {
       expect(result.llmContent).toContain('Timed out waiting');
     });
 
+    it('should return an error when the user cancels URL elicitation wait', async () => {
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(
+          createUrlElicitationRequiredError({
+            url: 'https://example.com/auth',
+            elicitationId: 'url-cancel-wait',
+            message: 'Authorize to continue.',
+          }),
+        ),
+      };
+      const waitForElicitationCompletion = vi.fn(
+        (_serverName: string, _elicitationId: string, signal?: AbortSignal) =>
+          signal?.aborted
+            ? Promise.reject(new DOMException('Aborted', 'AbortError'))
+            : Promise.resolve(),
+      );
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        {
+          ...mockConfigWithTruncation,
+          getElicitationHandler: () =>
+            vi.fn((event: { cancel?: () => void }) => {
+              event.cancel?.();
+              return Promise.resolve({ action: 'accept' });
+            }),
+          waitForElicitationCompletion,
+        } as any,
+        mockMcpClient,
+      );
+
+      const result = await retryTool
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(result.llmContent).toContain('was canceled');
+    });
+
     it('should interrupt URL elicitation retry when aborted while waiting', async () => {
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn().mockRejectedValueOnce({
-          code: -32042,
-          data: {
+        callTool: vi.fn().mockRejectedValueOnce(
+          createUrlElicitationRequiredError({
             url: 'https://example.com/auth',
             elicitationId: 'url-abort',
             message: 'Authorize to continue.',
-          },
-        }),
+          }),
+        ),
       };
       const retryTool = new DiscoveredMCPTool(
         mockCallableToolInstance,

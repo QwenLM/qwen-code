@@ -93,6 +93,78 @@ describe('elicitation helpers', () => {
       }),
     ).toEqual({ isValid: false, error: 'Select at least 2' });
   });
+
+  it('parses boolean strings explicitly', () => {
+    expect(validateElicitationInput('false', { type: 'boolean' })).toEqual({
+      isValid: true,
+      value: false,
+    });
+    expect(validateElicitationInput('1', { type: 'boolean' })).toEqual({
+      isValid: true,
+      value: true,
+    });
+    expect(validateElicitationInput('yes', { type: 'boolean' })).toEqual({
+      isValid: false,
+      error: 'Enter true or false',
+    });
+  });
+
+  it('rejects multi-select values outside the allowed options', () => {
+    expect(
+      validateElicitationInput(['read', 'admin'], {
+        type: 'array',
+        items: { enum: ['read', 'write'] },
+      }),
+    ).toEqual({ isValid: false, error: 'Invalid selection: admin' });
+
+    expect(
+      validateElicitationInput(['read', 'write'], {
+        type: 'array',
+        items: { enum: ['read', 'write'] },
+      }),
+    ).toEqual({ isValid: true, value: ['read', 'write'] });
+  });
+
+  it('requires numeric inputs to be fully numeric', () => {
+    expect(validateElicitationInput('42xyz', { type: 'integer' })).toEqual({
+      isValid: false,
+      error: 'Enter an integer',
+    });
+    expect(validateElicitationInput('12.5abc', { type: 'number' })).toEqual({
+      isValid: false,
+      error: 'Enter a number',
+    });
+    expect(validateElicitationInput('12.50', { type: 'number' })).toEqual({
+      isValid: true,
+      value: 12.5,
+    });
+  });
+
+  it('handles server-provided string patterns defensively', () => {
+    expect(
+      validateElicitationInput('OPS-42', {
+        type: 'string',
+        pattern: '^[A-Z]+-\\d+$',
+      }),
+    ).toEqual({ isValid: true, value: 'OPS-42' });
+
+    expect(
+      validateElicitationInput('ops-42', {
+        type: 'string',
+        pattern: '^[A-Z]+-\\d+$',
+      }),
+    ).toEqual({
+      isValid: false,
+      error: 'Does not match the required pattern',
+    });
+
+    expect(
+      validateElicitationInput('OPS-42', {
+        type: 'string',
+        pattern: '[',
+      }),
+    ).toEqual({ isValid: false, error: 'Invalid pattern' });
+  });
 });
 
 describe('registerElicitationHandler', () => {

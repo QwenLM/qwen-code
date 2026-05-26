@@ -443,6 +443,38 @@ describe('Server Config (config.ts)', () => {
       await expect(waitPromise).resolves.toBeUndefined();
     });
 
+    it('does not reuse a completion that already resolved a waiter', async () => {
+      vi.useFakeTimers();
+      const config = new Config(baseParams);
+      const waitPromise = config.waitForElicitationCompletion(
+        'test-server',
+        'elicitation-one-shot',
+        undefined,
+        100,
+      );
+
+      config.notifyElicitationCompletion({
+        serverName: 'test-server',
+        elicitationId: 'elicitation-one-shot',
+      });
+
+      await expect(waitPromise).resolves.toBeUndefined();
+
+      const secondWaitPromise = config
+        .waitForElicitationCompletion(
+          'test-server',
+          'elicitation-one-shot',
+          undefined,
+          100,
+        )
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(secondWaitPromise).resolves.toMatchObject({
+        name: 'TimeoutError',
+      });
+    });
+
     it('resolves immediately when completion arrived before waiting', async () => {
       const config = new Config(baseParams);
       config.notifyElicitationCompletion({

@@ -81,9 +81,7 @@ function getMcpClientCapabilities(enableUrlElicitationCapability = false) {
     : {};
 
   return {
-    roots: {
-      listChanged: true,
-    },
+    roots: {},
     elicitation,
   };
 }

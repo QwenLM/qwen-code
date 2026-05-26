@@ -741,9 +741,7 @@ describe('mcp-client', () => {
         },
         {
           capabilities: {
-            roots: {
-              listChanged: true,
-            },
+            roots: {},
             elicitation: {},
           },
         },
@@ -779,9 +777,7 @@ describe('mcp-client', () => {
         },
         {
           capabilities: {
-            roots: {
-              listChanged: true,
-            },
+            roots: {},
             elicitation: {
               form: {},
               url: {},

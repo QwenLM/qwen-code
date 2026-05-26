@@ -27,6 +27,7 @@ export type QueuedElicitationRequest = ElicitationRequestEvent & {
   completed?: boolean;
   respond: (result: ElicitResult) => void;
   dismiss: () => void;
+  cancel?: () => void;
 };
 
 interface Props {
@@ -495,6 +496,7 @@ const UrlElicitationDialog: React.FC<Props> = ({ event }) => {
   const [focused, setFocused] = useState<
     'accept' | 'decline' | 'open' | 'done' | 'cancel'
   >('accept');
+  const [openError, setOpenError] = useState<string | null>(null);
 
   useEffect(() => {
     const handleAbort = () => {
@@ -519,8 +521,31 @@ const UrlElicitationDialog: React.FC<Props> = ({ event }) => {
     }
   }, [event, event.completed, phase]);
 
-  const accept = () => {
-    void open(params.url);
+  const openRequestedUrl = async (): Promise<boolean> => {
+    const safetyError = getUrlSafetyError(params.url);
+    if (safetyError) {
+      setOpenError(safetyError);
+      return false;
+    }
+
+    try {
+      await open(params.url);
+      setOpenError(null);
+      return true;
+    } catch (error) {
+      setOpenError(
+        `Failed to open URL: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    }
+  };
+
+  const accept = async () => {
+    if (!(await openRequestedUrl())) {
+      return;
+    }
     event.respond({ action: 'accept' });
     setPhase('waiting');
     setFocused('open');
@@ -547,14 +572,15 @@ const UrlElicitationDialog: React.FC<Props> = ({ event }) => {
       }
       if (key.name === 'return') {
         if (phase === 'prompt') {
-          if (focused === 'accept') accept();
+          if (focused === 'accept') void accept();
           else {
             event.respond({ action: 'decline' });
             event.dismiss();
           }
         } else if (focused === 'open') {
-          void open(params.url);
+          void openRequestedUrl();
         } else if (focused === 'cancel') {
+          event.cancel?.();
           event.dismiss();
         } else {
           event.dismiss();
@@ -580,6 +606,11 @@ const UrlElicitationDialog: React.FC<Props> = ({ event }) => {
         </Text>
         {parsed.after}
       </Text>
+      {openError && (
+        <Box marginTop={1}>
+          <Text color={theme.status.error}>{openError}</Text>
+        </Box>
+      )}
       {phase === 'waiting' && (
         <Box marginTop={1}>
           <Text dimColor>Waiting for the server to confirm completion...</Text>
@@ -648,13 +679,33 @@ function parseUrl(url: string): {
 } {
   try {
     const parsed = new URL(url);
-    const index = url.indexOf(parsed.host);
+    if (!parsed.host) {
+      return { before: '', host: parsed.href, after: '' };
+    }
+    const userInfo = parsed.username
+      ? `${parsed.username}${parsed.password ? `:${parsed.password}` : ''}@`
+      : '';
     return {
-      before: url.slice(0, index),
+      before: `${parsed.protocol}//${userInfo}`,
       host: parsed.host,
-      after: url.slice(index + parsed.host.length),
+      after: `${parsed.pathname}${parsed.search}${parsed.hash}`,
     };
   } catch {
     return { before: '', host: url, after: '' };
   }
+}
+
+function getUrlSafetyError(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return 'The MCP server provided an invalid URL.';
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return 'Only http:// and https:// URLs can be opened automatically.';
+  }
+
+  return null;
 }

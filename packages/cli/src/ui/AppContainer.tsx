@@ -409,6 +409,12 @@ export const AppContainer = (props: AppContainerProps) => {
       });
     });
     return () => {
+      setElicitationRequests((previous) => {
+        for (const request of previous) {
+          request.respond({ action: 'cancel' });
+        }
+        return [];
+      });
       config.setElicitationHandler(undefined);
       config.setElicitationCompletionHandler(undefined);
     };

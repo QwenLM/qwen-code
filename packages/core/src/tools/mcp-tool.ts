@@ -18,6 +18,7 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { CallableTool, FunctionCall, Part } from '@google/genai';
+import { UrlElicitationRequiredError } from '@modelcontextprotocol/sdk/types.js';
 import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from '../utils/truncation.js';
@@ -26,7 +27,6 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('MCP_TOOL');
 
 type ToolParams = Record<string, unknown>;
-const URL_ELICITATION_REQUIRED_ERROR_CODE = -32042;
 const MAX_URL_ELICITATION_RETRIES = 3;
 
 interface UrlElicitationRetryRequest {
@@ -37,8 +37,8 @@ interface UrlElicitationRetryRequest {
 
 /**
  * Minimal interface for the raw MCP Client's callTool method.
- * This avoids a direct import of @modelcontextprotocol/sdk in this file,
- * keeping the dependency contained in mcp-client.ts.
+ * This avoids importing the full MCP Client type here; mcp-client.ts owns the
+ * concrete client lifecycle.
  */
 export interface McpDirectClient {
   callTool(
@@ -308,19 +308,41 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
 
     for (const elicitation of elicitations) {
-      const result = await handler({
-        serverName: this.serverName,
-        requestId: `${this.serverName}:${this.serverToolName}:url-retry:${retryCount}:${elicitation.elicitationId}`,
-        params: {
-          mode: 'url',
-          message: elicitation.message,
-          url: elicitation.url,
-          elicitationId: elicitation.elicitationId,
-        },
-        signal,
-      });
+      const waitAbortController = new AbortController();
+      let waitCanceledByUser = false;
+      const handleOuterAbort = () => {
+        waitAbortController.abort();
+      };
+      if (signal.aborted) {
+        waitAbortController.abort();
+      } else {
+        signal.addEventListener('abort', handleOuterAbort, { once: true });
+      }
+
+      let result: { action: 'accept' | 'decline' | 'cancel' };
+      try {
+        result = await handler({
+          serverName: this.serverName,
+          requestId: `${this.serverName}:${this.serverToolName}:url-retry:${retryCount}:${elicitation.elicitationId}`,
+          params: {
+            mode: 'url',
+            message: elicitation.message,
+            url: elicitation.url,
+            elicitationId: elicitation.elicitationId,
+          },
+          signal: waitAbortController.signal,
+          cancel: () => {
+            waitCanceledByUser = true;
+            waitAbortController.abort();
+          },
+        });
+      } catch (error) {
+        signal.removeEventListener('abort', handleOuterAbort);
+        throw error;
+      }
 
       if (result.action !== 'accept') {
+        signal.removeEventListener('abort', handleOuterAbort);
         return this.createMcpToolErrorResult(
           `URL elicitation for MCP tool '${this.serverToolName}' was ${result.action}.`,
         );
@@ -330,7 +352,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         await this.cliConfig.waitForElicitationCompletion(
           this.serverName,
           elicitation.elicitationId,
-          signal,
+          waitAbortController.signal,
         );
       } catch (waitError) {
         if (
@@ -341,7 +363,18 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
             `Timed out waiting for URL elicitation completion for MCP tool '${this.serverToolName}'.`,
           );
         }
+        if (
+          waitCanceledByUser &&
+          waitError instanceof DOMException &&
+          waitError.name === 'AbortError'
+        ) {
+          return this.createMcpToolErrorResult(
+            `URL elicitation wait for MCP tool '${this.serverToolName}' was canceled.`,
+          );
+        }
         throw waitError;
+      } finally {
+        signal.removeEventListener('abort', handleOuterAbort);
       }
     }
 
@@ -767,57 +800,17 @@ function getDisplayFromParts(parts: Part[]): string {
 function extractUrlElicitationsFromError(
   error: unknown,
 ): UrlElicitationRetryRequest[] {
-  const record = asRecord(error);
-  const nestedError = asRecord(record?.['error']);
-  const code = nestedError?.['code'] ?? record?.['code'];
-  if (code !== URL_ELICITATION_REQUIRED_ERROR_CODE) {
+  if (!(error instanceof UrlElicitationRequiredError)) {
     return [];
   }
 
-  const data = asRecord(nestedError?.['data']) ?? asRecord(record?.['data']);
-  if (!data) {
-    return [];
-  }
-
-  const rawElicitations = Array.isArray(data['elicitations'])
-    ? data['elicitations']
-    : Array.isArray(data['elicitation'])
-      ? data['elicitation']
-      : [data['elicitation'] ?? data];
-
-  return rawElicitations.flatMap((raw): UrlElicitationRetryRequest[] => {
-    const candidate = asRecord(raw);
-    if (!candidate) {
-      return [];
-    }
-    const url = getString(candidate['url']);
-    const elicitationId =
-      getString(candidate['elicitationId']) ??
-      getString(candidate['elicitation_id']) ??
-      getString(candidate['id']);
-    if (!url || !elicitationId) {
-      return [];
-    }
-    return [
-      {
-        url,
-        elicitationId,
-        message:
-          getString(candidate['message']) ??
-          'Complete the requested URL interaction to continue.',
-      },
-    ];
-  });
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function getString(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
+  return error.elicitations.map((elicitation) => ({
+    url: elicitation.url,
+    elicitationId: elicitation.elicitationId,
+    message:
+      elicitation.message ??
+      'Complete the requested URL interaction to continue.',
+  }));
 }
 
 /** Visible for testing */

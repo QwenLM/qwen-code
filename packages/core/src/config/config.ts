@@ -3130,11 +3130,16 @@ export class Config {
       event.elicitationId,
     );
     const listeners = this.elicitationCompletionListeners.get(key);
-    this.rememberCompletedElicitation(key);
-    if (!listeners) {
+    if (!listeners || listeners.size === 0) {
+      if (!this.completedElicitations.has(key)) {
+        this.rememberCompletedElicitation(key);
+      }
       return;
     }
+
     this.elicitationCompletionListeners.delete(key);
+    this.completedElicitations.delete(key);
+    this.clearCompletedElicitationTimer(key);
     for (const listener of listeners) {
       listener();
     }
