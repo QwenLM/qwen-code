@@ -42,6 +42,8 @@ interface ServeArgs {
   'mcp-client-budget'?: number;
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
   'allow-origin'?: string[];
+  'prompt-deadline-ms'?: number;
+  'writer-idle-timeout-ms'?: number;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -150,17 +152,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         array: true,
         description:
-          'T2.4 (#4514). Cross-origin allowlist for browser webui clients. ' +
-          'Repeatable; each value must be a canonical URL origin ' +
-          '(`<scheme>://<host>[:<port>]`, no trailing slash) or `*` for any ' +
-          'origin (loud warning; boot refuses if no bearer token is ' +
-          'configured. Recommended: pair with --require-auth on loopback so ' +
-          '/health and /demo are also bearer-gated). When unset, ' +
-          'the daemon rejects every request carrying an `Origin` header with ' +
-          "403 (today's behavior). Matched origins receive proper CORS " +
-          'response headers; unmatched still 403. Example: `--allow-origin ' +
-          'http://localhost:3000 --allow-origin http://localhost:5173`. ' +
-          'Pre-flight via `caps.features.allow_origin`.',
+          'T2.4 (#4514). Cross-origin allowlist for browser webui clients.',
+      })
+      .option('prompt-deadline-ms', {
+        type: 'number',
+        description:
+          'T2.9 (#4514). Server-side wallclock cap on POST /session/:id/prompt (ms). ' +
+          'Falls back to QWEN_SERVE_PROMPT_DEADLINE_MS. Positive integer.',
+      })
+      .option('writer-idle-timeout-ms', {
+        type: 'number',
+        description:
+          'T2.9 (#4514). Per-SSE-connection idle deadline (ms). ' +
+          'Falls back to QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS. Positive integer.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
     if (!argv['http-bridge']) {
@@ -236,11 +240,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requireAuth: argv['require-auth'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
-        // T2.4 (#4514). Pass through verbatim; runQwenServe re-runs
-        // `parseAllowOriginPatterns` at boot so a malformed entry is
-        // rejected before the listener binds.
         ...(argv['allow-origin'] && argv['allow-origin'].length > 0
           ? { allowOrigins: argv['allow-origin'] }
+          : {}),
+        ...(argv['prompt-deadline-ms'] !== undefined
+          ? { promptDeadlineMs: argv['prompt-deadline-ms'] }
+          : {}),
+        ...(argv['writer-idle-timeout-ms'] !== undefined
+          ? { writerIdleTimeoutMs: argv['writer-idle-timeout-ms'] }
           : {}),
       });
     } catch (err) {

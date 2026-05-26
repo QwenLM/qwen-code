@@ -126,4 +126,17 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(typeof Public.createDaemonAuthState).toBe('function');
     expect(typeof Public.DEVICE_FLOW_EXPIRY_GRACE_MS).toBe('number');
   });
+
+  it('mirrors the T2.9 errorKind additions in DAEMON_ERROR_KINDS (issue #4514)', () => {
+    // The SDK-side `DAEMON_ERROR_KINDS` is hand-mirrored from the
+    // serve-side `SERVE_ERROR_KINDS` in `acp-bridge/src/status.ts`.
+    // T2.9 added two kinds (`prompt_deadline_exceeded` for the
+    // POST /session/:id/prompt 504, `writer_idle_timeout` for the
+    // terminal SSE client_evicted frame). Lock them so a future PR
+    // that bumps the serve list without touching the SDK list fails
+    // here instead of shipping a typed-on-server-but-unknown-on-SDK
+    // mismatch.
+    expect(Public.DAEMON_ERROR_KINDS).toContain('prompt_deadline_exceeded');
+    expect(Public.DAEMON_ERROR_KINDS).toContain('writer_idle_timeout');
+  });
 });
