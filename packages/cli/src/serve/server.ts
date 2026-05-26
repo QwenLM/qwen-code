@@ -11,10 +11,12 @@ import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { APPROVAL_MODES, TrustGateError } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
+  allowOriginCors,
   bearerAuth,
   createMutationGate,
   denyBrowserOriginCors,
   hostAllowlist,
+  parseAllowOriginPatterns,
 } from './auth.js';
 import {
   DeviceFlowRegistry,
@@ -512,7 +514,29 @@ export function createServeApp(
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
   // gets a full 10MB `JSON.parse` before the 401 fires — a trivially
   // amplified CPU/memory cost from any wrong-token client.
-  app.use(denyBrowserOriginCors);
+  //
+  // T2.4 (issue #4514): when `--allow-origin` is configured, install the
+  // allowlist middleware instead of the deny-wall. The allowlist owns
+  // both halves of the policy (matched → CORS headers + pass-through or
+  // 204 preflight; unmatched → 403 with the same error envelope as the
+  // wall). When `--allow-origin` is empty/undefined, the deny-wall stays
+  // installed. Pattern parsing happens in `runQwenServe.ts` for validation;
+  // here we still keep the wildcard/no-token invariant for embedded
+  // callers that construct the app directly.
+  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
+    const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins);
+    if (parsedAllowOrigins.allowAny && !opts.token) {
+      throw new Error(
+        `Refusing to start with --allow-origin '*' but no bearer token ` +
+          `configured. '*' admits any cross-origin browser to the API; ` +
+          `without a token, any local page can drive the daemon. Set a ` +
+          `token or list specific origins instead of '*'.`,
+      );
+    }
+    app.use(allowOriginCors(parsedAllowOrigins));
+  } else {
+    app.use(denyBrowserOriginCors);
+  }
   app.use(hostAllowlist(opts.hostname, getPort));
 
   // --- Demo page: mirrors the `/health` loopback-gating pattern.
@@ -656,6 +680,10 @@ export function createServeApp(
       features: getAdvertisedServeFeatures(undefined, {
         requireAuth: opts.requireAuth === true,
         mcpPoolActive: opts.mcpPoolActive !== false,
+        // T2.4 (issue #4514): advertise `allow_origin` iff the daemon
+        // was booted with at least one `--allow-origin` pattern.
+        allowOriginActive:
+          opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
       }),
       modelServices: [],
       // #3803 §02: surface the bound workspace so clients can detect

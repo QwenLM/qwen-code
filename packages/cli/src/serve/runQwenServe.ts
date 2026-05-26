@@ -19,6 +19,7 @@ import {
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
+import { parseAllowOriginPatterns } from './auth.js';
 import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
@@ -356,6 +357,46 @@ export async function runQwenServe(
       `Refusing to start with --require-auth set but no bearer token ` +
         `configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or omit ` +
         `--require-auth to keep the loopback developer default.`,
+    );
+  }
+
+  // T2.4 (issue #4514). Validate `--allow-origin` patterns at boot so
+  // operators discover typos before the daemon advertises
+  // `allow_origin` to clients. Each entry must be either `*` or a value
+  // that round-trips through `new URL(...).origin` — see
+  // `parseAllowOriginPatterns` JSDoc for the strict-by-intent rationale.
+  // The parsed `ParsedAllowOriginPatterns` is then re-derived in
+  // `createServeApp` to avoid threading an extra option shape through;
+  // re-parsing is O(n) over operator-listed patterns and only happens
+  // once at boot.
+  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
+    // `InvalidAllowOriginPatternError` already names the bad pattern
+    // and the canonical form; surface it verbatim.
+    const parsed = parseAllowOriginPatterns(opts.allowOrigins);
+    // `*` admits cross-origin requests from any browser tab on the
+    // host. On a token-less loopback default that's a wide-open API
+    // surface — any page (https://evil.example.com, attacker-controlled
+    // ad-frame) can read every route. Refuse to start so operators
+    // don't ship this combination by accident. Mirrors the
+    // `--require-auth + no token` boot-refusal above. A token (any
+    // source: --token, env, --require-auth) makes the bearer the
+    // security boundary, so `*` is acceptable under that posture.
+    if (parsed.allowAny && !token) {
+      throw new Error(
+        `Refusing to start with --allow-origin '*' but no bearer token ` +
+          `configured. '*' admits any cross-origin browser to the API; ` +
+          `without a token, any local page can drive the daemon. Set ` +
+          `${QWEN_SERVER_TOKEN_ENV} or pass --token, or list specific ` +
+          `origins instead of '*'.`,
+      );
+    }
+    writeStderrLine(
+      `qwen serve: --allow-origin: ${opts.allowOrigins.join(', ')}` +
+        (parsed.allowAny
+          ? ' (WARNING: `*` admits any cross-origin browser — bearer ' +
+            'token gates API routes; /health and /demo remain pre-auth ' +
+            'on loopback unless --require-auth is set)'
+          : ''),
     );
   }
 

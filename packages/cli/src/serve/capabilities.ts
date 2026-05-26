@@ -201,6 +201,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // defaults (no flag) omit the tag, preserving the bit-for-bit shape
   // older clients expect.
   require_auth: { since: 'v1' },
+  // T2.4 (issue #4514). Daemon was booted with `--allow-origin <pattern>`
+  // (at least one entry, including the `*` literal). Advertised
+  // CONDITIONALLY — only when the flag is set — so browser SDK clients
+  // can pre-flight whether the daemon will honor their cross-origin
+  // request before issuing it (and parsing a 403). The configured
+  // pattern list is intentionally NOT echoed in the capabilities
+  // envelope — browser webui knows its own origin, and surfacing the
+  // list would let an unauthenticated `/capabilities` reader
+  // enumerate every trusted origin, which is useful recon for a
+  // misconfigured deployment.
+  allow_origin: { since: 'v1' },
   // Issue #4175 PR 21. Daemon exposes the device-flow auth surface
   // (`POST /workspace/auth/device-flow`, GET/DELETE on `/:id`, and
   // `GET /workspace/auth/status`). Advertised UNCONDITIONALLY: the
@@ -239,6 +250,13 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
 export interface AdvertiseFeatureToggles {
   requireAuth?: boolean;
   mcpPoolActive?: boolean;
+  /**
+   * T2.4 (issue #4514). `true` iff the daemon booted with at least one
+   * `--allow-origin <pattern>` entry. Drives advertisement of the
+   * `allow_origin` capability tag so SDK / webui clients can pre-flight
+   * the cross-origin path.
+   */
+  allowOriginActive?: boolean;
 }
 
 /**
@@ -285,6 +303,11 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   // valid` without per-tag pre-flighting.
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
+  // T2.4 (issue #4514): the `allow_origin` tag tracks whether the
+  // daemon was booted with at least one `--allow-origin` pattern. SDK
+  // clients pre-flight on it before issuing a cross-origin request
+  // they would otherwise expect to be 403'd by `denyBrowserOriginCors`.
+  ['allow_origin', (toggles) => toggles.allowOriginActive === true],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

@@ -178,6 +178,10 @@ const EXPECTED_REGISTERED_FEATURES = [
   'mcp_workspace_pool',
   'mcp_pool_restart',
   'require_auth',
+  // T2.4 (#4514). Conditional — advertised only when
+  // `--allow-origin <pattern>` is configured. Registry-declaration
+  // order puts it after `require_auth` (latest conditional tag added).
+  'allow_origin',
   'auth_device_flow',
   'permission_mediation',
 ] as const;
@@ -945,6 +949,24 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'allow_origin') {
+          // T2.4 (#4514): conditional on `allowOriginActive`, which the
+          // server.ts call site computes from
+          // `opts.allowOrigins?.length > 0`. Predicate is default-OFF
+          // (matches `require_auth` / pool pattern) so a baseline
+          // daemon without `--allow-origin` keeps today's bit-for-bit
+          // advertisement shape.
+          expect(predicate({ allowOriginActive: true })).toBe(true);
+          expect(predicate({ allowOriginActive: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { allowOriginActive: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         // Future conditional tag. Authors must add a branch above with
         // the toggle field that drives this predicate. Failing here is
         // intentional: it forces the new conditional tag to ship with a
@@ -1488,6 +1510,7 @@ describe('createServeApp', () => {
         .set('Origin', 'https://evil.example.com');
       expect(res.status).toBe(403);
       expect(res.body).toEqual({ error: 'Request denied by CORS policy' });
+      expect(res.headers['vary']).toBe('Origin');
     });
 
     it('accepts requests with no Origin header (CLI/SDK clients)', async () => {
@@ -3847,6 +3870,38 @@ describe('runQwenServe', () => {
     ).rejects.toThrow(/--require-auth/);
   });
 
+  it("refuses to start with --allow-origin '*' on loopback when no token is configured", async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        allowOrigins: ['*'],
+      }),
+    ).rejects.toThrow(/--allow-origin '\*'/);
+  });
+
+  it("starts with --allow-origin '*' when a token is configured", async () => {
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      token: 'secret',
+      allowOrigins: ['*'],
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Origin: 'https://anywhere.example.com' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'https://anywhere.example.com',
+    );
+    expect(res.headers.get('access-control-expose-headers')).toBe(
+      'Retry-After',
+    );
+  });
+
   // PR 14 fix (review #4247): runQwenServe is the documented embedded
   // entry point, so budget validation must live here, not just in the
   // yargs CLI handler. Embedded callers (other tools wrapping the
@@ -5270,6 +5325,172 @@ describe('same-origin Origin-stripping middleware', () => {
       .set('Host', `127.0.0.1:${baseOpts.port}`)
       .set('Origin', 'http://[::1]:4170');
     expect(res.status).not.toBe(403);
+  });
+});
+
+describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
+  // When `--allow-origin` is unset, today's denyBrowserOriginCors wall
+  // stays installed and matched-Origin requests get 403. The existing
+  // tests above already cover that path; this block exercises the
+  // allowlist-installed path.
+  const allowedOpts = {
+    ...baseOpts,
+    allowOrigins: ['http://localhost:3000', 'http://localhost:5173'],
+  };
+
+  it('matched origin gets 200 + CORS response headers (GET /health)', async () => {
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:3000');
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://localhost:3000',
+    );
+    expect(res.headers['vary']).toBe('Origin');
+    expect(res.headers['access-control-allow-methods']).toMatch(/POST/);
+    expect(res.headers['access-control-allow-headers']).toMatch(
+      /Authorization/,
+    );
+    expect(res.headers['access-control-max-age']).toBe('86400');
+    expect(res.headers['access-control-expose-headers']).toBe('Retry-After');
+  });
+
+  it('OPTIONS preflight returns 204 + CORS headers with no body', async () => {
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .options('/session/foo/prompt')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:5173')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'authorization,content-type');
+    expect(res.status).toBe(204);
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://localhost:5173',
+    );
+    expect(res.headers['access-control-allow-methods']).toMatch(/POST/);
+    expect(res.headers['access-control-expose-headers']).toBe('Retry-After');
+    expect(res.text).toBe('');
+  });
+
+  it('mismatched origin still gets 403 with the same error envelope as denyBrowserOriginCors', async () => {
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'https://evil.example.com');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Request denied by CORS policy');
+    // Reject path must not leak CORS headers — browsers would ignore
+    // them anyway, but emitting them advertises the allowlist size
+    // indirectly via header presence.
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    expect(res.headers['vary']).toBe('Origin');
+  });
+
+  it('CLI/SDK callers with no Origin header pass through unchanged', async () => {
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    expect(res.headers['vary']).toBeUndefined();
+  });
+
+  it('advertises `allow_origin` capability tag when configured', async () => {
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body.features).toContain('allow_origin');
+  });
+
+  it('does NOT advertise `allow_origin` when `--allow-origin` is unset (regression anchor for the conditional tag)', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body.features).not.toContain('allow_origin');
+  });
+
+  it('rejects embedded `*` allowlist without a token', () => {
+    const wildOpts = { ...baseOpts, allowOrigins: ['*'] };
+    expect(() =>
+      createServeApp(wildOpts, () => 4170, {
+        bridge: fakeBridge(),
+      }),
+    ).toThrow(/--allow-origin '\*'/);
+  });
+
+  it('`*` pattern with a token admits any cross-origin request', async () => {
+    const wildOpts = { ...baseOpts, token: 'secret', allowOrigins: ['*'] };
+    const app = createServeApp(wildOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'https://anywhere.example.com');
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'https://anywhere.example.com',
+    );
+  });
+
+  it('demo self-origin shim still works when `--allow-origin` is set (loopback strip runs first)', async () => {
+    // Regression anchor: the loopback-self-origin shim that strips the
+    // Origin header for matching addresses must continue working even
+    // when the new allowlist middleware is installed. Without this,
+    // browsers hitting the daemon's own port from the same port would
+    // need to be explicitly added to `--allow-origin` despite being a
+    // same-origin hit.
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', `http://127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    // Origin was stripped by the shim before reaching CORS, so no
+    // CORS response headers are set.
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  it('empty allowOrigins array behaves identically to undefined (install path unchanged)', async () => {
+    // Regression anchor for the `opts.allowOrigins && opts.allowOrigins.length > 0`
+    // gate. An empty array must NOT install the allowlist middleware —
+    // otherwise an embedded caller that passes `allowOrigins: []` would
+    // silently leave the daemon with no Origin protection.
+    const emptyOpts = { ...baseOpts, allowOrigins: [] };
+    const app = createServeApp(emptyOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const cap = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(cap.body.features).not.toContain('allow_origin');
+    const blocked = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:3000');
+    expect(blocked.status).toBe(403);
   });
 });
 

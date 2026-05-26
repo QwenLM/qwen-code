@@ -152,6 +152,31 @@ export interface ServeOptions {
    * via `runQwenServe.ts`.
    */
   mcpPoolActive?: boolean;
+  /**
+   * T2.4 (issue #4514). Cross-origin allowlist for browser webui
+   * deployments. Each entry is either the `*` literal (any origin
+   * allowed, advertised loudly in the boot breadcrumb) or a canonical
+   * URL origin (`<scheme>://<host>[:<port>]`, no trailing slash / path /
+   * userinfo / query). When at least one pattern is configured, the
+   * daemon installs `allowOriginCors` instead of `denyBrowserOriginCors`
+   * — matched cross-origin requests get proper CORS response headers
+   * (`Access-Control-Allow-Origin: <echoed>`, `Vary: Origin`,
+   * standard methods / headers / max-age, exposed `Retry-After`),
+   * unmatched cross-origin requests still get a 403 with the same error
+   * envelope as today.
+   *
+   * Empty / undefined preserves the default wall (any `Origin` header →
+   * 403 from `denyBrowserOriginCors`). Boot validates each entry through
+   * `parseAllowOriginPatterns` in
+   * `packages/cli/src/serve/auth.ts`; malformed entries throw
+   * `InvalidAllowOriginPatternError` and refuse to start.
+   *
+   * Loopback self-hits are unaffected — the demo-page Origin-strip
+   * shim (`server.ts` near `cachedSelfOrigins`) runs first and removes
+   * the `Origin` header for self-loopback addresses, so neither the
+   * old wall nor the new allowlist needs to know about them.
+   */
+  allowOrigins?: string[];
 }
 
 /**
