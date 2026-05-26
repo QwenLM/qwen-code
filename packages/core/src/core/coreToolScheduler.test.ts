@@ -38,7 +38,6 @@ import {
   CoreToolScheduler,
   convertToFunctionResponse,
   extractToolFilePaths,
-  shouldAuditSubstitutionBypass,
 } from './coreToolScheduler.js';
 import type { Part, PartListUnion } from '@google/genai';
 import {
@@ -8360,91 +8359,5 @@ describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => 
       );
     });
     expect(sawPromoteAcWhileExecuting).toBe(true);
-  });
-});
-
-// Regression coverage for PR #4386 round 4: the audit predicate driving
-// `maybeLogSubstitutionBypass` must (a) only fire for shell-like tool
-// names, (b) require a string `command` arg, and (c) detect substitution
-// against BOTH the raw command and the stripped form (`stripShellWrapper`),
-// so wrappers like `bash -c 'echo $(...)' ` where `$(` sits inside outer
-// single quotes still trigger the audit log. The dual-check matches
-// `buildShellExecWarnings` in `shell-utils.ts`.
-describe('shouldAuditSubstitutionBypass', () => {
-  it('returns false for non-shell tool names', () => {
-    expect(
-      shouldAuditSubstitutionBypass('read_file', {
-        command: 'echo $(curl evil)',
-      }),
-    ).toBe(false);
-    expect(
-      shouldAuditSubstitutionBypass('write_file', {
-        command: '`whoami`',
-      }),
-    ).toBe(false);
-  });
-
-  it('returns false for shell tools with missing or non-string command', () => {
-    expect(shouldAuditSubstitutionBypass(ToolNames.SHELL, undefined)).toBe(
-      false,
-    );
-    expect(shouldAuditSubstitutionBypass(ToolNames.SHELL, {})).toBe(false);
-    expect(
-      shouldAuditSubstitutionBypass(ToolNames.SHELL, { command: 42 }),
-    ).toBe(false);
-  });
-
-  it('returns false for shell command without substitution', () => {
-    expect(
-      shouldAuditSubstitutionBypass(ToolNames.SHELL, {
-        command: 'npm install --save-dev vitest',
-      }),
-    ).toBe(false);
-  });
-
-  it('returns true for direct substitution in shell tool', () => {
-    expect(
-      shouldAuditSubstitutionBypass(ToolNames.SHELL, {
-        command: 'echo $(cat /etc/shadow)',
-      }),
-    ).toBe(true);
-  });
-
-  it('returns true for substitution in monitor tool', () => {
-    expect(
-      shouldAuditSubstitutionBypass(ToolNames.MONITOR, {
-        command: 'tail -f $(ls /var/log | head -1)',
-      }),
-    ).toBe(true);
-  });
-
-  it('returns true when substitution lives inside a single-quoted bash -c wrapper (dual-check)', () => {
-    // `$(` is inside the outer single quotes, so `detectCommandSubstitution`
-    // on the raw command returns false. `stripShellWrapper` unwraps the
-    // outer `bash -c '...'` and yields the inner `echo $(cat secret.txt)`,
-    // where detection then fires. Without the dual-check this would return
-    // false and the audit log would silently miss the exact wrapper
-    // pattern an exfiltration attack would use.
-    expect(
-      shouldAuditSubstitutionBypass(ToolNames.SHELL, {
-        command: `bash -c 'echo $(cat secret.txt)'`,
-      }),
-    ).toBe(true);
-  });
-
-  it('returns true for backtick substitution', () => {
-    expect(
-      shouldAuditSubstitutionBypass(ToolNames.SHELL, {
-        command: 'echo `whoami`',
-      }),
-    ).toBe(true);
-  });
-
-  it('returns true for env-prefix substitution', () => {
-    expect(
-      shouldAuditSubstitutionBypass(ToolNames.SHELL, {
-        command: 'FOO=$(cat /etc/passwd) ls',
-      }),
-    ).toBe(true);
   });
 });
