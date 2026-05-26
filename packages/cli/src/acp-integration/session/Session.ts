@@ -293,6 +293,13 @@ export class Session implements SessionContext {
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
 
+  // Set true in dispose(). Guards #drainCronQueue and #drainNotificationQueue
+  // against the race where #drainNotificationQueue's finally block kicks off
+  // #drainCronQueue after the session has already been disposed (e.g. /clear
+  // or session reload), which would otherwise execute orphaned cron prompts
+  // on a session whose registries are already unregistered.
+  private disposed = false;
+
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
   private readonly toolCallEmitter: ToolCallEmitter;
@@ -347,7 +354,9 @@ export class Session implements SessionContext {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.notificationQueue = [];
+    this.cronQueue = [];
     this.notificationAbortController?.abort();
     this.notificationAbortController = null;
     this.notificationProcessing = false;
@@ -1421,6 +1430,7 @@ export class Session implements SessionContext {
    * as a mutex to prevent concurrent access to the chat.
    */
   async #drainCronQueue(): Promise<void> {
+    if (this.disposed) return;
     if (this.cronProcessing) return;
     // Don't process cron while a user prompt is active — the queue will be
     // drained after the prompt completes (see end of prompt()).
@@ -1648,6 +1658,7 @@ export class Session implements SessionContext {
   }
 
   async #drainNotificationQueue(): Promise<void> {
+    if (this.disposed) return;
     if (this.notificationProcessing) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;

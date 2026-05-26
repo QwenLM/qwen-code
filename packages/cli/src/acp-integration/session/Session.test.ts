@@ -3513,4 +3513,57 @@ describe('Session', () => {
       });
     });
   });
+
+  describe('dispose', () => {
+    type SessionInternals = {
+      notificationQueue: unknown[];
+      cronQueue: string[];
+      notificationProcessing: boolean;
+      disposed: boolean;
+    };
+
+    it('clears notification and cron queues, marks disposed, and unregisters callbacks', () => {
+      const internals = session as unknown as SessionInternals;
+      internals.notificationQueue.push({ taskId: 'stale' });
+      internals.cronQueue.push('stale-cron-prompt');
+      internals.notificationProcessing = true;
+      expect(internals.disposed).toBe(false);
+
+      session.dispose();
+
+      expect(internals.disposed).toBe(true);
+      expect(internals.notificationQueue).toHaveLength(0);
+      expect(internals.cronQueue).toHaveLength(0);
+      expect(internals.notificationProcessing).toBe(false);
+      expect(
+        mockBackgroundTaskRegistry.setNotificationCallback,
+      ).toHaveBeenLastCalledWith(undefined);
+      expect(
+        mockMonitorRegistry.setNotificationCallback,
+      ).toHaveBeenLastCalledWith(undefined);
+      expect(
+        mockBackgroundShellRegistry.setNotificationCallback,
+      ).toHaveBeenLastCalledWith(undefined);
+    });
+
+    it('is idempotent — repeated dispose() calls do not throw or re-register', () => {
+      const internals = session as unknown as SessionInternals;
+      session.dispose();
+      const callsAfterFirst =
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.length;
+
+      expect(() => session.dispose()).not.toThrow();
+      expect(internals.disposed).toBe(true);
+      expect(internals.notificationQueue).toHaveLength(0);
+      expect(internals.cronQueue).toHaveLength(0);
+      // The second dispose still unregisters (passes undefined again), which
+      // is harmless. We only care that no surprise re-registration occurs.
+      const last =
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(-1);
+      expect(last?.[0]).toBeUndefined();
+      expect(
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.length,
+      ).toBeGreaterThanOrEqual(callsAfterFirst);
+    });
+  });
 });
