@@ -93,41 +93,5 @@ export function agentTools(state: BridgeState): any[] {
         return formatJsonResult({ ok: true, sessionId });
       }),
     ),
-
-    tool(
-      'session_set_model',
-      'Switch the active model for a session.',
-      {
-        model_id: z.string().describe('Model ID to switch to.'),
-        session_id: z
-          .string()
-          .optional()
-          .describe('Session ID. Uses default session if omitted.'),
-      },
-      handler(async (args) => {
-        const sessionId = resolveSessionId(state, args.session_id);
-        const result = await state.client.setSessionModel(
-          sessionId,
-          args.model_id,
-        );
-        return formatJsonResult(result);
-      }),
-    ),
-
-    tool(
-      'session_context',
-      'Get the current session model/mode/config state.',
-      {
-        session_id: z
-          .string()
-          .optional()
-          .describe('Session ID. Uses default session if omitted.'),
-      },
-      handler(async (args) => {
-        const sessionId = resolveSessionId(state, args.session_id);
-        const result = await state.client.sessionContext(sessionId);
-        return formatJsonResult(result);
-      }),
-    ),
   ];
 }

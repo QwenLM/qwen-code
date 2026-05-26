@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { tool } from '../../tool.js';
 import { formatJsonResult } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
-import { handler, daemonFetch } from '../types.js';
+import { handler } from '../types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function workspaceReadTools(state: BridgeState): any[] {
@@ -56,7 +56,7 @@ export function workspaceReadTools(state: BridgeState): any[] {
         path: z.string().describe('File path to stat.'),
       },
       handler(async (args) => {
-        const result = await daemonFetch(state, '/stat', { path: args.path });
+        const result = await state.client.fileStat(args.path);
         return formatJsonResult(result);
       }),
     ),
@@ -68,7 +68,7 @@ export function workspaceReadTools(state: BridgeState): any[] {
         path: z.string().describe('Directory path to list.'),
       },
       handler(async (args) => {
-        const result = await daemonFetch(state, '/list', { path: args.path });
+        const result = await state.client.dirList(args.path);
         return formatJsonResult(result);
       }),
     ),
@@ -77,10 +77,12 @@ export function workspaceReadTools(state: BridgeState): any[] {
       'glob',
       'Find files matching a glob pattern in the workspace (max 5000 results).',
       {
-        pattern: z.string().describe('Glob pattern (e.g. "**/*.ts", "src/**/*.js").'),
+        pattern: z
+          .string()
+          .describe('Glob pattern (e.g. "**/*.ts", "src/**/*.js").'),
       },
       handler(async (args) => {
-        const result = await daemonFetch(state, '/glob', { pattern: args.pattern });
+        const result = await state.client.glob(args.pattern);
         return formatJsonResult(result);
       }),
     ),
@@ -89,45 +91,35 @@ export function workspaceReadTools(state: BridgeState): any[] {
       'workspace_mcp_status',
       'Get MCP server status including discovery state, server list, budgets.',
       {},
-      handler(async () => {
-        return formatJsonResult(await state.client.workspaceMcp());
-      }),
+      handler(async () => formatJsonResult(await state.client.workspaceMcp())),
     ),
 
     tool(
       'workspace_skills',
       'List available skills in the workspace.',
       {},
-      handler(async () => {
-        return formatJsonResult(await state.client.workspaceSkills());
-      }),
+      handler(async () => formatJsonResult(await state.client.workspaceSkills())),
     ),
 
     tool(
       'workspace_providers',
       'Get model provider status including current provider and available models.',
       {},
-      handler(async () => {
-        return formatJsonResult(await state.client.workspaceProviders());
-      }),
+      handler(async () => formatJsonResult(await state.client.workspaceProviders())),
     ),
 
     tool(
       'workspace_env',
       'Get daemon runtime environment snapshot (platform, sandbox, proxy, env var presence). Never leaks secret values.',
       {},
-      handler(async () => {
-        return formatJsonResult(await state.client.workspaceEnv());
-      }),
+      handler(async () => formatJsonResult(await state.client.workspaceEnv())),
     ),
 
     tool(
       'workspace_preflight',
       'Run readiness checks. Daemon-level cells always populated; ACP-level cells show not_started when idle.',
       {},
-      handler(async () => {
-        return formatJsonResult(await state.client.workspacePreflight());
-      }),
+      handler(async () => formatJsonResult(await state.client.workspacePreflight())),
     ),
   ];
 }

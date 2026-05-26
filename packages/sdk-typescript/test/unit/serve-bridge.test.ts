@@ -376,19 +376,17 @@ describe('serve-bridge', () => {
     });
 
     describe('agent tools', () => {
-      it('should register all 4 agent tools', async () => {
+      it('should register all 2 agent tools', async () => {
         const { state } = makeMockState();
         const { agentTools } = await import(
           '../../src/daemon-mcp/serve-bridge/tools/agent.js'
         );
         const tools = agentTools(state);
-        expect(tools).toHaveLength(4);
+        expect(tools).toHaveLength(2);
 
         const names = tools.map((t: { name: string }) => t.name);
         expect(names).toContain('prompt');
         expect(names).toContain('prompt_cancel');
-        expect(names).toContain('session_set_model');
-        expect(names).toContain('session_context');
       });
     });
 

@@ -554,6 +554,45 @@ export class DaemonClient {
     );
   }
 
+  async fileStat(filePath: string): Promise<unknown> {
+    const url = new URL(`${this.baseUrl}/stat`);
+    url.searchParams.set('path', filePath);
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /stat');
+        return (await res.json()) as unknown;
+      },
+    );
+  }
+
+  async dirList(dirPath: string): Promise<unknown> {
+    const url = new URL(`${this.baseUrl}/list`);
+    url.searchParams.set('path', dirPath);
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /list');
+        return (await res.json()) as unknown;
+      },
+    );
+  }
+
+  async glob(pattern: string): Promise<unknown> {
+    const url = new URL(`${this.baseUrl}/glob`);
+    url.searchParams.set('pattern', pattern);
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /glob');
+        return (await res.json()) as unknown;
+      },
+    );
+  }
+
   async writeWorkspaceFile(
     req: DaemonWorkspaceFileWriteRequest,
     clientId?: string,
