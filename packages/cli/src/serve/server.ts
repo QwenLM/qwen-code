@@ -1943,6 +1943,71 @@ export function createServeApp(
     },
   );
 
+  // T2.8 (#4514): Add a runtime MCP server. Validates body.name +
+  // body.config shape, forwards to HttpAcpBridge.addRuntimeMcpServer.
+  // Typed ACP errors (budget-exceeded, spawn-failed, invalid-config) are
+  // propagated via sendBridgeError with errorKind-based HTTP status mapping.
+  app.post(
+    '/workspace/mcp/servers',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const body = safeBody(req);
+      const name = body['name'];
+      // Validate name: must be non-empty string, alphanumeric + _ and -
+      if (typeof name !== 'string' || name.length === 0) {
+        res.status(400).json({
+          error: 'Server name is required and must be a non-empty string',
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      if (name.length > MAX_SERVER_NAME_LENGTH) {
+        res.status(400).json({
+          error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+        res.status(400).json({
+          error:
+            'Server name must contain only alphanumeric characters, underscores, and hyphens',
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      // Validate config: must be a non-null object
+      const config = body['config'];
+      if (
+        typeof config !== 'object' ||
+        config === null ||
+        Array.isArray(config)
+      ) {
+        res.status(400).json({
+          error: '`config` must be a non-null object',
+          code: 'missing_required_field',
+          field: 'config',
+        });
+        return;
+      }
+      // Validate client identity
+      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
+      if (clientId === null) return;
+      try {
+        const result = await bridge.addRuntimeMcpServer(
+          name,
+          config as Record<string, unknown>,
+          clientId ?? '',
+        );
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /workspace/mcp/servers',
+        });
+      }
+    },
+  );
+
   app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
     // #4175 Wave 4 PR 17. Scaffold-only init: the bridge writes an
     // empty QWEN.md without invoking the LLM. Default refuses
@@ -3360,6 +3425,57 @@ function sendBridgeErrorImpl(
       requestedAction: err.requestedAction,
     });
     return;
+  }
+  // T2.8 (#4514): errors from the ACP child with `data.errorKind` carry
+  // structured error semantics. Map known kinds to stable HTTP status
+  // codes so SDK clients can branch without parsing message text.
+  if (err && typeof err === 'object') {
+    const data = (err as { data?: unknown }).data;
+    if (data && typeof data === 'object') {
+      const kind = (data as { errorKind?: unknown }).errorKind;
+      if (kind === 'mcp_budget_would_exceed') {
+        res.status(409).json({
+          error: errorMessage(err),
+          code: 'mcp_budget_would_exceed',
+          ...(data as object),
+        });
+        return;
+      }
+      if (kind === 'mcp_server_spawn_failed') {
+        const d = data as {
+          errorKind: string;
+          serverName?: string;
+          exitCode?: number | null;
+          stderr?: string;
+          timeout?: boolean;
+        };
+        res.status(502).json({
+          error: errorMessage(err),
+          code: 'mcp_server_spawn_failed',
+          serverName: d.serverName,
+          exitCode: d.exitCode,
+          stderr: d.stderr,
+          ...(d.timeout !== undefined ? { timeout: d.timeout } : {}),
+        });
+        return;
+      }
+      if (kind === 'invalid_config') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_config',
+          ...(data as object),
+        });
+        return;
+      }
+      if (kind === 'acp_channel_unavailable') {
+        res.status(503).json({
+          error: errorMessage(err),
+          code: 'acp_channel_unavailable',
+          ...(data as object),
+        });
+        return;
+      }
+    }
   }
   // 5xx is the kind of error operators need to see in their daemon log
   // — bridge ENOMEM, agent stack trace, unexpected throw, etc. Without

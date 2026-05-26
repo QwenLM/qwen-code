@@ -306,6 +306,21 @@ interface FakeBridgeOpts {
         reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
       }
   >;
+  addRuntimeMcpServerImpl?: (
+    name: string,
+    config: Record<string, unknown>,
+    originatorClientId: string,
+  ) => Promise<
+    | {
+        name: string;
+        transport: string;
+        replaced: boolean;
+        shadowedSettings: boolean;
+        toolCount: number;
+        originatorClientId: string;
+      }
+    | { name: string; skipped: true; reason: 'budget_warning_only' }
+  >;
   closeImpl?: (
     sessionId: string,
     context?: BridgeClientRequestContext,
@@ -392,6 +407,11 @@ interface FakeBridge extends HttpAcpBridge {
     serverName: string;
     originatorClientId?: string;
     opts?: { entryIndex?: number };
+  }>;
+  addRuntimeMcpServerCalls: Array<{
+    name: string;
+    config: Record<string, unknown>;
+    originatorClientId: string;
   }>;
   closeCalls: Array<{
     sessionId: string;
@@ -601,6 +621,21 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       restarted: true as const,
       durationMs: 42,
     }));
+  const addRuntimeMcpServerCalls: FakeBridge['addRuntimeMcpServerCalls'] = [];
+  const addRuntimeMcpServerImpl =
+    opts.addRuntimeMcpServerImpl ??
+    (async (
+      name: string,
+      _config: Record<string, unknown>,
+      originatorClientId: string,
+    ) => ({
+      name,
+      transport: 'stdio' as const,
+      replaced: false,
+      shadowedSettings: false,
+      toolCount: 3,
+      originatorClientId,
+    }));
   const closeImpl = opts.closeImpl ?? (async () => {});
   const updateMetadataImpl =
     opts.updateMetadataImpl ??
@@ -648,6 +683,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
+    addRuntimeMcpServerCalls,
     closeCalls,
     updateMetadataCalls,
     heartbeatCalls,
@@ -830,6 +866,19 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(restartOpts !== undefined ? { opts: restartOpts } : {}),
       });
       return restartMcpServerImpl(serverName, originatorClientId, restartOpts);
+    },
+    async addRuntimeMcpServer(name, config, originatorClientId) {
+      addRuntimeMcpServerCalls.push({ name, config, originatorClientId });
+      return addRuntimeMcpServerImpl(name, config, originatorClientId);
+    },
+    async removeRuntimeMcpServer(_name, _originatorClientId) {
+      // Stub for FakeBridge — T2.8 Task 11 adds the real route + tests.
+      return {
+        name: _name,
+        removed: true as const,
+        wasShadowingSettings: false,
+        originatorClientId: _originatorClientId,
+      };
     },
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
@@ -3241,6 +3290,194 @@ describe('createServeApp', () => {
         serverName: 'docs',
         mcpStatus: 'DISCONNECTED',
       });
+    });
+  });
+
+  describe('POST /workspace/mcp/servers (T2.8 #4514)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('200 fresh add returns structured result', async () => {
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ name: 'echo', config: { command: 'echo', args: ['hello'] } });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        name: 'echo',
+        transport: 'stdio',
+        replaced: false,
+        shadowedSettings: false,
+        toolCount: 3,
+        originatorClientId: 'client-1',
+      });
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(1);
+      expect(bridge.addRuntimeMcpServerCalls[0]).toMatchObject({
+        name: 'echo',
+        config: { command: 'echo', args: ['hello'] },
+        originatorClientId: 'client-1',
+      });
+    });
+
+    it('200 soft refuse (skipped:true, reason:budget_warning_only)', async () => {
+      const bridge = fakeBridge({
+        knownClientIds: ['client-1'],
+        addRuntimeMcpServerImpl: async (name) => ({
+          name,
+          skipped: true as const,
+          reason: 'budget_warning_only' as const,
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ name: 'echo', config: { command: 'echo' } });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        name: 'echo',
+        skipped: true,
+        reason: 'budget_warning_only',
+      });
+    });
+
+    it('400 invalid_server_name when name is empty', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers')).send({
+        name: '',
+        config: { command: 'echo' },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_server_name when name exceeds MAX_SERVER_NAME_LENGTH', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const overlong = 'a'.repeat(257);
+      const res = await auth(request(app).post('/workspace/mcp/servers')).send({
+        name: overlong,
+        config: { command: 'echo' },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_server_name when name contains illegal chars (slash)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers')).send({
+        name: 'foo/bar',
+        config: { command: 'echo' },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 missing_required_field when config is absent', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers')).send({
+        name: 'echo',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('missing_required_field');
+      expect(res.body.field).toBe('config');
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('401 auth_required when no bearer token (strict gate)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/mcp/servers')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ name: 'echo', config: { command: 'echo' } });
+      expect(res.status).toBe(401);
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_client_id on unknown X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({ name: 'echo', config: { command: 'echo' } });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('409 mcp_budget_would_exceed when bridge throws with that errorKind', async () => {
+      const bridge = fakeBridge({
+        knownClientIds: ['client-1'],
+        addRuntimeMcpServerImpl: async () => {
+          throw Object.assign(new Error('Budget exceeded'), {
+            data: { errorKind: 'mcp_budget_would_exceed', serverName: 'echo' },
+          });
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ name: 'echo', config: { command: 'echo' } });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('mcp_budget_would_exceed');
+    });
+
+    it('502 mcp_server_spawn_failed with body details', async () => {
+      const bridge = fakeBridge({
+        knownClientIds: ['client-1'],
+        addRuntimeMcpServerImpl: async () => {
+          throw Object.assign(new Error('Spawn failed'), {
+            data: {
+              errorKind: 'mcp_server_spawn_failed',
+              serverName: 'broken',
+              exitCode: 1,
+              stderr: 'module not found',
+              timeout: false,
+            },
+          });
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ name: 'broken', config: { command: 'bad-cmd' } });
+      expect(res.status).toBe(502);
+      expect(res.body).toMatchObject({
+        code: 'mcp_server_spawn_failed',
+        serverName: 'broken',
+        exitCode: 1,
+        stderr: 'module not found',
+      });
+    });
+
+    it('503 acp_channel_unavailable when bridge throws with that errorKind', async () => {
+      const bridge = fakeBridge({
+        knownClientIds: ['client-1'],
+        addRuntimeMcpServerImpl: async () => {
+          throw Object.assign(new Error('No ACP channel'), {
+            data: { errorKind: 'acp_channel_unavailable' },
+          });
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ name: 'echo', config: { command: 'echo' } });
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('acp_channel_unavailable');
     });
   });
 
