@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as nodeFs from 'node:fs';
+import * as nodePath from 'node:path';
+import * as crypto from 'node:crypto';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { Storage } from '@qwen-code/qwen-code-core';
+
 export type DaemonLogLevel = 'INFO' | 'WARN' | 'ERROR';
 
 export interface DaemonLogContext {
@@ -109,7 +115,52 @@ function isOptedOut(): boolean {
   return ['0', 'false', 'off', 'no'].includes(raw.trim().toLowerCase());
 }
 
-export function initDaemonLogger(_opts: InitDaemonLoggerOptions): DaemonLogger {
+function computeDaemonId(pid: number, boundWorkspace: string): string {
+  const hash = crypto
+    .createHash('sha256')
+    .update(boundWorkspace)
+    .digest('hex')
+    .slice(0, 8);
+  return `serve-${pid}-${hash}`;
+}
+
+export function initDaemonLogger(opts: InitDaemonLoggerOptions): DaemonLogger {
   if (isOptedOut()) return NOOP_LOGGER;
-  throw new Error('initDaemonLogger: file path not implemented yet');
+
+  const pid = opts.pid ?? process.pid;
+  const now = opts.now ?? (() => new Date());
+  const stderr = opts.stderr ?? writeStderrLine;
+  const baseDir = opts.baseDir ?? Storage.getGlobalDebugDir();
+
+  const daemonId = computeDaemonId(pid, opts.boundWorkspace);
+  const daemonDir = nodePath.join(baseDir, 'daemon');
+  const logPath = nodePath.join(daemonDir, `${daemonId}.log`);
+
+  try {
+    nodeFs.mkdirSync(daemonDir, { recursive: true });
+    const firstLine = buildDaemonLogLine({
+      level: 'INFO',
+      message: `daemon started pid=${pid} workspace=${opts.boundWorkspace}`,
+      now: now(),
+    });
+    nodeFs.appendFileSync(logPath, firstLine);
+  } catch (err) {
+    stderr(
+      `qwen serve: daemon log disabled — init failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return NOOP_LOGGER;
+  }
+
+  // Methods come in Task 4. For now stub them so file-init tests pass.
+  return {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    raw: () => {},
+    getLogPath: () => logPath,
+    getDaemonId: () => daemonId,
+    flush: () => Promise.resolve(),
+  };
 }

@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import {
+  mkdtempSync,
+  readFileSync,
+  existsSync,
+  writeFileSync,
+  rmSync,
+} from 'node:fs';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { buildDaemonLogLine, initDaemonLogger } from './daemonLogger.js';
 
 describe('buildDaemonLogLine', () => {
@@ -122,4 +131,51 @@ describe('initDaemonLogger opt-out', () => {
       expect(logger.getDaemonId()).toBe('');
     });
   }
+});
+
+describe('initDaemonLogger file init', () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), 'daemon-log-'));
+  });
+  afterEach(() => {
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // cleanup best-effort
+    }
+  });
+
+  it('derives daemon-id "serve-<pid>-<workspaceHash>" and creates log file', () => {
+    const logger = initDaemonLogger({
+      boundWorkspace: '/workspace/foo',
+      pid: 1234,
+      baseDir: tmp,
+    });
+    expect(logger.getDaemonId()).toMatch(/^serve-1234-[0-9a-f]{8}$/);
+    expect(logger.getLogPath()).toBe(
+      path.join(tmp, 'daemon', `${logger.getDaemonId()}.log`),
+    );
+    expect(existsSync(logger.getLogPath())).toBe(true);
+    expect(readFileSync(logger.getLogPath(), 'utf8')).toMatch(
+      /\[INFO\] \[DAEMON\] daemon started pid=1234 workspace=\/workspace\/foo/,
+    );
+  });
+
+  it('falls back to no-op when mkdir fails', () => {
+    const stderr: string[] = [];
+    // Create a file where the directory should be -> mkdir EEXIST/ENOTDIR
+    const blockingFile = path.join(tmp, 'daemon');
+    writeFileSync(blockingFile, 'blocker');
+
+    const logger = initDaemonLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: (s) => stderr.push(s),
+    });
+    expect(logger.getLogPath()).toBe('');
+    expect(stderr.join('\n')).toMatch(/daemon log disabled/);
+    expect(() => logger.info('after')).not.toThrow();
+  });
 });
