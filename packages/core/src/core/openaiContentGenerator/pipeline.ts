@@ -364,13 +364,18 @@ export class ContentGenerationPipeline {
       const typed = providerRequest as unknown as Record<string, unknown>;
       // Provider buildRequest doesn't auto-inject `enable_thinking`, so a
       // guarded `in typed` check would never fire for default qwen3 configs.
-      // Hostname gate avoids leaking this qwen-specific field elsewhere.
-      // Scope: qwen3 hybrid only — GLM/DeepSeek-on-DashScope use different
-      // disable shapes and aren't handled.
+      // Hostname + model-name gate avoids leaking this qwen-specific field
+      // to non-qwen routings on the same DashScope hostname (GLM uses
+      // `extra_body.thinking.enabled`, DeepSeek-on-DashScope uses
+      // `thinking: { type: 'disabled' }`; sending `enable_thinking` to them
+      // is at best a no-op, at worst forwarded upstream and rejected).
       if (
         DashScopeOpenAICompatibleProvider.isDashScopeProvider(
           this.contentGeneratorConfig,
-        )
+        ) &&
+        (this.contentGeneratorConfig.model ?? '')
+          .toLowerCase()
+          .startsWith('qwen')
       ) {
         typed['enable_thinking'] = false;
       }

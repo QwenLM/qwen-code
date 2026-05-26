@@ -466,12 +466,14 @@ describe('ContentGenerationPipeline', () => {
       // Arrange — provider injects enable_thinking: true via extra_body
       // (e.g. user configured `enableThinking: true` via setup wizard,
       // see provider-config.ts), but request explicitly disables thinking.
-      // DashScope hostname is required because the override is gated on it
-      // (otherwise the qwen-specific `enable_thinking` field would leak to
-      // non-qwen providers).
+      // DashScope hostname + qwen model name are both required: the gate
+      // is hostname + model-name to avoid leaking the qwen-specific
+      // `enable_thinking` field to non-qwen routings (off-DashScope, or
+      // GLM/DeepSeek on the same DashScope hostname).
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.5-flash',
       } as ContentGeneratorConfig;
       mockConfig = {
         ...mockConfig,
@@ -951,6 +953,47 @@ describe('ContentGenerationPipeline', () => {
 
       (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('does NOT emit enable_thinking on a non-qwen model routed through DashScope', async () => {
+      // DashScope's compatible-mode endpoint routes multiple model families
+      // (qwen3, GLM, DeepSeek). Hostname alone is not enough — GLM uses
+      // `extra_body.thinking.enabled` and DeepSeek-on-DashScope uses
+      // `thinking: { type: 'disabled' }`, so sending `enable_thinking` is
+      // at best a no-op and at worst forwarded upstream and rejected.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
       ]);
       (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
         new GenerateContentResponse(),
