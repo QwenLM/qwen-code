@@ -22,7 +22,10 @@ vi.mock('../../utils/request-tokenizer/index.js', () => ({
   RequestTokenEstimator: vi.fn(() => mockTokenizer),
 }));
 
-type AnthropicCreateArgs = [unknown, { signal?: AbortSignal }?];
+type AnthropicCreateArgs = [
+  unknown,
+  { signal?: AbortSignal; headers?: Record<string, string> }?,
+];
 
 const anthropicMockState: {
   constructorOptions?: Record<string, unknown>;
@@ -1015,7 +1018,11 @@ describe('AnthropicContentGenerator', () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
-          yield { type: 'message_stop' };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 1 },
+          };
         })(),
       );
 
@@ -2415,6 +2422,98 @@ describe('AnthropicContentGenerator', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+    });
+
+    it('falls back to non-streaming when the stream is empty and surfaces provider errors', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl
+        .mockResolvedValueOnce(
+          (async function* () {
+            // Empty stream: compatible gateways can return HTTP 200 with no SSE
+            // events when the real failure body is only available non-streaming.
+          })(),
+        )
+        .mockRejectedValueOnce(new Error('400 Team API AKday消费金额已达上限'));
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      await expect(async () => {
+        for await (const _chunk of stream) {
+          void _chunk;
+        }
+      }).rejects.toThrow('400 Team API AKday消费金额已达上限');
+
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      const [streamingRequest] = anthropicState.createImpl.mock
+        .calls[0] as AnthropicCreateArgs;
+      const [fallbackRequest] = anthropicState.createImpl.mock
+        .calls[1] as AnthropicCreateArgs;
+      expect(streamingRequest).toEqual(
+        expect.objectContaining({ stream: true }),
+      );
+      expect(fallbackRequest).not.toHaveProperty('stream');
+    });
+
+    it('converts the non-streaming fallback response when an empty stream is recoverable', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield { type: 'message_stop' };
+          })(),
+        )
+        .mockResolvedValueOnce({
+          id: 'msg-fallback',
+          model: 'claude-test',
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'fallback ok' }],
+          usage: { input_tokens: 3, output_tokens: 2 },
+        });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+      }
+
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]?.responseId).toBe('msg-fallback');
+      expect(chunks[0]?.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'fallback ok' },
+      ]);
+      expect(chunks[0]?.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
     });
   });
 });
