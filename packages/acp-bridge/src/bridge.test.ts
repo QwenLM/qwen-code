@@ -6121,6 +6121,167 @@ describe('createHttpAcpBridge', () => {
       abort.abort();
       await bridge.shutdown();
     });
+
+    it('drops malformed model-update params (non-string ids) without throwing or emitting', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capturedConn = new AgentSideConnection(
+          () => new FakeAgent(),
+          agentStream,
+        );
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const seen: string[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) seen.push(e.type);
+      })();
+
+      // Non-string currentModelId / missing sessionId → early return, no throw.
+      await capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModelId: 123 as unknown as string,
+      });
+      await capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        currentModelId: 'qwen-max',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      abort.abort();
+      await collecting;
+      expect(seen.filter((t) => t === 'model_switched')).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('drops a model-update for an unknown sessionId (no entry, no buffer)', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capturedConn = new AgentSideConnection(
+          () => new FakeAgent(),
+          agentStream,
+        );
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const seen: string[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) seen.push(e.type);
+      })();
+
+      await capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: 'nonexistent-session',
+        currentModelId: 'qwen-max',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      abort.abort();
+      await collecting;
+      // Unlike the MCP-budget path (which buffers unknown ids), model-update
+      // drops them — the real session's bus sees nothing.
+      expect(seen.filter((t) => t === 'model_switched')).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('stamps originatorClientId from the active prompt on the promoted model_switched', async () => {
+      // While a prompt with a clientId is in flight, the session entry carries
+      // activePromptOriginatorClientId; the promoted model_switched must
+      // inherit it so peers can attribute the change.
+      let releasePrompt: (() => void) | undefined;
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          promptImpl: async () => {
+            await new Promise<void>((res) => {
+              releasePrompt = res;
+            });
+            return { stopReason: 'end_turn' };
+          },
+        });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      // Hang a prompt with a clientId → activePromptOriginatorClientId set.
+      const promptDone = bridge
+        .sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'hi' }],
+          },
+          undefined,
+          { clientId: session.clientId },
+        )
+        .catch(() => {});
+      await new Promise((r) => setTimeout(r, 10));
+
+      void capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModelId: 'qwen-max',
+      });
+
+      const collected: Array<{ type: string; originatorClientId?: string }> =
+        [];
+      for await (const e of iter) {
+        if (e.type === 'model_switched') {
+          collected.push({
+            type: e.type,
+            originatorClientId: e.originatorClientId,
+          });
+          break;
+        }
+      }
+      expect(collected[0]?.originatorClientId).toBe(session.clientId);
+      releasePrompt?.();
+      await promptDone;
+      abort.abort();
+      await bridge.shutdown();
+    });
   });
 
   describe('maxSessions cap (chiga0 Rec 3)', () => {
