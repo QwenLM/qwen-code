@@ -38,6 +38,7 @@ import type {
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import {
   createHttpAcpBridge,
+  findChannelInfoForEntry,
   InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
@@ -299,6 +300,26 @@ function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
 }
 
 describe('createHttpAcpBridge', () => {
+  it('selects a session entry channel when the current attach channel has changed', () => {
+    // Model the channel-overlap window directly: old channel A still has
+    // an entry, while new channel B is the current attach target.
+    const channelA = { name: 'A' };
+    const channelB = { name: 'B' };
+    const infoA = { channel: channelA, label: 'old-dying-channel' };
+    const infoB = { channel: channelB, label: 'fresh-attach-channel' };
+
+    expect(
+      findChannelInfoForEntry(infoB, [infoA, infoB], {
+        channel: channelA,
+      }),
+    ).toBe(infoA);
+    expect(
+      findChannelInfoForEntry(infoB, [infoB], {
+        channel: channelA,
+      }),
+    ).toBeUndefined();
+  });
+
   it('accepts a valid BridgeOptions.eventRingSize at construction time', () => {
     // Smoke: positive finite integers are accepted; the underlying
     // EventBus ring-size threading is exercised end-to-end in

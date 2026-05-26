@@ -278,6 +278,19 @@ interface ChannelInfo {
   isDying: boolean;
 }
 
+/** @internal Visible for bridge lifecycle regression tests. */
+export function findChannelInfoForEntry<T extends { channel: unknown }>(
+  current: T | undefined,
+  alive: Iterable<T>,
+  entry: { channel: unknown },
+): T | undefined {
+  if (current?.channel === entry.channel) return current;
+  for (const info of alive) {
+    if (info.channel === entry.channel) return info;
+  }
+  return undefined;
+}
+
 interface SessionEntry {
   sessionId: string;
   workspaceCwd: string;
@@ -2031,15 +2044,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     return channelInfo;
   };
 
-  const channelInfoForEntry = (
-    entry: SessionEntry,
-  ): ChannelInfo | undefined => {
-    if (channelInfo?.channel === entry.channel) return channelInfo;
-    for (const info of aliveChannels) {
-      if (info.channel === entry.channel) return info;
-    }
-    return undefined;
-  };
+  const channelInfoForEntry = (entry: SessionEntry): ChannelInfo | undefined =>
+    findChannelInfoForEntry(channelInfo, aliveChannels, entry);
 
   const getChannelClosedReject = (info: ChannelInfo): Promise<never> => {
     if (!info.statusClosedReject) {
@@ -2888,7 +2894,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       );
       if (defaultEntry === entry) defaultEntry = undefined;
       const ci = channelInfoForEntry(entry);
-      if (ci && ci.channel === entry.channel) {
+      if (ci) {
         ci.sessionIds.delete(sessionId);
       }
       for (const id of Array.from(entry.pendingPermissionIds)) {
@@ -3718,7 +3724,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // session leaves — other sessions on the same channel keep
       // running.
       const ci = channelInfoForEntry(entry);
-      if (ci && ci.channel === entry.channel) {
+      if (ci) {
         ci.sessionIds.delete(sessionId);
       }
       // PR 14b fix (codex round 5): tombstone the killed sessionId
