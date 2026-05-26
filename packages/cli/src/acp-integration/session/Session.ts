@@ -1598,10 +1598,6 @@ export class Session implements SessionContext {
       );
     }
 
-    // Capture the pre-switch model so the notification can carry
-    // `previousModelId`. Read BEFORE `switchModel` mutates it.
-    const previousModelId = this.config.getModel();
-
     await this.config.switchModel(
       selectedAuthType,
       parsed.modelId,
@@ -1626,9 +1622,6 @@ export class Session implements SessionContext {
         v: 1,
         sessionId: this.sessionId,
         currentModelId: parsed.modelId,
-        ...(previousModelId && previousModelId !== parsed.modelId
-          ? { previousModelId }
-          : {}),
       })
       .catch(() => {
         // Advisory only; a failed notification must not fail the model switch.

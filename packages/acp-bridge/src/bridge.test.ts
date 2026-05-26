@@ -6025,7 +6025,6 @@ describe('createHttpAcpBridge', () => {
         v: 1,
         sessionId: session.sessionId,
         currentModelId: 'qwen-max',
-        previousModelId: 'qwen-plus',
       });
 
       const collected: Array<{ type: string; data: unknown }> = [];

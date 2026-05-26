@@ -2869,10 +2869,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       const work = entry.modelChangeQueue.then(async () => {
         // A1: suppress the agent's current_model_update notification (this
         // path drives Session.setModel, which emits it) while the bridge
-        // owns the change — the bridge publishes model_switched below.
+        // owns the change. Publish the authoritative model_switched INSIDE
+        // this callback — i.e. while the flag is still true — mirroring
+        // `applyModelServiceId`, so the agent notification can never slip
+        // through after the flag clears even if transport ordering changes.
         entry.modelRoundtripInFlight = true;
         try {
-          return await Promise.race([
+          const result = await Promise.race([
             withTimeout(
               conn.unstable_setSessionModel(normalized),
               initTimeoutMs,
@@ -2880,6 +2883,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             ),
             transportClosed,
           ]);
+          try {
+            entry.events.publish({
+              type: 'model_switched',
+              data: { sessionId: entry.sessionId, modelId: req.modelId },
+              ...(originatorClientId ? { originatorClientId } : {}),
+            });
+          } catch {
+            /* bus closed */
+          }
+          return result;
         } finally {
           entry.modelRoundtripInFlight = false;
         }
@@ -2913,15 +2926,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         }
         throw err;
       }
-      try {
-        entry.events.publish({
-          type: 'model_switched',
-          data: { sessionId: entry.sessionId, modelId: req.modelId },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-      } catch {
-        /* bus closed */
-      }
+      // model_switched is published inside the work callback above (while the
+      // suppress flag is still set), mirroring applyModelServiceId.
       return response;
     },
 

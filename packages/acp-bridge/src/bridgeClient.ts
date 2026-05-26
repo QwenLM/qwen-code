@@ -481,9 +481,10 @@ export class BridgeClient implements Client {
   private readonly inFlightRestoreIds = new Set<string>();
 
   /**
-   * PR 14b: handle child→bridge ACP `extNotification` calls. Only one
-   * method is recognized today — `qwen/notify/session/mcp-budget-event`
-   * — translating the McpClientManager's budget-event payload into a
+   * PR 14b: handle child→bridge ACP `extNotification` calls. Two methods
+   * are recognized — `qwen/notify/session/mcp-budget-event` (PR 14b,
+   * McpClientManager budget events) and `qwen/notify/session/model-update`
+   * (A1 #4511, in-session model switch) — each translated into a
    * session-scoped SSE frame. Unknown methods, unknown event kinds,
    * and missing sessionIds are dropped silently for forward-compat
    * (a future child can add new notification methods without breaking
