@@ -22,6 +22,7 @@ import type {
   ServeWorkspaceAgentsStatus,
   ServeWorkspaceAgentDetail,
   ServeContextFileScope,
+  DaemonStatusProvider,
 } from '@qwen-code/acp-bridge';
 
 import type {
@@ -431,11 +432,25 @@ export interface DaemonWorkspaceServiceDeps {
   /** Factory for per-request filesystem instances. */
   fsFactory: WorkspaceFileSystemFactory;
 
-  /** Device-flow auth registry. */
-  deviceFlowRegistry: DeviceFlowRegistry;
+  /** Device-flow auth registry. Optional — auth routes are a no-op when absent. */
+  deviceFlowRegistry?: DeviceFlowRegistry;
 
-  /** Subagent manager for agents CRUD. */
-  subagentManager: unknown;
+  /** Subagent manager for agents CRUD. Optional — agents routes return empty when absent. */
+  subagentManager?: unknown;
+
+  /**
+   * Daemon-host status provider for env + preflight cells.
+   * When present, `getWorkspaceEnvStatus` returns daemon-local process state
+   * without querying ACP. When absent, falls back to idle placeholders.
+   */
+  statusProvider?: DaemonStatusProvider;
+
+  /**
+   * Returns whether the ACP channel is currently live. Used by
+   * `getWorkspaceEnvStatus` to populate the `acpChannelLive` field
+   * without requiring an ACP round-trip.
+   */
+  isChannelLive?: () => boolean;
 
   /** Persist tool enable/disable to workspace settings file. */
   persistDisabledTools: (
