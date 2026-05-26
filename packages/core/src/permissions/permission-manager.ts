@@ -16,10 +16,7 @@ import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperations } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import {
-  hasShellSubstitution,
-  normalizeMonitorCommand,
-} from '../utils/shell-utils.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   findDangerousAllowRules,
@@ -416,18 +413,6 @@ export class PermissionManager {
   private async resolveDefaultPermission(
     command: string,
   ): Promise<'allow' | 'ask'> {
-    // Belt-and-suspenders substitution gate on the raw command. The
-    // AST-based check below catches substitution inside the parsed
-    // tree (see PR #4386 R4 hoist in `evaluateStatementReadOnly`), but
-    // the regex-fallback path (`shellReadOnlyChecker.ts evaluateShellSegment`)
-    // and the L3 `ShellToolInvocation.getDefaultPermission` both strip
-    // wrappers before checking — gating here on the raw input prevents
-    // any caller-side strip from masking substitution. Cheap dual-check;
-    // see PR #4386 R6 (cid 3298521039).
-    if (hasShellSubstitution(command)) {
-      return 'ask';
-    }
-
     // AST-based read-only detection. Commands containing command
     // substitution are never read-only — `evaluateStatementReadOnly`
     // (shellAstParser.ts) guards on `containsCommandSubstitutionAST` at
