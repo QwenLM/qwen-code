@@ -80,6 +80,11 @@ if [[ "${proxy_ready}" != "1" ]]; then
 fi
 
 redacted_command="$(
+  # Note: avoid the GNU-only /I (case-insensitive) sed flag — BSD sed
+  # (macOS pre-Sequoia) silently fails to match with /I, so previously
+  # `API_KEY=…`, `Secret=…`, etc. would not be redacted on macOS. Use
+  # explicit per-letter character classes for the case-insensitive
+  # token-name matches; both BSD and GNU sed accept them.
   printf '%q ' "$@" |
     sed -E \
       -e 's/sk-[A-Za-z0-9_-]{12,}/sk-<redacted>/g' \
@@ -87,7 +92,7 @@ redacted_command="$(
       -e 's/AIza[0-9A-Za-z_-]{20,}/AIza<redacted>/g' \
       -e 's/(ghp|gho|ghu|ghs)_[A-Za-z0-9_]{20,}/gh_<redacted>/g' \
       -e 's/github_pat_[A-Za-z0-9_]{20,}/github_pat_<redacted>/g' \
-      -e 's/([A-Za-z0-9_.-]*(api[-_]?key|token|secret|credential)[A-Za-z0-9_.-]*=)[^[:space:]]+/\1<redacted>/Ig'
+      -e 's/([A-Za-z0-9_.-]*([Aa][Pp][Ii][-_]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll])[A-Za-z0-9_.-]*=)[^[:space:]]+/\1<redacted>/g'
 )"
 
 {
