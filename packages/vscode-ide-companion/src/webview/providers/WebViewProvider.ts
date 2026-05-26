@@ -257,7 +257,15 @@ export class WebViewProvider {
       // assistant replies when a new prompt starts while an async save is
       // still finishing.
       if (message.source?.startsWith('background_notification')) {
+        // Prefer the originating ACP session id (forwarded on the message)
+        // over the currently active conversation. The notification was
+        // generated using the originating conversation's full chat history
+        // as context; persisting it under whichever conversation is active
+        // *now* would leak that context into an unrelated conversation if
+        // the user switched panels between triggering the background task
+        // and the notification being delivered.
         const conversationId =
+          message.sessionId ??
           this.conversationStore.getCurrentConversationId();
         if (conversationId) {
           void this.conversationStore

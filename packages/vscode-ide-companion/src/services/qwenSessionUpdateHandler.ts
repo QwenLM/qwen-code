@@ -76,12 +76,22 @@ export class QwenSessionUpdateHandler {
         if (text && isDiscreteMessage && this.callbacks.onMessage) {
           const source =
             typeof meta?.source === 'string' ? meta.source : undefined;
+          // Forward the originating ACP session id so the webview can persist
+          // background-notification follow-ups against the conversation that
+          // owns the session, not whichever conversation happens to be active
+          // in the panel right now. Without this, switching conversations
+          // between triggering a background task and receiving its reply leaks
+          // the reply (and its full chat-history context) into the wrong
+          // conversation's persisted message store.
+          const sessionId =
+            typeof data.sessionId === 'string' ? data.sessionId : undefined;
           this.callbacks.onMessage({
             role: 'assistant',
             content: text,
             timestamp:
               typeof meta?.timestamp === 'number' ? meta.timestamp : Date.now(),
             ...(source ? { source } : {}),
+            ...(sessionId ? { sessionId } : {}),
           });
         } else if (text && this.callbacks.onStreamChunk) {
           this.callbacks.onStreamChunk(text);
