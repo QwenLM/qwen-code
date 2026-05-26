@@ -180,6 +180,43 @@ describe('initDaemonLogger file init', () => {
   });
 });
 
+describe('initDaemonLogger raw', () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), 'daemon-log-'));
+  });
+  afterEach(() => {
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // cleanup best-effort
+    }
+  });
+
+  it('appends prefixed line, no stderr tee', async () => {
+    const stderr: string[] = [];
+    const logger = initDaemonLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: (s) => stderr.push(s),
+    });
+    const stderrBefore = stderr.length;
+    logger.raw('[serve pid=123 cwd=/x] child crashed', 'warn');
+    logger.raw('[serve pid=123 cwd=/x] another');
+    await logger.flush();
+    const content = readFileSync(logger.getLogPath(), 'utf8');
+    expect(content).toContain(
+      '[WARN] [DAEMON] [serve pid=123 cwd=/x] child crashed\n',
+    );
+    expect(content).toContain(
+      '[INFO] [DAEMON] [serve pid=123 cwd=/x] another\n',
+    );
+    // No new stderr lines from raw()
+    expect(stderr.length).toBe(stderrBefore);
+  });
+});
+
 describe('initDaemonLogger info/warn/error', () => {
   let tmp: string;
   beforeEach(() => {

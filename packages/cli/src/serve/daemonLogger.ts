@@ -188,7 +188,11 @@ export function initDaemonLogger(opts: InitDaemonLoggerOptions): DaemonLogger {
     warn: (message, ctx) => teeLine('WARN', message, ctx),
     error: (message, err, ctx) =>
       teeLine('ERROR', message, ctx, err ?? undefined),
-    raw: () => {}, // implemented in Task 5
+    raw: (line: string, level: 'info' | 'warn' | 'error' = 'info') => {
+      const upper = level.toUpperCase() as DaemonLogLevel;
+      const formatted = `${now().toISOString()} [${upper}] [DAEMON] ${line}\n`;
+      enqueueAppend(formatted);
+    },
     getLogPath: () => logPath,
     getDaemonId: () => daemonId,
     flush: () => pending,
