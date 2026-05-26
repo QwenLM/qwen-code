@@ -945,6 +945,84 @@ export type DaemonMcpRestartResult =
     };
 
 /**
+ * T2.8 (#4514). Structural subset of core's `MCPServerConfig` exposed
+ * on the `POST /workspace/mcp/servers` route body. Covers all wire-
+ * relevant transport fields without pulling in core-only concerns
+ * (e.g. `includeTools` / `excludeTools` filtering, `extensionName`).
+ *
+ * All fields are optional — the daemon infers transport family from
+ * whichever set of fields is populated (stdio: `command`; SSE: `url`;
+ * HTTP: `httpUrl`; WebSocket: `tcp`; SDK: `type: 'sdk'`).
+ */
+export interface MCPServerConfigShape {
+  readonly type?: 'stdio' | 'sse' | 'http' | 'websocket' | 'sdk';
+  readonly command?: string;
+  readonly args?: string[];
+  readonly env?: Record<string, string>;
+  readonly cwd?: string;
+  readonly url?: string;
+  readonly httpUrl?: string;
+  readonly headers?: Record<string, string>;
+  readonly tcp?: string;
+  readonly timeout?: number;
+  readonly discoveryTimeoutMs?: number;
+  readonly trust?: boolean;
+  readonly description?: string;
+  readonly oauth?: Record<string, unknown>;
+}
+
+/**
+ * T2.8 (#4514). Body of `POST /workspace/mcp/servers` — adds (or
+ * replaces) a runtime MCP server.
+ */
+export interface DaemonRuntimeMcpAddRequest {
+  readonly name: string;
+  readonly config: MCPServerConfigShape;
+  readonly displayName?: string;
+}
+
+/**
+ * T2.8 (#4514). Response of `POST /workspace/mcp/servers`.
+ * Discriminated union: `.skipped` is absent (or `never`) on the
+ * success branch and `true` on the soft-refuse branch. Callers
+ * narrow with `if ('skipped' in res && res.skipped)`.
+ */
+export type DaemonRuntimeMcpAddResult =
+  | {
+      readonly name: string;
+      readonly transport: DaemonMcpTransport;
+      readonly replaced: boolean;
+      readonly shadowedSettings: boolean;
+      readonly toolCount: number;
+      readonly originatorClientId: string;
+      readonly skipped?: never;
+    }
+  | {
+      readonly name: string;
+      readonly skipped: true;
+      readonly reason: 'budget_warning_only';
+    };
+
+/**
+ * T2.8 (#4514). Response of `DELETE /workspace/mcp/servers/:name`.
+ * Discriminated union: `.skipped` absent on success, `true` on
+ * soft-refuse (server was not present — idempotent skip).
+ */
+export type DaemonRuntimeMcpRemoveResult =
+  | {
+      readonly name: string;
+      readonly removed: true;
+      readonly wasShadowingSettings: boolean;
+      readonly originatorClientId: string;
+      readonly skipped?: never;
+    }
+  | {
+      readonly name: string;
+      readonly skipped: true;
+      readonly reason: 'not_present';
+    };
+
+/**
  * Returned from `POST /session/:id/heartbeat`. `lastSeenAt` is the
  * server-side `Date.now()` epoch (ms) the daemon stored for this
  * session. `clientId` is echoed back only when the caller supplied a

@@ -31,6 +31,9 @@ import type {
   DaemonPermissionRequestEvent,
   DaemonPermissionResolvedData,
   DaemonPermissionResolvedEvent,
+  DaemonRuntimeMcpAddRequest,
+  DaemonRuntimeMcpAddResult,
+  DaemonRuntimeMcpRemoveResult,
   DaemonSessionDiedData,
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
@@ -198,5 +201,47 @@ describe('mcp_server_removed event drift insurance', () => {
       expect(known.data.wasShadowingSettings).toBe(true);
       expect(known.data.originatorClientId).toBe('client-2');
     }
+  });
+});
+
+describe('runtime MCP add/remove SDK types', () => {
+  it('request type compiles', () => {
+    const req: DaemonRuntimeMcpAddRequest = {
+      name: 'echo',
+      config: { command: 'node', args: ['echo.js'], type: 'stdio' },
+      displayName: 'Echo Server',
+    };
+    expect(req.name).toBe('echo');
+  });
+
+  it('add result has right shape', () => {
+    const res: DaemonRuntimeMcpAddResult = {
+      name: 'echo',
+      transport: 'stdio',
+      replaced: false,
+      shadowedSettings: false,
+      toolCount: 0,
+      originatorClientId: 'client-x',
+    };
+    expect(res.replaced).toBe(false);
+  });
+
+  it('add soft-refuse has right shape', () => {
+    const res: DaemonRuntimeMcpAddResult = {
+      name: 'echo',
+      skipped: true,
+      reason: 'budget_warning_only',
+    };
+    expect(res.skipped).toBe(true);
+  });
+
+  it('remove result has right shape', () => {
+    const res: DaemonRuntimeMcpRemoveResult = {
+      name: 'echo',
+      removed: true,
+      wasShadowingSettings: false,
+      originatorClientId: 'client-x',
+    };
+    expect(res.removed).toBe(true);
   });
 });
