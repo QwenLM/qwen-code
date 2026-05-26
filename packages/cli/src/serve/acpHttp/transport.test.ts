@@ -770,6 +770,40 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await s2.body?.cancel();
   });
 
+  it('prompt response is delivered even if the session closes mid-flight', async () => {
+    // Prompt resolves only after we close the session — exercises the
+    // binding-gone fallback (reply must ride the connection stream).
+    let release: () => void = () => {};
+    bridge.promptBehavior = async (_s, _q) => {
+      await new Promise<void>((r) => (release = r));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    // conn stream carries: buffered session/new reply (id 99), the close
+    // ack (id 91), AND the fallback prompt reply (id 90).
+    const connFrames = takeFrames(connStream, 3);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 90,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    // Close the session while the prompt is still in flight, then let it resolve.
+    await post(connId, { jsonrpc: '2.0', id: 91, method: 'session/close', params: { sessionId: 'sess-1' } });
+    await new Promise((r) => setTimeout(r, 30));
+    release();
+    const frames = (await connFrames) as Array<{ id: number }>;
+    // The prompt's id-90 response must appear (on the conn stream, since the
+    // session binding is gone) — not silently dropped.
+    expect(frames.map((f) => f.id)).toContain(90);
+    await sessStream.body?.cancel();
+  });
+
   it('DELETE without a connection id → 400', async () => {
     const res = await fetch(`${base}/acp`, { method: 'DELETE' });
     expect(res.status).toBe(400);

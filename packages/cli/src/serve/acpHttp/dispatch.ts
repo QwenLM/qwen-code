@@ -884,7 +884,17 @@ export class AcpDispatcher {
     errorFrame?: ReturnType<typeof error>,
   ): void {
     if (id === undefined) return;
-    conn.sendSession(sessionId, errorFrame ?? success(id, result));
+    const frame = errorFrame ?? success(id, result);
+    // If the session was torn down mid-flight (e.g. a concurrent
+    // `session/close`), the binding + session stream are gone and
+    // `sendSession` is lookup-only — it would SILENTLY DROP this frame,
+    // violating the JSON-RPC one-response-per-request contract. Fall back to
+    // the connection-scoped stream so an id'd request always gets its reply.
+    if (conn.sessions.has(sessionId)) {
+      conn.sendSession(sessionId, frame);
+    } else {
+      conn.sendConn(frame);
+    }
   }
 }
 
