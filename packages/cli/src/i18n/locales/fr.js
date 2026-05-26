@@ -119,6 +119,10 @@ export default {
   'Loading skills…': 'Chargement des compétences…',
   'Failed to load skills: {{error}}':
     'Échec du chargement des compétences : {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    "Échec de l'enregistrement de la configuration des compétences : {{error}}",
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'Toutes les compétences disponibles sont désactivées. Modifiez ~/.qwen/settings.json ou .qwen/settings.json (skills.disabled) pour les réactiver.',
   'Press esc to close.': 'Appuyez sur Échap pour fermer.',
   '{{count}} skills · ': '{{count}} compétences · ',
   '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} compétences · ',

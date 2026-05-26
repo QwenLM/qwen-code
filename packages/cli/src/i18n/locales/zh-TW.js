@@ -109,6 +109,10 @@ export default {
   'SkillManager not available.': 'SkillManager 不可用。',
   'Loading skills…': '正在載入技能…',
   'Failed to load skills: {{error}}': '載入技能失敗：{{error}}',
+  'Failed to save skills configuration: {{error}}':
+    '儲存技能設定失敗：{{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    '所有可用技能皆已停用。請編輯 ~/.qwen/settings.json 或 .qwen/settings.json（skills.disabled）以重新啟用。',
   'Press esc to close.': '按 Esc 關閉。',
   '{{count}} skills · ': '{{count}} 個技能 · ',
   '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} 個技能 · ',

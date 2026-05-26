@@ -56,6 +56,7 @@ vi.mock('./config/config.js', () => ({
   } as unknown as Config),
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
+  buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
 }));
 
 vi.mock('read-package-up', () => ({
@@ -307,6 +308,7 @@ describe('gemini.tsx main function', () => {
         userHooks: undefined,
         projectHooks: undefined,
       },
+      expect.any(Function),
     );
   });
 

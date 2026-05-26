@@ -35,11 +35,23 @@ function makeContext(opts: {
     listSkills: vi.fn().mockResolvedValue(skills),
   };
 
+  // Mirror the normalization that buildDisabledSkillNamesProvider applies
+  // (trim + lowercase + filter non-strings) so this fake matches the real
+  // Config.getDisabledSkillNames() contract — skillsCommand calls into it
+  // directly now instead of doing its own string munging.
+  const disabledSet = new Set(
+    mergedDisabled
+      .filter((n): n is string => typeof n === 'string')
+      .map((n) => n.trim().toLowerCase())
+      .filter(Boolean),
+  );
+
   return createMockCommandContext({
     executionMode,
     services: {
       config: {
         getSkillManager: () => skillManager,
+        getDisabledSkillNames: () => disabledSet,
       } as never,
       settings: {
         isTrusted,

@@ -125,6 +125,10 @@ export default {
   'SkillManager not available.': 'SkillManager not available.',
   'Loading skills…': 'Loading skills…',
   'Failed to load skills: {{error}}': 'Failed to load skills: {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    'Failed to save skills configuration: {{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.',
   'Press esc to close.': 'Press esc to close.',
   '{{count}} skills · ': '{{count}} skills · ',
   '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} skills · ',

@@ -422,14 +422,14 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       if (this.commandExecutor) {
         const content = await this.commandExecutor(this.params.skill);
         if (content !== null) {
-          logSkillLaunch(
-            this.config,
-            new SkillLaunchEvent(this.params.skill, true),
-          );
-          this.onSkillLoaded(this.params.skill);
+          // Delegated to a same-named non-skill command (file command or
+          // MCP prompt). Don't emit `SkillLaunchEvent` and don't track via
+          // `onSkillLoaded` — no skill body was loaded, and conflating the
+          // two would inflate skill telemetry / `/context` skill-token
+          // attribution with command runs.
           return {
             llmContent: [{ text: content }],
-            returnDisplay: `Executed command: ${this.params.skill}`,
+            returnDisplay: `Delegated to command: ${this.params.skill}`,
           };
         }
       }

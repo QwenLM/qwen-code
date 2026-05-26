@@ -121,6 +121,10 @@ export default {
   'Loading skills…': 'Carregant habilitats…',
   'Failed to load skills: {{error}}':
     'No s’han pogut carregar les habilitats: {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    "No s'ha pogut desar la configuració d'habilitats: {{error}}",
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'Totes les habilitats disponibles estan desactivades. Edita ~/.qwen/settings.json o .qwen/settings.json (skills.disabled) per tornar-les a activar.',
   'Press esc to close.': 'Prem Esc per tancar.',
   '{{count}} skills · ': '{{count}} habilitats · ',
   '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} habilitats · ',

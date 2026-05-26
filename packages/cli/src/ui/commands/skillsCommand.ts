@@ -14,11 +14,6 @@ import { MessageType, type HistoryItemSkillsList } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { normalizeSkillPriority } from '@qwen-code/qwen-code-core';
 
-function getDisabledSet(context: CommandContext): ReadonlySet<string> {
-  const list = context.services.settings?.merged.skills?.disabled ?? [];
-  return new Set(list.map((n) => n.trim().toLowerCase()).filter(Boolean));
-}
-
 export const skillsCommand: SlashCommand = {
   name: 'skills',
   get description() {
@@ -56,7 +51,11 @@ export const skillsCommand: SlashCommand = {
     // listing so users in those contexts still get something useful from
     // the bare command.
     const skills = await skillManager.listSkills();
-    const disabled = getDisabledSet(context);
+    // Reuse the central disabled-set provider so all surfaces
+    // (<available_skills>, /<name> completion, this list) agree on a
+    // single normalization pass instead of drifting independently.
+    const disabled =
+      context.services.config?.getDisabledSkillNames() ?? new Set<string>();
     const visibleSkills = skills.filter(
       (s) => !disabled.has(s.name.toLowerCase()),
     );

@@ -88,7 +88,14 @@ function levelLabel(level: SkillLevel): string {
 const NAME_COLUMN = 24;
 
 function lower(name: string): string {
-  return name.toLowerCase();
+  return name.trim().toLowerCase();
+}
+
+function normalizeNames(list: readonly string[]): string[] {
+  return list
+    .filter((n): n is string => typeof n === 'string')
+    .map(lower)
+    .filter(Boolean);
 }
 
 function namesFromScope(
@@ -102,17 +109,19 @@ function buildHigherDisabled(settings: LoadedSettings): {
   set: ReadonlySet<string>;
   scopeOf: (name: string) => string | null;
 } {
-  const sysDefaults = namesFromScope(settings, SettingScope.SystemDefaults);
-  const user = namesFromScope(settings, SettingScope.User);
-  const system = namesFromScope(settings, SettingScope.System);
-  const set = new Set([...sysDefaults, ...user, ...system].map(lower));
+  const sysDefaults = normalizeNames(
+    namesFromScope(settings, SettingScope.SystemDefaults),
+  );
+  const user = normalizeNames(namesFromScope(settings, SettingScope.User));
+  const system = normalizeNames(namesFromScope(settings, SettingScope.System));
+  const set = new Set([...sysDefaults, ...user, ...system]);
   // Highest-precedence scope wins for the locked-row label. System >
   // User > SystemDefaults matches the merge order in `settings.ts`.
   const scopeOf = (name: string): string | null => {
     const l = lower(name);
-    if (system.some((n) => lower(n) === l)) return 'System';
-    if (user.some((n) => lower(n) === l)) return 'User';
-    if (sysDefaults.some((n) => lower(n) === l)) return 'SystemDefaults';
+    if (system.includes(l)) return 'System';
+    if (user.includes(l)) return 'User';
+    if (sysDefaults.includes(l)) return 'SystemDefaults';
     return null;
   };
   return { set, scopeOf };
@@ -154,7 +163,8 @@ export function SkillsManagerDialog({
   // would re-derive on every parent re-render and could thrash the
   // `selectedKeys` derivation below.
   const initialWorkspaceDisabled = useMemo(
-    () => new Set(namesFromScope(settings, SettingScope.Workspace).map(lower)),
+    () =>
+      new Set(normalizeNames(namesFromScope(settings, SettingScope.Workspace))),
     [settings],
   );
   const higher = useMemo(() => buildHigherDisabled(settings), [settings]);
@@ -215,6 +225,30 @@ export function SkillsManagerDialog({
     );
   }, [unlockedSkills, query]);
 
+  // `activeValue` is what Enter operates on. MultiSelect's `onHighlight`
+  // populates it on arrow-key navigation, but NOT on initial mount or
+  // after a search filter that drops the previously highlighted row
+  // (`useSelectionList` re-INITIALIZE's with `pendingHighlight: false`).
+  // Without this effect, Enter on the first render is a no-op and Enter
+  // after a filter would invoke a stale (now-invisible) skill.
+  useEffect(() => {
+    if (filteredUnlocked.length === 0) {
+      if (activeValue !== null) setActiveValue(null);
+      return;
+    }
+    const stillVisible =
+      activeValue !== null &&
+      filteredUnlocked.some((s) => s.name === activeValue.name);
+    if (!stillVisible) {
+      const top = filteredUnlocked[0];
+      setActiveValue({
+        name: top.name,
+        description: top.description,
+        level: top.level,
+      });
+    }
+  }, [filteredUnlocked, activeValue]);
+
   const filteredLocked = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) return lockedSkills;
@@ -238,13 +272,18 @@ export function SkillsManagerDialog({
     [filteredUnlocked],
   );
 
-  // Persist any pending toggle changes. Returns true on success, false if
-  // the workspace is untrusted (caller should NOT proceed with follow-up
-  // actions like submitting a prompt). When there is nothing to persist
-  // (selection unchanged from initial) the call is a cheap no-op write
-  // plus refresh — kept simple over diffing because the dialog is
-  // short-lived.
-  const persistChanges = useCallback(async (): Promise<boolean> => {
+  // Persist any pending toggle changes. Returns:
+  //   - 'ok'        — write succeeded (or no-op because nothing changed)
+  //   - 'untrusted' — workspace is untrusted; follow-up actions (e.g. pick)
+  //                   should be aborted, error already surfaced to the user
+  //   - 'error'     — settings.setValue threw; error surfaced to the user.
+  //                   Caller should still close the dialog so the user is
+  //                   not stuck with a re-throwing Esc handler.
+  // The Esc-during-loading race is handled BY THE CALLER (see
+  // `handleSaveAndClose`) — `persistChanges` assumes data is loaded.
+  const persistChanges = useCallback(async (): Promise<
+    'ok' | 'untrusted' | 'error'
+  > => {
     if (!settings.isTrusted) {
       addItem(
         {
@@ -255,7 +294,7 @@ export function SkillsManagerDialog({
         },
         Date.now(),
       );
-      return false;
+      return 'untrusted';
     }
 
     const selected = new Set(selectedKeys ?? []);
@@ -271,11 +310,37 @@ export function SkillsManagerDialog({
       nextDisabled.push(existing ?? s.name);
     }
 
-    settings.setValue(
-      SettingScope.Workspace,
-      'skills.disabled',
-      nextDisabled.length > 0 ? nextDisabled : undefined,
-    );
+    // Skip the disk write + refresh roundtrip when the on-disk state
+    // already matches what we'd write. Comparing normalized lists keeps
+    // whitespace/case-only edits in the JSON file from being treated as
+    // changes. `previousWorkspace` includes only workspace-scope entries
+    // (matching what we're about to write) — locked entries from higher
+    // scopes are not in this list, so they don't affect the comparison.
+    const prevNormalized = normalizeNames(previousWorkspace).sort();
+    const nextNormalized = normalizeNames(nextDisabled).sort();
+    const unchanged =
+      prevNormalized.length === nextNormalized.length &&
+      prevNormalized.every((n, i) => n === nextNormalized[i]);
+    if (unchanged) return 'ok';
+
+    try {
+      settings.setValue(
+        SettingScope.Workspace,
+        'skills.disabled',
+        nextDisabled.length > 0 ? nextDisabled : undefined,
+      );
+    } catch (e) {
+      addItem(
+        {
+          type: MessageType.ERROR,
+          text: t('Failed to save skills configuration: {{error}}', {
+            error: e instanceof Error ? e.message : String(e),
+          }),
+        },
+        Date.now(),
+      );
+      return 'error';
+    }
 
     try {
       // ORDER MATTERS — must NOT be Promise.all. `reloadCommands` rebuilds
@@ -301,7 +366,7 @@ export function SkillsManagerDialog({
         Date.now(),
       );
     }
-    return true;
+    return 'ok';
   }, [
     addItem,
     reloadCommands,
@@ -313,9 +378,21 @@ export function SkillsManagerDialog({
 
   // Esc handler: auto-save current toggle state and close. Replaces the
   // earlier "save = Enter, Esc = cancel" model with auto-save on exit.
+  //
+  // Esc-during-loading guard: if the user presses Esc before `skills` and
+  // `selectedKeys` finish loading, we have no signal for "what should the
+  // disabled set look like" — `selectedKeys ?? []` would compute an empty
+  // selection, treat every unlocked skill as just-disabled (in fact the
+  // unlocked set is also empty here), and quietly clear any pre-existing
+  // workspace `skills.disabled` entry. Just close — there is nothing to
+  // save yet.
   const handleSaveAndClose = useCallback(async () => {
-    const ok = await persistChanges();
-    if (ok) {
+    if (skills === null || selectedKeys === null) {
+      onClose();
+      return;
+    }
+    const result = await persistChanges();
+    if (result === 'ok') {
       addItem(
         {
           type: MessageType.INFO,
@@ -325,7 +402,7 @@ export function SkillsManagerDialog({
       );
     }
     onClose();
-  }, [addItem, onClose, persistChanges]);
+  }, [addItem, onClose, persistChanges, selectedKeys, skills]);
 
   // Enter handler: save pending toggles, close, and DROP `/<skill-name>`
   // into the input buffer WITHOUT submitting. The user reviews and hits
@@ -333,17 +410,25 @@ export function SkillsManagerDialog({
   // points at a skill, the user decides whether/when to invoke.
   const handlePick = useCallback(
     async (skill: SkillItemValue) => {
-      const ok = await persistChanges();
-      if (!ok) {
-        // Untrusted workspace — error already surfaced by persistChanges.
-        // Still close the dialog; don't fill the input either.
+      // Don't pick a skill the user has just toggled off — `/<name>` would
+      // resolve to the disabled error path on submit. The same gate applies
+      // to skills locked by higher scope (those don't appear in the
+      // MultiSelect at all, so we only see them via stale `activeValue`).
+      const isEnabled =
+        selectedKeys !== null &&
+        selectedKeys.includes(skill.name) &&
+        !higher.set.has(lower(skill.name));
+      if (!isEnabled) {
         onClose();
         return;
       }
+      const result = await persistChanges();
       onClose();
-      setInputBuffer(`/${skill.name}`);
+      if (result === 'ok') {
+        setInputBuffer(`/${skill.name}`);
+      }
     },
-    [onClose, persistChanges, setInputBuffer],
+    [higher.set, onClose, persistChanges, selectedKeys, setInputBuffer],
   );
 
   useKeypress(

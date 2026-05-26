@@ -1224,7 +1224,18 @@ export function buildDisabledSkillNamesProvider(
 ): () => ReadonlySet<string> {
   return () => {
     const list = loadedSettings.merged.skills?.disabled ?? [];
-    return new Set(list.map((n) => n.trim().toLowerCase()).filter(Boolean));
+    // Defensive: settings.json is user-editable, so a stray non-string
+    // (e.g. `"disabled": [42, null]`) must not throw out of the provider.
+    // This closure is invoked from `validateToolParams` and `execute` in
+    // SkillTool — neither wraps the call in a try/catch, so an unhandled
+    // TypeError would brick every skill invocation. Filter to strings
+    // before normalizing.
+    return new Set(
+      list
+        .filter((n): n is string => typeof n === 'string')
+        .map((n) => n.trim().toLowerCase())
+        .filter(Boolean),
+    );
   };
 }
 

@@ -881,7 +881,10 @@ describe('SkillTool', () => {
       expect(executor).toHaveBeenCalledWith('mytool');
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('MCP prompt body');
-      expect(result.returnDisplay).toBe('Executed command: mytool');
+      // "Delegated to" rather than "Executed" so telemetry/UX can
+      // distinguish a disabled-skill→command pass-through from a real
+      // skill execution. See comment in skill.ts execute().
+      expect(result.returnDisplay).toBe('Delegated to command: mytool');
     });
 
     it('returns the disabled-specific error when no command alternative exists', async () => {

@@ -85,6 +85,10 @@ export default {
   'SkillManager not available.': 'SkillManager は利用できません。',
   'Loading skills…': 'スキルを読み込み中…',
   'Failed to load skills: {{error}}': 'スキルの読み込みに失敗：{{error}}',
+  'Failed to save skills configuration: {{error}}':
+    'スキル設定の保存に失敗しました：{{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'すべての利用可能なスキルが無効化されています。~/.qwen/settings.json または .qwen/settings.json (skills.disabled) を編集して再有効化してください。',
   'Press esc to close.': 'Esc で閉じる。',
   '{{count}} skills · ': '{{count}} スキル · ',
   '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} スキル · ',
