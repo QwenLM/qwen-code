@@ -85,7 +85,6 @@ import {
 } from '../utils/environmentContext.js';
 import {
   buildApiHistoryFromConversation,
-  getResumeTokenCounts,
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
@@ -225,7 +224,9 @@ export class GeminiClient {
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     if (resumedSessionData) {
-      replayUiTelemetryFromConversation(resumedSessionData.conversation);
+      const resumeTokenCounts = replayUiTelemetryFromConversation(
+        resumedSessionData.conversation,
+      );
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
       const resumedHistory = buildApiHistoryFromConversation(
@@ -234,9 +235,6 @@ export class GeminiClient {
       await this.startChat(
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
-      );
-      const resumeTokenCounts = getResumeTokenCounts(
-        resumedSessionData.conversation,
       );
       const chat = this.getChat();
       if (resumeTokenCounts) {

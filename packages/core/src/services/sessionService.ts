@@ -1308,7 +1308,7 @@ export function buildApiHistoryFromConversation(
  */
 export function replayUiTelemetryFromConversation(
   conversation: ConversationRecord,
-): void {
+): ResumeTokenCounts | undefined {
   uiTelemetryService.reset();
 
   for (const record of conversation.messages) {
@@ -1330,6 +1330,7 @@ export function replayUiTelemetryFromConversation(
       resumeTokenCounts.promptTokenCount,
     );
   }
+  return resumeTokenCounts;
 }
 
 export interface ResumeTokenCounts {

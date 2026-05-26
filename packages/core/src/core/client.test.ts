@@ -585,7 +585,7 @@ describe('Gemini Client (client.ts)', () => {
                 promptTokenCount: 200,
                 candidatesTokenCount: 60,
                 thoughtsTokenCount: 20,
-                totalTokenCount: 260,
+                totalTokenCount: 280,
               },
             },
           ],
@@ -598,7 +598,7 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(200);
-      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 60);
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 80);
     });
 
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {

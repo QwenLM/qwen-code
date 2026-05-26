@@ -9,6 +9,7 @@ import type { Content } from '@google/genai';
 import {
   estimateContentTokens,
   estimatePromptTokens,
+  getUsageOutputTokenCountForPromptEstimate,
 } from './tokenEstimation.js';
 
 const textContent = (text: string): Content => ({
@@ -105,5 +106,48 @@ describe('estimatePromptTokens', () => {
   it('falls back to full estimate when lastPromptTokenCount is 0', () => {
     const fullEst = estimateContentTokens([...history, user]);
     expect(estimatePromptTokens(history, user, 0)).toBe(fullEst);
+  });
+});
+
+describe('getUsageOutputTokenCountForPromptEstimate', () => {
+  it('uses totalTokenCount when available to avoid candidate/thought overlap ambiguity', () => {
+    expect(
+      getUsageOutputTokenCountForPromptEstimate({
+        promptTokenCount: 100,
+        totalTokenCount: 180,
+        candidatesTokenCount: 70,
+        thoughtsTokenCount: 50,
+      }),
+    ).toBe(80);
+  });
+
+  it('does not double-count thoughts that appear included in candidates', () => {
+    expect(
+      getUsageOutputTokenCountForPromptEstimate({
+        promptTokenCount: 100,
+        candidatesTokenCount: 150,
+        thoughtsTokenCount: 120,
+      }),
+    ).toBe(150);
+  });
+
+  it('adds thoughts when they exceed candidates and are likely disjoint', () => {
+    expect(
+      getUsageOutputTokenCountForPromptEstimate({
+        promptTokenCount: 100,
+        candidatesTokenCount: 50,
+        thoughtsTokenCount: 120,
+      }),
+    ).toBe(170);
+  });
+
+  it('clamps negative disjoint output token counts to zero', () => {
+    expect(
+      getUsageOutputTokenCountForPromptEstimate({
+        promptTokenCount: 100,
+        candidatesTokenCount: -10,
+        thoughtsTokenCount: -5,
+      }),
+    ).toBe(0);
   });
 });
