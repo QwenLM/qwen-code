@@ -1316,4 +1316,113 @@ describe('retryWithBackoff — Phase 4b retry context (ALS)', () => {
       { layer: 'inner', attempt: 2 },
     ]);
   });
+
+  it('persistent mode (status=429): onRetry fires with correct attempt + delayMs from persistent backoff', async () => {
+    // Review comment R1 #4 + R2 #3: the highest-volume production retry path
+    // (429 → persistent mode) was untested. Verify onRetry fires with the
+    // monotonic iterationCount and a reasonable backoff delay.
+    const onRetry = vi.fn();
+    let n = 0;
+    const fn = vi.fn(async () => {
+      n++;
+      if (n <= 2) {
+        const err: HttpError = new Error(`rate limited #${n}`);
+        err.status = 429;
+        throw err;
+      }
+      return 'ok';
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 5,
+      initialDelayMs: 50,
+      maxDelayMs: 200,
+      persistentMode: true,
+      onRetry,
+    });
+
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBe('ok');
+
+    expect(onRetry).toHaveBeenCalledTimes(2);
+    const first = onRetry.mock.calls[0]![0] as RetryAttemptInfo;
+    expect(first.attempt).toBe(1);
+    expect(first.errorStatus).toBe(429);
+    expect(first.delayMs).toBeGreaterThan(0);
+    const second = onRetry.mock.calls[1]![0] as RetryAttemptInfo;
+    expect(second.attempt).toBe(2);
+    expect(second.errorStatus).toBe(429);
+    // Persistent mode uses exponential backoff — second delay >= first
+    expect(second.delayMs).toBeGreaterThanOrEqual(first.delayMs);
+  });
+
+  it('normal retry with Retry-After header: onRetry receives the header-derived delayMs', async () => {
+    // Review comment R2 #7: verify that when the error includes a
+    // `retry-after` header, `onRetry.delayMs` reflects the parsed value
+    // (not the exponential backoff calculation).
+    const onRetry = vi.fn();
+    let n = 0;
+    const fn = vi.fn(async () => {
+      n++;
+      if (n <= 1) {
+        const err = new Error('rate limited') as HttpError & {
+          response?: { headers?: { 'retry-after'?: string } };
+        };
+        err.status = 429;
+        err.response = { headers: { 'retry-after': '2' } }; // 2 seconds
+        throw err;
+      }
+      return 'ok';
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 5,
+      initialDelayMs: 100,
+      maxDelayMs: 500,
+      onRetry,
+    });
+
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBe('ok');
+
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    const info = onRetry.mock.calls[0]![0] as RetryAttemptInfo;
+    // Retry-After: 2 → 2000ms
+    expect(info.delayMs).toBe(2000);
+    expect(info.errorStatus).toBe(429);
+  });
+
+  it('signal.aborted before onRetry: no phantom retry event emitted', async () => {
+    // Review comment R2 #6: when signal fires between catch and onRetry,
+    // the guard `if (!signal?.aborted)` should prevent onRetry from firing.
+    const onRetry = vi.fn();
+    const controller = new AbortController();
+    let n = 0;
+    const fn = vi.fn(async () => {
+      n++;
+      if (n === 1) {
+        // Abort the signal during the first failure — before onRetry runs
+        controller.abort();
+        const err: HttpError = new Error('server error');
+        err.status = 500;
+        throw err;
+      }
+      return 'ok';
+    });
+
+    // The retry loop should detect the aborted signal and NOT fire onRetry.
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 5,
+      initialDelayMs: 10,
+      maxDelayMs: 50,
+      signal: controller.signal,
+      onRetry,
+    }).catch((e: unknown) => e);
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    // onRetry should NOT have been called because signal was aborted
+    expect(onRetry).not.toHaveBeenCalled();
+  });
 });

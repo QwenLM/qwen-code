@@ -65,9 +65,11 @@ export interface RetryOptions {
    * callers so they stay silent in LLM-specific telemetry channels.
    *
    * Contract:
-   * - Invoked only after `await fn()` rejects in the catch block.
-   *   Synchronous throws inside `fn` execute OUTSIDE the ALS frame and may
-   *   produce undefined retry context.
+   * - Invoked only after `await fn()` rejects in the catch block of
+   *   `retryWithBackoff` (OUTSIDE the `retryContext.run()` ALS frame).
+   *   This is true for both synchronous and asynchronous throws from `fn`.
+   *   All retry-context data is passed via the `RetryAttemptInfo` parameter
+   *   — do NOT read `retryContext.getStore()` inside an `onRetry` callback.
    * - Content-retries via `shouldRetryOnContent` do NOT fire `onRetry`.
    *   If a future caller wires content retries, extend `retry.ts` to fire
    *   `onRetry` on that path too.
@@ -237,6 +239,11 @@ export async function retryWithBackoff<T>(
         const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
         const delayWithJitter = Math.max(0, currentDelay + jitter);
         await delay(delayWithJitter);
+        // Note: this inflates retryTotalDelayMs beyond what onRetry/ApiRetryEvent
+        // reports — content-retry delays are invisible in the api_retry telemetry
+        // channel (onRetry only fires from the catch-block error path). The LLM
+        // span's retry_total_delay_ms attribute includes ALL delays (content +
+        // error), which is the accurate "total time the user waited in backoff."
         retryTotalDelayMs += delayWithJitter;
         currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         continue;
@@ -307,19 +314,24 @@ export async function retryWithBackoff<T>(
         );
 
         // Phase 4b — fire onRetry telemetry callback BEFORE sleep, so
-        // operators see retry events live. Wrap in try/catch: a logging
-        // failure must NEVER break the retry loop.
-        try {
-          onRetry?.({
-            attempt: iterationCount,
-            error,
-            errorStatus,
-            delayMs,
-          });
-        } catch (cbError) {
-          debugLogger.warn(
-            `onRetry callback threw (swallowed): ${cbError instanceof Error ? cbError.message : String(cbError)}`,
-          );
+        // operators see retry events live. Guard with signal?.aborted so we
+        // don't emit a phantom retry event for an attempt that will never
+        // actually proceed (signal fires during the previous sleep or between
+        // catch and this point). Wrap in try/catch: a logging failure must
+        // NEVER break the retry loop.
+        if (!signal?.aborted) {
+          try {
+            onRetry?.({
+              attempt: iterationCount,
+              error,
+              errorStatus,
+              delayMs,
+            });
+          } catch (cbError) {
+            debugLogger.warn(
+              `onRetry callback threw (swallowed): ${cbError instanceof Error ? cbError.message : String(cbError)}`,
+            );
+          }
         }
 
         // Heartbeat sleep — chunked to keep CI alive
@@ -356,19 +368,23 @@ export async function retryWithBackoff<T>(
           currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         }
 
-        // Phase 4b — fire onRetry telemetry callback BEFORE sleep. Wrapped
-        // in try/catch so a logging failure cannot break the retry loop.
-        try {
-          onRetry?.({
-            attempt: iterationCount,
-            error,
-            errorStatus,
-            delayMs: actualDelayMs,
-          });
-        } catch (cbError) {
-          debugLogger.warn(
-            `onRetry callback threw (swallowed): ${cbError instanceof Error ? cbError.message : String(cbError)}`,
-          );
+        // Phase 4b — fire onRetry telemetry callback BEFORE sleep. Guard
+        // with signal?.aborted to avoid phantom events when abort fires
+        // between catch and here. Wrapped in try/catch so a logging failure
+        // cannot break the retry loop.
+        if (!signal?.aborted) {
+          try {
+            onRetry?.({
+              attempt: iterationCount,
+              error,
+              errorStatus,
+              delayMs: actualDelayMs,
+            });
+          } catch (cbError) {
+            debugLogger.warn(
+              `onRetry callback threw (swallowed): ${cbError instanceof Error ? cbError.message : String(cbError)}`,
+            );
+          }
         }
 
         await delay(actualDelayMs);
