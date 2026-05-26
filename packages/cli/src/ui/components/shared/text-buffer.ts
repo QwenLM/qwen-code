@@ -12,6 +12,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   createDebugLogger,
   unescapePath,
+  escapePath,
   getExternalEditorCommand,
   type EditorType,
 } from '@qwen-code/qwen-code-core';
@@ -2004,7 +2005,9 @@ function tryExtractFilePaths(
  * parseAllAtCommands terminates at unescaped whitespace and commas.
  */
 function escapePathAndCommas(path: string): string {
-  return path.replace(/([ \t,])/g, '\\$1');
+  // Use escapePath for whitespace, then additionally escape commas.
+  // parseAllAtCommands terminates at unescaped whitespace and commas.
+  return escapePath(path).replace(/,/g, '\\,');
 }
 
 /**
