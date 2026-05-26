@@ -215,7 +215,9 @@ export class AcpDispatcher {
       this.bridge.respondToSessionPermission(
         req.sessionId,
         req.bridgeRequestId,
-        { outcome: { outcome: 'cancelled' } } as never,
+        { outcome: { outcome: 'cancelled' } } as unknown as Parameters<
+          HttpAcpBridge['respondToSessionPermission']
+        >[2],
         clientId !== undefined ? { clientId } : undefined,
       );
     } catch {
@@ -554,7 +556,9 @@ export class AcpDispatcher {
           if (configId === 'model') {
             await this.bridge.setSessionModel(
               sessionId,
-              { modelId: value } as never,
+              { modelId: value } as unknown as Parameters<
+                HttpAcpBridge['setSessionModel']
+              >[1],
               ctx,
             );
           } else if (configId === 'mode') {
@@ -641,7 +645,9 @@ export class AcpDispatcher {
             : {};
           const result = this.bridge.updateSessionMetadata(
             sessionId,
-            metadata as never,
+            metadata as unknown as Parameters<
+              HttpAcpBridge['updateSessionMetadata']
+            >[1],
             this.sessionCtx(conn, sessionId, loopback),
           );
           this.replyConn(conn, id, result as unknown);
@@ -883,7 +889,7 @@ export class AcpDispatcher {
     conn.pending.delete(id);
 
     // A client error response is a cancellation; otherwise pass the result
-    // through. The `as never` defers shape validation to the bridge, so a
+    // through. The cast defers shape validation to the bridge, so a
     // MALFORMED result (e.g. `{}` with no `outcome`) makes the mediator
     // throw — and since we already removed the pending entry, teardown's
     // `abandonPendingForSession` can no longer cancel it, leaving the
@@ -898,7 +904,9 @@ export class AcpDispatcher {
       this.bridge.respondToSessionPermission(
         pending.sessionId,
         pending.bridgeRequestId,
-        vote as never,
+        vote as unknown as Parameters<
+          HttpAcpBridge['respondToSessionPermission']
+        >[2],
         this.sessionCtx(conn, pending.sessionId, fromLoopback),
       );
     } catch (err) {
@@ -934,7 +942,7 @@ export class AcpDispatcher {
     try {
       const result = await this.bridge.sendPrompt(
         sessionId,
-        params as never,
+        params as unknown as Parameters<HttpAcpBridge['sendPrompt']>[1],
         abort.signal,
         this.sessionCtx(conn, sessionId, fromLoopback),
       );
