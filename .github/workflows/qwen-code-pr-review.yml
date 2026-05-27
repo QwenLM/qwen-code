@@ -42,19 +42,22 @@ jobs:
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         github.event.issue.state == 'open' &&
-        contains(github.event.comment.body, '@qwen-code /review') &&
+        (github.event.comment.body == '@qwen-code /review' ||
+         startsWith(github.event.comment.body, '@qwen-code /review ')) &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request_review_comment' &&
         github.event.pull_request.state == 'open' &&
-        contains(github.event.comment.body, '@qwen-code /review') &&
+        (github.event.comment.body == '@qwen-code /review' ||
+         startsWith(github.event.comment.body, '@qwen-code /review ')) &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request_review' &&
         github.event.pull_request.state == 'open' &&
-        contains(github.event.review.body, '@qwen-code /review') &&
+        (github.event.review.body == '@qwen-code /review' ||
+         startsWith(github.event.review.body, '@qwen-code /review ')) &&
         (github.event.review.author_association == 'OWNER' ||
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR'))
