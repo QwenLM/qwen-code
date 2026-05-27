@@ -32,8 +32,8 @@ const server = createServeBridgeMcpServer({
 const transport = new StdioServerTransport();
 
 // Graceful shutdown on signals
-function shutdown() {
-  server.instance.close().catch(() => {});
+async function shutdown() {
+  try { await server.instance.close(); } catch { /* ignore */ }
   process.exit(0);
 }
 

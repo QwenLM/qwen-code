@@ -67,17 +67,29 @@ export function agentTools(state: BridgeState): any[] {
           ]);
           clearTimeout(timeoutId!);
 
-          if (timedOut) {
-            // Cancel daemon-side processing to prevent stale chunks
-            // from contaminating the next prompt's collector.
+          // Guard against Promise.race microtask race: only treat as timeout
+          // if collector was NOT already resolved by _meta
+          if (timedOut && !collector.resolved) {
             try { await state.client.cancel(sessionId); } catch { /* best-effort */ }
             const partialText = collector.texts.join('');
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({
+                session_id: sessionId,
+                stop_reason: 'timeout',
+                response: partialText || '(no text received)',
+                warning: 'Agent response may be incomplete. _meta event not received within 30s.',
+              }, null, 2) }],
+              isError: true,
+            };
+          }
+
+          // SSE disconnect or stopEventStream resolved the collector
+          if (collector.interrupted) {
             return formatJsonResult({
               session_id: sessionId,
-              stop_reason: 'timeout',
-              response: partialText || '(no text received)',
-              warning:
-                'Agent response may be incomplete. _meta event not received within 30s.',
+              stop_reason: 'interrupted',
+              response: collector.texts.join('') || '(no text received)',
+              warning: 'SSE stream was closed before the response completed.',
             });
           }
 

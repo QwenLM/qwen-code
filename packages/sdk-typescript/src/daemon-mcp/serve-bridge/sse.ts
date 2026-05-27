@@ -44,8 +44,13 @@ export function createPromptCollector(): PromptCollector {
  * Collects agent_message_chunk events into the active PromptCollector.
  */
 export function startEventStream(state: BridgeState, sessionId: string): void {
-  // Don't create duplicate streams
-  if (state.eventStreams.has(sessionId)) return;
+  // Don't create duplicate streams; allow re-creation if the old stream is dead
+  if (state.eventStreams.has(sessionId)) {
+    const existing = state.eventStreams.get(sessionId)!;
+    if (!existing.abortCtrl.signal.aborted) return;
+    // Stale entry from a dead stream — clean up and re-create
+    state.eventStreams.delete(sessionId);
+  }
 
   const abortCtrl = new AbortController();
   const stream: SessionEventStream = {
@@ -83,6 +88,15 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
               collector.resolve();
             }
           }
+        } else if (
+          typeof update['sessionUpdate'] === 'string' &&
+          /error|fail/i.test(update['sessionUpdate'] as string)
+        ) {
+          process.stderr.write(
+            `[serve-bridge] daemon error event for ${sessionId}: ${JSON.stringify(update)}\n`,
+          );
+          // Resolve collector so prompt returns immediately with partial text
+          stream.activeCollector?.resolve();
         }
       }
     } catch (err) {
@@ -95,7 +109,10 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
       }
     } finally {
       // Resolve any pending collector so prompt doesn't hang on disconnect
-      stream.activeCollector?.resolve();
+      if (stream.activeCollector) {
+        stream.activeCollector.interrupted = true;
+        stream.activeCollector.resolve();
+      }
       // Only delete if this is still our stream (not replaced by startEventStream)
       if (state.eventStreams.get(sessionId) === stream) {
         state.eventStreams.delete(sessionId);
@@ -116,7 +133,10 @@ export function stopEventStream(state: BridgeState, sessionId: string): void {
   if (stream) {
     stream.abortCtrl.abort();
     // Resolve any pending collector so prompt doesn't hang
-    stream.activeCollector?.resolve();
+    if (stream.activeCollector) {
+      stream.activeCollector.interrupted = true;
+      stream.activeCollector.resolve();
+    }
     state.eventStreams.delete(sessionId);
   }
 }

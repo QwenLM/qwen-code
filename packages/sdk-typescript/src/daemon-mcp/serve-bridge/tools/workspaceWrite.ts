@@ -76,6 +76,15 @@ export function workspaceWriteTools(state: BridgeState): any[] {
         session_id: z.string().optional().describe('Session ID. Uses default session if omitted.'),
       },
       handler(async (args) => {
+        // Block dangerous modes and persistent changes without explicit opt-in
+        if (
+          (args.persist || ['yolo', 'auto'].includes(args.mode)) &&
+          !state.allowGlobalScope
+        ) {
+          return formatToolError(
+            `Approval mode '${args.mode}'${args.persist ? ' with persist' : ''} is restricted for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.`,
+          );
+        }
         const sessionId = resolveSessionId(state, args.session_id);
         return formatJsonResult(
           await state.client.setSessionApprovalMode(sessionId, args.mode, { persist: args.persist }),
@@ -186,20 +195,26 @@ function validateGlobalScope(state: BridgeState, scope: string | undefined): any
 }
 
 async function handleAgentsManage(state: BridgeState, args: any): Promise<any> {
-  const scopeErr = validateGlobalScope(state, args.scope);
-  if (scopeErr) return scopeErr;
-
   switch (args.action) {
     case 'list':
       return formatJsonResult(await state.client.listWorkspaceAgents());
     case 'get':
       return handleAgentGet(state, args);
-    case 'create':
+    case 'create': {
+      const scopeErr = validateGlobalScope(state, args.scope);
+      if (scopeErr) return scopeErr;
       return handleAgentCreate(state, args);
-    case 'update':
+    }
+    case 'update': {
+      const scopeErr = validateGlobalScope(state, args.scope);
+      if (scopeErr) return scopeErr;
       return handleAgentUpdate(state, args);
-    case 'delete':
+    }
+    case 'delete': {
+      const scopeErr = validateGlobalScope(state, args.scope);
+      if (scopeErr) return scopeErr;
       return handleAgentDelete(state, args);
+    }
     default:
       return formatToolError(`Unknown action: ${args.action}`);
   }

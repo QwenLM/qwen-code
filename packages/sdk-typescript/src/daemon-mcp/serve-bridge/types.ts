@@ -49,6 +49,8 @@ export interface PromptCollector {
   resolve: () => void;
   promise: Promise<void>;
   resolved: boolean;
+  /** Set when the collector is resolved due to SSE disconnect or stopEventStream, not _meta. */
+  interrupted?: boolean;
 }
 
 /**

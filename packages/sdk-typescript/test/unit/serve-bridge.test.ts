@@ -505,6 +505,73 @@ describe('serve-bridge', () => {
       expect(result.content[0].text).toContain('Global scope is disabled');
     });
 
+    it('should reject yolo approval mode without allowGlobalScope', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+      });
+      state.allowGlobalScope = false;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const approvalTool = tools.find(
+        (t: { name: string }) => t.name === 'session_set_approval_mode',
+      );
+
+      const result = await approvalTool.handler(
+        { mode: 'yolo', session_id: 'test-session' },
+        {},
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('restricted for security');
+    });
+
+    it('should reject persistent approval mode change without allowGlobalScope', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+      });
+      state.allowGlobalScope = false;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const approvalTool = tools.find(
+        (t: { name: string }) => t.name === 'session_set_approval_mode',
+      );
+
+      const result = await approvalTool.handler(
+        { mode: 'default', persist: true, session_id: 'test-session' },
+        {},
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('restricted for security');
+    });
+
+    it('should allow read-only agents_manage actions with global scope', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: () => jsonResponse(200, []),
+      });
+      state.allowGlobalScope = false;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const agentsTool = tools.find(
+        (t: { name: string }) => t.name === 'workspace_agents_manage',
+      );
+
+      // list with scope=global should NOT be blocked (read-only)
+      const result = await agentsTool.handler(
+        { action: 'list', scope: 'global' },
+        {},
+      );
+      expect(result.isError).toBeUndefined();
+    });
+
     it('should reject file_write replace mode without expected_hash', async () => {
       const { state } = makeMockState({
         defaultSessionId: 'test-session',
