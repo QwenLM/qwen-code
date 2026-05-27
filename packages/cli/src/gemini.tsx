@@ -823,14 +823,10 @@ export async function main() {
       return;
     }
 
-    // Also clean up env vars for non-interactive paths
+    // Also clean up env vars for non-interactive paths so that
+    // subprocesses don't inherit stale state.
     delete process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'];
     delete process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'];
-      // and subprocesses don't inherit stale state.
-      delete process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'];
-      delete process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'];
-      return;
-    }
 
     // Non-interactive: defer finalize until after `config.initialize()` runs
     // so MCP discovery events (mcp_first_tool_registered, mcp_all_servers_settled,
