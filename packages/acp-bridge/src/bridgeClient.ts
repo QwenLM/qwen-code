@@ -506,6 +506,10 @@ export class BridgeClient implements Client {
         suggestion.length === 0 ||
         typeof promptId !== 'string'
       ) {
+        writeStderrLine(
+          `[demux] method=prompt-suggestion action=dropped reason=malformed ` +
+            `sessionId=${typeof sessionId === 'string' ? sessionId : '<missing>'}`,
+        );
         return;
       }
       const entry = this.resolveEntry(sessionId);
