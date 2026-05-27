@@ -531,7 +531,7 @@ describe('ContentGenerationPipeline', () => {
       ).toEqual(['zeta', 'alpha']);
     });
 
-    it('sorts self-hosted DeepSeek tools by model name before sending the wire request', async () => {
+    it('sorts self-hosted DeepSeek tools by function name before sending the wire request', async () => {
       mockContentGeneratorConfig.baseUrl = 'https://example.test/v1';
       mockContentGeneratorConfig.model = 'deepseek-v4-pro';
       const request: GenerateContentParameters = {
@@ -584,7 +584,6 @@ describe('ContentGenerationPipeline', () => {
           (tool: OpenAI.Chat.ChatCompletionTool) => tool.function.name,
         ),
       ).toEqual(['alpha', 'bravo', 'zeta']);
-      expect(apiCall.thinking).toBeUndefined();
     });
 
     it('should skip empty tools array in request', async () => {

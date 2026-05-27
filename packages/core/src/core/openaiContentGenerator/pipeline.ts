@@ -26,7 +26,7 @@ function compareStableStrings(left: string, right: string): number {
 }
 
 function getToolSortKey(tool: OpenAI.Chat.ChatCompletionTool): string {
-  return [tool.function.name, tool.type, JSON.stringify(tool)].join('\u0000');
+  return tool.function.name;
 }
 
 function sortToolsForCacheStableRequest(
@@ -389,8 +389,10 @@ export class ContentGenerationPipeline {
 
     // DeepSeek's KV cache is prefix-exact: a different tool order changes the
     // serialized prompt prefix even when the tool set and schemas are identical.
-    // Gate on isDeepSeekProvider so both official and self-hosted DeepSeek
-    // deployments benefit; non-DeepSeek providers keep caller order.
+    // Gate on broad provider detection because cache-prefix stability follows
+    // the DeepSeek model/protocol even for self-hosted deployments. The
+    // narrower hostname gate above is only for DeepSeek's official V4
+    // `thinking` wire shape, which self-hosted servers may reject.
     if (isDeepSeekProvider(this.contentGeneratorConfig)) {
       sortToolsForCacheStableRequest(providerRequest);
     }
