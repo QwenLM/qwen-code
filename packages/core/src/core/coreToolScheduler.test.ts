@@ -7286,6 +7286,8 @@ describe('CoreToolScheduler tool output truncation', () => {
     constructor(
       private readonly output: PartListUnion,
       private readonly display: ToolResultDisplay = 'large output completed',
+      private readonly alreadyTruncated = false,
+      private readonly onResult?: (result: ToolResult) => void,
     ) {
       super(
         LargeOutputTool.Name,
@@ -7301,6 +7303,8 @@ describe('CoreToolScheduler tool output truncation', () => {
     ): ToolInvocation<Record<string, never>, ToolResult> {
       const output = this.output;
       const display = this.display;
+      const alreadyTruncated = this.alreadyTruncated;
+      const onResult = this.onResult;
       return new (class extends BaseToolInvocation<
         Record<string, never>,
         ToolResult
@@ -7314,10 +7318,15 @@ describe('CoreToolScheduler tool output truncation', () => {
         }
 
         async execute(): Promise<ToolResult> {
-          return {
+          const result: ToolResult = {
             llmContent: output,
             returnDisplay: display,
           };
+          if (alreadyTruncated) {
+            result.alreadyTruncated = true;
+          }
+          onResult?.(result);
+          return result;
         }
       })(params);
     }
@@ -7332,9 +7341,16 @@ describe('CoreToolScheduler tool output truncation', () => {
       disableHooks?: boolean;
       returnDisplay?: ToolResultDisplay;
       throwOnThresholdRead?: boolean;
+      alreadyTruncated?: boolean;
+      onResult?: (result: ToolResult) => void;
     } = {},
   ) {
-    const tool = new LargeOutputTool(output, options.returnDisplay);
+    const tool = new LargeOutputTool(
+      output,
+      options.returnDisplay,
+      options.alreadyTruncated,
+      options.onResult,
+    );
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-tool-output-'));
     const mockToolRegistry = {
       ensureTool: async (name: string) =>
@@ -7627,6 +7643,58 @@ describe('CoreToolScheduler tool output truncation', () => {
     expect(completedCalls[0].response.contentLength).toBe(output.length);
   });
 
+  it('bounds large PostToolUse hook context before appending it', async () => {
+    const smallOutput = 'small output';
+    const hookContext = 'H'.repeat(5000);
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output:
+          request.eventName === 'PostToolUse'
+            ? { hookSpecificOutput: { additionalContext: hookContext } }
+            : {},
+      })),
+    };
+    const mockWriteFile = vi.mocked(fsPromises.writeFile);
+    mockWriteFile.mockClear();
+    const { scheduler, onAllToolCallsComplete } = createLargeOutputScheduler(
+      smallOutput,
+      {
+        threshold: 120,
+        truncateLines: 6,
+        messageBus,
+        disableHooks: false,
+      },
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'large-hook-context-1',
+          name: LargeOutputTool.Name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-large-hook-context-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    const output = extractFunctionResponseOutput(
+      completedCalls[0].response.responseParts,
+    );
+
+    expect(output).toContain(smallOutput);
+    expect(output).toContain('[CONTENT TRUNCATED]');
+    expect(output.length).toBeLessThan(smallOutput.length + hookContext.length);
+    expect(completedCalls[0].response.contentLength).toBe(output.length);
+    expect(mockWriteFile).toHaveBeenCalledTimes(1);
+  });
+
   it('does not truncate already-truncated tool output again', async () => {
     const alreadyTruncatedOutput =
       'Tool output was too large and has been truncated.\n' +
@@ -7645,6 +7713,7 @@ describe('CoreToolScheduler tool output truncation', () => {
         threshold: 120,
         truncateLines: 6,
         returnDisplay,
+        alreadyTruncated: true,
       },
     );
 
@@ -7671,6 +7740,44 @@ describe('CoreToolScheduler tool output truncation', () => {
     expect(output.match(/Tool output was too large/g)).toHaveLength(1);
     expect(completedCalls[0].response.resultDisplay).toBe(returnDisplay);
     expect(mockWriteFile).not.toHaveBeenCalled();
+  });
+
+  it('does not treat truncation prefix text as an implicit skip signal', async () => {
+    const outputThatQuotesTruncation =
+      'Tool output was too large and has been truncated.\n' +
+      'This line is legitimate tool output, not scheduler metadata.\n' +
+      'A'.repeat(5000);
+    const mockWriteFile = vi.mocked(fsPromises.writeFile);
+    mockWriteFile.mockClear();
+    const { scheduler, onAllToolCallsComplete } = createLargeOutputScheduler(
+      outputThatQuotesTruncation,
+      { threshold: 120, truncateLines: 6 },
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'quoted-prefix-1',
+          name: LargeOutputTool.Name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-quoted-prefix-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    const output = extractFunctionResponseOutput(
+      completedCalls[0].response.responseParts,
+    );
+
+    expect(output.length).toBeLessThan(outputThatQuotesTruncation.length);
+    expect(completedCalls[0].response.resultDisplay).toContain(
+      'Output too long and was saved to:',
+    );
+    expect(mockWriteFile).toHaveBeenCalledTimes(1);
   });
 
   it('adds the saved full output path to string returnDisplay when truncating', async () => {
@@ -7700,6 +7807,41 @@ describe('CoreToolScheduler tool output truncation', () => {
     expect(output).toContain('The full output has been saved to:');
     expect(completedCalls[0].response.resultDisplay).toEqual(
       expect.stringContaining('Output too long and was saved to:'),
+    );
+  });
+
+  it('does not mutate the original tool result when adding the saved output path', async () => {
+    const largeOutput = 'A'.repeat(5000);
+    let returnedResult: ToolResult | undefined;
+    const { scheduler, onAllToolCallsComplete } = createLargeOutputScheduler(
+      largeOutput,
+      {
+        returnDisplay: 'original display',
+        onResult: (result) => {
+          returnedResult = result;
+        },
+      },
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'large-display-no-mutate-1',
+          name: LargeOutputTool.Name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-large-display-no-mutate-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+
+    expect(returnedResult?.returnDisplay).toBe('original display');
+    expect(completedCalls[0].response.resultDisplay).toContain(
+      'original display\nOutput too long and was saved to:',
     );
   });
 

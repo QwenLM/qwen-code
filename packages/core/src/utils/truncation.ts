@@ -15,11 +15,6 @@ import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUNCATION');
 
-/**
- * Sentinel used both as the first line of the truncation envelope and as a
- * `startsWith` guard in coreToolScheduler.ts to detect already-truncated
- * output. Do not change the wording without updating both call sites.
- */
 export const TOOL_OUTPUT_TRUNCATED_PREFIX =
   'Tool output was too large and has been truncated.';
 

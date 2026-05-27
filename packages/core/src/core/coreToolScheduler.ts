@@ -110,10 +110,7 @@ import {
   type HookSpanMetadata,
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
-import {
-  TOOL_OUTPUT_TRUNCATED_PREFIX,
-  truncateToolOutput,
-} from '../utils/truncation.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
@@ -2805,6 +2802,7 @@ export class CoreToolScheduler {
 
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
+        let resultDisplay = toolResult.returnDisplay;
         let postToolUseAdditionalContext: string | undefined;
 
         // PostToolUse Hook
@@ -2877,10 +2875,7 @@ export class CoreToolScheduler {
           }
         }
 
-        if (
-          typeof content === 'string' &&
-          !content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)
-        ) {
+        if (typeof content === 'string' && !toolResult.alreadyTruncated) {
           try {
             const truncated = await truncateToolOutput(
               this.config,
@@ -2889,13 +2884,10 @@ export class CoreToolScheduler {
               scheduledCall.request.prompt_id,
             );
             content = truncated.content;
-            if (
-              truncated.outputFile &&
-              typeof toolResult.returnDisplay === 'string'
-            ) {
-              const separator = toolResult.returnDisplay.length > 0 ? '\n' : '';
-              toolResult.returnDisplay =
-                `${toolResult.returnDisplay}${separator}` +
+            if (truncated.outputFile && typeof resultDisplay === 'string') {
+              const separator = resultDisplay.length > 0 ? '\n' : '';
+              resultDisplay =
+                `${resultDisplay}${separator}` +
                 `Output too long and was saved to: ${truncated.outputFile}`;
             }
           } catch (truncationError) {
@@ -2929,6 +2921,35 @@ export class CoreToolScheduler {
         }
 
         if (postToolUseAdditionalContext) {
+          try {
+            const truncatedHookContext = await truncateToolOutput(
+              this.config,
+              `${toolName}:post_tool_use_additional_context`,
+              postToolUseAdditionalContext,
+              scheduledCall.request.prompt_id,
+            );
+            postToolUseAdditionalContext = truncatedHookContext.content;
+          } catch (truncationError) {
+            debugLogger.warn(
+              `PostToolUse additional context truncation failed for ${toolName} ` +
+                `(callId=${scheduledCall.request.callId}, prompt_id=${scheduledCall.request.prompt_id}): ` +
+                (truncationError instanceof Error
+                  ? truncationError.message
+                  : String(truncationError)),
+            );
+            logToolOutputTruncationFailed(
+              this.config,
+              new ToolOutputTruncationFailedEvent(
+                scheduledCall.request.prompt_id,
+                {
+                  toolName: `${toolName}:post_tool_use_additional_context`,
+                  callId: scheduledCall.request.callId,
+                  originalContentLength: postToolUseAdditionalContext.length,
+                  error: truncationError,
+                },
+              ),
+            );
+          }
           content = appendAdditionalContext(
             content,
             postToolUseAdditionalContext,
@@ -3036,7 +3057,7 @@ export class CoreToolScheduler {
         const successResponse: ToolCallResponseInfo = {
           callId,
           responseParts: response,
-          resultDisplay: toolResult.returnDisplay,
+          resultDisplay,
           error: undefined,
           errorType: undefined,
           contentLength,
