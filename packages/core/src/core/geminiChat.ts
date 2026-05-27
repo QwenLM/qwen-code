@@ -1619,18 +1619,26 @@ export class GeminiChat {
           compressionInfo.compressionStatus === CompressionStatus.COMPRESSED &&
           historyBeforeHardRescue
         ) {
+          // Hard-rescue compression mutates in-memory history before this
+          // guard can compare the compressed prompt size. If the compressed
+          // prompt is still too large to send, restore the pre-compression
+          // state and defer the JSONL compression checkpoint until a guarded
+          // send is actually allowed below.
           this.setHistory(historyBeforeHardRescue);
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.telemetryService?.setLastPromptTokenCount(
             lastPromptTokenCountBeforeHardRescue,
           );
         }
+        const compressionStatus =
+          CompressionStatus[compressionInfo.compressionStatus] ??
+          String(compressionInfo.compressionStatus);
         debugLogger.warn(
           `[compaction] hard-tier rescue stopped oversized prompt: ` +
             `prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, ` +
             `hard=${hard}, localPromptTokensAfterCompression=` +
             `${localPromptTokensAfterCompression}, compressionStatus=` +
-            `${compressionInfo.compressionStatus}, newTokenCount=` +
+            `${compressionStatus}, newTokenCount=` +
             `${compressionInfo.newTokenCount}, consecutiveFailures=` +
             `${this.consecutiveFailures}. ${message}`,
         );
