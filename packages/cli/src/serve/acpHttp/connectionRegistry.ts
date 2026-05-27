@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { logSafe } from './jsonRpc.js';
 import type { SseStream } from './sseStream.js';
 
 /**
@@ -27,7 +28,7 @@ const DEFAULT_MAX_CONNECTIONS = 64;
 export type AbandonPendingFn = (
   req: PendingClientRequest,
   clientId: string | undefined,
-) => void;
+) => boolean;
 
 /**
  * Best-effort bridge detach for a session's bridge-stamped clientId on
@@ -291,7 +292,16 @@ export class AcpConnection {
     this.connStream?.close();
   }
 
-  /** Cancel + drop any pending agent→client requests for a closing session. */
+  /**
+   * Cancel + drop any pending agent→client requests for a closing session.
+   * This is the LAST-RESORT recovery path: `resolveClientResponse` retains a
+   * pending entry on double-failure (vote AND cancel both threw) precisely so
+   * this teardown sweep can retry the cancel. We always drop the entry here
+   * (the connection is going away — there is no further retry after teardown),
+   * but if the cancel itself still fails (triple-failure) the bridge mediator
+   * may be stuck awaiting a vote that will never arrive, so log it for the
+   * operator rather than failing silently.
+   */
   private abandonPendingForSession(
     sessionId: string,
     clientId: string | undefined,
@@ -299,7 +309,12 @@ export class AcpConnection {
     for (const [id, req] of this.pending) {
       if (req.sessionId !== sessionId) continue;
       this.pending.delete(id);
-      this.onAbandonPending?.(req, clientId);
+      const cancelled = this.onAbandonPending?.(req, clientId) ?? true;
+      if (!cancelled) {
+        writeStderrLine(
+          `qwen serve: /acp MEDIATOR STUCK: abandonPendingForSession(${logSafe(sessionId)}) cancel failed for ${logSafe(req.bridgeRequestId)}`,
+        );
+      }
     }
   }
 }

@@ -466,10 +466,14 @@ export class AcpDispatcher {
           // to load (TOCTOU). Client should retry after the close settles.
           if (conn.closingSessions.has(sessionId)) {
             if (id !== undefined) {
+              // The client's params are valid — the rejection is a server-side
+              // timing race against an in-flight close, so use INTERNAL_ERROR
+              // (-32603), not INVALID_PARAMS, to signal a transient/retryable
+              // condition rather than a permanent parameter fault.
               conn.sendConn(
                 error(
                   id,
-                  RPC.INVALID_PARAMS,
+                  RPC.INTERNAL_ERROR,
                   `session ${sessionId} is being closed; retry`,
                 ),
               );
@@ -512,11 +516,13 @@ export class AcpDispatcher {
               ),
             );
             // Connection-still-alive close race → tell the client to retry.
+            // Same rationale as the pre-await guard: a transient server-side
+            // race, so INTERNAL_ERROR (-32603), not INVALID_PARAMS.
             if (closeRaced && !conn.destroyed && id !== undefined) {
               conn.sendConn(
                 error(
                   id,
-                  RPC.INVALID_PARAMS,
+                  RPC.INTERNAL_ERROR,
                   `session ${sessionId} was closed during load; retry`,
                 ),
               );
@@ -902,13 +908,21 @@ export class AcpDispatcher {
         // there is none, cancel (deny-safe) rather than register+stall.
         const binding = conn.sessions.get(sessionId);
         if (!binding?.stream || binding.stream.isClosed) {
-          this.cancelAbandonedPermission(
+          const cancelled = this.cancelAbandonedPermission(
             { sessionId, bridgeRequestId: data.requestId },
             // Pass the bridge-stamped clientId when the binding still exists
             // (stream closed but session live) — only `undefined` when the
             // session is fully gone.
             binding?.clientId,
           );
+          // Mirror resolveClientResponse: a failed cancel (non-"not found")
+          // leaves the bridge mediator waiting for a vote that will never
+          // arrive until teardown, so surface it for the operator.
+          if (!cancelled) {
+            writeStderrLine(
+              `qwen serve: /acp permission cancel FAILED for ${logSafe(sessionId)} (mediator may be stuck until teardown)`,
+            );
+          }
           return;
         }
         const id = conn.nextId();

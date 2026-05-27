@@ -1065,8 +1065,86 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await post(connId, { jsonrpc: '2.0', id: 301, method: 'session/load', params: { sessionId: 'sess-1' } });
     const frames = (await got) as Array<{ id: number; error?: { code: number } }>;
     const loadReply = frames.find((f) => f.id === 301);
-    expect(loadReply?.error?.code).toBe(-32602); // "being closed; retry"
+    // Transient server-side race → INTERNAL_ERROR (-32603), not INVALID_PARAMS.
+    expect(loadReply?.error?.code).toBe(-32603); // "being closed; retry"
+    expect(loadReply?.error?.message).toContain('being closed');
     releaseClose();
+  });
+
+  it('session/load while close races DURING loadSession → post-await reject + rollback', async () => {
+    // Distinct from the pre-await guard above: here the pre-await
+    // `closingSessions` check passes, then a `session/close` for the same id
+    // starts WHILE `loadSession` is awaiting. The post-await re-check
+    // (dispatch.ts) must detect `closeRaced`, roll back the just-restored
+    // attach (detachClient, since loadAttached=true), and reply INTERNAL_ERROR.
+    let releaseLoad: () => void = () => {};
+    let releaseClose: () => void = () => {};
+    const connId = await initialize();
+    await newSession(connId); // own sess-1 so session/close passes requireOwned
+    // Arm the gates only AFTER ownership is established — otherwise newSession's
+    // own spawnOrAttach would block on bridge.gate and never grant ownership.
+    bridge.gate = new Promise<void>((r) => (releaseLoad = r));
+    bridge.closeGate = new Promise<void>((r) => (releaseClose = r));
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 2); // buffered session/new reply + load reject
+    await new Promise((r) => setTimeout(r, 50));
+    // Load goes in-flight (awaits bridge.gate); pre-await closingSessions empty.
+    void post(connId, { jsonrpc: '2.0', id: 340, method: 'session/load', params: { sessionId: 'sess-1' } });
+    await new Promise((r) => setTimeout(r, 20));
+    // Close starts DURING the load → marks sess-1 closing (awaits closeGate).
+    void post(connId, { jsonrpc: '2.0', id: 341, method: 'session/close', params: { sessionId: 'sess-1' } });
+    await new Promise((r) => setTimeout(r, 20));
+    releaseLoad(); // loadSession resolves → post-await sees closeRaced
+    const frames = (await got) as Array<{ id: number; error?: { code: number; message: string } }>;
+    const loadReply = frames.find((f) => f.id === 340);
+    expect(loadReply?.error?.code).toBe(-32603);
+    expect(loadReply?.error?.message).toContain('closed during load');
+    // attached:true → rollback is a detach, NOT a kill.
+    expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(true);
+    expect(bridge.killed).not.toContain('sess-1');
+    releaseClose();
+  });
+
+  it('double-failure permission vote → pending retained + retried on teardown', async () => {
+    // Core R14 invariant: when BOTH the vote and the immediate cancel throw a
+    // non-"not found" error, resolveClientResponse must RETAIN the pending
+    // entry so connection teardown's abandonPendingForSession can retry the
+    // cancel (otherwise the bridge mediator is stuck forever). Retention is
+    // observable as a SECOND cancel attempt during teardown.
+    const calls: unknown[] = [];
+    bridge.respondToSessionPermission = ((_s: string, _r: string, resp: unknown) => {
+      calls.push(resp);
+      throw new Error('mediator unavailable'); // vote AND every cancel fail
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: { requestId: 'perm-d', sessionId: 'sess-1', toolCall: {}, options: [{ optionId: 'allow' }] },
+      });
+      await new Promise((r) => setTimeout(r, 100));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sess = await openStream(connId, 'sess-1');
+    const got = takeFrames(sess, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, { jsonrpc: '2.0', id: 350, method: 'session/prompt', params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] } });
+    const [reqFrame] = (await got) as Array<{ id: string }>;
+    // Vote → respondToSessionPermission throws → immediate cancel ALSO throws.
+    await post(connId, { jsonrpc: '2.0', id: reqFrame.id, result: { outcome: { outcome: 'selected', optionId: 'allow' } } });
+    await new Promise((r) => setTimeout(r, 40));
+    // Teardown retries the cancel — whether triggered by the session stream
+    // closing or the explicit DELETE below. Either way it only happens if the
+    // entry was RETAINED after the immediate cancel failed.
+    await fetch(`${base}/acp`, { method: 'DELETE', headers: { 'acp-connection-id': connId } });
+    await new Promise((r) => setTimeout(r, 40));
+    const cancels = calls.filter((c) => JSON.stringify(c).includes('cancelled'));
+    // 1 vote + ≥2 cancels (immediate fail + teardown retry). If the entry were
+    // dropped unconditionally after the failed immediate cancel, there would be
+    // exactly ONE cancel — so ≥2 is the retention invariant.
+    expect(cancels.length).toBeGreaterThanOrEqual(2);
+    expect(calls.length).toBeGreaterThanOrEqual(3);
   });
 
   it('client error response to a permission request → cancellation', async () => {
